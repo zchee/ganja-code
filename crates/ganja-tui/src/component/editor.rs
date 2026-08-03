@@ -4,7 +4,10 @@
 //! what Enter means before the keystroke ever reaches the widget.
 
 use ratatui::{
-    buffer::Buffer, crossterm::event::KeyEvent, layout::Rect, widgets::Block, widgets::Widget as _,
+    buffer::Buffer,
+    crossterm::event::KeyEvent,
+    layout::Rect,
+    widgets::{Block, Widget as _},
 };
 use ratatui_textarea::TextArea;
 

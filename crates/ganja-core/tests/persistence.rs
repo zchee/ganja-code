@@ -28,8 +28,6 @@ use futures::{
     StreamExt as _,
     stream::{self, BoxStream},
 };
-use tokio_util::sync::CancellationToken;
-
 use ganja_core::{
     Engine, EngineError, Message, Part, PartBody, PartId, Permissions, Registry, Role, SessionId,
     SessionInfo, Storage, ToolState, Usage,
@@ -37,6 +35,7 @@ use ganja_core::{
     provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake},
     storage,
 };
+use tokio_util::sync::CancellationToken;
 
 /// A store rooted in a directory that vanishes with the test. The directory
 /// handle is returned because dropping it deletes the tree.
