@@ -5,13 +5,13 @@
 
 ## Purpose
 
-CI definitions. One workflow, two jobs, and it is the contract every phase is gated against: a phase is not done until these pass.
+CI definitions. One workflow, three jobs, and it is the contract every phase is gated against: a phase is not done until these pass.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `ci.yaml` | `lint` (rustfmt, clippy, core-purity) on ubuntu; `test` matrixed over ubuntu and xcode runners, with the upstream opencode checkout provisioned for the golden differential suite. |
+| `ci.yaml` | `lint` (rustfmt, clippy, core-purity) on ubuntu; `deny` (cargo-deny advisories/licenses/bans/sources against `deny.toml`) on ubuntu only, because lockfile analysis cannot differ by OS; `test` matrixed over ubuntu and xcode runners, with the upstream opencode checkout provisioned for the golden differential suite. |
 
 ## For AI Agents
 
@@ -32,6 +32,6 @@ Reproduce a CI failure locally by running the same four commands from the reposi
 
 ### External
 
-`actions/checkout@v7`, `dtolnay/rust-toolchain@nightly`, `Swatinem/rust-cache@v2`, `actions/cache@v4`, `oven-sh/setup-bun@v2` (bun 1.3.14).
+`actions/checkout@v7`, `dtolnay/rust-toolchain@nightly`, `Swatinem/rust-cache@v2`, `actions/cache@v4`, `oven-sh/setup-bun@v2` (bun 1.3.14), `EmbarkStudios/cargo-deny-action@v2` (cargo-deny, configured by the root `deny.toml`).
 
 <!-- MANUAL: -->
