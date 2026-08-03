@@ -5,3 +5,10 @@
 //! `crossterm` — so the engine stays testable without a terminal and can later
 //! be driven over a network transport. CI enforces the rule by asserting that
 //! `cargo tree -p ganja-core -e normal` never mentions `ratatui`.
+
+pub mod engine;
+pub mod protocol;
+pub mod provider;
+
+pub use engine::{Engine, EngineError};
+pub use protocol::{Command, Event, FinishReason};

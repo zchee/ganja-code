@@ -13,6 +13,8 @@ anyhow.workspace = true
 # feature on the crate instance `ratatui` re-exports.
 crossterm.workspace = true
 futures.workspace = true
+ganja-core.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 tokio.workspace = true
+unicode-width.workspace = true
