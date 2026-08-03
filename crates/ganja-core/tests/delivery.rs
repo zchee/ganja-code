@@ -23,7 +23,7 @@ const EVENTS: usize = 10_000;
 
 /// How far the producer may drift from the queue ceiling before the assertion
 /// calls it unthrottled. The engine holds at most one fragment in flight while
-/// it waits for room, plus the three events that open a turn.
+/// it waits for room, plus the four events that open a turn.
 const CEILING_SLACK: usize = 8;
 
 /// Fragments the consumer takes between pauses.
@@ -75,6 +75,8 @@ async fn a_slow_consumer_receives_every_event_in_order() {
             produced: Arc::clone(&produced),
         }),
         "flood-model",
+        Arc::new(ganja_core::Registry::new(Vec::new())),
+        ganja_core::Permissions::default(),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -98,7 +100,8 @@ async fn a_slow_consumer_receives_every_event_in_order() {
     );
 
     // A turn opens with both message envelopes and the part the fragments land
-    // in, before any fragment addresses it.
+    // in, before any fragment addresses it. The agent loop also brackets each
+    // request with step-marker parts, which carry no fragments and are skipped.
     assert!(matches!(
         events.next().await,
         Some(Event::MessageStarted { .. })
@@ -107,8 +110,12 @@ async fn a_slow_consumer_receives_every_event_in_order() {
         events.next().await,
         Some(Event::MessageStarted { .. })
     ));
-    let Some(Event::PartStarted { part, .. }) = events.next().await else {
-        panic!("the reply's part should be announced before its fragments");
+    let part = loop {
+        match events.next().await {
+            Some(Event::PartStarted { part, .. }) if part.as_text().is_some() => break part,
+            Some(Event::PartStarted { .. }) => {}
+            other => panic!("the reply's part should be announced before its fragments: {other:?}"),
+        }
     };
 
     for index in 0..EVENTS {
@@ -123,13 +130,18 @@ async fn a_slow_consumer_receives_every_event_in_order() {
         assert_eq!(delta, index.to_string(), "fragment {index} arrived late");
     }
 
-    assert!(matches!(
-        events.next().await,
-        Some(Event::MessageFinished {
-            reason: FinishReason::Completed,
-            ..
-        })
-    ));
+    // The step-finish marker precedes the finish; both arrive after every
+    // fragment, which is the ordering being proved.
+    loop {
+        match events.next().await {
+            Some(Event::PartStarted { .. }) => {}
+            Some(Event::MessageFinished {
+                reason: FinishReason::Completed,
+                ..
+            }) => break,
+            other => panic!("the turn should end after the last fragment: {other:?}"),
+        }
+    }
     assert_eq!(
         produced.load(Ordering::SeqCst),
         EVENTS,

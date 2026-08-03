@@ -166,6 +166,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             model: "test-model".to_owned(),
             system: None,
             messages: vec![ganja_core::Message::user("hello")],
+            tools: Vec::new(),
         };
 
         // First turn: refused, with the key quoted back at us. Matched rather

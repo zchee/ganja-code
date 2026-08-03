@@ -9,7 +9,7 @@
 //! between API versions, and a turn that panicked or failed on one would make
 //! every future addition a breaking change.
 
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, sync::LazyLock};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -19,7 +19,8 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    protocol::{FinishReason, Part, Role, Usage},
+    catalog,
+    protocol::{FinishReason, Message, PartBody, Role, ToolState, Usage},
     provider::{
         ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, check_base_url,
         client, open, require_credential, setting, shown_base_url, sse::Frame,
@@ -47,7 +48,35 @@ pub const API_VERSION: &str = "2023-06-01";
 /// The API requires the field and has no "as much as the model allows"
 /// sentinel, so this is a ceiling rather than a target: the model stops when it
 /// is done, and `stop_reason: max_tokens` is what a truncated reply looks like.
-pub const DEFAULT_MAX_TOKENS: u32 = 8_192;
+///
+/// The number is upstream's `OUTPUT_TOKEN_MAX` (`provider/transform.ts`), which
+/// is deliberately below what the current models will generate — their own
+/// limits are 64k and up. A ceiling that far under the model's is what keeps a
+/// single runaway reply from spending a context window, and
+/// [`AnthropicProvider::max_tokens`] lowers it further for any model whose own
+/// limit is smaller.
+pub const DEFAULT_MAX_TOKENS: u32 = 32_000;
+
+/// What a call that never produced one reports as its result.
+///
+/// A tool part still [`ToolState::Pending`] or [`ToolState::Running`] when it
+/// reaches a later request belongs to a turn that died — cancelled, or failed —
+/// before the tool answered. Neither obvious move is available: dropping the
+/// `tool_use` block leaves the assistant text claiming a call that is not
+/// there, and keeping it unanswered is a request the API refuses outright,
+/// because every `tool_use` must be resolved by a `tool_result` in the message
+/// that follows. So the pair is emitted with this in place of the output, and
+/// marked as an error, which is both true and something the model can act on.
+/// Upstream resolves the same dangling call with the wording
+/// "[Tool execution was interrupted]".
+const NO_RESULT: &str = "[no result recorded]";
+
+/// Arguments for a call the model never finished streaming.
+///
+/// `input` is required on a `tool_use` block, and a [`ToolState::Pending`] part
+/// has none to give: an empty object is the honest spelling of "the model was
+/// still saying".
+static NO_INPUT: LazyLock<Value> = LazyLock::new(|| Value::Object(serde_json::Map::new()));
 
 /// Streams replies from the Anthropic Messages API.
 pub struct AnthropicProvider {
@@ -126,6 +155,21 @@ impl AnthropicProvider {
         self.max_tokens = max_tokens;
         self
     }
+
+    /// The reply cap a request for `model` may ask for.
+    ///
+    /// The configured ceiling, lowered to whatever the catalog says the model
+    /// will generate in one reply: asking a model for more than its own limit
+    /// is a 400 rather than a longer answer. A model the table does not know
+    /// keeps the configured value, because there is nothing truer to say about
+    /// it. This is upstream's `maxOutputTokens` —
+    /// `min(model.limit.output, OUTPUT_TOKEN_MAX)` — with
+    /// [`DEFAULT_MAX_TOKENS`] as the second term.
+    fn max_tokens(&self, model: &str) -> u32 {
+        catalog::model(model)
+            .and_then(|info| u32::try_from(info.max_output).ok())
+            .map_or(self.max_tokens, |ceiling| ceiling.min(self.max_tokens))
+    }
 }
 
 #[async_trait]
@@ -144,7 +188,7 @@ impl Provider for AnthropicProvider {
         // on the wire.
         check_base_url(&self.base_url)?;
 
-        let body = Body::new(&request, self.max_tokens);
+        let body = Body::new(&request, self.max_tokens(&request.model));
         let built = self
             .client
             .post(format!(
@@ -172,39 +216,213 @@ struct Body<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<&'a str>,
     messages: Vec<Turn<'a>>,
+    /// Omitted rather than sent empty. A turn with nothing to offer the model
+    /// is the ordinary case for a session with no registry, and `"tools": []`
+    /// is a field several compatible endpoints treat differently from its
+    /// absence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ToolSpec<'a>>,
+}
+
+/// One tool as the Messages API advertises it.
+#[derive(Debug, Serialize)]
+struct ToolSpec<'a> {
+    name: &'a str,
+    description: &'a str,
+    input_schema: &'a Value,
 }
 
 /// One message as the Messages API spells it.
 #[derive(Debug, Serialize)]
 struct Turn<'a> {
     role: &'static str,
-    content: &'a str,
+    content: Content<'a>,
+}
+
+/// What a message carries.
+///
+/// The API accepts a bare string for a message that is only text, which is what
+/// every message was before tools, and what most still are.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum Content<'a> {
+    /// The whole message is this text.
+    Text(&'a str),
+    /// Anything else: text beside calls, or a message of results.
+    Blocks(Vec<Block<'a>>),
+}
+
+/// One content block.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Block<'a> {
+    /// Something the model said, or was told.
+    Text {
+        /// The text itself.
+        text: &'a str,
+    },
+    /// A call the model made.
+    ToolUse {
+        /// The provider's identifier for the call, which its result names.
+        id: &'a str,
+        /// Tool that was called.
+        name: &'a str,
+        /// The arguments it was called with.
+        input: &'a Value,
+    },
+    /// What a call produced, or why it produced nothing.
+    ToolResult {
+        /// The call this answers.
+        tool_use_id: &'a str,
+        /// The result, as the model sees it.
+        content: &'a str,
+        /// Sent only when the call failed; the API reads its absence as
+        /// success.
+        #[serde(skip_serializing_if = "succeeded")]
+        is_error: bool,
+    },
+}
+
+/// Whether a result block describes a call that worked.
+fn succeeded(is_error: &bool) -> bool {
+    !*is_error
 }
 
 impl<'a> Body<'a> {
+    /// Turns a request into the JSON the Messages API expects.
+    ///
+    /// # How a transcript becomes a request
+    ///
+    /// Canonical [`Message`]s carry ordered parts and hold a call beside its
+    /// result; the API carries ordered content blocks and puts the result in
+    /// the *next* message, with the user role. So one assistant message becomes
+    /// up to two:
+    ///
+    /// - its text parts become `text` blocks and its tool parts `tool_use`
+    ///   blocks, in the order the parts are in, so the model reads its own
+    ///   reply back in the order it produced it;
+    /// - every one of those calls contributes a `tool_result` block to a single
+    ///   user message placed immediately after, because the API answers a
+    ///   message's calls in the message that follows it and rejects a
+    ///   `tool_result` naming a call it cannot see. All of one message's
+    ///   results share that one user message, which is what "immediately after"
+    ///   leaves room for.
+    ///
+    /// Step markers serialize to nothing. They record where one model request
+    /// ended and the next began, which is this crate's bookkeeping rather than
+    /// anything the model said.
+    ///
+    /// A message that contributes no blocks is dropped rather than sent empty:
+    /// the API rejects empty content, and an assistant turn that failed before
+    /// its first fragment is exactly that.
     fn new(request: &'a ChatRequest, max_tokens: u32) -> Self {
+        let mut messages = Vec::with_capacity(request.messages.len());
+
+        for message in &request.messages {
+            let (blocks, results) = split(message);
+            if blocks.is_empty() {
+                continue;
+            }
+
+            messages.push(Turn {
+                role: match message.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                },
+                content: content(blocks),
+            });
+
+            if !results.is_empty() {
+                messages.push(Turn {
+                    role: "user",
+                    content: Content::Blocks(results),
+                });
+            }
+        }
+
         Self {
             model: &request.model,
             max_tokens,
             stream: true,
             system: request.system.as_deref(),
-            messages: request
-                .messages
+            messages,
+            tools: request
+                .tools
                 .iter()
-                .filter_map(|message| {
-                    // The API rejects an empty content string, and an assistant
-                    // turn that failed before its first fragment produces one.
-                    let content = message.parts.first().and_then(Part::as_text)?;
-                    (!content.trim().is_empty()).then_some(Turn {
-                        role: match message.role {
-                            Role::User => "user",
-                            Role::Assistant => "assistant",
-                        },
-                        content,
-                    })
+                .map(|tool| ToolSpec {
+                    name: &tool.name,
+                    description: &tool.description,
+                    input_schema: &tool.schema,
                 })
                 .collect(),
         }
+    }
+}
+
+/// Splits one message into the blocks it sends and the results that answer it.
+fn split(message: &Message) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
+    let mut blocks = Vec::with_capacity(message.parts.len());
+    let mut results = Vec::new();
+
+    for part in &message.parts {
+        match &part.body {
+            PartBody::Text { text } => {
+                if !text.trim().is_empty() {
+                    blocks.push(Block::Text { text });
+                }
+            }
+            PartBody::Tool {
+                call_id,
+                tool,
+                state,
+            } => {
+                blocks.push(Block::ToolUse {
+                    id: call_id,
+                    name: tool,
+                    input: input(state),
+                });
+
+                let (content, is_error) = result(state);
+                results.push(Block::ToolResult {
+                    tool_use_id: call_id,
+                    content,
+                    is_error,
+                });
+            }
+            PartBody::StepStart | PartBody::StepFinish { .. } => {}
+        }
+    }
+
+    (blocks, results)
+}
+
+/// Spells `blocks` the shortest way the API accepts them.
+fn content(blocks: Vec<Block<'_>>) -> Content<'_> {
+    if let [Block::Text { text }] = blocks.as_slice() {
+        return Content::Text(text);
+    }
+
+    Content::Blocks(blocks)
+}
+
+/// The arguments a call ran with, or [`NO_INPUT`] when it never got that far.
+fn input(state: &ToolState) -> &Value {
+    match state {
+        ToolState::Pending => &NO_INPUT,
+        ToolState::Running { input, .. }
+        | ToolState::Completed { input, .. }
+        | ToolState::Error { input, .. } => input,
+    }
+}
+
+/// What a call produced and whether that counts as a failure.
+fn result(state: &ToolState) -> (&str, bool) {
+    match state {
+        ToolState::Completed { output, .. } => (output, false),
+        ToolState::Error { error, .. } => (error, true),
+        // See [`NO_RESULT`]: the turn that made this call died before the tool
+        // answered, and an unanswered call is a request the API refuses.
+        ToolState::Pending | ToolState::Running { .. } => (NO_RESULT, true),
     }
 }
 
@@ -424,10 +642,13 @@ mod tests {
     use futures::StreamExt as _;
     use tokio_util::sync::CancellationToken;
 
-    use super::{AnthropicProvider, Body, DEFAULT_MAX_TOKENS, Mapping};
+    use serde_json::json;
+
+    use super::{AnthropicProvider, Body, DEFAULT_MAX_TOKENS, Mapping, NO_RESULT};
     use crate::{
-        protocol::{FinishReason, Message, Part, Usage},
+        protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
         provider::{ChatRequest, Provider as _, ProviderError, ProviderEvent, replay},
+        tool::ToolDefinition,
     };
 
     /// Runs a recorded transcript through the real splitter and mapper.
@@ -561,6 +782,40 @@ mod tests {
         );
     }
 
+    /// A call is executed when its arguments end, so closing one whose
+    /// arguments never arrived would run a tool on half a request. A stream
+    /// that died mid-call has to end as a failure with the call still open.
+    #[tokio::test]
+    async fn a_stream_that_dies_mid_call_never_closes_it() {
+        let seen = events(include_str!(
+            "../../tests/fixtures/anthropic_tool_call_cut_short.sse"
+        ))
+        .await;
+
+        assert_eq!(text(&seen), "Let me read that file.");
+        assert_eq!(
+            seen.iter()
+                .filter(|event| !matches!(event, ProviderEvent::TextDelta(_)))
+                .collect::<Vec<_>>(),
+            vec![
+                &ProviderEvent::ToolCallStart {
+                    id: "toolu_01Cut".to_owned(),
+                    name: "read".to_owned(),
+                },
+                // The fragment the body was cut in half of never arrives: an
+                // incomplete frame is not a frame.
+                &ProviderEvent::ToolCallDelta {
+                    id: "toolu_01Cut".to_owned(),
+                    json: "{\"file".to_owned(),
+                },
+                &ProviderEvent::Failed(ProviderError::Transport(
+                    "the response body ended before the model finished".to_owned()
+                )),
+            ],
+            "got {seen:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_body_that_stops_mid_reply_fails_rather_than_completing() {
         let seen = events(include_str!("../../tests/fixtures/anthropic_truncated.sse")).await;
@@ -627,6 +882,7 @@ mod tests {
         let request = ChatRequest {
             model: "claude-test".to_owned(),
             system: Some("be brief".to_owned()),
+            tools: Vec::new(),
             messages: vec![
                 Message::user("hello"),
                 Message::assistant("claude"),
@@ -660,11 +916,299 @@ mod tests {
             model: "claude-test".to_owned(),
             system: None,
             messages: vec![Message::user("hi")],
+            tools: Vec::new(),
         };
         let body = serde_json::to_string(&Body::new(&request, 16)).expect("the body serializes");
 
         assert!(!body.contains("system"), "got {body}");
         assert!(body.contains(r#""max_tokens":16"#), "got {body}");
+    }
+
+    /// A tool part carrying `state`, as an assistant message holds one.
+    fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
+        Part {
+            id: PartId::ascending(),
+            body: PartBody::Tool {
+                call_id: call_id.to_owned(),
+                tool: tool.to_owned(),
+                state,
+            },
+        }
+    }
+
+    /// The transcript of a turn that read a file and failed to glob: a step
+    /// marker, some text, one call that worked, one that did not, and the step
+    /// marker that closed the request.
+    fn a_turn_with_two_calls() -> Message {
+        let mut assistant = Message::assistant("claude-test");
+
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepStart,
+        });
+        assistant.parts.push(Part::text("Reading the file first."));
+        assistant.parts.push(tool_part(
+            "toolu_01Read",
+            "read",
+            ToolState::Completed {
+                input: json!({"filePath": "src/main.rs"}),
+                output: "fn main() {}".to_owned(),
+                title: "src/main.rs".to_owned(),
+                metadata: json!({}),
+                started: 1,
+                completed: 2,
+            },
+        ));
+        assistant.parts.push(tool_part(
+            "toolu_01Glob",
+            "glob",
+            ToolState::Error {
+                input: json!({"pattern": "**/*.rs"}),
+                error: "no such directory".to_owned(),
+                started: 3,
+                completed: 4,
+            },
+        ));
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepFinish {
+                usage: Usage::default(),
+            },
+        });
+
+        assistant
+    }
+
+    /// A request offering `read`, which is what a session with a registry
+    /// sends on every turn.
+    fn a_tool() -> ToolDefinition {
+        ToolDefinition {
+            name: "read".to_owned(),
+            description: "Reads a file from disk.".to_owned(),
+            schema: json!({
+                "type": "object",
+                "properties": {"filePath": {"type": "string"}},
+                "required": ["filePath"],
+            }),
+        }
+    }
+
+    #[test]
+    fn a_request_advertises_the_tools_it_was_given() {
+        let request = ChatRequest {
+            model: "claude-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("read src/main.rs")],
+            tools: vec![a_tool()],
+        };
+
+        let body = serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS))
+            .expect("the body serializes");
+
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "name": "read",
+                "description": "Reads a file from disk.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"filePath": {"type": "string"}},
+                    "required": ["filePath"],
+                },
+            }]),
+            "got {body}"
+        );
+    }
+
+    /// A turn that called tools has to read back to the model the way it
+    /// happened: the calls in the assistant message that made them, and their
+    /// results in the user message that follows, which is the only place the
+    /// API accepts them.
+    #[test]
+    fn a_finished_call_is_sent_back_as_a_use_and_a_result() {
+        let request = ChatRequest {
+            model: "claude-test".to_owned(),
+            system: Some("be brief".to_owned()),
+            messages: vec![
+                Message::user("read src/main.rs"),
+                a_turn_with_two_calls(),
+                Message::user("thanks"),
+            ],
+            tools: vec![a_tool()],
+        };
+
+        let body = serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS))
+            .expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "read src/main.rs"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Reading the file first."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01Read",
+                        "name": "read",
+                        "input": {"filePath": "src/main.rs"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01Glob",
+                        "name": "glob",
+                        "input": {"pattern": "**/*.rs"},
+                    },
+                ]},
+                // One message for both results, because the API answers a
+                // message's calls in the message that follows it.
+                {"role": "user", "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_01Read",
+                        "content": "fn main() {}",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_01Glob",
+                        "content": "no such directory",
+                        "is_error": true,
+                    },
+                ]},
+                {"role": "user", "content": "thanks"},
+            ]),
+            "got {body}"
+        );
+    }
+
+    /// A turn cancelled while a tool was running leaves a call nobody answered.
+    /// Sending it as it stands is a request the API refuses outright, and
+    /// dropping it leaves the reply talking about a call that is not there, so
+    /// the pair is completed with a placeholder.
+    #[test]
+    fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
+        for state in [
+            ToolState::Pending,
+            ToolState::Running {
+                input: json!({"filePath": "src/main.rs"}),
+                started: 1,
+            },
+        ] {
+            let running = matches!(state, ToolState::Running { .. });
+            let mut assistant = Message::assistant("claude-test");
+            assistant
+                .parts
+                .push(tool_part("toolu_01Read", "read", state));
+
+            let request = ChatRequest {
+                model: "claude-test".to_owned(),
+                system: None,
+                messages: vec![Message::user("read src/main.rs"), assistant],
+                tools: Vec::new(),
+            };
+
+            let body = serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS))
+                .expect("the body serializes");
+
+            assert_eq!(
+                body["messages"][1],
+                json!({"role": "assistant", "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_01Read",
+                    "name": "read",
+                    // A call the model never finished streaming has no
+                    // arguments, and the field is required.
+                    "input": if running { json!({"filePath": "src/main.rs"}) } else { json!({}) },
+                }]}),
+                "got {body}"
+            );
+            assert_eq!(
+                body["messages"][2],
+                json!({"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_01Read",
+                    "content": NO_RESULT,
+                    "is_error": true,
+                }]}),
+                "an unanswered call must not reach the API unanswered: {body}"
+            );
+        }
+    }
+
+    /// Step markers are this crate's bookkeeping — where one model request
+    /// ended and the next began — rather than anything the model said, so a
+    /// message of nothing else is not a message at all.
+    #[test]
+    fn step_markers_are_not_sent() {
+        let mut assistant = Message::assistant("claude-test");
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepStart,
+        });
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepFinish {
+                usage: Usage::default(),
+            },
+        });
+
+        let request = ChatRequest {
+            model: "claude-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("hi"), assistant],
+            tools: Vec::new(),
+        };
+
+        let body = serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS))
+            .expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            json!([{"role": "user", "content": "hi"}]),
+            "got {body}"
+        );
+    }
+
+    /// Asking a model for more than it will generate is a 400 rather than a
+    /// longer reply, and the catalog is what knows the difference. Whichever of
+    /// the two ceilings is lower wins, in both directions.
+    #[test]
+    fn the_reply_cap_is_the_lower_of_the_catalog_and_the_configuration() {
+        let provider = AnthropicProvider::new("sk-test-canary-XYZ").expect("a client builds");
+
+        assert_eq!(
+            provider.max_tokens("claude-test"),
+            DEFAULT_MAX_TOKENS,
+            "a model the table does not know keeps the configured ceiling"
+        );
+        assert_eq!(
+            provider.max_tokens("claude-sonnet-5"),
+            DEFAULT_MAX_TOKENS,
+            "a model that will generate more than the cap is still capped: \
+             sonnet's own limit is 128k"
+        );
+
+        let modest = AnthropicProvider::new("sk-test-canary-XYZ")
+            .expect("a client builds")
+            .with_max_tokens(4_096);
+
+        assert_eq!(
+            modest.max_tokens("claude-sonnet-5"),
+            4_096,
+            "a caller asking for less than the cap gets what it asked for"
+        );
+
+        let generous = provider.with_max_tokens(200_000);
+
+        assert_eq!(
+            generous.max_tokens("claude-haiku-4-5"),
+            64_000,
+            "the model's own limit is the ceiling once it is the smaller one"
+        );
+        assert_eq!(
+            generous.max_tokens("claude-test"),
+            200_000,
+            "and an unknown model is still asked for what the caller configured"
+        );
     }
 
     /// Both credentials a provider holds: the key it was built with, and
@@ -742,6 +1286,7 @@ mod tests {
                     model: "claude-sonnet-5".to_owned(),
                     system: None,
                     messages: vec![Message::user("hi")],
+                    tools: Vec::new(),
                 },
                 CancellationToken::new(),
             )

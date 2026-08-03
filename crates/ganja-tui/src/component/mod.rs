@@ -2,4 +2,5 @@
 
 pub mod chat;
 pub mod editor;
+pub mod permission;
 pub mod status;

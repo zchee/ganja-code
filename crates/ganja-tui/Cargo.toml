@@ -16,5 +16,9 @@ futures.workspace = true
 ganja-core.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 unicode-width.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

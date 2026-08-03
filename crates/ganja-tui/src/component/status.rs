@@ -28,12 +28,16 @@ const SPINNER_PERIOD: Duration = Duration::from_millis(80);
 const HINTS: &str = "Enter send \u{b7} Alt+Enter newline \u{b7} Esc cancel \u{b7} Ctrl-C quit";
 
 /// What the engine is doing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activity {
     /// Idle, waiting for a prompt.
     Ready,
     /// A reply is streaming in.
     Streaming,
+    /// A tool call is executing, named by its registry id.
+    Tool(String),
+    /// A tool call is waiting on the user's permission decision.
+    Permission,
     /// The last turn was cancelled.
     Stopped,
     /// The last turn could not be answered; the notice says why.
@@ -41,12 +45,14 @@ pub enum Activity {
 }
 
 impl Activity {
-    fn label(self) -> &'static str {
+    fn label(&self) -> String {
         match self {
-            Self::Ready => "ready",
-            Self::Streaming => "streaming",
-            Self::Stopped => "stopped",
-            Self::Failed => "failed",
+            Self::Ready => "ready".to_owned(),
+            Self::Streaming => "streaming".to_owned(),
+            Self::Tool(tool) => format!("tool: {tool}"),
+            Self::Permission => "waiting on permission".to_owned(),
+            Self::Stopped => "stopped".to_owned(),
+            Self::Failed => "failed".to_owned(),
         }
     }
 }
@@ -140,7 +146,7 @@ impl Status {
             left.push_str(self.spinner());
             left.push(' ');
         }
-        left.push_str(self.activity.label());
+        left.push_str(&self.activity.label());
         // Spend sits beside the state, where its width is predictable; the
         // notice is last because it is the one part with no length limit.
         if let Some(totals) = &self.totals {
@@ -322,5 +328,21 @@ mod tests {
         assert!(!status.is_streaming());
         assert!(line.starts_with("failed"), "got {line:?}");
         assert!(line.contains("no usable credentials"), "got {line:?}");
+    }
+
+    #[test]
+    fn a_running_tool_names_itself_in_the_activity_label() {
+        let mut status = Status::new(None);
+        status.set_activity(Activity::Tool("shell".to_owned()));
+
+        assert!(rendered(&status, 100).contains("tool: shell"));
+    }
+
+    #[test]
+    fn waiting_on_a_permission_has_its_own_label() {
+        let mut status = Status::new(None);
+        status.set_activity(Activity::Permission);
+
+        assert!(rendered(&status, 100).contains("waiting on permission"));
     }
 }

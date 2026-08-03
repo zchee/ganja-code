@@ -56,6 +56,7 @@ async fn smoke(provider: &dyn Provider, model: &str) {
                 model: model.to_owned(),
                 system: Some("Answer with a single word.".to_owned()),
                 messages: vec![Message::user(PROMPT)],
+                tools: Vec::new(),
             },
             CancellationToken::new(),
         )

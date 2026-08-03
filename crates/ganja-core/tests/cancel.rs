@@ -6,7 +6,10 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use ganja_core::{Command, Engine, Event, FinishReason, provider::FakeProvider, provider::fake};
+use ganja_core::{
+    Command, Engine, Event, FinishReason, Permissions, Registry, provider::FakeProvider,
+    provider::fake,
+};
 
 /// The plan's budget: a cancel is visible within a tenth of a second.
 const CANCEL_BUDGET: Duration = Duration::from_millis(100);
@@ -19,7 +22,12 @@ const WARMUP_FRAGMENTS: usize = 3;
 
 #[tokio::test]
 async fn cancelling_mid_stream_finishes_the_turn_inside_the_budget() {
-    let engine = Engine::new(Arc::new(FakeProvider::default()), fake::MODEL);
+    let engine = Engine::new(
+        Arc::new(FakeProvider::default()),
+        fake::MODEL,
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+    );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine

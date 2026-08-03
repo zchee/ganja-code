@@ -8,18 +8,31 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-# Only where dyn-safety demands it: `Provider` is used behind `Arc<dyn _>`.
+# Only where dyn-safety demands it: `Provider` and `Tool` live behind
+# `Arc<dyn _>`.
 async-trait.workspace = true
+# Tool argument schemas, generated from the argument structs themselves so the
+# schema a model sees cannot drift from what the tool parses.
+schemars.workspace = true
 # Resolves `auth.json` under the XDG data directory on every platform, macOS
 # included, which is where upstream keeps its own credentials there.
 etcetera.workspace = true
 futures.workspace = true
+# `glob` and `grep` walk the filesystem in-process rather than shelling to
+# `rg`, sharing the same crates ripgrep itself is built on for byte-identical
+# glob and ignore-file semantics.
+grep-regex.workspace = true
+grep-searcher.workspace = true
+ignore.workspace = true
 # The HTTP providers speak SSE, so only `stream` and `json` are load-bearing;
 # the workspace declaration pins rustls so no build here reaches for OpenSSL.
 reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `edit` reports what it changed as a unified patch, which a frontend renders
+# instead of the two whole files.
+similar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -29,6 +42,11 @@ url.workspace = true
 # `CancellationToken` lives behind `rt`; the workspace declaration carries no
 # features so crates opt into exactly the modules they use.
 tokio-util = { workspace = true, features = ["rt"] }
+
+[target.'cfg(unix)'.dependencies]
+# The shell tool runs commands in their own process group and `killpg` is the
+# call that ends one; Windows support arrives with its own mechanism later.
+libc.workspace = true
 
 [dev-dependencies]
 # The credential tests write real files, with real permission bits, in a
