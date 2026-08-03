@@ -56,7 +56,7 @@ use url::Host;
 
 use crate::{
     auth, catalog,
-    protocol::{FinishReason, Message, Usage},
+    protocol::{FinishReason, Message, Part, PartBody, Usage},
     provider::sse::Frame,
     tool::ToolDefinition,
 };
@@ -93,6 +93,30 @@ pub struct ChatRequest {
     /// Tools the model may call, advertised on every request. Empty means the
     /// model is not offered any.
     pub tools: Vec<ToolDefinition>,
+}
+
+/// Splits one message's parts into a slice per model request.
+///
+/// A whole turn accumulates into a single [`Message`]: every request it took
+/// opens with a [`PartBody::StepStart`] marker, and everything up to the next
+/// one is what the model said and called in that step. Both HTTP providers
+/// encode one message per step rather than one per canonical message, because
+/// the two APIs carry a call's result in the message *after* the one that made
+/// it. Flattening a multi-step turn would emit every call and then every
+/// result, which the API accepts — it reads as parallel tool use — but which
+/// presents what the model said in a later step as having been said before the
+/// earlier step's results came back. The model's reasoning would be misordered
+/// against the evidence it was reasoning from, and worse the longer the turn.
+///
+/// This is upstream's shape. `session/message-v2.ts` keeps `step-start` parts in
+/// the message it hands the AI SDK, and `convertToModelMessages` flushes one
+/// assistant message — followed by one message holding that step's results — at
+/// every marker it meets.
+///
+/// Parts before the first marker are a step of their own, so a hand-built
+/// message or a transcript stored before markers existed still encodes whole.
+fn steps(parts: &[Part]) -> impl Iterator<Item = &[Part]> {
+    parts.split(|part| matches!(part.body, PartBody::StepStart))
 }
 
 /// Something a provider reported while answering.

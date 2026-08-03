@@ -18,10 +18,10 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    protocol::{FinishReason, Message, PartBody, Role, ToolState, Usage},
+    protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
         ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, check_base_url,
-        client, open, require_credential, setting, shown_base_url, sse::Frame,
+        client, open, require_credential, setting, shown_base_url, sse::Frame, steps,
     },
 };
 
@@ -259,24 +259,24 @@ impl<'a> Body<'a> {
     ///
     /// # How a transcript becomes a request
     ///
-    /// Canonical [`Message`]s carry ordered parts and hold a call beside its
-    /// result; this API carries one content string per message, calls in a
-    /// `tool_calls` array beside it, and each result as its own `tool` message.
-    /// So one assistant message becomes one message plus one per call:
+    /// Canonical [`Message`](crate::protocol::Message)s carry ordered parts and
+    /// hold a call beside its result; this API carries one content string per
+    /// message, calls in a `tool_calls` array beside it, and each result as its
+    /// own `tool` message. So each of a message's [`steps`] becomes one message
+    /// plus one per call:
     ///
     /// - its text parts become the content and its tool parts the `tool_calls`
     ///   entries;
-    /// - every one of those calls is answered by a `tool` message placed
+    /// - every one of that step's calls is answered by a `tool` message placed
     ///   immediately after, in call order, because the API refuses an assistant
     ///   turn that follows an unanswered call.
     ///
-    /// Step markers serialize to nothing: they record where one model request
-    /// ended and the next began, which is this crate's bookkeeping rather than
-    /// anything the model said.
+    /// Step markers themselves serialize to nothing: they say where the split
+    /// falls, not anything the model said.
     ///
-    /// A message that would carry neither content nor calls is dropped rather
-    /// than sent empty, which is what an assistant turn that failed before its
-    /// first fragment is.
+    /// A step that would carry neither content nor calls is dropped rather than
+    /// sent empty, which is what both the marker that opens a turn and an
+    /// assistant turn that failed before its first fragment are.
     fn new(request: &'a ChatRequest) -> Self {
         // Chat completions has no `system` field: the prompt is the first
         // message, with its own role.
@@ -288,21 +288,25 @@ impl<'a> Body<'a> {
             .collect();
 
         for message in &request.messages {
-            let (content, calls, results) = split(message);
-            if content.is_none() && calls.is_empty() {
-                continue;
-            }
+            let role = match message.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
 
-            messages.push(Turn {
-                role: match message.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                },
-                content,
-                tool_calls: calls,
-                tool_call_id: None,
-            });
-            messages.extend(results);
+            for step in steps(&message.parts) {
+                let (content, calls, results) = split(step);
+                if content.is_none() && calls.is_empty() {
+                    continue;
+                }
+
+                messages.push(Turn {
+                    role,
+                    content,
+                    tool_calls: calls,
+                    tool_call_id: None,
+                });
+                messages.extend(results);
+            }
         }
 
         Self {
@@ -328,14 +332,14 @@ impl<'a> Body<'a> {
     }
 }
 
-/// Splits one message into its content, the calls it made, and the messages
-/// that answer them.
-fn split<'a>(message: &'a Message) -> (Option<Cow<'a, str>>, Vec<Call<'a>>, Vec<Turn<'a>>) {
+/// Splits one step into its content, the calls it made, and the messages that
+/// answer them.
+fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>) {
     let mut texts: Vec<&str> = Vec::new();
     let mut calls = Vec::new();
     let mut results = Vec::new();
 
-    for part in &message.parts {
+    for part in parts {
         match &part.body {
             PartBody::Text { text } => {
                 if !text.trim().is_empty() {
@@ -357,6 +361,8 @@ fn split<'a>(message: &'a Message) -> (Option<Cow<'a, str>>, Vec<Call<'a>>, Vec<
                 });
                 results.push(Turn::answered(call_id, result(state)));
             }
+            // `StepFinish` carries a step's bill rather than content, and
+            // `StepStart` was consumed as the boundary this step was cut at.
             PartBody::StepStart | PartBody::StepFinish { .. } => {}
         }
     }
@@ -364,9 +370,9 @@ fn split<'a>(message: &'a Message) -> (Option<Cow<'a, str>>, Vec<Call<'a>>, Vec<
     let content = match texts.as_slice() {
         [] => None,
         [only] => Some(Cow::Borrowed(*only)),
-        // One message, one content string: several text parts are one reply
-        // interrupted by calls, and joining them without a separator would run
-        // the last word of a step into the first of the next.
+        // One message, one content string. Within a step that means fragments
+        // of one reply the calls interrupted, and joining them without a
+        // separator would run the last word of one into the first of the next.
         many => Some(Cow::Owned(many.join("\n"))),
     };
 
@@ -406,6 +412,14 @@ fn result(state: &ToolState) -> &str {
 #[derive(Debug, Default)]
 struct Mapping {
     usage: Usage,
+    /// `prompt_tokens` as reported, before the cached count is taken back out
+    /// of it.
+    ///
+    /// This API's `prompt_tokens` is the whole prompt *including* whatever
+    /// `prompt_tokens_details.cached_tokens` was served from the cache, while
+    /// [`Usage`]'s five counters are disjoint. Held raw and reconciled once the
+    /// stream ends, so that the two counts need not have arrived together.
+    prompt_tokens: u64,
     /// Identifiers of the tool calls seen so far, by their position in the
     /// chunk's `tool_calls` array — which is the only thing that correlates
     /// arguments with the call they belong to.
@@ -476,7 +490,7 @@ impl Mapping {
     /// Reads the trailing usage chunk, which is the only one that has one.
     fn absorb(&mut self, usage: &Value) {
         for (pointer, slot) in [
-            ("prompt_tokens", &mut self.usage.input_tokens),
+            ("prompt_tokens", &mut self.prompt_tokens),
             ("completion_tokens", &mut self.usage.output_tokens),
         ] {
             if let Some(count) = usage[pointer].as_u64() {
@@ -557,6 +571,24 @@ impl Mapping {
                 .map(|(_index, id)| ProviderEvent::ToolCallEnd { id }),
         );
 
+        // `prompt_tokens` counts the cached tokens as well, and `Usage` keeps
+        // its five counters disjoint so that each can be billed at its own
+        // rate, so the cached ones come back out here. Without this a cached
+        // session reports its prompt twice and is priced several times over —
+        // a cache read costs a tenth of what fresh input does.
+        //
+        // Upstream reaches the same shape twice over: `packages/core`'s
+        // OpenAI-compatible model derives a `noCache` count as
+        // `promptTokens - cachedTokens`, and `session.ts`'s `getUsage` subtracts
+        // both cache counters from `inputTokens` before pricing anything.
+        //
+        // Saturating rather than wrapping: an endpoint claiming more cached
+        // tokens than prompt tokens must read as nothing fresh, not as a bill
+        // for eighteen quintillion tokens.
+        self.usage.input_tokens = self
+            .prompt_tokens
+            .saturating_sub(self.usage.cache_read_tokens);
+
         events.push(ProviderEvent::Usage(self.usage));
         events.push(ProviderEvent::Finish(FinishReason::Completed));
     }
@@ -592,6 +624,7 @@ mod tests {
 
     use super::{Body, Mapping, NO_RESULT, OpenAiProvider};
     use crate::{
+        catalog,
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
         provider::{ChatRequest, ProviderError, ProviderEvent, replay},
         tool::ToolDefinition,
@@ -630,7 +663,10 @@ mod tests {
             &seen[seen.len() - 2..],
             &[
                 ProviderEvent::Usage(Usage {
-                    input_tokens: 42,
+                    // The chunk says `prompt_tokens: 42` with 16 of them
+                    // cached, and `Usage` keeps its counters disjoint, so the
+                    // fresh half of that prompt is 26.
+                    input_tokens: 26,
                     output_tokens: 9,
                     reasoning_tokens: 4,
                     cache_read_tokens: 16,
@@ -639,6 +675,105 @@ mod tests {
                 ProviderEvent::Finish(FinishReason::Completed),
             ],
             "the trailing usage chunk should be reported before the finish, got {seen:?}"
+        );
+    }
+
+    /// This API reports the whole prompt as `prompt_tokens` and then says how
+    /// much of it the cache served; [`Usage`] keeps the two apart so each can be
+    /// billed at its own rate, a cache read costing a fraction of fresh input.
+    /// Handing both counts through unchanged bills the cached half twice.
+    #[tokio::test]
+    async fn a_cached_prompt_reports_only_its_fresh_half_as_input() {
+        let cases = [
+            (
+                "a cached prompt bills only what the cache did not serve",
+                concat!(
+                    r#"data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"#,
+                    r#""usage":{"prompt_tokens":1000,"completion_tokens":20,"#,
+                    r#""prompt_tokens_details":{"cached_tokens":800}}}"#,
+                    "\n\ndata: [DONE]\n\n",
+                ),
+                Usage {
+                    input_tokens: 200,
+                    output_tokens: 20,
+                    cache_read_tokens: 800,
+                    ..Usage::default()
+                },
+            ),
+            (
+                "an endpoint claiming more cached tokens than prompt tokens reads as \
+                 nothing fresh rather than wrapping into a bill nobody owes",
+                concat!(
+                    r#"data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"#,
+                    r#""usage":{"prompt_tokens":100,"completion_tokens":5,"#,
+                    r#""prompt_tokens_details":{"cached_tokens":900}}}"#,
+                    "\n\ndata: [DONE]\n\n",
+                ),
+                Usage {
+                    input_tokens: 0,
+                    output_tokens: 5,
+                    cache_read_tokens: 900,
+                    ..Usage::default()
+                },
+            ),
+            (
+                "a prompt nothing was cached for is fresh in full",
+                concat!(
+                    r#"data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"#,
+                    r#""usage":{"prompt_tokens":1000,"completion_tokens":20}}"#,
+                    "\n\ndata: [DONE]\n\n",
+                ),
+                Usage {
+                    input_tokens: 1_000,
+                    output_tokens: 20,
+                    ..Usage::default()
+                },
+            ),
+        ];
+
+        for (name, transcript, expected) in cases {
+            let seen = events(transcript).await;
+
+            assert!(
+                seen.contains(&ProviderEvent::Usage(expected)),
+                "{name}: got {seen:?}"
+            );
+        }
+    }
+
+    /// The bill the corrected counts actually produce. Priced apart, a heavily
+    /// cached prompt costs a fraction of what the same tokens would fresh —
+    /// which is exactly the difference double-counting used to erase.
+    #[test]
+    fn a_cached_prompt_is_billed_once_rather_than_twice() {
+        let model = catalog::model("gpt-5.6").expect("the catalog knows the model");
+        let corrected = Usage {
+            input_tokens: 200_000,
+            output_tokens: 0,
+            cache_read_tokens: 800_000,
+            ..Usage::default()
+        };
+        // What the same response cost before the cached tokens came back out of
+        // `prompt_tokens`: the whole million counted as fresh input *and* the
+        // cached 800k counted again beside it.
+        let doubled = Usage {
+            input_tokens: 1_000_000,
+            ..corrected
+        };
+
+        let billed = catalog::cost(&corrected, model).total_usd;
+        let expected = model.pricing.input * 0.2 + model.pricing.cache_read * 0.8;
+
+        assert!(
+            (billed - expected).abs() < 1e-9,
+            "200k fresh at ${}/Mtok plus 800k cached at ${}/Mtok is ${expected}, got ${billed}",
+            model.pricing.input,
+            model.pricing.cache_read,
+        );
+        assert!(
+            catalog::cost(&doubled, model).total_usd > billed * 3.0,
+            "the old counts over-reported by more than a factor of three, which is \
+             the size of the error this pins"
         );
     }
 
@@ -741,8 +876,9 @@ mod tests {
                 &ProviderEvent::ToolCallEnd {
                     id: "call_glob".to_owned(),
                 },
+                // 317 prompt tokens of which the cache served 256: 61 fresh.
                 &ProviderEvent::Usage(Usage {
-                    input_tokens: 317,
+                    input_tokens: 61,
                     output_tokens: 58,
                     cache_read_tokens: 256,
                     ..Usage::default()
@@ -1078,6 +1214,159 @@ mod tests {
         );
     }
 
+    /// The transcript of a turn that took two model requests: it read a file,
+    /// read what came back, and only then said what it was going to do about
+    /// it. Both steps are parts of one assistant message, which is what makes
+    /// the boundary between them worth respecting.
+    fn a_turn_of_two_steps() -> Message {
+        let mut assistant = Message::assistant("gpt-test");
+
+        for (text, call_id, tool, input, output) in [
+            (
+                "Reading.",
+                "call_read",
+                "read",
+                json!({"filePath": "src/main.rs"}),
+                "fn main() { let x = 1; }",
+            ),
+            (
+                "Now editing.",
+                "call_edit",
+                "edit",
+                json!({"filePath": "src/main.rs", "oldString": "1", "newString": "2"}),
+                "1 replacement",
+            ),
+        ] {
+            assistant.parts.push(Part {
+                id: PartId::ascending(),
+                body: PartBody::StepStart,
+            });
+            assistant.parts.push(Part::text(text));
+            assistant.parts.push(tool_part(
+                call_id,
+                tool,
+                ToolState::Completed {
+                    input,
+                    output: output.to_owned(),
+                    title: "src/main.rs".to_owned(),
+                    metadata: json!({}),
+                    started: 1,
+                    completed: 2,
+                },
+            ));
+            assistant.parts.push(Part {
+                id: PartId::ascending(),
+                body: PartBody::StepFinish {
+                    usage: Usage::default(),
+                },
+            });
+        }
+
+        assistant
+    }
+
+    /// A turn that took two model requests reads back as two of them. The API
+    /// would accept one flattened message — both calls in one `tool_calls`
+    /// array, then both `tool` messages — but it would join "Reading." and "Now
+    /// editing." into a single content string sitting ahead of every result, so
+    /// a model re-reading its own trace would find its reasoning shuffled out
+    /// from under the evidence it reasoned from.
+    #[test]
+    fn a_two_step_turn_is_sent_back_one_message_pair_per_step() {
+        let request = ChatRequest {
+            model: "gpt-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("fix the bug"), a_turn_of_two_steps()],
+            tools: vec![a_tool()],
+        };
+
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "fix the bug"},
+                {"role": "assistant", "content": "Reading.", "tool_calls": [{
+                    "id": "call_read",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": r#"{"filePath":"src/main.rs"}"#},
+                }]},
+                {
+                    "role": "tool",
+                    "content": "fn main() { let x = 1; }",
+                    "tool_call_id": "call_read",
+                },
+                // The second step opens here, after its evidence rather than
+                // before it.
+                {"role": "assistant", "content": "Now editing.", "tool_calls": [{
+                    "id": "call_edit",
+                    "type": "function",
+                    "function": {
+                        "name": "edit",
+                        "arguments":
+                            r#"{"filePath":"src/main.rs","newString":"2","oldString":"1"}"#,
+                    },
+                }]},
+                {"role": "tool", "content": "1 replacement", "tool_call_id": "call_edit"},
+            ]),
+            "got {body}"
+        );
+
+        // The property the shape above exists for, stated on its own so that a
+        // future rearrangement of the messages cannot quietly lose it.
+        let wire = body["messages"].to_string();
+        let position = |needle: &str| wire.find(needle).expect("the wire holds {needle}");
+        assert!(
+            position("Now editing.") > position("fn main() { let x = 1; }"),
+            "what the model said in the second step must read as having been \
+             said after the first step's result came back: {wire}"
+        );
+    }
+
+    /// Older stored transcripts and hand-built messages carry no step markers
+    /// at all. There is one step in that case, not none: everything the message
+    /// holds, encoded exactly as it was before turns were ever split.
+    #[test]
+    fn a_turn_without_step_markers_is_one_step() {
+        let mut assistant = Message::assistant("gpt-test");
+        assistant.parts.push(Part::text("Reading."));
+        assistant.parts.push(tool_part(
+            "call_read",
+            "read",
+            ToolState::Completed {
+                input: json!({"filePath": "src/main.rs"}),
+                output: "fn main() {}".to_owned(),
+                title: "src/main.rs".to_owned(),
+                metadata: json!({}),
+                started: 1,
+                completed: 2,
+            },
+        ));
+
+        let request = ChatRequest {
+            model: "gpt-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("read it"), assistant],
+            tools: Vec::new(),
+        };
+
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "read it"},
+                {"role": "assistant", "content": "Reading.", "tool_calls": [{
+                    "id": "call_read",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": r#"{"filePath":"src/main.rs"}"#},
+                }]},
+                {"role": "tool", "content": "fn main() {}", "tool_call_id": "call_read"},
+            ]),
+            "got {body}"
+        );
+    }
+
     /// A turn cancelled while a tool was running leaves a call nobody answered,
     /// and an assistant turn following an unanswered call is a request this API
     /// refuses. Dropping the call instead would leave the reply talking about
@@ -1130,13 +1419,13 @@ mod tests {
         }
     }
 
-    /// Step markers are this crate's bookkeeping — where one model request
-    /// ended and the next began — rather than anything the model said, so a
-    /// message of nothing else is not a message at all. Text either side of one
-    /// is a single reply the calls interrupted, and this API has one content
-    /// string per message to put it in.
+    /// Step markers never travel as content of their own — they are this
+    /// crate's bookkeeping — but they do decide where one message ends and the
+    /// next begins, so text either side of one is two messages rather than one
+    /// joined string. A message holding nothing but markers is not a message at
+    /// all.
     #[test]
-    fn step_markers_are_not_sent_and_the_text_around_them_is_joined() {
+    fn a_step_marker_starts_a_new_message_rather_than_being_dropped() {
         let mut assistant = Message::assistant("gpt-test");
         assistant.parts.push(Part::text("Reading the file."));
         assistant.parts.push(Part {
@@ -1172,11 +1461,43 @@ mod tests {
             body["messages"],
             json!([
                 {"role": "user", "content": "hi"},
-                {
-                    "role": "assistant",
-                    "content": "Reading the file.\nIt holds a main function.",
-                },
+                {"role": "assistant", "content": "Reading the file."},
+                {"role": "assistant", "content": "It holds a main function."},
             ]),
+            "got {body}"
+        );
+    }
+
+    /// Fragments of one step's reply, on the other hand, are one message: this
+    /// API has a single content string per message, and joining them without a
+    /// separator would run the last word of one into the first of the next.
+    #[test]
+    fn text_fragments_within_one_step_are_joined_into_one_message() {
+        let mut assistant = Message::assistant("gpt-test");
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepStart,
+        });
+        assistant.parts.push(Part::text("Reading the file."));
+        assistant
+            .parts
+            .push(Part::text("It holds a main function."));
+
+        let request = ChatRequest {
+            model: "gpt-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("hi"), assistant],
+            tools: Vec::new(),
+        };
+
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+        assert_eq!(
+            body["messages"][1],
+            json!({
+                "role": "assistant",
+                "content": "Reading the file.\nIt holds a main function.",
+            }),
             "got {body}"
         );
     }

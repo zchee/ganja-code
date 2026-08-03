@@ -20,10 +20,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     catalog,
-    protocol::{FinishReason, Message, PartBody, Role, ToolState, Usage},
+    protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
         ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, check_base_url,
-        client, open, require_credential, setting, shown_base_url, sse::Frame,
+        client, open, require_credential, setting, shown_base_url, sse::Frame, steps,
     },
 };
 
@@ -293,50 +293,61 @@ impl<'a> Body<'a> {
     ///
     /// # How a transcript becomes a request
     ///
-    /// Canonical [`Message`]s carry ordered parts and hold a call beside its
-    /// result; the API carries ordered content blocks and puts the result in
-    /// the *next* message, with the user role. So one assistant message becomes
-    /// up to two:
+    /// Canonical [`Message`](crate::protocol::Message)s carry ordered parts and
+    /// hold a call beside its result; the API carries ordered content blocks
+    /// and puts the result in the *next* message, with the user role. So each
+    /// of a message's [`steps`] becomes up to two:
     ///
     /// - its text parts become `text` blocks and its tool parts `tool_use`
     ///   blocks, in the order the parts are in, so the model reads its own
     ///   reply back in the order it produced it;
-    /// - every one of those calls contributes a `tool_result` block to a single
-    ///   user message placed immediately after, because the API answers a
-    ///   message's calls in the message that follows it and rejects a
-    ///   `tool_result` naming a call it cannot see. All of one message's
-    ///   results share that one user message, which is what "immediately after"
-    ///   leaves room for.
+    /// - every one of that step's calls contributes a `tool_result` block to a
+    ///   single user message placed immediately after, because the API answers
+    ///   a message's calls in the message that follows it and rejects a
+    ///   `tool_result` naming a call it cannot see. All of one step's results
+    ///   share that one user message, which is what "immediately after" leaves
+    ///   room for.
     ///
-    /// Step markers serialize to nothing. They record where one model request
-    /// ended and the next began, which is this crate's bookkeeping rather than
-    /// anything the model said.
+    /// Step markers themselves serialize to nothing: they say where the split
+    /// falls, not anything the model said.
     ///
-    /// A message that contributes no blocks is dropped rather than sent empty:
-    /// the API rejects empty content, and an assistant turn that failed before
-    /// its first fragment is exactly that.
+    /// A step that contributes no blocks is dropped rather than sent empty: the
+    /// API rejects empty content, and both the marker that opens a turn and an
+    /// assistant turn that failed before its first fragment are exactly that.
+    ///
+    /// Two *steps of one message* that end up with the same role are merged
+    /// back into a single message, which is what keeps splitting a turn up from
+    /// ever emitting a transcript whose roles fail to alternate. Steps normally
+    /// alternate on their own — every step but a turn's last one ends in calls,
+    /// and those calls' results are a user message in between — so this catches
+    /// only the interrupted shapes that do not, which before this split were
+    /// one message anyway. Upstream arrives here from the other direction: the
+    /// AI SDK's Anthropic provider regroups the per-step messages it is handed
+    /// by role (`groupIntoBlocks`) before it builds a request.
     fn new(request: &'a ChatRequest, max_tokens: u32) -> Self {
-        let mut messages = Vec::with_capacity(request.messages.len());
+        let mut turns: Vec<(&'static str, Vec<Block<'a>>)> =
+            Vec::with_capacity(request.messages.len());
 
         for message in &request.messages {
-            let (blocks, results) = split(message);
-            if blocks.is_empty() {
-                continue;
-            }
+            let role = match message.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            // Where this message's own steps start, so that merging stays
+            // inside it: two adjacent canonical messages are two things the
+            // transcript holds apart, whatever their roles.
+            let first = turns.len();
 
-            messages.push(Turn {
-                role: match message.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                },
-                content: content(blocks),
-            });
+            for step in steps(&message.parts) {
+                let (blocks, results) = split(step);
+                if blocks.is_empty() {
+                    continue;
+                }
 
-            if !results.is_empty() {
-                messages.push(Turn {
-                    role: "user",
-                    content: Content::Blocks(results),
-                });
+                merge(&mut turns, first, role, blocks);
+                if !results.is_empty() {
+                    merge(&mut turns, first, "user", results);
+                }
             }
         }
 
@@ -345,7 +356,13 @@ impl<'a> Body<'a> {
             max_tokens,
             stream: true,
             system: request.system.as_deref(),
-            messages,
+            messages: turns
+                .into_iter()
+                .map(|(role, blocks)| Turn {
+                    role,
+                    content: content(blocks),
+                })
+                .collect(),
             tools: request
                 .tools
                 .iter()
@@ -359,12 +376,32 @@ impl<'a> Body<'a> {
     }
 }
 
-/// Splits one message into the blocks it sends and the results that answer it.
-fn split(message: &Message) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
-    let mut blocks = Vec::with_capacity(message.parts.len());
+/// Adds `blocks` to the transcript, extending the message before them when that
+/// one carries `role` too and belongs to the same canonical message —
+/// everything from index `first` on.
+fn merge<'a>(
+    turns: &mut Vec<(&'static str, Vec<Block<'a>>)>,
+    first: usize,
+    role: &'static str,
+    blocks: Vec<Block<'a>>,
+) {
+    if turns.len() > first
+        && let Some((last, held)) = turns.last_mut()
+        && *last == role
+    {
+        held.extend(blocks);
+        return;
+    }
+
+    turns.push((role, blocks));
+}
+
+/// Splits one step into the blocks it sends and the results that answer it.
+fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
+    let mut blocks = Vec::with_capacity(parts.len());
     let mut results = Vec::new();
 
-    for part in &message.parts {
+    for part in parts {
         match &part.body {
             PartBody::Text { text } => {
                 if !text.trim().is_empty() {
@@ -389,6 +426,8 @@ fn split(message: &Message) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
                     is_error,
                 });
             }
+            // `StepFinish` carries a step's bill rather than content, and
+            // `StepStart` was consumed as the boundary this step was cut at.
             PartBody::StepStart | PartBody::StepFinish { .. } => {}
         }
     }
@@ -1074,6 +1113,224 @@ mod tests {
                         "is_error": true,
                     },
                 ]},
+                {"role": "user", "content": "thanks"},
+            ]),
+            "got {body}"
+        );
+    }
+
+    /// The transcript of a turn that took two model requests: it read a file,
+    /// read what came back, and only then said what it was going to do about
+    /// it. Both steps are parts of one assistant message, which is what makes
+    /// the boundary between them worth respecting.
+    fn a_turn_of_two_steps() -> Message {
+        let mut assistant = Message::assistant("claude-test");
+
+        for (text, call_id, tool, input, output) in [
+            (
+                "Reading.",
+                "toolu_01Read",
+                "read",
+                json!({"filePath": "src/main.rs"}),
+                "fn main() { let x = 1; }",
+            ),
+            (
+                "Now editing.",
+                "toolu_01Edit",
+                "edit",
+                json!({"filePath": "src/main.rs", "oldString": "1", "newString": "2"}),
+                "1 replacement",
+            ),
+        ] {
+            assistant.parts.push(Part {
+                id: PartId::ascending(),
+                body: PartBody::StepStart,
+            });
+            assistant.parts.push(Part::text(text));
+            assistant.parts.push(tool_part(
+                call_id,
+                tool,
+                ToolState::Completed {
+                    input,
+                    output: output.to_owned(),
+                    title: "src/main.rs".to_owned(),
+                    metadata: json!({}),
+                    started: 1,
+                    completed: 2,
+                },
+            ));
+            assistant.parts.push(Part {
+                id: PartId::ascending(),
+                body: PartBody::StepFinish {
+                    usage: Usage::default(),
+                },
+            });
+        }
+
+        assistant
+    }
+
+    /// A turn that took two model requests reads back as two of them. The API
+    /// would accept one flattened message — both calls, then both results, is
+    /// indistinguishable from parallel tool use — but it would put "Now
+    /// editing." *before* the read it was said in response to, and a model
+    /// re-reading its own trace would find its reasoning shuffled out from
+    /// under the evidence it reasoned from.
+    #[test]
+    fn a_two_step_turn_is_sent_back_one_message_pair_per_step() {
+        let request = ChatRequest {
+            model: "claude-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("fix the bug"), a_turn_of_two_steps()],
+            tools: vec![a_tool()],
+        };
+
+        let body = serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS))
+            .expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "fix the bug"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Reading."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01Read",
+                        "name": "read",
+                        "input": {"filePath": "src/main.rs"},
+                    },
+                ]},
+                {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_01Read",
+                    "content": "fn main() { let x = 1; }",
+                }]},
+                // The second step opens here, after its evidence rather than
+                // before it.
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Now editing."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01Edit",
+                        "name": "edit",
+                        "input": {
+                            "filePath": "src/main.rs",
+                            "oldString": "1",
+                            "newString": "2",
+                        },
+                    },
+                ]},
+                {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_01Edit",
+                    "content": "1 replacement",
+                }]},
+            ]),
+            "got {body}"
+        );
+
+        // The property the shape above exists for, stated on its own so that a
+        // future rearrangement of the blocks cannot quietly lose it.
+        let wire = body["messages"].to_string();
+        let position = |needle: &str| wire.find(needle).expect("the wire holds {needle}");
+        assert!(
+            position("Now editing.") > position("fn main() { let x = 1; }"),
+            "what the model said in the second step must read as having been \
+             said after the first step's result came back: {wire}"
+        );
+    }
+
+    /// Older stored transcripts and hand-built messages carry no step markers
+    /// at all. There is one step in that case, not none: everything the message
+    /// holds, encoded exactly as it was before turns were ever split.
+    #[test]
+    fn a_turn_without_step_markers_is_one_step() {
+        let mut assistant = Message::assistant("claude-test");
+        assistant.parts.push(Part::text("Reading."));
+        assistant.parts.push(tool_part(
+            "toolu_01Read",
+            "read",
+            ToolState::Completed {
+                input: json!({"filePath": "src/main.rs"}),
+                output: "fn main() {}".to_owned(),
+                title: "src/main.rs".to_owned(),
+                metadata: json!({}),
+                started: 1,
+                completed: 2,
+            },
+        ));
+
+        let request = ChatRequest {
+            model: "claude-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("read it"), assistant],
+            tools: Vec::new(),
+        };
+
+        let body = serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS))
+            .expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "read it"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Reading."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01Read",
+                        "name": "read",
+                        "input": {"filePath": "src/main.rs"},
+                    },
+                ]},
+                {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_01Read",
+                    "content": "fn main() {}",
+                }]},
+            ]),
+            "got {body}"
+        );
+    }
+
+    /// Splitting a turn must never produce two messages in a row with the same
+    /// role: this API refuses a transcript whose roles do not alternate. Steps
+    /// alternate on their own whenever each ends in calls, so what is left is
+    /// the interrupted shape — a step that said something and called nothing,
+    /// with another step behind it — which was one message before the split and
+    /// stays one after it.
+    #[test]
+    fn two_steps_that_called_nothing_stay_one_message() {
+        let mut assistant = Message::assistant("claude-test");
+        for text in ["Thinking about it.", "Here is the answer."] {
+            assistant.parts.push(Part {
+                id: PartId::ascending(),
+                body: PartBody::StepStart,
+            });
+            assistant.parts.push(Part::text(text));
+        }
+
+        let request = ChatRequest {
+            model: "claude-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("hi"), assistant, Message::user("thanks")],
+            tools: Vec::new(),
+        };
+
+        let body = serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS))
+            .expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Thinking about it."},
+                    {"type": "text", "text": "Here is the answer."},
+                ]},
+                // And a message of its own is still a message of its own:
+                // merging stops at the edge of the one it started in.
                 {"role": "user", "content": "thanks"},
             ]),
             "got {body}"
