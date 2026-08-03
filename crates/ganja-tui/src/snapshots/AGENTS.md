@@ -12,6 +12,7 @@
 | File | Description |
 |------|-------------|
 | `ganja_tui__app__tests__snapshot_permission_dialog_open.snap` | The permission modal over a transcript. |
+| `ganja_tui__app__tests__snapshot_permission_dialog_with_a_call_too_long_to_fit.snap` | The same modal overflowing: the reply keys stay, the cut is flagged with an explicit `+N lines not shown`. |
 | `ganja_tui__app__tests__snapshot_tool_pending.snap` | A tool call reported but not yet running. |
 | `ganja_tui__app__tests__snapshot_tool_running.snap` | A tool call in flight. |
 | `ganja_tui__app__tests__snapshot_tool_completed_with_a_diff.snap` | A completed call whose metadata carries a unified diff. |

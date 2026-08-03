@@ -31,7 +31,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 
 Components are exercised through `App::handle` and rendered into a `TestBackend` — no terminal, no running turn. Screen output is asserted with `insta` snapshots in `../snapshots/`. After an intentional visual change: `cargo insta review`.
 
-Snapshot coverage today: the permission dialog open, the sessions picker open and after moving the selection, and a tool call in each of its states (pending, running, completed with a diff, error). A new tool state or dialog needs its own snapshot.
+Snapshot coverage today: the permission dialog open and overflowing (the cut flagged, the reply keys kept), the sessions picker open and after moving the selection, and a tool call in each of its states (pending, running, completed with a diff, error). A new tool state or dialog needs its own snapshot.
 
 ### Common Patterns
 
