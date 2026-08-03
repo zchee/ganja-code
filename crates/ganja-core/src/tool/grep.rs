@@ -8,9 +8,9 @@
 //! `ignore`-crate walk instead of spawning `rg` — the same regex engine and
 //! ignore-file handling ripgrep itself is built on. Match order (and so
 //! which consecutive matches get grouped under one path header) is sorted by
-//! relative path here, for the same determinism reason `glob` sorts: no
-//! explicit sort exists in this pinned upstream, only whatever order
-//! `rg --json` happened to emit results in.
+//! path here, for the same determinism reason `glob` sorts: no explicit sort
+//! exists in this pinned upstream, only whatever order `rg --json` happened
+//! to emit results in.
 //!
 //! One upstream quirk survives the port intact rather than being "fixed":
 //! naming a specific *file* as `path` does not restrict the search to that
@@ -52,7 +52,8 @@ struct Args {
 
 /// One matched line.
 struct Match {
-    /// The matched file, relative to the directory searched.
+    /// The matched file, as an absolute path — upstream's
+    /// `path.resolve(<search base>, item.entry.path)`.
     path: String,
     /// 1-indexed line number within that file.
     line: u64,
@@ -105,6 +106,17 @@ impl Tool for GrepTool {
                 .parent()
                 .map_or_else(|| PathBuf::from("."), Path::to_owned)
         };
+        // What the model does with a match is read the file, and `read`
+        // resolves a relative argument against the *session* directory, not
+        // against grep's search base — so a relative match path names a
+        // different file, or none at all. Upstream never hands one out:
+        // `tool/grep.ts` maps every row through
+        // `path.resolve(<base>, item.entry.path)`. Absolutising the base is
+        // what makes every path below absolute, because a match is reported as
+        // its walk path under this directory, and `std::path::absolute` is
+        // `path.resolve`'s operation — process-directory fallback included,
+        // which the engine's own `cwd` needs when `current_dir()` fails.
+        let base_dir = std::path::absolute(&base_dir).unwrap_or(base_dir);
 
         let pattern = args.pattern;
         let include = args.include;
@@ -188,7 +200,11 @@ fn resolve(cwd: &Path, path: Option<&str>) -> PathBuf {
 }
 
 /// Searches every file under `base_dir` for `pattern`, honoring `include`
-/// when given, sorted by relative path and capped to [`LIMIT`] matches.
+/// when given, sorted by path and capped to [`LIMIT`] matches.
+///
+/// Each match names its file by the walk's path for it, which is `base_dir`
+/// plus the path under it — so an absolute `base_dir` is what makes the
+/// reported paths absolute, as upstream's row mapping does.
 ///
 /// `store` is ganja's own credential store, and the one file the walk steps
 /// over: `grep` runs without asking and prints the lines it matched, so a
@@ -257,7 +273,13 @@ fn search(
             break;
         }
 
-        let relative = to_slash(path.strip_prefix(base_dir).unwrap_or(path));
+        // The walk's own path, which carries `base_dir` as its prefix, rather
+        // than a relative form: this is where a match becomes something the
+        // model can hand straight to `read`. Nothing here answers `ripgrep.ts`'s
+        // `replaceAll("\\", "/")` on the relative path, because the
+        // `path.resolve` it feeds puts the platform's own separator back — so
+        // this platform's separator is what upstream ends up printing too.
+        let reported = path.display().to_string();
         // A file that cannot be searched — permission denied, a race with a
         // delete, or content `grep-searcher` refuses as binary — is skipped
         // rather than failing the whole call, matching upstream's
@@ -268,7 +290,7 @@ fn search(
             UTF8(|line_number, line| {
                 let text = clamp_match_text(line.trim_end_matches(['\n', '\r']));
                 matches.push(Match {
-                    path: relative.clone(),
+                    path: reported.clone(),
                     line: line_number,
                     text,
                 });
@@ -293,15 +315,6 @@ fn clamp_match_text(text: &str) -> String {
     kept
 }
 
-/// `path`'s components joined with `/`, regardless of the platform's own
-/// separator — matching upstream's explicit `replaceAll("\\", "/")`.
-fn to_slash(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, sync::Arc};
@@ -309,7 +322,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{GrepTool, search};
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError, read::ReadTool};
 
     /// A context rooted at `cwd`, with a cancel nobody has pulled.
     fn ctx(cwd: PathBuf) -> ToolCtx {
@@ -346,6 +359,73 @@ mod tests {
         );
         assert!(!out.output.contains("b.rs"));
         assert_eq!(out.metadata["matches"], 2);
+    }
+
+    #[tokio::test]
+    async fn every_match_names_its_file_by_absolute_path() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        std::fs::write(dir.path().join("a.rs"), "needle\n").expect("the fixture writes");
+
+        let out = GrepTool
+            .run(
+                serde_json::json!({ "pattern": "needle" }),
+                &ctx(dir.path().to_owned()),
+            )
+            .await
+            .expect("a grep over a real directory succeeds");
+
+        let header = format!("{}:", dir.path().join("a.rs").display());
+        assert!(
+            out.output.contains(&header),
+            "expected the header {header:?} in {:?}",
+            out.output
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_taken_from_greps_output_reads_back_through_the_read_tool() {
+        // The chain the model actually walks: grep, then read the file grep
+        // named. Both calls share one context, as they do inside a turn, and
+        // grep is pointed at a subdirectory — so a relative match path would
+        // be resolved by `read` against the session directory rather than
+        // against grep's search base, and would name a file that is not there.
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        std::fs::create_dir(dir.path().join("nested")).expect("the fixture writes");
+        std::fs::write(
+            dir.path().join("nested").join("found.rs"),
+            "fn needle() {}\n",
+        )
+        .expect("the fixture writes");
+        let context = ctx(dir.path().to_owned());
+
+        let found = GrepTool
+            .run(
+                serde_json::json!({ "pattern": "needle", "path": "nested" }),
+                &context,
+            )
+            .await
+            .expect("a grep over a subdirectory succeeds");
+
+        // Lifted out of the output text the way the model lifts it: nothing
+        // here rebuilds the path from what the fixture knows.
+        let quoted = found
+            .output
+            .lines()
+            .find_map(|line| line.strip_suffix(':'))
+            .expect("grep heads each file's matches with that file's path");
+
+        let read = ReadTool
+            .run(serde_json::json!({ "filePath": quoted }), &context)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("read must accept the path grep printed ({quoted:?}): {error:?}")
+            });
+
+        assert!(
+            read.output.contains("1: fn needle() {}"),
+            "the chain must land on the file grep matched: {:?}",
+            read.output
+        );
     }
 
     #[tokio::test]
@@ -566,9 +646,10 @@ mod tests {
             .map(|item| (item.path.as_str(), item.line))
             .collect();
 
+        let notes = dir.path().join("notes.md").display().to_string();
         assert_eq!(
             hits,
-            vec![("notes.md", 1)],
+            vec![(notes.as_str(), 1)],
             "the store must contribute nothing, and a sibling must still match"
         );
     }
