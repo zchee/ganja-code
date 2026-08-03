@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The three panes the layout draws — transcript, prompt editor, status bar — plus the permission modal that overlays them while a tool call waits on the user.
+The three panes the layout draws — transcript, prompt editor, status bar — plus the modals that overlay them: the permission dialog while a tool call waits on the user, and the sessions picker while a stored conversation is being chosen.
 
 ## Key Files
 
@@ -16,6 +16,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 | `editor.rs` | The prompt editor — a `ratatui-textarea` `TextArea` with ganja's submit rules layered on top. |
 | `status.rs` | The status bar: what the engine is doing (`Activity`), what the session has spent (`Totals`), and the keys that matter. |
 | `permission.rs` | The centered modal blocking on one pending tool call. Spec: upstream `packages/tui/src/routes/session/permission.tsx`, trimmed to the one-shot shape `PermissionReply` offers today. |
+| `sessions.rs` | The centered modal listing this project's stored sessions to resume. Spec: upstream `packages/tui/src/routes/session/list.tsx`, trimmed to the columns a person picks by. |
 
 ## For AI Agents
 
@@ -30,7 +31,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 
 Components are exercised through `App::handle` and rendered into a `TestBackend` — no terminal, no running turn. Screen output is asserted with `insta` snapshots in `../snapshots/`. After an intentional visual change: `cargo insta review`.
 
-Snapshot coverage today: the permission dialog open, and a tool call in each of its states (pending, running, completed with a diff, error). A new tool state or dialog needs its own snapshot.
+Snapshot coverage today: the permission dialog open, the sessions picker open and after moving the selection, and a tool call in each of its states (pending, running, completed with a diff, error). A new tool state or dialog needs its own snapshot.
 
 ### Common Patterns
 

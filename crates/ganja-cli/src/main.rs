@@ -4,20 +4,61 @@
 //! the tool is for; the subcommands exist to set it up and to answer questions
 //! about it without taking the screen over.
 
-use std::io::{self, IsTerminal as _, Read as _, Write as _};
+use std::{
+    io::{self, IsTerminal as _, Read as _, Write as _},
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context as _, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
-use ganja_core::{auth, catalog};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use ganja_core::{Project, SessionInfo, Storage, Usage, auth, catalog};
 use secrecy::{SecretString, zeroize::Zeroize as _};
+use tracing_appender::non_blocking::WorkerGuard;
 
 /// Terminal-first AI coding agent.
+///
+/// `args_conflicts_with_subcommands` is what stops `ganja --continue models`
+/// from parsing: a resume flag describes the session a UI run opens, so an
+/// invocation that is not a UI run has no use for one, and quietly ignoring it
+/// would look like it had been honored.
 #[derive(Debug, Parser)]
-#[command(name = "ganja", version, about)]
+#[command(name = "ganja", version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Absent means the interactive UI, which is the point of the binary.
     #[command(subcommand)]
     command: Option<Command>,
+    #[command(flatten)]
+    resume: ResumeArgs,
+}
+
+/// Which stored session the UI opens, if any.
+///
+/// `multiple = false` makes clap itself refuse `--continue --session x`: the
+/// two name different sessions, and a hand-written check would have to invent
+/// which of them wins.
+#[derive(Debug, Args)]
+#[group(multiple = false)]
+struct ResumeArgs {
+    /// Resume the most recently updated session of this project.
+    // `continue` is a keyword, so the field is raw-identified rather than
+    // renamed: what the flag is called is upstream's `--continue`/`-c`.
+    #[arg(long, short = 'c')]
+    r#continue: bool,
+    /// Resume the session with this id, as `ganja sessions` lists it.
+    #[arg(long, short = 's', value_name = "ID")]
+    session: Option<String>,
+}
+
+impl ResumeArgs {
+    /// What the flags ask the UI to open. Absent is a fresh session.
+    fn wanted(self) -> Option<ganja_tui::Resume> {
+        if self.r#continue {
+            return Some(ganja_tui::Resume::Latest);
+        }
+
+        self.session.map(ganja_tui::Resume::Session)
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -29,6 +70,8 @@ enum Command {
     },
     /// List the models this build knows how to size and price.
     Models,
+    /// List the stored sessions of the project this was run in.
+    Sessions,
 }
 
 #[derive(Debug, Subcommand)]
@@ -82,16 +125,253 @@ impl std::fmt::Display for ProviderId {
     }
 }
 
+/// Directory ganja keeps its state in, under the XDG data home. Spelled here
+/// rather than asked of `ganja-core`, which resolves the same directory
+/// privately in two places already and exports neither.
+const DIRECTORY: &str = "ganja";
+
+/// Directory rolling log files land in, under [`DIRECTORY`]. Not per project:
+/// a log is about the run, and a run that could not resolve a project still
+/// has something worth writing down.
+const LOGS: &str = "log";
+
+/// What every log file is named before the appender's date, and the extension
+/// after it: `ganja.2026-08-04.log`.
+const LOG_NAME: &str = "ganja";
+const LOG_EXTENSION: &str = "log";
+
+/// Days of logs kept. A rotation with no bound is a disk leak on a machine
+/// nobody is watching; a week is enough to still have the run being asked
+/// about.
+const LOG_FILES: usize = 7;
+
+/// What is traced when `RUST_LOG` says nothing, or says something the filter
+/// cannot parse.
+const DEFAULT_FILTER: &str = "info";
+
+/// Where a project's sessions live, under its data directory.
+///
+/// Pinned to the directory `ganja-tui` opens `Engine::persistent` on: the two
+/// crates naming it separately is what the frozen seam asks for, and a listing
+/// that read a different one would show nothing and look correct doing it.
+const STORAGE: &str = "storage";
+
+/// What a session with no title is listed as. Most of them: a title is earned
+/// by a completed turn, and the fake provider never earns one.
+const UNTITLED: &str = "(untitled)";
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    match Cli::parse().command {
-        None => ganja_tui::run().await,
+    // Parsed before the log is installed so that `--version`, `--help` and a
+    // usage error do not create a log directory for a run that never started.
+    let cli = Cli::parse();
+    // Held until `main` returns: dropping the guard stops the appender's
+    // worker thread, and whatever it had not written is lost.
+    let _logging = install_logging();
+
+    match cli.command {
+        None => ganja_tui::run(cli.resume.wanted()).await,
         Some(Command::Auth { action }) => auth_command(action),
         Some(Command::Models) => {
             models_command();
             Ok(())
         }
+        Some(Command::Sessions) => sessions_command(),
     }
+}
+
+/// Sends `tracing` output to a rolling file under the data home.
+///
+/// A file is the only sink, and that is the point rather than a default: the
+/// UI owns the alternate screen for as long as it runs, so a subscriber
+/// writing to stdout or stderr would draw over the thing being diagnosed.
+/// Subcommands have the same claim on stdout, which callers capture.
+///
+/// Nothing here is fatal. A log is a diagnostic, and a run that cannot write
+/// one is still a run worth having, so a data home that will not resolve or a
+/// directory that will not be created costs the run its log and says so on
+/// stderr — safe, because this happens before the terminal is taken over.
+///
+/// The returned guard flushes the appender's worker thread when it drops.
+#[must_use]
+fn install_logging() -> Option<WorkerGuard> {
+    let directory = match log_directory() {
+        Ok(directory) => directory,
+        Err(error) => return declined(&format!("{error:#}")),
+    };
+
+    let appender = match tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(LOG_NAME)
+        .filename_suffix(LOG_EXTENSION)
+        .max_log_files(LOG_FILES)
+        .build(&directory)
+    {
+        Ok(appender) => appender,
+        Err(error) => {
+            return declined(&format!("{} is not writable: {error}", directory.display()));
+        }
+    };
+
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_FILTER));
+    let installed = tracing_subscriber::fmt()
+        .with_writer(writer)
+        // A file is not a terminal, so colour codes in it are noise every
+        // reader has to filter back out.
+        .with_ansi(false)
+        .with_env_filter(filter)
+        .try_init();
+
+    match installed {
+        // The guard is what keeps the worker thread alive, so it only means
+        // anything once something is actually feeding it.
+        Ok(()) => Some(guard),
+        Err(error) => declined(&format!("a subscriber is already installed: {error}")),
+    }
+}
+
+/// Says why there will be no log this run, and answers [`None`] so the caller
+/// reads as one expression.
+fn declined(reason: &str) -> Option<WorkerGuard> {
+    eprintln!("note: not logging to a file: {reason}");
+
+    None
+}
+
+/// `<data home>/ganja/log`.
+fn log_directory() -> Result<PathBuf> {
+    use etcetera::base_strategy::{BaseStrategy as _, Xdg};
+
+    // XDG conventions on every platform, macOS included, matching how
+    // `ganja_core::auth` and `ganja_core::project` resolve their own paths.
+    let base = Xdg::new().context("the home directory holding the log could not be located")?;
+
+    Ok(base.data_dir().join(DIRECTORY).join(LOGS))
+}
+
+/// Lists the stored sessions of the project this was run in, newest first.
+///
+/// The store is read directly rather than through an [`ganja_core::Engine`],
+/// because building one selects a provider and a provider wants a credential:
+/// asking what was worked on yesterday is not a reason to need an API key.
+fn sessions_command() -> Result<()> {
+    let sessions = session_storage()?
+        .list_sessions()
+        .context("failed to read the stored sessions")?;
+
+    if sessions.is_empty() {
+        println!("no sessions here yet; run `ganja` in this project and send a prompt");
+
+        return Ok(());
+    }
+
+    println!(
+        "{:<21}  {:>9}  {:>7}  TITLE",
+        "SESSION", "UPDATED", "TOKENS"
+    );
+
+    let now = millis_now();
+    for session in sessions {
+        println!(
+            "{:<21}  {:>9}  {:>7}  {}",
+            session.id.as_str(),
+            age(session.updated, now),
+            catalog::compact_tokens(billed_tokens(&session.usage)),
+            title(&session),
+        );
+    }
+
+    Ok(())
+}
+
+/// The session store of the project this was run in.
+fn session_storage() -> Result<Storage> {
+    let cwd = std::env::current_dir().context("failed to read the working directory")?;
+    let root = Project::resolve(&cwd)
+        .data_dir()
+        .context("failed to locate this project's data directory")?
+        .join(STORAGE);
+
+    Ok(Storage::open(root))
+}
+
+/// What a session is called in the listing, with anything that would move the
+/// cursor taken out.
+///
+/// A title is written by a model, which makes it untrusted text: a newline
+/// would break the row into pieces and an escape sequence would be *executed*
+/// by the terminal printing it. Neither belongs in a column.
+fn title(session: &SessionInfo) -> String {
+    let Some(title) = session.title.as_deref() else {
+        return UNTITLED.to_owned();
+    };
+
+    let printable: String = title
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = printable.trim();
+
+    if trimmed.is_empty() {
+        UNTITLED.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Every token a session was billed for.
+///
+/// [`Usage::reasoning_tokens`] is deliberately left out: it counts a subset of
+/// [`Usage::output_tokens`] rather than a count beside it, so adding it would
+/// report the same thinking twice.
+fn billed_tokens(usage: &Usage) -> u64 {
+    usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+}
+
+/// Now, in milliseconds since the Unix epoch, which is what a stored session
+/// records.
+fn millis_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// Renders how long ago `then` was, relative to `now`, both in milliseconds
+/// since the Unix epoch.
+///
+/// An age rather than a timestamp, because the question a listing answers is
+/// "which of these was I just in" — and because there is no date library in
+/// the workspace manifest, and putting one there is not this crate's call.
+///
+/// A `then` in the future is a clock that moved rather than a session from the
+/// future, so it reads as the present instead of as a negative age.
+fn age(then: u64, now: u64) -> String {
+    const MINUTE: u64 = 60 * 1_000;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    let elapsed = now.saturating_sub(then);
+    if elapsed < MINUTE {
+        return "just now".to_owned();
+    }
+    if elapsed < HOUR {
+        return format!("{}m ago", elapsed / MINUTE);
+    }
+    if elapsed < DAY {
+        return format!("{}h ago", elapsed / HOUR);
+    }
+
+    format!("{}d ago", elapsed / DAY)
 }
 
 fn auth_command(action: Auth) -> Result<()> {
@@ -334,9 +614,41 @@ fn per_mtok(price: f64) -> String {
     format!("${trimmed}")
 }
 
+/// What the sessions listing renders, exercised where it is written.
+///
+/// These live inside the binary because the helpers they cover are private to
+/// it. That also puts the empty-store message out of reach: driving the built
+/// binary needs `CARGO_BIN_EXE_ganja`, which cargo defines for integration
+/// tests only, so that one assertion belongs in `tests/` instead.
 #[cfg(test)]
 mod tests {
-    use super::per_mtok;
+    use ganja_core::{SessionId, SessionInfo, Usage, storage::VERSION};
+
+    use super::{UNTITLED, age, billed_tokens, per_mtok, title};
+
+    const SECOND: u64 = 1_000;
+    const MINUTE: u64 = 60 * SECOND;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    /// The moment every fixture is aged against, so a test asserts on the
+    /// interval it asked for rather than on whatever the clock says.
+    const NOW: u64 = 1_000 * DAY;
+
+    /// A stored session that differs from the next only in what it is called,
+    /// which is all [`title`] reads.
+    fn info(name: Option<&str>) -> SessionInfo {
+        SessionInfo {
+            id: SessionId::from("ses_1".to_owned()),
+            version: VERSION,
+            title: name.map(str::to_owned),
+            created: 0,
+            updated: NOW,
+            usage: Usage::default(),
+            context_tokens: 0,
+            summary: None,
+        }
+    }
 
     #[test]
     fn a_price_keeps_every_digit_that_means_something() {
@@ -344,5 +656,112 @@ mod tests {
         assert_eq!(per_mtok(4.5), "$4.5");
         assert_eq!(per_mtok(0.075), "$0.075");
         assert_eq!(per_mtok(0.0), "$0");
+    }
+
+    /// A title is written by a model, so it is untrusted text on its way to a
+    /// terminal that would *execute* an escape sequence in it — the same threat
+    /// the picker in `ganja-tui` is pinned against, on the surface that has no
+    /// `ratatui` filtering underneath it. `println!` writes straight to the
+    /// tty, so this function is the only thing standing between the two.
+    #[test]
+    fn a_title_the_model_wrote_cannot_move_the_terminals_cursor() {
+        let listed = title(&info(Some(
+            "\u{1b}[2J\u{1b}[31mporting storage\u{7}\r\nsecond row",
+        )));
+
+        let leaked: Vec<char> = listed
+            .chars()
+            .filter(|character| character.is_control())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "control characters reached a printed row: {leaked:?} in {listed:?}"
+        );
+        // Without this the assertion above would also pass on an empty string.
+        assert!(
+            listed.contains("porting storage"),
+            "the printable remainder still has to be listed: {listed:?}"
+        );
+        // A newline would have broken one row of the table into two.
+        assert!(
+            !listed.contains('\n') && listed.contains("second row"),
+            "a newline has to become a space, not a row break: {listed:?}"
+        );
+    }
+
+    #[test]
+    fn a_title_with_nothing_printable_left_falls_back_to_untitled() {
+        assert_eq!(title(&info(None)), UNTITLED);
+        assert_eq!(title(&info(Some(""))), UNTITLED);
+        assert_eq!(title(&info(Some("   "))), UNTITLED);
+        // Every character here is replaced by a space, and the row would then
+        // be blank rather than merely odd.
+        assert_eq!(title(&info(Some("\u{1b}\u{7}\r\n\t"))), UNTITLED);
+    }
+
+    #[test]
+    fn a_title_is_listed_without_the_whitespace_around_it() {
+        assert_eq!(title(&info(Some("  porting storage  "))), "porting storage");
+    }
+
+    /// The picker in `ganja-tui` renders the same ages from its own copy of
+    /// this arithmetic — deliberately, so neither crate has to reach into the
+    /// other. Deliberate duplication still drifts, so these mirror the
+    /// assertions in `component/sessions.rs` one for one. Note the arguments
+    /// are in the opposite order there, which is the cheapest way for the two
+    /// to start disagreeing without anyone noticing.
+    #[test]
+    fn ages_round_to_the_unit_they_are_reported_in() {
+        assert_eq!(age(NOW, NOW), "just now");
+        assert_eq!(age(NOW - 59 * SECOND, NOW), "just now");
+        assert_eq!(age(NOW - 5 * MINUTE, NOW), "5m ago");
+        assert_eq!(age(NOW - 3 * HOUR, NOW), "3h ago");
+        assert_eq!(age(NOW - 2 * DAY, NOW), "2d ago");
+        // A clock that moved backwards between runs, not a session recorded in
+        // the future.
+        assert_eq!(age(NOW + DAY, NOW), "just now");
+    }
+
+    /// Each bucket's first and last moment, because an off-by-one here reads
+    /// as "60m ago" or "24h ago" — a listing that is wrong in a way a user
+    /// would notice but not be able to explain.
+    #[test]
+    fn each_age_bucket_ends_where_the_next_one_begins() {
+        assert_eq!(age(NOW - (MINUTE - 1), NOW), "just now");
+        assert_eq!(age(NOW - MINUTE, NOW), "1m ago");
+        assert_eq!(age(NOW - (HOUR - 1), NOW), "59m ago");
+        assert_eq!(age(NOW - HOUR, NOW), "1h ago");
+        assert_eq!(age(NOW - (DAY - 1), NOW), "23h ago");
+        assert_eq!(age(NOW - DAY, NOW), "1d ago");
+    }
+
+    /// Reasoning tokens are a slice of `output_tokens` rather than a count
+    /// beside them, so billing them again would report the same thinking
+    /// twice. That reasoning lives in a doc comment; this is what keeps it
+    /// true.
+    #[test]
+    fn the_billed_total_counts_what_was_paid_for_and_counts_it_once() {
+        let usage = Usage {
+            input_tokens: 1,
+            output_tokens: 20,
+            reasoning_tokens: 8,
+            cache_read_tokens: 300,
+            cache_write_tokens: 4_000,
+        };
+
+        assert_eq!(billed_tokens(&usage), 1 + 20 + 300 + 4_000);
+        assert_eq!(billed_tokens(&Usage::default()), 0);
+
+        // The exclusion has to be the rule rather than an accident of the
+        // numbers above: thinking harder must not move the bill.
+        let thinking_harder = Usage {
+            reasoning_tokens: 19,
+            ..usage
+        };
+        assert_eq!(
+            billed_tokens(&thinking_harder),
+            billed_tokens(&usage),
+            "reasoning_tokens is already inside output_tokens"
+        );
     }
 }
