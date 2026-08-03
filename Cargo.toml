@@ -38,6 +38,9 @@ reqwest = { version = "0.13.4", default-features = false, features = [
     "system-proxy",
 ] }
 schemars = "1.2.2"
+# Key material is held in `SecretString` so that it is wiped on drop and cannot
+# reach a `Debug` rendering; `serde` is what lets `auth.json` decode into one.
+secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 similar = "3.1.1"
@@ -57,6 +60,9 @@ tokio-util = "0.7.19"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# Already in the tree via `reqwest`, which re-exports only `Url`; the provider
+# endpoint check needs `Host` to compare a host as a host rather than as text.
+url = "2.5.8"
 # Already in the tree via `ratatui-core`; declared here because the chat
 # viewport measures its own wrap widths instead of leaning on `Paragraph`.
 unicode-width = "0.2.2"

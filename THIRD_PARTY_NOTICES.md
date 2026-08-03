@@ -13,6 +13,14 @@ The implementation is original Rust code using idiomatic patterns; it is **not a
 
 ---
 
+## Scope of this file
+
+These notices cover material **incorporated into this repository's own sources**: ported behavior, prompt texts, and theme definitions.
+
+Rust dependencies are not vendored here — they are resolved by Cargo and recorded in `Cargo.lock`. Their license notices are therefore not reproduced in this file; a complete, generated attribution list belongs with the distributed binaries and is produced at packaging time (e.g. `cargo about`). Listing individual crates here would give an arbitrary and misleading picture of a tree that carries hundreds of them.
+
+---
+
 ## MIT License
 
 The following is the complete license text from upstream opencode:

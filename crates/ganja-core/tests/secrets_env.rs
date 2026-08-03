@@ -10,6 +10,13 @@
 //! One test, one binary, on purpose: it mutates process-wide environment
 //! variables, and `cargo test` runs the tests inside a binary on parallel
 //! threads.
+//!
+//! The capture is installed as the *global* subscriber rather than a
+//! thread-local default. A thread-local one only sees what the calling thread
+//! traces, so it would quietly stop covering the library the day someone gave
+//! this test a multi-threaded runtime — the assertions would still pass, on an
+//! empty search space. Being global means the flavour cannot matter, and the
+//! assertion that a library-internal trace arrived is what proves it.
 
 use std::{
     env, io,
@@ -142,12 +149,12 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         .with_ansi(false)
         .with_max_level(tracing::Level::TRACE)
         .finish();
+    // Global rather than thread-local, so that what this catches does not
+    // depend on which thread the library happens to trace from.
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("this binary holds one test, so nothing else has installed one");
 
     let rendered = {
-        // `set_default` is per-thread and this runtime is single-threaded, so
-        // everything the turn logs lands in `capture`.
-        let _guard = tracing::subscriber::set_default(subscriber);
-
         let anthropic = AnthropicProvider::from_env()
             .expect("the planted key builds a provider")
             .with_base_url(&url);
@@ -191,10 +198,21 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
 
     let logged = capture.logged();
 
-    assert!(
-        !logged.is_empty(),
-        "the capture caught nothing, so finding no key in it would prove nothing"
-    );
+    // Not just "something was captured": something the *library* traced, from
+    // wherever it traced it. Anything less and a change to how the turn is
+    // driven could empty the search space without failing a single assertion.
+    // These two are the mapper's own lines, one per fixture frame it skips or
+    // reads, and neither is written by this test.
+    for line in [
+        "skipping an unfamiliar Anthropic frame",
+        "the model stopped",
+    ] {
+        assert!(
+            logged.contains(line),
+            "the capture never saw the library trace {line:?}, so finding no key \
+             in it would prove nothing:\n{logged}"
+        );
+    }
     assert!(
         !logged.contains(CANARY),
         "a credential reached the log:\n{logged}"

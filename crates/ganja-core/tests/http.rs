@@ -7,7 +7,10 @@
 //! wherever the kernel happens to put it, which is the condition the splitter
 //! exists to survive.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use futures::StreamExt as _;
 use ganja_core::{
@@ -85,6 +88,82 @@ async fn serve(responses: Vec<Vec<u8>>, pace: Duration) -> Endpoint {
     }
 }
 
+/// A loopback endpoint that records everything it is sent.
+///
+/// The point of recording is to be able to prove a negative: that a host the
+/// client was told to go to was never talked to at all.
+struct Recorder {
+    /// Base URL a redirect can point at.
+    url: String,
+    /// Every request the endpoint received, in order.
+    seen: Arc<Mutex<Vec<String>>>,
+    _server: tokio::task::JoinHandle<()>,
+}
+
+impl Recorder {
+    fn seen(&self) -> Vec<String> {
+        self.seen.lock().expect("the log is never poisoned").clone()
+    }
+
+    /// Forgets what it has been sent, so that a later assertion about an empty
+    /// log is about the requests that came after this point.
+    fn clear(&self) {
+        self.seen.lock().expect("the log is never poisoned").clear();
+    }
+}
+
+/// The value `request` carries for the header `name`.
+///
+/// Field names are case-insensitive, and which case a client sends is its own
+/// business, so the comparison has to be too.
+fn header(request: &str, name: &str) -> Option<String> {
+    request.lines().find_map(|line| {
+        let (field, value) = line.split_once(':')?;
+
+        field
+            .trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_owned())
+    })
+}
+
+/// Serves `responses`, one per connection, keeping what it was asked.
+async fn record(responses: Vec<Vec<u8>>) -> Recorder {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback is bindable");
+    let url = format!(
+        "http://{}",
+        listener
+            .local_addr()
+            .expect("a bound socket has an address")
+    );
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+
+    let server = tokio::spawn(async move {
+        for response in responses {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+
+            let received = request(&mut socket).await;
+            log.lock()
+                .expect("the log is never poisoned")
+                .push(String::from_utf8_lossy(&received).into_owned());
+
+            let _ = socket.write_all(&response).await;
+            let _ = socket.flush().await;
+        }
+    });
+
+    Recorder {
+        url,
+        seen,
+        _server: server,
+    }
+}
+
 /// Reads one whole HTTP request: head, then as many body bytes as it declared.
 async fn request(socket: &mut TcpStream) -> Vec<u8> {
     let mut seen = Vec::new();
@@ -127,6 +206,24 @@ fn response(status: &str, headers: &[(&str, &str)], body: &str) -> Vec<u8> {
 /// A 200 carrying an event stream.
 fn streamed(body: &str) -> Vec<u8> {
     response("200 OK", &[("content-type", "text/event-stream")], body)
+}
+
+/// A 200 that promises more body than it delivers.
+///
+/// A close-delimited response ending early is indistinguishable from one that
+/// simply finished; declaring a length and then dying is what makes the client
+/// itself raise the error, which is the path this exercises.
+fn cut_short(body: &str) -> Vec<u8> {
+    let promised = (body.len() + 4_096).to_string();
+
+    response(
+        "200 OK",
+        &[
+            ("content-type", "text/event-stream"),
+            ("content-length", &promised),
+        ],
+        body,
+    )
 }
 
 /// The request every test sends.
@@ -198,6 +295,175 @@ async fn openai_streams_a_reply_over_a_real_socket() {
     );
 }
 
+/// A 3xx is an instruction to send the request somewhere else, and the request
+/// carries the API key in a header. `reqwest` follows up to ten of them by
+/// default and strips only the headers it recognizes as credentials, which
+/// `x-api-key` is not — so a redirect from an endpoint that has been hijacked,
+/// or from a gateway somebody typo'd into the environment, is enough to hand
+/// the key to a host of its choosing. A turn is a single `POST` that nothing
+/// legitimately redirects, so the answer is to refuse.
+#[tokio::test]
+async fn a_redirect_is_reported_rather_than_followed_to_wherever_it_points() {
+    // Answers with a stream, so that following the redirect would look like a
+    // perfectly successful turn rather than an error anyone would notice.
+    let bait = record(vec![
+        streamed(include_str!("fixtures/anthropic_happy_path.sse")),
+        streamed(include_str!("fixtures/openai_happy_path.sse")),
+        streamed(include_str!("fixtures/anthropic_happy_path.sse")),
+        streamed(include_str!("fixtures/openai_happy_path.sse")),
+    ])
+    .await;
+
+    // Control first: reached directly, this endpoint does receive both
+    // credentials. Without it, the assertions below would hold just as well
+    // against a recorder that cannot read a header at all, or a provider that
+    // stopped sending one — an empty log proves nothing until something has
+    // shown the log can fill.
+    {
+        let anthropic = AnthropicProvider::new(CANARY)
+            .expect("a client builds")
+            .with_base_url(&bait.url);
+        let openai = OpenAiProvider::new(CANARY)
+            .expect("a client builds")
+            .with_base_url(&bait.url);
+
+        turn(&anthropic).await.expect("the endpoint answers");
+        turn(&openai).await.expect("the endpoint answers");
+
+        let seen = bait.seen();
+        assert_eq!(
+            seen.iter()
+                .filter_map(|request| header(request, "x-api-key"))
+                .collect::<Vec<_>>(),
+            vec![CANARY],
+            "the recorder should see Anthropic's key header when it is sent one: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter()
+                .filter_map(|request| header(request, "authorization"))
+                .collect::<Vec<_>>(),
+            vec![format!("Bearer {CANARY}")],
+            "the recorder should see OpenAI's bearer token when it is sent one: {seen:?}"
+        );
+
+        bait.clear();
+    }
+
+    let redirector = serve(
+        vec![
+            response(
+                "302 Found",
+                &[("location", &format!("{}/v1/messages", bait.url))],
+                "",
+            ),
+            response(
+                "302 Found",
+                &[("location", &format!("{}/chat/completions", bait.url))],
+                "",
+            ),
+        ],
+        Duration::ZERO,
+    )
+    .await;
+
+    let anthropic = AnthropicProvider::new(CANARY)
+        .expect("a client builds")
+        .with_base_url(&redirector.url);
+    let openai = OpenAiProvider::new(CANARY)
+        .expect("a client builds")
+        .with_base_url(&redirector.url);
+
+    for error in [
+        turn(&anthropic).await.expect_err("a 302 is not an answer"),
+        turn(&openai).await.expect_err("a 302 is not an answer"),
+    ] {
+        assert!(
+            matches!(error, ProviderError::Status { status: 302, .. }),
+            "a redirect must be reported as the refusal it is, got {error:?}"
+        );
+    }
+
+    let seen = bait.seen();
+    for name in ["x-api-key", "authorization"] {
+        assert!(
+            !seen.iter().any(|request| header(request, name).is_some()),
+            "{name} reached the host the redirect named: {seen:?}"
+        );
+    }
+    assert!(
+        !seen.iter().any(|request| request.contains(CANARY)),
+        "the credential reached the host the redirect named: {seen:?}"
+    );
+    assert!(
+        seen.is_empty(),
+        "the redirect was followed, and whatever it pointed at was sent the request: {seen:?}"
+    );
+}
+
+/// A redirect that leaves the machine must not inherit the exemption that let
+/// the request be plain HTTP in the first place: loopback is exempt because the
+/// bytes stay on the machine, and a 3xx to a public host is exactly the thing
+/// that would make that false.
+///
+/// Nothing is followed at all, so this holds for the same reason the test above
+/// does. It is asserted separately rather than argued from two controls being
+/// correct only in combination — and the assertion is specifically that the
+/// redirect was *refused where it stood*, because a transport error here would
+/// mean it had been followed and merely failed to resolve.
+#[tokio::test]
+async fn a_loopback_endpoint_cannot_redirect_the_key_off_the_machine() {
+    // `.invalid` is reserved by RFC 2606 and never resolves, so a followed
+    // redirect fails as a transport error rather than reaching anyone.
+    let redirector = serve(
+        vec![response(
+            "302 Found",
+            &[("location", "http://elsewhere.invalid/v1/messages")],
+            "",
+        )],
+        Duration::ZERO,
+    )
+    .await;
+    let provider = AnthropicProvider::new(CANARY)
+        .expect("a client builds")
+        .with_base_url(&redirector.url);
+
+    let error = turn(&provider).await.expect_err("a 302 is not an answer");
+
+    assert!(
+        matches!(error, ProviderError::Status { status: 302, .. }),
+        "a redirect off the machine must be refused where it stands, got {error:?}"
+    );
+}
+
+/// The base URL comes out of the environment, and the key travels in a header
+/// on every request, so an endpoint that is not `https` puts it on the wire in
+/// the clear. Loopback is the exception the test suite itself relies on.
+#[tokio::test]
+async fn a_plain_http_endpoint_off_the_machine_is_refused_before_anything_is_sent() {
+    let provider = AnthropicProvider::new(CANARY)
+        .expect("a client builds")
+        .with_base_url("http://ganja:sk-test-canary-XYZ@api.anthropic.example");
+
+    let error = turn(&provider)
+        .await
+        .expect_err("a plain-http endpoint is refused");
+    let rendered = format!("{error} / {error:?}");
+
+    assert!(
+        matches!(error, ProviderError::Transport(_)),
+        "got {error:?}"
+    );
+    assert!(
+        rendered.contains("https"),
+        "the refusal should say what would have been acceptable: {rendered}"
+    );
+    assert!(
+        !rendered.contains(CANARY) && !rendered.contains("api.anthropic.example"),
+        "a base URL may carry credentials in its userinfo, so it must not be \
+         echoed back: {rendered}"
+    );
+}
+
 #[tokio::test]
 async fn a_body_that_stops_early_fails_the_turn_rather_than_finishing_it() {
     let endpoint = serve(
@@ -218,6 +484,44 @@ async fn a_body_that_stops_early_fails_the_turn_rather_than_finishing_it() {
             Some(ProviderEvent::Failed(ProviderError::Transport(_)))
         ),
         "a dropped body must never read as a completed turn, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_body_that_dies_mid_message_reports_why_without_echoing_the_base_url() {
+    // A body that dies mid-message is reported as an event rather than
+    // returned, so it leaves the provider by a different path than the
+    // pre-stream transport error — and that path renders a `reqwest::Error`
+    // straight into the message. Today nothing has to strip the base URL's
+    // userinfo out of it, because `reqwest` renders a URL with its credentials
+    // already removed; this holds that guarantee still, since it is a
+    // dependency's promise rather than one this crate keeps itself.
+    let endpoint = serve(
+        vec![cut_short(include_str!("fixtures/anthropic_truncated.sse"))],
+        Duration::ZERO,
+    )
+    .await;
+    let provider = AnthropicProvider::new(CANARY)
+        .expect("a client builds")
+        .with_base_url(
+            endpoint
+                .url
+                .replace("http://", &format!("http://ganja:{CANARY}@")),
+        );
+
+    let events = turn(&provider).await.expect("the endpoint answers");
+    let rendered = format!("{events:?}");
+
+    assert!(
+        matches!(
+            events.last(),
+            Some(ProviderEvent::Failed(ProviderError::Transport(_)))
+        ),
+        "a body that died must not read as a finished turn, got {events:?}"
+    );
+    assert!(
+        !rendered.contains(CANARY),
+        "the base URL's userinfo reached a mid-stream failure: {rendered}"
     );
 }
 
