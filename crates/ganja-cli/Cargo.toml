@@ -14,6 +14,10 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# The log directory is resolved here rather than asked of `ganja-core`, which
+# exposes its own paths but not the data home they hang under. `auth.rs` and
+# `project.rs` already each resolve it this way; this is the third.
+etcetera.workspace = true
 ganja-core.workspace = true
 ganja-tui.workspace = true
 # Only for the raw-mode read that keeps a typed API key off the screen, through
@@ -24,6 +28,15 @@ ratatui.workspace = true
 # assembled in is wiped rather than left in the heap.
 secrecy.workspace = true
 tokio.workspace = true
+# The binary is where the log sink is chosen, because it is the only crate that
+# knows whether a terminal is about to be taken over. The library crates trace;
+# none of them decides where it lands.
+tracing.workspace = true
+# Rolling files, so a long-lived session cannot grow one without bound, and a
+# worker thread, so a trace never blocks the render loop on a disk write.
+tracing-appender.workspace = true
+# `env-filter` is what makes `RUST_LOG` mean anything here.
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

@@ -19,6 +19,15 @@ use crate::theme::Theme;
 /// Lines one wheel notch moves the viewport.
 pub const WHEEL_LINES: isize = 3;
 
+/// What a resumed reply says when the process that was writing it died.
+///
+/// The engine leaves such a message exactly as it found it — `time.completed`
+/// absent, whatever parts reached the disk still attached — rather than
+/// inventing an ending for it. Saying nothing here would render the fragment
+/// as a reply that simply stopped mid-sentence, which is the one reading that
+/// is actually false.
+const INTERRUPTED: &str = "[interrupted] the session ended before this reply finished";
+
 /// How an entry names who wrote it.
 fn label(role: Role) -> &'static str {
     match role {
@@ -42,6 +51,10 @@ struct Entry {
     id: MessageId,
     role: Role,
     parts: Vec<Part>,
+    /// The reply this entry holds was cut off by a crash; see [`INTERRUPTED`].
+    /// Only a resume can know this — a live message is equally unfinished
+    /// while it streams, and there the absence means "still arriving".
+    interrupted: bool,
     wrapped: Option<Wrapped>,
 }
 
@@ -54,12 +67,38 @@ struct Wrapped {
 impl Chat {
     /// Appends `message` and returns to following the tail.
     pub fn start_message(&mut self, message: Message) {
+        self.push(message, false);
+    }
+
+    /// Appends a message read back from a resumed session's store.
+    ///
+    /// The same append a live `MessageStarted` performs, plus the one thing a
+    /// stored message can say that a live one cannot: an assistant message the
+    /// store never saw finish was cut off by a crash. Both routes end in
+    /// [`Chat::push`], so a resumed transcript and a streamed one are the same
+    /// entries built the same way — which is what lets the two replay
+    /// identically.
+    pub fn restore_message(&mut self, message: Message) {
+        let interrupted = message.role == Role::Assistant && message.time.completed.is_none();
+
+        self.push(message, interrupted);
+    }
+
+    /// The one place an entry enters the transcript.
+    fn push(&mut self, message: Message, interrupted: bool) {
         self.entries.push(Entry {
             id: message.id,
             role: message.role,
             parts: message.parts,
+            interrupted,
             wrapped: None,
         });
+        self.follow_tail();
+    }
+
+    /// Empties the transcript, which is what switching sessions does to it.
+    pub fn clear(&mut self) {
+        self.entries.clear();
         self.follow_tail();
     }
 
@@ -262,6 +301,13 @@ impl Entry {
                 PartBody::StepStart | PartBody::StepFinish { .. } => {}
             }
         }
+        if self.interrupted {
+            lines.extend(
+                wrap(INTERRUPTED, usize::from(width))
+                    .into_iter()
+                    .map(|line| Line::styled(line, theme.error)),
+            );
+        }
         // Breathing room before the next entry.
         lines.push(Line::styled(String::new(), Style::default()));
 
@@ -424,7 +470,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 /// Splits `text` at the last boundary that fits in `width` columns, always
 /// consuming at least one character so callers cannot loop forever.
-fn split_at_width(text: &str, width: usize) -> (&str, &str) {
+pub(crate) fn split_at_width(text: &str, width: usize) -> (&str, &str) {
     let mut used = 0;
 
     for (index, character) in text.char_indices() {
@@ -833,5 +879,92 @@ mod tests {
             !lines.iter().any(|line| line.contains("[running] shell")),
             "the pending block should have been replaced, not kept alongside, got {lines:?}"
         );
+    }
+
+    /// A reply whose process died mid-stream reads as a reply that simply
+    /// stopped talking. Saying so is the difference between a transcript that
+    /// is incomplete and one that is wrong.
+    #[test]
+    fn a_resumed_reply_the_store_never_saw_finish_says_it_was_interrupted() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part::text("half a thought"));
+        assert_eq!(reply.time.completed, None, "the fixture must be unfinished");
+        chat.restore_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 70, 20));
+
+        assert!(
+            lines.iter().any(|line| line.contains("[interrupted]")),
+            "an unfinished stored reply should say so, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("half a thought")),
+            "what did reach the disk still has to render, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_resumed_reply_that_finished_carries_no_interrupted_marker() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part::text("a whole thought"));
+        reply.complete();
+        chat.restore_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 70, 20));
+
+        assert!(
+            !lines.iter().any(|line| line.contains("[interrupted]")),
+            "a completed reply must not be accused of dying, got {lines:?}"
+        );
+    }
+
+    /// The same field is absent on a reply that is merely still arriving, so
+    /// the marker cannot key on it alone.
+    #[test]
+    fn a_streaming_reply_is_not_mistaken_for_an_interrupted_one() {
+        let mut chat = Chat::default();
+        let reply = Message::assistant("canned");
+        let part = Part::text("");
+        chat.start_message(reply.clone());
+        chat.start_part(&reply.id, part.clone());
+        chat.append_delta(&reply.id, &part.id, "still arriving");
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 70, 20));
+
+        assert!(
+            !lines.iter().any(|line| line.contains("[interrupted]")),
+            "a live reply is unfinished, not interrupted, got {lines:?}"
+        );
+    }
+
+    /// Only a reply can be cut off mid-sentence: a user message is whole the
+    /// moment it is sent, whatever the store recorded about its clock.
+    #[test]
+    fn a_resumed_prompt_is_never_marked_interrupted() {
+        let mut chat = Chat::default();
+        let mut prompt = Message::user("what did I ask");
+        prompt.time.completed = None;
+        chat.restore_message(prompt);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 70, 20));
+
+        assert!(
+            !lines.iter().any(|line| line.contains("[interrupted]")),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn clearing_leaves_nothing_of_the_previous_session_on_screen() {
+        let mut chat = Chat::default();
+        transcript(&mut chat, 20);
+        rendered(&mut chat, VIEWPORT);
+
+        chat.clear();
+
+        assert!(rendered(&mut chat, VIEWPORT).iter().all(String::is_empty));
+        assert!(chat.is_following_tail());
     }
 }

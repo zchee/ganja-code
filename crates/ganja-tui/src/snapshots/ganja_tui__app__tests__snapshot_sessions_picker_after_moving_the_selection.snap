@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+                                                                                
+  ┌ sessions ────────────────────────────────────────────────────────────────┐  
+  │  porting the session store                         just now  12.4k tokens│  
+  │> ses_middle                                          5m ago   1.2k tokens│  
+  │  a first look at the tool registry                   3h ago     42 tokens│  
+  │                                                                          │  
+  │[j/k] [up/down] move   [Enter] resume   [Esc] close                       │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready                  Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit
