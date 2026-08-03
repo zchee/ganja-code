@@ -1,0 +1,122 @@
+# cargo-deny audits Cargo.lock: security advisories, license compliance,
+# duplicate/banned dependencies, and which registries a crate may come from.
+# Run locally with `cargo deny check`; CI runs the same four checks via
+# EmbarkStudios/cargo-deny-action in .github/workflows/ci.yaml.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Left covering every platform rather than pinned to the two CI runner
+# triples (ubuntu-26.04, xcode-27): those labels can change host architecture
+# across GitHub Actions image updates, and an unrestricted graph only ever
+# adds extra platform-gated crates to what gets checked, never drops one CI
+# actually builds for.
+targets = []
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
+#
+# cargo-deny 0.20 has no per-category severity knob here any more: a RUSTSEC
+# vulnerability always fails `check advisories`, unconditionally. `ganja`
+# types and holds provider API keys in memory, so that unconditional
+# hard-fail is exactly this project's posture already, with no config
+# needed. `ignore` is the only override lever, and stays empty unless a
+# specific advisory is a documented false positive.
+[advisories]
+ignore = []
+
+# https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
+[licenses]
+# Every entry here is a license `cargo deny check licenses` actually reported
+# for a crate in this workspace's dependency tree (`cargo deny list
+# --layout license`), not a guess — each comment names which crate(s) carry
+# it. All are OSI-approved permissive licenses or public-domain-equivalent
+# dedications; none are copyleft.
+#
+# `r-efi` (a UEFI type-definitions crate, pulled in transitively only through
+# `getrandom`'s `target_os = "uefi"` backend, which nothing in this workspace
+# targets) is triple-licensed "MIT OR Apache-2.0 OR LGPL-2.1-or-later". Both
+# MIT and Apache-2.0 are already allowed below, which satisfies that OR
+# expression, so LGPL-2.1-or-later — the only copyleft license anywhere in
+# this tree — is deliberately left off this list rather than allowed wholesale.
+allow = [
+    # This workspace's own license, and the single most common dependency
+    # license in the tree (rustls, tokio, serde, clap, and most of the rest).
+    "Apache-2.0",
+    # Apache-2.0 plus a linking exception used by rustix and its raw-syscall
+    # dependencies (linux-raw-sys, wasi).
+    "Apache-2.0 WITH LLVM-exception",
+    # aws-lc-sys, encoding_rs, subtle.
+    "BSD-3-Clause",
+    # ryu (dtolnay's float formatter): the Boost Software License.
+    "BSL-1.0",
+    # dunce: public domain dedication.
+    "CC0-1.0",
+    # webpki-root-certs: Mozilla's CA bundle re-exported under Google's
+    # Community Data License Agreement (data-only crate, not code).
+    "CDLA-Permissive-2.0",
+    # The rustls/aws-lc-rs TLS stack and untrusted.
+    "ISC",
+    # The single most common dependency license after Apache-2.0.
+    "MIT",
+    # aws-lc-sys, dunce: MIT with the attribution clause dropped.
+    "MIT-0",
+    # The icu4x Unicode-data stack pulled in transitively via `url` -> `idna`
+    # (icu_collections, icu_normalizer(_data), icu_properties(_data),
+    # icu_provider, litemap, potential_utf, tinystr, unicode-ident, writeable,
+    # yoke(-derive), zerofrom(-derive), zerotrie, zerovec(-derive)): the
+    # Unicode License v3.
+    "Unicode-3.0",
+    # The ripgrep-adjacent crates this project's grep tool is built on
+    # (aho-corasick, globset, grep-matcher, grep-regex, grep-searcher, ignore,
+    # memchr, same-file, walkdir, winapi-util): public domain dedication.
+    "Unlicense",
+    # foldhash.
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = false
+
+# https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
+[bans]
+# Duplicate versions of a crate are common in a tree this size and not a
+# security issue by themselves; this only ever produces a warning.
+multiple-versions = "warn"
+# Tool default, kept explicit rather than left to defaults-may-change: every
+# workspace member depends on its siblings by path (`ganja-core.workspace =
+# true`), which cargo reports as an unversioned "*" requirement since a path
+# dep has no registry version to pin. `allow-wildcard-paths` cannot exempt
+# that here — cargo-deny only applies it to crates marked `publish = false`,
+# and none of these three set that field — so "deny" would hard-fail CI on
+# the workspace's own internal wiring, not a real supply-chain risk. "warn"
+# still surfaces a genuine external wildcard dependency without that false
+# positive.
+wildcards = "warn"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+allow-workspace = false
+deny = []
+skip = []
+skip-tree = []
+
+# https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html
+[sources]
+# crates.io only: nothing in this workspace's Cargo.toml is a git or
+# alternate-registry dependency, so an unknown source is always an error,
+# not a warning to notice later.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []
