@@ -13,6 +13,8 @@
 //! `make -j8` still running underneath it.
 
 use std::{
+    collections::VecDeque,
+    io::Write as _,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
@@ -52,6 +54,23 @@ const DRAIN_GRACE: Duration = Duration::from_millis(100);
 /// Longest command echoed in a one-line description.
 const DESCRIBE_LIMIT: usize = 80;
 
+/// How much of a running command's output is held in memory.
+///
+/// Upstream's `keep = limits.maxBytes * 2` (`tool/shell.ts`, `run`). A
+/// command is free to write more than a machine has memory for — `yes` under
+/// the two-minute default timeout is gigabytes — and what the model is
+/// eventually shown is the *end* of the output anyway, so only the most
+/// recent chunks are worth keeping. Everything else has already gone to the
+/// spill file by the time it is dropped.
+const KEEP: usize = truncate::MAX_CHARS * 2;
+
+/// How much output accumulates before it starts going to disk instead.
+///
+/// Upstream's `if (Buffer.byteLength(full, "utf-8") > limits.maxBytes)` — one
+/// result's whole budget. Below it a command's output never touches the disk
+/// at all, which is the overwhelmingly common case.
+const SPILL_THRESHOLD: usize = truncate::MAX_CHARS;
+
 /// What the model passes to `bash`.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct Args {
@@ -81,6 +100,15 @@ pub struct ShellTool {
     description: String,
     /// The shell binary commands run under.
     shell: PathBuf,
+    /// Where an overflowing command's output is spilled, when it must not go
+    /// where [`truncate::open_spill`] would put it.
+    ///
+    /// Only a test ever sets this, through [`ShellTool::spilling_into`]: a
+    /// test that spilled into the resolved data directory would fill a real
+    /// person's `~/.local/share` with fixtures, which `tests/AGENTS.md`
+    /// forbids in as many words. Every other build leaves it empty and the
+    /// location is resolved per call.
+    spill_dir: Option<PathBuf>,
 }
 
 impl ShellTool {
@@ -97,7 +125,28 @@ impl ShellTool {
         Self {
             description: describe_tool(&name),
             shell,
+            spill_dir: None,
         }
+    }
+
+    /// Spills into `dir` rather than the resolved data directory. See
+    /// [`ShellTool::spill_dir`].
+    #[cfg(test)]
+    fn spilling_into(dir: &Path) -> Self {
+        Self {
+            spill_dir: Some(dir.to_owned()),
+            ..Self::new()
+        }
+    }
+}
+
+/// Opens a spill file seeded with `head`, in `dir` when one was named and
+/// wherever [`truncate::open_spill`] resolves when none was. See
+/// [`ShellTool::spill_dir`] for why the choice exists at all.
+fn open_spill(dir: Option<&Path>, head: &[u8]) -> Option<(PathBuf, std::fs::File)> {
+    match dir {
+        Some(dir) => truncate::open_spill_in(dir, head),
+        None => truncate::open_spill(head),
     }
 }
 
@@ -154,8 +203,9 @@ impl Tool for ShellTool {
 
         // Both pipes are drained the whole time the command runs: a command
         // that writes more than a pipe buffer holds would otherwise block on
-        // its own output and never reach the exit this races for.
-        let collected = Arc::new(Mutex::new(Vec::new()));
+        // its own output and never reach the exit this races for. What it
+        // drains into is bounded — see [`Collector`].
+        let collected = Arc::new(Mutex::new(Collector::new(self.spill_dir.clone())));
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
         let mut pumps = tokio::spawn({
@@ -193,19 +243,44 @@ impl Tool for ShellTool {
             return Err(ToolError::Cancelled);
         }
 
-        let raw = collected
+        let (window, dropped, spilled) = collected
             .lock()
             .expect("the output buffer is never poisoned")
-            .clone();
+            .finish();
         // Lossy for the same reason upstream's `TextDecoder` is: a command is
         // free to write bytes that are not text, and losing a byte beats
-        // failing a call that otherwise worked.
-        let clamped = truncate::clamp(&String::from_utf8_lossy(&raw));
-        let mut output = if clamped.text.is_empty() {
-            "(no output)".to_owned()
-        } else {
-            clamped.text
+        // failing a call that otherwise worked. Decoding the window whole,
+        // rather than chunk by chunk, keeps a code point split across two
+        // reads intact.
+        let (mut output, clipped) = tail(&String::from_utf8_lossy(&window));
+        let truncated = dropped || clipped;
+
+        // Everything cut has to be somewhere the model can still reach, which
+        // is what this tool's own prompt promises. A command that never
+        // reached [`SPILL_THRESHOLD`] has no file yet, so one is written now
+        // from the window — which in that case is the whole output.
+        let spill = match spilled {
+            Some(path) => Some(path),
+            None if clipped => open_spill(self.spill_dir.as_deref(), &window).map(|(path, _)| path),
+            None => None,
         };
+
+        if output.is_empty() {
+            output = "(no output)".to_owned();
+        }
+        // Upstream's marker, verbatim and in its position: a prefix, so the
+        // model reads why the output starts mid-stream before it reads the
+        // output (`tool/shell.ts`, `run`). Deliberately not `truncate`'s own
+        // `hint`, which the other tools use — this one names the whole file
+        // rather than a way to search it, because what was cut is the head.
+        if let Some(path) = &spill
+            && truncated
+        {
+            output = format!(
+                "...output truncated...\n\nFull output saved to: {}\n\n{output}",
+                path.display()
+            );
+        }
 
         if matches!(ended, Ended::TimedOut) {
             output.push_str(&format!(
@@ -221,15 +296,207 @@ impl Tool for ShellTool {
             _ => None,
         };
 
+        let mut metadata = serde_json::json!({
+            "exit": exit,
+            "truncated": truncated,
+        });
+        // Upstream spreads `outputPath` in only for `cut && file`, so a call
+        // that kept everything names no file rather than naming an absent one.
+        if let Some(path) = &spill
+            && truncated
+        {
+            metadata["outputPath"] = serde_json::json!(path);
+        }
+
         Ok(ToolOutput {
             title: args.command,
             output,
-            metadata: serde_json::json!({
-                "exit": exit,
-                "truncated": clamped.truncated,
-            }),
+            metadata,
         })
     }
+}
+
+/// Where a running command's output goes.
+///
+/// Three things at once, which is what upstream's `run` keeps in `list`,
+/// `full` and `sink` (`tool/shell.ts`): a bounded window of the most recent
+/// chunks, the head held in memory until there is enough of it to be worth a
+/// file, and that file once there is. The invariant the whole type exists for
+/// is that none of them grows without limit — a command that writes forever
+/// costs [`KEEP`] bytes of memory and however much disk it fills, never more
+/// memory than that.
+#[derive(Default)]
+struct Collector {
+    /// The most recent chunks, oldest first.
+    window: VecDeque<Vec<u8>>,
+    /// Bytes [`Collector::window`] holds, so the bound is a subtraction
+    /// rather than a walk.
+    used: usize,
+    /// Whether anything has fallen out of the window.
+    dropped: bool,
+    /// Where the whole output goes.
+    spill: Spill,
+    /// Which directory that file is opened in; see [`ShellTool::spill_dir`].
+    spill_dir: Option<PathBuf>,
+}
+
+/// The file a command's whole output is kept in, and how far along it is.
+enum Spill {
+    /// No file yet, and this is everything the command has written. Bounded
+    /// by [`SPILL_THRESHOLD`], which is the point at which one is worth
+    /// opening.
+    Holding(Vec<u8>),
+    /// Open, with everything since appended to it as it arrives.
+    Open(PathBuf, std::fs::File),
+    /// There was nowhere writable to put it. The window is then the only
+    /// record, which is the one case where output is lost outright — the
+    /// alternative is holding it in memory, and holding output in memory
+    /// without a bound is the defect this type exists to prevent.
+    Refused,
+}
+
+impl Default for Spill {
+    fn default() -> Self {
+        Self::Holding(Vec::new())
+    }
+}
+
+impl Collector {
+    /// A collector that spills into `spill_dir`, or wherever
+    /// [`truncate::open_spill`] resolves when it is empty.
+    fn new(spill_dir: Option<PathBuf>) -> Self {
+        Self {
+            spill_dir,
+            ..Self::default()
+        }
+    }
+
+    /// Takes one chunk of the command's output.
+    fn push(&mut self, chunk: &[u8]) {
+        // The window first: whatever else happens, the end of the output is
+        // what the model is shown, so the newest bytes are the ones to keep.
+        self.used += chunk.len();
+        self.window.push_back(chunk.to_vec());
+        // `len() > 1` is upstream's guard, and it matters: a single chunk
+        // larger than the whole budget is still the only thing there is to
+        // show, and dropping it would leave the model reading nothing at all.
+        while self.used > KEEP && self.window.len() > 1 {
+            let Some(oldest) = self.window.pop_front() else {
+                break;
+            };
+            self.used -= oldest.len();
+            self.dropped = true;
+        }
+
+        // Taken by value so each arm can simply hand back the next state,
+        // rather than assigning into a field it is holding a borrow of.
+        let next = match std::mem::take(&mut self.spill) {
+            // Past the threshold the file is the record, and memory is not.
+            // The write is synchronous inside the lock on purpose: these are
+            // pipe-sized appends to a local file, and the alternative is
+            // holding a lock across an await in the one path that must never
+            // stall a producer — the same trade `session::Persist` makes, for
+            // the same reason.
+            Spill::Open(path, mut file) => {
+                if file.write_all(chunk).is_ok() {
+                    Spill::Open(path, file)
+                } else {
+                    // A disk that stopped accepting writes does not fail the
+                    // command: the window still holds the end of the output,
+                    // which is what the model reads.
+                    self.dropped = true;
+                    Spill::Refused
+                }
+            }
+            Spill::Refused => Spill::Refused,
+            Spill::Holding(mut bytes) => {
+                bytes.extend_from_slice(chunk);
+                if bytes.len() <= SPILL_THRESHOLD {
+                    Spill::Holding(bytes)
+                } else {
+                    match open_spill(self.spill_dir.as_deref(), &bytes) {
+                        Some((path, file)) => Spill::Open(path, file),
+                        // Nowhere to spill to, so the head is let go rather
+                        // than kept growing. It counts as dropped because it
+                        // is: the model must not read a partial output as if
+                        // it were the whole thing.
+                        None => {
+                            self.dropped = true;
+                            Spill::Refused
+                        }
+                    }
+                }
+            }
+        };
+        self.spill = next;
+    }
+
+    /// The window as one buffer, whether anything was cut on the way, and the
+    /// spill file if one was opened.
+    fn finish(&mut self) -> (Vec<u8>, bool, Option<PathBuf>) {
+        let mut window = Vec::with_capacity(self.used);
+        for chunk in &self.window {
+            window.extend_from_slice(chunk);
+        }
+        let path = match &self.spill {
+            Spill::Open(path, _) => Some(path.clone()),
+            Spill::Holding(_) | Spill::Refused => None,
+        };
+
+        (window, self.dropped, path)
+    }
+}
+
+/// The last [`truncate::MAX_LINES`] lines of `text` that fit in
+/// [`truncate::MAX_CHARS`], and whether anything was cut.
+///
+/// Upstream's `tail` (`tool/shell.ts`), and the direction is the point: every
+/// other tool in this crate clamps to the *head* through [`truncate::clamp`],
+/// because the beginning of a file or a search is what matters. The end of a
+/// command's output is what matters — the error it failed with, the summary
+/// it printed — so this one keeps the end, exactly as upstream does.
+fn tail(text: &str) -> (String, bool) {
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.len() <= truncate::MAX_LINES && text.len() <= truncate::MAX_CHARS {
+        return (text.to_owned(), false);
+    }
+
+    let mut kept: Vec<&str> = Vec::new();
+    let mut bytes = 0_usize;
+    for line in lines.iter().rev() {
+        if kept.len() >= truncate::MAX_LINES {
+            break;
+        }
+        // The newline that would rejoin this line to the one after it, which
+        // the first line kept does not need.
+        let size = line.len() + usize::from(!kept.is_empty());
+        if bytes + size > truncate::MAX_CHARS {
+            if kept.is_empty() {
+                // One line longer than the entire budget. Upstream keeps its
+                // tail rather than nothing, walking forward off any byte that
+                // continues a character so what survives is still text.
+                return (last_bytes(line, truncate::MAX_CHARS).to_owned(), true);
+            }
+            break;
+        }
+        kept.push(line);
+        bytes += size;
+    }
+    kept.reverse();
+
+    (kept.join("\n"), true)
+}
+
+/// The last `budget` bytes of `line`, moved forward to the nearest character
+/// boundary — upstream's `while ((buf[start] & 0xc0) === 0x80) start++`, which
+/// is the same question `is_char_boundary` answers.
+fn last_bytes(line: &str, budget: usize) -> &str {
+    let mut start = line.len().saturating_sub(budget);
+    while start < line.len() && !line.is_char_boundary(start) {
+        start += 1;
+    }
+
+    &line[start..]
 }
 
 impl ShellTool {
@@ -320,12 +587,12 @@ async fn kill_tree(child: &mut Child) {
     let _ = child.start_kill();
 }
 
-/// Appends everything `reader` produces to `sink`.
+/// Hands everything `reader` produces to `sink`.
 ///
-/// Both pipes share one buffer, so stdout and stderr interleave in the order
-/// they arrived — which is what a terminal would have shown, and what
+/// Both pipes share one collector, so stdout and stderr interleave in the
+/// order they arrived — which is what a terminal would have shown, and what
 /// upstream's merged stream carries.
-async fn pump<R: AsyncRead + Unpin>(mut reader: R, sink: Arc<Mutex<Vec<u8>>>) {
+async fn pump<R: AsyncRead + Unpin>(mut reader: R, sink: Arc<Mutex<Collector>>) {
     let mut chunk = [0_u8; 8192];
 
     loop {
@@ -334,7 +601,7 @@ async fn pump<R: AsyncRead + Unpin>(mut reader: R, sink: Arc<Mutex<Vec<u8>>>) {
             Ok(read) => sink
                 .lock()
                 .expect("the output buffer is never poisoned")
-                .extend_from_slice(&chunk[..read]),
+                .push(&chunk[..read]),
         }
     }
 }
@@ -438,8 +705,8 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::{DEFAULT_TIMEOUT, ShellTool};
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
+    use super::{Collector, DEFAULT_TIMEOUT, KEEP, ShellTool, tail};
+    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError, truncate};
 
     /// A context rooted at `cwd`, with a cancel nobody has pulled.
     fn ctx(cwd: PathBuf) -> ToolCtx {
@@ -635,6 +902,192 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(3),
             "a cancel should not wait out the command, took {elapsed:?}"
+        );
+    }
+
+    /// A command may write more than this machine has memory for, and the
+    /// two-minute default timeout is long enough for `yes` to prove it. What
+    /// bounds it is the window: the newest [`KEEP`] bytes stay in memory,
+    /// everything else has already gone to the spill file, and what the model
+    /// reads is the end of the output rather than the beginning of it.
+    #[tokio::test]
+    async fn a_flood_of_output_is_bounded_in_memory_and_the_tail_is_what_survives() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let spill = dir.path().join("tool-output");
+        // ~230 KB over 40,000 lines: past the line budget, past the byte
+        // budget, and past [`KEEP`], so the spill really opens mid-run.
+        let out = ShellTool::spilling_into(&spill)
+            .run(
+                serde_json::json!({ "command": "seq 1 40000" }),
+                &ctx(dir.path().to_owned()),
+            )
+            .await
+            .expect("a command that floods still completes");
+
+        assert_eq!(out.metadata["truncated"], true);
+        assert!(
+            out.output
+                .starts_with("...output truncated...\n\nFull output saved to: "),
+            "the model has to read why the output starts mid-stream, got {:?}",
+            &out.output[..out.output.len().min(120)]
+        );
+        assert!(
+            out.output.contains("\n40000"),
+            "the end of the output is what a shell result is for"
+        );
+        assert!(
+            !out.output.contains("\n1\n"),
+            "the head should have been cut, not the tail"
+        );
+        assert!(
+            out.output.len() < truncate::MAX_CHARS + 1_024,
+            "what the model reads must fit the budget, got {} bytes",
+            out.output.len()
+        );
+
+        let path = out.metadata["outputPath"]
+            .as_str()
+            .expect("a truncated command names where its output went");
+        let full = std::fs::read_to_string(path).expect("the spill is readable");
+        assert!(
+            full.starts_with("1\n") && full.trim_end().ends_with("\n40000"),
+            "the spill holds everything, not just what was shown"
+        );
+        assert!(
+            full.len() > KEEP,
+            "the spill should hold more than was ever in memory at once, got {} bytes",
+            full.len()
+        );
+    }
+
+    /// The overwhelmingly common case: nothing is cut, so nothing is spilled
+    /// and no file is named.
+    #[tokio::test]
+    async fn output_that_fits_the_budget_names_no_file_and_says_it_was_not_truncated() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let spill = dir.path().join("tool-output");
+
+        let out = ShellTool::spilling_into(&spill)
+            .run(
+                serde_json::json!({ "command": "seq 1 10" }),
+                &ctx(dir.path().to_owned()),
+            )
+            .await
+            .expect("a small command runs");
+
+        assert_eq!(out.output, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n");
+        assert_eq!(out.metadata["truncated"], false);
+        assert!(
+            out.metadata.get("outputPath").is_none(),
+            "a call that kept everything must not name a file: {:?}",
+            out.metadata
+        );
+        assert!(
+            !spill.exists(),
+            "nothing should have been written to disk at all"
+        );
+    }
+
+    /// The window is what bounds memory, so it is worth proving directly:
+    /// ten megabytes through the collector leaves [`KEEP`] bytes behind it,
+    /// and the file holds every one of them.
+    #[test]
+    fn the_collector_holds_a_bounded_window_however_much_is_pushed_through_it() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let spill = dir.path().join("tool-output");
+        let mut collector = Collector::new(Some(spill.clone()));
+
+        let chunk = vec![b'x'; 8192];
+        let pushes = (10 * 1024 * 1024) / chunk.len();
+        for _ in 0..pushes {
+            collector.push(&chunk);
+        }
+
+        let (window, dropped, path) = collector.finish();
+        assert!(
+            window.len() <= KEEP,
+            "the window is the memory bound, got {} bytes for {} pushed",
+            window.len(),
+            pushes * chunk.len()
+        );
+        assert!(dropped, "a flood that big cannot have been kept whole");
+        let path = path.expect("everything past the threshold goes to a file");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("the spill exists")
+                .len()
+                .try_into(),
+            Ok(pushes * chunk.len()),
+            "the spill holds every byte that was pushed"
+        );
+    }
+
+    /// A single chunk larger than the whole window is still the only thing
+    /// there is to show, which is why upstream's `list.length > 1` guard is
+    /// part of the port.
+    #[test]
+    fn one_chunk_larger_than_the_window_is_kept_rather_than_dropped() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let mut collector = Collector::new(Some(dir.path().join("tool-output")));
+
+        collector.push(&vec![b'x'; KEEP * 2]);
+
+        let (window, _, _) = collector.finish();
+        assert_eq!(
+            window.len(),
+            KEEP * 2,
+            "dropping the only chunk would leave the model reading nothing"
+        );
+    }
+
+    #[test]
+    fn the_tail_keeps_the_end_of_the_output_and_says_it_cut() {
+        let short = "one\ntwo\nthree";
+        assert_eq!(tail(short), (short.to_owned(), false));
+
+        let many = (1..=truncate::MAX_LINES + 10)
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (kept, cut) = tail(&many);
+
+        assert!(cut);
+        assert_eq!(
+            kept.lines().count(),
+            truncate::MAX_LINES,
+            "the budget is a line count, not a suggestion"
+        );
+        assert!(
+            kept.ends_with(&(truncate::MAX_LINES + 10).to_string()),
+            "the last line of the output is the one that matters"
+        );
+        assert!(
+            kept.starts_with("11\n"),
+            "and the lines before the budget are the ones that go: {:?}",
+            &kept[..kept.len().min(20)]
+        );
+    }
+
+    #[test]
+    fn one_line_longer_than_the_budget_keeps_its_tail_without_splitting_a_character() {
+        // Every character is four bytes, so a byte-indexed cut lands inside
+        // one unless the boundary is walked forward.
+        let line = "\u{1F980}".repeat(truncate::MAX_CHARS);
+        let (kept, cut) = tail(&line);
+
+        assert!(cut);
+        assert!(
+            kept.len() <= truncate::MAX_CHARS,
+            "the tail still has to fit the budget, got {} bytes",
+            kept.len()
+        );
+        assert!(
+            kept.chars().all(|character| character == '\u{1F980}'),
+            "a cut inside a character would have left a replacement behind"
+        );
+        assert!(
+            line.ends_with(&kept),
+            "what survives is the end of the line"
         );
     }
 
