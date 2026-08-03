@@ -427,6 +427,22 @@ pub enum Command {
         /// The user's decision.
         reply: PermissionReply,
     },
+    /// Runs the rest of the session as a different agent: its prompt, its
+    /// rules, and the model it prefers. Takes effect at the **next** turn —
+    /// upstream re-resolves the agent per prompt and so does this — and is
+    /// refused while one is streaming.
+    SwitchAgent {
+        /// The agent's name, which must be one the engine's registry holds
+        /// and must not be a subagent.
+        name: String,
+    },
+    /// Asks the rest of the session's requests of a different model. Same
+    /// provider only: the provider instance is fixed when the engine is built.
+    /// Takes effect at the next turn, and is refused while one is streaming.
+    SwitchModel {
+        /// The model's id, as the provider spells it.
+        model: String,
+    },
 }
 
 /// What the user decided about one permission request.
@@ -498,6 +514,15 @@ pub enum Event {
         title: String,
         /// The arguments it would run with.
         args: serde_json::Value,
+        /// Directories outside the project this call would work in, which an
+        /// "always" answer would also remember. Empty — and absent from the
+        /// wire — for a call that stays inside the checkout, which is what
+        /// keeps the common case's bytes what they always were.
+        ///
+        /// A dialog that showed the command and not these would be asking
+        /// about something narrower than what the answer covers.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        directories: Vec<String>,
     },
     /// A permission request was answered — by the user, or by a cancel
     /// refusing it — so a frontend can retire the dialog.
@@ -650,6 +675,12 @@ mod tests {
                 id: PermissionId::from("perm_1".to_owned()),
                 reply: PermissionReply::Always,
             },
+            Command::SwitchAgent {
+                name: "plan".to_owned(),
+            },
+            Command::SwitchModel {
+                model: "claude-haiku-4.5".to_owned(),
+            },
         ];
 
         for command in cases {
@@ -698,6 +729,7 @@ mod tests {
                 tool: "shell".to_owned(),
                 title: "cargo test".to_owned(),
                 args: serde_json::json!({"command": "cargo test"}),
+                directories: vec!["/tmp/scratch".to_owned()],
             },
             Event::PermissionReplied {
                 id: PermissionId::from("perm_1".to_owned()),
@@ -873,6 +905,8 @@ mod tests {
                 }),
                 r#"{"type":"part_updated","message_id":"msg_1","part":{"id":"prt_1","type":"tool","call_id":"call_1","tool":"shell","state":{"status":"running","input":{"command":"ls"},"started":7}}}"#,
             ),
+            // A call that stays inside the checkout, whose bytes are exactly
+            // what they were before `directories` existed.
             (
                 serde_json::to_string(&Event::PermissionRequested {
                     id: PermissionId::from("perm_1".to_owned()),
@@ -880,8 +914,20 @@ mod tests {
                     tool: "shell".to_owned(),
                     title: "ls".to_owned(),
                     args: serde_json::json!({"command": "ls"}),
+                    directories: Vec::new(),
                 }),
                 r#"{"type":"permission_requested","id":"perm_1","call_id":"call_1","tool":"shell","title":"ls","args":{"command":"ls"}}"#,
+            ),
+            (
+                serde_json::to_string(&Event::PermissionRequested {
+                    id: PermissionId::from("perm_1".to_owned()),
+                    call_id: "call_1".to_owned(),
+                    tool: "shell".to_owned(),
+                    title: "ls /etc".to_owned(),
+                    args: serde_json::json!({"command": "ls /etc"}),
+                    directories: vec!["/etc".to_owned(), "/tmp/scratch".to_owned()],
+                }),
+                r#"{"type":"permission_requested","id":"perm_1","call_id":"call_1","tool":"shell","title":"ls /etc","args":{"command":"ls /etc"},"directories":["/etc","/tmp/scratch"]}"#,
             ),
             (
                 serde_json::to_string(&Event::PermissionReplied {
@@ -889,6 +935,18 @@ mod tests {
                     reply: PermissionReply::Reject,
                 }),
                 r#"{"type":"permission_replied","id":"perm_1","reply":"reject"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::SwitchAgent {
+                    name: "plan".to_owned(),
+                }),
+                r#"{"type":"switch_agent","name":"plan"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::SwitchModel {
+                    model: "claude-haiku-4.5".to_owned(),
+                }),
+                r#"{"type":"switch_model","model":"claude-haiku-4.5"}"#,
             ),
         ];
 

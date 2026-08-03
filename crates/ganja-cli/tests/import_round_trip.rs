@@ -21,10 +21,10 @@ use ganja_core::{
     permission::Action,
 };
 
-/// A rule this build cannot carry out is still a rule, so `deny` survives as
-/// itself rather than being flattened into [`Action::Ask`].
+/// An imported `deny` is a rule this build carries out: it refuses the call
+/// without asking anybody.
 fn deny() -> Action {
-    Action::Other("deny".to_owned())
+    Action::Deny
 }
 
 #[test]

@@ -282,6 +282,8 @@ mod tests {
             },
             context_tokens: 0,
             summary: None,
+            agent: None,
+            model: None,
         }
     }
 
