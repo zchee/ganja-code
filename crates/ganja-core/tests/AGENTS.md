@@ -47,13 +47,13 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 ### Testing Requirements
 
 ```sh
-cargo test -p ganja-core --test agent_loop
-cargo test -p ganja-core --test golden -- --nocapture
+cargo nextest run -E 'binary(agent_loop)'
+cargo nextest run -E 'binary(golden)' --no-capture
 ```
 
 ### Common Patterns
 
-- **One test per binary where process-wide state is mutated.** `cargo test` runs a binary's tests on parallel threads, so a file that sets environment variables or depends on the process working directory (`secrets_env.rs`, `fake_script_env.rs`, `golden.rs`) holds exactly one test. Do not add a second test to those files — put it in a new file.
+- **One test per binary where process-wide state is mutated.** A file that sets environment variables or depends on the process working directory (`secrets_env.rs`, `fake_script_env.rs`, `golden.rs`) holds exactly one test. nextest runs each test in its own process, so it would tolerate more — but a plain `cargo test` runs a binary's tests on parallel threads, and the one-per-binary rule keeps the suite correct under both runners. Do not add a second test to those files — put it in a new file.
 - **Redirect `XDG_DATA_HOME`.** Anything that reads or writes stored state must not touch the real user's credentials, permissions or spilled output.
 - **Serve real bytes, don't mock the client.** Provider suites bind a loopback `TcpListener` and speak real HTTP, because mocking would skip the request that is actually built and the frames it is actually split into.
 - **Assert on the redacted tail, never a whole key** — a test that printed one would put it in CI output, which is the failure redaction exists to prevent.

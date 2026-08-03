@@ -1,0 +1,28 @@
+#:schema https://raw.githubusercontent.com/nextest-rs/nextest/refs/heads/main/nextest-runner/jsonschemas/repo-config.json
+
+# cargo-nextest configuration. nextest runs each test in its own process, which
+# suits this suite: the tests that mutate process-wide environment
+# (secrets_env, fake_script_env, credentials_env) are isolated by construction
+# rather than by being kept off the same thread, and the loopback HTTP and
+# golden servers bind kernel-assigned ports, so nothing races under parallelism.
+
+[profile.default]
+# Nothing here legitimately runs long — the golden differential is a few
+# seconds and the pty drills about one. Flag anything past 30s as slow, and
+# hard-terminate at 8 periods (4 minutes) so a wedged pty test fails loudly
+# instead of hanging the run: killing a process inside a pty can deadlock in
+# the kernel until its terminal drains, which no in-test timeout can reach.
+slow-timeout = { period = "30s", terminate-after = 8 }
+
+# A test that fails once and passes on retry is flaky, and hiding that is how a
+# differential harness rots. Never retry; a failure is a failure.
+retries = 0
+
+[profile.ci]
+# CI runs the whole suite even after the first failure, so one red test does
+# not mask the state of the rest.
+fail-fast = false
+# Surface the slow ones in CI logs so a creeping regression in the golden or
+# pty timings is visible before it reaches the terminate-after cap.
+slow-timeout = { period = "30s", terminate-after = 8 }
+final-status-level = "slow"
