@@ -1,0 +1,210 @@
+//! A credential planted in the environment must not come back out.
+//!
+//! The risk this pins down is not a `println!` somebody forgot: it is that a
+//! credential travels through a `Debug` rendering, a `tracing` field, or an
+//! error body the provider echoed, and nobody notices because none of those
+//! look like printing a secret. So a canary key is planted the way a real one
+//! is — in the environment — a turn is run against a socket that rejects it by
+//! quoting it back, and every byte of what came out is searched.
+//!
+//! One test, one binary, on purpose: it mutates process-wide environment
+//! variables, and `cargo test` runs the tests inside a binary on parallel
+//! threads.
+
+use std::{
+    env, io,
+    sync::{Arc, Mutex},
+};
+
+use futures::StreamExt as _;
+use ganja_core::provider::{
+    self, AnthropicProvider, ChatRequest, OpenAiProvider, Provider as _, ProviderEvent,
+};
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::TcpListener,
+};
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::MakeWriter;
+
+/// The key planted in the environment. Nothing may render it.
+const CANARY: &str = "sk-test-canary-XYZ";
+
+/// A `tracing` writer a test can read back.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    fn logged(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
+    }
+}
+
+impl io::Write for Capture {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the log is never poisoned")
+            .extend_from_slice(buffer);
+
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for Capture {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Serves `responses`, one per connection, then closes.
+async fn serve(responses: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback is bindable");
+    let url = format!(
+        "http://{}",
+        listener
+            .local_addr()
+            .expect("a bound socket has an address")
+    );
+
+    let server = tokio::spawn(async move {
+        for response in responses {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+
+            let mut request = [0_u8; 8192];
+            let _ = socket.read(&mut request).await;
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.flush().await;
+        }
+    });
+
+    (url, server)
+}
+
+/// A close-delimited response.
+fn response(status: &str, content_type: &str, body: &str) -> String {
+    format!("HTTP/1.1 {status}\r\nconnection: close\r\ncontent-type: {content_type}\r\n\r\n{body}")
+}
+
+#[tokio::test]
+async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
+    let home = tempfile::tempdir().expect("a temp directory");
+    // SAFETY: this binary holds exactly one test, so nothing else in the
+    // process is reading the environment concurrently.
+    unsafe {
+        env::set_var("XDG_DATA_HOME", home.path());
+        env::set_var("ANTHROPIC_API_KEY", CANARY);
+        env::set_var("OPENAI_API_KEY", CANARY);
+        env::set_var("GANJA_PROVIDER", "anthropic");
+        env::remove_var("GANJA_MODEL");
+        env::remove_var("ANTHROPIC_BASE_URL");
+        env::remove_var("OPENAI_BASE_URL");
+    }
+
+    let selection = provider::from_env().expect("the planted key selects anthropic");
+    assert_eq!(selection.provider.id(), "anthropic");
+    assert!(
+        selection.notice.is_none(),
+        "a provider that was asked for by name needs no notice"
+    );
+
+    let (url, _server) = serve(vec![
+        response(
+            "401 Unauthorized",
+            "application/json",
+            // The shape that makes this worth testing: the provider quotes the
+            // credential it refused.
+            &format!(
+                r#"{{"type":"error","error":{{"type":"authentication_error","message":"invalid x-api-key: {CANARY}"}}}}"#
+            ),
+        ),
+        response(
+            "200 OK",
+            "text/event-stream",
+            include_str!("fixtures/anthropic_happy_path.sse"),
+        ),
+    ])
+    .await;
+
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    let rendered = {
+        // `set_default` is per-thread and this runtime is single-threaded, so
+        // everything the turn logs lands in `capture`.
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let anthropic = AnthropicProvider::from_env()
+            .expect("the planted key builds a provider")
+            .with_base_url(&url);
+        let openai = OpenAiProvider::from_env()
+            .expect("the planted key builds a provider")
+            .with_base_url(&url);
+
+        let request = ChatRequest {
+            model: "test-model".to_owned(),
+            system: None,
+            messages: vec![ganja_core::Message::user("hello")],
+        };
+
+        // First turn: refused, with the key quoted back at us. Matched rather
+        // than `expect_err`, because the success type is a stream and streams
+        // have no `Debug`.
+        let Err(refusal) = anthropic
+            .stream(request.clone(), CancellationToken::new())
+            .await
+        else {
+            panic!("a 401 is not answerable");
+        };
+
+        // Second turn: answered, which is the log-heavy path — unknown event
+        // types, unknown delta types, comments and stop reasons all trace.
+        let events: Vec<ProviderEvent> = anthropic
+            .stream(request, CancellationToken::new())
+            .await
+            .expect("the second response is a stream")
+            .collect()
+            .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::TextDelta(_))),
+            "the answered turn should have streamed text, got {events:?}"
+        );
+
+        format!("{anthropic:?} {openai:?} {refusal} {refusal:?}")
+    };
+
+    let logged = capture.logged();
+
+    assert!(
+        !logged.is_empty(),
+        "the capture caught nothing, so finding no key in it would prove nothing"
+    );
+    assert!(
+        !logged.contains(CANARY),
+        "a credential reached the log:\n{logged}"
+    );
+    assert!(
+        !rendered.contains(CANARY),
+        "a credential reached a rendering: {rendered}"
+    );
+    assert!(
+        rendered.contains("[redacted]"),
+        "the echoed key should be masked rather than dropped: {rendered}"
+    );
+}

@@ -291,6 +291,16 @@ async fn stream_turn(turn: &Turn, assistant: &mut Message) -> Option<Outcome> {
                 }
             }
             ProviderEvent::Usage(usage) => assistant.usage = Some(usage),
+            // A provider that died mid-stream keeps whatever it already
+            // streamed — the transcript is honest about how far it got — but
+            // the turn is reported as failed, never as a model that stopped
+            // talking on purpose.
+            ProviderEvent::Failed(error) => {
+                return Some(Outcome {
+                    reason: FinishReason::Failed,
+                    error: Some(error.to_string()),
+                });
+            }
             ProviderEvent::Finish(reason) => {
                 return Some(Outcome {
                     reason,

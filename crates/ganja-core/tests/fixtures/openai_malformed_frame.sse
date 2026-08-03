@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl-Broken","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Broken","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":", wor
+
+data: {"id":"chatcmpl-Broken","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"content":"never read"},"finish_reason":null}]}
+
+data: [DONE]
+
