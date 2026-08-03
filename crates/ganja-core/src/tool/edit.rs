@@ -16,7 +16,7 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     ops::Range,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, LazyLock, Mutex},
 };
 
@@ -24,7 +24,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput};
+use crate::{
+    project::Project,
+    tool::{Tool, ToolCtx, ToolError, ToolOutput},
+};
 
 /// What the model is told about the tool: upstream's prompt file, verbatim.
 const DESCRIPTION: &str = include_str!("edit.txt");
@@ -152,6 +155,9 @@ impl Tool for EditTool {
         }
 
         let path = resolve(&ctx.cwd, &args.file_path);
+        // Before the lock, and long before anything is written: a refused path
+        // has no business holding up another call to the same file.
+        refuse_link_escape(&ctx.cwd, &path)?;
         let guard = lock(&path);
         let _held = guard.lock().await;
 
@@ -283,6 +289,124 @@ fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
 /// directory, or whole when it lies outside.
 fn relative(cwd: &Path, path: &Path) -> String {
     path.strip_prefix(cwd).unwrap_or(path).display().to_string()
+}
+
+/// Refuses a path that is inside the project by its text but lands outside it
+/// once the filesystem has its say — that is, one a symbolic link redirects.
+///
+/// The permission gate resolves the same path and asks about it
+/// (`permission.rs`, `outside`), but it answers *before* the call runs: a link
+/// planted between the answer and the write redirects it afterwards, and a
+/// [`crate::permission::Permissions::default`] set has no project to compare
+/// anything against at all. `fs::write` follows links, so this is the check
+/// the write itself makes, immediately before opening the file.
+///
+/// Only a link that *escapes* is refused. A call that openly names somewhere
+/// outside the project is the gate's business and not this function's — the
+/// user was asked about that directory and may well have allowed it — so the
+/// rule is precisely the one this tool's contract states: do not follow a link
+/// out of the project. Text inside plus reality outside is that link and
+/// nothing else.
+///
+/// Resolution mirrors `permission::resolve` deliberately, so the gate and the
+/// tool cannot disagree about where a path goes: canonicalise what exists, so
+/// every link along it and every `..` is already applied, then apply what does
+/// not exist yet by text — a `..` there cannot cross a link, because nothing
+/// it names is on the disk to be one.
+///
+/// The window between this check and the open is narrowed, not closed. Only
+/// opening the canonical parent with `O_NOFOLLOW` would close it, which this
+/// port does not do yet; what is refused here is the escape that exists when
+/// the call is made, which is the shape a planted link takes.
+///
+/// The twin of this lives in `tool/write.rs`. The two are deliberately
+/// duplicated rather than shared: exactly two tools write, and the alternative
+/// is a module whose only job is to hold one function.
+fn refuse_link_escape(cwd: &Path, path: &Path) -> Result<(), ToolError> {
+    let root = Project::resolve(cwd).root().to_owned();
+    let real = real_path(path);
+    if real.starts_with(&root) {
+        return Ok(());
+    }
+    if !claimed(cwd, path).starts_with(&root) {
+        return Ok(());
+    }
+
+    Err(ToolError::Failed(format!(
+        "{} is inside the project but resolves to {}, which is not: a symbolic \
+         link on that path leads out of {}. Refusing to write through it — name \
+         the real path if that is what you meant.",
+        path.display(),
+        real.display(),
+        root.display()
+    )))
+}
+
+/// Where `path` really lands: canonical for as much of it as exists, lexical
+/// for whatever does not exist yet.
+fn real_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+
+    let mut ancestors: Vec<Component> = path.components().collect();
+    let mut rest: Vec<Component> = Vec::new();
+    while let Some(component) = ancestors.pop() {
+        rest.push(component);
+        let existing: PathBuf = ancestors.iter().collect();
+        if existing.as_os_str().is_empty() {
+            continue;
+        }
+        if let Ok(canonical) = std::fs::canonicalize(&existing) {
+            return apply(canonical, rest.iter().rev().copied());
+        }
+    }
+
+    lexical(path)
+}
+
+/// What the call claimed the path was, before any link was followed: the
+/// session directory in canonical form, with everything the call added applied
+/// by text.
+///
+/// Only the anchor is canonicalised, and that asymmetry is the whole point —
+/// the anchor is the one part of the path the model did not choose. Comparing
+/// raw text against a canonical root would be wrong in the other direction on
+/// any machine where the session directory is reached through a link, which on
+/// macOS is every temporary directory there is (`/var` -> `/private/var`):
+/// every path under it would read as "outside the project" and every edit
+/// would be refused.
+fn claimed(cwd: &Path, path: &Path) -> PathBuf {
+    let anchor = std::fs::canonicalize(cwd).unwrap_or_else(|_| lexical(cwd));
+
+    match path.strip_prefix(cwd) {
+        Ok(rest) => apply(anchor, rest.components()),
+        Err(_) => lexical(path),
+    }
+}
+
+/// `path` made absolute with its `.` and `..` applied by text alone, which is
+/// what it claims to be before the filesystem is consulted.
+fn lexical(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+
+    apply(PathBuf::new(), absolute.components())
+}
+
+/// `base` with `rest` applied by text: `.` ignored, `..` popped, anything else
+/// pushed.
+fn apply<'a>(mut base: PathBuf, rest: impl Iterator<Item = Component<'a>>) -> PathBuf {
+    for component in rest {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                base.pop();
+            }
+            other => base.push(other.as_os_str()),
+        }
+    }
+
+    base
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1211,203 @@ mod tests {
     /// Runs an edit and gives back what the model would see.
     async fn run(ctx: &ToolCtx, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
         EditTool.run(args, ctx).await
+    }
+
+    /// A project whose root is pinned by a `.git`, and somewhere outside it.
+    ///
+    /// The marker is what makes the boundary deterministic: `Project::resolve`
+    /// walks up for one, so without it the root would be whatever ancestor of
+    /// the temporary directory happened to be a checkout — and on a machine
+    /// whose `TMPDIR` sits inside one, that ancestor would contain "outside"
+    /// too and these tests would quietly stop testing anything.
+    #[cfg(unix)]
+    fn project_and_elsewhere() -> (tempfile::TempDir, tempfile::TempDir) {
+        let project = tempfile::tempdir().expect("a scratch directory");
+        std::fs::create_dir(project.path().join(".git")).expect("the marker is creatable");
+        let elsewhere = tempfile::tempdir().expect("a second scratch directory");
+
+        (project, elsewhere)
+    }
+
+    /// An edit follows a link exactly as a write does, and a link planted at a
+    /// path the project allows is how the file outside it gets rewritten.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_edit_through_a_link_that_leaves_the_project_is_refused() {
+        let (project, elsewhere) = project_and_elsewhere();
+        let secret = elsewhere.path().join("secret.txt");
+        std::fs::write(&secret, "alpha\n").expect("the fixture writes");
+        let planted = project.path().join("notes.txt");
+        std::os::unix::fs::symlink(&secret, &planted).expect("the link is creatable");
+
+        let context = ctx(project.path());
+        context.files.record(&planted);
+        let refused = failure(
+            &context,
+            serde_json::json!({
+                "filePath": "notes.txt",
+                "oldString": "alpha",
+                "newString": "omega",
+            }),
+        )
+        .await;
+
+        assert!(
+            refused.contains("symbolic link"),
+            "an edit through a link out of the project must say so: {refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&secret).expect("the file outside still exists"),
+            "alpha\n",
+            "the edit followed the link and rewrote a file outside the project"
+        );
+    }
+
+    /// The same escape one level up, where it is the directory that leads out.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_edit_inside_a_linked_directory_that_leaves_the_project_is_refused() {
+        let (project, elsewhere) = project_and_elsewhere();
+        let secret = elsewhere.path().join("secret.txt");
+        std::fs::write(&secret, "alpha\n").expect("the fixture writes");
+        std::os::unix::fs::symlink(elsewhere.path(), project.path().join("escape"))
+            .expect("the link is creatable");
+
+        let context = ctx(project.path());
+        // Recorded under the name the call spells, so read-before-write is
+        // satisfied and the refusal below can only be the escape guard's.
+        context
+            .files
+            .record(&project.path().join("escape").join("secret.txt"));
+        let refused = failure(
+            &context,
+            serde_json::json!({
+                "filePath": "escape/secret.txt",
+                "oldString": "alpha",
+                "newString": "omega",
+            }),
+        )
+        .await;
+
+        assert!(
+            refused.contains("symbolic link"),
+            "a linked parent leads out of the project just as well: {refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&secret).expect("the file outside still exists"),
+            "alpha\n"
+        );
+    }
+
+    /// `..` is not resolved by `std::path::absolute`, so a path can carry one
+    /// all the way here — `grep` hands the model absolute paths that may hold
+    /// one. A `..` *after* a link lands where the link led: the text collapses
+    /// to a path inside the project, so a prefix test on it would pass, while
+    /// the kernel resolves it somewhere else entirely. That is why both sides
+    /// of the comparison are canonical and never raw text.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dot_dot_path_that_climbs_out_through_a_link_is_refused() {
+        let (project, elsewhere) = project_and_elsewhere();
+        // Two levels, so `link/..` lands somewhere this test owns rather than
+        // in the shared temporary root.
+        let inner = elsewhere.path().join("inner");
+        std::fs::create_dir(&inner).expect("the fixture makes a directory");
+        let landing = elsewhere.path().join("secret.txt");
+        std::fs::write(&landing, "alpha\n").expect("the fixture writes");
+        std::os::unix::fs::symlink(&inner, project.path().join("link"))
+            .expect("the link is creatable");
+
+        let context = ctx(project.path());
+        context
+            .files
+            .record(&project.path().join("link").join("..").join("secret.txt"));
+        let refused = failure(
+            &context,
+            serde_json::json!({
+                "filePath": "link/../secret.txt",
+                "oldString": "alpha",
+                "newString": "omega",
+            }),
+        )
+        .await;
+
+        assert!(
+            refused.contains("symbolic link"),
+            "`link/..` is the link's parent, not the project: {refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&landing).expect("the file outside still exists"),
+            "alpha\n",
+            "the edit escaped the project through `..` after a link"
+        );
+    }
+
+    /// The other direction, and the one `grep` actually produces: a `..` that
+    /// comes back inside the project is an ordinary path, not an escape.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dot_dot_path_that_lands_back_inside_the_project_is_edited() {
+        let (project, _elsewhere) = project_and_elsewhere();
+        std::fs::create_dir(project.path().join("nested")).expect("the fixture makes a directory");
+        let file = project.path().join("a.rs");
+        std::fs::write(&file, "alpha\n").expect("the fixture writes");
+
+        let context = ctx(project.path());
+        context
+            .files
+            .record(&project.path().join("nested").join("..").join("a.rs"));
+        run(
+            &context,
+            serde_json::json!({
+                "filePath": "nested/../a.rs",
+                "oldString": "alpha",
+                "newString": "omega",
+            }),
+        )
+        .await
+        .expect("a `..` that comes back inside the project is not an escape");
+
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file is readable"),
+            "omega\n"
+        );
+    }
+
+    /// The case the guard must not break: a link that stays inside the project
+    /// is an ordinary way to arrange a checkout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_edit_through_a_link_that_stays_inside_the_project_still_applies() {
+        let (project, _elsewhere) = project_and_elsewhere();
+        let real = project.path().join("real");
+        std::fs::create_dir(&real).expect("the fixture makes a directory");
+        let file = real.join("notes.txt");
+        std::fs::write(&file, "alpha\n").expect("the fixture writes");
+        std::os::unix::fs::symlink(&real, project.path().join("link"))
+            .expect("the link is creatable");
+
+        let context = ctx(project.path());
+        // Recorded under the name the edit uses: read-before-write keys on the
+        // path as the call spells it, which is a link away from `file`.
+        context
+            .files
+            .record(&project.path().join("link").join("notes.txt"));
+        run(
+            &context,
+            serde_json::json!({
+                "filePath": "link/notes.txt",
+                "oldString": "alpha",
+                "newString": "omega",
+            }),
+        )
+        .await
+        .expect("a link that goes nowhere new is not an escape");
+
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file is readable"),
+            "omega\n"
+        );
     }
 
     /// The message of a failed edit.
