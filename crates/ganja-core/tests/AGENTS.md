@@ -13,8 +13,10 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 |------|-------------|
 | `agent_loop.rs` | The loop end to end: a turn spans as many model requests as its tool calls demand, every call is gated, executed and answered in order, and the event stream tells the whole story. Providers and tools are scripted doubles. |
 | `cancel.rs` | A cancelled turn stops promptly and stays stopped. |
+| `cancel_process_group.rs` | A cancelled turn takes the whole process group of the command it was running with it. |
 | `delivery.rs` | The lossless guarantee: a consumer slower than the producer still sees every event, in order. |
 | `permissions.rs` | Rules from a working directory to a file and back — resolve the project, find its data directory, store an answer, see a later session honour it. |
+| `persistence.rs` | A conversation outlives the process: write-through as it streams, resume with interrupted calls closed, auto-title, compaction at the context ceiling. |
 | `http.rs` | Both HTTP providers against a real loopback socket: the request actually built, the retry actually scheduled, the body actually split into frames. |
 | `golden.rs` | **The differential harness.** Drives ganja *and* real upstream opencode against one replay endpoint and compares the tool calls each executed. See below. |
 | `secrets_env.rs` | A canary key planted in the environment must not come back out through a `Debug`, a `tracing` field, or an error body the provider echoed. One test, one binary. |
