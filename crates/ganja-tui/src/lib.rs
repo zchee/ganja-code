@@ -187,6 +187,8 @@ mod tests {
             usage: ganja_core::Usage::default(),
             context_tokens: 0,
             summary: None,
+            agent: None,
+            model: None,
         };
         let message = Message::user(prompt);
 

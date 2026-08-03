@@ -698,6 +698,8 @@ mod tests {
             },
             context_tokens: 0,
             summary: None,
+            agent: None,
+            model: None,
         };
         let message = Message::user("what the picker is choosing between");
 
@@ -1606,6 +1608,7 @@ mod tests {
             tool: "shell".to_owned(),
             title: "cargo test".to_owned(),
             args: serde_json::json!({"command": "cargo test"}),
+            directories: Vec::new(),
         }
     }
 

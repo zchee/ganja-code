@@ -120,6 +120,17 @@ pub struct SessionInfo {
     /// transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<MessageId>,
+    /// Agent this session was last running as, so that reopening it reopens
+    /// the same session rather than one that merely has the same transcript.
+    /// Absent on every session written before agents existed, and on any
+    /// session an engine with no agent registry created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Model this session was last asking. Absent for the same reasons as
+    /// above; restored only when the provider this process holds still serves
+    /// it, since the provider is fixed when the engine is built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// A write the storage could not perform. Reads do not produce errors for
@@ -614,6 +625,8 @@ mod tests {
             usage: Usage::default(),
             context_tokens: 0,
             summary: None,
+            agent: None,
+            model: None,
         }
     }
 
@@ -754,6 +767,8 @@ mod tests {
         assert_eq!(written["version"], VERSION);
         assert!(written.get("title").is_none(), "{written}");
         assert!(written.get("summary").is_none(), "{written}");
+        assert!(written.get("agent").is_none(), "{written}");
+        assert!(written.get("model").is_none(), "{written}");
 
         let filled = SessionInfo {
             title: Some("porting storage".to_owned()),
@@ -764,6 +779,8 @@ mod tests {
             },
             context_tokens: 1_234,
             summary: Some(MessageId::from("msg_2".to_owned())),
+            agent: Some("plan".to_owned()),
+            model: Some("claude-haiku-4.5".to_owned()),
             ..bare.clone()
         };
         storage.save_info(&filled).expect("the info stores");

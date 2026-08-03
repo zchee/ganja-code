@@ -815,7 +815,7 @@ mod tests {
                 ("bash", "git *", Action::Ask),
                 // A rule this build cannot carry out is still a rule: `deny`
                 // survives as itself rather than being flattened to `ask`.
-                ("bash", "*", Action::Other("deny".to_owned())),
+                ("bash", "*", Action::Deny),
                 ("edit", "*", Action::Ask),
             ]
         );
@@ -857,11 +857,7 @@ mod tests {
             rules,
             vec![
                 ("bash".to_owned(), "git *".to_owned(), Action::Allow),
-                (
-                    "bash".to_owned(),
-                    "*".to_owned(),
-                    Action::Other("deny".to_owned())
-                ),
+                ("bash".to_owned(), "*".to_owned(), Action::Deny),
                 ("bash".to_owned(), "cargo *".to_owned(), Action::Allow),
                 ("edit".to_owned(), "*".to_owned(), Action::Ask),
                 ("webfetch".to_owned(), "*".to_owned(), Action::Allow),

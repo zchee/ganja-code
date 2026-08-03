@@ -704,6 +704,8 @@ mod tests {
             usage: Usage::default(),
             context_tokens: 0,
             summary: None,
+            agent: None,
+            model: None,
         }
     }
 

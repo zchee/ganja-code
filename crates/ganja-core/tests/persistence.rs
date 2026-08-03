@@ -202,6 +202,8 @@ fn seed_info(id: &SessionId, context_tokens: u64) -> SessionInfo {
         usage: Usage::default(),
         context_tokens,
         summary: None,
+        agent: None,
+        model: None,
     }
 }
 

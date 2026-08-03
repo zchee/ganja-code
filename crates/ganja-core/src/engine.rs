@@ -30,6 +30,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    agent::{self, Agent},
+    catalog,
+    config::AgentMode,
     permission::Permissions,
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
@@ -69,16 +72,73 @@ pub enum EngineError {
     /// itself refusing.
     #[error(transparent)]
     Storage(#[from] StorageError),
+    /// A [`Command::SwitchAgent`] reached an engine built without an agent
+    /// registry, which is every engine a test or a golden run builds.
+    #[error("this engine has no agents; it was built without a registry")]
+    NoAgents,
+    /// [`Command::SwitchAgent`] named an agent the registry does not hold.
+    #[error("no agent named {name}")]
+    UnknownAgent {
+        /// The name nothing answers to.
+        name: String,
+    },
+    /// [`Command::SwitchAgent`] named a subagent. Those exist to be spawned by
+    /// the task tool, and a session that ran as one would have no way back to
+    /// the tools it gave up.
+    #[error("{name} is a subagent, which only the task tool runs")]
+    SubagentNotSelectable {
+        /// The subagent that was asked for.
+        name: String,
+    },
+    /// [`Command::SwitchModel`] named a model this session's provider does not
+    /// serve. The provider is fixed when the engine is built, so a model
+    /// belonging to another one is not a switch this build can make.
+    #[error("{provider} does not serve a model named {model}")]
+    UnknownModel {
+        /// The model that was asked for.
+        model: String,
+        /// The provider that was asked for it.
+        provider: String,
+    },
+}
+
+/// What the next turn runs as.
+///
+/// Both halves are switchable mid-session and both take effect at the next
+/// turn, never the one in flight: upstream re-resolves them per prompt, and a
+/// turn that changed model halfway would be one conversation asked of two.
+#[derive(Debug, Default)]
+struct Active {
+    /// Model the next request asks for.
+    model: String,
+    /// Agent whose prompt and rules the next turn runs under. [`None`] on an
+    /// engine built without a registry, where there is nothing to run as.
+    agent: Option<String>,
+    /// Agent the *previous* turn ran under, which is the whole of what the
+    /// plan-to-build reminder needs to know. In memory only: a message does
+    /// not record the agent that produced it, so a resumed session starts
+    /// with no opinion about what came before.
+    previous_agent: Option<String>,
 }
 
 /// Owns the turn lifecycle and publishes what happens during it.
 pub struct Engine {
     provider: Arc<dyn Provider>,
-    model: String,
-    /// What the model is told before it is told anything else, composed once
-    /// by [`crate::instruction::system_prompt`]. [`None`] is an engine nobody
-    /// configured, which every scripted and golden run relies on.
-    system: Option<String>,
+    /// The model and agent the next turn runs as; see [`Active`].
+    active: std::sync::Mutex<Active>,
+    /// The half of the system prompt an agent replaces: the base prompt for
+    /// the model's family, composed by [`crate::instruction::system_prompt`].
+    /// [`None`] is an engine nobody configured, which every scripted and
+    /// golden run relies on.
+    base_prompt: Option<String>,
+    /// The half no agent replaces — the environment block and the instruction
+    /// files — which is why it is held apart from the base prompt rather than
+    /// concatenated into it: switching agents swaps one and keeps the other.
+    prompt_suffix: Option<String>,
+    /// Agents this session may run as. [`None`] leaves every turn on the base
+    /// prompt with no agent rules, which is what an engine built for a golden
+    /// run wants.
+    agents: Option<Arc<agent::Registry>>,
     /// Tools the model is offered, and the agent loop executes.
     tools: Arc<Registry>,
     /// Rules deciding which tool calls wait for the user.
@@ -160,8 +220,14 @@ impl Engine {
 
         Self {
             provider,
-            model,
-            system: None,
+            active: std::sync::Mutex::new(Active {
+                model,
+                agent: None,
+                previous_agent: None,
+            }),
+            base_prompt: None,
+            prompt_suffix: None,
+            agents: None,
             tools,
             permissions: Arc::new(std::sync::Mutex::new(permissions)),
             // Captured at construction so a process whose directory later
@@ -189,8 +255,47 @@ impl Engine {
     /// [`None`] leaves the requests without one, which is what
     /// [`Engine::new`]'s scripted and golden runs depend on.
     #[must_use]
-    pub fn with_system(mut self, system: Option<String>) -> Self {
-        self.system = system;
+    pub fn with_system(self, system: Option<String>) -> Self {
+        self.with_system_parts(system, None)
+    }
+
+    /// Sets the system prompt as its two halves.
+    ///
+    /// `base` is the half an agent replaces — the prompt for the model's
+    /// family — and `suffix` is the half none of them do: the environment
+    /// block and the instruction files, which describe where the session is
+    /// working and are true of every agent that works there. They are kept
+    /// apart rather than concatenated because switching agents has to swap one
+    /// and keep the other, and a single string cannot be taken back apart.
+    ///
+    /// Joined by a bare newline, as upstream's `session/llm/request.ts` joins
+    /// them, and [`None`] only when neither half says anything.
+    #[must_use]
+    pub fn with_system_parts(mut self, base: Option<String>, suffix: Option<String>) -> Self {
+        self.base_prompt = base;
+        self.prompt_suffix = suffix;
+
+        self
+    }
+
+    /// Sets the agents this session may run as, and starts it on the
+    /// registry's default.
+    ///
+    /// The default's ruleset becomes the permission baseline immediately: an
+    /// engine that had agents but judged its first turn without them would be
+    /// running the agent's prompt under somebody else's rules.
+    #[must_use]
+    pub fn with_agents(mut self, agents: Arc<agent::Registry>) -> Self {
+        let start = agents.default_agent().to_owned();
+        if let Some(agent) = agents.get(&start) {
+            self.install(agent);
+            let mut active = self.active();
+            active.agent = Some(start);
+            if let Some(model) = agent.model.clone().filter(|model| self.serves(model)) {
+                active.model = model;
+            }
+        }
+        self.agents = Some(agents);
 
         self
     }
@@ -200,6 +305,25 @@ impl Engine {
     #[must_use]
     pub fn permissions(&self) -> Arc<std::sync::Mutex<Permissions>> {
         Arc::clone(&self.permissions)
+    }
+
+    /// The model the next turn will ask for.
+    #[must_use]
+    pub fn model(&self) -> String {
+        self.active().model.clone()
+    }
+
+    /// The agent the next turn will run as, or [`None`] on an engine built
+    /// without a registry.
+    #[must_use]
+    pub fn agent(&self) -> Option<String> {
+        self.active().agent.clone()
+    }
+
+    /// The agents this session may run as, for a picker to list.
+    #[must_use]
+    pub fn agents(&self) -> Option<&Arc<agent::Registry>> {
+        self.agents.as_ref()
     }
 
     /// Every stored session, newest first — what a session picker lists.
@@ -312,6 +436,7 @@ impl Engine {
             .collect();
 
         *self.history.lock().await = window;
+        self.restore_selection(&info);
         {
             let mut live = state
                 .live
@@ -323,6 +448,69 @@ impl Engine {
         drop(slot);
 
         Ok(transcript)
+    }
+
+    /// Puts a resumed session back on the agent and model it was running.
+    ///
+    /// Either half may be refused: the agent registry is built from this
+    /// process's config and may no longer hold the agent, and the provider is
+    /// fixed at construction so a session stored under another one names a
+    /// model this build cannot ask for (**D8**). A refusal is a warning and
+    /// the engine's own selection stands — a session that reopened silently
+    /// asking a model that does not exist would fail every turn instead.
+    fn restore_selection(&self, info: &SessionInfo) {
+        if let Some(name) = &info.agent {
+            match self
+                .agents
+                .as_ref()
+                .and_then(|registry| registry.get(name))
+                .filter(|agent| agent.mode != AgentMode::Subagent)
+            {
+                Some(agent) => {
+                    self.install(agent);
+                    self.active().agent = Some(agent.name.clone());
+                }
+                None => tracing::warn!(
+                    session = info.id.as_str(),
+                    agent = name.as_str(),
+                    "the stored agent is not one this build has; resuming on the default"
+                ),
+            }
+        }
+
+        if let Some(model) = &info.model {
+            if self.serves(model) {
+                self.active().model = model.clone();
+            } else {
+                tracing::warn!(
+                    session = info.id.as_str(),
+                    model = model.as_str(),
+                    provider = self.provider.id(),
+                    "the stored model is not one this provider serves; \
+                     resuming on the one this session was started with"
+                );
+            }
+        }
+
+        // Nothing in the transcript says which agent produced which message,
+        // so a resumed session has no previous turn to compare against and
+        // does not replay the plan-to-build reminder.
+        self.active().previous_agent = None;
+    }
+
+    /// The system prompt one turn carries: the agent's own prompt where it has
+    /// one, the model family's base prompt where it does not, and the
+    /// unchanging suffix after either.
+    fn system_for(&self, agent: Option<&Agent>) -> Option<String> {
+        let head = agent
+            .and_then(|agent| agent.prompt.as_deref())
+            .or(self.base_prompt.as_deref());
+
+        match (head, self.prompt_suffix.as_deref()) {
+            (None, None) => None,
+            (Some(only), None) | (None, Some(only)) => Some(only.to_owned()),
+            (Some(head), Some(suffix)) => Some(format!("{head}\n{suffix}")),
+        }
     }
 
     /// Claims the event stream.
@@ -351,8 +539,10 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::Busy`] when a prompt arrives while another turn
-    /// is still streaming, or still waiting on a permission.
+    /// Returns [`EngineError::Busy`] when a prompt or a switch arrives while
+    /// another turn is still streaming, or still waiting on a permission, and
+    /// the agent and model refusals for a switch that names something this
+    /// session cannot become.
     pub async fn send(&self, command: Command) -> Result<(), EngineError> {
         match command {
             Command::SendPrompt { text } => self.start_turn(text).await,
@@ -364,6 +554,137 @@ impl Engine {
                 self.reply_permission(&id, reply).await;
                 Ok(())
             }
+            Command::SwitchAgent { name } => self.switch_agent(name).await,
+            Command::SwitchModel { model } => self.switch_model(model).await,
+        }
+    }
+
+    /// The active selection, which is never held across an await.
+    fn active(&self) -> std::sync::MutexGuard<'_, Active> {
+        self.active
+            .lock()
+            .expect("the active selection is never poisoned")
+    }
+
+    /// Installs `agent`'s ruleset as the permission baseline.
+    fn install(&self, agent: &Agent) {
+        self.permissions
+            .lock()
+            .expect("the permission rules are never poisoned")
+            .set_baseline(agent.rules.clone());
+    }
+
+    /// Whether this engine's provider serves `model`.
+    ///
+    /// The catalog is the only thing that knows, and it does not know every
+    /// provider — the built-in fake one is not in it, and neither is whatever
+    /// a test drives. A provider the catalog says nothing about cannot be
+    /// contradicted, so any model it is asked for is taken at its word;
+    /// refusing every switch there would make the command untestable in
+    /// exactly the runs that are cheapest to run.
+    fn serves(&self, model: &str) -> bool {
+        let provider = self.provider.id();
+        let mut known = catalog::models()
+            .filter(|known| known.provider_id == provider)
+            .peekable();
+
+        match known.peek() {
+            Some(_) => known.any(|known| known.id == model),
+            None => !model.trim().is_empty(),
+        }
+    }
+
+    /// Runs the rest of the session as `name`.
+    async fn switch_agent(&self, name: String) -> Result<(), EngineError> {
+        // Held across the whole switch, exactly as `resume` holds it: a prompt
+        // that arrives mid-switch waits and then runs as the agent that was
+        // asked for, rather than racing it.
+        let turn = self.turn.lock().await;
+        if turn.is_some() {
+            return Err(EngineError::Busy);
+        }
+
+        let Some(registry) = &self.agents else {
+            return Err(EngineError::NoAgents);
+        };
+        let Some(agent) = registry.get(&name) else {
+            return Err(EngineError::UnknownAgent { name });
+        };
+        if agent.mode == AgentMode::Subagent {
+            return Err(EngineError::SubagentNotSelectable { name });
+        }
+
+        self.install(agent);
+        {
+            let mut active = self.active();
+            active.agent = Some(agent.name.clone());
+            // Upstream's pickers key the model off the agent, so switching to
+            // one that prefers a model switches the model with it. A model the
+            // provider does not serve is not a reason to refuse the agent —
+            // the session simply keeps asking the model it was already asking.
+            if let Some(model) = agent.model.clone().filter(|model| self.serves(model)) {
+                active.model = model;
+            }
+        }
+        self.remember_selection();
+        drop(turn);
+
+        Ok(())
+    }
+
+    /// Asks the rest of the session's requests of `model`.
+    async fn switch_model(&self, model: String) -> Result<(), EngineError> {
+        let turn = self.turn.lock().await;
+        if turn.is_some() {
+            return Err(EngineError::Busy);
+        }
+
+        if !self.serves(&model) {
+            return Err(EngineError::UnknownModel {
+                model,
+                provider: self.provider.id().to_owned(),
+            });
+        }
+
+        self.active().model = model;
+        self.remember_selection();
+        drop(turn);
+
+        Ok(())
+    }
+
+    /// Writes the current selection onto the live session record, so that
+    /// reopening the session reopens the same one.
+    ///
+    /// Nothing to do before the first prompt has minted a session — the record
+    /// that does not exist yet is created carrying whatever is active then.
+    fn remember_selection(&self) {
+        let Some(state) = &self.persistence else {
+            return;
+        };
+        let (model, agent) = {
+            let active = self.active();
+            (active.model.clone(), active.agent.clone())
+        };
+
+        let mut live = state
+            .live
+            .lock()
+            .expect("the live session is never poisoned");
+        let Some(info) = live.info.as_mut() else {
+            return;
+        };
+        info.model = Some(model);
+        info.agent = agent;
+        info.updated = now();
+
+        if let Err(error) = state.storage.save_info(info) {
+            tracing::warn!(
+                session = info.id.as_str(),
+                %error,
+                "the session's agent and model could not be stored; \
+                 the switch holds for this process only"
+            );
         }
     }
 
@@ -372,6 +693,24 @@ impl Engine {
         if turn.is_some() {
             return Err(EngineError::Busy);
         }
+
+        // Read once, and recorded as the previous turn's agent in the same
+        // breath, so that the plan-to-build reminder fires for exactly one
+        // turn however many follow it.
+        let (model, name, previous) = {
+            let mut active = self.active();
+            let name = active.agent.clone();
+            let previous = std::mem::replace(&mut active.previous_agent, name.clone());
+
+            (active.model.clone(), name, previous)
+        };
+        let agent = self
+            .agents
+            .as_ref()
+            .zip(name.as_deref())
+            .and_then(|(registry, name)| registry.get(name));
+        let system = self.system_for(agent);
+        let reminders = reminders(name.as_deref(), previous.as_deref());
 
         // The first prompt on a persistent engine mints the session, and its
         // record reaches the disk before the first byte streams: a crash
@@ -387,7 +726,9 @@ impl Engine {
                     live.warned_uncataloged = false;
                 }
                 live.info
-                    .get_or_insert_with(|| fresh_session(&state.storage))
+                    .get_or_insert_with(|| {
+                        fresh_session(&state.storage, name.clone(), model.clone())
+                    })
                     .id
                     .clone()
             };
@@ -411,8 +752,9 @@ impl Engine {
         // terminal event.
         tokio::spawn(run_turn(Turn {
             provider: Arc::clone(&self.provider),
-            model: self.model.clone(),
-            system: self.system.clone(),
+            model,
+            system,
+            reminders,
             tools: Arc::clone(&self.tools),
             permissions: Arc::clone(&self.permissions),
             cwd: self.cwd.clone(),
@@ -469,8 +811,35 @@ impl Engine {
 /// What a tool part that was still open when its process died says on resume.
 const INTERRUPTED: &str = "the session was interrupted before this call finished";
 
-/// A brand-new session record, already on disk by the time it is adopted.
-fn fresh_session(storage: &Storage) -> SessionInfo {
+/// The synthetic user parts one turn's request carries, ported from upstream's
+/// `session/reminders.ts`.
+///
+/// Two of them, and both are about the agent rather than about anything the
+/// user said: the planning agent is told on every turn that it may not act,
+/// and the turn that stops planning is told once that it may.
+///
+/// Upstream's second condition is "any assistant message in the window ran as
+/// `plan`", which re-injects the notice on every build turn for the rest of
+/// the session. This build compares against the previous turn alone, so it is
+/// said once, where it means something (deviation: build-switch-once). The
+/// cost is that neither survives a restart, since a stored message does not
+/// record the agent that produced it.
+fn reminders(agent: Option<&str>, previous: Option<&str>) -> Vec<String> {
+    let mut found = Vec::new();
+
+    if agent == Some(agent::PLAN) {
+        found.push(agent::PLAN_REMINDER.to_owned());
+    }
+    if agent == Some(agent::BUILD) && previous == Some(agent::PLAN) {
+        found.push(agent::BUILD_SWITCH_REMINDER.to_owned());
+    }
+
+    found
+}
+
+/// A brand-new session record, already on disk by the time it is adopted,
+/// carrying whatever the engine is set to run as.
+fn fresh_session(storage: &Storage, agent: Option<String>, model: String) -> SessionInfo {
     let created = now();
     let info = SessionInfo {
         id: SessionId::ascending(),
@@ -481,6 +850,8 @@ fn fresh_session(storage: &Storage) -> SessionInfo {
         usage: Usage::default(),
         context_tokens: 0,
         summary: None,
+        agent,
+        model: Some(model),
     };
 
     if let Err(error) = storage.save_info(&info) {
@@ -911,6 +1282,8 @@ mod tests {
             usage: Usage::default(),
             context_tokens: window,
             summary: None,
+            agent: None,
+            model: None,
         };
         storage.save_info(&info).expect("the seeded record writes");
         let earlier = Message::user("the objective");

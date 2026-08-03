@@ -24,6 +24,9 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 | `fake_script_env.rs` | `GANJA_FAKE_SCRIPT` is read on both routes a session takes to a provider, and *not* on the route the rest of the suite takes. One test, one binary. |
 | `live.rs` | Opt-in vendor smoke tests: the request this build sends is one the vendor still accepts today. |
 | `live_agent.rs` | Opt-in: one live turn through the real agent loop — a real model, offered this build's real tools, calls them and the arguments parse. |
+| `config.rs` | The five-tier precedence table: global file < explicit file < project file < environment < flags, each tier proven to outrank the one below. Mutates environment variables — one test, one binary. |
+| `agents.rs` | Agents at the engine level: the planning agent's refusals, config rules deciding unasked, prompt swap on switch, plan reminders reaching requests and not history, switch persistence across a resume, mid-turn refusal. |
+| `permission_directories.rs` | A shell call naming a directory outside the project surfaces that directory in the permission event. Mutates `XDG_DATA_HOME` — one test, one binary. |
 
 ## Subdirectories
 

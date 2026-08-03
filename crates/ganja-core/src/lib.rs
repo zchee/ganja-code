@@ -6,6 +6,7 @@
 //! be driven over a network transport. CI enforces the rule by asserting that
 //! `cargo tree -p ganja-core -e normal` never mentions `ratatui`.
 
+pub mod agent;
 pub mod auth;
 pub mod catalog;
 pub mod config;
@@ -19,6 +20,7 @@ pub mod session;
 pub mod storage;
 pub mod tool;
 
+pub use agent::{Agent, AgentError, Registry as AgentRegistry};
 pub use auth::{AuthError, Credential};
 pub use catalog::{Cost, ModelInfo};
 pub use config::{
