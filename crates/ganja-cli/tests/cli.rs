@@ -215,6 +215,53 @@ fn models_lists_the_catalog_and_marks_one_default_per_provider() {
         );
 }
 
+/// A project with nothing stored yet is what every project is on its first
+/// run, and the store is created lazily — so "there is no store directory" and
+/// "there are no sessions" are the same situation, and it has to read as an
+/// invitation rather than as a failure.
+///
+/// The working directory is pinned as well as the data home because `sessions`
+/// resolves its store from the directory it was run in. Inheriting the
+/// runner's would make this a question about *this* checkout's project, which
+/// is empty here only because the data home happens to be redirected too;
+/// naming both is what makes the empty store structural rather than incidental.
+#[test]
+fn listing_sessions_in_a_project_with_none_invites_rather_than_fails() {
+    let data = data();
+    let project = TempDir::new().expect("a temporary directory is creatable");
+
+    ganja(&data)
+        .current_dir(project.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no sessions here yet"));
+}
+
+/// A first run has nothing to say on stderr.
+///
+/// The binary creates its log directory before the appender opens it, because
+/// the appender prunes old files as it opens — it *reads* the directory first,
+/// and a directory nothing has created yet makes it complain. The complaint is
+/// harmless and looks anything but, and it lands on the one run where a user
+/// has the least context for judging it: the first one in a new project.
+///
+/// A fresh data home is what makes this a first run, so the assertion is on
+/// the run's own silence rather than on any string — nothing this binary means
+/// to say belongs on stderr when nothing went wrong.
+#[test]
+fn a_first_run_in_a_fresh_data_home_says_nothing_on_stderr() {
+    let data = data();
+    let project = TempDir::new().expect("a temporary directory is creatable");
+
+    ganja(&data)
+        .current_dir(project.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+}
+
 /// Configuration mistakes have to be reported before the terminal is put into
 /// raw mode, or the message is drawn over and lost.
 #[test]

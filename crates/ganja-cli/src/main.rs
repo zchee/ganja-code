@@ -200,6 +200,18 @@ fn install_logging() -> Option<WorkerGuard> {
         Err(error) => return declined(&format!("{error:#}")),
     };
 
+    // Created here rather than left to the appender, which opens its file only
+    // *after* pruning the old ones — and pruning reads a directory that, on a
+    // first run, nothing has made yet. The appender recovers and creates it,
+    // but not before writing its own complaint to stderr, and it lands on the
+    // one run where a user has the least context for reading it as harmless.
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        return declined(&format!(
+            "{} could not be created: {error}",
+            directory.display()
+        ));
+    }
+
     let appender = match tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix(LOG_NAME)
