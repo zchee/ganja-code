@@ -465,6 +465,10 @@ impl Persist {
 pub(crate) struct Turn {
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) model: String,
+    /// What the model is told before it is told anything else. Carried by
+    /// every request this turn makes except the title one, which asks a
+    /// different question and brings its own prompt.
+    pub(crate) system: Option<String>,
     /// Tools the model is offered, and this loop executes.
     pub(crate) tools: Arc<Registry>,
     /// Rules deciding which calls wait for the user.
@@ -1026,9 +1030,13 @@ async fn compact_if_needed(turn: &Turn) -> ControlFlow<Option<Outcome>> {
         return ControlFlow::Continue(());
     }
 
+    // The same system prompt the conversation was held under. Summarizing
+    // without it would judge what mattered by different instructions than the
+    // ones that produced the transcript, and the summary is what the rest of
+    // the session is built on.
     let request = ChatRequest {
         model: turn.model.clone(),
-        system: None,
+        system: turn.system.clone(),
         messages: vec![Message::user(prompt)],
         tools: Vec::new(),
     };
@@ -1298,7 +1306,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
 
         ChatRequest {
             model: turn.model.clone(),
-            system: None,
+            system: turn.system.clone(),
             messages,
             tools: turn.tools.definitions(),
         }
@@ -2058,6 +2066,7 @@ mod tests {
         let turn = Turn {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
             model: fake::MODEL.to_owned(),
+            system: None,
             tools: Arc::new(Registry::new(vec![tool])),
             permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
             cwd: std::env::temp_dir(),
