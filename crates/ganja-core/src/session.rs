@@ -82,6 +82,23 @@ pub const FAKE_TITLE_ENV: &str = "GANJA_FAKE_TITLE";
 /// allowed to cost.
 const TEXT_FLUSH: Duration = Duration::from_millis(250);
 
+/// How long a cancelled tool is still polled before its future is abandoned.
+///
+/// A tool cleans up *inside* the future it returned: the shell tool kills its
+/// command's process group there (`tool/shell.rs`, `kill_tree`). Dropping
+/// that future the instant a cancel lands — which is what losing a plain race
+/// does — never reaches that code, so the handle's own `kill_on_drop` takes
+/// the direct child and everything the command forked keeps running; a
+/// cancelled `sleep 300` outlives the turn. So the cancel signals the token
+/// the tool watches and then keeps polling the same future for this long.
+///
+/// It is a ceiling, not a wait: the tool returning ends it, so the slowest
+/// builtin cleanup (the shell tool's 200ms `SIGTERM` grace plus its 100ms
+/// output drain) fits inside it with room to spare, a tool that ignores the
+/// cancel costs the turn no more than this, and a turn with no tool running
+/// never reaches it at all.
+const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
+
 /// Characters a fallback title keeps of the first prompt.
 const FALLBACK_TITLE_CHARS: usize = 50;
 
@@ -1580,19 +1597,48 @@ async fn resolve(
     }
 
     // The tool gets a child of the turn's token so a cancel reaches it, and
-    // the race below is what refuses to wait for a tool that ignores it:
-    // losing the race drops the tool's future, which is as killed as this
-    // process can make it. The shell tool owns group-killing its child.
+    // the race below is what stops waiting for the tool's *result*. What it
+    // must not do is drop the tool's future along with the wait: the shell
+    // tool `killpg`s its command's process group from inside that future, so
+    // a dropped one leaves the group alive — see [`TOOL_CANCEL_GRACE`]. The
+    // cancelled future is therefore polled on until it winds itself up, or
+    // until the grace says it never will.
     let ctx = ToolCtx {
         cwd: turn.cwd.clone(),
         cancel: turn.cancel.child_token(),
         call_id: call.id.clone(),
         files: Arc::clone(&turn.files),
     };
-    let result = tokio::select! {
+    let running = tool.run(args.clone(), &ctx);
+    tokio::pin!(running);
+    let finished = tokio::select! {
         biased;
-        () = turn.cancel.cancelled() => Err(ToolError::Cancelled),
-        result = tool.run(args.clone(), &ctx) => result,
+        () = turn.cancel.cancelled() => None,
+        result = &mut running => Some(result),
+    };
+    let result = match finished {
+        Some(result) => result,
+        None => {
+            // The token the tool watches is already cancelled, so this waits
+            // on cleanup rather than on the work.
+            if tokio::time::timeout(TOOL_CANCEL_GRACE, running)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    tool = call.name.as_str(),
+                    grace = ?TOOL_CANCEL_GRACE,
+                    "the tool did not finish cancelling in time; abandoning it, \
+                     which may leave what it started running"
+                );
+            }
+
+            // Whatever the tool managed to return inside the grace, the turn
+            // ended because it was cancelled and says exactly what it said
+            // before: the cancel is the outcome, and the grace bought the
+            // tool its cleanup, not a second chance at a result.
+            Err(ToolError::Cancelled)
+        }
     };
 
     match result {
