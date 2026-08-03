@@ -1,0 +1,25 @@
+[package]
+name = "ganja-cli"
+description = "The `ganja` command-line binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ganja"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+ganja-tui.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+expectrl.workspace = true
