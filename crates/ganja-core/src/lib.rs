@@ -14,6 +14,7 @@ pub mod project;
 pub mod protocol;
 pub mod provider;
 pub mod session;
+pub mod storage;
 pub mod tool;
 
 pub use auth::{AuthError, Credential};
@@ -25,4 +26,5 @@ pub use protocol::{
     Command, Event, FinishReason, Message, MessageId, MessageTime, Part, PartBody, PartId,
     PermissionId, PermissionReply, Role, ToolState, Usage,
 };
+pub use storage::{SessionId, SessionInfo, Storage, StorageError};
 pub use tool::{Registry, Tool, ToolCtx, ToolDefinition, ToolError, ToolOutput};
