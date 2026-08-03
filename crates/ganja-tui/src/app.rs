@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
-use ganja_core::{Command, Engine, Event as CoreEvent, FinishReason, Role};
+use ganja_core::{Command, Engine, Event as CoreEvent, FinishReason, Role, Usage, catalog};
 use ratatui::{
     DefaultTerminal, Terminal,
     backend::Backend,
@@ -28,7 +28,7 @@ use crate::{
     component::{
         chat::{Chat, WHEEL_LINES},
         editor::{self, Editor},
-        status::{Activity, Status},
+        status::{Activity, Status, Totals},
     },
     event::AppEvent,
     theme::Theme,
@@ -46,10 +46,15 @@ const NEWLINE_MODIFIERS: KeyModifiers = KeyModifiers::SHIFT
 /// The whole terminal application.
 pub struct App {
     engine: Engine,
+    /// Model the engine asks for, kept here because pricing a turn needs it and
+    /// the engine's copy is not the frontend's business.
+    model: String,
     chat: Chat,
     editor: Editor,
     status: Status,
     theme: Theme,
+    /// What the session has spent, accumulated across turns.
+    totals: Totals,
     /// State changed since the last frame.
     dirty: bool,
     /// The change came from the keyboard, which skips the coalescing gate.
@@ -59,17 +64,20 @@ pub struct App {
 }
 
 impl App {
-    /// Builds an app driven by `engine`, showing `notice` in the status bar.
+    /// Builds an app driven by `engine`, which is asking `model`, showing
+    /// `notice` in the status bar.
     #[must_use]
-    pub fn new(engine: Engine, notice: Option<String>) -> Self {
+    pub fn new(engine: Engine, model: impl Into<String>, notice: Option<String>) -> Self {
         let theme = Theme::default();
 
         Self {
             engine,
+            model: model.into(),
             chat: Chat::default(),
             editor: Editor::new(&theme),
             status: Status::new(notice),
             theme,
+            totals: Totals::default(),
             dirty: true,
             urgent: true,
             last_draw: Instant::now(),
@@ -252,17 +260,51 @@ impl App {
                 part_id,
                 delta,
             } => self.chat.append_delta(&message_id, &part_id, &delta),
-            CoreEvent::MessageFinished { reason, error, .. } => {
+            CoreEvent::MessageFinished {
+                reason,
+                usage,
+                error,
+                ..
+            } => {
                 self.status.set_activity(match reason {
                     FinishReason::Completed => Activity::Ready,
                     FinishReason::Cancelled => Activity::Stopped,
                     FinishReason::Failed => Activity::Failed,
                 });
+                if let Some(usage) = usage {
+                    self.record(&usage);
+                }
                 if error.is_some() {
                     self.status.set_notice(error);
                 }
             }
         }
+    }
+
+    /// Adds what a turn spent to the session totals.
+    ///
+    /// Tokens accumulate whatever the model is, so a run against the fake
+    /// provider still shows counts; dollars only appear once the catalog can
+    /// price the model, because a made-up figure is worse than none.
+    fn record(&mut self, usage: &Usage) {
+        // The three input counters are disjoint, so what a turn spent on the
+        // way in is their sum rather than `input_tokens` alone.
+        let input = usage
+            .input_tokens
+            .saturating_add(usage.cache_read_tokens)
+            .saturating_add(usage.cache_write_tokens);
+
+        self.totals.input_tokens = self.totals.input_tokens.saturating_add(input);
+        self.totals.output_tokens = self
+            .totals
+            .output_tokens
+            .saturating_add(usage.output_tokens);
+
+        if let Some(model) = catalog::model(&self.model) {
+            *self.totals.cost_usd.get_or_insert(0.0) += catalog::cost(usage, model).total_usd;
+        }
+
+        self.status.set_totals(self.totals);
     }
 
     fn needs_draw(&self) -> bool {
@@ -292,7 +334,7 @@ mod tests {
 
     use futures::{StreamExt as _, stream::BoxStream};
     use ganja_core::{
-        Engine, Event as CoreEvent, FinishReason, Message, Part,
+        Engine, Event as CoreEvent, FinishReason, Message, Part, Usage,
         provider::{FakeProvider, fake},
     };
     use ratatui::{
@@ -312,7 +354,7 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(engine(), None)
+        App::new(engine(), fake::MODEL, None)
     }
 
     /// An app plus the engine stream its own loop would read, for the tests
@@ -321,7 +363,7 @@ mod tests {
         let engine = engine();
         let events = engine.subscribe().await.expect("the test subscribes first");
 
-        (App::new(engine, None), events)
+        (App::new(engine, fake::MODEL, None), events)
     }
 
     /// Feeds the app the next `count` engine events.
@@ -614,6 +656,156 @@ mod tests {
             "the failure should be explained:\n{}",
             screen(&terminal)
         );
+    }
+
+    /// Builds the finish event a provider that reported its usage produces.
+    fn finished(model: &str, usage: Usage) -> AppEvent {
+        AppEvent::Core(CoreEvent::MessageFinished {
+            message_id: Message::assistant(model).id,
+            reason: FinishReason::Completed,
+            usage: Some(usage),
+            error: None,
+            completed: 0,
+        })
+    }
+
+    /// Spend is per session, not per turn, so two turns add up — and the sum
+    /// counts cache traffic, which is billed and is otherwise invisible.
+    #[tokio::test]
+    async fn usage_accumulates_across_turns_and_reaches_the_status_bar() {
+        const MODEL: &str = "claude-sonnet-5";
+
+        let mut app = App::new(engine(), MODEL, None);
+        let usage = Usage {
+            input_tokens: 6_000,
+            output_tokens: 400,
+            reasoning_tokens: 200,
+            cache_read_tokens: 6_000,
+            cache_write_tokens: 300,
+        };
+
+        for _ in 0..2 {
+            app.handle(finished(MODEL, usage))
+                .await
+                .expect("a turn end is handled");
+        }
+
+        assert_eq!(
+            app.totals.input_tokens, 24_600,
+            "6,000 + 6,000 + 300, twice"
+        );
+        assert_eq!(app.totals.output_tokens, 800);
+
+        let mut terminal = terminal(100, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+
+        assert!(screen.contains("24.6k in"), "got:\n{screen}");
+        assert!(screen.contains("800 out"), "got:\n{screen}");
+        // Two turns of $0.01795: input 6k at $2, 6k cached at $0.20, 300
+        // written at $2.50, output 400 at $10, all per million tokens.
+        assert!(screen.contains("$0.0359"), "got:\n{screen}");
+    }
+
+    /// The fake provider reports usage against a model with no price, which is
+    /// exactly the case that must show counts and no dollars.
+    #[tokio::test]
+    async fn an_unpriced_model_reports_its_tokens_and_invents_no_price() {
+        let mut app = app();
+
+        app.handle(finished(
+            fake::MODEL,
+            Usage {
+                input_tokens: 40,
+                output_tokens: 7,
+                ..Usage::default()
+            },
+        ))
+        .await
+        .expect("a turn end is handled");
+
+        assert_eq!(app.totals.cost_usd, None);
+
+        let mut terminal = terminal(100, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+
+        assert!(screen.contains("40 in"), "got:\n{screen}");
+        assert!(screen.contains("7 out"), "got:\n{screen}");
+        assert!(!screen.contains('$'), "got:\n{screen}");
+    }
+
+    /// A turn that died part-way through still spent what it spent. Since a
+    /// provider failure became a terminal `Failed` event, a finish can carry
+    /// both an error and the usage reported before the stream broke, and the
+    /// bill has to survive the failure rather than being written off with it.
+    #[tokio::test]
+    async fn a_failed_turn_still_bills_for_what_it_spent() {
+        const MODEL: &str = "claude-sonnet-5";
+
+        let mut app = App::new(engine(), MODEL, None);
+
+        app.handle(AppEvent::Core(CoreEvent::MessageFinished {
+            message_id: Message::assistant(MODEL).id,
+            reason: FinishReason::Failed,
+            usage: Some(Usage {
+                input_tokens: 2_000,
+                output_tokens: 150,
+                ..Usage::default()
+            }),
+            error: Some("the provider answered 500: overloaded".to_owned()),
+            completed: 0,
+        }))
+        .await
+        .expect("a failed turn is handled");
+
+        assert_eq!(app.totals.input_tokens, 2_000);
+        assert_eq!(app.totals.output_tokens, 150);
+
+        let mut terminal = terminal(120, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+
+        assert!(screen.contains("failed"), "got:\n{screen}");
+        assert!(screen.contains("2.0k in"), "got:\n{screen}");
+        // 2,000 in at $2 plus 150 out at $10, per million tokens.
+        assert!(screen.contains("$0.0055"), "got:\n{screen}");
+        assert!(
+            screen.contains("overloaded"),
+            "the reason must survive beside the bill:\n{screen}"
+        );
+    }
+
+    /// A turn that ends without usage — a cancel, or a provider that reports
+    /// none — leaves the totals alone rather than resetting them.
+    #[tokio::test]
+    async fn a_turn_without_usage_does_not_disturb_the_totals() {
+        const MODEL: &str = "claude-sonnet-5";
+
+        let mut app = App::new(engine(), MODEL, None);
+        app.handle(finished(
+            MODEL,
+            Usage {
+                input_tokens: 1_000,
+                output_tokens: 100,
+                ..Usage::default()
+            },
+        ))
+        .await
+        .expect("a turn end is handled");
+
+        app.handle(AppEvent::Core(CoreEvent::MessageFinished {
+            message_id: Message::assistant(MODEL).id,
+            reason: FinishReason::Cancelled,
+            usage: None,
+            error: None,
+            completed: 0,
+        }))
+        .await
+        .expect("a cancel is handled");
+
+        assert_eq!(app.totals.input_tokens, 1_000);
+        assert_eq!(app.totals.output_tokens, 100);
     }
 
     #[tokio::test]

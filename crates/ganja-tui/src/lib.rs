@@ -34,11 +34,17 @@ use crate::app::App;
 /// restored.
 pub async fn run() -> Result<()> {
     let selection = provider::from_env().context("failed to select a provider")?;
-    let engine = Engine::new(selection.provider, selection.model);
+    // The frontend keeps its own copy so that it can price a turn without
+    // reaching into the engine for the model it was built with.
+    let engine = Engine::new(selection.provider, selection.model.clone());
 
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_mouse() {
-        Ok(()) => App::new(engine, selection.notice).run(&mut terminal).await,
+        Ok(()) => {
+            App::new(engine, selection.model, selection.notice)
+                .run(&mut terminal)
+                .await
+        }
         Err(error) => Err(error),
     };
     let restored = restore();
