@@ -11,11 +11,11 @@ The frontend's event loop and the state it owns. One `tokio::select!` in `app.rs
 
 | File | Description |
 |------|-------------|
-| `lib.rs` | `run()`: selects a provider from the environment, builds the `Engine` with builtin tools and project permission rules, enters the alternate screen with mouse capture, and restores the terminal on every exit path including panic. |
+| `lib.rs` | `run()`: selects a provider from the environment, builds the `Engine` with builtin tools and project permission rules, loads the theme set **before** the terminal is taken over (a bad theme file warns where it can be read), enters the alternate screen with mouse capture, and restores the terminal on every exit path including panic. |
 | `app.rs` | `App`: the `select!` loop, key handling, and the state every component renders from. Also holds the snapshot tests. |
 | `event.rs` | `AppEvent { Term, Core, Tick }` — the one enum every event source folds into. Engine events are boxed because they dwarf the other variants. |
-| `theme.rs` | The P1 palette: three roles, no configuration. Themes become loadable data in P5. |
-| `component/` | The three panes plus the permission modal (see `component/AGENTS.md`). |
+| `theme/` | Loadable themes: upstream's JSON schema and resolver (`json.rs` — defs, dark/light variants, ANSI integers, cycle refusal), the builtin/custom registry with revisions (`registry.rs`), the persisted pick under the data home (`selection.rs`), and the `Theme` style slots (`mod.rs`). Four upstream themes ship verbatim from `../assets/themes/`; default is `opencode`. |
+| `component/` | The three panes plus the modals (see `component/AGENTS.md`). |
 | `snapshots/` | `insta` snapshots for the tests in `app.rs` (see `snapshots/AGENTS.md`). |
 
 ## For AI Agents

@@ -34,9 +34,10 @@ use crate::{
         permission::Permission,
         sessions::{self, Sessions},
         status::{Activity, Status, Totals},
+        themes::ThemeList,
     },
     event::AppEvent,
-    theme::Theme,
+    theme::{Theme, Themes},
 };
 
 /// Shortest gap between frames: roughly 60 FPS.
@@ -74,6 +75,10 @@ pub struct App {
     /// The stored sessions the user is choosing between, while the picker is
     /// open.
     sessions: Option<Sessions>,
+    /// The themes the user is choosing between, while that picker is open.
+    theme_list: Option<ThemeList>,
+    /// Every theme this run can switch to, and which one is active.
+    themes: Themes,
     theme: Theme,
     /// What the session has spent, accumulated across turns.
     totals: Totals,
@@ -87,10 +92,20 @@ pub struct App {
 
 impl App {
     /// Builds an app driven by `engine`, which is asking `model`, showing
-    /// `notice` in the status bar.
+    /// `notice` in the status bar, drawn in whichever of `themes` is active.
+    ///
+    /// The registry is handed in rather than loaded here so that the disk —
+    /// the user's theme directory and their stored pick — is read on the one
+    /// startup path that should read it, and so that the lane wiring
+    /// configuration in has somewhere to put a configured theme.
     #[must_use]
-    pub fn new(engine: Engine, model: impl Into<String>, notice: Option<String>) -> Self {
-        let theme = Theme::default();
+    pub fn new(
+        engine: Engine,
+        model: impl Into<String>,
+        notice: Option<String>,
+        mut themes: Themes,
+    ) -> Self {
+        let theme = themes.theme();
 
         Self {
             engine,
@@ -100,6 +115,8 @@ impl App {
             status: Status::new(notice),
             permission: None,
             sessions: None,
+            theme_list: None,
+            themes,
             theme,
             totals: Totals::default(),
             dirty: true,
@@ -212,19 +229,29 @@ impl App {
     {
         terminal
             .draw(|frame| {
+                let area = frame.area();
                 let [transcript, prompt, status] = Layout::vertical([
                     Constraint::Min(1),
                     Constraint::Length(editor::HEIGHT),
                     Constraint::Length(1),
                 ])
-                .areas(frame.area());
+                .areas(area);
 
                 let buffer = frame.buffer_mut();
+                // The theme's surface goes down first and everything is drawn
+                // over it, which is how a theme reaches the cells no component
+                // writes to. A theme with no background of its own patches
+                // nothing, leaving the terminal's — image, transparency and
+                // all — showing (upstream `context/theme.tsx:269`).
+                buffer.set_style(area, self.theme.background);
                 self.chat.render(transcript, buffer, &self.theme);
                 // The permission dialog draws last so that it is on top: it is
                 // the one modal a turn is blocked on.
                 if let Some(sessions) = &self.sessions {
                     sessions.render(transcript, buffer, &self.theme);
+                }
+                if let Some(themes) = &self.theme_list {
+                    themes.render(transcript, buffer, &self.theme);
                 }
                 if let Some(permission) = &self.permission {
                     permission.render(transcript, buffer, &self.theme);
@@ -285,9 +312,20 @@ impl App {
             return Ok(());
         }
 
+        if self.theme_list.is_some() {
+            self.handle_theme_key(key.code);
+
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_picker().await;
+            }
+            // Temporary: the command palette is what opens this dialog once it
+            // lands, at which point `/themes` replaces the binding.
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_themes();
             }
             // A no-op while idle, which is exactly what Esc should do there.
             KeyCode::Esc => self.engine.send(Command::CancelTurn).await?,
@@ -306,7 +344,72 @@ impl App {
 
     /// Whether a modal is claiming the keys and the wheel.
     fn modal_open(&self) -> bool {
-        self.permission.is_some() || self.sessions.is_some()
+        self.permission.is_some() || self.sessions.is_some() || self.theme_list.is_some()
+    }
+
+    /// Opens the theme picker with the cursor on the theme already in use.
+    fn open_themes(&mut self) {
+        self.theme_list = Some(ThemeList::new(self.themes.names(), self.themes.active()));
+    }
+
+    /// One keypress while the theme picker is open, which owns every key.
+    fn handle_theme_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.close_themes(true),
+            KeyCode::Up | KeyCode::Char('k') => self.move_theme(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_theme(1),
+            KeyCode::Enter => self.close_themes(false),
+            _ => {}
+        }
+    }
+
+    /// Moves the cursor by `delta` rows and applies what it lands on.
+    ///
+    /// Applying on the way past is the point of the dialog: a theme is
+    /// something you recognize on screen, not something you recognize by name.
+    fn move_theme(&mut self, delta: isize) {
+        let Some(list) = &mut self.theme_list else {
+            return;
+        };
+        list.move_selection(delta);
+
+        if let Some(name) = list.selected().map(str::to_owned) {
+            self.apply_theme(&name);
+        }
+    }
+
+    /// Closes the picker, either putting back the theme it opened on or
+    /// keeping — and storing — the one under the cursor.
+    ///
+    /// A pick that cannot be stored still applies for this run; the notice says
+    /// only that it will not survive it.
+    fn close_themes(&mut self, revert: bool) {
+        let Some(list) = self.theme_list.take() else {
+            return;
+        };
+
+        if revert {
+            self.apply_theme(list.initial());
+            return;
+        }
+        if let Err(refusal) = self.themes.persist() {
+            self.status.set_notice(Some(refusal.to_string()));
+        }
+    }
+
+    /// Installs `name` everywhere the active theme is held.
+    ///
+    /// Not one assignment: the editor holds the styles it was built with, and
+    /// the transcript caches lines with their styles baked in. The first is
+    /// repainted here; the second notices at its next frame, because the theme
+    /// carries a revision the cache compares against.
+    fn apply_theme(&mut self, name: &str) {
+        let Some(theme) = self.themes.select(name) else {
+            return;
+        };
+
+        self.editor.restyle(&theme);
+        self.theme = theme;
     }
 
     /// Opens the sessions picker over what this project's store holds.
@@ -525,11 +628,16 @@ mod tests {
             Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
             MouseEvent, MouseEventKind,
         },
+        style::{Color, Modifier},
     };
     use tempfile::TempDir;
 
     use super::{App, FRAME, Permission, permission_reply};
-    use crate::{component::sessions, event::AppEvent};
+    use crate::{
+        component::sessions,
+        event::AppEvent,
+        theme::{DEFAULT_THEME, Themes},
+    };
 
     fn engine() -> Engine {
         Engine::new(
@@ -540,8 +648,10 @@ mod tests {
         )
     }
 
+    /// An app over the builtin themes: no disk is read, so a test never
+    /// sees the machine's own theme directory or stored pick.
     fn app() -> App {
-        App::new(engine(), fake::MODEL, None)
+        App::new(engine(), fake::MODEL, None, Themes::builtin())
     }
 
     /// An app whose engine writes into, and lists from, a store in `directory`.
@@ -560,6 +670,7 @@ mod tests {
             ),
             fake::MODEL,
             None,
+            Themes::builtin(),
         )
     }
 
@@ -644,7 +755,10 @@ mod tests {
         let engine = engine();
         let events = engine.subscribe().await.expect("the test subscribes first");
 
-        (App::new(engine, fake::MODEL, None), events)
+        (
+            App::new(engine, fake::MODEL, None, Themes::builtin()),
+            events,
+        )
     }
 
     /// Feeds the app the next `count` engine events.
@@ -673,6 +787,109 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A screen dump carrying style as well as text.
+    ///
+    /// [`screen`] reads `.symbol()` only, which is what lets every layout
+    /// snapshot survive a change of palette — and what makes it useless for
+    /// pinning one. This one emits each row as the runs of cells that share a
+    /// style, with the colors and modifiers the backend was actually handed.
+    fn styled_screen(terminal: &Terminal<TestBackend>) -> String {
+        /// One run of same-styled cells.
+        fn run(text: &str, (fg, bg, modifier): (Color, Color, Modifier)) -> String {
+            let mut described = format!("{text:?} {fg:?} on {bg:?}");
+            if !modifier.is_empty() {
+                described.push_str(&format!(" {modifier:?}"));
+            }
+
+            format!("[{described}]")
+        }
+
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+
+        (0..area.height)
+            .map(|row| {
+                let mut runs = Vec::new();
+                let mut text = String::new();
+                let mut style: Option<(Color, Color, Modifier)> = None;
+
+                for column in 0..area.width {
+                    let cell = &buffer[(column, row)];
+                    let cell_style = (cell.fg, cell.bg, cell.modifier);
+
+                    if style != Some(cell_style) {
+                        if let Some(previous) = style {
+                            runs.push(run(&text, previous));
+                        }
+                        text.clear();
+                        style = Some(cell_style);
+                    }
+                    text.push_str(cell.symbol());
+                }
+                if let Some(previous) = style {
+                    runs.push(run(&text, previous));
+                }
+
+                format!("{row:>2} {}", runs.join(" "))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// An app drawing in the builtin theme `name`.
+    fn themed_app(name: &str) -> App {
+        let mut themes = Themes::builtin();
+        themes
+            .select(name)
+            .unwrap_or_else(|| panic!("{name} should be a builtin theme"));
+
+        App::new(engine(), fake::MODEL, None, themes)
+    }
+
+    /// The transcript the per-theme snapshots are taken over: a prompt, a
+    /// reply, an edit carrying a diff and a call that was refused — between
+    /// them every role the transcript paints.
+    fn palette_transcript(app: &mut App) {
+        app.chat
+            .start_message(Message::user("show me every color you have"));
+
+        let mut reply = Message::assistant("canned");
+        reply
+            .parts
+            .push(Part::text("One edit applied, one command refused."));
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "edit".to_owned(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({"filePath": "theme.rs"}),
+                    output: "edited theme.rs".to_owned(),
+                    title: "theme.rs".to_owned(),
+                    metadata: serde_json::json!({
+                        "diff": "@@ -1,2 +1,2 @@\n-let theme = Theme::default();\n+let theme = themes.theme();\n context"
+                    }),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        reply.parts.push(Part {
+            id: PartId::from("prt_2".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_2".to_owned(),
+                tool: "bash".to_owned(),
+                state: ToolState::Error {
+                    input: serde_json::json!({"command": "rm -rf /"}),
+                    error: "refused: destructive command".to_owned(),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        app.chat.start_message(reply);
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
@@ -956,7 +1173,7 @@ mod tests {
     async fn usage_accumulates_across_turns_and_reaches_the_status_bar() {
         const MODEL: &str = "claude-sonnet-5";
 
-        let mut app = App::new(engine(), MODEL, None);
+        let mut app = App::new(engine(), MODEL, None, Themes::builtin());
         let usage = Usage {
             input_tokens: 6_000,
             output_tokens: 400,
@@ -1024,7 +1241,7 @@ mod tests {
     async fn a_failed_turn_still_bills_for_what_it_spent() {
         const MODEL: &str = "claude-sonnet-5";
 
-        let mut app = App::new(engine(), MODEL, None);
+        let mut app = App::new(engine(), MODEL, None, Themes::builtin());
 
         app.handle(AppEvent::core(CoreEvent::MessageFinished {
             message_id: Message::assistant(MODEL).id,
@@ -1063,7 +1280,7 @@ mod tests {
     async fn a_turn_without_usage_does_not_disturb_the_totals() {
         const MODEL: &str = "claude-sonnet-5";
 
-        let mut app = App::new(engine(), MODEL, None);
+        let mut app = App::new(engine(), MODEL, None, Themes::builtin());
         app.handle(finished(
             MODEL,
             Usage {
@@ -1619,7 +1836,7 @@ mod tests {
             ganja_core::Permissions::default(),
         );
         let mut events = engine.subscribe().await.expect("the test subscribes first");
-        let mut app = App::new(engine, fake::MODEL, None);
+        let mut app = App::new(engine, fake::MODEL, None, Themes::builtin());
 
         for event in typing("hello") {
             app.handle(event).await.expect("typing is handled");
@@ -1819,6 +2036,272 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
 
         insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// Live preview is what the dialog is for: the theme under the cursor is
+    /// applied as the cursor reaches it, before anything is confirmed.
+    #[tokio::test]
+    async fn moving_the_cursor_in_the_theme_picker_applies_what_it_lands_on() {
+        let mut app = app();
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-t is handled");
+
+        assert!(app.theme_list.is_some(), "the picker should be open");
+        assert_eq!(
+            app.theme.name(),
+            DEFAULT_THEME,
+            "opening previews nothing: the cursor starts where the user is"
+        );
+
+        app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await
+            .expect("j is handled");
+
+        assert_eq!(
+            app.theme.name(),
+            "terminal",
+            "the row below opencode should already be applied"
+        );
+        assert_eq!(app.themes.active(), "terminal");
+        assert!(app.theme_list.is_some(), "moving must not close the picker");
+    }
+
+    /// The other half of preview: browsing has to cost nothing.
+    #[tokio::test]
+    async fn cancelling_the_theme_picker_puts_back_the_theme_it_opened_on() {
+        let mut app = app();
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-t is handled");
+        app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await
+            .expect("j is handled");
+        assert_ne!(app.theme.name(), DEFAULT_THEME, "a preview must have run");
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+
+        assert!(app.theme_list.is_none(), "escape closes the picker");
+        assert_eq!(app.theme.name(), DEFAULT_THEME);
+        assert_eq!(app.themes.active(), DEFAULT_THEME);
+    }
+
+    #[tokio::test]
+    async fn keeping_a_theme_closes_the_picker_and_leaves_it_applied() {
+        let mut app = app();
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-t is handled");
+        app.handle(key(KeyCode::Char('k'), KeyModifiers::NONE))
+            .await
+            .expect("k is handled");
+        let previewed = app.theme.name().to_owned();
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(app.theme_list.is_none());
+        assert_eq!(app.theme.name(), previewed);
+    }
+
+    /// The picker owns every key while it is open, exactly as the sessions one
+    /// does — otherwise `j` would be typed into the prompt behind it.
+    #[tokio::test]
+    async fn keys_while_the_theme_picker_is_open_do_not_reach_the_editor() {
+        let mut app = app();
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-t is handled");
+
+        for event in typing("jkx") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        assert!(app.editor.prompt().is_none());
+        assert!(app.theme_list.is_some());
+    }
+
+    /// The wheel belongs to whatever modal is up, like it does for the other
+    /// two: scrolling the transcript out from under a dialog is never what the
+    /// notch meant.
+    #[tokio::test]
+    async fn the_wheel_does_not_reach_the_transcript_while_the_theme_picker_is_open() {
+        let mut app = app();
+        for index in 0..60 {
+            app.chat
+                .start_message(Message::user(format!("entry {index}")));
+        }
+        app.draw(&mut terminal(40, 12)).expect("a frame draws");
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-t is handled");
+        app.handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })))
+        .await
+        .expect("a wheel event is handled");
+
+        assert!(
+            app.chat.is_following_tail(),
+            "the wheel should be swallowed"
+        );
+    }
+
+    /// A pick has to outlive the run that made it, and the theme it names has
+    /// to be the one the next run opens on.
+    #[tokio::test]
+    async fn a_kept_theme_is_stored_and_reopened_next_run() {
+        let directory = temporary();
+        let store = directory.path().join("tui.json");
+
+        let mut themes = Themes::builtin();
+        themes.adopt_store(store.clone());
+        let mut app = App::new(engine(), fake::MODEL, None, themes);
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-t is handled");
+        app.handle(key(KeyCode::Char('k'), KeyModifiers::NONE))
+            .await
+            .expect("k is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        let kept = app.theme.name().to_owned();
+
+        let mut reopened = Themes::builtin();
+        reopened.adopt_store(store);
+        let next_run = App::new(engine(), fake::MODEL, None, reopened);
+
+        assert_eq!(next_run.theme.name(), kept);
+        assert_ne!(kept, DEFAULT_THEME, "the fixture must have changed it");
+    }
+
+    /// A cancel must not leave the previewed name behind in the store.
+    #[tokio::test]
+    async fn a_cancelled_preview_is_never_written_down() {
+        let directory = temporary();
+        let store = directory.path().join("tui.json");
+
+        let mut themes = Themes::builtin();
+        themes.adopt_store(store.clone());
+        let mut app = App::new(engine(), fake::MODEL, None, themes);
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-t is handled");
+        app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await
+            .expect("j is handled");
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+
+        assert!(
+            !store.exists(),
+            "nothing was confirmed, so nothing is stored"
+        );
+    }
+
+    /// A theme switch has to reach the editor and the cached transcript, not
+    /// just the panes redrawn from scratch every frame.
+    #[tokio::test]
+    async fn a_theme_switch_repaints_the_whole_screen() {
+        let mut app = themed_app("aura");
+        palette_transcript(&mut app);
+
+        let mut screen_buffer = terminal(80, 24);
+        app.draw(&mut screen_buffer).expect("a frame draws");
+        let (glyphs_before, styles_before) =
+            (screen(&screen_buffer), styled_screen(&screen_buffer));
+
+        app.apply_theme("gruvbox");
+        app.draw(&mut screen_buffer).expect("a frame draws");
+
+        assert_eq!(
+            glyphs_before,
+            screen(&screen_buffer),
+            "a theme switch must not move a single glyph"
+        );
+        assert_ne!(
+            styles_before,
+            styled_screen(&screen_buffer),
+            "nothing was repainted"
+        );
+    }
+
+    #[test]
+    fn snapshot_theme_opencode() {
+        let mut app = themed_app(DEFAULT_THEME);
+        palette_transcript(&mut app);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(styled_screen(&terminal));
+    }
+
+    #[test]
+    fn snapshot_theme_tokyonight() {
+        let mut app = themed_app("tokyonight");
+        palette_transcript(&mut app);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(styled_screen(&terminal));
+    }
+
+    #[test]
+    fn snapshot_theme_gruvbox() {
+        let mut app = themed_app("gruvbox");
+        palette_transcript(&mut app);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(styled_screen(&terminal));
+    }
+
+    #[test]
+    fn snapshot_theme_aura() {
+        let mut app = themed_app("aura");
+        palette_transcript(&mut app);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(styled_screen(&terminal));
+    }
+
+    /// Opened the way a user opens it, and dumped with styles: this is what
+    /// pins the selected row's fill and the panel surface behind the list.
+    #[tokio::test]
+    async fn snapshot_themes_dialog_open() {
+        let mut app = app();
+        palette_transcript(&mut app);
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-t is handled");
+
+        assert!(
+            app.theme_list.is_some(),
+            "the picker must be open, or the snapshot is of a bare screen"
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(styled_screen(&terminal));
     }
 
     #[tokio::test]

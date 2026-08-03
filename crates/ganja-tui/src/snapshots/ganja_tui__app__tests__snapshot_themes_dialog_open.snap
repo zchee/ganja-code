@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: styled_screen(&terminal)
+---
+ 0 ["you" Rgb(128, 128, 128) on Rgb(10, 10, 10)] ["                                                                             " Reset on Rgb(10, 10, 10)]
+ 1 ["show me every color " Rgb(157, 124, 216) on Rgb(10, 10, 10)] ["┌ themes ──────────────────────────────┐" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+ 2 ["                    " Reset on Rgb(10, 10, 10)] ["│  aura                                │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+ 3 ["ganja" Rgb(128, 128, 128) on Rgb(10, 10, 10)] ["               " Reset on Rgb(10, 10, 10)] ["│  gruvbox                             │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+ 4 ["One edit applied, on" Rgb(238, 238, 238) on Rgb(10, 10, 10)] ["│" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["> opencode                            " Rgb(10, 10, 10) on Rgb(250, 178, 131)] ["│" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+ 5 ["[done] edit: theme.r" Rgb(238, 238, 238) on Rgb(10, 10, 10)] ["│  terminal                            │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+ 6 ["@@ -1,2 +1,2 @@" Rgb(128, 128, 128) on Rgb(10, 10, 10)] ["     " Reset on Rgb(10, 10, 10)] ["│  tokyonight                          │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+ 7 ["-let theme = Theme::" Rgb(197, 59, 83) on Rgb(10, 10, 10)] ["│                                      │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+ 8 ["+let theme = themes." Rgb(79, 214, 190) on Rgb(10, 10, 10)] ["│" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["[j/k] [up/down] preview   [Enter] keep" Rgb(128, 128, 128) on Rgb(20, 20, 20)] ["│" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+ 9 ["context" Rgb(128, 128, 128) on Rgb(10, 10, 10)] ["             " Reset on Rgb(10, 10, 10)] ["│                                      │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+10 ["[error] bash: rm -rf" Rgb(224, 108, 117) on Rgb(10, 10, 10)] ["│                                      │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+11 ["refused: destructive" Rgb(224, 108, 117) on Rgb(10, 10, 10)] ["│                                      │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+12 ["                    " Reset on Rgb(10, 10, 10)] ["│                                      │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+13 ["                    " Reset on Rgb(10, 10, 10)] ["│                                      │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+14 ["                    " Reset on Rgb(10, 10, 10)] ["│                                      │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+15 ["                    " Reset on Rgb(10, 10, 10)] ["│                                      │" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+16 ["                    " Reset on Rgb(10, 10, 10)] ["└──────────────────────────────────────┘" Rgb(238, 238, 238) on Rgb(20, 20, 20)] ["                    " Reset on Rgb(10, 10, 10)]
+17 ["                                                                                " Reset on Rgb(10, 10, 10)]
+18 ["┌ message ─────────────────────────────────────────────────────────────────────┐" Rgb(128, 128, 128) on Rgb(10, 10, 10)]
+19 ["│" Rgb(128, 128, 128) on Rgb(10, 10, 10)] [" " Rgb(128, 128, 128) on Rgb(10, 10, 10) REVERSED] ["Ask ganja something...                                                       │" Rgb(128, 128, 128) on Rgb(10, 10, 10)]
+20 ["│                                                                              │" Rgb(128, 128, 128) on Rgb(10, 10, 10)]
+21 ["│                                                                              │" Rgb(128, 128, 128) on Rgb(10, 10, 10)]
+22 ["└──────────────────────────────────────────────────────────────────────────────┘" Rgb(128, 128, 128) on Rgb(10, 10, 10)]
+23 ["ready" Rgb(157, 124, 216) on Rgb(10, 10, 10)] ["                  " Reset on Rgb(10, 10, 10)] ["Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit" Rgb(128, 128, 128) on Rgb(10, 10, 10)]
