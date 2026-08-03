@@ -27,6 +27,9 @@ globset = "0.4.19"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.31"
+# `killpg`, so cancelling a shell command takes its whole process group with
+# it without shelling out to `kill(1)`.
+libc = "0.2.189"
 ratatui = "0.30.2"
 ratatui-textarea = "0.9.2"
 reqwest = { version = "0.13.4", default-features = false, features = [

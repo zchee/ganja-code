@@ -9,13 +9,20 @@
 pub mod auth;
 pub mod catalog;
 pub mod engine;
+pub mod permission;
+pub mod project;
 pub mod protocol;
 pub mod provider;
+pub mod session;
+pub mod tool;
 
 pub use auth::{AuthError, Credential};
 pub use catalog::{Cost, ModelInfo};
 pub use engine::{Engine, EngineError};
+pub use permission::{Decision, Permissions};
+pub use project::{Project, ProjectError};
 pub use protocol::{
-    Command, Event, FinishReason, Message, MessageId, MessageTime, Part, PartBody, PartId, Role,
-    Usage,
+    Command, Event, FinishReason, Message, MessageId, MessageTime, Part, PartBody, PartId,
+    PermissionId, PermissionReply, Role, ToolState, Usage,
 };
+pub use tool::{Registry, Tool, ToolCtx, ToolDefinition, ToolError, ToolOutput};

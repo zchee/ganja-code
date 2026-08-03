@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+ganja                                                                           
+[running] shell: cargo test                                                     
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready                  Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit

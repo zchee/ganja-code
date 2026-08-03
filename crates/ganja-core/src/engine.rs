@@ -5,12 +5,14 @@
 //! on the turn task and never on the render loop. A single subscriber is
 //! supported through P6, after which fanout gets per-subscriber queues.
 //!
-//! The engine owns the transcript. A turn appends the user's message, streams
-//! the reply into an assistant message, and reports both through the event
-//! stream, so a frontend that applies every event holds exactly what the next
-//! [`ChatRequest`] will carry.
+//! The engine owns the transcript. A turn appends the user's message, runs the
+//! agent loop in [`crate::session`] — streaming the reply, executing the tool
+//! calls it asks for, asking again until a request ends without any — and
+//! reports every part of it through the event stream, so a frontend that
+//! applies every event holds exactly what the next
+//! [`ChatRequest`](crate::provider::ChatRequest) will carry.
 
-use std::{ops::ControlFlow, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use futures::{StreamExt as _, stream::BoxStream};
 use tokio::sync::{Mutex, mpsc};
@@ -18,8 +20,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    protocol::{Command, Event, FinishReason, Message, Part, PartId},
-    provider::{ChatRequest, Provider, ProviderEvent},
+    permission::Permissions,
+    protocol::{Command, Event},
+    provider::Provider,
+    session::{Turn, TurnHandle, run_turn},
+    tool::{FileTimes, Registry},
 };
 
 /// Events the engine queues before a producer has to wait for the subscriber.
@@ -28,7 +33,8 @@ pub const EVENT_CAPACITY: usize = 1024;
 /// A command the engine refused.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    /// A turn is streaming and P2 runs one turn at a time.
+    /// A turn is streaming — or waiting on a permission — and the engine runs
+    /// one turn at a time.
     #[error("a turn is already streaming; cancel it before sending another prompt")]
     Busy,
     /// [`Engine::subscribe`] was called more than once.
@@ -40,30 +46,60 @@ pub enum EngineError {
 pub struct Engine {
     provider: Arc<dyn Provider>,
     model: String,
+    /// Tools the model is offered, and the agent loop executes.
+    tools: Arc<Registry>,
+    /// Rules deciding which tool calls wait for the user.
+    permissions: Arc<std::sync::Mutex<Permissions>>,
+    /// Directory tool calls resolve relative paths against, captured once so
+    /// every call in a session agrees on where it is.
+    cwd: PathBuf,
+    /// Which files this session has read, shared by every tool call in it.
+    files: Arc<FileTimes>,
     events: mpsc::Sender<Event>,
     unclaimed: Mutex<Option<mpsc::Receiver<Event>>>,
-    /// Holds the cancellation handle of the turn in flight, and doubles as the
-    /// idle/busy flag.
-    turn: Arc<Mutex<Option<CancellationToken>>>,
+    /// Holds the handle of the turn in flight, and doubles as the idle/busy
+    /// flag. The handle carries the turn's cancellation token and the
+    /// permission wait a [`Command::ReplyPermission`] routes into.
+    turn: Arc<Mutex<Option<TurnHandle>>>,
     /// The conversation so far. P4 persists it; until then it lives and dies
     /// with the process.
-    history: Arc<Mutex<Vec<Message>>>,
+    history: Arc<Mutex<Vec<crate::protocol::Message>>>,
 }
 
 impl Engine {
-    /// Builds an engine that answers through `provider`, asking it for `model`.
+    /// Builds an engine that answers through `provider`, asking it for
+    /// `model`, executing calls to `tools` under `permissions`.
     #[must_use]
-    pub fn new(provider: Arc<dyn Provider>, model: impl Into<String>) -> Self {
+    pub fn new(
+        provider: Arc<dyn Provider>,
+        model: impl Into<String>,
+        tools: Arc<Registry>,
+        permissions: Permissions,
+    ) -> Self {
         let (events, receiver) = mpsc::channel(EVENT_CAPACITY);
 
         Self {
             provider,
             model: model.into(),
+            tools,
+            permissions: Arc::new(std::sync::Mutex::new(permissions)),
+            // Captured at construction so a process whose directory later
+            // moves keeps resolving paths where the session began. A process
+            // with no readable directory falls back to relative resolution.
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            files: Arc::new(FileTimes::default()),
             events,
             unclaimed: Mutex::new(Some(receiver)),
             turn: Arc::default(),
             history: Arc::default(),
         }
+    }
+
+    /// The permission rules this engine consults, shared with the agent loop
+    /// and with whatever persists an "always" answer.
+    #[must_use]
+    pub fn permissions(&self) -> Arc<std::sync::Mutex<Permissions>> {
+        Arc::clone(&self.permissions)
     }
 
     /// Claims the event stream.
@@ -93,12 +129,16 @@ impl Engine {
     /// # Errors
     ///
     /// Returns [`EngineError::Busy`] when a prompt arrives while another turn
-    /// is still streaming.
+    /// is still streaming, or still waiting on a permission.
     pub async fn send(&self, command: Command) -> Result<(), EngineError> {
         match command {
             Command::SendPrompt { text } => self.start_turn(text).await,
             Command::CancelTurn => {
                 self.cancel_turn().await;
+                Ok(())
+            }
+            Command::ReplyPermission { id, reply } => {
+                self.reply_permission(&id, reply).await;
                 Ok(())
             }
         }
@@ -111,19 +151,29 @@ impl Engine {
         }
 
         let cancel = CancellationToken::new();
-        *turn = Some(cancel.clone());
+        let pending = Arc::new(std::sync::Mutex::new(None));
+        *turn = Some(TurnHandle {
+            cancel: cancel.clone(),
+            permission: Arc::clone(&pending),
+        });
         drop(turn);
 
         // The task is deliberately not joined. `cancel` is what stops a turn,
-        // and it now reaches the provider itself, so an aborted HTTP stream is
-        // the provider's business rather than something the engine has to kill
-        // from outside. Aborting the task instead would skip the cleanup below
-        // that releases the busy slot and guarantees a terminal event.
+        // and it reaches the provider and every running tool, so an aborted
+        // HTTP stream is the provider's business rather than something the
+        // engine has to kill from outside. Aborting the task instead would
+        // skip the cleanup that releases the busy slot and guarantees a
+        // terminal event.
         tokio::spawn(run_turn(Turn {
             provider: Arc::clone(&self.provider),
             model: self.model.clone(),
+            tools: Arc::clone(&self.tools),
+            permissions: Arc::clone(&self.permissions),
+            cwd: self.cwd.clone(),
+            files: Arc::clone(&self.files),
             prompt,
             cancel,
+            pending,
             events: self.events.clone(),
             slot: Arc::clone(&self.turn),
             history: Arc::clone(&self.history),
@@ -133,221 +183,38 @@ impl Engine {
     }
 
     async fn cancel_turn(&self) {
-        if let Some(cancel) = self.turn.lock().await.as_ref() {
-            cancel.cancel();
+        if let Some(turn) = self.turn.lock().await.as_ref() {
+            turn.cancel.cancel();
         }
     }
-}
 
-/// Everything one turn needs, gathered so the spawned task takes one argument.
-struct Turn {
-    provider: Arc<dyn Provider>,
-    model: String,
-    prompt: String,
-    cancel: CancellationToken,
-    events: mpsc::Sender<Event>,
-    slot: Arc<Mutex<Option<CancellationToken>>>,
-    history: Arc<Mutex<Vec<Message>>>,
-}
+    /// Routes a reply to the permission wait that asked for it.
+    ///
+    /// A reply nothing is waiting for — the id is stale, the turn already
+    /// ended, or a cancel raced it — is defined to be ignored: the turn task
+    /// owns answering every request exactly once, so there is nothing here to
+    /// repair.
+    async fn reply_permission(
+        &self,
+        id: &crate::protocol::PermissionId,
+        reply: crate::protocol::PermissionReply,
+    ) {
+        let delivered = self.turn.lock().await.as_ref().is_some_and(|turn| {
+            let mut pending = turn
+                .permission
+                .lock()
+                .expect("the pending permission is never poisoned");
 
-/// Why a turn ended, and what to say about it.
-struct Outcome {
-    reason: FinishReason,
-    error: Option<String>,
-}
-
-async fn run_turn(turn: Turn) {
-    let mut assistant = Message::assistant(turn.model.clone());
-    let outcome = stream_turn(&turn, &mut assistant).await;
-    let completed = assistant.complete();
-
-    // A turn that died before its first fragment leaves nothing worth sending
-    // back as context — and some providers reject an empty assistant message.
-    if assistant.has_content() {
-        turn.history.lock().await.push(assistant.clone());
-    }
-
-    // Released before the finish event is queued so that a prompt sent in
-    // reaction to it is never rejected as busy.
-    *turn.slot.lock().await = None;
-
-    if let Some(outcome) = outcome {
-        let _ = turn
-            .events
-            .send(Event::MessageFinished {
-                message_id: assistant.id,
-                reason: outcome.reason,
-                usage: assistant.usage,
-                error: outcome.error,
-                completed,
-            })
-            .await;
-    }
-}
-
-/// Runs one turn, accumulating the reply into `assistant` and returning why it
-/// ended, or [`None`] once the subscriber is gone and there is nobody left to
-/// tell.
-async fn stream_turn(turn: &Turn, assistant: &mut Message) -> Option<Outcome> {
-    let user = Message::user(turn.prompt.clone());
-    let request = {
-        let mut history = turn.history.lock().await;
-        history.push(user.clone());
-
-        ChatRequest {
-            model: turn.model.clone(),
-            system: None,
-            messages: history.clone(),
-        }
-    };
-
-    turn.events
-        .send(Event::MessageStarted { message: user })
-        .await
-        .ok()?;
-    turn.events
-        .send(Event::MessageStarted {
-            message: assistant.clone(),
-        })
-        .await
-        .ok()?;
-
-    let mut events = match turn.provider.stream(request, turn.cancel.clone()).await {
-        Ok(events) => events,
-        Err(error) => {
-            return Some(Outcome {
-                reason: FinishReason::Failed,
-                error: Some(error.to_string()),
-            });
-        }
-    };
-
-    // The text part fragments accumulate into, once one is open.
-    let mut open: Option<PartId> = None;
-
-    loop {
-        // Biased so that a cancel already in hand always wins the race against
-        // a fragment that happens to be ready, which is what bounds how long a
-        // cancelled turn can keep streaming.
-        let event = tokio::select! {
-            biased;
-            () = turn.cancel.cancelled() => return Some(Outcome::cancelled()),
-            event = events.next() => event,
-        };
-
-        let Some(event) = event else {
-            // A stream that ends after a cancel ended because of it; one that
-            // ends without a finish has said all it is going to.
-            return Some(if turn.cancel.is_cancelled() {
-                Outcome::cancelled()
-            } else {
-                Outcome::completed()
-            });
-        };
-
-        match event {
-            ProviderEvent::TextDelta(delta) => {
-                let part_id = match &open {
-                    Some(part_id) => part_id.clone(),
-                    None => {
-                        let part = Part::text(String::new());
-                        let part_id = part.id.clone();
-                        assistant.parts.push(part.clone());
-                        open = Some(part_id.clone());
-
-                        if let ControlFlow::Break(stop) = deliver(
-                            turn,
-                            Event::PartStarted {
-                                message_id: assistant.id.clone(),
-                                part,
-                            },
-                        )
-                        .await
-                        {
-                            return stop;
-                        }
-
-                        part_id
-                    }
-                };
-
-                // The open part is the newest one: nothing else appends parts
-                // until P3's tools do.
-                if let Some(text) = assistant.parts.last_mut().and_then(Part::as_text_mut) {
-                    text.push_str(&delta);
-                }
-
-                if let ControlFlow::Break(stop) = deliver(
-                    turn,
-                    Event::PartDelta {
-                        message_id: assistant.id.clone(),
-                        part_id,
-                        delta,
-                    },
-                )
-                .await
-                {
-                    return stop;
-                }
+            match pending.take_if(|waiting| waiting.id == *id) {
+                // A closed receiver means the turn is already tearing down,
+                // which is the same race as replying after the turn ended.
+                Some(waiting) => waiting.sender.send(reply).is_ok(),
+                None => false,
             }
-            ProviderEvent::Usage(usage) => assistant.usage = Some(usage),
-            // A provider that died mid-stream keeps whatever it already
-            // streamed — the transcript is honest about how far it got — but
-            // the turn is reported as failed, never as a model that stopped
-            // talking on purpose.
-            ProviderEvent::Failed(error) => {
-                return Some(Outcome {
-                    reason: FinishReason::Failed,
-                    error: Some(error.to_string()),
-                });
-            }
-            ProviderEvent::Finish(reason) => {
-                return Some(Outcome {
-                    reason,
-                    error: None,
-                });
-            }
-            // Reasoning and tool calls have no protocol part until P3 renders
-            // and executes them. Dropping them keeps the transcript honest
-            // instead of pasting raw arguments into the reply.
-            event @ (ProviderEvent::ReasoningDelta(_)
-            | ProviderEvent::ToolCallStart { .. }
-            | ProviderEvent::ToolCallDelta { .. }
-            | ProviderEvent::ToolCallEnd { .. }) => {
-                tracing::debug!(?event, "provider event has no rendered part yet");
-            }
-        }
-    }
-}
+        });
 
-/// Queues `event`, or breaks with the turn's report.
-///
-/// [`mpsc::Sender::send`] is cancel-safe: losing the race drops the event
-/// without queueing it, which is what an abandoned turn wants. Waiting on a
-/// full queue must not outlive a cancel, hence the race.
-async fn deliver(turn: &Turn, event: Event) -> ControlFlow<Option<Outcome>> {
-    tokio::select! {
-        biased;
-        () = turn.cancel.cancelled() => ControlFlow::Break(Some(Outcome::cancelled())),
-        queued = turn.events.send(event) => match queued {
-            Ok(()) => ControlFlow::Continue(()),
-            Err(_) => ControlFlow::Break(None),
-        },
-    }
-}
-
-impl Outcome {
-    fn completed() -> Self {
-        Self {
-            reason: FinishReason::Completed,
-            error: None,
-        }
-    }
-
-    fn cancelled() -> Self {
-        Self {
-            reason: FinishReason::Cancelled,
-            error: None,
+        if !delivered {
+            tracing::debug!(id = id.as_str(), "no permission is waiting for this reply");
         }
     }
 }
@@ -365,14 +232,27 @@ mod tests {
 
     use super::{Engine, EngineError};
     use crate::{
+        permission::Permissions,
         protocol::{Command, Event, FinishReason, Message, Role, Usage},
         provider::{
             ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake::MODEL,
         },
+        tool::Registry,
     };
 
-    fn engine() -> Engine {
+    /// An engine over `provider` with no tools and default rules, which is
+    /// all these tests need: they prove the turn lifecycle, not the loop.
+    fn bare(provider: Arc<dyn Provider>, model: &str) -> Engine {
         Engine::new(
+            provider,
+            model,
+            Arc::new(Registry::new(Vec::new())),
+            Permissions::default(),
+        )
+    }
+
+    fn engine() -> Engine {
+        bare(
             Arc::new(FakeProvider::new(
                 "one two",
                 std::time::Duration::from_millis(1),
@@ -472,7 +352,10 @@ mod tests {
                         text.push_str(delta);
                     }
                 }
-                Event::MessageFinished { .. } => {}
+                Event::MessageFinished { .. }
+                | Event::PartUpdated { .. }
+                | Event::PermissionRequested { .. }
+                | Event::PermissionReplied { .. } => {}
             }
         }
 
@@ -515,7 +398,10 @@ mod tests {
 
         assert_eq!(
             seen.iter()
-                .filter(|event| matches!(event, Event::PartStarted { .. }))
+                .filter(|event| matches!(
+                    event,
+                    Event::PartStarted { part, .. } if part.as_text().is_some()
+                ))
                 .count(),
             1,
             "streamed text belongs to one part, got {seen:?}"
@@ -553,7 +439,7 @@ mod tests {
             ProviderEvent::Finish(FinishReason::Completed),
         ]));
         let seen = Arc::clone(&provider.seen);
-        let engine = Engine::new(provider, "scripted-model");
+        let engine = bare(provider, "scripted-model");
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
         for prompt in ["first", "second"] {
@@ -579,7 +465,12 @@ mod tests {
             .map(|message| {
                 (
                     message.model.as_deref().unwrap_or("user"),
-                    message.parts.first().and_then(|part| part.as_text()),
+                    // The first text part: an assistant message now opens
+                    // with a step marker before anything it said.
+                    message
+                        .parts
+                        .iter()
+                        .find_map(crate::protocol::Part::as_text),
                 )
             })
             .collect();
@@ -596,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_provider_that_cannot_answer_still_finishes_the_turn() {
-        let engine = Engine::new(
+        let engine = bare(
             Arc::new(ScriptedProvider::failing(ProviderError::Auth(
                 "ANTHROPIC_API_KEY is unset".to_owned(),
             ))),
@@ -638,7 +529,7 @@ mod tests {
             "connection reset".to_owned(),
         )));
         let seen = Arc::clone(&provider.seen);
-        let engine = Engine::new(provider, "scripted-model");
+        let engine = bare(provider, "scripted-model");
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
         for prompt in ["first", "second"] {

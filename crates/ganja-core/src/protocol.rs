@@ -22,9 +22,12 @@ const MESSAGE_PREFIX: &str = "msg";
 /// Prefix upstream gives part ids.
 const PART_PREFIX: &str = "prt";
 
+/// Prefix for permission request ids.
+const PERMISSION_PREFIX: &str = "perm";
+
 /// Milliseconds since the Unix epoch, saturating rather than failing when the
 /// clock is set before 1970.
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
@@ -102,6 +105,32 @@ impl From<String> for PartId {
     }
 }
 
+/// Identifies one permission request, so a reply can name what it answers.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PermissionId(String);
+
+impl PermissionId {
+    /// Mints an id that sorts after every id minted before it.
+    #[must_use]
+    pub fn ascending() -> Self {
+        Self(ascending(PERMISSION_PREFIX))
+    }
+
+    /// The id as it travels the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for PermissionId {
+    /// Adopts a stored id; see [`MessageId::from`].
+    fn from(id: String) -> Self {
+        Self(id)
+    }
+}
+
 /// Who produced a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,9 +163,13 @@ pub struct Usage {
 /// The kinds of content a [`Part`] can carry.
 ///
 /// The tag travels as a `type` field beside the part's id, which is the shape
-/// upstream's parts have, so P3's tool and step parts and P4's stored
-/// transcripts add variants without moving anything already on the wire.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// upstream's parts have, so P4's stored transcripts can add variants without
+/// moving anything already on the wire.
+///
+/// `Eq` stops at [`PartBody::Tool`]: tool arguments are arbitrary JSON, and
+/// `serde_json::Value` holds floats, so everything containing a part compares
+/// with `PartialEq` only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PartBody {
     /// Plain text, streamed in fragments.
@@ -144,12 +177,76 @@ pub enum PartBody {
         /// Everything accumulated so far.
         text: String,
     },
+    /// One tool call, from the model asking for it through its result.
+    Tool {
+        /// Correlates the provider's call with its result on the next request.
+        call_id: String,
+        /// Tool being called, by registry id.
+        tool: String,
+        /// Where the call currently stands.
+        state: ToolState,
+    },
+    /// The turn began another model request. Tool results make a turn span
+    /// several requests, and each one opens with this marker.
+    StepStart,
+    /// A model request finished, and what it spent.
+    StepFinish {
+        /// What this request cost, as the provider reported it.
+        usage: Usage,
+    },
+}
+
+/// Where a tool call stands, mirroring upstream's `pending → running →
+/// completed | error` lifecycle.
+///
+/// Timestamps are milliseconds since the Unix epoch, like every other time on
+/// the wire.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolState {
+    /// The model is still streaming the call's arguments.
+    Pending,
+    /// The call is executing.
+    Running {
+        /// The parsed arguments it runs with.
+        input: serde_json::Value,
+        /// When execution began.
+        started: u64,
+    },
+    /// The call finished and its output is what the model sees next.
+    Completed {
+        /// The arguments it ran with.
+        input: serde_json::Value,
+        /// What the tool returned, as the model sees it.
+        output: String,
+        /// One-line description of what ran, for rendering.
+        title: String,
+        /// Structured extras a frontend may render richer than text.
+        metadata: serde_json::Value,
+        /// When execution began.
+        started: u64,
+        /// When execution finished.
+        completed: u64,
+    },
+    /// The call failed, or was refused, and the message is what the model
+    /// sees next.
+    Error {
+        /// The arguments it was asked to run with.
+        input: serde_json::Value,
+        /// What went wrong, as the model sees it.
+        error: String,
+        /// When execution began.
+        started: u64,
+        /// When it failed.
+        completed: u64,
+    },
 }
 
 /// One piece of a message.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Part {
-    /// Identifies the part so that [`Event::PartDelta`] can address it.
+    /// Identifies the part so that [`Event::PartDelta`] and
+    /// [`Event::PartUpdated`] can address it.
     pub id: PartId,
     /// What the part carries.
     #[serde(flatten)]
@@ -166,11 +263,26 @@ impl Part {
         }
     }
 
+    /// Builds a tool part with a fresh id, opening in
+    /// [`ToolState::Pending`].
+    #[must_use]
+    pub fn tool(call_id: impl Into<String>, tool: impl Into<String>) -> Self {
+        Self {
+            id: PartId::ascending(),
+            body: PartBody::Tool {
+                call_id: call_id.into(),
+                tool: tool.into(),
+                state: ToolState::Pending,
+            },
+        }
+    }
+
     /// The text this part carries, or [`None`] when it carries something else.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match &self.body {
             PartBody::Text { text } => Some(text),
+            PartBody::Tool { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => None,
         }
     }
 
@@ -178,6 +290,7 @@ impl Part {
     pub fn as_text_mut(&mut self) -> Option<&mut String> {
         match &mut self.body {
             PartBody::Text { text } => Some(text),
+            PartBody::Tool { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => None,
         }
     }
 }
@@ -193,7 +306,7 @@ pub struct MessageTime {
 }
 
 /// One turn's worth of content from one side of the conversation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     /// Identifies the message; ids sort in creation order.
     pub id: MessageId,
@@ -256,12 +369,15 @@ impl Message {
     }
 
     /// Whether the message carries anything worth keeping. An assistant turn
-    /// that failed before its first fragment does not.
+    /// that failed before its first fragment does not, and neither do bare
+    /// step markers: what counts is text the model said or a tool it called.
     #[must_use]
     pub fn has_content(&self) -> bool {
-        self.parts
-            .iter()
-            .any(|part| part.as_text().is_none_or(|text| !text.is_empty()))
+        self.parts.iter().any(|part| match &part.body {
+            PartBody::Text { text } => !text.is_empty(),
+            PartBody::Tool { .. } => true,
+            PartBody::StepStart | PartBody::StepFinish { .. } => false,
+        })
     }
 }
 
@@ -275,7 +391,28 @@ pub enum Command {
         text: String,
     },
     /// Stops the turn that is streaming; a no-op when the engine is idle.
+    /// When the turn is waiting on a permission, cancelling also refuses it.
     CancelTurn,
+    /// Answers an [`Event::PermissionRequested`]. Ignored when nothing with
+    /// this id is waiting, which is what a reply racing a cancel becomes.
+    ReplyPermission {
+        /// The request being answered.
+        id: PermissionId,
+        /// The user's decision.
+        reply: PermissionReply,
+    },
+}
+
+/// What the user decided about one permission request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionReply {
+    /// Run this one call.
+    Once,
+    /// Run it, and stop asking about calls like it in this project.
+    Always,
+    /// Refuse the call. The model is told, and decides what to do next.
+    Reject,
 }
 
 /// Something the engine observed, delivered to the subscribed frontend in
@@ -284,9 +421,9 @@ pub enum Command {
 /// The stream is the whole truth: a frontend that applies every event in order
 /// holds the same transcript the engine does, which is what lets P4 rebuild a
 /// session and P7 serve one over a socket. Names follow upstream's bus —
-/// [`Event::PartDelta`] is `message.part.delta`, [`Event::PartStarted`] is
-/// `message.part.updated`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// [`Event::PartDelta`] is `message.part.delta`, [`Event::PartStarted`] and
+/// [`Event::PartUpdated`] are `message.part.updated`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     /// A message entered the transcript. A user message arrives complete; an
@@ -312,6 +449,37 @@ pub enum Event {
         part_id: PartId,
         /// What to append.
         delta: String,
+    },
+    /// A part changed as a whole — a tool call moved through its lifecycle —
+    /// and this is its new value, replacing the part with the same id.
+    PartUpdated {
+        /// Message the part belongs to.
+        message_id: MessageId,
+        /// The part as it now stands.
+        part: Part,
+    },
+    /// A tool call wants to run and the engine is waiting on the answer. The
+    /// turn holds until [`Command::ReplyPermission`] names this id, or the
+    /// turn is cancelled.
+    PermissionRequested {
+        /// Names this request, for the reply.
+        id: PermissionId,
+        /// The tool call waiting on the decision.
+        call_id: String,
+        /// Tool asking to run, by registry id.
+        tool: String,
+        /// One line saying what would run, fit for a dialog.
+        title: String,
+        /// The arguments it would run with.
+        args: serde_json::Value,
+    },
+    /// A permission request was answered — by the user, or by a cancel
+    /// refusing it — so a frontend can retire the dialog.
+    PermissionReplied {
+        /// The request that was answered.
+        id: PermissionId,
+        /// What was decided.
+        reply: PermissionReply,
     },
     /// The turn ended and the engine is idle again. Always the last event of a
     /// turn, whatever went wrong during it.
@@ -349,8 +517,28 @@ pub enum FinishReason {
 mod tests {
     use super::{
         Command, Event, FinishReason, Message, MessageId, MessageTime, Part, PartBody, PartId,
-        Role, Usage,
+        PermissionId, PermissionReply, Role, ToolState, Usage,
     };
+
+    /// Builds a completed tool part with pinned ids and times, the richest
+    /// shape a part takes on the wire.
+    fn pinned_tool_part() -> Part {
+        Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "read".to_owned(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({"path": "a.rs"}),
+                    output: "fn main() {}".to_owned(),
+                    title: "a.rs".to_owned(),
+                    metadata: serde_json::json!({}),
+                    started: 7,
+                    completed: 9,
+                },
+            },
+        }
+    }
 
     /// Builds a message with pinned ids and times so a test can assert on the
     /// exact bytes that reach the wire.
@@ -432,6 +620,10 @@ mod tests {
                 text: "hello".to_owned(),
             },
             Command::CancelTurn,
+            Command::ReplyPermission {
+                id: PermissionId::from("perm_1".to_owned()),
+                reply: PermissionReply::Always,
+            },
         ];
 
         for command in cases {
@@ -458,7 +650,7 @@ mod tests {
                 delta: "hi".to_owned(),
             },
             Event::MessageFinished {
-                message_id: message.id,
+                message_id: message.id.clone(),
                 reason: FinishReason::Failed,
                 usage: Some(Usage {
                     input_tokens: 3,
@@ -469,6 +661,21 @@ mod tests {
                 }),
                 error: Some("no credentials".to_owned()),
                 completed: 9,
+            },
+            Event::PartUpdated {
+                message_id: message.id.clone(),
+                part: pinned_tool_part(),
+            },
+            Event::PermissionRequested {
+                id: PermissionId::from("perm_1".to_owned()),
+                call_id: "call_1".to_owned(),
+                tool: "shell".to_owned(),
+                title: "cargo test".to_owned(),
+                args: serde_json::json!({"command": "cargo test"}),
+            },
+            Event::PermissionReplied {
+                id: PermissionId::from("perm_1".to_owned()),
+                reply: PermissionReply::Reject,
             },
         ];
 
@@ -564,6 +771,98 @@ mod tests {
                     completed: 9,
                 }),
                 r#"{"type":"message_finished","message_id":"msg_1","reason":"failed","error":"no credentials","completed":9}"#,
+            ),
+            (
+                serde_json::to_string(&Command::ReplyPermission {
+                    id: PermissionId::from("perm_1".to_owned()),
+                    reply: PermissionReply::Once,
+                }),
+                r#"{"type":"reply_permission","id":"perm_1","reply":"once"}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::Tool {
+                        call_id: "call_1".to_owned(),
+                        tool: "read".to_owned(),
+                        state: ToolState::Pending,
+                    },
+                }),
+                r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"read","state":{"status":"pending"}}"#,
+            ),
+            (
+                serde_json::to_string(&pinned_tool_part()),
+                r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"read","state":{"status":"completed","input":{"path":"a.rs"},"output":"fn main() {}","title":"a.rs","metadata":{},"started":7,"completed":9}}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::Tool {
+                        call_id: "call_1".to_owned(),
+                        tool: "shell".to_owned(),
+                        state: ToolState::Error {
+                            input: serde_json::json!({"command": "rm -rf /"}),
+                            error: "refused".to_owned(),
+                            started: 7,
+                            completed: 9,
+                        },
+                    },
+                }),
+                r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"shell","state":{"status":"error","input":{"command":"rm -rf /"},"error":"refused","started":7,"completed":9}}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::StepStart,
+                }),
+                r#"{"id":"prt_1","type":"step_start"}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::StepFinish {
+                        usage: Usage {
+                            input_tokens: 1,
+                            output_tokens: 2,
+                            ..Usage::default()
+                        },
+                    },
+                }),
+                r#"{"id":"prt_1","type":"step_finish","usage":{"input_tokens":1,"output_tokens":2,"reasoning_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0}}"#,
+            ),
+            (
+                serde_json::to_string(&Event::PartUpdated {
+                    message_id: MessageId::from("msg_1".to_owned()),
+                    part: Part {
+                        id: PartId::from("prt_1".to_owned()),
+                        body: PartBody::Tool {
+                            call_id: "call_1".to_owned(),
+                            tool: "shell".to_owned(),
+                            state: ToolState::Running {
+                                input: serde_json::json!({"command": "ls"}),
+                                started: 7,
+                            },
+                        },
+                    },
+                }),
+                r#"{"type":"part_updated","message_id":"msg_1","part":{"id":"prt_1","type":"tool","call_id":"call_1","tool":"shell","state":{"status":"running","input":{"command":"ls"},"started":7}}}"#,
+            ),
+            (
+                serde_json::to_string(&Event::PermissionRequested {
+                    id: PermissionId::from("perm_1".to_owned()),
+                    call_id: "call_1".to_owned(),
+                    tool: "shell".to_owned(),
+                    title: "ls".to_owned(),
+                    args: serde_json::json!({"command": "ls"}),
+                }),
+                r#"{"type":"permission_requested","id":"perm_1","call_id":"call_1","tool":"shell","title":"ls","args":{"command":"ls"}}"#,
+            ),
+            (
+                serde_json::to_string(&Event::PermissionReplied {
+                    id: PermissionId::from("perm_1".to_owned()),
+                    reply: PermissionReply::Reject,
+                }),
+                r#"{"type":"permission_replied","id":"perm_1","reply":"reject"}"#,
             ),
         ];
 

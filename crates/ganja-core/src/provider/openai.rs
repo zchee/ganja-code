@@ -8,7 +8,7 @@
 //! Unlike Anthropic, the frames are unnamed — every one is a `data:` line
 //! holding a chunk object, and the stream ends with the literal `[DONE]`.
 
-use std::{collections::HashMap, fmt};
+use std::{borrow::Cow, collections::HashMap, fmt};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -18,7 +18,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    protocol::{FinishReason, Part, Role, Usage},
+    protocol::{FinishReason, Message, PartBody, Role, ToolState, Usage},
     provider::{
         ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, check_base_url,
         client, open, require_credential, setting, shown_base_url, sse::Frame,
@@ -40,6 +40,18 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// The frame that ends a chat-completions stream.
 const DONE: &str = "[DONE]";
+
+/// What a call that never produced one reports as its result.
+///
+/// A tool part still [`ToolState::Pending`] or [`ToolState::Running`] when it
+/// reaches a later request belongs to a turn that died — cancelled, or failed —
+/// before the tool answered. Dropping the entry from `tool_calls` would leave
+/// the assistant text claiming a call that is not there; leaving it unanswered
+/// is a request the API refuses, because every id in `tool_calls` must be
+/// answered by a `tool` message before the next assistant turn. So the pair is
+/// emitted with this in place of the output. Upstream resolves the same
+/// dangling call with the wording "[Tool execution was interrupted]".
+const NO_RESULT: &str = "[no result recorded]";
 
 /// Streams replies from an OpenAI-compatible chat completions endpoint.
 pub struct OpenAiProvider {
@@ -152,6 +164,11 @@ struct Body<'a> {
     /// Without this the stream reports no token counts at all.
     stream_options: StreamOptions,
     messages: Vec<Turn<'a>>,
+    /// Omitted rather than sent empty. A turn with nothing to offer the model
+    /// is the ordinary case for a session with no registry, and plenty of
+    /// compatible endpoints reject `"tools": []` outright.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ToolSpec<'a>>,
 }
 
 /// Opt-in for the trailing usage chunk.
@@ -160,21 +177,133 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// One tool as chat completions advertises it.
+#[derive(Debug, Serialize)]
+struct ToolSpec<'a> {
+    /// Only `function` exists today; the field is what makes room for the rest.
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: FunctionSpec<'a>,
+}
+
+/// The half of a tool advertisement that describes the function.
+#[derive(Debug, Serialize)]
+struct FunctionSpec<'a> {
+    name: &'a str,
+    description: &'a str,
+    /// The argument schema, which this API names `parameters`.
+    parameters: &'a Value,
+}
+
 /// One message as chat completions spells it.
 #[derive(Debug, Serialize)]
 struct Turn<'a> {
     role: &'static str,
-    content: &'a str,
+    /// Absent on an assistant message that only called tools, which is how the
+    /// API spells a turn that said nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<Cow<'a, str>>,
+    /// The calls an assistant message made.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<Call<'a>>,
+    /// Set on a `tool` message, naming the call it answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+}
+
+/// One call an assistant message made.
+#[derive(Debug, Serialize)]
+struct Call<'a> {
+    /// The provider's identifier for the call, which its result names.
+    id: &'a str,
+    /// Only `function` exists today.
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: CallFunction<'a>,
+}
+
+/// The half of a call that says what was called, and how.
+#[derive(Debug, Serialize)]
+struct CallFunction<'a> {
+    name: &'a str,
+    /// The arguments as a JSON *string*, which is how this API carries them —
+    /// the model streams them as text, and a server is free to hand back
+    /// whatever it was given, valid JSON or not.
+    arguments: String,
+}
+
+impl<'a> Turn<'a> {
+    /// A message that is only text.
+    fn said(role: &'static str, content: Cow<'a, str>) -> Self {
+        Self {
+            role,
+            content: Some(content),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// One call's result, which this API carries as a message of its own.
+    fn answered(tool_call_id: &'a str, content: &'a str) -> Self {
+        Self {
+            role: "tool",
+            content: Some(Cow::Borrowed(content)),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id),
+        }
+    }
 }
 
 impl<'a> Body<'a> {
+    /// Turns a request into the JSON chat completions expects.
+    ///
+    /// # How a transcript becomes a request
+    ///
+    /// Canonical [`Message`]s carry ordered parts and hold a call beside its
+    /// result; this API carries one content string per message, calls in a
+    /// `tool_calls` array beside it, and each result as its own `tool` message.
+    /// So one assistant message becomes one message plus one per call:
+    ///
+    /// - its text parts become the content and its tool parts the `tool_calls`
+    ///   entries;
+    /// - every one of those calls is answered by a `tool` message placed
+    ///   immediately after, in call order, because the API refuses an assistant
+    ///   turn that follows an unanswered call.
+    ///
+    /// Step markers serialize to nothing: they record where one model request
+    /// ended and the next began, which is this crate's bookkeeping rather than
+    /// anything the model said.
+    ///
+    /// A message that would carry neither content nor calls is dropped rather
+    /// than sent empty, which is what an assistant turn that failed before its
+    /// first fragment is.
     fn new(request: &'a ChatRequest) -> Self {
         // Chat completions has no `system` field: the prompt is the first
         // message, with its own role.
-        let system = request.system.as_deref().map(|content| Turn {
-            role: "system",
-            content,
-        });
+        let mut messages: Vec<Turn<'a>> = request
+            .system
+            .as_deref()
+            .map(|content| Turn::said("system", Cow::Borrowed(content)))
+            .into_iter()
+            .collect();
+
+        for message in &request.messages {
+            let (content, calls, results) = split(message);
+            if content.is_none() && calls.is_empty() {
+                continue;
+            }
+
+            messages.push(Turn {
+                role: match message.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                },
+                content,
+                tool_calls: calls,
+                tool_call_id: None,
+            });
+            messages.extend(results);
+        }
 
         Self {
             model: &request.model,
@@ -182,20 +311,94 @@ impl<'a> Body<'a> {
             stream_options: StreamOptions {
                 include_usage: true,
             },
-            messages: system
-                .into_iter()
-                .chain(request.messages.iter().filter_map(|message| {
-                    let content = message.parts.first().and_then(Part::as_text)?;
-                    (!content.trim().is_empty()).then_some(Turn {
-                        role: match message.role {
-                            Role::User => "user",
-                            Role::Assistant => "assistant",
-                        },
-                        content,
-                    })
-                }))
+            messages,
+            tools: request
+                .tools
+                .iter()
+                .map(|tool| ToolSpec {
+                    kind: "function",
+                    function: FunctionSpec {
+                        name: &tool.name,
+                        description: &tool.description,
+                        parameters: &tool.schema,
+                    },
+                })
                 .collect(),
         }
+    }
+}
+
+/// Splits one message into its content, the calls it made, and the messages
+/// that answer them.
+fn split<'a>(message: &'a Message) -> (Option<Cow<'a, str>>, Vec<Call<'a>>, Vec<Turn<'a>>) {
+    let mut texts: Vec<&str> = Vec::new();
+    let mut calls = Vec::new();
+    let mut results = Vec::new();
+
+    for part in &message.parts {
+        match &part.body {
+            PartBody::Text { text } => {
+                if !text.trim().is_empty() {
+                    texts.push(text);
+                }
+            }
+            PartBody::Tool {
+                call_id,
+                tool,
+                state,
+            } => {
+                calls.push(Call {
+                    id: call_id,
+                    kind: "function",
+                    function: CallFunction {
+                        name: tool,
+                        arguments: arguments(state),
+                    },
+                });
+                results.push(Turn::answered(call_id, result(state)));
+            }
+            PartBody::StepStart | PartBody::StepFinish { .. } => {}
+        }
+    }
+
+    let content = match texts.as_slice() {
+        [] => None,
+        [only] => Some(Cow::Borrowed(*only)),
+        // One message, one content string: several text parts are one reply
+        // interrupted by calls, and joining them without a separator would run
+        // the last word of a step into the first of the next.
+        many => Some(Cow::Owned(many.join("\n"))),
+    };
+
+    (content, calls, results)
+}
+
+/// The arguments a call ran with, as the JSON string this API carries.
+///
+/// A call the model never finished streaming has none; an empty object is the
+/// honest spelling of "the model was still saying", and the field is required.
+fn arguments(state: &ToolState) -> String {
+    let input = match state {
+        ToolState::Pending => return "{}".to_owned(),
+        ToolState::Running { input, .. }
+        | ToolState::Completed { input, .. }
+        | ToolState::Error { input, .. } => input,
+    };
+
+    serde_json::to_string(input).expect("a serde_json::Value always serializes")
+}
+
+/// What a call produced, or why it produced nothing.
+///
+/// This API has no error flag on a result, so a failure travels as the text the
+/// model reads — which is what [`ToolState::Error`] holds anyway.
+fn result(state: &ToolState) -> &str {
+    match state {
+        ToolState::Completed { output, .. } => output,
+        ToolState::Error { error, .. } => error,
+        // See [`NO_RESULT`]: the turn that made this call died before the tool
+        // answered, and an unanswered call is a request the API refuses.
+        ToolState::Pending | ToolState::Running { .. } => NO_RESULT,
     }
 }
 
@@ -385,10 +588,13 @@ mod tests {
     use futures::StreamExt as _;
     use tokio_util::sync::CancellationToken;
 
-    use super::{Body, Mapping, OpenAiProvider};
+    use serde_json::json;
+
+    use super::{Body, Mapping, NO_RESULT, OpenAiProvider};
     use crate::{
-        protocol::{FinishReason, Message, Part, Usage},
+        protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
         provider::{ChatRequest, ProviderError, ProviderEvent, replay},
+        tool::ToolDefinition,
     };
 
     /// Runs a recorded transcript through the real splitter and mapper.
@@ -479,6 +685,106 @@ mod tests {
                 },
                 &ProviderEvent::Finish(FinishReason::Completed),
             ]
+        );
+    }
+
+    /// A model that talks while it calls, which chat completions carries as
+    /// content and `tool_calls` in the same chunk. Neither may swallow the
+    /// other, and a call's fragments have to find their way back to the call
+    /// they belong to across everything in between.
+    #[tokio::test]
+    async fn text_and_a_fragmented_call_interleave_without_losing_either() {
+        let seen = events(include_str!(
+            "../../tests/fixtures/openai_tool_calls_interleaved.sse"
+        ))
+        .await;
+
+        assert_eq!(text(&seen), "Reading the file first. Then the directory.");
+        assert_eq!(
+            seen.iter()
+                .filter(|event| !matches!(event, ProviderEvent::TextDelta(_)))
+                .collect::<Vec<_>>(),
+            vec![
+                &ProviderEvent::ToolCallStart {
+                    id: "call_read".to_owned(),
+                    name: "read".to_owned(),
+                },
+                &ProviderEvent::ToolCallDelta {
+                    id: "call_read".to_owned(),
+                    json: "{\"file".to_owned(),
+                },
+                &ProviderEvent::ToolCallDelta {
+                    id: "call_read".to_owned(),
+                    json: "Path\":\"src/".to_owned(),
+                },
+                &ProviderEvent::ToolCallDelta {
+                    id: "call_read".to_owned(),
+                    json: "main.rs\"}".to_owned(),
+                },
+                &ProviderEvent::ToolCallStart {
+                    id: "call_glob".to_owned(),
+                    name: "glob".to_owned(),
+                },
+                &ProviderEvent::ToolCallDelta {
+                    id: "call_glob".to_owned(),
+                    json: "{\"pattern\"".to_owned(),
+                },
+                &ProviderEvent::ToolCallDelta {
+                    id: "call_glob".to_owned(),
+                    json: ":\"**/*.rs\"}".to_owned(),
+                },
+                // Chat completions has no per-call terminator, so both calls
+                // close when the stream does, in index order.
+                &ProviderEvent::ToolCallEnd {
+                    id: "call_read".to_owned(),
+                },
+                &ProviderEvent::ToolCallEnd {
+                    id: "call_glob".to_owned(),
+                },
+                &ProviderEvent::Usage(Usage {
+                    input_tokens: 317,
+                    output_tokens: 58,
+                    cache_read_tokens: 256,
+                    ..Usage::default()
+                }),
+                &ProviderEvent::Finish(FinishReason::Completed),
+            ],
+            "got {seen:?}"
+        );
+    }
+
+    /// A call is executed when its arguments end, so closing one whose
+    /// arguments never arrived would run a tool on half a request. A stream
+    /// that died mid-call has to end as a failure with the call still open —
+    /// which for this API means the `[DONE]` that closes calls never came.
+    #[tokio::test]
+    async fn a_stream_that_dies_mid_call_never_closes_it() {
+        let seen = events(include_str!(
+            "../../tests/fixtures/openai_tool_call_cut_short.sse"
+        ))
+        .await;
+
+        assert_eq!(text(&seen), "Let me read that file.");
+        assert_eq!(
+            seen.iter()
+                .filter(|event| !matches!(event, ProviderEvent::TextDelta(_)))
+                .collect::<Vec<_>>(),
+            vec![
+                &ProviderEvent::ToolCallStart {
+                    id: "call_cut".to_owned(),
+                    name: "read".to_owned(),
+                },
+                // The chunk the body was cut in half of never arrives: an
+                // incomplete frame is not a frame.
+                &ProviderEvent::ToolCallDelta {
+                    id: "call_cut".to_owned(),
+                    json: "{\"file".to_owned(),
+                },
+                &ProviderEvent::Failed(ProviderError::Transport(
+                    "the response body ended before the model finished".to_owned()
+                )),
+            ],
+            "got {seen:?}"
         );
     }
 
@@ -591,6 +897,7 @@ mod tests {
             model: "gpt-test".to_owned(),
             system: Some("be brief".to_owned()),
             messages: vec![Message::user("hello"), empty, Message::user("again")],
+            tools: Vec::new(),
         };
 
         let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
@@ -616,12 +923,261 @@ mod tests {
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("hi")],
+            tools: Vec::new(),
         };
         let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
 
         assert_eq!(
             body["messages"],
             serde_json::json!([{"role": "user", "content": "hi"}])
+        );
+    }
+
+    /// A tool part carrying `state`, as an assistant message holds one.
+    fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
+        Part {
+            id: PartId::ascending(),
+            body: PartBody::Tool {
+                call_id: call_id.to_owned(),
+                tool: tool.to_owned(),
+                state,
+            },
+        }
+    }
+
+    /// The transcript of a turn that read a file and failed to glob: a step
+    /// marker, some text, one call that worked, one that did not, and the step
+    /// marker that closed the request.
+    fn a_turn_with_two_calls() -> Message {
+        let mut assistant = Message::assistant("gpt-test");
+
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepStart,
+        });
+        assistant.parts.push(Part::text("Reading the file first."));
+        assistant.parts.push(tool_part(
+            "call_read",
+            "read",
+            ToolState::Completed {
+                input: json!({"filePath": "src/main.rs"}),
+                output: "fn main() {}".to_owned(),
+                title: "src/main.rs".to_owned(),
+                metadata: json!({}),
+                started: 1,
+                completed: 2,
+            },
+        ));
+        assistant.parts.push(tool_part(
+            "call_glob",
+            "glob",
+            ToolState::Error {
+                input: json!({"pattern": "**/*.rs"}),
+                error: "no such directory".to_owned(),
+                started: 3,
+                completed: 4,
+            },
+        ));
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepFinish {
+                usage: Usage::default(),
+            },
+        });
+
+        assistant
+    }
+
+    /// A request offering `read`, which is what a session with a registry
+    /// sends on every turn.
+    fn a_tool() -> ToolDefinition {
+        ToolDefinition {
+            name: "read".to_owned(),
+            description: "Reads a file from disk.".to_owned(),
+            schema: json!({
+                "type": "object",
+                "properties": {"filePath": {"type": "string"}},
+                "required": ["filePath"],
+            }),
+        }
+    }
+
+    #[test]
+    fn a_request_advertises_the_tools_it_was_given() {
+        let request = ChatRequest {
+            model: "gpt-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("read src/main.rs")],
+            tools: vec![a_tool()],
+        };
+
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Reads a file from disk.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"filePath": {"type": "string"}},
+                        "required": ["filePath"],
+                    },
+                },
+            }]),
+            "got {body}"
+        );
+    }
+
+    /// A turn that called tools has to read back to the model the way it
+    /// happened: the calls on the assistant message that made them, and each
+    /// result as the `tool` message that answers it.
+    #[test]
+    fn a_finished_call_is_sent_back_as_a_call_and_a_tool_message() {
+        let request = ChatRequest {
+            model: "gpt-test".to_owned(),
+            system: None,
+            messages: vec![
+                Message::user("read src/main.rs"),
+                a_turn_with_two_calls(),
+                Message::user("thanks"),
+            ],
+            tools: vec![a_tool()],
+        };
+
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "read src/main.rs"},
+                {"role": "assistant", "content": "Reading the file first.", "tool_calls": [
+                    {
+                        "id": "call_read",
+                        "type": "function",
+                        // Arguments travel as a string, not as an object: the
+                        // model streams them as text and this API carries them
+                        // the way it received them.
+                        "function": {"name": "read", "arguments": r#"{"filePath":"src/main.rs"}"#},
+                    },
+                    {
+                        "id": "call_glob",
+                        "type": "function",
+                        "function": {"name": "glob", "arguments": r#"{"pattern":"**/*.rs"}"#},
+                    },
+                ]},
+                {"role": "tool", "content": "fn main() {}", "tool_call_id": "call_read"},
+                // A failure has nowhere to be flagged here, so it travels as
+                // the text the model reads.
+                {"role": "tool", "content": "no such directory", "tool_call_id": "call_glob"},
+                {"role": "user", "content": "thanks"},
+            ]),
+            "got {body}"
+        );
+    }
+
+    /// A turn cancelled while a tool was running leaves a call nobody answered,
+    /// and an assistant turn following an unanswered call is a request this API
+    /// refuses. Dropping the call instead would leave the reply talking about
+    /// one that is not there, so the pair is completed with a placeholder.
+    #[test]
+    fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
+        for state in [
+            ToolState::Pending,
+            ToolState::Running {
+                input: json!({"filePath": "src/main.rs"}),
+                started: 1,
+            },
+        ] {
+            let running = matches!(state, ToolState::Running { .. });
+            let mut assistant = Message::assistant("gpt-test");
+            assistant.parts.push(tool_part("call_read", "read", state));
+
+            let request = ChatRequest {
+                model: "gpt-test".to_owned(),
+                system: None,
+                messages: vec![Message::user("read src/main.rs"), assistant],
+                tools: Vec::new(),
+            };
+
+            let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+            assert_eq!(
+                body["messages"][1],
+                json!({"role": "assistant", "tool_calls": [{
+                    "id": "call_read",
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        // A call the model never finished streaming has no
+                        // arguments, and the field is required.
+                        "arguments": if running { r#"{"filePath":"src/main.rs"}"# } else { "{}" },
+                    },
+                }]}),
+                "a turn that only called a tool has no content to send: {body}"
+            );
+            assert_eq!(
+                body["messages"][2],
+                json!({
+                    "role": "tool",
+                    "content": NO_RESULT,
+                    "tool_call_id": "call_read",
+                }),
+                "an unanswered call must not reach the API unanswered: {body}"
+            );
+        }
+    }
+
+    /// Step markers are this crate's bookkeeping — where one model request
+    /// ended and the next began — rather than anything the model said, so a
+    /// message of nothing else is not a message at all. Text either side of one
+    /// is a single reply the calls interrupted, and this API has one content
+    /// string per message to put it in.
+    #[test]
+    fn step_markers_are_not_sent_and_the_text_around_them_is_joined() {
+        let mut assistant = Message::assistant("gpt-test");
+        assistant.parts.push(Part::text("Reading the file."));
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepFinish {
+                usage: Usage::default(),
+            },
+        });
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepStart,
+        });
+        assistant
+            .parts
+            .push(Part::text("It holds a main function."));
+
+        let mut markers_only = Message::assistant("gpt-test");
+        markers_only.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepStart,
+        });
+
+        let request = ChatRequest {
+            model: "gpt-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("hi"), assistant, markers_only],
+            tools: Vec::new(),
+        };
+
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": "Reading the file.\nIt holds a main function.",
+                },
+            ]),
+            "got {body}"
         );
     }
 

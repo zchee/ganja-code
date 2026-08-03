@@ -36,7 +36,17 @@ pub async fn run() -> Result<()> {
     let selection = provider::from_env().context("failed to select a provider")?;
     // The frontend keeps its own copy so that it can price a turn without
     // reaching into the engine for the model it was built with.
-    let engine = Engine::new(selection.provider, selection.model.clone());
+    //
+    // The registry carries every builtin tool the agent loop can execute;
+    // permission rules load for the project the terminal was opened in.
+    let engine = Engine::new(
+        selection.provider,
+        selection.model.clone(),
+        std::sync::Arc::new(ganja_core::Registry::with_builtins()),
+        ganja_core::Permissions::load(
+            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        ),
+    );
 
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_mouse() {
