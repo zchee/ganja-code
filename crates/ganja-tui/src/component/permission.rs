@@ -172,4 +172,46 @@ mod tests {
     fn a_zero_area_draws_nothing_and_does_not_panic() {
         rendered(&permission(), Rect::new(0, 0, 0, 0));
     }
+
+    /// The dialog renders text the model chose: `title` is built from the tool
+    /// call's own arguments. A title carrying a literal escape sequence must
+    /// never reach the terminal, where it could clear the screen, move the
+    /// cursor, or repaint the very prompt the user is about to answer — the one
+    /// moment in the session where what is on screen has to be trustworthy.
+    ///
+    /// Nothing in this crate strips it. `ratatui-core` filters control
+    /// characters twice, in `Span::styled_graphemes` (`text/span.rs`) and again
+    /// in `Buffer::set_stringn` (`buffer/buffer.rs`), both as
+    /// `filter(|g| !g.contains(char::is_control))`. That protection is
+    /// inherited, so it would vanish silently the day a component writes to the
+    /// backend or calls `Cell::set_symbol` itself. Pinned here so that day
+    /// fails a test instead of shipping.
+    #[test]
+    fn an_escape_sequence_in_a_title_never_reaches_the_buffer() {
+        let permission = Permission::new(
+            PermissionId::from("perm_1".to_owned()),
+            "shell".to_owned(),
+            "\u{1b}[2J\u{1b}[31mrm -rf /\u{7}".to_owned(),
+            serde_json::json!({ "command": "\u{1b}[2Jrm -rf /" }),
+        );
+
+        let screen = rendered(&permission, Rect::new(0, 0, 60, 18));
+
+        // `rendered` joins rows with a newline of its own; any other control
+        // character in the string got there from the dialog's own text.
+        let leaked: Vec<char> = screen
+            .chars()
+            .filter(|character| *character != '\n' && character.is_control())
+            .collect();
+
+        assert!(
+            leaked.is_empty(),
+            "control characters reached the buffer: {leaked:?}\n{screen}"
+        );
+        // Without this the assertion above would also pass on a blank screen.
+        assert!(
+            screen.contains("rm -rf /"),
+            "the printable remainder still has to render:\n{screen}"
+        );
+    }
 }

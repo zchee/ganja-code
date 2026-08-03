@@ -18,7 +18,7 @@ pub mod write;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
 
@@ -213,11 +213,62 @@ fn modification_stamp(path: &Path) -> Option<SystemTime> {
         .ok()
 }
 
+/// Where ganja keeps its own credentials, or [`None`] when this machine has no
+/// home directory to resolve a store against — in which case there is nothing
+/// here to protect.
+///
+/// Resolved once per process: the store cannot move while ganja runs, a guard
+/// that could be pointed somewhere harmless by setting an environment variable
+/// mid-run would not be worth much, and `grep` would otherwise re-derive the
+/// path for every file it walks past.
+fn credential_store() -> Option<&'static Path> {
+    static STORE: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    STORE
+        .get_or_init(|| crate::auth::store_path().ok())
+        .as_deref()
+}
+
+/// Whether `path` is ganja's credential store.
+///
+/// `read` and `grep` run without asking — that is what makes them usable — and
+/// both take a path the model chose, so without this a model acting on
+/// instructions it read in a file or a fetched page could put this machine's
+/// provider API keys straight into the transcript that is sent to a provider.
+///
+/// Only ganja's own store is guarded. Which *other* files hold secrets is a
+/// question only the user can answer, and a built-in half-answer would read as
+/// a promise this cannot keep.
+pub(crate) fn is_credential_store(path: &Path) -> bool {
+    credential_store().is_some_and(|store| is_same_file(path, store))
+}
+
+/// Whether `left` and `right` name the same file.
+///
+/// Both sides are canonicalized, so a link planted at an innocent name and a
+/// `..` route that climbs back down onto the store are caught rather than
+/// compared as text. Canonicalizing needs the path to exist and neither side is
+/// guaranteed to — the store is absent until the first `ganja auth login` — so
+/// a failure falls back to comparing what was written, made absolute. That
+/// fallback does not resolve `..`, which is what a missing file costs: a file
+/// that is not there has no contents to leak.
+fn is_same_file(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => match (std::path::absolute(left), std::path::absolute(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use super::{FileTimes, Registry, ToolError};
+    use super::{
+        FileTimes, Registry, ToolError, credential_store, is_credential_store, is_same_file,
+    };
 
     #[test]
     fn the_registry_finds_a_tool_by_id_and_misses_unknown_names() {
@@ -286,5 +337,78 @@ mod tests {
         times
             .check_fresh(&path)
             .expect("both handles see the same log");
+    }
+
+    #[test]
+    fn the_credential_store_guard_answers_for_the_store_and_not_for_a_namesake() {
+        let store = credential_store().expect("this machine has a home directory");
+
+        assert!(
+            is_credential_store(store),
+            "the guard has to recognize the store it exists to protect"
+        );
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let namesake = dir.path().join("auth.json");
+        std::fs::write(&namesake, "{}").expect("the fixture writes");
+
+        assert!(
+            !is_credential_store(&namesake),
+            "the guard is about which file this is, not what it is called"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_at_an_innocent_name_is_still_the_file_it_points_at() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let target = dir.path().join("auth.json");
+        std::fs::write(&target, "{}").expect("the fixture writes");
+        let planted = dir.path().join("notes.json");
+        std::os::unix::fs::symlink(&target, &planted).expect("the link plants");
+
+        assert!(
+            is_same_file(&planted, &target),
+            "a link is the file it points at, whatever it is called"
+        );
+    }
+
+    #[test]
+    fn a_route_that_climbs_out_and_back_down_lands_on_the_same_file() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let target = dir.path().join("auth.json");
+        std::fs::write(&target, "{}").expect("the fixture writes");
+        let nested = dir.path().join("one").join("two");
+        std::fs::create_dir_all(&nested).expect("the fixture nests");
+
+        let climbed = nested.join("..").join("..").join("auth.json");
+
+        assert!(
+            is_same_file(&climbed, &target),
+            "{} should resolve onto {}",
+            climbed.display(),
+            target.display()
+        );
+    }
+
+    #[test]
+    fn paths_that_cannot_be_canonicalized_are_compared_as_written() {
+        // Canonicalizing needs the file to be there, and the store is not until
+        // the first login: what is left to compare is the paths themselves.
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let absent = dir.path().join("ganja").join("auth.json");
+        let present = dir.path().join("auth.json");
+        std::fs::write(&present, "{}").expect("the fixture writes");
+
+        assert!(is_same_file(&absent, &absent));
+        assert!(is_same_file(&dir.path().join("./ganja/auth.json"), &absent));
+        assert!(!is_same_file(
+            &dir.path().join("ganja").join("other.json"),
+            &absent
+        ));
+        assert!(
+            !is_same_file(&present, &absent),
+            "a file that exists is not one that does not"
+        );
     }
 }
