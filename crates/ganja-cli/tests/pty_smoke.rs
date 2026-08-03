@@ -19,6 +19,12 @@ const STARTUP_GRACE: Duration = Duration::from_millis(500);
 /// wrapping.
 const REPLY_OPENING: &str = "Acknowledged";
 
+/// The prompt to type. Typing draws it one cell at a time — the terminal only
+/// receives the cells that changed — so this string only ever appears whole
+/// when the transcript draws it into blank cells, which is what makes it an
+/// assertion about the engine's user message rather than about the editor.
+const PROMPT: &str = "kaleidoscope";
+
 fn ganja() -> OsSession {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command.env("GANJA_PROVIDER", "fake");
@@ -65,9 +71,12 @@ fn control_c_quits_the_tui_cleanly() {
 fn a_submitted_prompt_streams_a_reply_before_quitting() {
     let mut session = ganja();
 
-    session.send("hello").expect("failed to type the prompt");
+    session.send(PROMPT).expect("failed to type the prompt");
     session.send("\r").expect("failed to send Enter");
 
+    session
+        .expect(PROMPT)
+        .expect("the engine's user message never reached the transcript");
     session
         .expect(REPLY_OPENING)
         .expect("the fake provider's reply never reached the transcript");

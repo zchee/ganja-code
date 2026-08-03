@@ -7,6 +7,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use async_trait::async_trait;
 use futures::{
     StreamExt as _,
     stream::{self, BoxStream},
@@ -14,14 +15,15 @@ use futures::{
 use ganja_core::{
     Command, Event, FinishReason,
     engine::{EVENT_CAPACITY, Engine},
-    provider::Provider,
+    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
 };
+use tokio_util::sync::CancellationToken;
 
 const EVENTS: usize = 10_000;
 
 /// How far the producer may drift from the queue ceiling before the assertion
 /// calls it unthrottled. The engine holds at most one fragment in flight while
-/// it waits for room.
+/// it waits for room, plus the three events that open a turn.
 const CEILING_SLACK: usize = 8;
 
 /// Fragments the consumer takes between pauses.
@@ -42,30 +44,38 @@ struct FloodProvider {
     produced: Arc<AtomicUsize>,
 }
 
+#[async_trait]
 impl Provider for FloodProvider {
     fn id(&self) -> &str {
         "flood"
     }
 
-    fn stream(&self, _prompt: &str) -> BoxStream<'static, String> {
+    async fn stream(
+        &self,
+        _request: ChatRequest,
+        _cancel: CancellationToken,
+    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
         let produced = Arc::clone(&self.produced);
 
-        stream::iter(0..self.count)
+        Ok(stream::iter(0..self.count)
             .map(move |index| {
                 produced.fetch_add(1, Ordering::SeqCst);
-                index.to_string()
+                ProviderEvent::TextDelta(index.to_string())
             })
-            .boxed()
+            .boxed())
     }
 }
 
 #[tokio::test]
 async fn a_slow_consumer_receives_every_event_in_order() {
     let produced = Arc::new(AtomicUsize::new(0));
-    let engine = Engine::new(Arc::new(FloodProvider {
-        count: EVENTS,
-        produced: Arc::clone(&produced),
-    }));
+    let engine = Engine::new(
+        Arc::new(FloodProvider {
+            count: EVENTS,
+            produced: Arc::clone(&produced),
+        }),
+        "flood-model",
+    );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -87,28 +97,39 @@ async fn a_slow_consumer_receives_every_event_in_order() {
         "the queue never filled, so backpressure was never exercised: {queued} fragments"
     );
 
-    assert_eq!(events.next().await, Some(Event::TurnStarted));
+    // A turn opens with both message envelopes and the part the fragments land
+    // in, before any fragment addresses it.
+    assert!(matches!(
+        events.next().await,
+        Some(Event::MessageStarted { .. })
+    ));
+    assert!(matches!(
+        events.next().await,
+        Some(Event::MessageStarted { .. })
+    ));
+    let Some(Event::PartStarted { part, .. }) = events.next().await else {
+        panic!("the reply's part should be announced before its fragments");
+    };
 
     for index in 0..EVENTS {
         if index.is_multiple_of(DRAIN_BATCH) {
             tokio::time::sleep(DRAIN_PAUSE).await;
         }
 
-        assert_eq!(
-            events.next().await,
-            Some(Event::TextDelta {
-                text: index.to_string()
-            }),
-            "fragment {index} arrived out of order or not at all"
-        );
+        let Some(Event::PartDelta { part_id, delta, .. }) = events.next().await else {
+            panic!("fragment {index} arrived out of order or not at all");
+        };
+        assert_eq!(part_id, part.id, "fragment {index} addressed another part");
+        assert_eq!(delta, index.to_string(), "fragment {index} arrived late");
     }
 
-    assert_eq!(
+    assert!(matches!(
         events.next().await,
-        Some(Event::TurnFinished {
-            reason: FinishReason::Completed
+        Some(Event::MessageFinished {
+            reason: FinishReason::Completed,
+            ..
         })
-    );
+    ));
     assert_eq!(
         produced.load(Ordering::SeqCst),
         EVENTS,

@@ -34,7 +34,7 @@ use crate::app::App;
 /// restored.
 pub async fn run() -> Result<()> {
     let selection = provider::from_env().context("failed to select a provider")?;
-    let engine = Engine::new(selection.provider);
+    let engine = Engine::new(selection.provider, selection.model);
 
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_mouse() {

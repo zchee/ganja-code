@@ -1,11 +1,16 @@
 //! The transcript viewport.
 //!
+//! The transcript is built from engine events alone — the frontend never
+//! invents an entry — so the same event stream replays into the same screen,
+//! which is what P4's resumed sessions and P7's remote clients depend on.
+//!
 //! Each entry caches the lines it wrapped to at a given width, so a frame costs
 //! one wrap per entry that actually changed plus a walk over the entries the
-//! viewport crosses — never a reflow of the whole transcript. P1 renders plain
+//! viewport crosses — never a reflow of the whole transcript. P2 renders plain
 //! text; P6 slots markdown parsing in ahead of the wrap as a second, width-
 //! independent cache stage.
 
+use ganja_core::{Message, MessageId, Part, PartId, Role};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Line};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
@@ -14,21 +19,11 @@ use crate::theme::Theme;
 /// Lines one wheel notch moves the viewport.
 pub const WHEEL_LINES: isize = 3;
 
-/// Who produced an entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Role {
-    /// Text the user submitted.
-    User,
-    /// Text the engine streamed back.
-    Assistant,
-}
-
-impl Role {
-    fn label(self) -> &'static str {
-        match self {
-            Self::User => "you",
-            Self::Assistant => "ganja",
-        }
+/// How an entry names who wrote it.
+fn label(role: Role) -> &'static str {
+    match role {
+        Role::User => "you",
+        Role::Assistant => "ganja",
     }
 }
 
@@ -44,8 +39,9 @@ pub struct Chat {
 
 #[derive(Debug)]
 struct Entry {
+    id: MessageId,
     role: Role,
-    text: String,
+    parts: Vec<Part>,
     wrapped: Option<Wrapped>,
 }
 
@@ -56,25 +52,52 @@ struct Wrapped {
 }
 
 impl Chat {
-    /// Appends a new entry and returns to following the tail.
-    pub fn push(&mut self, role: Role, text: String) {
+    /// Appends `message` and returns to following the tail.
+    pub fn start_message(&mut self, message: Message) {
         self.entries.push(Entry {
-            role,
-            text,
+            id: message.id,
+            role: message.role,
+            parts: message.parts,
             wrapped: None,
         });
         self.follow_tail();
     }
 
-    /// Extends the newest entry, which is how a streamed reply grows.
+    /// Appends a part to the message that is streaming.
     ///
-    /// Does nothing on an empty transcript: the engine always announces a turn
-    /// before its first fragment.
-    pub fn extend_last(&mut self, text: &str) {
-        if let Some(entry) = self.entries.last_mut() {
-            entry.text.push_str(text);
+    /// Does nothing for a message the transcript never saw start: an event
+    /// stream joined halfway is missing the entry, not broken.
+    pub fn start_part(&mut self, message_id: &MessageId, part: Part) {
+        if let Some(entry) = self.entry_mut(message_id) {
+            entry.parts.push(part);
             entry.wrapped = None;
         }
+    }
+
+    /// Extends a part, which is how a streamed reply grows.
+    pub fn append_delta(&mut self, message_id: &MessageId, part_id: &PartId, delta: &str) {
+        let Some(entry) = self.entry_mut(message_id) else {
+            return;
+        };
+
+        if let Some(text) = entry
+            .parts
+            .iter_mut()
+            .find(|part| part.id == *part_id)
+            .and_then(Part::as_text_mut)
+        {
+            text.push_str(delta);
+            entry.wrapped = None;
+        }
+    }
+
+    /// Finds an entry by id, newest first: deltas address the message that is
+    /// still streaming, which is the one at the end.
+    fn entry_mut(&mut self, message_id: &MessageId) -> Option<&mut Entry> {
+        self.entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.id == *message_id)
     }
 
     /// Moves the viewport by `delta` lines, negative being towards the top.
@@ -197,12 +220,16 @@ impl Entry {
             Role::Assistant => theme.fg,
         };
 
-        let mut lines = vec![Line::styled(self.role.label().to_owned(), theme.dim)];
-        lines.extend(
-            wrap(&self.text, usize::from(width))
-                .into_iter()
-                .map(|line| Line::styled(line, body_style)),
-        );
+        let mut lines = vec![Line::styled(label(self.role).to_owned(), theme.dim)];
+        // Parts wrap on their own so that P3's tool output can render
+        // differently without reflowing the text around it.
+        for text in self.parts.iter().filter_map(Part::as_text) {
+            lines.extend(
+                wrap(text, usize::from(width))
+                    .into_iter()
+                    .map(|line| Line::styled(line, body_style)),
+            );
+        }
         // Breathing room before the next entry.
         lines.push(Line::styled(String::new(), Style::default()));
 
@@ -276,9 +303,10 @@ fn split_at_width(text: &str, width: usize) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
+    use ganja_core::{Message, Part};
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    use super::{Chat, Role, split_at_width, wrap};
+    use super::{Chat, split_at_width, wrap};
     use crate::theme::Theme;
 
     const VIEWPORT: Rect = Rect {
@@ -287,6 +315,14 @@ mod tests {
         width: 20,
         height: 6,
     };
+
+    /// Fills a transcript the way the engine does: one complete user message
+    /// per entry.
+    fn transcript(chat: &mut Chat, entries: usize) {
+        for index in 0..entries {
+            chat.start_message(Message::user(format!("entry {index}")));
+        }
+    }
 
     fn rendered(chat: &mut Chat, area: Rect) -> Vec<String> {
         let mut buffer = Buffer::empty(area);
@@ -352,9 +388,7 @@ mod tests {
     #[test]
     fn a_new_entry_scrolls_into_view() {
         let mut chat = Chat::default();
-        for index in 0..20 {
-            chat.push(Role::Assistant, format!("entry {index}"));
-        }
+        transcript(&mut chat, 20);
 
         let lines = rendered(&mut chat, VIEWPORT);
 
@@ -368,9 +402,7 @@ mod tests {
     #[test]
     fn scrolling_up_pins_the_viewport_and_scrolling_back_down_releases_it() {
         let mut chat = Chat::default();
-        for index in 0..20 {
-            chat.push(Role::Assistant, format!("entry {index}"));
-        }
+        transcript(&mut chat, 20);
         rendered(&mut chat, VIEWPORT);
 
         chat.scroll_lines(-9);
@@ -388,9 +420,7 @@ mod tests {
     #[test]
     fn paging_moves_about_a_screenful() {
         let mut chat = Chat::default();
-        for index in 0..40 {
-            chat.push(Role::Assistant, format!("entry {index}"));
-        }
+        transcript(&mut chat, 40);
         rendered(&mut chat, VIEWPORT);
 
         chat.scroll_pages(-4);
@@ -406,9 +436,14 @@ mod tests {
     #[test]
     fn a_streamed_entry_grows_in_place() {
         let mut chat = Chat::default();
-        chat.push(Role::Assistant, String::new());
-        chat.extend_last("hello ");
-        chat.extend_last("world");
+        let reply = Message::assistant("canned");
+        let part = Part::text("");
+        chat.start_message(reply.clone());
+        chat.start_part(&reply.id, part.clone());
+
+        for fragment in ["hello ", "world"] {
+            chat.append_delta(&reply.id, &part.id, fragment);
+        }
 
         let lines = rendered(&mut chat, VIEWPORT);
 
@@ -418,10 +453,33 @@ mod tests {
         );
     }
 
+    /// Every part of a message renders, which is what keeps P3's tool output
+    /// from displacing the text around it.
     #[test]
-    fn extending_an_empty_transcript_is_a_no_op() {
+    fn a_message_renders_all_of_its_parts() {
         let mut chat = Chat::default();
-        chat.extend_last("orphan");
+        let reply = Message::assistant("canned");
+        chat.start_message(reply.clone());
+        for text in ["first", "second"] {
+            chat.start_part(&reply.id, Part::text(text));
+        }
+
+        let lines = rendered(&mut chat, VIEWPORT);
+
+        assert!(
+            lines.iter().any(|line| line == "first") && lines.iter().any(|line| line == "second"),
+            "both parts should render, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn events_for_a_message_the_transcript_never_saw_are_ignored() {
+        let mut chat = Chat::default();
+        let orphan = Message::assistant("canned");
+        let part = Part::text("");
+
+        chat.start_part(&orphan.id, part.clone());
+        chat.append_delta(&orphan.id, &part.id, "orphan");
 
         assert!(rendered(&mut chat, VIEWPORT).iter().all(String::is_empty));
     }
