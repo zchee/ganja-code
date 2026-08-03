@@ -360,8 +360,9 @@ impl App {
     /// provider still shows counts; dollars only appear once the catalog can
     /// price the model, because a made-up figure is worse than none.
     fn record(&mut self, usage: &Usage) {
-        // The three input counters are disjoint, so what a turn spent on the
-        // way in is their sum rather than `input_tokens` alone.
+        // The three input counters are disjoint — `Usage` says so, and each
+        // provider is what normalizes to it — so what a turn spent on the way
+        // in is their sum rather than `input_tokens` alone.
         let input = usage
             .input_tokens
             .saturating_add(usage.cache_read_tokens)
