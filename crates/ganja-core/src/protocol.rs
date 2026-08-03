@@ -42,7 +42,7 @@ pub(crate) fn now() -> u64 {
 /// lexicographically by creation time and cannot collide inside one process.
 /// Ordering across processes is only as good as the clock, which is the same
 /// guarantee upstream makes.
-fn ascending(prefix: &str) -> String {
+pub(crate) fn ascending(prefix: &str) -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     let millis = now();
@@ -145,14 +145,40 @@ pub enum Role {
 ///
 /// Cost stays out until there is a model table to price tokens against; the
 /// counts are what every provider reports and what P4 accumulates per session.
+///
+/// # The three input counters are disjoint
+///
+/// [`input_tokens`](Self::input_tokens), [`cache_read_tokens`](Self::cache_read_tokens)
+/// and [`cache_write_tokens`](Self::cache_write_tokens) never count the same
+/// token twice: what a prompt cost on the way in is their **sum**, and each is
+/// billed at its own rate, a cache read costing a fraction of fresh input.
+/// [`reasoning_tokens`](Self::reasoning_tokens) is the one exception and the
+/// only nesting here — it is a *subset* of [`output_tokens`](Self::output_tokens),
+/// which both providers already bill whole, so pricing it again would
+/// double-charge the thinking. `catalog::cost` and the frontend's session
+/// totals both read the counters that way.
+///
+/// **Normalizing to that shape is the provider's job**, because the vendors do
+/// not agree. Anthropic's Messages API reports its cache counts beside
+/// `input_tokens` and outside it, so its mapping is a copy. OpenAI's
+/// `prompt_tokens` is the whole prompt *including* the cached part, so its
+/// mapping subtracts `prompt_tokens_details.cached_tokens` before filling
+/// `input_tokens` in. A provider that hands its raw numbers straight through
+/// makes every consumer of this type over-report — silently, and worst on the
+/// heavily cached sessions where the counts matter most.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Usage {
-    /// Tokens the request cost.
+    /// Fresh input tokens: what the request cost that the cache did not serve.
+    ///
+    /// Disjoint from both cache counters — see the type's own documentation.
     pub input_tokens: u64,
-    /// Tokens the reply cost.
+    /// Tokens the reply cost, thinking included.
     pub output_tokens: u64,
     /// Output tokens the model spent thinking, where it reports them apart.
+    ///
+    /// A subset of [`output_tokens`](Self::output_tokens) rather than a count
+    /// beside it, which is why nothing prices it separately.
     pub reasoning_tokens: u64,
     /// Input tokens served from the provider's prompt cache.
     pub cache_read_tokens: u64,
