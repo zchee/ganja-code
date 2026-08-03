@@ -19,3 +19,6 @@ target
 
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
+
+# oh-my-claudecode operational state (plans, notepads, logs, handoffs)
+.omc/
