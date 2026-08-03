@@ -288,6 +288,20 @@ fn search(
             &matcher,
             path,
             UTF8(|line_number, line| {
+                // Deliberate divergence, and a shipped decision rather than an
+                // oversight: upstream keeps the line terminator that ripgrep's
+                // `lines.text` carries (`packages/core/src/ripgrep.ts:267` hands
+                // the field through untouched), and since `tool/grep.ts` then
+                // joins its rows with `\n`, upstream's output ends every match
+                // row with a blank line — including one *between* consecutive
+                // matches in the same file. Trimming per line is what makes this
+                // port's output readable, and readable is what was chosen.
+                //
+                // The golden differential compares grep's output against
+                // upstream's and therefore has to forgive exactly this one
+                // difference; `tests/golden.rs` names and documents that
+                // exception. Changing the trim here without changing it there
+                // will fail that comparison.
                 let text = clamp_match_text(line.trim_end_matches(['\n', '\r']));
                 matches.push(Match {
                     path: reported.clone(),
