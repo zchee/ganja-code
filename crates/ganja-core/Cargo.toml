@@ -6,3 +6,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[dependencies]
+futures.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+# `CancellationToken` lives behind `rt`; the workspace declaration carries no
+# features so crates opt into exactly the modules they use.
+tokio-util = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+serde_json.workspace = true

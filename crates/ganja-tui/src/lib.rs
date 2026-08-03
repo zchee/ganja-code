@@ -1,91 +1,68 @@
 //! ratatui frontend for ganja.
 //!
-//! P0 ships the shell only: an alternate-screen app whose single
-//! [`tokio::select!`] loop owns all UI state, renders a bordered
-//! [`ratatui_textarea::TextArea`] plus a hint bar, and exits cleanly. The chat
-//! viewport and the engine it talks to arrive with P1.
+//! The crate owns every pixel and no engine logic: it turns terminal events
+//! into [`Command`](ganja_core::Command)s and
+//! [`Event`](ganja_core::Event)s into frames.
+
+pub mod app;
+pub mod component;
+pub mod event;
+pub mod theme;
+
+use std::io::stdout;
 
 use anyhow::{Context as _, Result};
-use futures::StreamExt as _;
-use ratatui::{
-    DefaultTerminal, Frame,
-    crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    layout::{Constraint, Layout},
-    style::Stylize as _,
-    text::Line,
-    widgets::Block,
+use ganja_core::{Engine, provider};
+use ratatui::crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
+    execute,
 };
-use ratatui_textarea::TextArea;
 
-const HINT: &str = " q or Ctrl-C quits · every other key edits the message ";
+use crate::app::App;
 
 /// Runs the interactive terminal UI until the user quits.
 ///
 /// The terminal is restored on every exit path, including a panic: the hook
-/// installed by [`ratatui::try_init`] runs ahead of any other panic handler.
+/// installed here undoes mouse capture and then defers to the one
+/// [`ratatui::try_init`] installed, which leaves raw mode and the alternate
+/// screen.
 ///
 /// # Errors
 ///
-/// Returns an error if the terminal cannot be initialized, drawn to, read from,
-/// or restored.
+/// Returns an error if `GANJA_PROVIDER` names a provider this build does not
+/// have, or if the terminal cannot be initialized, drawn to, read from, or
+/// restored.
 pub async fn run() -> Result<()> {
-    let terminal = ratatui::try_init().context("failed to initialize the terminal")?;
-    let outcome = event_loop(terminal).await;
-    let restored = ratatui::try_restore().context("failed to restore the terminal");
+    let selection = provider::from_env().context("failed to select a provider")?;
+    let engine = Engine::new(selection.provider);
+
+    let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
+    let outcome = match capture_mouse() {
+        Ok(()) => App::new(engine, selection.notice).run(&mut terminal).await,
+        Err(error) => Err(error),
+    };
+    let restored = restore();
 
     outcome.and(restored)
 }
 
-async fn event_loop(mut terminal: DefaultTerminal) -> Result<()> {
-    let mut editor = TextArea::default();
-    editor.set_block(Block::bordered().title(" message "));
-    editor.set_placeholder_text("Ask ganja something…");
+/// Turns on wheel reporting and extends the panic hook to turn it back off.
+fn capture_mouse() -> Result<()> {
+    execute!(stdout(), EnableMouseCapture).context("failed to enable mouse reporting")?;
 
-    let mut terminal_events = EventStream::new();
-
-    loop {
-        terminal
-            .draw(|frame| draw(frame, &editor))
-            .context("failed to draw a frame")?;
-
-        tokio::select! {
-            event = terminal_events.next() => {
-                let Some(event) = event else {
-                    // The event source closed; nothing left to react to.
-                    break;
-                };
-                let event = event.context("failed to read a terminal event")?;
-
-                if let Event::Key(key) = event
-                    && key.kind != KeyEventKind::Release
-                {
-                    if is_quit(key) {
-                        break;
-                    }
-                    editor.input(key);
-                }
-            }
-            // Raw mode swallows Ctrl-C, so this arm only fires for a signal
-            // raised from outside the terminal, such as `kill -INT`.
-            _ = tokio::signal::ctrl_c() => break,
-        }
-    }
+    let installed = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(stdout(), DisableMouseCapture);
+        installed(info);
+    }));
 
     Ok(())
 }
 
-fn draw(frame: &mut Frame, editor: &TextArea) {
-    let [editor_area, hint_area] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
+fn restore() -> Result<()> {
+    let mouse =
+        execute!(stdout(), DisableMouseCapture).context("failed to disable mouse reporting");
+    let terminal = ratatui::try_restore().context("failed to restore the terminal");
 
-    frame.render_widget(editor, editor_area);
-    frame.render_widget(Line::from(HINT).dim(), hint_area);
-}
-
-fn is_quit(key: KeyEvent) -> bool {
-    match key.code {
-        KeyCode::Char('q') => true,
-        KeyCode::Char('c') => key.modifiers.contains(KeyModifiers::CONTROL),
-        _ => false,
-    }
+    mouse.and(terminal)
 }
