@@ -1,0 +1,50 @@
+<!-- Parent: ../AGENTS.md -->
+<!-- Generated: 2026-08-04 | Updated: 2026-08-04 -->
+
+# ganja-cli/tests
+
+## Purpose
+
+Assertions on the shipped binary rather than on library functions: the command-line surface, and a pty suite that drives the real terminal UI through a fake turn, a scripted tool chain, and every exit path.
+
+## Key Files
+
+| File | Description |
+|------|-------------|
+| `cli.rs` | The command-line surface — subcommands, credential storage, redaction. Every credential assertion is on the redacted tail: a test that printed a whole key would put it in CI output, which is the failure redaction exists to prevent. |
+| `pty_smoke.rs` | Unix-only (`#![cfg(unix)]`). Runs the binary under a pty: a fake turn streams into the transcript, a scripted turn runs a read, an edit and a shell command past the permission dialog, and the terminal is left restored however the process exits. |
+
+## For AI Agents
+
+### Working In This Directory
+
+**What a pty test may assert on** is the subtle part, and getting it wrong produces a flaky suite rather than an honest failure:
+
+- A terminal is only sent the cells that *changed*, so a string arrives whole only when it was drawn over cells it differs from everywhere — in practice, over blank ones. Anything drawn on top of other text comes back split around the characters that happened to already match. That is why the status bar is never waited for, and why scripted tests run in a window tall enough that the centered permission dialog lands *below* the transcript's last line rather than across it.
+- So the screen is used **for synchronization only**: waiting for the dialog, and waiting for the turn to reach its closing word. What a run actually proves is read back off the filesystem — the file the edit changed, the files the shell commands wrote, the rules an "always" answer stored.
+- Waiting for the dialog is safe because a step's tool calls are resolved after the model's stream ends, so no fragment of the reply can race the dialog open. A script's `cadence_ms` therefore only decides how long a run takes, never what it proves — which is why these wait for the options line rather than for a tool's name in the reply.
+
+### Testing Requirements
+
+```sh
+cargo test -p ganja-cli --test cli         # fast
+cargo test -p ganja-cli --test pty_smoke   # unix only, slower
+```
+
+A pty run drives the binary through `GANJA_PROVIDER=fake` with a `GANJA_FAKE_SCRIPT` written into a temp directory, and `XDG_DATA_HOME` redirected so stored permission rules land in the fixture, not in the real user's data directory.
+
+### Common Patterns
+
+Timeouts are generous on purpose (`EXIT_DEADLINE` is 10s): a timeout here should mean "hung", not "slow machine". Assert on stored files wherever a filesystem assertion is available; reach for the screen only when nothing else can observe the behavior.
+
+## Dependencies
+
+### Internal
+
+The built `ganja` binary, located by `assert_cmd`.
+
+### External
+
+`expectrl` (pty sessions, unix), `assert_cmd`, `predicates`, `tempfile`, `serde_json` (fake scripts and stored permission rules are JSON documents, not text).
+
+<!-- MANUAL: -->
