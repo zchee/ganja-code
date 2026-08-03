@@ -697,6 +697,19 @@ async fn an_over_budget_session_is_summarized_before_the_turn() {
         info.context_tokens, 222,
         "the last request's input replaces the over-budget measure"
     );
+    // Compaction is spend the user is on the hook for, so the session's
+    // running total has to carry the summarize request too — not just the
+    // turn that followed it. The script bills 111 and 222 input, 7 output
+    // each, against a seeded total of zero.
+    assert_eq!(
+        info.usage,
+        Usage {
+            input_tokens: 333,
+            output_tokens: 14,
+            ..Usage::default()
+        },
+        "the summarize request's own tokens belong in the session's usage"
+    );
     let transcript = storage
         .load_transcript(&sid)
         .expect("the transcript reloads");
