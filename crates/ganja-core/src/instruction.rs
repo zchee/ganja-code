@@ -117,16 +117,42 @@ pub fn system_prompt(config: &Config, cwd: &Path, model_id: &str) -> Option<Stri
     compose(&global_files(), config, cwd, model_id)
 }
 
+/// The half of the system prompt no agent replaces: the environment block and
+/// the instruction files, true of every agent working in `cwd`.
+///
+/// This is what `Engine::with_system_parts` takes as `suffix` — a switch swaps
+/// the base-or-agent half and keeps this one. Composed once like the rest of
+/// the prompt (D22), so after a mid-session model switch the environment block
+/// keeps naming the launch model.
+///
+/// Never [`None`] in practice — the environment block always says something —
+/// but typed to match its consumer.
+#[must_use]
+pub fn suffix(config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
+    suffix_from(&global_files(), config, cwd, model_id)
+}
+
 /// [`system_prompt`], with the global instruction candidates handed in.
 ///
 /// The split is what lets the tests below prove the composition without the
 /// machine running them contributing an `AGENTS.md` of its own — and the global
 /// candidates really are an input to discovery rather than something it knows.
 fn compose(global: &[PathBuf], config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
-    let mut prompt = String::with_capacity(base_prompt(model_id).len() * 2);
-    prompt.push_str(base_prompt(model_id));
+    let base = base_prompt(model_id);
+    let tail = suffix_from(global, config, cwd, model_id).unwrap_or_default();
+
+    let mut prompt = String::with_capacity(base.len() + tail.len() + 1);
+    prompt.push_str(base);
     prompt.push('\n');
-    prompt.push_str(&environment(cwd, model_id));
+    prompt.push_str(&tail);
+
+    (!prompt.is_empty()).then_some(prompt)
+}
+
+/// [`suffix`], with the global instruction candidates handed in — the same
+/// test seam [`compose`] has, for the same reason.
+fn suffix_from(global: &[PathBuf], config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
+    let mut prompt = environment(cwd, model_id);
 
     for path in discover(global, config, cwd) {
         // A file that cannot be read contributes nothing, exactly as an empty
