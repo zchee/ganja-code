@@ -87,16 +87,13 @@ ignore = false
 # Duplicate versions of a crate are common in a tree this size and not a
 # security issue by themselves; this only ever produces a warning.
 multiple-versions = "warn"
-# Tool default, kept explicit rather than left to defaults-may-change: every
-# workspace member depends on its siblings by path (`ganja-core.workspace =
-# true`), which cargo reports as an unversioned "*" requirement since a path
-# dep has no registry version to pin. `allow-wildcard-paths` cannot exempt
-# that here — cargo-deny only applies it to crates marked `publish = false`,
-# and none of these three set that field — so "deny" would hard-fail CI on
-# the workspace's own internal wiring, not a real supply-chain risk. "warn"
-# still surfaces a genuine external wildcard dependency without that false
-# positive.
-wildcards = "warn"
+# Path dependencies between workspace members surface as unversioned "*"
+# requirements (a path dep has no registry version to pin). With every member
+# marked `publish = false`, `allow-wildcard-paths` exempts exactly that
+# internal wiring, which is what lets a genuine external wildcard dependency
+# be a hard failure instead of a warning someone has to notice.
+wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
