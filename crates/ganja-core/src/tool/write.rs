@@ -529,6 +529,80 @@ mod tests {
         );
     }
 
+    /// Both halves of the `..` story, pinned together because they are one
+    /// decision and a refactor that collapsed them into a single rule would
+    /// break exactly one of them. The input shape is model-reachable: `grep`
+    /// hands back absolute paths that can carry a `..`, and the model hands
+    /// them straight to this tool.
+    ///
+    /// - A `..` popped on the way to a link leaves the *claim* inside the
+    ///   project, so the link at the end of it is still caught. Judge the
+    ///   claim without popping and it reads as external, and the escape walks
+    ///   out through the gap.
+    /// - A `..` that walks the claim out of the project is not this tool's
+    ///   call at all: it is openly external, indistinguishable from naming
+    ///   the destination outright, and the permission gate is what asks.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dot_dot_is_popped_before_the_claim_is_judged() {
+        // Nested on purpose, so `<cwd>/..` is a directory this test owns and
+        // the openly-external half below cannot litter the shared temp root.
+        let outer = tempfile::tempdir().expect("a scratch directory");
+        let project = outer.path().join("project");
+        let elsewhere = outer.path().join("elsewhere");
+        for dir in [
+            &project,
+            &project.join(".git"),
+            &project.join("nested"),
+            &elsewhere,
+        ] {
+            std::fs::create_dir(dir).expect("the fixture makes its directories");
+        }
+
+        // Half one: `..` popped, then a link that leaves the project anyway.
+        let secret = elsewhere.join("secret.txt");
+        std::fs::write(&secret, "before").expect("the fixture writes");
+        std::os::unix::fs::symlink(&secret, project.join("escape.txt"))
+            .expect("the link is creatable");
+
+        let context = ctx(project.clone());
+        context
+            .files
+            .record(&project.join("nested").join("..").join("escape.txt"));
+        let refused = WriteTool
+            .run(
+                serde_json::json!({ "filePath": "nested/../escape.txt", "content": "after" }),
+                &context,
+            )
+            .await
+            .expect_err("`nested/..` is the project, and the link still leaves it");
+
+        assert!(
+            matches!(&refused, ToolError::Failed(message) if message.contains("symbolic link")),
+            "got {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&secret).expect("the file outside still exists"),
+            "before",
+            "a `..` earlier in the path hid the link from the guard"
+        );
+
+        // Half two: `..` that walks out. The guard stands aside; the gate asks.
+        WriteTool
+            .run(
+                serde_json::json!({ "filePath": "../outside.txt", "content": "gated" }),
+                &ctx(project),
+            )
+            .await
+            .expect("an openly external `..` is the gate's decision, not a refusal here");
+
+        assert_eq!(
+            std::fs::read_to_string(outer.path().join("outside.txt"))
+                .expect("the file was written"),
+            "gated"
+        );
+    }
+
     /// A path that is openly outside the project — however it is spelled, `..`
     /// included — is the permission gate's decision and not this tool's: the
     /// user is asked about that directory (`permission.rs`, `outside`, which
