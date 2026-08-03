@@ -17,9 +17,14 @@
 //! of — are carried through a rewrite untouched instead of being dropped, so
 //! `ganja auth login` can never cost someone a credential it did not understand.
 //!
-//! Secrets never reach a log. [`Credential`] renders as its last four
-//! characters through both [`Debug`] and [`Display`], and nothing in this module
-//! formats a whole key.
+//! Secrets never reach a log. Key material is held in a [`SecretString`], whose
+//! own [`Debug`] is a placeholder and whose contents are wiped when the last
+//! handle drops; [`Credential`] renders as its last four characters through both
+//! [`Debug`] and [`Display`], and nothing in this module formats a whole key.
+//!
+//! The file is replaced by writing a sibling and renaming it into place. That
+//! sibling is created exclusively, because its name is predictable and a
+//! symbolic link planted at it would otherwise redirect the write.
 
 use std::{
     collections::BTreeMap,
@@ -31,6 +36,7 @@ use std::{
 use std::os::unix::fs::PermissionsExt as _;
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
+use secrecy::{ExposeSecret as _, SecretString, zeroize::Zeroize as _};
 use serde::Deserialize;
 use serde_json::{Value, error::Category};
 
@@ -95,6 +101,15 @@ impl RedactedTail {
         Self(format!("{MASK}{visible}"))
     }
 
+    /// Same, for key material that has not been unwrapped.
+    ///
+    /// Public so that a caller holding a secret never has to expose one to say
+    /// which key it is holding.
+    #[must_use]
+    pub fn of_secret(secret: &SecretString) -> Self {
+        Self::of(secret.expose_secret())
+    }
+
     /// The redacted form, for a caller that needs to place it in a table.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -116,18 +131,32 @@ impl fmt::Debug for RedactedTail {
     }
 }
 
+/// Whether a secret carries nothing but whitespace, which is not a credential.
+fn is_blank(secret: &SecretString) -> bool {
+    secret.expose_secret().trim().is_empty()
+}
+
 /// An API key, and the only thing a provider needs to authenticate.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// The key is held in a [`SecretString`], so reading it back takes an explicit
+/// `expose_secret` — this module has three: [`RedactedTail::of_secret`] and
+/// [`is_blank`], which exist to avoid using the key rather than to use it, and
+/// [`Store::set`], which has to hand the plaintext to the serializer that
+/// writes it to disk — and the material is wiped when the last handle drops
+/// along every path this module controls. There is deliberately no `PartialEq`:
+/// comparing secrets is not something this crate needs, and an implementation
+/// of it would be a timing oracle nobody asked for.
+#[derive(Clone)]
 pub struct Credential {
     /// The key itself, as the provider expects it in a header.
-    pub api_key: String,
+    pub api_key: SecretString,
 }
 
 impl Credential {
     /// The key as it may be shown.
     #[must_use]
     pub fn tail(&self) -> RedactedTail {
-        RedactedTail::of(&self.api_key)
+        RedactedTail::of_secret(&self.api_key)
     }
 }
 
@@ -250,7 +279,7 @@ enum Stored {
     /// A plain API key.
     Api {
         /// The key.
-        key: String,
+        key: SecretString,
     },
     /// Something this build cannot authenticate with.
     #[serde(other)]
@@ -299,9 +328,15 @@ impl Store {
         };
         check_private(&self.path, &metadata)?;
 
-        let bytes = fs::read(&self.path).map_err(|source| self.io("could not be read", source))?;
+        let mut bytes =
+            fs::read(&self.path).map_err(|source| self.io("could not be read", source))?;
+        let parsed = serde_json::from_slice(&bytes);
+        // This held every stored key in plaintext; the parse has taken what it
+        // needs, so there is no reason to leave it in the heap to be handed to
+        // the next allocation or written to a core dump.
+        bytes.zeroize();
 
-        serde_json::from_slice(&bytes).map_err(|error| AuthError::malformed(&self.path, &error))
+        parsed.map_err(|error| AuthError::malformed(&self.path, &error))
     }
 
     /// Replaces the file's contents.
@@ -328,7 +363,11 @@ impl Store {
         let temporary = self
             .path
             .with_file_name(format!("{FILE}.{}.tmp", std::process::id()));
-        write_private(&temporary, &json).map_err(|source| AuthError::Io {
+        let written = write_private(&temporary, &json);
+        // Wiped whether or not the write landed, and before the `?`: the buffer
+        // holds every stored key in plaintext and the file now has its own copy.
+        json.zeroize();
+        written.map_err(|source| AuthError::Io {
             context: format!("{} could not be written", temporary.display()),
             source,
         })?;
@@ -349,11 +388,15 @@ impl Store {
             .map(|api_key| Credential { api_key }))
     }
 
-    fn set(&self, provider_id: &str, api_key: &str) -> Result<(), AuthError> {
+    /// Stores `api_key`, exposing it exactly once: the serializer that puts it
+    /// on disk needs the plaintext, and there is no way to write a file without
+    /// the bytes that go in it.
+    fn set(&self, provider_id: &str, api_key: impl Into<SecretString>) -> Result<(), AuthError> {
+        let api_key = api_key.into();
         let mut data = self.read()?;
         data.insert(
             provider_id.to_owned(),
-            serde_json::json!({ "type": "api", "key": api_key }),
+            serde_json::json!({ "type": "api", "key": api_key.expose_secret() }),
         );
 
         self.write(&data)
@@ -375,7 +418,7 @@ impl Store {
             .read()?
             .iter()
             .filter_map(|(provider_id, value)| {
-                usable_key(value).map(|key| (provider_id.clone(), RedactedTail::of(&key)))
+                usable_key(value).map(|key| (provider_id.clone(), RedactedTail::of_secret(&key)))
             })
             .collect())
     }
@@ -385,11 +428,17 @@ impl Store {
 ///
 /// An entry storing an empty key is treated as absent rather than as a
 /// credential that will fail at the provider with a confusing message.
-fn usable_key(value: &Value) -> Option<String> {
+///
+/// The whole file has already been parsed into [`Value`]s by the time this is
+/// called, which is what carrying unknown entries through a rewrite costs: for
+/// the length of a read, every key in the file exists as a plain `String`
+/// inside `serde_json`. Wrapping starts here because this is the first point
+/// at which one value is known to be a credential.
+fn usable_key(value: &Value) -> Option<SecretString> {
     match serde_json::from_value::<Stored>(value.clone()) {
         // An entry that does not decode at all is somebody else's — upstream
         // filters the same way rather than failing the whole read.
-        Ok(Stored::Api { key }) if !key.trim().is_empty() => Some(key),
+        Ok(Stored::Api { key }) if !is_blank(&key) => Some(key),
         _ => None,
     }
 }
@@ -415,29 +464,59 @@ fn check_private(_path: &Path, _metadata: &fs::Metadata) -> Result<(), AuthError
     Ok(())
 }
 
-/// Writes `bytes` to a file only its owner can read, creating or truncating it.
+/// Creates `path`, failing if anything is already there.
+///
+/// `create_new` is `O_CREAT | O_EXCL`, which does not follow a symbolic link at
+/// the final component. That is the whole point: the temporary file's name is
+/// derived from the process id, so anyone sharing the machine can predict it
+/// and plant a link pointing at a file of their choosing, and an opening that
+/// followed it would write every stored key wherever the link led.
 #[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
+fn create_private(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     // The mode is set at creation rather than afterwards so that the file is
     // never, even briefly, readable by anyone else.
-    let mut file = fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(PRIVATE)
-        .open(path)?;
-    // An existing temporary file keeps its old mode, so this fixes one up.
+        .open(path)
+}
+
+/// Windows has no mode bits to set; its ACLs are a P7 problem.
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// Writes `bytes` to a newly created file only its owner can read.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let mut file = match create_private(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            // Either a write that crashed before its rename, or something
+            // planted to catch this one. Unlinking the name and creating it
+            // again exclusively settles both without widening the window: what
+            // is removed is the name, never whatever it pointed at, and a
+            // second link planted in between fails the retry outright.
+            fs::remove_file(path)?;
+            create_private(path)?
+        }
+        result => result?,
+    };
+    // `open` masks the mode with the process umask, so a narrow umask could
+    // leave the file unreadable to the owner that has to rename and reread it.
+    // This is on the descriptor, not the path, so it cannot be redirected.
+    #[cfg(unix)]
     file.set_permissions(fs::Permissions::from_mode(PRIVATE))?;
     file.write_all(bytes)?;
 
     file.sync_all()
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    fs::write(path, bytes)
 }
 
 /// The API key `provider_id`'s environment variable carries.
@@ -446,11 +525,17 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// `$(cat …)` arrives with a newline that would corrupt the request header. An
 /// exported-but-empty variable reads as unset: that is how a shell says "not
 /// for this command", and it must not shadow a stored key.
-fn key_from_env(provider_id: &str) -> Option<String> {
-    let value = env::var(key_var(provider_id)?).ok()?;
+fn key_from_env(provider_id: &str) -> Option<SecretString> {
+    let mut value = env::var(key_var(provider_id)?).ok()?;
     let trimmed = value.trim();
+    let key = (!trimmed.is_empty()).then(|| SecretString::from(trimmed));
+    // The copy `env::var` handed back is wiped, so that this module's own
+    // plaintext does not outlive the call. The environment block itself still
+    // holds the value — that is how it was passed in, and not this module's to
+    // clear — so this narrows the exposure rather than ending it.
+    value.zeroize();
 
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    key
 }
 
 /// Where credentials are stored.
@@ -490,7 +575,10 @@ pub fn credential_for(provider_id: &str) -> Result<Option<Credential>, AuthError
 ///
 /// Returns [`AuthError`] when the existing file cannot be read or the new one
 /// cannot be written.
-pub fn set_credential(provider_id: &str, api_key: &str) -> Result<(), AuthError> {
+pub fn set_credential(
+    provider_id: &str,
+    api_key: impl Into<SecretString>,
+) -> Result<(), AuthError> {
     Store::open()?.set(provider_id, api_key)
 }
 
@@ -521,7 +609,7 @@ pub fn list_providers() -> Result<Vec<Entry>, AuthError> {
         .filter_map(|(provider_id, variable)| {
             key_from_env(provider_id).map(|key| Entry {
                 provider_id: (*provider_id).to_owned(),
-                tail: RedactedTail::of(&key),
+                tail: RedactedTail::of_secret(&key),
                 source: Source::Environment(variable),
             })
         })
@@ -552,6 +640,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
+    use secrecy::{ExposeSecret as _, SecretString};
     use tempfile::TempDir;
 
     use super::{
@@ -562,6 +651,13 @@ mod tests {
     /// A key that exists only to be hunted for in output. Nothing may print it
     /// whole.
     const CANARY: &str = "sk-canary-8842";
+
+    /// The key a lookup found, for a test that has to prove a whole key round
+    /// tripped rather than just its tail. [`Credential`] has no `PartialEq`, on
+    /// purpose, so this is how a test compares one.
+    fn key_of(credential: Option<Credential>) -> Option<String> {
+        credential.map(|credential| credential.api_key.expose_secret().to_owned())
+    }
 
     /// Serializes the tests that read or write process-wide environment
     /// variables. `cargo test` runs a binary's tests on a thread pool, and
@@ -633,7 +729,7 @@ mod tests {
         let store = store(&directory);
 
         assert_eq!(
-            store.get("anthropic").expect("a missing file is fine"),
+            key_of(store.get("anthropic").expect("a missing file is fine")),
             None
         );
         assert!(store.stored().expect("a missing file is fine").is_empty());
@@ -648,10 +744,8 @@ mod tests {
         store.set("anthropic", CANARY).expect("the key stores");
 
         assert_eq!(
-            store.get("anthropic").expect("the key reads back"),
-            Some(Credential {
-                api_key: CANARY.to_owned()
-            })
+            key_of(store.get("anthropic").expect("the key reads back")),
+            Some(CANARY.to_owned())
         );
         assert_eq!(
             store.stored().expect("the listing reads"),
@@ -659,7 +753,10 @@ mod tests {
         );
 
         assert!(store.remove("anthropic").expect("the key is removable"));
-        assert_eq!(store.get("anthropic").expect("the file still reads"), None);
+        assert_eq!(
+            key_of(store.get("anthropic").expect("the file still reads")),
+            None
+        );
     }
 
     /// The file shape is upstream's, so that the two tools can eventually read
@@ -704,7 +801,10 @@ mod tests {
             .expect("the fixture is made private");
 
         // The OAuth entry is not a usable API key, so it is not offered.
-        assert_eq!(store.get("anthropic").expect("the file reads"), None);
+        assert_eq!(
+            key_of(store.get("anthropic").expect("the file reads")),
+            None
+        );
         assert_eq!(
             store.stored().expect("the listing reads"),
             vec![("openai".to_owned(), RedactedTail::of("sk-old-0001"))]
@@ -725,10 +825,8 @@ mod tests {
         assert_eq!(rewritten["openai"], original["openai"]);
         assert_eq!(rewritten["anthropic"]["type"], "api");
         assert_eq!(
-            store.get("anthropic").expect("the new key reads back"),
-            Some(Credential {
-                api_key: CANARY.to_owned()
-            })
+            key_of(store.get("anthropic").expect("the new key reads back")),
+            Some(CANARY.to_owned())
         );
     }
 
@@ -738,7 +836,7 @@ mod tests {
         let store = store(&directory);
         store.set("openai", "   ").expect("the entry stores");
 
-        assert_eq!(store.get("openai").expect("the file reads"), None);
+        assert_eq!(key_of(store.get("openai").expect("the file reads")), None);
         assert!(store.stored().expect("the listing reads").is_empty());
     }
 
@@ -801,6 +899,77 @@ mod tests {
         );
     }
 
+    /// The store is written through a temporary file whose name is derived from
+    /// the process id, so anyone else on the machine can work out what it will
+    /// be called and plant a symbolic link there first. An open that followed
+    /// it would write every stored key wherever the link led — and then rename
+    /// the link itself over `auth.json`, leaving the store pointing at it. The
+    /// open is exclusive, so it refuses the name instead of following it.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_at_the_temporary_file_cannot_redirect_the_write() {
+        let directory = temporary();
+        let store = store(&directory);
+
+        let target = directory.path().join("somewhere-else");
+        fs::write(&target, b"not a credential store").expect("the target writes");
+        let planted = directory
+            .path()
+            .join(format!("auth.json.{}.tmp", std::process::id()));
+        std::os::unix::fs::symlink(&target, &planted).expect("the link plants");
+
+        store
+            .set("anthropic", CANARY)
+            .expect("the key still stores");
+
+        assert_eq!(
+            fs::read_to_string(&target).expect("the target still exists"),
+            "not a credential store",
+            "the write followed a planted link"
+        );
+        assert_eq!(
+            key_of(store.get("anthropic").expect("the store reads back")),
+            Some(CANARY.to_owned()),
+            "refusing the planted name must not cost the write"
+        );
+        assert!(
+            !planted.is_symlink(),
+            "the temporary file should not outlive the write"
+        );
+        assert!(
+            !fs::read_to_string(&store.path)
+                .expect("the store exists")
+                .is_empty(),
+            "the store should hold the key, not be a link to somewhere else"
+        );
+    }
+
+    /// The other half of creating the temporary file exclusively: a write that
+    /// died between creating it and renaming it leaves the name behind, and a
+    /// build that only ever refused an existing name would then never be able
+    /// to store a key again until someone deleted a file they have no reason to
+    /// know about. The name is removed and re-created, so a crash costs
+    /// nothing.
+    #[test]
+    fn a_temporary_file_left_by_a_crashed_write_does_not_wedge_the_store() {
+        let directory = temporary();
+        let store = store(&directory);
+        let stale = directory
+            .path()
+            .join(format!("auth.json.{}.tmp", std::process::id()));
+        fs::write(&stale, b"{ half a write that never landed").expect("the stale file writes");
+
+        store
+            .set("anthropic", CANARY)
+            .expect("the key still stores");
+
+        assert_eq!(
+            key_of(store.get("anthropic").expect("the store reads back")),
+            Some(CANARY.to_owned())
+        );
+        assert!(!stale.exists(), "the stale file should have been consumed");
+    }
+
     /// A key readable by other users of the machine is already compromised;
     /// reading it anyway would hide that.
     #[cfg(unix)]
@@ -836,7 +1005,7 @@ mod tests {
     #[test]
     fn nothing_renders_a_whole_key() {
         let credential = Credential {
-            api_key: CANARY.to_owned(),
+            api_key: SecretString::from(CANARY),
         };
         let tail = credential.tail();
         let entry = Entry {
@@ -869,6 +1038,14 @@ mod tests {
         // A key too short to have a tail still shows nothing of itself.
         assert_eq!(RedactedTail::of("ab").as_str(), "****ab");
         assert_eq!(RedactedTail::of("").as_str(), "****");
+
+        // The field is public, so something that renders it directly rather
+        // than going through `Credential` has to be redacted too.
+        let field = format!("{:?}", credential.api_key);
+        assert!(
+            !field.contains(CANARY) && field.contains("REDACTED"),
+            "the key material renders itself: {field}"
+        );
     }
 
     #[test]
@@ -893,7 +1070,7 @@ mod tests {
         assert_eq!(store_path().expect("the path resolves"), expected);
 
         assert_eq!(
-            credential_for("anthropic").expect("an empty environment is fine"),
+            key_of(credential_for("anthropic").expect("an empty environment is fine")),
             None
         );
         assert!(list_providers().expect("the listing reads").is_empty());
@@ -901,9 +1078,7 @@ mod tests {
         set_credential("anthropic", "sk-stored-0001").expect("the key stores");
         assert!(expected.is_file(), "the parent directories are created");
         assert_eq!(
-            credential_for("anthropic")
-                .expect("the stored key reads")
-                .map(|credential| credential.api_key),
+            key_of(credential_for("anthropic").expect("the stored key reads")),
             Some("sk-stored-0001".to_owned())
         );
         assert_eq!(
@@ -917,9 +1092,7 @@ mod tests {
 
         set_env("ANTHROPIC_API_KEY", Some(CANARY));
         assert_eq!(
-            credential_for("anthropic")
-                .expect("the environment reads")
-                .map(|credential| credential.api_key),
+            key_of(credential_for("anthropic").expect("the environment reads")),
             Some(CANARY.to_owned()),
             "the environment has to win"
         );
@@ -936,17 +1109,13 @@ mod tests {
         // exported-but-empty variable falls through to the stored key.
         set_env("ANTHROPIC_API_KEY", Some("  sk-padded-0002\n"));
         assert_eq!(
-            credential_for("anthropic")
-                .expect("the environment reads")
-                .map(|credential| credential.api_key),
+            key_of(credential_for("anthropic").expect("the environment reads")),
             Some("sk-padded-0002".to_owned())
         );
 
         set_env("ANTHROPIC_API_KEY", Some("   "));
         assert_eq!(
-            credential_for("anthropic")
-                .expect("the stored key reads")
-                .map(|credential| credential.api_key),
+            key_of(credential_for("anthropic").expect("the stored key reads")),
             Some("sk-stored-0001".to_owned()),
             "an empty variable must not shadow a stored key"
         );

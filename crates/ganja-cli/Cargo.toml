@@ -20,6 +20,9 @@ ganja-tui.workspace = true
 # the same crossterm instance the UI drives so the two cannot disagree about
 # terminal state.
 ratatui.workspace = true
+# A typed or piped key is wrapped the moment it is whole, and the buffer it was
+# assembled in is wiped rather than left in the heap.
+secrecy.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

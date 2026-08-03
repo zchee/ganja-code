@@ -18,6 +18,7 @@ use std::{
 };
 
 use reqwest::header::HeaderMap;
+use secrecy::zeroize::Zeroize as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::provider::{ApiKey, ProviderError};
@@ -128,15 +129,16 @@ pub(super) async fn send(
 /// Turns a final non-2xx response into the error the turn reports.
 async fn refusal(response: reqwest::Response, key: &ApiKey) -> ProviderError {
     let status = response.status().as_u16();
-    let body = response.text().await.unwrap_or_default();
+    let mut body = response.text().await.unwrap_or_default();
+    // A provider that quotes the credential it refused is a real shape, and
+    // this is the one place that text becomes an error message and a log line,
+    // so it is the one place the quote has to be masked.
+    let message = key.redact(&summarize(&body));
+    // The unmasked body was one of those quotes; the masked copy is the only
+    // one anything downstream should be able to find.
+    body.zeroize();
 
-    ProviderError::Status {
-        status,
-        // A provider that quotes the credential it refused is a real shape, and
-        // this is the one place that text becomes an error message and a log
-        // line, so it is the one place the quote has to be masked.
-        message: key.redact(&summarize(&body)),
-    }
+    ProviderError::Status { status, message }
 }
 
 /// Trims an error body to something a status bar can hold, on a char boundary.

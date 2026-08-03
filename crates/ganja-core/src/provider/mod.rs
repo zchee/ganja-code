@@ -14,6 +14,28 @@
 //! request that never starts streaming fails the call to [`Provider::stream`];
 //! one that dies mid-stream yields [`ProviderEvent::Failed`]. The engine turns
 //! both into a `Failed` finish carrying the message.
+//!
+//! # Where a credential can travel
+//!
+//! Both HTTP providers authenticate with a header, so every hop the request
+//! takes is a party that sees the key. Three things bound that set, and all
+//! three are here rather than in the individual providers:
+//!
+//! - Redirects are not followed ([`client`]). `reqwest` strips `Authorization`
+//!   across hosts but knows nothing about Anthropic's `x-api-key`, so a 3xx
+//!   from a hijacked endpoint would hand the key to whatever it names. These
+//!   are one-shot `POST`s that never legitimately redirect.
+//! - The endpoint must be `https`, or loopback ([`check_base_url`]). The base
+//!   URL is environment-controlled, and plain HTTP to anywhere else puts the
+//!   key on the wire in the clear.
+//! - `reqwest` is built with its `system-proxy` feature, so `HTTPS_PROXY`,
+//!   `HTTP_PROXY` and `ALL_PROXY` in the environment redirect provider traffic
+//!   through a proxy of their choosing. That is deliberate — a corporate
+//!   network is frequently only reachable that way — but it is a trust
+//!   boundary: whoever sets those variables chooses who terminates the
+//!   connection. For an `https` endpoint a proxy sees a `CONNECT` tunnel it
+//!   cannot read without a certificate the machine already trusts; for a
+//!   loopback endpoint no proxy is used.
 
 use std::{
     collections::VecDeque,
@@ -27,7 +49,10 @@ use futures::{
     Stream, StreamExt as _,
     stream::{self, BoxStream},
 };
+use reqwest::Url;
+use secrecy::{ExposeSecret as _, SecretString};
 use tokio_util::sync::CancellationToken;
+use url::Host;
 
 use crate::{
     auth, catalog,
@@ -162,32 +187,34 @@ pub trait Provider: Send + Sync {
 
 /// An API key.
 ///
-/// The only way to read one is [`ApiKey::expose`], which exists so that a
-/// grep for it finds every place a credential leaves the type. Everything else
-/// — [`fmt::Debug`], and therefore every `tracing` field that renders a
-/// provider — sees a placeholder.
-#[derive(Clone, PartialEq, Eq)]
-struct ApiKey(String);
+/// The only way to read one is [`ApiKey::expose`], which is the single place in
+/// this crate's provider code that calls `expose_secret`, so that a grep for
+/// either finds every place a credential leaves the type. Everything else —
+/// [`fmt::Debug`], and therefore every `tracing` field that renders a provider
+/// — sees a placeholder, and the key material is wiped when the last handle to
+/// it drops.
+#[derive(Clone)]
+struct ApiKey(SecretString);
 
 impl ApiKey {
     /// Wraps a credential, rejecting a blank one so that an exported-but-empty
     /// variable fails at startup rather than as a 401 mid-turn.
-    fn new(key: impl Into<String>) -> Option<Self> {
-        let key = key.into();
+    fn new(key: impl Into<SecretString>) -> Option<Self> {
+        let key = Self(key.into());
 
-        (!key.trim().is_empty()).then_some(Self(key))
+        (!key.expose().trim().is_empty()).then_some(key)
     }
 
     /// The credential itself, for putting on the wire.
     fn expose(&self) -> &str {
-        &self.0
+        self.0.expose_secret()
     }
 
     /// Replaces the credential with a placeholder wherever it appears in
     /// `text`, so that a provider echoing back the key it rejected cannot put
     /// it in an error message or a log line.
     fn redact(&self, text: &str) -> String {
-        text.replace(&self.0, "[redacted]")
+        text.replace(self.expose(), "[redacted]")
     }
 }
 
@@ -195,6 +222,99 @@ impl fmt::Debug for ApiKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ApiKey([redacted])")
     }
+}
+
+/// Builds the HTTP client both providers send with.
+///
+/// Shared so that the redirect policy cannot be forgotten by whichever provider
+/// is added next: a turn is a single `POST` that no endpoint has a reason to
+/// redirect, and `reqwest` only strips the headers it knows are credentials —
+/// `Authorization` and friends — leaving Anthropic's `x-api-key` to be handed
+/// to whatever host a 3xx names.
+///
+/// # Errors
+///
+/// Returns [`ProviderError::Transport`] when no client can be built, which in
+/// practice means the TLS backend failed to initialize.
+fn client() -> Result<reqwest::Client, ProviderError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| ProviderError::Transport(format!("no HTTP client: {error}")))
+}
+
+/// Refuses a base URL that would put the credential on the wire in the clear.
+///
+/// Plain HTTP is allowed to loopback and nowhere else: the bytes never reach a
+/// network there, which is what the test suite and a local inference server
+/// both rely on. Everything else has to be `https`, because the key travels in
+/// a header on every request.
+///
+/// The URL is deliberately absent from every message. A base URL is
+/// configuration, and configuration is allowed to carry credentials in its
+/// userinfo, so echoing it back is how a key reaches a log.
+///
+/// The host is compared as a parsed host and never as text. Every cheap way of
+/// spelling this check is bypassable — `http://127.0.0.1.evil.com` beats a
+/// prefix match, `http://127.0.0.1@evil.com` beats a substring match, and
+/// `http://localhost.evil.com` beats a "starts with localhost" match — and all
+/// three are ordinary hosts belonging to whoever registered them.
+fn check_base_url(base_url: &str) -> Result<(), ProviderError> {
+    let parsed = Url::parse(base_url)
+        .map_err(|error| ProviderError::Transport(format!("the base URL is not a URL: {error}")))?;
+
+    // `Url` has already done the parsing that makes this safe: whatever sits
+    // before an `@` is userinfo and never reaches `host()`, and a host that
+    // merely contains an address is a domain, not that address.
+    let loopback = match parsed.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        // Only the exact name. RFC 6761 reserves everything under `.localhost`
+        // for loopback too, but that is a promise about resolvers rather than
+        // one the resolver on this machine has to keep, and a suffix match is
+        // the shape of bypass this function exists to refuse.
+        Some(Host::Domain(name)) => name == "localhost",
+        None => false,
+    };
+
+    if parsed.scheme() == "https" || (parsed.scheme() == "http" && loopback) {
+        return Ok(());
+    }
+
+    Err(ProviderError::Transport(
+        "the base URL must be https, or http to loopback; anything else puts the \
+         API key on the wire in the clear"
+            .to_owned(),
+    ))
+}
+
+/// A base URL as it may be shown.
+///
+/// [`check_base_url`] treats a URL carrying credentials in its userinfo as
+/// legitimate configuration, and a gateway URL is somewhere people put a token
+/// in a query string too. Both are therefore credentials this crate holds for
+/// the length of a session, and neither may reach a rendering — which is what
+/// a provider's [`fmt::Debug`] is, and what every `tracing` field holding one
+/// becomes.
+///
+/// Shared for the same reason [`client`] is: two copies of a redaction are one
+/// copy too many.
+fn shown_base_url(base_url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(base_url) else {
+        // Nothing here parsed, so there is no structure to lift a credential
+        // out of and no way to know whether what is left holds one.
+        return "[unparseable]".to_owned();
+    };
+
+    // Each of these can carry a secret, and none of them is needed to tell one
+    // endpoint from another: what identifies it is the scheme, host, port and
+    // path that survive.
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+
+    parsed.into()
 }
 
 /// Turns one provider's frames into events.
@@ -506,7 +626,10 @@ mod tests {
     use futures::{StreamExt as _, stream};
     use tokio_util::sync::CancellationToken;
 
-    use super::{ApiKey, Mapper, ProviderError, ProviderEvent, events, sse::Frame};
+    use super::{
+        ApiKey, Mapper, ProviderError, ProviderEvent, check_base_url, events, shown_base_url,
+        sse::Frame,
+    };
     use crate::protocol::FinishReason;
 
     /// Emits whatever a frame's data spells, so that the plumbing can be
@@ -555,6 +678,103 @@ mod tests {
         assert_eq!(key.expose(), "sk-test-canary-XYZ");
         assert!(ApiKey::new("   ").is_none(), "a blank key is not a key");
         assert!(ApiKey::new("").is_none());
+    }
+
+    /// The key travels in a header on every request, so the transport is what
+    /// decides who else gets to read it. Loopback is exempt because the bytes
+    /// never reach a network — which is what the test suite and a local
+    /// inference server both depend on.
+    #[test]
+    fn only_https_or_loopback_may_carry_a_key() {
+        let allowed = [
+            "https://api.anthropic.com",
+            "https://gateway.example/v1",
+            "http://127.0.0.1:8080",
+            // The whole 127/8 block is loopback, not just the one address.
+            "http://127.10.20.30:1234",
+            "http://[::1]:8080/v1",
+            "http://localhost:11434/v1",
+            // Userinfo is legal configuration, and does not change the hop.
+            "http://ganja:secret@127.0.0.1:8080",
+        ];
+        // Every one of these is an ordinary host belonging to whoever
+        // registered it, and every one of them defeats some cheaper spelling of
+        // this check: a prefix match, a substring match, a suffix match, or a
+        // look at the URL rather than at its host.
+        let refused = [
+            "http://api.anthropic.com",
+            "http://192.168.1.10:8080",
+            "http://127.0.0.1.evil.com",
+            "http://127.0.0.1@evil.com",
+            "http://localhost@evil.com",
+            "http://localhost.evil.com",
+            "http://evil.com/127.0.0.1",
+            "http://evil.com/?host=localhost",
+            "http://evil.com#127.0.0.1",
+            "http://notlocalhost",
+            // An IPv4-mapped IPv6 address does reach loopback, but `is_loopback`
+            // is only true of `::1`; refusing it fails in the safe direction.
+            "http://[::ffff:127.0.0.1]",
+            "ftp://127.0.0.1",
+            "file:///etc/passwd",
+            "not a url at all",
+            "",
+        ];
+
+        for base_url in allowed {
+            assert!(
+                check_base_url(base_url).is_ok(),
+                "{base_url} should be usable"
+            );
+        }
+        for base_url in refused {
+            let error = check_base_url(base_url)
+                .expect_err(&format!("{base_url} should not be handed a key"));
+
+            assert!(
+                matches!(error, ProviderError::Transport(_)),
+                "{base_url}: got {error:?}"
+            );
+            // A base URL is allowed to carry credentials in its userinfo, so
+            // the refusal must describe the rule rather than quote the URL.
+            assert!(
+                !format!("{error} / {error:?}").contains(base_url) || base_url.is_empty(),
+                "{base_url} was echoed back by its own refusal"
+            );
+        }
+    }
+
+    /// What a base URL may carry into a rendering, and what it may not. The
+    /// stripped parts are the ones a credential fits in; the kept parts are the
+    /// ones that say which endpoint this is.
+    #[test]
+    fn a_shown_base_url_keeps_the_endpoint_and_drops_the_secrets() {
+        let cases = [
+            ("https://api.anthropic.com", "https://api.anthropic.com/"),
+            (
+                "https://ganja:secret@gateway.invalid:8443/v1",
+                "https://gateway.invalid:8443/v1",
+            ),
+            // A token in a query string is a real shape for a gateway URL.
+            (
+                "https://gateway.invalid/v1?token=secret",
+                "https://gateway.invalid/v1",
+            ),
+            (
+                "https://gateway.invalid/v1#secret",
+                "https://gateway.invalid/v1",
+            ),
+            // Userinfo with no password at all still names an account.
+            ("https://secret@gateway.invalid", "https://gateway.invalid/"),
+            ("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1"),
+            // Nothing parsed, so nothing can be said to be safe.
+            ("not a url at all", "[unparseable]"),
+            ("", "[unparseable]"),
+        ];
+
+        for (base_url, expected) in cases {
+            assert_eq!(shown_base_url(base_url), expected, "showing {base_url}");
+        }
     }
 
     #[tokio::test]
