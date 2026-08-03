@@ -19,19 +19,21 @@
 //!
 //! # Divergences
 //!
-//! - **D18** — the prompt is composed once, at startup, where upstream rebuilds
+//! - **D22** — the prompt is composed once, at startup, where upstream rebuilds
 //!   it for every request. The two things that can go stale in a long session
 //!   are the date and the working directory; neither moves during a session
 //!   ganja can have, since the working directory is captured once at engine
 //!   construction, and a session that outlives midnight tells the model
 //!   yesterday's date.
-//! - **D19** — the environment block's model line names the model the way the
+//! - **D23** — the environment block's model line names the model the way the
 //!   provider is asked for it. Upstream additionally spells the `provider/model`
 //!   pair, which is not available where this is composed.
-//! - **D20** — the date is UTC. Upstream renders the machine's local date;
+//! - **D24** — the date is UTC. Upstream renders the machine's local date;
 //!   there is no date library in this workspace, and reaching `localtime_r`
 //!   through `libc` for one line — unsafe, and unix-only — buys less than it
 //!   costs.
+//! - **D25** — instruction globs do not consult ignore files, but do keep the
+//!   hidden-file rule; see [`glob`].
 //! - **D2** — `http(s)` entries in `instructions` are skipped with a warning
 //!   rather than fetched.
 
@@ -323,12 +325,13 @@ fn resolve_entry(cwd: &Path, stop: &Path, entry: &str) -> Vec<PathBuf> {
 
 /// The files under `directory` matching `pattern`, sorted.
 ///
-/// Ignore files are deliberately not consulted: `.gitignore` says what a
-/// *search* should show, and this is not a search — it is a path the user wrote
-/// down, and git's opinion of a file says nothing about whether they meant it.
-/// The hidden-file rule is kept, so an unanchored pattern does not descend into
-/// `.git`; a pattern naming a dotfile directly still matches it, because an
-/// override match is checked before the hidden rule.
+/// Ignore files are deliberately not consulted (**D25**): `.gitignore` says
+/// what a *search* should show, and this is not a search — it is a path the
+/// user wrote down, and git's opinion of a file says nothing about whether they
+/// meant it. The hidden-file rule is kept, so an unanchored pattern does not
+/// descend into `.git`; a pattern naming a dotfile directly still matches it,
+/// because an override match is checked before the hidden rule. Upstream's own
+/// glob consults neither rule.
 fn glob(directory: &Path, pattern: &str) -> Vec<PathBuf> {
     let mut builder = ignore::overrides::OverrideBuilder::new(directory);
     let Ok(overrides) = builder.add(pattern).and_then(|builder| builder.build()) else {
