@@ -1603,41 +1603,55 @@ async fn resolve(
     // a dropped one leaves the group alive — see [`TOOL_CANCEL_GRACE`]. The
     // cancelled future is therefore polled on until it winds itself up, or
     // until the grace says it never will.
-    let ctx = ToolCtx {
-        cwd: turn.cwd.clone(),
-        cancel: turn.cancel.child_token(),
-        call_id: call.id.clone(),
-        files: Arc::clone(&turn.files),
-    };
-    let running = tool.run(args.clone(), &ctx);
-    tokio::pin!(running);
-    let finished = tokio::select! {
-        biased;
-        () = turn.cancel.cancelled() => None,
-        result = &mut running => Some(result),
-    };
-    let result = match finished {
-        Some(result) => result,
-        None => {
-            // The token the tool watches is already cancelled, so this waits
-            // on cleanup rather than on the work.
-            if tokio::time::timeout(TOOL_CANCEL_GRACE, running)
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    tool = call.name.as_str(),
-                    grace = ?TOOL_CANCEL_GRACE,
-                    "the tool did not finish cancelling in time; abandoning it, \
-                     which may leave what it started running"
-                );
-            }
+    // A cancel that arrived before the tool was ever polled must not start it.
+    // The grace below is for a tool that is already *running*, and a future's
+    // first poll is precisely where its body begins — so entering the grace
+    // holding an unpolled future would start the work the cancel refused, and
+    // then discard its result. `write` and `read` never look at their token,
+    // so one first polled there would run to completion: the file changed, the
+    // transcript saying the call was cancelled. Checking here rather than
+    // trusting the race below is what keeps those two facts the same fact.
+    let result = if turn.cancel.is_cancelled() {
+        Err(ToolError::Cancelled)
+    } else {
+        let ctx = ToolCtx {
+            cwd: turn.cwd.clone(),
+            cancel: turn.cancel.child_token(),
+            call_id: call.id.clone(),
+            files: Arc::clone(&turn.files),
+        };
+        let running = tool.run(args.clone(), &ctx);
+        tokio::pin!(running);
+        let finished = tokio::select! {
+            biased;
+            () = turn.cancel.cancelled() => None,
+            result = &mut running => Some(result),
+        };
+        match finished {
+            Some(result) => result,
+            None => {
+                // The token the tool watches is already cancelled, so this
+                // waits on cleanup rather than on the work. Reached only with
+                // a future that has been polled at least once, which is what
+                // makes "cleanup" the right word for what is being waited on.
+                if tokio::time::timeout(TOOL_CANCEL_GRACE, running)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        tool = call.name.as_str(),
+                        grace = ?TOOL_CANCEL_GRACE,
+                        "the tool did not finish cancelling in time; abandoning it, \
+                         which may leave what it started running"
+                    );
+                }
 
-            // Whatever the tool managed to return inside the grace, the turn
-            // ended because it was cancelled and says exactly what it said
-            // before: the cancel is the outcome, and the grace bought the
-            // tool its cleanup, not a second chance at a result.
-            Err(ToolError::Cancelled)
+                // Whatever the tool managed to return inside the grace, the
+                // turn ended because it was cancelled and says exactly what it
+                // said before: the cancel is the outcome, and the grace bought
+                // the tool its cleanup, not a second chance at a result.
+                Err(ToolError::Cancelled)
+            }
         }
     };
 
@@ -1979,8 +1993,185 @@ async fn deliver(turn: &Turn, event: Event) -> ControlFlow<Option<Outcome>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_usage, parse_args};
-    use crate::protocol::Usage;
+    use std::{path::PathBuf, sync::Arc, time::Duration};
+
+    use tokio::sync::{Mutex, mpsc};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{BufferedCall, Turn, add_usage, parse_args, resolve};
+    use crate::{
+        FinishReason, Message, Part, PartBody, Permissions, Registry, ToolState,
+        protocol::Usage,
+        provider::{FakeProvider, fake},
+        tool::{FileTimes, Tool, ToolCtx, ToolError, ToolOutput},
+    };
+
+    /// A tool that marks the filesystem the moment its body runs.
+    ///
+    /// It never looks at its cancellation token, which is not laziness: that
+    /// is `write.rs` and `read.rs` exactly as they are today, and the point of
+    /// the test is that nothing inside a tool is what saves us here.
+    struct Effectful {
+        marker: PathBuf,
+    }
+
+    #[derive(schemars::JsonSchema)]
+    struct NoArgs {}
+
+    #[async_trait::async_trait]
+    impl Tool for Effectful {
+        fn id(&self) -> &'static str {
+            "effectful"
+        }
+
+        fn description(&self) -> &str {
+            "marks the filesystem when it runs"
+        }
+
+        fn schema(&self) -> schemars::Schema {
+            schemars::schema_for!(NoArgs)
+        }
+
+        async fn run(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &ToolCtx,
+        ) -> Result<ToolOutput, ToolError> {
+            std::fs::write(&self.marker, "the body ran").expect("the marker is writable");
+
+            Ok(ToolOutput {
+                title: "effectful".to_owned(),
+                output: "done".to_owned(),
+                metadata: serde_json::json!({}),
+            })
+        }
+    }
+
+    /// A turn carrying `tool` and nothing else of consequence. The receiver
+    /// comes back with it because dropping it would close the event channel
+    /// and turn every `deliver` into a different kind of stop.
+    fn turn_with(
+        cancel: CancellationToken,
+        tool: Arc<dyn Tool>,
+    ) -> (Turn, mpsc::Receiver<crate::Event>) {
+        let (events, received) = mpsc::channel(64);
+        let turn = Turn {
+            provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
+            model: fake::MODEL.to_owned(),
+            tools: Arc::new(Registry::new(vec![tool])),
+            permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
+            cwd: std::env::temp_dir(),
+            files: Arc::new(FileTimes::default()),
+            prompt: "run it".to_owned(),
+            cancel,
+            pending: Arc::new(std::sync::Mutex::new(None)),
+            events,
+            slot: Arc::new(Mutex::new(None)),
+            history: Arc::new(Mutex::new(Vec::new())),
+            persist: None,
+        };
+
+        (turn, received)
+    }
+
+    /// A cancel that lands before the tool is ever polled must not start it.
+    ///
+    /// `resolve` builds the tool's future and then races it against the turn's
+    /// token. The race is `biased` on the cancel, so an already-cancelled turn
+    /// takes that arm *without polling the future at all* — and the grace that
+    /// follows used to be where that future got its first poll, which is where
+    /// an async body begins. A tool that never checks its token then ran to
+    /// completion inside the grace: the file written, the result thrown away,
+    /// the transcript reporting a cancel. This pins the two back together.
+    ///
+    /// The part is seeded already-closed on purpose. `set_tool_state` refuses
+    /// to reopen a terminal state and returns `None`, which skips the block
+    /// holding the `deliver` call — and `deliver` is the last cancel
+    /// checkpoint before the race. That is one of the two real ways to arrive
+    /// at the race with a cancelled token, and the only one a test can reach
+    /// without racing the scheduler.
+    #[tokio::test]
+    async fn a_call_cancelled_before_it_starts_never_runs_the_tool() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let marker = dir.path().join("ran");
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (turn, _received) = turn_with(
+            cancel,
+            Arc::new(Effectful {
+                marker: marker.clone(),
+            }),
+        );
+
+        let mut assistant = Message::assistant("canned");
+        let mut part = Part::tool("call_1", "effectful");
+        let part_id = part.id.clone();
+        if let PartBody::Tool { state, .. } = &mut part.body {
+            *state = ToolState::Error {
+                input: serde_json::json!({}),
+                error: "closed by an earlier race".to_owned(),
+                started: 0,
+                completed: 1,
+            };
+        }
+        assistant.parts.push(part);
+
+        let call = BufferedCall {
+            id: "call_1".to_owned(),
+            name: "effectful".to_owned(),
+            json: "{}".to_owned(),
+            part_id,
+        };
+
+        let flow = resolve(&turn, &mut assistant, &call).await;
+
+        assert!(
+            !marker.exists(),
+            "the tool body ran for a call that was cancelled before it started"
+        );
+        match flow {
+            std::ops::ControlFlow::Break(Some(outcome)) => {
+                assert_eq!(outcome.reason, FinishReason::Cancelled);
+            }
+            other => panic!("a cancelled call ends the turn: {:?}", other.is_break()),
+        }
+    }
+
+    /// The same call on a turn nobody cancelled still runs, so the guard above
+    /// is a guard and not a wall.
+    #[tokio::test]
+    async fn a_call_on_a_live_turn_still_runs_the_tool() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let marker = dir.path().join("ran");
+
+        let (turn, _received) = turn_with(
+            CancellationToken::new(),
+            Arc::new(Effectful {
+                marker: marker.clone(),
+            }),
+        );
+
+        let mut assistant = Message::assistant("canned");
+        let part = Part::tool("call_1", "effectful");
+        let part_id = part.id.clone();
+        assistant.parts.push(part);
+
+        let call = BufferedCall {
+            id: "call_1".to_owned(),
+            name: "effectful".to_owned(),
+            json: "{}".to_owned(),
+            part_id,
+        };
+
+        let flow = resolve(&turn, &mut assistant, &call).await;
+
+        assert!(marker.exists(), "an uncancelled call has to actually run");
+        assert!(
+            flow.is_continue(),
+            "a tool that succeeded lets the turn carry on"
+        );
+    }
 
     #[test]
     fn arguments_parse_leniently_and_fail_loudly() {
