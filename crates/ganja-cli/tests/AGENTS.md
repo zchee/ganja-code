@@ -13,6 +13,7 @@ Assertions on the shipped binary rather than on library functions: the command-l
 |------|-------------|
 | `cli.rs` | The command-line surface — subcommands, credential storage, redaction. Every credential assertion is on the redacted tail: a test that printed a whole key would put it in CI output, which is the failure redaction exists to prevent. |
 | `pty_smoke.rs` | Unix-only (`#![cfg(unix)]`). Runs the binary under a pty: a fake turn streams into the transcript, a scripted turn runs a read, an edit and a shell command past the permission dialog, and the terminal is left restored however the process exits. |
+| `resume_drill.rs` | Unix-only. The crash drill: a scripted turn is SIGKILLed mid tool call, the store must hold an unfinished envelope with the streamed text, and `--continue` must show that text marked interrupted. Kills wait for pty EOF before reaping — a session leader cannot finish dying while its terminal has unread output. |
 
 ## For AI Agents
 

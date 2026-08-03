@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use ganja_core::{
-    Command, Engine, Event as CoreEvent, FinishReason, PartBody, PermissionReply, Role, ToolState,
-    Usage, catalog,
+    Command, Engine, Event as CoreEvent, FinishReason, Message, PartBody, PermissionReply, Role,
+    ToolState, Usage, catalog,
 };
 use ratatui::{
     DefaultTerminal, Terminal,
@@ -32,6 +32,7 @@ use crate::{
         chat::{Chat, WHEEL_LINES},
         editor::{self, Editor},
         permission::Permission,
+        sessions::{self, Sessions},
         status::{Activity, Status, Totals},
     },
     event::AppEvent,
@@ -70,6 +71,9 @@ pub struct App {
     status: Status,
     /// The tool call currently waiting on the user's decision, if any.
     permission: Option<Permission>,
+    /// The stored sessions the user is choosing between, while the picker is
+    /// open.
+    sessions: Option<Sessions>,
     theme: Theme,
     /// What the session has spent, accumulated across turns.
     totals: Totals,
@@ -95,12 +99,32 @@ impl App {
             editor: Editor::new(&theme),
             status: Status::new(notice),
             permission: None,
+            sessions: None,
             theme,
             totals: Totals::default(),
             dirty: true,
             urgent: true,
             last_draw: Instant::now(),
             quit: false,
+        }
+    }
+
+    /// Fills the transcript from a resumed session's stored `transcript`.
+    ///
+    /// The messages take the same route into the viewport that a live
+    /// `MessageStarted` takes, so a resumed session and a streamed one are the
+    /// same entries built the same way. Nothing is invented on the way in: the
+    /// engine hands over what it read back, including replies it never saw
+    /// finish, which render as interrupted rather than as complete.
+    ///
+    /// The spend counters are deliberately left alone. What a stored session
+    /// cost cannot be recomputed here — the store records the tokens but not
+    /// which model spent them — so the status bar keeps meaning what it has
+    /// always meant: what this run has spent. The picker is where a session's
+    /// accumulated size is shown.
+    pub fn seed(&mut self, transcript: Vec<Message>) {
+        for message in transcript {
+            self.chat.restore_message(message);
         }
     }
 
@@ -197,6 +221,11 @@ impl App {
 
                 let buffer = frame.buffer_mut();
                 self.chat.render(transcript, buffer, &self.theme);
+                // The permission dialog draws last so that it is on top: it is
+                // the one modal a turn is blocked on.
+                if let Some(sessions) = &self.sessions {
+                    sessions.render(transcript, buffer, &self.theme);
+                }
                 if let Some(permission) = &self.permission {
                     permission.render(transcript, buffer, &self.theme);
                 }
@@ -217,7 +246,7 @@ impl App {
             TermEvent::Key(key) if key.kind != KeyEventKind::Release => {
                 self.handle_key(key).await?
             }
-            TermEvent::Mouse(mouse) if self.permission.is_none() => match mouse.kind {
+            TermEvent::Mouse(mouse) if !self.modal_open() => match mouse.kind {
                 MouseEventKind::ScrollUp => self.chat.scroll_lines(-WHEEL_LINES),
                 MouseEventKind::ScrollDown => self.chat.scroll_lines(WHEEL_LINES),
                 _ => {}
@@ -250,7 +279,16 @@ impl App {
             return Ok(());
         }
 
+        if self.sessions.is_some() {
+            self.handle_picker_key(key.code).await;
+
+            return Ok(());
+        }
+
         match key.code {
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_picker().await;
+            }
             // A no-op while idle, which is exactly what Esc should do there.
             KeyCode::Esc => self.engine.send(Command::CancelTurn).await?,
             KeyCode::Enter if key.modifiers.intersects(NEWLINE_MODIFIERS) => {
@@ -264,6 +302,73 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Whether a modal is claiming the keys and the wheel.
+    fn modal_open(&self) -> bool {
+        self.permission.is_some() || self.sessions.is_some()
+    }
+
+    /// Opens the sessions picker over what this project's store holds.
+    ///
+    /// A refusal — an engine running without storage, a store that will not
+    /// read — lands in the status bar: there is nothing to pick from, so a
+    /// dialog would have nothing to say that the notice does not.
+    async fn open_picker(&mut self) {
+        match self.engine.sessions().await {
+            Ok(entries) => self.sessions = Some(Sessions::new(entries, sessions::now())),
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
+    }
+
+    /// One keypress while the picker is open, which owns every key: the
+    /// editor and the transcript beneath it are not what the user is acting
+    /// on right now.
+    async fn handle_picker_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.sessions = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(sessions) = &mut self.sessions {
+                    sessions.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(sessions) = &mut self.sessions {
+                    sessions.move_selection(1);
+                }
+            }
+            KeyCode::Enter => self.resume_selected().await,
+            _ => {}
+        }
+    }
+
+    /// Switches to the session the picker is on.
+    ///
+    /// The screen changes only once the engine has actually resumed: a resume
+    /// it refuses — mid-turn, or a session that vanished between listing and
+    /// choosing — leaves the current conversation up, with the refusal in the
+    /// status bar. The picker stays open so the user still has the list they
+    /// were choosing from.
+    async fn resume_selected(&mut self) {
+        let Some(id) = self
+            .sessions
+            .as_ref()
+            .and_then(|sessions| sessions.selected())
+            .map(|info| info.id.clone())
+        else {
+            // An empty list has nothing under the cursor; Enter means nothing.
+            return;
+        };
+
+        match self.engine.resume(&id).await {
+            Ok(transcript) => {
+                self.sessions = None;
+                self.chat.clear();
+                self.seed(transcript);
+                self.status.set_notice(None);
+            }
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
     }
 
     /// Hands the editor's contents to the engine.
@@ -409,8 +514,9 @@ mod tests {
     use futures::{StreamExt as _, stream::BoxStream};
     use ganja_core::{
         Engine, Event as CoreEvent, FinishReason, Message, Part, PartBody, PartId, PermissionId,
-        PermissionReply, ToolState, Usage,
+        PermissionReply, SessionId, SessionInfo, Storage, ToolState, Usage,
         provider::{FakeProvider, fake},
+        storage::VERSION,
     };
     use ratatui::{
         Terminal,
@@ -420,9 +526,10 @@ mod tests {
             MouseEvent, MouseEventKind,
         },
     };
+    use tempfile::TempDir;
 
     use super::{App, FRAME, Permission, permission_reply};
-    use crate::event::AppEvent;
+    use crate::{component::sessions, event::AppEvent};
 
     fn engine() -> Engine {
         Engine::new(
@@ -435,6 +542,100 @@ mod tests {
 
     fn app() -> App {
         App::new(engine(), fake::MODEL, None)
+    }
+
+    /// An app whose engine writes into, and lists from, a store in `directory`.
+    ///
+    /// The picker asks the engine what it holds, so a picker test needs the
+    /// real storage path rather than a stub: what it renders is what
+    /// [`Engine::sessions`] read off the disk.
+    fn persistent_app(directory: &TempDir) -> App {
+        App::new(
+            Engine::persistent(
+                Arc::new(FakeProvider::default()),
+                fake::MODEL,
+                Arc::new(ganja_core::Registry::new(Vec::new())),
+                ganja_core::Permissions::default(),
+                Storage::open(directory.path().join("storage")),
+            ),
+            fake::MODEL,
+            None,
+        )
+    }
+
+    /// Stores one session under `id`, last touched `ago` milliseconds before
+    /// `now`, carrying `tokens` of accumulated input and one message.
+    fn store_session(
+        directory: &TempDir,
+        id: &str,
+        title: Option<&str>,
+        now: u64,
+        ago: u64,
+        tokens: u64,
+    ) {
+        let storage = Storage::open(directory.path().join("storage"));
+        let updated = now.saturating_sub(ago);
+        let info = SessionInfo {
+            id: SessionId::from(id.to_owned()),
+            version: VERSION,
+            title: title.map(str::to_owned),
+            created: updated,
+            updated,
+            usage: Usage {
+                input_tokens: tokens,
+                ..Usage::default()
+            },
+            context_tokens: 0,
+            summary: None,
+        };
+        let message = Message::user("what the picker is choosing between");
+
+        storage.save_info(&info).expect("the info stores");
+        storage
+            .save_message(&info.id, &message)
+            .expect("the envelope stores");
+        for part in &message.parts {
+            storage
+                .save_part(&info.id, &message.id, part)
+                .expect("the part stores");
+        }
+    }
+
+    /// The three sessions the picker snapshots render: one titled and recent,
+    /// one that never earned a title, and one old enough to be listed in
+    /// hours.
+    ///
+    /// Ages are written as offsets from the clock the picker itself reads when
+    /// it opens, because a row says how long ago a session was touched. Fixed
+    /// timestamps would re-age every day and rot the snapshot; an offset
+    /// renders the same interval forever.
+    fn store_pickable_sessions(directory: &TempDir) {
+        const MINUTE: u64 = 60 * 1_000;
+        const HOUR: u64 = 60 * MINUTE;
+
+        let now = sessions::now();
+
+        store_session(
+            directory,
+            "ses_newest",
+            Some("porting the session store"),
+            now,
+            30 * 1_000,
+            12_400,
+        );
+        store_session(directory, "ses_middle", None, now, 5 * MINUTE, 1_234);
+        store_session(
+            directory,
+            "ses_oldest",
+            Some("a first look at the tool registry"),
+            now,
+            3 * HOUR,
+            42,
+        );
+    }
+
+    fn temporary() -> TempDir {
+        TempDir::new().expect("a temporary directory is creatable")
     }
 
     /// An app plus the engine stream its own loop would read, for the tests
@@ -1072,6 +1273,107 @@ mod tests {
         );
     }
 
+    /// A stored conversation of `count` messages with the shape a real one
+    /// has: prompts of a few lines, replies of a paragraph or two, and every
+    /// fifth reply carrying a finished tool call between its text parts.
+    ///
+    /// Deliberately not made of one-word messages. The cost the frontend pays
+    /// on a resume is wrapping every line of every entry, so a transcript of
+    /// stubs would measure nothing.
+    fn stored_transcript(count: usize) -> Vec<Message> {
+        (0..count)
+            .map(|index| {
+                if index.is_multiple_of(2) {
+                    return Message::user(format!(
+                        "turn {index}: each part of a message is written to its own file, so a\n\
+                         streaming text part can be rewritten as it grows without rewriting the\n\
+                         whole envelope. Walk me through what a resume has to rebuild from that."
+                    ));
+                }
+
+                let mut reply = Message::assistant(fake::MODEL);
+                reply.parts.push(Part::text(format!(
+                    "turn {index}: a resume reads the info file first, because it names the\n\
+                     summary the live window starts from. Everything from that message onward\n\
+                     is read back envelope by envelope, and each envelope's parts are read from\n\
+                     the part directory keyed by the message id.\n\
+                     \n\
+                     Assistant messages that carry no content stay in the transcript but are\n\
+                     left out of the request window, since some providers reject an empty\n\
+                     message; they render as interrupted rather than as complete."
+                )));
+
+                if index.is_multiple_of(5) {
+                    reply.parts.push(Part {
+                        id: PartId::from(format!("prt_{index}")),
+                        body: PartBody::Tool {
+                            call_id: format!("call_{index}"),
+                            tool: "read".to_owned(),
+                            state: ToolState::Completed {
+                                input: serde_json::json!({"filePath": "crates/ganja-core/src/storage.rs"}),
+                                output: "read 412 lines".to_owned(),
+                                title: "storage.rs".to_owned(),
+                                metadata: serde_json::json!({}),
+                                started: 0,
+                                completed: 1,
+                            },
+                        },
+                    });
+                    reply.parts.push(Part::text(
+                        "The tool call above is closed as an error on resume when the previous\n\
+                         process died before it finished, because the next request has to answer\n\
+                         every call the model opened.",
+                    ));
+                }
+
+                reply.complete();
+                reply
+            })
+            .collect()
+    }
+
+    /// P4 acceptance: a 200-message session reaches its first frame inside
+    /// 150ms.
+    ///
+    /// The measured window is [`App::seed`] plus the first [`App::draw`], over
+    /// messages already in memory. Reading them off the disk is the engine's
+    /// cost and is timed where it happens; what the frontend owes is turning a
+    /// resumed transcript into a screen. The first frame is the expensive one
+    /// because it wraps every entry — later frames reuse the cache.
+    #[test]
+    fn a_two_hundred_message_session_reaches_its_first_frame_inside_the_budget() {
+        const BUDGET: Duration = Duration::from_millis(150);
+        const MESSAGES: usize = 200;
+
+        // Built outside the window: composing fixtures is not what a resume
+        // pays for.
+        let transcript = stored_transcript(MESSAGES);
+        let mut app = app();
+        let mut terminal = terminal(100, 30);
+
+        let started = Instant::now();
+        app.seed(transcript);
+        app.draw(&mut terminal).expect("the first frame draws");
+        let elapsed = started.elapsed();
+
+        // The gate runner reads this number off the test log rather than
+        // trusting a green assertion to mean it was measured.
+        eprintln!(
+            "{MESSAGES} messages, {} wrapped lines: first frame in {elapsed:?} (budget {BUDGET:?})",
+            app.chat.line_count()
+        );
+
+        assert!(
+            app.chat.line_count() >= 1_000,
+            "a transcript this budget is worth measuring should be at least 1,000 lines, got {}",
+            app.chat.line_count()
+        );
+        assert!(
+            elapsed < BUDGET,
+            "the first frame took {elapsed:?}, budget is {BUDGET:?}"
+        );
+    }
+
     #[test]
     fn a_fresh_app_wants_its_first_frame() {
         let app = app();
@@ -1462,6 +1764,58 @@ mod tests {
             "cargo test".to_owned(),
             serde_json::json!({"command": "cargo test"}),
         ));
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// Opens the picker the way a user does — Ctrl-S, through `App::handle` —
+    /// so what is snapshotted is the dialog over the list the engine actually
+    /// read back, not a `Sessions` assembled by the test.
+    #[tokio::test]
+    async fn snapshot_sessions_picker_open() {
+        let directory = temporary();
+        store_pickable_sessions(&directory);
+        let mut app = persistent_app(&directory);
+
+        app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-s is handled");
+
+        assert!(
+            app.sessions.is_some(),
+            "the picker must be open, or the snapshot is of a bare screen"
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_sessions_picker_after_moving_the_selection() {
+        let directory = temporary();
+        store_pickable_sessions(&directory);
+        let mut app = persistent_app(&directory);
+
+        app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-s is handled");
+        app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await
+            .expect("j is handled");
+
+        assert_eq!(
+            app.sessions
+                .as_ref()
+                .and_then(|sessions| sessions.selected())
+                .map(|info| info.id.as_str()),
+            Some("ses_middle"),
+            "j should move down one row rather than reaching the editor"
+        );
 
         let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");

@@ -22,3 +22,7 @@ unicode-width.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+# The resume tests drive a real session store, because what they pin is that a
+# resume either finds the session it was asked for or fails loudly — which a
+# stubbed store could only assert about itself.
+tempfile.workspace = true

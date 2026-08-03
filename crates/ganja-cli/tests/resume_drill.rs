@@ -1,0 +1,543 @@
+//! The acceptance drill sessions owe: kill the process outright while a turn
+//! is in flight, start it again with `--continue`, and find the conversation
+//! where it was left — a reply the store never saw finish, said to be
+//! interrupted rather than shown as one that simply stopped talking.
+//!
+//! # Why the window is a sleeping shell command
+//!
+//! "Mid-flight" has to be a state the drill can *hold*, not one it has to
+//! catch. A kill aimed at streaming text would race the stream and pass or
+//! fail on how fast the machine is. A scripted `bash` call that sleeps puts
+//! the turn in a state it stays in for as long as the sleep lasts, and the
+//! call's own part file — written before the command is even spawned — is
+//! what says the window is open. Nothing here is timed; everything is waited
+//! for.
+//!
+//! # What is asserted where
+//!
+//! Per the rules `pty_smoke.rs` sets out, the screen is used for
+//! synchronization and for the one question only the frontend can answer: that
+//! a resumed transcript carries the marker. What the crash actually left
+//! behind is read back off the store, because a terminal is only sent the
+//! cells that changed and a filesystem assertion is the honest one wherever
+//! there is one to make.
+//!
+//! # Killing a process that owns a terminal
+//!
+//! A process in a pty is a session leader, and a session leader finishes
+//! exiting only once its terminal's output queue has drained. So the kill has
+//! two halves that cannot be separated: send the signal, then read the pty
+//! out. Waiting for the exit status without reading deadlocks outright — the
+//! process is waiting for a reader and the reader is waiting for the process —
+//! and it deadlocks in the kernel, where no timeout in this file can reach it.
+//!
+//! For the same family of reasons the kill is aimed at a moment when the run's
+//! own child is idle: the drill waits for the command to say it started rather
+//! than for the store to say it was started, and the scripted command keeps
+//! work after the sleep so that the shell forks the sleep off instead of
+//! replacing itself with it. A kill that landed while that child was still
+//! starting up was seen to wedge the run in its exit with the child stuck in
+//! `execve`.
+//!
+//! # The command the kill leaves behind
+//!
+//! `SIGKILL` runs no cleanup, so the sleeping command outlives the agent that
+//! spawned it. Nothing here waits on it — the run is reaped by pid and the
+//! store is read off disk — and it is reparented rather than left a zombie of
+//! this test's, so it costs nothing but its own exit, well inside a `cargo
+//! test` run.
+#![cfg(unix)]
+
+use std::{
+    fs,
+    ops::{Deref, DerefMut},
+    path::{Path, PathBuf},
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
+
+use expectrl::{
+    ControlCode, Eof, Expect as _, Session,
+    process::unix::{Signal, WaitStatus},
+    session::OsSession,
+};
+use serde_json::{Value, json};
+use tempfile::TempDir;
+
+/// How long the resumed run is given to draw and then to quit. Generous on
+/// purpose: a timeout here should mean "hung", not "slow machine".
+const EXIT_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Time for the app to enable raw mode and start reading events. A keystroke
+/// sent before that can be discarded by the line discipline.
+const STARTUP_GRACE: Duration = Duration::from_millis(500);
+
+/// Width both ptys are opened at. Wide enough that neither string this drill
+/// waits for is wrapped — [`INTERRUPTED`] is the longer of the two, and the
+/// transcript pane is the full width of the window.
+const COLUMNS: u16 = 80;
+
+/// Rows both ptys are opened at.
+///
+/// The permission dialog is centered in the transcript pane, so the taller the
+/// window, the further below the transcript's content it is drawn — and cells
+/// nothing has drawn into are what let the options line reach the pty whole.
+/// The resumed run has no dialog, but it runs in the same window so that the
+/// two runs differ in the flag under test and in nothing else.
+const ROWS: u16 = 80;
+
+/// How long the store is polled before the run is called hung. It covers a
+/// prompt, a model turn, a permission answer and a spawn, on a machine sharing
+/// its cores with the rest of the suite.
+const STORE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How often the store is looked at while waiting for it to say something.
+const POLL: Duration = Duration::from_millis(50);
+
+/// How long the scripted command sleeps for.
+///
+/// It only has to outlast the assertions between the window opening and the
+/// kill, which are a handful of file reads; the margin is because the cost of
+/// too short a sleep is a flaky suite and the cost of too long a one is a
+/// process that lingers after a test that already passed.
+const HELD_SECONDS: u64 = 45;
+
+/// The file the scripted command writes before it sleeps, in the project
+/// directory the command runs in. It is what says a shell really started —
+/// only a running one could have written it.
+const HELD: &str = "held.txt";
+
+/// The reply the killed turn gets to stream. One word, so a single fragment
+/// carries it, and one that appears nowhere else in the UI — it has to be
+/// recognizable both in the part file it lands in and on the resumed screen.
+const PARTIAL: &str = "half-said-hierophant";
+
+/// The prompt to type, and what the user's stored message will hold.
+const PROMPT: &str = "kaleidoscope";
+
+/// The permission dialog's options line, which is the one string on screen
+/// that says a dialog — rather than a tool — is what the turn is waiting on.
+/// Pinned to `ganja_tui::component::permission`.
+const DIALOG_OPTIONS: &str = "[y] allow once   [a] always allow   [n]/[Esc] reject";
+
+/// What a resumed reply the store never saw finish says about itself. Pinned
+/// to `ganja_tui::component::chat`.
+const INTERRUPTED: &str = "[interrupted] the session ended before this reply finished";
+
+/// Where the drill's script is written, inside the project directory.
+const SCRIPT: &str = "script.json";
+
+/// The state a call that is executing is stored in. Pinned to
+/// `ganja_core::protocol::ToolState`, which tags its variants `status`.
+const RUNNING: &str = "running";
+
+/// Where a project's sessions live, under its data directory. Pinned to the
+/// same constant in `ganja-cli` and `ganja-tui`.
+const STORAGE: &str = "storage";
+
+/// A `ganja` process in a pty, reaped however the test that owns it ends.
+struct Ganja {
+    /// Taken by whichever of the two endings the test reaches. One still here
+    /// when the guard drops belongs to a test that failed part-way through,
+    /// and it is holding a pty and a temporary directory nothing else frees.
+    session: Option<OsSession>,
+}
+
+impl Ganja {
+    /// Spawns `command` in a pty and waits for the app to take the terminal
+    /// over.
+    fn spawn(command: Command) -> Self {
+        let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
+        session.set_expect_timeout(Some(EXIT_DEADLINE));
+        session
+            .get_process_mut()
+            .set_window_size(COLUMNS, ROWS)
+            .expect("failed to size the pty");
+
+        thread::sleep(STARTUP_GRACE);
+
+        Self {
+            session: Some(session),
+        }
+    }
+
+    /// Kills the process outright and reaps it.
+    ///
+    /// `SIGKILL` rather than the escalation the guard uses, because what the
+    /// drill is about is the state a process left behind when it was given no
+    /// chance to tidy up: a signal it could have handled would let the engine
+    /// close the turn on its way out, and then nothing under test would be
+    /// under test.
+    fn kill_outright(mut self) {
+        let mut session = self
+            .session
+            .take()
+            .expect("a session is only ever ended once");
+
+        session
+            .get_process_mut()
+            .kill(Signal::SIGKILL)
+            .expect("failed to SIGKILL the `ganja` process");
+
+        // Reading the pty out is not tidying up, it is what lets the kill
+        // finish. A session leader — which is what a process in a pty is —
+        // only completes its exit once its terminal's output queue has
+        // drained, so a test that reached for the exit status without first
+        // emptying the pty would wait on a process that is itself waiting on
+        // the test. Both would wait forever.
+        session
+            .expect(Eof)
+            .expect("the killed `ganja` never let go of the pty");
+
+        let status = session
+            .get_process()
+            .wait()
+            .expect("failed to reap the killed `ganja` process");
+        assert!(
+            matches!(status, WaitStatus::Signaled(_, Signal::SIGKILL, _)),
+            "expected a process killed outright, got {status:?}"
+        );
+    }
+
+    /// Quits with Ctrl-C and checks that the process ended cleanly.
+    fn quit_and_assert_clean_exit(mut self) {
+        self.send(ControlCode::EndOfText)
+            .expect("failed to send Ctrl-C");
+
+        let mut session = self
+            .session
+            .take()
+            .expect("a session is only ever ended once");
+
+        session
+            .expect(Eof)
+            .expect("`ganja` did not exit within the deadline");
+
+        let status = session
+            .get_process()
+            .wait()
+            .expect("failed to reap the `ganja` process");
+        assert!(
+            matches!(status, WaitStatus::Exited(_, 0)),
+            "expected a clean exit, got {status:?}"
+        );
+    }
+}
+
+impl Deref for Ganja {
+    type Target = OsSession;
+
+    fn deref(&self) -> &Self::Target {
+        self.session.as_ref().expect("the session outlives its use")
+    }
+}
+
+impl DerefMut for Ganja {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.session.as_mut().expect("the session outlives its use")
+    }
+}
+
+impl Drop for Ganja {
+    fn drop(&mut self) {
+        let Some(mut session) = self.session.take() else {
+            return;
+        };
+
+        // Escalates through SIGHUP to SIGKILL and reaps what it stops. A test
+        // that panicked mid-drill left a child in raw mode on a pty, and
+        // leaving it running would outlive the whole `cargo test` run.
+        let _ = session.get_process_mut().exit(true);
+    }
+}
+
+fn temporary() -> TempDir {
+    TempDir::new().expect("a temporary directory is creatable")
+}
+
+/// A project directory holding the drill's script.
+///
+/// The checkout marker is what pins the project — and so the store the runs
+/// write into — to this directory rather than to whatever the temporary
+/// directory happens to sit inside.
+fn project() -> TempDir {
+    let directory = temporary();
+    fs::create_dir(directory.path().join(".git")).expect("the checkout marker is creatable");
+
+    // The marker comes first so that a shell which reached it is a shell that
+    // is past its own `execve`; the echo after the sleep is what stops the
+    // shell from replacing itself with the sleep, which would put the run's
+    // direct child back inside one. Both are load-bearing — see the module
+    // documentation for what a kill that lands on an `execve` does.
+    let script = json!({
+        "cadence_ms": 1,
+        "turns": [{
+            "text": PARTIAL,
+            "tool_calls": [{
+                "name": "bash",
+                "args": {
+                    "command": format!("echo held > {HELD}; sleep {HELD_SECONDS}; echo released"),
+                },
+            }],
+        }],
+    });
+    fs::write(
+        directory.path().join(SCRIPT),
+        serde_json::to_vec_pretty(&script).expect("a script serializes"),
+    )
+    .expect("the script is writable");
+
+    directory
+}
+
+/// Runs the binary in `project` with `arguments`, keeping its state under
+/// `data` and playing the drill's script.
+///
+/// `ganja_core::provider::fake::SCRIPT_ENV` and the XDG variable are spelled
+/// out rather than imported: what a pty test pins is the contract a demo
+/// actually uses, which is the name of the variable.
+fn ganja(project: &TempDir, data: &TempDir, arguments: &[&str]) -> Ganja {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
+    command
+        // Relative paths in a call resolve against the engine's directory,
+        // which is the one the binary was started in — and it is also what
+        // decides which project's store the run opens.
+        .current_dir(project.path())
+        .args(arguments)
+        .env("GANJA_PROVIDER", "fake")
+        .env("GANJA_FAKE_SCRIPT", project.path().join(SCRIPT))
+        // Sessions land under the data home, so a drill with its own keeps it
+        // from reading what another stored — or from writing into a
+        // developer's real one.
+        .env("XDG_DATA_HOME", data.path());
+
+    Ganja::spawn(command)
+}
+
+/// Types [`PROMPT`] and submits it, then waits for the engine to put it in the
+/// transcript — which is what says the turn has started.
+fn submit_prompt(session: &mut Ganja) {
+    session.send(PROMPT).expect("failed to type the prompt");
+    session.send("\r").expect("failed to send Enter");
+
+    session
+        .expect(PROMPT)
+        .expect("the engine's user message never reached the transcript");
+}
+
+/// The `storage/` directory the runs under `data` write into, once one of them
+/// has created it.
+///
+/// The project's directory is found rather than computed, because its name is
+/// `ganja-core`'s to decide; that there is at most one of them is itself worth
+/// asserting, since a run that stored under two projects stored under the
+/// wrong one.
+fn storage_root(data: &TempDir) -> Option<PathBuf> {
+    let roots: Vec<PathBuf> = fs::read_dir(data.path().join("ganja").join("project"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join(STORAGE))
+        .filter(|root| root.is_dir())
+        .collect();
+
+    assert!(
+        roots.len() <= 1,
+        "one run stores under one project, got {roots:?}"
+    );
+
+    roots.into_iter().next()
+}
+
+/// The stored JSON files directly under `directory`, in filename order — which
+/// is the order they were created in, because every stored id ascends.
+fn stored_files(directory: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    found.sort();
+
+    found
+}
+
+/// One stored document, or [`None`] while it is not there to be read.
+///
+/// A poll of a store a live process is writing into has to tolerate both an
+/// absent file and one that is being replaced, which is why neither a missing
+/// file nor an unreadable one is an error here.
+fn document(path: &Path) -> Option<Value> {
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+/// What one session's assistant reply looks like on disk.
+struct StoredReply {
+    /// The message envelope, `{"version":…,"payload":…}` as written.
+    envelope: Value,
+    /// The part envelopes filed under it, oldest first.
+    parts: Vec<Value>,
+}
+
+impl StoredReply {
+    /// Whether the store ever saw the reply finish.
+    ///
+    /// A `time.completed` a turn has not reached is left out of the file
+    /// rather than written as null, and indexing answers a missing field with
+    /// null, so the two read the same here — which is the point, since both
+    /// mean the same thing: this reply has no ending.
+    fn finished(&self) -> bool {
+        !self.envelope["payload"]["time"]["completed"].is_null()
+    }
+
+    /// Everything the stored text parts carry, in the order they were written.
+    fn text(&self) -> String {
+        self.parts
+            .iter()
+            .filter_map(|part| part["payload"]["text"].as_str())
+            .collect()
+    }
+
+    /// The status of every stored tool call, in the order they were written.
+    fn call_states(&self) -> Vec<String> {
+        self.parts
+            .iter()
+            .map(|part| &part["payload"])
+            .filter(|payload| payload["type"] == "tool")
+            .filter_map(|payload| payload["state"]["status"].as_str().map(str::to_owned))
+            .collect()
+    }
+}
+
+/// The assistant reply the store under `root` holds, once it holds one.
+///
+/// The layout is `ganja_core::storage`'s: one info file names the session, one
+/// envelope per message under it, and one file per part under that.
+fn stored_reply(root: &Path) -> Option<StoredReply> {
+    let session = stored_files(&root.join("session").join("info"))
+        .into_iter()
+        .next()?;
+    let session = session.file_stem()?.to_str()?.to_owned();
+
+    let messages = root.join("session").join("message").join(&session);
+    let (path, envelope) = stored_files(&messages).into_iter().find_map(|path| {
+        let document = document(&path)?;
+        (document["payload"]["role"] == "assistant").then_some((path, document))
+    })?;
+
+    let message = path.file_stem()?.to_str()?.to_owned();
+    let parts = stored_files(
+        &root
+            .join("session")
+            .join("part")
+            .join(&session)
+            .join(&message),
+    )
+    .iter()
+    .filter_map(|path| document(path))
+    .collect();
+
+    Some(StoredReply { envelope, parts })
+}
+
+/// Whether the store says the drill's window is open: the streamed text has
+/// reached its part file, and the call that holds the turn open is recorded as
+/// executing.
+fn mid_flight(root: &Path) -> bool {
+    stored_reply(root).is_some_and(|reply| {
+        reply.text().contains(PARTIAL) && reply.call_states().iter().any(|state| state == RUNNING)
+    })
+}
+
+/// Polls the store until it says `ready`, or gives up after
+/// [`STORE_DEADLINE`].
+///
+/// Polling rather than sleeping is what keeps the drill honest on a loaded
+/// machine: a fixed wait long enough to be reliable there would be long enough
+/// to hide a regression that let the window close early.
+fn wait_until(data: &TempDir, what: &str, ready: impl Fn(&Path) -> bool) {
+    let deadline = Instant::now() + STORE_DEADLINE;
+
+    while !storage_root(data).is_some_and(|root| ready(&root)) {
+        assert!(
+            Instant::now() < deadline,
+            "the store never showed {what} within {STORE_DEADLINE:?}"
+        );
+        thread::sleep(POLL);
+    }
+}
+
+/// The whole drill: a turn is held open by a sleeping command, the process is
+/// killed outright, and what it left on disk is a reply with no ending — which
+/// `--continue` shows for what it is rather than as a reply that stopped
+/// mid-sentence.
+#[test]
+fn a_reply_killed_mid_call_comes_back_under_continue_marked_interrupted() {
+    let project = project();
+    let data = temporary();
+
+    let mut session = ganja(&project, &data, &[]);
+    submit_prompt(&mut session);
+
+    // Waiting for the dialog is safe: a step's calls are resolved after the
+    // model's stream has ended, so no fragment of the reply can race the
+    // options line onto the screen.
+    session
+        .expect(DIALOG_OPTIONS)
+        .expect("no permission dialog for the shell command");
+    session
+        .send("y")
+        .expect("failed to allow the sleeping shell command");
+
+    // Both halves matter. The store saying `running` is what the drill is
+    // about; the marker the command itself wrote is what says the shell is
+    // past its own startup, and so that the kill below lands on a run whose
+    // child is sleeping rather than on one whose child is still starting up.
+    let held = project.path().join(HELD);
+    wait_until(&data, "a call whose command has started", |root| {
+        held.is_file() && mid_flight(root)
+    });
+
+    session.kill_outright();
+
+    // What survived the kill is the store, so that is what is asked. Read
+    // after the kill rather than reused from the wait: the claim is about what
+    // a dead process left behind, not about what a live one had written.
+    let survived = storage_root(&data)
+        .as_deref()
+        .and_then(stored_reply)
+        .expect("the killed run's session should still be on disk");
+
+    assert!(
+        !survived.finished(),
+        "a reply its process died in the middle of must not be stored as finished, got {}",
+        survived.envelope["payload"]["time"]
+    );
+    assert!(
+        survived.text().contains(PARTIAL),
+        "what was streamed before the kill must have reached a part file, got {:?}",
+        survived.text()
+    );
+    assert_eq!(
+        survived.call_states(),
+        vec![RUNNING.to_owned()],
+        "the call the process died inside must be left exactly as it was"
+    );
+
+    let mut resumed = ganja(&project, &data, &["--continue"]);
+
+    resumed
+        .expect(PARTIAL)
+        .expect("the resumed transcript never showed what had been streamed");
+    resumed
+        .expect(INTERRUPTED)
+        .expect("the resumed reply was not shown as one that never finished");
+
+    resumed.quit_and_assert_clean_exit();
+}
