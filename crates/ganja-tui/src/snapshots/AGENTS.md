@@ -19,6 +19,8 @@
 | `ganja_tui__app__tests__snapshot_tool_error.snap` | A call that failed, as the user sees it. |
 | `ganja_tui__app__tests__snapshot_sessions_picker_open.snap` | The sessions picker over a transcript, newest selected. |
 | `ganja_tui__app__tests__snapshot_sessions_picker_after_moving_the_selection.snap` | The same picker after `j`, proving the marker follows the selection. |
+| `ganja_tui__app__tests__snapshot_themes_dialog_open.snap` | The theme list over a transcript, active theme marked. |
+| `ganja_tui__app__tests__snapshot_theme_{opencode,tokyonight,gruvbox,aura}.snap` | One style-aware frame per ported theme — symbol runs with fg/bg/modifiers, which is what actually pins a palette. |
 
 ## For AI Agents
 
@@ -28,6 +30,7 @@
 - **A snapshot diff is a question, not a failure.** Read it before accepting: they cover exactly the states where a rendering regression would otherwise be invisible, so an unexpected change in one is usually a real bug in wrapping, layout or state mapping.
 - Filenames are generated from the module path and test name (`ganja_tui__app__tests__<test>`), so renaming a test orphans its snapshot — delete the stale file in the same change.
 - `.snap.new` files are unaccepted results; they must not be committed.
+- Two dump shapes exist: `screen()` captures symbols only (palette-independent — a theme change must NOT diff these), while `styled_screen()` captures symbol runs plus fg/bg/modifiers (the per-theme snapshots). Pick the one that matches what the test is pinning.
 
 ### Testing Requirements
 

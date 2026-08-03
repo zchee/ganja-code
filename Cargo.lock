@@ -930,14 +930,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "etcetera",
  "futures",
  "ganja-core",
  "insta",
  "ratatui",
  "ratatui-textarea",
+ "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "unicode-width",
 ]
 

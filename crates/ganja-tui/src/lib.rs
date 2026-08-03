@@ -18,7 +18,7 @@ use ratatui::crossterm::{
     execute,
 };
 
-use crate::app::App;
+use crate::{app::App, theme::Themes};
 
 /// Directory the session store lives in, under the project's data directory.
 const STORAGE: &str = "storage";
@@ -81,10 +81,16 @@ pub async fn run(resume: Option<Resume>) -> Result<()> {
         None => Vec::new(),
     };
 
+    // The builtins, the user's own themes, and the theme they last picked.
+    // Resolved before the terminal is taken over, like the resume above: a
+    // warning about a theme file that would not load is worth reading, and it
+    // is unreadable once the alternate screen is up.
+    let themes = Themes::load();
+
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_mouse() {
         Ok(()) => {
-            let mut app = App::new(engine, selection.model, selection.notice);
+            let mut app = App::new(engine, selection.model, selection.notice, themes);
             app.seed(seed);
             app.run(&mut terminal).await
         }

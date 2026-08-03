@@ -16,12 +16,23 @@ anyhow.workspace = true
 # Not named in the source: it exists to enable crossterm's `event-stream`
 # feature on the crate instance `ratatui` re-exports.
 crossterm.workspace = true
+# Themes are discovered under the XDG config directory and the runtime pick is
+# stored under the XDG data directory; the same resolver the engine's stores
+# use, so both halves of the app agree on where a user's files live.
+etcetera.workspace = true
 futures.workspace = true
 ganja-core.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
+# Theme files decode into typed structures rather than being walked as raw
+# values, so a missing `theme` block is a decode error naming the file.
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+# A custom theme that will not load is skipped rather than fatal, which is only
+# defensible if the run says which file it dropped and why.
+tracing.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
