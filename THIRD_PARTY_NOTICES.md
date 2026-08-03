@@ -8,6 +8,7 @@ What is ported from the upstream specification:
 - **Behavior**: streaming chat, tool calling, permission gating, session persistence, configuration loading
 - **Tool prompt texts**: descriptions in `crates/ganja-core/src/tool/` derive from upstream `packages/opencode/src/tool/*.txt` and from prompt strings embedded in the tool sources under `packages/opencode/src/tool/` (MIT licensed, attributed below)
 - **Theme definitions**: color schemes and styling adapted from `packages/tui/src/theme/`. The files under `crates/ganja-tui/assets/themes/` — `opencode.json`, `tokyonight.json`, `gruvbox.json`, `aura.json` — are verbatim copies of the upstream `packages/tui/src/theme/assets/` files of the same names.
+- **System prompt texts**: the files under `crates/ganja-core/src/prompt/` — `anthropic.txt`, `gpt.txt`, `default.txt` — are verbatim copies of the upstream `packages/opencode/src/session/prompt/` files of the same names. The `Instructions from: {path}` header and the `<env>` block wording derive from `packages/opencode/src/session/{instruction.ts,system.ts}`.
 
 The implementation is original Rust code using idiomatic patterns; it is **not a code translation** but rather a faithful behavioral port of the upstream TypeScript/JavaScript specification.
 

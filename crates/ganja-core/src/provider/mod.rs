@@ -56,6 +56,7 @@ use url::Host;
 
 use crate::{
     auth, catalog,
+    config::{Config, split_model},
     protocol::{FinishReason, Message, Part, PartBody, Usage},
     provider::sse::Frame,
     tool::ToolDefinition,
@@ -85,7 +86,10 @@ pub const PROVIDERS: [&str; 3] = [anthropic::ID, openai::ID, fake::ID];
 pub struct ChatRequest {
     /// Model identifier, spelled the way the provider expects it on the wire.
     pub model: String,
-    /// System prompt. P5 fills it from `AGENTS.md` and the agent definitions.
+    /// What the model is told before it is told anything else, composed by
+    /// [`crate::instruction::system_prompt`] and installed with
+    /// [`Engine::with_system`](crate::Engine::with_system). [`None`] is an
+    /// engine nobody configured, and the shape every scripted run asks in.
     pub system: Option<String>,
     /// The conversation so far, oldest first, ending with the message the user
     /// just sent.
@@ -595,29 +599,77 @@ fn setting(variable: &str) -> Option<String> {
 /// that a bare `cargo run` still demonstrates a streamed reply while making
 /// clear that nothing real is being asked.
 ///
+/// Equivalent to [`select`] with a config that asks for nothing, which is what
+/// it is: the environment is one tier of a chain, and this is the chain with
+/// every other tier empty.
+///
 /// # Errors
 ///
 /// Returns [`SelectionError`] when the variable names a provider this build
 /// does not have, or names one whose credentials are missing. Both fail here,
 /// before the terminal is put into raw mode, so that the message is readable.
 pub fn from_env() -> Result<Selection, SelectionError> {
-    let requested = match env::var(PROVIDER_ENV) {
-        Ok(requested) => requested,
+    select(&Config::default())
+}
+
+/// Resolves the provider and model a session runs on.
+///
+/// Four tiers, and the first one that says something wins each half of the
+/// answer separately — a flag may name the model while the config names the
+/// provider:
+///
+/// 1. `--model`, carried on [`Config::overrides`];
+/// 2. [`PROVIDER_ENV`] and [`MODEL_ENV`], where an empty [`MODEL_ENV`] counts
+///    as unset and an empty [`PROVIDER_ENV`] is a provider nothing ships;
+/// 3. [`Config::model`], `"provider/model"`, split on its first slash;
+/// 4. the catalog's default model for whichever provider the tiers above
+///    named — and, when none of them named one at all, the built-in fake
+///    provider with a notice saying so.
+///
+/// # Errors
+///
+/// Returns [`SelectionError`] when a provider is named that this build does not
+/// have, or one whose credentials are missing, or one the catalog has no
+/// default model for. All of them fail here, before the terminal is put into
+/// raw mode, so that the message is readable.
+pub fn select(config: &Config) -> Result<Selection, SelectionError> {
+    let flag = config.overrides.model.as_deref().map(split_model);
+    let file = config.model.as_deref().map(split_model);
+
+    let environment = match env::var(PROVIDER_ENV) {
+        // Not `setting`: an exported-but-empty `GANJA_PROVIDER` is a mistake
+        // worth naming rather than a variable to look past, and it reaches the
+        // "no such provider" refusal below saying exactly what it was set to.
+        Ok(requested) => Some(requested),
         Err(VarError::NotUnicode(requested)) => {
             return Err(SelectionError::Unknown {
                 requested: requested.to_string_lossy().into_owned(),
             });
         }
-        Err(VarError::NotPresent) => {
-            return Ok(Selection {
-                provider: Arc::new(FakeProvider::default()),
-                model: setting(MODEL_ENV).unwrap_or_else(|| fake::MODEL.to_owned()),
-                notice: Some(format!(
-                    "{PROVIDER_ENV} is unset - replying from the built-in {} provider",
-                    fake::ID
-                )),
-            });
-        }
+        Err(VarError::NotPresent) => None,
+    };
+
+    // Each half falls through the tiers on its own. A flag naming a bare model
+    // leaves the provider to whatever named one next.
+    let requested = flag
+        .and_then(|(provider, _)| provider)
+        .map(str::to_owned)
+        .or(environment)
+        .or_else(|| file.and_then(|(provider, _)| provider).map(str::to_owned));
+    let named_model = flag
+        .map(|(_, model)| model.to_owned())
+        .or_else(|| setting(MODEL_ENV))
+        .or_else(|| file.map(|(_, model)| model.to_owned()));
+
+    let Some(requested) = requested else {
+        return Ok(Selection {
+            provider: Arc::new(FakeProvider::default()),
+            model: named_model.unwrap_or_else(|| fake::MODEL.to_owned()),
+            notice: Some(format!(
+                "{PROVIDER_ENV} is unset - replying from the built-in {} provider",
+                fake::ID
+            )),
+        });
     };
 
     let provider: Arc<dyn Provider> = match requested.as_str() {
@@ -629,7 +681,7 @@ pub fn from_env() -> Result<Selection, SelectionError> {
 
     // The catalog owns the defaults, so a session that names no model still
     // asks for one whose context window and price this build knows.
-    let model = match setting(MODEL_ENV) {
+    let model = match named_model {
         Some(model) => model,
         None if requested == fake::ID => fake::MODEL.to_owned(),
         None => catalog::default_model(&requested)

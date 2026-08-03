@@ -28,6 +28,12 @@ futures.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
 ignore.workspace = true
+# Config files are JSONC, the way upstream's are. Only the `serde` feature is
+# on: it makes the parser itself a `serde::Deserializer` over the token stream,
+# so a config decodes straight into its typed struct and sees keys in document
+# order. Going through a `serde_json::Value` instead would sort them, and the
+# order permission rules were written in is what decides which one wins.
+jsonc-parser = { workspace = true, features = ["serde"] }
 # The HTTP providers speak SSE, so only `stream` and `json` are load-bearing;
 # the workspace declaration pins rustls so no build here reaches for OpenSSL.
 reqwest.workspace = true
