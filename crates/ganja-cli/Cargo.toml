@@ -24,6 +24,12 @@ clap.workspace = true
 etcetera.workspace = true
 ganja-core.workspace = true
 ganja-tui.workspace = true
+# The importer reads someone else's config, which is JSONC whatever its
+# extension says, and it has to see the keys in document order — permission
+# rules are evaluated last-match-wins, so a reader that sorted them would change
+# which rule decides. The AST preserves that order; `serde` is what then proves
+# the file this writes is one `ganja_core::config::Config` can read back.
+jsonc-parser = { workspace = true, features = ["serde"] }
 # Only for the raw-mode read that keeps a typed API key off the screen, through
 # the same crossterm instance the UI drives so the two cannot disagree about
 # terminal state.
