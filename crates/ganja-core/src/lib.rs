@@ -8,7 +8,9 @@
 
 pub mod auth;
 pub mod catalog;
+pub mod config;
 pub mod engine;
+pub mod instruction;
 pub mod permission;
 pub mod project;
 pub mod protocol;
@@ -19,7 +21,12 @@ pub mod tool;
 
 pub use auth::{AuthError, Credential};
 pub use catalog::{Cost, ModelInfo};
+pub use config::{
+    AgentConfig, AgentMode, CommandConfig, Config, ConfigError, Overrides, PermissionConfig,
+    ThemeMode,
+};
 pub use engine::{Engine, EngineError};
+pub use instruction::system_prompt;
 pub use permission::{Decision, Permissions};
 pub use project::{Project, ProjectError};
 pub use protocol::{

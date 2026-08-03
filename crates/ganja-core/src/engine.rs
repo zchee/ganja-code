@@ -75,6 +75,10 @@ pub enum EngineError {
 pub struct Engine {
     provider: Arc<dyn Provider>,
     model: String,
+    /// What the model is told before it is told anything else, composed once
+    /// by [`crate::instruction::system_prompt`]. [`None`] is an engine nobody
+    /// configured, which every scripted and golden run relies on.
+    system: Option<String>,
     /// Tools the model is offered, and the agent loop executes.
     tools: Arc<Registry>,
     /// Rules deciding which tool calls wait for the user.
@@ -157,6 +161,7 @@ impl Engine {
         Self {
             provider,
             model,
+            system: None,
             tools,
             permissions: Arc::new(std::sync::Mutex::new(permissions)),
             // Captured at construction so a process whose directory later
@@ -170,6 +175,24 @@ impl Engine {
             history: Arc::default(),
             persistence,
         }
+    }
+
+    /// Sets what the model is told before it is told anything else.
+    ///
+    /// Consuming rather than a setter, so it composes with either constructor
+    /// and cannot be called on an engine that is already streaming a turn. The
+    /// prompt is captured once and carried by every request a turn makes —
+    /// including the one that summarizes a conversation for compaction, which
+    /// is what stops a compacted session from losing the instructions the rest
+    /// of it was written under.
+    ///
+    /// [`None`] leaves the requests without one, which is what
+    /// [`Engine::new`]'s scripted and golden runs depend on.
+    #[must_use]
+    pub fn with_system(mut self, system: Option<String>) -> Self {
+        self.system = system;
+
+        self
     }
 
     /// The permission rules this engine consults, shared with the agent loop
@@ -389,6 +412,7 @@ impl Engine {
         tokio::spawn(run_turn(Turn {
             provider: Arc::clone(&self.provider),
             model: self.model.clone(),
+            system: self.system.clone(),
             tools: Arc::clone(&self.tools),
             permissions: Arc::clone(&self.permissions),
             cwd: self.cwd.clone(),
@@ -532,6 +556,7 @@ mod tests {
         provider::{
             ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake::MODEL,
         },
+        storage::{self, SessionId, SessionInfo, Storage},
         tool::Registry,
     };
 
@@ -750,7 +775,10 @@ mod tests {
         let requests = seen.lock().expect("the request log is never poisoned");
         let first = requests.first().expect("the first turn asked the provider");
         assert_eq!(first.model, "scripted-model");
-        assert!(first.system.is_none());
+        assert!(
+            first.system.is_none(),
+            "an engine nobody configured asks without a system prompt"
+        );
         assert_eq!(first.messages.len(), 1, "the first turn has no history");
 
         let second = requests.get(1).expect("the second turn asked too");
@@ -845,6 +873,89 @@ mod tests {
             "an empty reply should not enter the history, got {:?}",
             second.messages
         );
+    }
+
+    /// Every request a turn makes carries the configured prompt — including
+    /// the one that summarizes the conversation for compaction, which is what
+    /// keeps a compacted session from being summarized under instructions the
+    /// rest of it was never held under.
+    #[tokio::test]
+    async fn a_configured_system_prompt_reaches_the_agent_and_the_summarize_requests() {
+        const SYSTEM: &str = "you are a canary";
+
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            ProviderEvent::TextDelta("sure".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ]));
+        let seen = Arc::clone(&provider.seen);
+
+        // A model the catalog knows, and a session already at its ceiling, so
+        // the next turn compacts before it asks anything.
+        let model = crate::catalog::default_model("anthropic")
+            .expect("the catalog has a default for a provider this build ships");
+        let window = crate::catalog::model(model)
+            .expect("the default model is in the catalog")
+            .context_window;
+
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let storage = Storage::open(directory.path().join("storage"));
+        let session = SessionId::ascending();
+        let info = SessionInfo {
+            id: session.clone(),
+            version: storage::VERSION,
+            // Pre-titled, so the title machinery stays out of a test that is
+            // not about it and cannot spend a request of its own.
+            title: Some("seeded".to_owned()),
+            created: 1,
+            updated: 2,
+            usage: Usage::default(),
+            context_tokens: window,
+            summary: None,
+        };
+        storage.save_info(&info).expect("the seeded record writes");
+        let earlier = Message::user("the objective");
+        storage
+            .save_message(&session, &earlier)
+            .expect("the seeded envelope writes");
+        for part in &earlier.parts {
+            storage
+                .save_part(&session, &earlier.id, part)
+                .expect("the seeded part writes");
+        }
+
+        let engine = Engine::persistent(
+            provider,
+            model,
+            Arc::new(Registry::new(Vec::new())),
+            Permissions::default(),
+            storage,
+        )
+        .with_system(Some(SYSTEM.to_owned()));
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+        engine.resume(&session).await.expect("the session loads");
+
+        engine
+            .send(Command::SendPrompt {
+                text: "next".to_owned(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        drain(&mut events).await;
+
+        let requests = seen.lock().expect("the request log is never poisoned");
+        assert_eq!(
+            requests.len(),
+            2,
+            "a compacting turn asks twice: summarize, then the model itself"
+        );
+        assert!(
+            requests[0].tools.is_empty(),
+            "the summarize request is the toolless one, got {:?}",
+            requests[0]
+        );
+        for request in requests.iter() {
+            assert_eq!(request.system.as_deref(), Some(SYSTEM));
+        }
     }
 
     #[tokio::test]
