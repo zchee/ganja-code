@@ -17,11 +17,15 @@ The engine's modules. The shape to hold in mind: `engine.rs` accepts commands an
 | `protocol.rs` | Wire protocol v1: `Command`, `Event`, `Message`, `Part`/`PartBody`, `ToolState`, `Usage`, and the ascending id types. Every type is serde-serializable. |
 | `provider/` | Sources of assistant text (see `provider/AGENTS.md`). |
 | `tool/` | What the model can do besides talk (see `tool/AGENTS.md`). |
-| `permission.rs` | Decides which tool calls run unasked and which wait for the user; persists "always" answers per project. |
+| `permission.rs` | Decides which tool calls run unasked, which wait for the user, and which are refused outright (`deny`); layers builtin defaults < agent rules < config rules < stored "always" answers, last match winning; persists "always" answers per project. |
 | `auth.rs` | Provider credentials: environment first, then `auth.json` under the XDG data directory. |
 | `project.rs` | Which project a working directory belongs to (walk up for `.git`), and where its state lives. |
 | `catalog.rs` | Compiled-in models.dev snapshot: context windows, max output, pricing, per-provider default model. |
-| `storage.rs` | **P4, in progress.** Versioned JSON session storage under the project data directory. Currently uncommitted with `todo!()` stubs — owned by another lane; do not edit. |
+| `storage.rs` | Versioned JSON session storage under the project data directory: envelopes with an explicit version, write-through, quarantine-on-corrupt. Session records carry the agent and model a resume restores. |
+| `config.rs` | `ganja.jsonc`/`ganja.json`: discovery (global dir, `GANJA_CONFIG`, project walk-up), JSONC decode of the curated keys, tier merge with flag overrides on top. Unknown top-level keys are refused by name; permission rule order survives exactly as written. |
+| `instruction.rs` | The system prompt: a base prompt per model family (`prompt/*.txt`), the `<env>` block, and `AGENTS.md`-family instruction discovery, assembled in upstream's `Instructions from:` shape. Reaches the engine through `Engine::with_system`/`with_system_parts`. |
+| `agent.rs` | The agent roster: build, plan, general, explore (upstream's rulesets adapted to ganja's tool surface), config overlay, `default_agent` resolution. An agent is a name, a prompt that replaces the base prompt, and rules layered beneath the user's stored answers. |
+| `prompt/` | Upstream prompt texts, byte-verbatim — attributed in the root notices. |
 
 ## For AI Agents
 

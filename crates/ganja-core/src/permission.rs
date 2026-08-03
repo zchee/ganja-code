@@ -70,9 +70,20 @@
 //! — and `pattern` is what it covers within that; both are matched as
 //! wildcards, so a configuration phase can
 //! write `{ "permission": "*", "pattern": "*", "action": "ask" }` and have it
-//! mean every call. An `action` this build does not know — upstream also has
-//! `deny` — is kept as it was written and treated as `ask`, so a rule from a
-//! newer build can only ever make this one more cautious, never less.
+//! mean every call. An `action` this build does not know is kept as it was
+//! written and treated as `ask`, so a rule from a newer build can only ever
+//! make this one more cautious, never less.
+//!
+//! # Where the rules come from
+//!
+//! Two layers, and the boundary between them is who wrote them. The
+//! **baseline** is what a build decided — the ruleset of the agent the session
+//! runs as, which already carries the config's own `permission` block
+//! ([`crate::agent`]) — and it is replaced wholesale whenever the agent
+//! changes. The **stored** rules are the answers a person gave, and they sit
+//! on top, so an "always allow" is never undone by switching agents.
+//! Evaluation walks the concatenation backwards, which is the same
+//! last-match-wins walk it always was.
 //!
 //! Nothing here can fail a turn. A store that cannot be read is quarantined or
 //! ignored with a warning and the session falls back to the defaults; a store
@@ -145,9 +156,14 @@ const SHELL_LIKE: &[&str] = &["bash", "shell"];
 const URL_LIKE: &[&str] = &["webfetch"];
 
 /// Tools whose call names one file, which upstream checks them against as a
-/// path relative to the project (`tool/write.ts`, `tool/edit.ts`:
-/// `patterns: [path.relative(instance.worktree, filepath)]`).
-const FILE_LIKE: &[&str] = &["edit", "write"];
+/// path relative to the project (`tool/write.ts`, `tool/edit.ts`,
+/// `tool/read.ts`: `patterns: [path.relative(instance.worktree, filepath)]`).
+///
+/// `read` is here for the same reason it is upstream — it asks with the file
+/// it would read, and calls `assertExternalDirectory` on it — and without it
+/// the shared `read: {"*.env": "ask"}` default would be a rule about a pattern
+/// no read call ever produces.
+const FILE_LIKE: &[&str] = &["edit", "read", "write"];
 
 /// Argument carrying the command a shell-like tool would run.
 const COMMAND: &str = "command";
@@ -354,12 +370,21 @@ const ARITY: &[(&str, usize)] = &[
 ];
 
 /// What to do with a tool call before it runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Ordered by how much it stops: a call that produces several answers takes
+/// the strongest of them, so one denied pattern refuses the whole call and one
+/// unfamiliar one asks about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Decision {
     /// Run it without asking.
     Allow,
     /// Put it in front of the user first.
     Ask,
+    /// Refuse it outright. No dialog: a rule already answered, and answering
+    /// again is not the user's to do. The model reads the refusal as the
+    /// call's result and carries on — a denial is information, never a turn
+    /// abort.
+    Deny,
 }
 
 /// What a rule does with the calls it covers.
@@ -370,12 +395,26 @@ pub enum Action {
     Allow,
     /// Put them in front of the user.
     Ask,
-    /// Something a newer build wrote — upstream's `deny`, or whatever comes
-    /// after it. Kept exactly as it was found so a rewrite does not drop it,
-    /// and treated as [`Action::Ask`]: a rule this build cannot carry out is
-    /// still a rule saying this call is not routine.
+    /// Refuse them, without asking anyone. Upstream's third action
+    /// (`permission/index.ts`, `ask`), and what a config `permission` block
+    /// writes to take a tool away from an agent.
+    Deny,
+    /// Something a newer build wrote. Kept exactly as it was found so a
+    /// rewrite does not drop it, and treated as [`Action::Ask`]: a rule this
+    /// build cannot carry out is still a rule saying this call is not routine.
     #[serde(untagged)]
     Other(String),
+}
+
+impl Action {
+    /// What this action decides on its own.
+    fn decision(&self) -> Decision {
+        match self {
+            Self::Allow => Decision::Allow,
+            Self::Deny => Decision::Deny,
+            Self::Ask | Self::Other(_) => Decision::Ask,
+        }
+    }
 }
 
 /// One stored decision about a family of calls.
@@ -392,6 +431,11 @@ pub struct Rule {
 /// The project's permission rules, layered over the defaults.
 #[derive(Debug, Default)]
 pub struct Permissions {
+    /// What the build decided, beneath everything a person did: the ruleset of
+    /// the agent this session runs as, config rules and all. Empty until
+    /// [`Permissions::set_baseline`] installs one, which is what keeps a set
+    /// built by [`Permissions::default`] judging exactly what it always did.
+    baseline: Vec<Rule>,
     /// Stored rules, then the ones this session added, in the order they were
     /// decided: the last one that matches a call wins.
     rules: Vec<Rule>,
@@ -444,6 +488,15 @@ impl Permissions {
         permissions
     }
 
+    /// Replaces the rules beneath the stored ones — the agent's ruleset.
+    ///
+    /// Wholesale rather than appended: an agent switch changes which build-side
+    /// rules apply, and layering the new set on top of the old one would leave
+    /// a denial from an agent nobody is running any more.
+    pub fn set_baseline(&mut self, rules: Vec<Rule>) {
+        self.baseline = rules;
+    }
+
     /// What to do with a call to `tool` carrying `args`.
     #[must_use]
     pub fn check(&self, tool: &str, args: &serde_json::Value) -> Decision {
@@ -455,35 +508,42 @@ impl Permissions {
         // Every directory the call names has to come back allowed, the same
         // all-or-nothing rule the patterns below get: a call naming three
         // directories is stopped by the one that was never answered for.
-        if self
+        let located = self
             .outside_dirs(tool, args)
             .iter()
-            .any(|directory| self.decide(EXTERNAL_DIRECTORY, &covering(directory)) == Decision::Ask)
-        {
-            return Decision::Ask;
-        }
+            .map(|directory| self.decide(EXTERNAL_DIRECTORY, &covering(directory)))
+            .max()
+            .unwrap_or(Decision::Allow);
 
         let patterns = self.patterns(tool, args);
 
         // Nothing to judge means the call is nothing but directory moves,
         // which [`moves_only`] has already proven cannot run anything else.
-        // Spelled out rather than left to `all` over an empty set, because
+        // Spelled out rather than left to `max` over an empty set, because
         // "produced no patterns" and "every pattern is allowed" are different
         // facts and only one of them is safe to answer with silence.
-        if patterns.is_empty() {
-            return Decision::Allow;
-        }
-
+        //
         // Upstream asks unless every pattern the call produces is allowed, so
-        // one unfamiliar command in a chain is enough to stop the whole chain.
-        if patterns
+        // one unfamiliar command in a chain is enough to stop the whole chain
+        // — and one denied command refuses it, whatever the rest said.
+        let asked = patterns
             .iter()
-            .all(|pattern| self.decide(tool, pattern) == Decision::Allow)
-        {
-            Decision::Allow
-        } else {
-            Decision::Ask
-        }
+            .map(|pattern| self.decide(tool, pattern))
+            .max()
+            .unwrap_or(Decision::Allow);
+
+        located.max(asked)
+    }
+
+    /// The rules that have anything to say about `tool`, which is what upstream
+    /// hands the model when it refuses a call
+    /// (`packages/core/src/v1/permission.ts`, `DeniedError`).
+    #[must_use]
+    pub fn relevant(&self, tool: &str) -> Vec<Rule> {
+        self.ordered()
+            .filter(|rule| matches(tool, &rule.permission))
+            .cloned()
+            .collect()
     }
 
     /// Records an "always allow" answer for calls like this one.
@@ -580,11 +640,18 @@ impl Permissions {
         // only caller that knows: opening a ruleset says nothing about which
         // directory the session was started in.
         Self {
+            baseline: Vec::new(),
             rules,
             store,
             root: None,
             cwd: None,
         }
+    }
+
+    /// Every rule that applies, weakest first — the build's beneath the
+    /// person's, which is the order precedence runs in.
+    fn ordered(&self) -> impl DoubleEndedIterator<Item = &Rule> {
+        self.baseline.iter().chain(self.rules.iter())
     }
 
     /// The directories this call would work in that the project does not reach.
@@ -608,7 +675,12 @@ impl Permissions {
     ///
     /// Sorted and deduplicated: each of these can become a stored rule, and the
     /// order they are stored in is part of what a person reads back later.
-    fn outside_dirs(&self, tool: &str, args: &serde_json::Value) -> Vec<PathBuf> {
+    ///
+    /// Visible to the crate because a permission dialog has to name them: the
+    /// question "may this run" is not answerable without "where", and a dialog
+    /// that showed the command and not the directory would be asking about
+    /// something narrower than what an answer covers.
+    pub(crate) fn outside_dirs(&self, tool: &str, args: &serde_json::Value) -> Vec<PathBuf> {
         let (Some(root), Some(cwd)) = (&self.root, &self.cwd) else {
             return Vec::new();
         };
@@ -707,14 +779,12 @@ impl Permissions {
     /// they say nothing.
     fn decide(&self, tool: &str, pattern: &str) -> Decision {
         let matched = self
-            .rules
-            .iter()
+            .ordered()
             .rev()
             .find(|rule| matches(tool, &rule.permission) && matches(pattern, &rule.pattern));
 
         match matched {
-            Some(rule) if rule.action == Action::Allow => Decision::Allow,
-            Some(_) => Decision::Ask,
+            Some(rule) => rule.action.decision(),
             None if ASK_BY_DEFAULT.contains(&tool) => Decision::Ask,
             None => Decision::Allow,
         }
@@ -1380,7 +1450,7 @@ fn holding(path: PathBuf) -> PathBuf {
 ///   covering `lst`;
 /// - separators are normalised, so a rule written with either kind of slash
 ///   covers a path written with the other.
-fn matches(text: &str, pattern: &str) -> bool {
+pub(crate) fn matches(text: &str, pattern: &str) -> bool {
     let text = normalize(text);
     let pattern = normalize(pattern);
 
@@ -2714,10 +2784,10 @@ mod tests {
     #[test]
     fn an_unknown_action_asks_and_survives_a_rewrite() {
         let directory = temporary();
-        let denied = json!({ "permission": "shell", "pattern": "rm *", "action": "deny" });
+        let unknown = json!({ "permission": "shell", "pattern": "rm *", "action": "escalate" });
         write_store(
             &directory,
-            &json!({ "version": VERSION, "rules": [denied] }),
+            &json!({ "version": VERSION, "rules": [unknown] }),
         );
 
         let mut permissions = stored(&directory);
@@ -2728,8 +2798,160 @@ mod tests {
 
         permissions.remember_always("shell", &shell("ls"));
         let rules = read(&directory)["rules"].clone();
-        assert_eq!(rules[0], denied, "a rule this build cannot honour is kept");
+        assert_eq!(rules[0], unknown, "a rule this build cannot honour is kept");
         assert_eq!(rules[1]["pattern"], "ls *");
+    }
+
+    /// A stored `deny` is not an unknown action any more: it refuses the call,
+    /// and no dialog is offered, because a rule already answered.
+    #[test]
+    fn a_denied_call_is_refused_without_asking() {
+        let directory = temporary();
+        write_store(
+            &directory,
+            &json!({
+                "version": VERSION,
+                "rules": [{ "permission": "shell", "pattern": "rm *", "action": "deny" }],
+            }),
+        );
+
+        let permissions = stored(&directory);
+        assert_eq!(
+            permissions.check("shell", &shell("rm -rf /")),
+            Decision::Deny
+        );
+        assert_eq!(
+            permissions.check("shell", &shell("ls")),
+            Decision::Ask,
+            "a deny about one command says nothing about another"
+        );
+    }
+
+    /// One denied command in a chain refuses the whole chain, the same
+    /// all-or-nothing rule an unanswered one gets — and it outranks it.
+    #[test]
+    fn one_denied_command_refuses_the_chain_it_is_in() {
+        let directory = temporary();
+        write_store(
+            &directory,
+            &json!({
+                "version": VERSION,
+                "rules": [{ "permission": "shell", "pattern": "curl *", "action": "deny" }],
+            }),
+        );
+
+        assert_eq!(
+            stored(&directory).check("shell", &shell("cargo build && curl example.com")),
+            Decision::Deny
+        );
+    }
+
+    /// The rules a refusal shows the model are the ones that could have
+    /// decided it, upstream's `DeniedError` filter.
+    #[test]
+    fn the_rules_a_refusal_names_are_the_ones_about_that_tool() {
+        let mut permissions = Permissions::default();
+        permissions.set_baseline(vec![
+            Rule {
+                permission: "edit".to_owned(),
+                pattern: "*".to_owned(),
+                action: Action::Deny,
+            },
+            Rule {
+                permission: "grep".to_owned(),
+                pattern: "*".to_owned(),
+                action: Action::Allow,
+            },
+        ]);
+
+        let named = permissions.relevant("edit");
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert_eq!(named[0].permission, "edit");
+    }
+
+    /// The baseline sits *beneath* the stored answers, so an "always allow"
+    /// given by a person is never undone by the agent they switch to.
+    #[test]
+    fn a_stored_answer_outranks_the_baseline_beneath_it() {
+        let directory = temporary();
+        let mut permissions = stored(&directory);
+        permissions.remember_always("shell", &shell("cargo test"));
+
+        permissions.set_baseline(vec![Rule {
+            permission: "shell".to_owned(),
+            pattern: "*".to_owned(),
+            action: Action::Ask,
+        }]);
+
+        assert_eq!(
+            permissions.check("shell", &shell("cargo test --release")),
+            Decision::Allow
+        );
+        assert_eq!(
+            permissions.check("shell", &shell("npm run dev")),
+            Decision::Ask,
+            "the baseline still decides everything nobody answered for"
+        );
+    }
+
+    /// Installing a baseline replaces the last one outright: a denial belongs
+    /// to the agent that wrote it and leaves with it.
+    #[test]
+    fn a_new_baseline_replaces_the_one_before_it() {
+        let mut permissions = Permissions::default();
+        let deny = |permission: &str| Rule {
+            permission: permission.to_owned(),
+            pattern: "*".to_owned(),
+            action: Action::Deny,
+        };
+
+        permissions.set_baseline(vec![deny("edit")]);
+        assert_eq!(
+            permissions.check("edit", &json!({ "filePath": "a.rs" })),
+            Decision::Deny
+        );
+
+        permissions.set_baseline(vec![deny("todowrite")]);
+        assert_eq!(
+            permissions.check("edit", &json!({ "filePath": "a.rs" })),
+            Decision::Ask,
+            "edit is back to what the defaults say about it"
+        );
+        assert_eq!(permissions.check("todowrite", &json!({})), Decision::Deny);
+    }
+
+    /// A read is checked against the file it names, which is what gives the
+    /// shared `*.env` rule anything to match.
+    #[test]
+    fn a_read_is_judged_by_the_file_it_names() {
+        let store = temporary();
+        let project = temporary();
+        let root = project.path().to_path_buf();
+
+        let mut permissions = scoped(&store, &project);
+        permissions.set_baseline(vec![
+            Rule {
+                permission: "read".to_owned(),
+                pattern: "*.env".to_owned(),
+                action: Action::Ask,
+            },
+            Rule {
+                permission: "read".to_owned(),
+                pattern: "*.env.example".to_owned(),
+                action: Action::Allow,
+            },
+        ]);
+
+        let read_of = |name: &str| json!({ "filePath": root.join(name).to_string_lossy() });
+        assert_eq!(permissions.check("read", &read_of(".env")), Decision::Ask);
+        assert_eq!(
+            permissions.check("read", &read_of(".env.example")),
+            Decision::Allow
+        );
+        assert_eq!(
+            permissions.check("read", &read_of("src/main.rs")),
+            Decision::Allow
+        );
     }
 
     /// The last matching rule wins, so a later answer can overrule an earlier
@@ -2840,9 +3062,17 @@ mod tests {
                 Rule {
                     permission: "shell".to_owned(),
                     pattern: "*".to_owned(),
-                    action: Action::Other("deny".to_owned()),
+                    action: Action::Deny,
                 },
                 json!({ "permission": "shell", "pattern": "*", "action": "deny" }),
+            ),
+            (
+                Rule {
+                    permission: "shell".to_owned(),
+                    pattern: "*".to_owned(),
+                    action: Action::Other("escalate".to_owned()),
+                },
+                json!({ "permission": "shell", "pattern": "*", "action": "escalate" }),
             ),
         ] {
             assert_eq!(

@@ -57,6 +57,21 @@ use crate::{
 /// upstream `packages/core/src/v1/permission.ts` (`RejectedError`).
 const REJECTED: &str = "The user rejected permission to use this specific tool call.";
 
+/// What the model reads when a rule refuses a call before anyone is asked,
+/// ported from upstream `packages/core/src/v1/permission.ts` (`DeniedError`).
+///
+/// The rules travel with the message, as upstream's do: a model told only that
+/// it may not do something tries the same thing spelled differently, where one
+/// told *which rule* stopped it can work out what else the rule covers.
+fn denied(rules: &[crate::permission::Rule]) -> String {
+    let rendered = serde_json::to_string(rules).unwrap_or_else(|_| "[]".to_owned());
+
+    format!(
+        "The user has specified a rule which prevents you from using this specific tool call. \
+         Here are some of the relevant rules {rendered}"
+    )
+}
+
 /// What a buffered call reads when the provider died before it could run.
 ///
 /// No upstream analogue: the AI SDK executes tools mid-stream, so a provider
@@ -469,6 +484,9 @@ pub(crate) struct Turn {
     /// every request this turn makes except the title one, which asks a
     /// different question and brings its own prompt.
     pub(crate) system: Option<String>,
+    /// Synthetic user text this turn's requests carry, appended to the last
+    /// user message; see [`stream_step`].
+    pub(crate) reminders: Vec<String>,
     /// Tools the model is offered, and this loop executes.
     pub(crate) tools: Arc<Registry>,
     /// Rules deciding which calls wait for the user.
@@ -1304,6 +1322,23 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             messages.push(assistant.clone());
         }
 
+        // Upstream's `session/reminders.ts` appends these to the last user
+        // message, and — on the path this port takes — never writes them
+        // through, so they belong to the REQUEST and not to the transcript.
+        // That is deliberate on both sides: the notice is about the state the
+        // session is in right now, and a stored copy would still be telling a
+        // later turn about a mode it left. This clone is the request's alone,
+        // so nothing here can reach the history it was copied from.
+        if !turn.reminders.is_empty()
+            && let Some(user) = messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.role == Role::User)
+        {
+            user.parts
+                .extend(turn.reminders.iter().cloned().map(Part::text));
+        }
+
         ChatRequest {
             model: turn.model.clone(),
             system: turn.system.clone(),
@@ -1568,18 +1603,34 @@ async fn resolve(
         .expect("the permission rules are never poisoned")
         .check(&call.name, &args);
 
-    if decision == Decision::Ask {
-        match wait_permission(turn, call, tool.describe(&args), &args).await? {
-            PermissionReply::Once => {}
-            PermissionReply::Always => turn
+    match decision {
+        Decision::Allow => {}
+        // A rule already answered this one, so there is nothing to put in
+        // front of anybody. Like a refusal, it is information: the model reads
+        // why, and the turn carries on.
+        Decision::Deny => {
+            let rules = turn
                 .permissions
                 .lock()
                 .expect("the permission rules are never poisoned")
-                .remember_always(&call.name, &args),
-            // A refusal is information, not a turn abort: the model reads it
-            // as the call's result and decides what to do next.
-            PermissionReply::Reject => {
-                return fail_call(turn, assistant, call, args, REJECTED).await;
+                .relevant(&call.name);
+            let message = denied(&rules);
+
+            return fail_call(turn, assistant, call, args, &message).await;
+        }
+        Decision::Ask => {
+            match wait_permission(turn, call, tool.describe(&args), &args).await? {
+                PermissionReply::Once => {}
+                PermissionReply::Always => turn
+                    .permissions
+                    .lock()
+                    .expect("the permission rules are never poisoned")
+                    .remember_always(&call.name, &args),
+                // A refusal is information, not a turn abort: the model reads
+                // it as the call's result and decides what to do next.
+                PermissionReply::Reject => {
+                    return fail_call(turn, assistant, call, args, REJECTED).await;
+                }
             }
         }
     }
@@ -1767,6 +1818,19 @@ async fn wait_permission(
         sender,
     });
 
+    // The directories an "always" answer would also remember, disclosed with
+    // the request so the dialog can say what it is really asking about.
+    // Collected here rather than at `check` because this is the one place a
+    // person is about to read them.
+    let directories = turn
+        .permissions
+        .lock()
+        .expect("the permission rules are never poisoned")
+        .outside_dirs(&call.name, args)
+        .iter()
+        .map(|directory| directory.to_string_lossy().into_owned())
+        .collect();
+
     if let ControlFlow::Break(stop) = deliver(
         turn,
         Event::PermissionRequested {
@@ -1775,6 +1839,7 @@ async fn wait_permission(
             tool: call.name.clone(),
             title,
             args: args.clone(),
+            directories,
         },
     )
     .await
@@ -2067,6 +2132,7 @@ mod tests {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
             model: fake::MODEL.to_owned(),
             system: None,
+            reminders: Vec::new(),
             tools: Arc::new(Registry::new(vec![tool])),
             permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
             cwd: std::env::temp_dir(),
