@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
+use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, is_credential_store, truncate};
 
 /// How many lines a call reads when it names no `limit`. Upstream's
 /// `DEFAULT_READ_LIMIT`.
@@ -91,6 +91,12 @@ impl Tool for ReadTool {
         let args: Args = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArgs(error.to_string()))?;
         let filepath = resolve(&ctx.cwd, &args.file_path);
+        // Checked before the file is stat'ed, so a store that has not been
+        // written yet is refused exactly like one that has: what the model
+        // learns must not depend on whether this machine is logged in.
+        if is_credential_store(&filepath) {
+            return Err(credential_refusal(&filepath));
+        }
         let title = display(&ctx.cwd, &filepath);
 
         let metadata = match std::fs::metadata(&filepath) {
@@ -183,6 +189,23 @@ fn miss(filepath: &Path) -> ToolError {
         .join("\n");
     ToolError::Failed(format!(
         "File not found: {}\n\nDid you mean one of these?\n{list}",
+        filepath.display()
+    ))
+}
+
+/// What the model is told when it asks for ganja's own credential store.
+///
+/// The arguments were well formed, so this is a failure rather than an argument
+/// complaint, and the text is written to end the attempt rather than just this
+/// call: a model that reads "refused" without reading "permanently" spends the
+/// next step trying a different spelling of the same path.
+fn credential_refusal(filepath: &Path) -> ToolError {
+    ToolError::Failed(format!(
+        "{} is ganja's credential store: it holds the provider API keys this \
+         machine authenticates with, and reading it would put them in the \
+         transcript that is sent to a provider. The refusal is fixed, not a \
+         permission that can be granted, so retrying will not help. Continue \
+         without this file's contents.",
         filepath.display()
     ))
 }
@@ -514,7 +537,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::ReadTool;
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError, credential_store};
 
     /// A context rooted at `cwd`, with a fresh, empty read log.
     fn ctx(cwd: PathBuf) -> ToolCtx {
@@ -820,5 +843,76 @@ mod tests {
                 "missing {name}: {schema}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ganjas_credential_store_is_refused_by_absolute_path() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let store = credential_store().expect("this machine has a home directory");
+
+        let refused = ReadTool
+            .run(
+                serde_json::json!({ "filePath": store.to_str().unwrap() }),
+                &ctx(dir.path().to_owned()),
+            )
+            .await
+            .expect_err("the credential store is never readable");
+
+        let ToolError::Failed(message) = &refused else {
+            panic!("well-formed arguments are not an argument error: {refused:?}");
+        };
+        assert!(
+            message.contains("is ganja's credential store"),
+            "got {message}"
+        );
+        assert!(message.contains("provider API keys"), "got {message}");
+        assert!(
+            message.contains("retrying will not help"),
+            "a model that thinks the refusal is retryable will retry: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ganjas_credential_store_is_refused_through_a_relative_route_onto_it() {
+        let store = credential_store().expect("this machine has a home directory");
+        let directory = store.parent().expect("the store lives in a directory");
+        let name = store.file_name().expect("the store is a file");
+
+        let refused = ReadTool
+            .run(
+                serde_json::json!({ "filePath": name.to_str().unwrap() }),
+                &ctx(directory.to_owned()),
+            )
+            .await
+            .expect_err("a relative route onto the store is still the store");
+
+        let ToolError::Failed(message) = &refused else {
+            panic!("well-formed arguments are not an argument error: {refused:?}");
+        };
+        assert!(
+            message.contains("is ganja's credential store"),
+            "got {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_file_that_only_shares_the_stores_name_still_reads() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let namesake = dir.path().join("auth.json");
+        std::fs::write(&namesake, "not a credential store").expect("the fixture writes");
+
+        let out = ReadTool
+            .run(
+                serde_json::json!({ "filePath": namesake.to_str().unwrap() }),
+                &ctx(dir.path().to_owned()),
+            )
+            .await
+            .expect("the guard is identity-based: any other auth.json still reads");
+
+        assert!(
+            out.output.contains("1: not a credential store"),
+            "got {:?}",
+            out.output
+        );
     }
 }
