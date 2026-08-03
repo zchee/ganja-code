@@ -1,0 +1,16 @@
+data: {"id":"chatcmpl-Fixture","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Fixture","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"reasoning_content":"A greeting is enough."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Fixture","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Fixture","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"content":", world"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Fixture","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Fixture","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-Fixture","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":9,"total_tokens":51,"prompt_tokens_details":{"cached_tokens":16},"completion_tokens_details":{"reasoning_tokens":4}}}
+
+data: [DONE]
+
