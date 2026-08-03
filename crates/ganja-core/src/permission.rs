@@ -25,10 +25,13 @@
 //! every file. So upstream gates the location separately, under a permission
 //! of its own ([`EXTERNAL_DIRECTORY`]) that a call raises alongside the tool's
 //! when it would work outside the project: a shell command on its `workdir`
-//! (`tool/shell.ts`, `ask`), a write or an edit on the directory holding the
-//! file (`tool/write.ts`, `tool/edit.ts`). Both have to come back allowed.
+//! *and* on every path its file-naming commands are handed (`tool/shell.ts`,
+//! `collect` and `ask`), a write or an edit on the directory holding the file
+//! (`tool/write.ts`, `tool/edit.ts`). All of them have to come back allowed.
 //! Without that second gate a remembered `cargo test` would run in any
-//! checkout the model names, build script and all.
+//! checkout the model names, build script and all — and a remembered `rm *`
+//! would reach `/etc/passwd`, since the pattern that remembers *what* runs
+//! says nothing about what it is pointed at.
 //!
 //! A rule naming a tool cannot answer this one — `write` is not
 //! `external_directory` — which is what keeps an "always" given before this
@@ -44,8 +47,8 @@
 //! upstream's table in `permission/arity.ts`, ported here verbatim. For
 //! every other tool, "always" is a rule covering the whole tool, as upstream's
 //! tools ask with `always: ["*"]`. A call that also raised the location gate
-//! leaves a second rule behind for the directory it named, so that answering
-//! the dialog the user actually saw does not leave them answering it again.
+//! leaves a rule behind for each directory it named, so that answering the
+//! dialog the user actually saw does not leave them answering it again.
 //!
 //! # Storage
 //!
@@ -76,6 +79,7 @@
 //! that cannot be written costs the answer its persistence and nothing else.
 
 use std::{
+    borrow::Cow,
     fs, io,
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -173,6 +177,20 @@ const CWD_COMMANDS: &[&str] = &[
     "push-location",
     "set-location",
 ];
+
+/// Commands whose arguments name files, so that what they are handed says
+/// *where* a call would work and not only what it would do.
+///
+/// Upstream's `FILES` (`tool/shell.ts:29-50`), POSIX subset: the PowerShell
+/// aliases listed beside these (`get-content`, `copy-item`, …) and the separate
+/// `CMD_FILES` set are inert here, because `default_shell` only ever picks zsh,
+/// bash or sh.
+///
+/// Upstream builds the set as `[...CWD, …]`, and the directory moves belonging
+/// to it is the point rather than an oversight: `cd /etc` names /etc as surely
+/// as `cat /etc/passwd` does, and it takes every later command in the same
+/// shell along with it.
+const FILE_COMMANDS: &[&str] = &["cat", "chmod", "chown", "cp", "mkdir", "mv", "rm", "touch"];
 
 /// Characters that end one command and begin the next.
 ///
@@ -433,8 +451,14 @@ impl Permissions {
         // `ask`), and it is asked about even when the call produces no
         // patterns of its own: `cd build` in somebody else's checkout is
         // still somebody else's checkout.
-        if let Some(directory) = self.outside(tool, args)
-            && self.decide(EXTERNAL_DIRECTORY, &covering(&directory)) == Decision::Ask
+        //
+        // Every directory the call names has to come back allowed, the same
+        // all-or-nothing rule the patterns below get: a call naming three
+        // directories is stopped by the one that was never answered for.
+        if self
+            .outside_dirs(tool, args)
+            .iter()
+            .any(|directory| self.decide(EXTERNAL_DIRECTORY, &covering(directory)) == Decision::Ask)
         {
             return Decision::Ask;
         }
@@ -469,16 +493,25 @@ impl Permissions {
     pub fn remember_always(&mut self, tool: &str, args: &serde_json::Value) {
         let mut learned = Vec::new();
 
-        // Upstream answers the location dialog with the glob it asked with
+        // Upstream answers the location dialog with the globs it asked with
         // (`tool/shell.ts`, `ask`: `always: globs`), so an "always" given to
         // the dialog the user saw covers the whole of what they saw. Leaving
         // it out would leave them answering the same question every turn.
-        if let Some(directory) = self.outside(tool, args) {
+        //
+        // Each rule's pattern is `dir/*`, and [`glob`]'s `*` spans separators,
+        // so every one of them is **recursive**: answering for `/tmp/scratch`
+        // answers for everything beneath it too. That is upstream's own shape
+        // (`always: globs`), but a call naming three directories now leaves
+        // three such rules behind where it used to leave one — worth weighing
+        // before widening what [`Permissions::outside_dirs`] collects.
+        for directory in self.outside_dirs(tool, args) {
             // A directory whose *name* carries a wildcard would be remembered
             // as one, and `/tmp/build*/*` covers every sibling sharing the
             // prefix. There is no escaping it — [`glob`] has no escape syntax
             // — so such a directory is not remembered and keeps asking, the
             // same answer [`always_rules`] gives a command spelled that way.
+            // The call's other directories are still remembered: a partial
+            // answer beats one the user has to give again from scratch.
             if means_itself(&directory.to_string_lossy()) {
                 learned.push(Rule {
                     permission: EXTERNAL_DIRECTORY.to_owned(),
@@ -554,55 +587,72 @@ impl Permissions {
         }
     }
 
-    /// The directory this call would work in, when the project does not reach
-    /// it.
+    /// The directories this call would work in that the project does not reach.
     ///
-    /// [`None`] is "nothing more to ask about": the call names no path, the
-    /// path is inside the project, or there is no project to compare it
-    /// against.
+    /// Empty is "nothing more to ask about": the call names nothing outside, or
+    /// there is no project to compare anything against.
     ///
-    /// Which argument names the path depends on the tool, and so does what the
-    /// answer would cover. A shell command's `workdir` *is* the directory it
-    /// would work in, and upstream asks about that directory
-    /// (`tool/shell.ts:626`). A write or an edit names a file, and upstream
-    /// asks about the directory holding it
-    /// (`packages/core/src/location-mutation.ts:135-136`) — one answer covers
-    /// the file the user was shown and its siblings, which is the boundary
-    /// they were actually reasoning about.
-    fn outside(&self, tool: &str, args: &serde_json::Value) -> Option<PathBuf> {
+    /// Three things become a directory here, which is upstream's `collect`
+    /// together with the line that follows it (`tool/shell.ts`, `collect`, and
+    /// 626):
+    ///
+    /// - a shell command's `workdir`, whenever the project does not reach it —
+    ///   it *is* where the command runs;
+    /// - every path argument of a command that names files ([`names_files`]),
+    ///   reduced to the directory holding it, because that is the boundary an
+    ///   answer covers;
+    /// - for a write or an edit, the directory holding the file it names
+    ///   (`packages/core/src/location-mutation.ts:135-136`) — one answer covers
+    ///   the file the user was shown and its siblings, which is the boundary
+    ///   they were actually reasoning about.
+    ///
+    /// Sorted and deduplicated: each of these can become a stored rule, and the
+    /// order they are stored in is part of what a person reads back later.
+    fn outside_dirs(&self, tool: &str, args: &serde_json::Value) -> Vec<PathBuf> {
         let (Some(root), Some(cwd)) = (&self.root, &self.cwd) else {
-            return None;
+            return Vec::new();
         };
+        let text = |name| args.get(name).and_then(serde_json::Value::as_str);
+        let mut found: Vec<PathBuf> = Vec::new();
 
-        let (argument, names_the_directory) = if SHELL_LIKE.contains(&tool) {
-            (WORKDIR, true)
-        } else if FILE_LIKE.contains(&tool) {
-            (FILE_PATH, false)
-        } else {
-            return None;
-        };
-        let named = args.get(argument).and_then(serde_json::Value::as_str)?;
+        if SHELL_LIKE.contains(&tool) {
+            // Where the command runs — and so also where its own relative
+            // arguments resolve from, which is why the scan below shares this
+            // base rather than the session's directory. Upstream hands
+            // `collect` the very same one.
+            let base = text(WORKDIR).map_or_else(|| cwd.clone(), |workdir| against(cwd, workdir));
+            if !base.starts_with(root) {
+                found.push(base.clone());
+            }
 
-        // The tools' own resolution, to the letter (`tool/shell.rs`, and
-        // `write`/`edit` against the same session cwd): a gate that resolves a
-        // path differently from the code that uses it is gating a different
-        // path.
-        let path = if Path::new(named).is_absolute() {
-            resolve(Path::new(named))
-        } else {
-            resolve(&cwd.join(named))
-        };
-        if path.starts_with(root) {
-            return None;
+            for chunk in text(COMMAND).map(chunks).unwrap_or_default() {
+                let tokens = tokens(&chunk);
+                if !tokens.first().is_some_and(|verb| names_files(verb)) {
+                    continue;
+                }
+                for argument in path_args(&tokens) {
+                    let Some(path) = arg_path(argument, &base) else {
+                        continue;
+                    };
+                    if path.starts_with(root) {
+                        continue;
+                    }
+                    found.push(holding(path));
+                }
+            }
+        } else if FILE_LIKE.contains(&tool)
+            && let Some(named) = text(FILE_PATH)
+        {
+            let path = against(cwd, named);
+            if !path.starts_with(root) {
+                found.push(holding(path));
+            }
         }
 
-        // Whether the project reaches it is decided by the path the call
-        // named; what an answer would cover is the directory around it.
-        if names_the_directory || path.is_dir() {
-            return Some(path);
-        }
+        found.sort();
+        found.dedup();
 
-        Some(path.parent().map_or(path.clone(), Path::to_path_buf))
+        found
     }
 
     /// The patterns a call has to have allowed before it can run.
@@ -644,11 +694,7 @@ impl Permissions {
     fn file_pattern(&self, args: &serde_json::Value) -> Option<String> {
         let (root, cwd) = (self.root.as_ref()?, self.cwd.as_ref()?);
         let file = args.get(FILE_PATH).and_then(serde_json::Value::as_str)?;
-        let resolved = if Path::new(file).is_absolute() {
-            resolve(Path::new(file))
-        } else {
-            resolve(&cwd.join(file))
-        };
+        let resolved = against(cwd, file);
 
         Some(match resolved.strip_prefix(root) {
             Ok(relative) if relative.as_os_str().is_empty() => HERE.to_owned(),
@@ -970,11 +1016,33 @@ fn always_rules(tool: &str, args: &serde_json::Value) -> Vec<Rule> {
     vec![allow(ANY.to_owned())]
 }
 
-/// The commands `command` runs, as the text of each.
+/// The commands `command` runs that need a permission of their own, as the text
+/// of each.
+///
+/// A chunk that only moves the shell around is left out, which is upstream's
+/// `!CWD.has(cmd)` guard on pattern collection (`tool/shell.ts`, `collect`).
+/// The path scan does **not** use this view — see [`chunks`].
+fn commands(command: &str) -> Vec<String> {
+    chunks(command)
+        .into_iter()
+        .filter(|chunk| !moves_only(chunk))
+        .collect()
+}
+
+/// Every chunk `command` splits into at the operators that separate one command
+/// from the next.
 ///
 /// Quoted separators belong to the command they sit in, so
-/// `git commit -m "a && b"` is one command, not two.
-fn commands(command: &str) -> Vec<String> {
+/// `git commit -m "a && b"` is one chunk, not two.
+///
+/// This is the whole list, directory moves included, and it is the view
+/// [`Permissions::outside_dirs`] scans for paths. Upstream keeps the same two
+/// views over one parse (`tool/shell.ts`, `collect`): its `FILES` scan visits
+/// every command node, while only the nodes that are *not* directory moves
+/// contribute a pattern. Scanning [`commands`] instead would never see
+/// `cd /etc && cat passwd`, where the move is what takes the command after it
+/// out of the project.
+fn chunks(command: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
@@ -1003,27 +1071,29 @@ fn commands(command: &str) -> Vec<String> {
                 if characters.peek() == Some(&character) && matches!(character, '&' | '|') {
                     characters.next();
                 }
-                push_command(&mut found, &mut current);
+                push_chunk(&mut found, &mut current);
             }
             _ => current.push(character),
         }
     }
-    push_command(&mut found, &mut current);
+    push_chunk(&mut found, &mut current);
 
     found
 }
 
-/// Adds what has been collected to `found`, unless it is nothing worth asking
-/// about.
-fn push_command(found: &mut Vec<String>, current: &mut String) {
-    let command = std::mem::take(current);
-    let command = command.trim();
+/// Adds what has been collected to `found`, unless there is nothing there.
+///
+/// Whether a chunk is worth *asking* about is [`commands`]'s question rather
+/// than this one: the path scan needs the chunks that filter throws away.
+fn push_chunk(found: &mut Vec<String>, current: &mut String) {
+    let chunk = std::mem::take(current);
+    let chunk = chunk.trim();
 
-    if command.is_empty() || moves_only(command) {
+    if chunk.is_empty() {
         return;
     }
 
-    found.push(command.to_owned());
+    found.push(chunk.to_owned());
 }
 
 /// Whether `text` still means itself once it is read as a pattern.
@@ -1149,6 +1219,153 @@ fn tokens(command: &str) -> Vec<String> {
     }
 
     found
+}
+
+/// Whether `verb` is one of the commands whose arguments name files.
+///
+/// Upstream's `FILES.has(cmd)`, which is [`FILE_COMMANDS`] together with the
+/// directory moves in [`CWD_COMMANDS`].
+fn names_files(verb: &str) -> bool {
+    FILE_COMMANDS.contains(&verb) || CWD_COMMANDS.contains(&verb)
+}
+
+/// The arguments in `tokens` that name paths, as upstream's `pathArgs` picks
+/// them out (`tool/shell.ts:188-218`, POSIX branch): everything after the verb
+/// except `-flag`s, and except `chmod`'s `+mode`.
+///
+/// Upstream's third filter — dropping `/switch`-style arguments — belongs to its
+/// `cmd.exe` branch and is left out for the same reason its PowerShell aliases
+/// are.
+///
+/// The `+mode` exception is upstream's, and is kept rather than tidied: `chmod
+/// +x` drops the mode while `chmod 755` does not, so a bare numeric mode is
+/// scanned as though it named a file. Both spellings are relative text that
+/// resolves inside the project and falls out at the next step, so neither is
+/// observable through [`Permissions::check`] — matching upstream costs nothing
+/// here, and diverging would cost the reason to trust the rest of the port.
+fn path_args(tokens: &[String]) -> Vec<&str> {
+    let verb = tokens.first().map_or("", String::as_str);
+
+    tokens
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .filter(|token| !token.starts_with('-'))
+        .filter(|token| !(verb == "chmod" && token.starts_with('+')))
+        .collect()
+}
+
+/// The path `argument` names, resolved against `base`, or [`None`] when this
+/// scan cannot say what it names.
+///
+/// Upstream's `argPath` in the POSIX order (`tool/shell.ts:369-376`): unquote,
+/// expand a leading `~`, cut the text before the first glob metacharacter, and
+/// give up on anything a shell would substitute into.
+///
+/// **Divergence, deliberate.** The unquoting is already done, and done wider:
+/// [`tokens`] drops quotes wherever they appear and applies backslash escapes,
+/// while upstream's `unquote` only strips a matched outer pair off the token's
+/// own text. So `rm "/etc"/passwd` names `/etc/passwd` here and stays the
+/// literal text `"/etc"/passwd` upstream — which upstream then resolves *inside*
+/// the project and asks nothing about. This port asks. The difference runs in
+/// the direction of asking, and closing it would mean writing quote handling
+/// that is deliberately worse than the one already here.
+fn arg_path(argument: &str, base: &Path) -> Option<PathBuf> {
+    let expanded = expand_home(argument);
+    let named = glob_prefix(&expanded)?;
+
+    if named.is_empty() || dynamic(named) {
+        return None;
+    }
+
+    Some(against(base, named))
+}
+
+/// `text` with a leading `~` replaced by this user's home directory, which is
+/// upstream's `home` (`tool/shell.ts:135-139`).
+///
+/// `~user` is left alone, as upstream leaves it: only this process's own home is
+/// known without asking the system who else has one.
+fn expand_home(text: &str) -> Cow<'_, str> {
+    let Some(rest) = text.strip_prefix('~') else {
+        return Cow::Borrowed(text);
+    };
+    let tail = if rest.is_empty() {
+        None
+    } else if let Some(tail) = rest.strip_prefix(['/', '\\'].as_slice()) {
+        Some(tail)
+    } else {
+        return Cow::Borrowed(text);
+    };
+    // No home directory to expand against is not a way past the gate: the text
+    // is judged as it was written, which resolves relative to the call's own
+    // directory and is compared like any other path.
+    let Ok(home) = etcetera::home_dir() else {
+        return Cow::Borrowed(text);
+    };
+
+    let expanded = match tail {
+        Some(tail) => home.join(tail),
+        None => home,
+    };
+    Cow::Owned(expanded.to_string_lossy().into_owned())
+}
+
+/// `text` cut before the first glob metacharacter, or [`None`] when there is no
+/// literal text in front of one.
+///
+/// Upstream's `prefix` (`tool/shell.ts:181-186`) returns nothing at all when the
+/// metacharacter is the very first character, and its `argPath` then skips the
+/// argument. Cutting to an empty string instead would resolve to the directory
+/// the command runs in and collect *that*, so `rm *.log` would name a directory
+/// nobody wrote — which upstream never does.
+fn glob_prefix(text: &str) -> Option<&str> {
+    match text.find(['*', '?', '['].as_slice()) {
+        Some(0) => None,
+        Some(index) => Some(&text[..index]),
+        None => Some(text),
+    }
+}
+
+/// Whether `text` carries something a shell would run or expand, which makes the
+/// path it ends up naming unknowable until it does.
+///
+/// Upstream's `dynamic` (`tool/shell.ts:174-179`): a leading `(` or `@(`, or a
+/// substitution anywhere. It tests `$(`, `${` and a bare `$` separately because
+/// its PowerShell branch treats them differently; on POSIX any `$` is already
+/// enough and subsumes the first two.
+///
+/// Upstream calls this scan advisory (`packages/core/src/tool/bash.ts:109`) and
+/// so is this one: an argument bearing a substitution is invisible to *both*
+/// sides, so `rm "$(echo /etc/passwd)"` is gated by its ordinary pattern and not
+/// by the location gate.
+fn dynamic(text: &str) -> bool {
+    text.starts_with('(') || text.starts_with("@(") || text.contains(['$', '`'].as_slice())
+}
+
+/// `named` resolved against `base`: absolute as it was written, relative joined
+/// to `base`, and [`resolve`]d either way.
+///
+/// Every path this module judges goes through here, because a gate that resolves
+/// a path differently from the code that will use it is gating a different path.
+fn against(base: &Path, named: &str) -> PathBuf {
+    let path = Path::new(named);
+
+    if path.is_absolute() {
+        resolve(path)
+    } else {
+        resolve(&base.join(path))
+    }
+}
+
+/// The directory an answer about `path` would cover: `path` itself when it is
+/// one, and the directory holding it otherwise.
+fn holding(path: PathBuf) -> PathBuf {
+    if path.is_dir() {
+        return path;
+    }
+
+    path.parent().map_or(path.clone(), Path::to_path_buf)
 }
 
 /// Whether `text` is covered by `pattern`.
@@ -1894,6 +2111,275 @@ mod tests {
             permissions.check("bash", &call),
             Decision::Ask,
             "and it keeps asking about itself rather than being remembered wide"
+        );
+    }
+
+    /// The finding this scan exists for. A rule remembers *what* runs, so
+    /// `rm build.log` answered once stores `rm *` — and with nothing gating what
+    /// the verb is pointed at, that answer reached any file on the machine.
+    #[test]
+    fn a_remembered_verb_cannot_be_pointed_at_a_file_outside_the_project() {
+        let store = temporary();
+        let project = temporary();
+
+        let mut permissions = scoped(&store, &project);
+        permissions.remember_always("shell", &shell("rm build.log"));
+
+        assert_eq!(
+            permissions.check("shell", &shell("rm build.log")),
+            Decision::Allow,
+            "the answer still covers the file it was given for"
+        );
+        for reached in ["rm -rf /etc/passwd", "rm /etc/shadow", "cat /etc/passwd"] {
+            assert_eq!(
+                permissions.check("shell", &shell(reached)),
+                Decision::Ask,
+                "`rm *` says what may run, never what it may be pointed at: {reached}"
+            );
+        }
+    }
+
+    /// A directory move needs no permission of its own and contributes no
+    /// pattern, so the pattern gate sees only the command *after* it — which may
+    /// well be remembered. What has to stop the pair is the directory the move
+    /// names, because every later command in the same shell runs there.
+    ///
+    /// This is why the scan walks [`chunks`] rather than [`commands`]: the latter
+    /// drops exactly these, and upstream's `FILES` set includes the moves for
+    /// exactly this reason.
+    #[test]
+    fn a_move_that_takes_the_next_command_out_of_the_project_is_scanned_too() {
+        let store = temporary();
+        let project = temporary();
+        let elsewhere = temporary();
+
+        let mut permissions = scoped(&store, &project);
+        permissions.remember_always("shell", &shell("cat notes.md"));
+        assert_eq!(
+            permissions.check("shell", &shell("cat notes.md")),
+            Decision::Allow,
+            "the remembered `cat *` is what makes the pattern gate blind here"
+        );
+
+        for escape in [
+            format!("cd {} && cat passwd", elsewhere.path().display()),
+            // The same climb spelled relatively, which `moves_only` accepts as
+            // an ordinary path and so drops from the patterns entirely.
+            "cd ../.. && cat etc/passwd".to_owned(),
+        ] {
+            assert_eq!(
+                permissions.check("shell", &shell(&escape)),
+                Decision::Ask,
+                "{escape}"
+            );
+        }
+    }
+
+    /// Only the arguments that actually leave the project become directories:
+    /// the one that stays inside leaves no rule behind, so an answer covers what
+    /// the user was shown and not a boundary they never crossed.
+    #[test]
+    fn only_the_arguments_that_leave_the_project_become_directories() {
+        let store = temporary();
+        let project = temporary();
+        let outside = temporary();
+
+        let mut permissions = scoped(&store, &project);
+        let call = shell(&format!("cp {}/shadow ./stolen", outside.path().display()));
+
+        assert_eq!(permissions.check("shell", &call), Decision::Ask);
+        permissions.remember_always("shell", &call);
+
+        assert_eq!(
+            read(&store)["rules"],
+            json!([
+                {
+                    "permission": "external_directory",
+                    "pattern": covering(&resolve(outside.path())),
+                    "action": "allow",
+                },
+                { "permission": "shell", "pattern": "cp *", "action": "allow" },
+            ]),
+            "`./stolen` resolves inside the project and leaves no rule behind"
+        );
+    }
+
+    /// A `~` names a directory the project does not reach, and the answer covers
+    /// the directory holding the file rather than the file itself.
+    ///
+    /// Ganja raises **one** dialog per call — [`Permissions::check`] returns a
+    /// single [`Decision`] and `Event::PermissionRequested` is one event — where
+    /// upstream asks twice in a row. The two halves of the answer still both
+    /// land, which is what the user consented to either way.
+    #[test]
+    fn a_tilde_path_outside_the_project_is_asked_about_and_remembered_by_directory() {
+        let store = temporary();
+        let project = temporary();
+        let home = etcetera::home_dir().expect("this machine has a home directory");
+
+        let mut permissions = scoped(&store, &project);
+        assert_eq!(
+            permissions.check("shell", &shell("cat ~/.ssh/id_rsa")),
+            Decision::Ask,
+            "a key outside the project is asked about"
+        );
+
+        // The stored shape is pinned through a leaf that cannot exist, so the
+        // expectation does not depend on whether this machine has a key — or,
+        // if it has one, on what that key is a link to.
+        let call = shell("cat ~/.ganja-no-such-directory/secret");
+        permissions.remember_always("shell", &call);
+
+        assert_eq!(
+            read(&store)["rules"],
+            json!([
+                {
+                    "permission": "external_directory",
+                    "pattern": covering(&resolve(&home.join(".ganja-no-such-directory"))),
+                    "action": "allow",
+                },
+                { "permission": "shell", "pattern": "cat *", "action": "allow" },
+            ]),
+            "one dialog, both halves of the answer"
+        );
+        assert_eq!(permissions.check("shell", &call), Decision::Allow);
+        assert_eq!(
+            permissions.check("shell", &shell("cat ~/.ssh/id_rsa")),
+            Decision::Ask,
+            "answering for one directory under the home answers for no other"
+        );
+    }
+
+    /// The gate costs the ordinary case nothing: a command working on the
+    /// project's own files is answered once, by its verb, and stores no location
+    /// rule at all.
+    #[test]
+    fn commands_that_stay_inside_the_project_leave_the_location_gate_alone() {
+        let project = temporary();
+        fs::create_dir(project.path().join("subdir")).expect("the subdirectory is creatable");
+
+        for (command, remembered) in [
+            ("rm build.log", "rm *"),
+            ("mkdir -p subdir/build", "mkdir *"),
+            // `+x` is dropped as a mode rather than scanned as a path, which is
+            // upstream's asymmetry — see [`path_args`].
+            ("chmod +x build.sh", "chmod *"),
+        ] {
+            let store = temporary();
+            let mut permissions = scoped(&store, &project);
+
+            assert_eq!(
+                permissions.check("shell", &shell(command)),
+                Decision::Ask,
+                "the verb still needs an answer: {command}"
+            );
+            permissions.remember_always("shell", &shell(command));
+
+            assert_eq!(
+                read(&store)["rules"],
+                json!([{ "permission": "shell", "pattern": remembered, "action": "allow" }]),
+                "no location rule belongs to a call that never left the project: {command}"
+            );
+            assert_eq!(
+                permissions.check("shell", &shell(command)),
+                Decision::Allow,
+                "{command}"
+            );
+        }
+    }
+
+    /// An argument carrying a substitution names a path nobody can know before
+    /// the shell runs it, so the scan skips it — as upstream's does, which
+    /// documents this scan as advisory. The ordinary pattern gate still applies,
+    /// and answering it does not open the location gate for anything.
+    #[test]
+    fn an_argument_carrying_a_substitution_is_left_to_the_pattern_gate() {
+        let store = temporary();
+        let project = temporary();
+
+        let mut permissions = scoped(&store, &project);
+        let call = shell(r#"rm "$(echo /etc/passwd)""#);
+
+        assert_eq!(permissions.check("shell", &call), Decision::Ask);
+        permissions.remember_always("shell", &call);
+
+        assert_eq!(
+            read(&store)["rules"],
+            json!([{ "permission": "shell", "pattern": "rm *", "action": "allow" }]),
+            "the scan cannot see through a substitution, on either side of the port"
+        );
+        assert_eq!(
+            permissions.check("shell", &shell("rm -rf /etc/passwd")),
+            Decision::Ask,
+            "and the pattern that answer stored still reaches nothing outside"
+        );
+    }
+
+    /// The workdir is still the first thing asked about, for a command that
+    /// names no files at all — the path the scan's generalization to a list must
+    /// not have dropped.
+    #[test]
+    fn a_workdir_outside_the_project_is_asked_about_on_its_own() {
+        let store = temporary();
+        let project = temporary();
+        let elsewhere = temporary();
+
+        let mut permissions = scoped(&store, &project);
+        let call = shell_in("ls", elsewhere.path());
+
+        assert_eq!(permissions.check("shell", &call), Decision::Ask);
+        permissions.remember_always("shell", &call);
+
+        assert_eq!(
+            read(&store)["rules"],
+            json!([
+                {
+                    "permission": "external_directory",
+                    "pattern": covering(&resolve(elsewhere.path())),
+                    "action": "allow",
+                },
+                { "permission": "shell", "pattern": "ls *", "action": "allow" },
+            ]),
+        );
+        assert_eq!(permissions.check("shell", &call), Decision::Allow);
+    }
+
+    /// A call can name several directories, and one of them being unrememberable
+    /// must not cost the others their answer. The partial memory is deliberate:
+    /// the call keeps asking — because a directory nobody answered for is still
+    /// unanswered — while the answer that *could* be stored was.
+    #[test]
+    fn a_wildcard_directory_is_skipped_without_costing_the_others_their_answer() {
+        let store = temporary();
+        let project = temporary();
+        let globbed = temporary();
+        let clean = temporary();
+
+        let mut permissions = scoped(&store, &project);
+        let call = shell_in(
+            &format!("rm {}/x", clean.path().display()),
+            globbed.path().join("a*"),
+        );
+
+        assert_eq!(permissions.check("shell", &call), Decision::Ask);
+        permissions.remember_always("shell", &call);
+
+        assert_eq!(
+            read(&store)["rules"],
+            json!([
+                {
+                    "permission": "external_directory",
+                    "pattern": covering(&resolve(clean.path())),
+                    "action": "allow",
+                },
+                { "permission": "shell", "pattern": "rm *", "action": "allow" },
+            ]),
+            "the directory that means itself is remembered; the wildcard one cannot be"
+        );
+        assert_eq!(
+            permissions.check("shell", &call),
+            Decision::Ask,
+            "and the call keeps asking, because one directory it names is still unanswered"
         );
     }
 
