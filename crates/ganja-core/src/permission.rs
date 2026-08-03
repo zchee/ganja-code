@@ -2114,6 +2114,36 @@ mod tests {
         );
     }
 
+    /// The P3 finding in the words it was reported in: "`rm -rf ~/Documents`
+    /// runs unasked after one 'always' on `rm build.log`".
+    ///
+    /// The mechanisms are already covered — a path argument reaching outside the
+    /// project, and `~` expanding to somewhere the project does not reach — but
+    /// they are covered separately, in two tests that a reader has to compose to
+    /// see that this shape is closed. Naming the reported shape is what makes
+    /// that one read instead of three.
+    #[test]
+    fn a_remembered_delete_cannot_be_aimed_at_the_home_directory() {
+        let store = temporary();
+        let project = temporary();
+
+        let mut permissions = scoped(&store, &project);
+        permissions.remember_always("shell", &shell("rm build.log"));
+        assert_eq!(
+            permissions.check("shell", &shell("rm build.log")),
+            Decision::Allow,
+            "the answer still covers the file it was given for"
+        );
+
+        for aimed in ["rm -rf ~/Documents", "rm -rf ~/Documents/notes", "rm -rf ~"] {
+            assert_eq!(
+                permissions.check("shell", &shell(aimed)),
+                Decision::Ask,
+                "{aimed}"
+            );
+        }
+    }
+
     /// The finding this scan exists for. A rule remembers *what* runs, so
     /// `rm build.log` answered once stores `rm *` — and with nothing gating what
     /// the verb is pointed at, that answer reached any file on the machine.
