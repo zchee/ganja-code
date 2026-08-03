@@ -1,0 +1,42 @@
+# Third-Party Notices
+
+## opencode
+
+This repository is a behavioral port to Rust of [opencode](https://github.com/anomalyco/opencode), pinned at reference tag **v1.18.11** (released 2026-08-01).
+
+What is ported from the upstream specification:
+- **Behavior**: streaming chat, tool calling, permission gating, session persistence, configuration loading
+- **Tool prompt texts**: descriptions in `crates/ganja-core/src/tool/` derive from upstream `packages/opencode/src/tool/*.txt` (MIT licensed, attributed below)
+- **Theme definitions**: color schemes and styling adapted from `packages/tui/src/theme/`
+
+The implementation is original Rust code using idiomatic patterns; it is **not a code translation** but rather a faithful behavioral port of the upstream TypeScript/JavaScript specification.
+
+---
+
+## MIT License
+
+The following is the complete license text from upstream opencode:
+
+```
+MIT License
+
+Copyright (c) 2025 opencode
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

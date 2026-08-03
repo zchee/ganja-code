@@ -1,0 +1,66 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/zchee/ganja-code"
+
+# Every dependency the port is expected to need through P4 is declared here so
+# that member crates only ever opt in, never choose a version.
+[workspace.dependencies]
+ganja-core = { path = "crates/ganja-core" }
+ganja-tui = { path = "crates/ganja-tui" }
+
+anyhow = "1.0.104"
+async-trait = "0.1.91"
+clap = { version = "4.6.5", features = ["derive"] }
+# `ratatui` re-exports this exact crate; depending on it here is what turns on
+# `event-stream`, which the re-export alone cannot request.
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+etcetera = "0.11.0"
+futures = "0.3.33"
+globset = "0.4.19"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+ignore = "0.4.31"
+ratatui = "0.30.2"
+ratatui-textarea = "0.9.2"
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "charset",
+    "http2",
+    "json",
+    "rustls",
+    "stream",
+    "system-proxy",
+] }
+schemars = "1.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+similar = "3.1.1"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = [
+    "fs",
+    "io-util",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-stream = "0.1.19"
+tokio-util = "0.7.19"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+assert_cmd = "2.2.2"
+expectrl = "0.9.0"
+insta = "1.48.0"
+predicates = "3.1.4"
+similar-asserts = "2.0.0"
+tempfile = "3.27.0"

@@ -1,0 +1,18 @@
+[package]
+name = "ganja-tui"
+description = "ratatui frontend for ganja."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+# Not named in the source: it exists to enable crossterm's `event-stream`
+# feature on the crate instance `ratatui` re-exports.
+crossterm.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+ratatui-textarea.workspace = true
+tokio.workspace = true
