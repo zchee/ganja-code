@@ -31,6 +31,8 @@ pub enum Activity {
     Streaming,
     /// The last turn was cancelled.
     Stopped,
+    /// The last turn could not be answered; the notice says why.
+    Failed,
 }
 
 impl Activity {
@@ -39,6 +41,7 @@ impl Activity {
             Self::Ready => "ready",
             Self::Streaming => "streaming",
             Self::Stopped => "stopped",
+            Self::Failed => "failed",
         }
     }
 }
@@ -186,5 +189,19 @@ mod tests {
 
         assert!(!status.is_streaming());
         assert!(rendered(&status, 100).starts_with("stopped"));
+    }
+
+    #[test]
+    fn a_failed_turn_reads_as_failed_and_explains_itself() {
+        let mut status = Status::new(None);
+        status.set_activity(Activity::Streaming);
+        status.set_activity(Activity::Failed);
+        status.set_notice(Some("no usable credentials".to_owned()));
+
+        let line = rendered(&status, 100);
+
+        assert!(!status.is_streaming());
+        assert!(line.starts_with("failed"), "got {line:?}");
+        assert!(line.contains("no usable credentials"), "got {line:?}");
     }
 }

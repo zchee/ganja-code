@@ -8,11 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Only where dyn-safety demands it: `Provider` is used behind `Arc<dyn _>`.
+async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tracing.workspace = true
 # `CancellationToken` lives behind `rt`; the workspace declaration carries no
 # features so crates opt into exactly the modules they use.
 tokio-util = { workspace = true, features = ["rt"] }

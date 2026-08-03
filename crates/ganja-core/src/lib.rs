@@ -11,4 +11,7 @@ pub mod protocol;
 pub mod provider;
 
 pub use engine::{Engine, EngineError};
-pub use protocol::{Command, Event, FinishReason};
+pub use protocol::{
+    Command, Event, FinishReason, Message, MessageId, MessageTime, Part, PartBody, PartId, Role,
+    Usage,
+};
