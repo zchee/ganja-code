@@ -247,40 +247,11 @@ impl Tool for ShellTool {
             .lock()
             .expect("the output buffer is never poisoned")
             .finish();
-        // Lossy for the same reason upstream's `TextDecoder` is: a command is
-        // free to write bytes that are not text, and losing a byte beats
-        // failing a call that otherwise worked. Decoding the window whole,
-        // rather than chunk by chunk, keeps a code point split across two
-        // reads intact.
-        let (mut output, clipped) = tail(&String::from_utf8_lossy(&window));
-        let truncated = dropped || clipped;
-
-        // Everything cut has to be somewhere the model can still reach, which
-        // is what this tool's own prompt promises. A command that never
-        // reached [`SPILL_THRESHOLD`] has no file yet, so one is written now
-        // from the window — which in that case is the whole output.
-        let spill = match spilled {
-            Some(path) => Some(path),
-            None if clipped => open_spill(self.spill_dir.as_deref(), &window).map(|(path, _)| path),
-            None => None,
-        };
-
-        if output.is_empty() {
-            output = "(no output)".to_owned();
-        }
-        // Upstream's marker, verbatim and in its position: a prefix, so the
-        // model reads why the output starts mid-stream before it reads the
-        // output (`tool/shell.ts`, `run`). Deliberately not `truncate`'s own
-        // `hint`, which the other tools use — this one names the whole file
-        // rather than a way to search it, because what was cut is the head.
-        if let Some(path) = &spill
-            && truncated
-        {
-            output = format!(
-                "...output truncated...\n\nFull output saved to: {}\n\n{output}",
-                path.display()
-            );
-        }
+        let Assembled {
+            mut output,
+            truncated,
+            spill,
+        } = assemble(&window, dropped, spilled, self.spill_dir.as_deref());
 
         if matches!(ended, Ended::TimedOut) {
             output.push_str(&format!(
@@ -302,6 +273,7 @@ impl Tool for ShellTool {
         });
         // Upstream spreads `outputPath` in only for `cut && file`, so a call
         // that kept everything names no file rather than naming an absent one.
+        // A partial spill is still named: the model can read what did land.
         if let Some(path) = &spill
             && truncated
         {
@@ -348,11 +320,52 @@ enum Spill {
     Holding(Vec<u8>),
     /// Open, with everything since appended to it as it arrives.
     Open(PathBuf, std::fs::File),
-    /// There was nowhere writable to put it. The window is then the only
-    /// record, which is the one case where output is lost outright — the
-    /// alternative is holding it in memory, and holding output in memory
-    /// without a bound is the defect this type exists to prevent.
-    Refused,
+    /// Nothing more can be written, carrying the file that was open when
+    /// writing stopped — [`None`] when there never was one.
+    ///
+    /// The path outliving the failure is the point. A write that fails
+    /// part-way leaves a real file holding everything up to that chunk, and
+    /// forgetting it would send [`Collector::finish`] off to open a second
+    /// one from the window alone: strictly less output, and advertised as
+    /// more. Only the path is kept and never the bytes, so the memory bound
+    /// is exactly what it was.
+    ///
+    /// [`None`] is the one case where output is lost outright — nowhere
+    /// writable was ever found — and the alternative there is holding it in
+    /// memory, which is the defect this type exists to prevent.
+    Refused(Option<PathBuf>),
+}
+
+/// The file a finished command's output was spilled to, and how much of the
+/// output actually reached it.
+///
+/// The distinction is what the notice is allowed to claim. A file the model
+/// is told holds the "full output" had better hold it.
+enum Spilled {
+    /// Everything the command wrote.
+    Whole(PathBuf),
+    /// Everything up to the point the spill could no longer be written.
+    Partial(PathBuf),
+}
+
+impl Spilled {
+    /// Where the file is, whichever it is.
+    fn path(&self) -> &Path {
+        match self {
+            Self::Whole(path) | Self::Partial(path) => path,
+        }
+    }
+
+    /// How the notice introduces it. "Full" is upstream's wording
+    /// (`tool/shell.ts`, `run`); "Partial" is this port's, for a state
+    /// upstream does not distinguish — it dies on a failed spill write where
+    /// this one keeps the call alive and has to say what survived.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Whole(_) => "Full",
+            Self::Partial(_) => "Partial",
+        }
+    }
 }
 
 impl Default for Spill {
@@ -403,12 +416,14 @@ impl Collector {
                 } else {
                     // A disk that stopped accepting writes does not fail the
                     // command: the window still holds the end of the output,
-                    // which is what the model reads.
+                    // which is what the model reads. The file keeps its name
+                    // — everything written before this chunk is still in it,
+                    // and that is more than the window has.
                     self.dropped = true;
-                    Spill::Refused
+                    Spill::Refused(Some(path))
                 }
             }
-            Spill::Refused => Spill::Refused,
+            Spill::Refused(path) => Spill::Refused(path),
             Spill::Holding(mut bytes) => {
                 bytes.extend_from_slice(chunk);
                 if bytes.len() <= SPILL_THRESHOLD {
@@ -422,7 +437,7 @@ impl Collector {
                         // it were the whole thing.
                         None => {
                             self.dropped = true;
-                            Spill::Refused
+                            Spill::Refused(None)
                         }
                     }
                 }
@@ -432,18 +447,93 @@ impl Collector {
     }
 
     /// The window as one buffer, whether anything was cut on the way, and the
-    /// spill file if one was opened.
-    fn finish(&mut self) -> (Vec<u8>, bool, Option<PathBuf>) {
+    /// spill file if one was opened — saying whether it holds everything.
+    fn finish(&mut self) -> (Vec<u8>, bool, Option<Spilled>) {
         let mut window = Vec::with_capacity(self.used);
         for chunk in &self.window {
             window.extend_from_slice(chunk);
         }
-        let path = match &self.spill {
-            Spill::Open(path, _) => Some(path.clone()),
-            Spill::Holding(_) | Spill::Refused => None,
+        let spilled = match &self.spill {
+            Spill::Open(path, _) => Some(Spilled::Whole(path.clone())),
+            // Seeded with everything up to the threshold and appended to
+            // since, so what is in it is the output up to the failure.
+            Spill::Refused(Some(path)) => Some(Spilled::Partial(path.clone())),
+            Spill::Holding(_) | Spill::Refused(None) => None,
         };
 
-        (window, self.dropped, path)
+        (window, self.dropped, spilled)
+    }
+}
+
+/// What a finished command hands back: what the model reads, whether anything
+/// was cut, and the file the rest of it is in.
+struct Assembled {
+    output: String,
+    truncated: bool,
+    spill: Option<PathBuf>,
+}
+
+/// Turns what the collector kept into what the model reads.
+///
+/// Split out of [`ShellTool::run`] so the shapes that are awkward to reach
+/// through a real command — a spill that failed part-way, above all — can be
+/// exercised directly.
+fn assemble(
+    window: &[u8],
+    dropped: bool,
+    spilled: Option<Spilled>,
+    spill_dir: Option<&Path>,
+) -> Assembled {
+    // Lossy for the same reason upstream's `TextDecoder` is: a command is
+    // free to write bytes that are not text, and losing a byte beats failing
+    // a call that otherwise worked. Decoding the window whole, rather than
+    // chunk by chunk, keeps a code point split across two reads intact.
+    let (mut output, clipped) = tail(&String::from_utf8_lossy(window));
+    let truncated = dropped || clipped;
+
+    // Everything cut has to be somewhere the model can still reach, which is
+    // what this tool's own prompt promises.
+    let spill = match spilled {
+        // A file opened while the command ran already holds more than the
+        // window does. Opening a second one from the window would orphan it
+        // and hand the model strictly less.
+        Some(spilled) => Some(spilled),
+        // No file yet, so one is written now from the window. It is the whole
+        // output precisely when nothing was dropped on the way — a command
+        // under [`SPILL_THRESHOLD`] never lost anything, whereas one whose
+        // spill could not be opened at all did.
+        None if clipped => open_spill(spill_dir, window).map(|(path, _)| {
+            if dropped {
+                Spilled::Partial(path)
+            } else {
+                Spilled::Whole(path)
+            }
+        }),
+        None => None,
+    };
+
+    if output.is_empty() {
+        output = "(no output)".to_owned();
+    }
+    // Upstream's marker, verbatim and in its position: a prefix, so the model
+    // reads why the output starts mid-stream before it reads the output
+    // (`tool/shell.ts`, `run`). Deliberately not `truncate`'s own `hint`,
+    // which the other tools use — this one names the whole file rather than a
+    // way to search it, because what was cut is the head.
+    if let Some(spilled) = &spill
+        && truncated
+    {
+        output = format!(
+            "...output truncated...\n\n{} output saved to: {}\n\n{output}",
+            spilled.label(),
+            spilled.path().display()
+        );
+    }
+
+    Assembled {
+        output,
+        truncated,
+        spill: spill.map(|spilled| spilled.path().to_owned()),
     }
 }
 
@@ -698,14 +788,17 @@ fn shorten(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::Arc,
         time::{Duration, Instant},
     };
 
     use tokio_util::sync::CancellationToken;
 
-    use super::{Collector, DEFAULT_TIMEOUT, KEEP, ShellTool, tail};
+    use super::{
+        Collector, DEFAULT_TIMEOUT, KEEP, SPILL_THRESHOLD, ShellTool, Spill, Spilled, assemble,
+        tail,
+    };
     use crate::tool::{FileTimes, Tool, ToolCtx, ToolError, truncate};
 
     /// A context rooted at `cwd`, with a cancel nobody has pulled.
@@ -1003,7 +1096,7 @@ mod tests {
             collector.push(&chunk);
         }
 
-        let (window, dropped, path) = collector.finish();
+        let (window, dropped, spilled) = collector.finish();
         assert!(
             window.len() <= KEEP,
             "the window is the memory bound, got {} bytes for {} pushed",
@@ -1011,14 +1104,97 @@ mod tests {
             pushes * chunk.len()
         );
         assert!(dropped, "a flood that big cannot have been kept whole");
-        let path = path.expect("everything past the threshold goes to a file");
+        let spilled = spilled.expect("everything past the threshold goes to a file");
+        assert!(
+            matches!(spilled, Spilled::Whole(_)),
+            "every write succeeded, so the file holds the whole output"
+        );
         assert_eq!(
-            std::fs::metadata(&path)
+            std::fs::metadata(spilled.path())
                 .expect("the spill exists")
                 .len()
                 .try_into(),
             Ok(pushes * chunk.len()),
             "the spill holds every byte that was pushed"
+        );
+    }
+
+    /// The files sitting in `dir`, so a test can say how many were written.
+    fn spill_files(dir: &Path) -> Vec<PathBuf> {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .expect("the spill directory exists")
+            .map(|entry| entry.expect("a readable directory entry").path())
+            .collect();
+        entries.sort();
+
+        entries
+    }
+
+    /// A spill that stops accepting writes part-way leaves a real file holding
+    /// everything up to that point — far more than the window does. Forgetting
+    /// its name would orphan it and send the assembly off to write a second
+    /// file from the window alone, which the model would then be told is the
+    /// "full output": less output, advertised as more.
+    ///
+    /// The failure is produced by putting a read-only descriptor where the
+    /// writable one was, so every later write fails with `EBADF` on demand —
+    /// no full disk and no resource limit needed to reach the state.
+    #[cfg(unix)]
+    #[test]
+    fn a_spill_that_stops_accepting_writes_keeps_the_file_it_already_wrote() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let spill = dir.path().join("tool-output");
+        let mut collector = Collector::new(Some(spill.clone()));
+
+        // Past the threshold, so the file is opened and seeded with the head.
+        collector.push(&vec![b'a'; SPILL_THRESHOLD + 1]);
+        let Spill::Open(opened, _) = std::mem::take(&mut collector.spill) else {
+            panic!("crossing the threshold opens the spill");
+        };
+        let written = std::fs::metadata(&opened).expect("the spill exists").len();
+        collector.spill = Spill::Open(
+            opened.clone(),
+            std::fs::File::open(&opened).expect("the spill re-opens read-only"),
+        );
+
+        collector.push(b"this chunk cannot land");
+
+        let (window, dropped, spilled) = collector.finish();
+        assert!(dropped, "output that could not be written is output lost");
+        assert!(
+            matches!(&spilled, Some(Spilled::Partial(path)) if *path == opened),
+            "the partial file keeps its name"
+        );
+
+        let assembled = assemble(&window, dropped, spilled, Some(&spill));
+
+        assert!(
+            assembled.output.contains("Partial output saved to:"),
+            "a file that stops short must not be introduced as the whole \
+             output: {:?}",
+            &assembled.output[..assembled.output.len().min(120)]
+        );
+        assert!(
+            !assembled.output.contains("Full output saved to:"),
+            "got {:?}",
+            &assembled.output[..assembled.output.len().min(120)]
+        );
+        assert_eq!(
+            assembled.spill.as_deref(),
+            Some(opened.as_path()),
+            "the notice and the metadata must name the file that has the output"
+        );
+        assert_eq!(
+            spill_files(&spill),
+            vec![opened.clone()],
+            "a second file was written, orphaning the first"
+        );
+        assert_eq!(
+            std::fs::metadata(&opened)
+                .expect("the spill still exists")
+                .len(),
+            written,
+            "the partial file should be left exactly as the failure left it"
         );
     }
 
