@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 concurrency:
@@ -14,17 +16,22 @@ env:
 jobs:
   lint:
     name: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: clippy, rustfmt
+
       - uses: Swatinem/rust-cache@v2
+
       - name: rustfmt
         run: cargo fmt --all --check
+
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+
       - name: ganja-core stays free of terminal dependencies
         run: '! cargo tree -p ganja-core -e normal | grep -q ratatui'
 
@@ -33,11 +40,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: 
+          - ubuntu-26.04
+          - xcode-27
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+
       - uses: dtolnay/rust-toolchain@nightly
+
       - uses: Swatinem/rust-cache@v2
+
       - name: test
         run: cargo test --workspace
