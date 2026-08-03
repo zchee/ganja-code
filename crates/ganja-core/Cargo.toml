@@ -17,12 +17,15 @@ futures.workspace = true
 # The HTTP providers speak SSE, so only `stream` and `json` are load-bearing;
 # the workspace declaration pins rustls so no build here reaches for OpenSSL.
 reqwest.workspace = true
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
+# `Host`, for deciding whether an endpoint is loopback without matching strings.
+url.workspace = true
 # `CancellationToken` lives behind `rt`; the workspace declaration carries no
 # features so crates opt into exactly the modules they use.
 tokio-util = { workspace = true, features = ["rt"] }

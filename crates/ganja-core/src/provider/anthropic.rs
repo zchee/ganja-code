@@ -13,6 +13,7 @@ use std::{collections::HashMap, fmt};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use secrecy::SecretString;
 use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -20,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     protocol::{FinishReason, Part, Role, Usage},
     provider::{
-        ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, open,
-        require_credential, setting, sse::Frame,
+        ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, check_base_url,
+        client, open, require_credential, setting, shown_base_url, sse::Frame,
     },
 };
 
@@ -59,11 +60,15 @@ pub struct AnthropicProvider {
 impl fmt::Debug for AnthropicProvider {
     /// Renders without the credential, so that logging a provider — or a
     /// `tracing` field holding one — cannot leak it.
+    ///
+    /// That includes the base URL, which is allowed to carry a credential in
+    /// its userinfo and is not exempt from the rule just because the credential
+    /// arrived as configuration.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AnthropicProvider")
             .field("key", &self.key)
-            .field("base_url", &self.base_url)
+            .field("base_url", &shown_base_url(&self.base_url))
             .field("max_tokens", &self.max_tokens)
             .finish()
     }
@@ -76,7 +81,7 @@ impl AnthropicProvider {
     ///
     /// Returns [`ProviderError::Transport`] when no HTTP client can be built,
     /// which in practice means the TLS backend failed to initialize.
-    pub fn new(key: impl Into<String>) -> Result<Self, ProviderError> {
+    pub fn new(key: impl Into<SecretString>) -> Result<Self, ProviderError> {
         let key = ApiKey::new(key)
             .ok_or_else(|| ProviderError::Auth(format!("{API_KEY_ENV} is empty")))?;
 
@@ -92,13 +97,18 @@ impl AnthropicProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderError::Auth`] when the credential is missing, so that
-    /// a misconfigured session dies at startup rather than at the first prompt.
+    /// Returns [`ProviderError::Auth`] when the credential is missing and
+    /// [`ProviderError::Transport`] when [`BASE_URL_ENV`] names an endpoint the
+    /// key cannot safely be sent to, so that a misconfigured session dies at
+    /// startup rather than at the first prompt.
     pub fn from_env() -> Result<Self, ProviderError> {
+        let base_url = setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+        check_base_url(&base_url)?;
+
         Ok(Self {
             client: client()?,
             key: require_credential(ID, API_KEY_ENV)?,
-            base_url: setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
+            base_url,
             max_tokens: DEFAULT_MAX_TOKENS,
         })
     }
@@ -118,13 +128,6 @@ impl AnthropicProvider {
     }
 }
 
-/// Builds the shared HTTP client.
-fn client() -> Result<reqwest::Client, ProviderError> {
-    reqwest::Client::builder()
-        .build()
-        .map_err(|error| ProviderError::Transport(format!("no HTTP client: {error}")))
-}
-
 #[async_trait]
 impl Provider for AnthropicProvider {
     fn id(&self) -> &str {
@@ -136,6 +139,11 @@ impl Provider for AnthropicProvider {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+        // Checked here as well as at startup because `with_base_url` can point
+        // a provider anywhere, and this is the last moment before the key goes
+        // on the wire.
+        check_base_url(&self.base_url)?;
+
         let body = Body::new(&request, self.max_tokens);
         let built = self
             .client
@@ -419,7 +427,7 @@ mod tests {
     use super::{AnthropicProvider, Body, DEFAULT_MAX_TOKENS, Mapping};
     use crate::{
         protocol::{FinishReason, Message, Part, Usage},
-        provider::{ChatRequest, ProviderError, ProviderEvent, replay},
+        provider::{ChatRequest, Provider as _, ProviderError, ProviderEvent, replay},
     };
 
     /// Runs a recorded transcript through the real splitter and mapper.
@@ -659,23 +667,103 @@ mod tests {
         assert!(body.contains(r#""max_tokens":16"#), "got {body}");
     }
 
+    /// Both credentials a provider holds: the key it was built with, and
+    /// whatever the base URL carries. The second is configuration rather than
+    /// something this build asked for, which makes it easy to forget and no
+    /// less of a secret. `Debug` is the whole surface — there is no `Display`
+    /// for a provider — and it is what every `tracing` field holding one
+    /// renders through.
     #[test]
     fn a_provider_never_renders_its_credential() {
-        let provider = AnthropicProvider::new("sk-test-canary-XYZ")
-            .expect("an HTTP client builds")
-            .with_base_url("https://example.invalid");
+        // Both shapes `check_base_url` blesses: a gateway reached over https,
+        // and the loopback endpoint the integration suite itself points at —
+        // which is where a userinfo-bearing base URL actually shows up today.
+        let cases = [
+            (
+                "https://ganja:sk-url-canary-9999@gateway.invalid:8443/v1?token=sk-query-canary-7777",
+                "gateway.invalid:8443",
+            ),
+            (
+                "http://ganja:sk-url-canary-9999@127.0.0.1:8080",
+                "127.0.0.1:8080",
+            ),
+        ];
 
-        let rendered = format!("{provider:?}");
+        for (base_url, endpoint) in cases {
+            let provider = AnthropicProvider::new("sk-test-canary-XYZ")
+                .expect("an HTTP client builds")
+                .with_base_url(base_url);
 
-        assert!(
-            !rendered.contains("sk-test-canary-XYZ"),
-            "a provider leaked its key: {rendered}"
-        );
-        assert!(rendered.contains("[redacted]"), "got {rendered}");
+            let rendered = format!("{provider:?}");
+
+            for secret in [
+                "sk-test-canary-XYZ",
+                "sk-url-canary-9999",
+                "sk-query-canary-7777",
+                "ganja:",
+            ] {
+                assert!(
+                    !rendered.contains(secret),
+                    "a provider leaked {secret}: {rendered}"
+                );
+            }
+            assert!(rendered.contains("[redacted]"), "got {rendered}");
+            // Still worth reading: which endpoint this provider is pointed at
+            // is the first thing anyone debugging one wants to know.
+            assert!(
+                rendered.contains(endpoint),
+                "the endpoint should survive being made safe to print: {rendered}"
+            );
+        }
     }
 
     #[test]
     fn a_blank_credential_is_refused() {
         assert!(AnthropicProvider::new("  ").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_request_that_cannot_be_built_reports_why_without_the_endpoint() {
+        // A newline cannot go in a header value, so the request fails to build
+        // after `check_base_url` has passed. Nothing strips the base URL out of
+        // the message: a builder error carries no URL, and a `reqwest::Error`
+        // that does carry one renders it with its credentials already removed.
+        // Both are the dependency's behaviour rather than this crate's, which
+        // is why they are worth holding here.
+        let provider = AnthropicProvider::new("sk-test-canary-XYZ\nnewline")
+            .expect("an HTTP client builds")
+            .with_base_url(
+                "https://ganja:sk-url-canary-9999@gateway.invalid:8443/v1?token=sk-query-canary-7777",
+            );
+
+        let opened = provider
+            .stream(
+                ChatRequest {
+                    model: "claude-sonnet-5".to_owned(),
+                    system: None,
+                    messages: vec![Message::user("hi")],
+                },
+                CancellationToken::new(),
+            )
+            .await;
+
+        // A stream is not `Debug`, so this cannot go through `expect_err`.
+        let Err(error) = opened else {
+            panic!("a header value with a newline cannot be built");
+        };
+
+        let rendered = format!("{error} / {error:?}");
+        for secret in [
+            "sk-test-canary-XYZ",
+            "sk-url-canary-9999",
+            "sk-query-canary-7777",
+            "ganja:",
+        ] {
+            assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+        }
+        assert!(
+            rendered.contains("malformed request"),
+            "the failure should still say what happened: {rendered}"
+        );
     }
 }

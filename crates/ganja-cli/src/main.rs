@@ -9,6 +9,7 @@ use std::io::{self, IsTerminal as _, Read as _, Write as _};
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use ganja_core::{auth, catalog};
+use secrecy::{SecretString, zeroize::Zeroize as _};
 
 /// Terminal-first AI coding agent.
 #[derive(Debug, Parser)]
@@ -103,25 +104,41 @@ fn auth_command(action: Auth) -> Result<()> {
 
 fn login(provider: ProviderId, key: Option<String>) -> Result<()> {
     let key = match key {
-        Some(key) => key,
+        // A key given on the command line was already in the shell's history
+        // and its process table entry before this ran; wrapping it is all that
+        // is left to do about it.
+        Some(key) => secret(key),
         None => read_key(provider)?,
     };
-    // A key pasted out of a file or a password manager arrives with
-    // whitespace that would corrupt the request header.
-    let key = key.trim();
-    if key.is_empty() {
+    let Some(key) = key else {
         bail!("no key was given; nothing was stored");
-    }
+    };
+    let tail = auth::RedactedTail::of_secret(&key);
 
     auth::set_credential(provider.as_str(), key)
         .with_context(|| format!("failed to store the {provider} key"))?;
 
     println!(
-        "stored the {provider} key {} in {}",
-        auth::RedactedTail::of(key),
+        "stored the {provider} key {tail} in {}",
         auth::store_path()?.display()
     );
     warn_if_shadowed(provider)
+}
+
+/// Wraps a key and wipes the buffer it was assembled in.
+///
+/// Trimming happens here because a key pasted out of a file or a password
+/// manager arrives with whitespace that would corrupt the request header, and
+/// a key that is nothing but whitespace is not a key: [`None`] says so without
+/// making the caller unwrap a secret to find out.
+fn secret(mut key: String) -> Option<SecretString> {
+    let trimmed = key.trim();
+    let wrapped = (!trimmed.is_empty()).then(|| SecretString::from(trimmed));
+    // The `String` is what the key was typed, piped or passed into, and nothing
+    // else will clear it; the copy that matters from here on is the wrapped one.
+    key.zeroize();
+
+    wrapped
 }
 
 fn list() -> Result<()> {
@@ -187,18 +204,18 @@ fn warn_if_shadowed(provider: ProviderId) -> Result<()> {
 ///
 /// Piped input is read whole so that `pass show … | ganja auth login` works;
 /// otherwise the key is typed at a prompt.
-fn read_key(provider: ProviderId) -> Result<String> {
+fn read_key(provider: ProviderId) -> Result<Option<SecretString>> {
     let mut stdin = io::stdin();
     if stdin.is_terminal() {
         return prompt_for_key(provider);
     }
 
     let mut piped = String::new();
-    stdin
-        .read_to_string(&mut piped)
-        .context("failed to read the key from standard input")?;
+    let read = stdin.read_to_string(&mut piped);
+    let key = secret(piped);
+    read.context("failed to read the key from standard input")?;
 
-    Ok(piped)
+    Ok(key)
 }
 
 /// Asks for a key at a terminal that does not echo it.
@@ -209,7 +226,7 @@ fn read_key(provider: ProviderId) -> Result<String> {
 /// offers to suppress it, which also means this loop has to handle Enter,
 /// Backspace and Ctrl-C itself — in raw mode the terminal driver does none of
 /// that, and Ctrl-C raises no signal.
-fn prompt_for_key(provider: ProviderId) -> Result<String> {
+fn prompt_for_key(provider: ProviderId) -> Result<Option<SecretString>> {
     use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
     /// Leaves raw mode however the read ends, panic included: a terminal left
@@ -236,10 +253,25 @@ fn prompt_for_key(provider: ProviderId) -> Result<String> {
     key
 }
 
-fn read_unechoed() -> Result<String> {
+fn read_unechoed() -> Result<Option<SecretString>> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
-    let mut key = String::new();
+    /// Wipes what was typed however the read ends, cancellation and panic
+    /// included — a key abandoned half-way through is still a key.
+    ///
+    /// Best effort, and worth being precise about: `zeroize` clears the whole
+    /// capacity of the buffer, so a backspaced character goes too, but a
+    /// `String` that grew as it was typed reallocated, and the prefixes it left
+    /// behind are not reachable to wipe.
+    struct Typed(String);
+
+    impl Drop for Typed {
+        fn drop(&mut self) {
+            self.0.zeroize();
+        }
+    }
+
+    let mut typed = Typed(String::new());
     loop {
         let Event::Key(pressed) = event::read().context("failed to read the key")? else {
             continue;
@@ -249,14 +281,14 @@ fn read_unechoed() -> Result<String> {
         }
 
         match pressed.code {
-            KeyCode::Enter => return Ok(key),
+            KeyCode::Enter => return Ok(secret(std::mem::take(&mut typed.0))),
             KeyCode::Backspace => {
-                key.pop();
+                typed.0.pop();
             }
             KeyCode::Char('c' | 'd') if pressed.modifiers.contains(KeyModifiers::CONTROL) => {
                 bail!("cancelled; nothing was stored")
             }
-            KeyCode::Char(character) => key.push(character),
+            KeyCode::Char(character) => typed.0.push(character),
             // Arrows, function keys and the rest have no meaning in a secret.
             _ => {}
         }

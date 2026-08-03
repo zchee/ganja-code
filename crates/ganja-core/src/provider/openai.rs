@@ -12,6 +12,7 @@ use std::{collections::HashMap, fmt};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use secrecy::SecretString;
 use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -19,8 +20,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     protocol::{FinishReason, Part, Role, Usage},
     provider::{
-        ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, open,
-        require_credential, setting, sse::Frame,
+        ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, check_base_url,
+        client, open, require_credential, setting, shown_base_url, sse::Frame,
     },
 };
 
@@ -50,11 +51,15 @@ pub struct OpenAiProvider {
 impl fmt::Debug for OpenAiProvider {
     /// Renders without the credential, so that logging a provider — or a
     /// `tracing` field holding one — cannot leak it.
+    ///
+    /// That includes the base URL, which is allowed to carry a credential in
+    /// its userinfo and is not exempt from the rule just because the credential
+    /// arrived as configuration.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpenAiProvider")
             .field("key", &self.key)
-            .field("base_url", &self.base_url)
+            .field("base_url", &shown_base_url(&self.base_url))
             .finish()
     }
 }
@@ -66,7 +71,7 @@ impl OpenAiProvider {
     ///
     /// Returns [`ProviderError::Auth`] for a blank credential and
     /// [`ProviderError::Transport`] when no HTTP client can be built.
-    pub fn new(key: impl Into<String>) -> Result<Self, ProviderError> {
+    pub fn new(key: impl Into<SecretString>) -> Result<Self, ProviderError> {
         let key = ApiKey::new(key)
             .ok_or_else(|| ProviderError::Auth(format!("{API_KEY_ENV} is empty")))?;
 
@@ -81,13 +86,18 @@ impl OpenAiProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderError::Auth`] when the credential is missing, so that
-    /// a misconfigured session dies at startup rather than at the first prompt.
+    /// Returns [`ProviderError::Auth`] when the credential is missing and
+    /// [`ProviderError::Transport`] when [`BASE_URL_ENV`] names an endpoint the
+    /// key cannot safely be sent to, so that a misconfigured session dies at
+    /// startup rather than at the first prompt.
     pub fn from_env() -> Result<Self, ProviderError> {
+        let base_url = setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+        check_base_url(&base_url)?;
+
         Ok(Self {
             client: client()?,
             key: require_credential(ID, API_KEY_ENV)?,
-            base_url: setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
+            base_url,
         })
     }
 
@@ -98,13 +108,6 @@ impl OpenAiProvider {
         self.base_url = base_url.into();
         self
     }
-}
-
-/// Builds the shared HTTP client.
-fn client() -> Result<reqwest::Client, ProviderError> {
-    reqwest::Client::builder()
-        .build()
-        .map_err(|error| ProviderError::Transport(format!("no HTTP client: {error}")))
 }
 
 #[async_trait]
@@ -118,6 +121,11 @@ impl Provider for OpenAiProvider {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+        // Checked here as well as at startup because `with_base_url` can point
+        // a provider anywhere, and this is the last moment before the key goes
+        // on the wire.
+        check_base_url(&self.base_url)?;
+
         let body = Body::new(&request);
         let built = self
             .client
@@ -617,19 +625,50 @@ mod tests {
         );
     }
 
+    /// Both credentials a provider holds: the key it was built with, and
+    /// whatever the base URL carries — which for this provider is the common
+    /// case, since pointing it at a gateway is the whole reason the base URL is
+    /// configurable.
     #[test]
     fn a_provider_never_renders_its_credential() {
-        let provider = OpenAiProvider::new("sk-test-canary-XYZ")
-            .expect("an HTTP client builds")
-            .with_base_url("https://example.invalid/v1");
+        // Both shapes `check_base_url` blesses. The loopback one is not
+        // hypothetical: it is what a local inference server is reached on, and
+        // what the integration suite points this provider at.
+        let cases = [
+            (
+                "https://ganja:sk-url-canary-9999@gateway.invalid:8443/v1?token=sk-query-canary-7777",
+                "gateway.invalid:8443",
+            ),
+            (
+                "http://ganja:sk-url-canary-9999@127.0.0.1:8080",
+                "127.0.0.1:8080",
+            ),
+        ];
 
-        let rendered = format!("{provider:?}");
+        for (base_url, endpoint) in cases {
+            let provider = OpenAiProvider::new("sk-test-canary-XYZ")
+                .expect("an HTTP client builds")
+                .with_base_url(base_url);
 
-        assert!(
-            !rendered.contains("sk-test-canary-XYZ"),
-            "a provider leaked its key: {rendered}"
-        );
-        assert!(rendered.contains("[redacted]"), "got {rendered}");
+            let rendered = format!("{provider:?}");
+
+            for secret in [
+                "sk-test-canary-XYZ",
+                "sk-url-canary-9999",
+                "sk-query-canary-7777",
+                "ganja:",
+            ] {
+                assert!(
+                    !rendered.contains(secret),
+                    "a provider leaked {secret}: {rendered}"
+                );
+            }
+            assert!(rendered.contains("[redacted]"), "got {rendered}");
+            assert!(
+                rendered.contains(endpoint),
+                "the endpoint should survive being made safe to print: {rendered}"
+            );
+        }
     }
 
     #[test]
