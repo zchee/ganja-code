@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl-CutTool","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"Let me read that file."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-CutTool","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_cut","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-CutTool","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-CutTool","object":"chat.completion.chunk","created":1770000000,"model":"gpt-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"Path\":\"src/ma

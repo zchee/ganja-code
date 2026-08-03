@@ -58,6 +58,7 @@ use crate::{
     auth, catalog,
     protocol::{FinishReason, Message, Usage},
     provider::sse::Frame,
+    tool::ToolDefinition,
 };
 
 pub mod anthropic;
@@ -80,16 +81,18 @@ pub const MODEL_ENV: &str = "GANJA_MODEL";
 pub const PROVIDERS: [&str; 3] = [anthropic::ID, openai::ID, fake::ID];
 
 /// One request to a model.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChatRequest {
     /// Model identifier, spelled the way the provider expects it on the wire.
     pub model: String,
-    /// System prompt. P2 has nothing to put here; P5 fills it from `AGENTS.md`
-    /// and the agent definitions.
+    /// System prompt. P5 fills it from `AGENTS.md` and the agent definitions.
     pub system: Option<String>,
     /// The conversation so far, oldest first, ending with the message the user
     /// just sent.
     pub messages: Vec<Message>,
+    /// Tools the model may call, advertised on every request. Empty means the
+    /// model is not offered any.
+    pub tools: Vec<ToolDefinition>,
 }
 
 /// Something a provider reported while answering.

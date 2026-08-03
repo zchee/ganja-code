@@ -1,0 +1,31 @@
+{
+  "prompt": "Write hello.py that prints hello golden, then run it with python3.",
+  "seed": {},
+  "steps": [
+    {
+      "text": "Writing the script.",
+      "calls": [
+        {
+          "name": "write",
+          "arguments": {
+            "filePath": "hello.py",
+            "content": "print(\"hello golden\")\n"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Running it.",
+      "calls": [
+        {
+          "name": "bash",
+          "arguments": { "command": "python3 hello.py" }
+        }
+      ]
+    },
+    {
+      "text": "Done.",
+      "calls": []
+    }
+  ]
+}

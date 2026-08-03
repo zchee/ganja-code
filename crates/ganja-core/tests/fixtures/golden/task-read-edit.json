@@ -1,0 +1,34 @@
+{
+  "prompt": "Read notes.txt then change alpha to omega.",
+  "seed": {
+    "notes.txt": "alpha\nbeta\n"
+  },
+  "steps": [
+    {
+      "text": "Reading the file.",
+      "calls": [
+        {
+          "name": "read",
+          "arguments": { "filePath": "notes.txt" }
+        }
+      ]
+    },
+    {
+      "text": "Now editing.",
+      "calls": [
+        {
+          "name": "edit",
+          "arguments": {
+            "filePath": "notes.txt",
+            "oldString": "alpha",
+            "newString": "omega"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Done.",
+      "calls": []
+    }
+  ]
+}

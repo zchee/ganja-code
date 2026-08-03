@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
-use ganja_core::{Command, Engine, Event as CoreEvent, FinishReason, Role, Usage, catalog};
+use ganja_core::{
+    Command, Engine, Event as CoreEvent, FinishReason, PartBody, PermissionReply, Role, ToolState,
+    Usage, catalog,
+};
 use ratatui::{
     DefaultTerminal, Terminal,
     backend::Backend,
@@ -28,6 +31,7 @@ use crate::{
     component::{
         chat::{Chat, WHEEL_LINES},
         editor::{self, Editor},
+        permission::Permission,
         status::{Activity, Status, Totals},
     },
     event::AppEvent,
@@ -43,6 +47,18 @@ const NEWLINE_MODIFIERS: KeyModifiers = KeyModifiers::SHIFT
     .union(KeyModifiers::ALT)
     .union(KeyModifiers::CONTROL);
 
+/// The reply a key sends while the permission dialog is open, or [`None`]
+/// for a key the dialog swallows without acting on it. Pulled out of
+/// [`App::handle_key`] so the mapping can be asserted on its own.
+fn permission_reply(code: KeyCode) -> Option<PermissionReply> {
+    match code {
+        KeyCode::Char('y') => Some(PermissionReply::Once),
+        KeyCode::Char('a') => Some(PermissionReply::Always),
+        KeyCode::Char('n') | KeyCode::Esc => Some(PermissionReply::Reject),
+        _ => None,
+    }
+}
+
 /// The whole terminal application.
 pub struct App {
     engine: Engine,
@@ -52,6 +68,8 @@ pub struct App {
     chat: Chat,
     editor: Editor,
     status: Status,
+    /// The tool call currently waiting on the user's decision, if any.
+    permission: Option<Permission>,
     theme: Theme,
     /// What the session has spent, accumulated across turns.
     totals: Totals,
@@ -76,6 +94,7 @@ impl App {
             chat: Chat::default(),
             editor: Editor::new(&theme),
             status: Status::new(notice),
+            permission: None,
             theme,
             totals: Totals::default(),
             dirty: true,
@@ -113,7 +132,7 @@ impl App {
                     None => break,
                 },
                 incoming = core_events.next() => match incoming {
-                    Some(incoming) => AppEvent::Core(incoming),
+                    Some(incoming) => AppEvent::core(incoming),
                     None => break,
                 },
                 () = tokio::time::sleep(self.until_next_frame()), if self.wants_wakeup() => {
@@ -148,7 +167,7 @@ impl App {
                 self.urgent = true;
             }
             AppEvent::Core(event) => {
-                self.handle_core(event);
+                self.handle_core(*event);
                 self.dirty = true;
             }
             AppEvent::Tick => {}
@@ -178,6 +197,9 @@ impl App {
 
                 let buffer = frame.buffer_mut();
                 self.chat.render(transcript, buffer, &self.theme);
+                if let Some(permission) = &self.permission {
+                    permission.render(transcript, buffer, &self.theme);
+                }
                 self.editor.render(prompt, buffer);
                 self.status.render(status, buffer, &self.theme);
             })
@@ -195,7 +217,7 @@ impl App {
             TermEvent::Key(key) if key.kind != KeyEventKind::Release => {
                 self.handle_key(key).await?
             }
-            TermEvent::Mouse(mouse) => match mouse.kind {
+            TermEvent::Mouse(mouse) if self.permission.is_none() => match mouse.kind {
                 MouseEventKind::ScrollUp => self.chat.scroll_lines(-WHEEL_LINES),
                 MouseEventKind::ScrollDown => self.chat.scroll_lines(WHEEL_LINES),
                 _ => {}
@@ -207,10 +229,28 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Char('c' | 'q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.quit = true;
+        if matches!(key.code, KeyCode::Char('c' | 'q'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.quit = true;
+            return Ok(());
+        }
+
+        if let Some(permission) = &self.permission {
+            // Every other key is swallowed while the modal is open: the
+            // editor and the transcript beneath it are not what the user is
+            // acting on right now.
+            if let Some(reply) = permission_reply(key.code) {
+                let id = permission.id().clone();
+                self.engine
+                    .send(Command::ReplyPermission { id, reply })
+                    .await?;
             }
+
+            return Ok(());
+        }
+
+        match key.code {
             // A no-op while idle, which is exactly what Esc should do there.
             KeyCode::Esc => self.engine.send(Command::CancelTurn).await?,
             KeyCode::Enter if key.modifiers.intersects(NEWLINE_MODIFIERS) => {
@@ -260,6 +300,39 @@ impl App {
                 part_id,
                 delta,
             } => self.chat.append_delta(&message_id, &part_id, &delta),
+            CoreEvent::PartUpdated { message_id, part } => {
+                if let PartBody::Tool { tool, state, .. } = &part.body {
+                    self.status.set_activity(match state {
+                        ToolState::Pending | ToolState::Running { .. } => {
+                            Activity::Tool(tool.clone())
+                        }
+                        ToolState::Completed { .. } | ToolState::Error { .. } => {
+                            Activity::Streaming
+                        }
+                    });
+                }
+                self.chat.update_part(&message_id, part);
+            }
+            CoreEvent::PermissionRequested {
+                id,
+                tool,
+                title,
+                args,
+                ..
+            } => {
+                self.permission = Some(Permission::new(id, tool, title, args));
+                self.status.set_activity(Activity::Permission);
+            }
+            CoreEvent::PermissionReplied { id, .. } => {
+                let names_open_request = self
+                    .permission
+                    .as_ref()
+                    .is_some_and(|permission| *permission.id() == id);
+                if names_open_request {
+                    self.permission = None;
+                    self.status.set_activity(Activity::Streaming);
+                }
+            }
             CoreEvent::MessageFinished {
                 reason,
                 usage,
@@ -334,7 +407,8 @@ mod tests {
 
     use futures::{StreamExt as _, stream::BoxStream};
     use ganja_core::{
-        Engine, Event as CoreEvent, FinishReason, Message, Part, Usage,
+        Engine, Event as CoreEvent, FinishReason, Message, Part, PartBody, PartId, PermissionId,
+        PermissionReply, ToolState, Usage,
         provider::{FakeProvider, fake},
     };
     use ratatui::{
@@ -346,11 +420,16 @@ mod tests {
         },
     };
 
-    use super::{App, FRAME};
+    use super::{App, FRAME, Permission, permission_reply};
     use crate::event::AppEvent;
 
     fn engine() -> Engine {
-        Engine::new(Arc::new(FakeProvider::default()), fake::MODEL)
+        Engine::new(
+            Arc::new(FakeProvider::default()),
+            fake::MODEL,
+            Arc::new(ganja_core::Registry::new(Vec::new())),
+            ganja_core::Permissions::default(),
+        )
     }
 
     fn app() -> App {
@@ -370,7 +449,7 @@ mod tests {
     async fn pump(app: &mut App, events: &mut BoxStream<'static, CoreEvent>, count: usize) {
         for _ in 0..count {
             let event = events.next().await.expect("the engine keeps reporting");
-            app.handle(AppEvent::Core(event))
+            app.handle(AppEvent::core(event))
                 .await
                 .expect("an engine event is handled");
         }
@@ -549,7 +628,7 @@ mod tests {
 
         while app.status.is_streaming() {
             let event = events.next().await.expect("the engine keeps reporting");
-            app.handle(AppEvent::Core(event))
+            app.handle(AppEvent::core(event))
                 .await
                 .expect("an engine event is handled");
         }
@@ -588,19 +667,19 @@ mod tests {
         let reply = Message::assistant("canned");
         let part = Part::text("");
 
-        app.handle(AppEvent::Core(CoreEvent::MessageStarted {
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
             message: reply.clone(),
         }))
         .await
         .expect("a message start is handled");
-        app.handle(AppEvent::Core(CoreEvent::PartStarted {
+        app.handle(AppEvent::core(CoreEvent::PartStarted {
             message_id: reply.id.clone(),
             part: part.clone(),
         }))
         .await
         .expect("a part start is handled");
         for fragment in ["stream", "ed ", "reply"] {
-            app.handle(AppEvent::Core(CoreEvent::PartDelta {
+            app.handle(AppEvent::core(CoreEvent::PartDelta {
                 message_id: reply.id.clone(),
                 part_id: part.id.clone(),
                 delta: fragment.to_owned(),
@@ -619,7 +698,7 @@ mod tests {
             screen(&terminal)
         );
 
-        app.handle(AppEvent::Core(CoreEvent::MessageFinished {
+        app.handle(AppEvent::core(CoreEvent::MessageFinished {
             message_id: reply.id,
             reason: FinishReason::Cancelled,
             usage: None,
@@ -637,7 +716,7 @@ mod tests {
     async fn a_failed_turn_reports_why_in_the_status_bar() {
         let mut app = app();
 
-        app.handle(AppEvent::Core(CoreEvent::MessageFinished {
+        app.handle(AppEvent::core(CoreEvent::MessageFinished {
             message_id: Message::assistant("canned").id,
             reason: FinishReason::Failed,
             usage: None,
@@ -660,7 +739,7 @@ mod tests {
 
     /// Builds the finish event a provider that reported its usage produces.
     fn finished(model: &str, usage: Usage) -> AppEvent {
-        AppEvent::Core(CoreEvent::MessageFinished {
+        AppEvent::core(CoreEvent::MessageFinished {
             message_id: Message::assistant(model).id,
             reason: FinishReason::Completed,
             usage: Some(usage),
@@ -745,7 +824,7 @@ mod tests {
 
         let mut app = App::new(engine(), MODEL, None);
 
-        app.handle(AppEvent::Core(CoreEvent::MessageFinished {
+        app.handle(AppEvent::core(CoreEvent::MessageFinished {
             message_id: Message::assistant(MODEL).id,
             reason: FinishReason::Failed,
             usage: Some(Usage {
@@ -794,7 +873,7 @@ mod tests {
         .await
         .expect("a turn end is handled");
 
-        app.handle(AppEvent::Core(CoreEvent::MessageFinished {
+        app.handle(AppEvent::core(CoreEvent::MessageFinished {
             message_id: Message::assistant(MODEL).id,
             reason: FinishReason::Cancelled,
             usage: None,
@@ -876,12 +955,12 @@ mod tests {
         let mut app = app();
         let reply = Message::assistant("canned");
         let part = Part::text("");
-        app.handle(AppEvent::Core(CoreEvent::MessageStarted {
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
             message: reply.clone(),
         }))
         .await
         .expect("a message start is handled");
-        app.handle(AppEvent::Core(CoreEvent::PartStarted {
+        app.handle(AppEvent::core(CoreEvent::PartStarted {
             message_id: reply.id.clone(),
             part: part.clone(),
         }))
@@ -891,7 +970,7 @@ mod tests {
         let mut terminal = terminal(40, 12);
         app.draw(&mut terminal).expect("a frame draws");
 
-        app.handle(AppEvent::Core(CoreEvent::PartDelta {
+        app.handle(AppEvent::core(CoreEvent::PartDelta {
             message_id: reply.id,
             part_id: part.id,
             delta: "burst".to_owned(),
@@ -998,5 +1077,394 @@ mod tests {
 
         assert!(app.needs_draw());
         assert!(app.until_next_frame() <= FRAME);
+    }
+
+    fn permission_event(id: &str) -> CoreEvent {
+        CoreEvent::PermissionRequested {
+            id: PermissionId::from(id.to_owned()),
+            call_id: "call_1".to_owned(),
+            tool: "shell".to_owned(),
+            title: "cargo test".to_owned(),
+            args: serde_json::json!({"command": "cargo test"}),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_moves_through_its_lifecycle_on_screen() {
+        let mut app = app();
+        let reply = Message::assistant("canned");
+        let part = Part::tool("call_1", "shell");
+
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            message: reply.clone(),
+        }))
+        .await
+        .expect("a message start is handled");
+        app.handle(AppEvent::core(CoreEvent::PartStarted {
+            message_id: reply.id.clone(),
+            part: part.clone(),
+        }))
+        .await
+        .expect("a part start is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("[running] shell"),
+            "got:\n{}",
+            screen(&terminal)
+        );
+
+        app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            message_id: reply.id.clone(),
+            part: Part {
+                id: part.id.clone(),
+                body: PartBody::Tool {
+                    call_id: "call_1".to_owned(),
+                    tool: "shell".to_owned(),
+                    state: ToolState::Running {
+                        input: serde_json::json!({"command": "cargo test"}),
+                        started: 0,
+                    },
+                },
+            },
+        }))
+        .await
+        .expect("a running update is handled");
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("cargo test"),
+            "got:\n{}",
+            screen(&terminal)
+        );
+
+        app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            message_id: reply.id.clone(),
+            part: Part {
+                id: part.id.clone(),
+                body: PartBody::Tool {
+                    call_id: "call_1".to_owned(),
+                    tool: "shell".to_owned(),
+                    state: ToolState::Completed {
+                        input: serde_json::json!({"command": "cargo test"}),
+                        output: "ok".to_owned(),
+                        title: "cargo test".to_owned(),
+                        metadata: serde_json::json!({}),
+                        started: 0,
+                        completed: 1,
+                    },
+                },
+            },
+        }))
+        .await
+        .expect("a completed update is handled");
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen_text = screen(&terminal);
+        assert!(screen_text.contains("[done] shell"), "got:\n{screen_text}");
+        assert!(screen_text.contains("ok"), "got:\n{screen_text}");
+    }
+
+    #[tokio::test]
+    async fn a_part_updated_for_an_unseen_id_is_appended_not_dropped() {
+        let mut app = app();
+        let reply = Message::assistant("canned");
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            message: reply.clone(),
+        }))
+        .await
+        .expect("a message start is handled");
+
+        // No PartStarted for this id: a frontend that joined mid-stream still
+        // has to converge on the same transcript.
+        app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            message_id: reply.id.clone(),
+            part: Part {
+                id: PartId::from("prt_orphan".to_owned()),
+                body: PartBody::Tool {
+                    call_id: "call_1".to_owned(),
+                    tool: "read".to_owned(),
+                    state: ToolState::Running {
+                        input: serde_json::json!({"filePath": "a.rs"}),
+                        started: 0,
+                    },
+                },
+            },
+        }))
+        .await
+        .expect("an update for an unseen id is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("a.rs"),
+            "an update for an id the transcript never saw start should still append, got:\n{}",
+            screen(&terminal)
+        );
+    }
+
+    #[test]
+    fn permission_keys_map_to_the_right_reply() {
+        assert_eq!(
+            permission_reply(KeyCode::Char('y')),
+            Some(PermissionReply::Once)
+        );
+        assert_eq!(
+            permission_reply(KeyCode::Char('a')),
+            Some(PermissionReply::Always)
+        );
+        assert_eq!(
+            permission_reply(KeyCode::Char('n')),
+            Some(PermissionReply::Reject)
+        );
+        assert_eq!(
+            permission_reply(KeyCode::Esc),
+            Some(PermissionReply::Reject)
+        );
+        assert_eq!(permission_reply(KeyCode::Char('x')), None);
+    }
+
+    #[tokio::test]
+    async fn keys_while_the_dialog_is_open_are_sent_as_replies_not_typed() {
+        let mut app = app();
+        app.handle(AppEvent::core(permission_event("perm_1")))
+            .await
+            .expect("a permission request is handled");
+
+        app.handle(key(KeyCode::Char('y'), KeyModifiers::NONE))
+            .await
+            .expect("y is handled");
+
+        assert!(
+            app.permission.is_some(),
+            "the dialog waits for PermissionReplied before closing"
+        );
+        assert!(
+            app.editor.prompt().is_none(),
+            "the keystroke must not reach the editor"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permission_request_opens_the_dialog() {
+        let mut app = app();
+        app.handle(AppEvent::core(permission_event("perm_1")))
+            .await
+            .expect("a permission request is handled");
+
+        assert!(app.permission.is_some());
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(screen.contains("shell"), "got:\n{screen}");
+        assert!(screen.contains("cargo test"), "got:\n{screen}");
+    }
+
+    #[tokio::test]
+    async fn a_matching_reply_closes_the_dialog_but_a_stray_one_does_not() {
+        let mut app = app();
+        app.handle(AppEvent::core(permission_event("perm_1")))
+            .await
+            .expect("a permission request is handled");
+        assert!(app.permission.is_some());
+
+        app.handle(AppEvent::core(CoreEvent::PermissionReplied {
+            id: PermissionId::from("perm_other".to_owned()),
+            reply: PermissionReply::Reject,
+        }))
+        .await
+        .expect("a stray reply is handled");
+        assert!(
+            app.permission.is_some(),
+            "a reply naming a different request must not close this dialog"
+        );
+
+        app.handle(AppEvent::core(CoreEvent::PermissionReplied {
+            id: PermissionId::from("perm_1".to_owned()),
+            reply: PermissionReply::Once,
+        }))
+        .await
+        .expect("the matching reply is handled");
+        assert!(app.permission.is_none());
+    }
+
+    #[tokio::test]
+    async fn control_c_still_quits_while_the_dialog_is_open() {
+        let mut app = app();
+        app.handle(AppEvent::core(permission_event("perm_1")))
+            .await
+            .expect("a permission request is handled");
+
+        app.handle(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-c is handled");
+
+        assert!(app.quit);
+    }
+
+    /// Drives a real turn to a streaming state, opens the dialog by hand
+    /// (nothing in this build yet gates a real tool call on one), presses
+    /// Esc, and proves the turn was never cancelled: it runs to a natural
+    /// `Completed` finish rather than the `Cancelled` the sibling escape test
+    /// gets when Esc is allowed to reach `CancelTurn`.
+    #[tokio::test]
+    async fn escape_with_the_dialog_open_does_not_cancel_the_turn() {
+        let engine = Engine::new(
+            Arc::new(FakeProvider::new("one two three", Duration::from_millis(2))),
+            fake::MODEL,
+            Arc::new(ganja_core::Registry::new(Vec::new())),
+            ganja_core::Permissions::default(),
+        );
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, fake::MODEL, None);
+
+        for event in typing("hello") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        pump(&mut app, &mut events, 4).await;
+        assert!(app.status.is_streaming());
+
+        app.handle(AppEvent::core(permission_event("perm_1")))
+            .await
+            .expect("a permission request is handled");
+        assert!(app.permission.is_some());
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(
+            app.permission.is_some(),
+            "Esc should reject the dialog, not close it before PermissionReplied"
+        );
+
+        let mut finished = None;
+        while finished.is_none() {
+            let event = events.next().await.expect("the engine keeps reporting");
+            if let CoreEvent::MessageFinished { reason, .. } = &event {
+                finished = Some(*reason);
+            }
+            app.handle(AppEvent::core(event))
+                .await
+                .expect("an engine event is handled");
+        }
+
+        assert_eq!(
+            finished,
+            Some(FinishReason::Completed),
+            "Esc must not have cancelled the turn"
+        );
+        assert!(
+            app.permission.is_some(),
+            "the dialog should not self-close on an unrelated event"
+        );
+    }
+
+    #[test]
+    fn snapshot_tool_pending() {
+        let mut app = app();
+        let mut message = Message::assistant("canned");
+        message.parts.push(Part::tool("call_1", "shell"));
+        app.chat.start_message(message);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[test]
+    fn snapshot_tool_running() {
+        let mut app = app();
+        let mut message = Message::assistant("canned");
+        message.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "shell".to_owned(),
+                state: ToolState::Running {
+                    input: serde_json::json!({"command": "cargo test"}),
+                    started: 0,
+                },
+            },
+        });
+        app.chat.start_message(message);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[test]
+    fn snapshot_tool_completed_with_a_diff() {
+        let mut app = app();
+        let mut message = Message::assistant("canned");
+        message.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "edit".to_owned(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({"filePath": "a.rs"}),
+                    output: "edited a.rs".to_owned(),
+                    title: "a.rs".to_owned(),
+                    metadata: serde_json::json!({
+                        "diff": "@@ -1,2 +1,2 @@\n-old line\n+new line\n context line"
+                    }),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        app.chat.start_message(message);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[test]
+    fn snapshot_tool_error() {
+        let mut app = app();
+        let mut message = Message::assistant("canned");
+        message.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "shell".to_owned(),
+                state: ToolState::Error {
+                    input: serde_json::json!({"command": "rm -rf /"}),
+                    error: "refused: destructive command\nsee policy for details".to_owned(),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        app.chat.start_message(message);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[test]
+    fn snapshot_permission_dialog_open() {
+        let mut app = app();
+        app.permission = Some(Permission::new(
+            PermissionId::from("perm_1".to_owned()),
+            "shell".to_owned(),
+            "cargo test".to_owned(),
+            serde_json::json!({"command": "cargo test"}),
+        ));
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
     }
 }

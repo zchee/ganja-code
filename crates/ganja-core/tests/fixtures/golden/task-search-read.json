@@ -1,0 +1,31 @@
+{
+  "prompt": "Find the golden marker and read the file it is in.",
+  "seed": {
+    "docs/guide.md": "# Guide\n\ngolden marker lives here\n",
+    "docs/other.md": "# Other\n\nnothing to see\n"
+  },
+  "steps": [
+    {
+      "text": "Searching.",
+      "calls": [
+        {
+          "name": "grep",
+          "arguments": { "pattern": "golden marker" }
+        }
+      ]
+    },
+    {
+      "text": "Reading the hit.",
+      "calls": [
+        {
+          "name": "read",
+          "arguments": { "filePath": "docs/guide.md" }
+        }
+      ]
+    },
+    {
+      "text": "Done.",
+      "calls": []
+    }
+  ]
+}

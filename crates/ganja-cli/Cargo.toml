@@ -28,6 +28,9 @@ tokio.workspace = true
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
+# The pty tests write the fake provider's script and read the permission rules
+# a session stored, both of which are JSON documents rather than text.
+serde_json.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]

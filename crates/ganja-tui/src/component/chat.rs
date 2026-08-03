@@ -10,7 +10,7 @@
 //! text; P6 slots markdown parsing in ahead of the wrap as a second, width-
 //! independent cache stage.
 
-use ganja_core::{Message, MessageId, Part, PartId, Role};
+use ganja_core::{Message, MessageId, Part, PartBody, PartId, Role, ToolState};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Line};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
@@ -89,6 +89,24 @@ impl Chat {
             text.push_str(delta);
             entry.wrapped = None;
         }
+    }
+
+    /// Replaces a part with the same id; appends it instead so a frontend
+    /// that missed `PartStarted` still converges on the same transcript.
+    pub fn update_part(&mut self, message_id: &MessageId, part: Part) {
+        let Some(entry) = self.entry_mut(message_id) else {
+            return;
+        };
+
+        match entry
+            .parts
+            .iter_mut()
+            .find(|existing| existing.id == part.id)
+        {
+            Some(existing) => *existing = part,
+            None => entry.parts.push(part),
+        }
+        entry.wrapped = None;
     }
 
     /// Finds an entry by id, newest first: deltas address the message that is
@@ -221,19 +239,138 @@ impl Entry {
         };
 
         let mut lines = vec![Line::styled(label(self.role).to_owned(), theme.dim)];
-        // Parts wrap on their own so that P3's tool output can render
-        // differently without reflowing the text around it.
-        for text in self.parts.iter().filter_map(Part::as_text) {
-            lines.extend(
-                wrap(text, usize::from(width))
-                    .into_iter()
-                    .map(|line| Line::styled(line, body_style)),
-            );
+        // Parts wrap on their own so that a tool block can carry its own
+        // style instead of the running text style around it.
+        for part in &self.parts {
+            match &part.body {
+                PartBody::Text { text } => {
+                    lines.extend(
+                        wrap(text, usize::from(width))
+                            .into_iter()
+                            .map(|line| Line::styled(line, body_style)),
+                    );
+                }
+                PartBody::Tool { tool, state, .. } => {
+                    for (text, style) in tool_lines(tool, state, theme) {
+                        lines.extend(
+                            wrap(&text, usize::from(width))
+                                .into_iter()
+                                .map(|line| Line::styled(line, style)),
+                        );
+                    }
+                }
+                PartBody::StepStart | PartBody::StepFinish { .. } => {}
+            }
         }
         // Breathing room before the next entry.
         lines.push(Line::styled(String::new(), Style::default()));
 
         self.wrapped = Some(Wrapped { width, lines });
+    }
+}
+
+/// Tool argument keys tried in priority order when deriving a compact title
+/// from a call's input. Tool-agnostic on purpose: an unfamiliar tool still
+/// shows something recognizable instead of just its bare name.
+const TITLE_KEYS: [&str; 5] = ["command", "filePath", "path", "pattern", "url"];
+
+/// Lines a tool call's output or diff may show before the rest is clamped.
+/// The full text is what the model saw; the transcript only needs the gist.
+const TOOL_PREVIEW_LINES: usize = 4;
+
+/// Picks a short, recognizable field out of a call's arguments, so a running
+/// or failed call can name what it is doing without repeating the raw JSON.
+fn derive_title(input: &serde_json::Value) -> Option<String> {
+    let object = input.as_object()?;
+    TITLE_KEYS
+        .iter()
+        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+}
+
+/// One line naming the tool, with `title` appended when there is one.
+fn tool_heading(tool: &str, marker: &str, title: Option<&str>) -> String {
+    match title.filter(|title| !title.is_empty()) {
+        Some(title) => format!("[{marker}] {tool}: {title}"),
+        None => format!("[{marker}] {tool}"),
+    }
+}
+
+/// The first `TOOL_PREVIEW_LINES` lines of `text`, with a marker appended
+/// when more were cut.
+fn clamp_preview(text: &str) -> Vec<String> {
+    let mut lines = text.lines();
+    let mut preview: Vec<String> = lines
+        .by_ref()
+        .take(TOOL_PREVIEW_LINES)
+        .map(str::to_owned)
+        .collect();
+    if lines.next().is_some() {
+        preview.push("...".to_owned());
+    }
+    preview
+}
+
+/// Styles one line of a unified diff by its leading marker. Hunk headers and
+/// context lines recede like the rest of the chrome; only the change itself
+/// stands out.
+fn diff_line_style(line: &str, theme: &Theme) -> Style {
+    if line.starts_with('+') && !line.starts_with("+++") {
+        theme.add
+    } else if line.starts_with('-') && !line.starts_with("---") {
+        theme.remove
+    } else {
+        theme.dim
+    }
+}
+
+/// One compact block for a tool call, in whatever state it currently stands.
+/// `Pending`/`Running` share a heading so a call reads the same before and
+/// after its arguments arrive; `StepStart`/`StepFinish` never reach here.
+fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<(String, Style)> {
+    match state {
+        ToolState::Pending => vec![(tool_heading(tool, "running", None), theme.dim)],
+        ToolState::Running { input, .. } => vec![(
+            tool_heading(tool, "running", derive_title(input).as_deref()),
+            theme.dim,
+        )],
+        ToolState::Completed {
+            output,
+            title,
+            metadata,
+            ..
+        } => {
+            let mut lines = vec![(tool_heading(tool, "done", Some(title.as_str())), theme.fg)];
+            let diff = metadata
+                .get("diff")
+                .and_then(serde_json::Value::as_str)
+                .filter(|diff| !diff.is_empty());
+
+            if let Some(diff) = diff {
+                lines.extend(clamp_preview(diff).into_iter().map(|line| {
+                    let style = diff_line_style(&line, theme);
+                    (format!("  {line}"), style)
+                }));
+            } else if !output.is_empty() {
+                lines.extend(
+                    clamp_preview(output)
+                        .into_iter()
+                        .map(|line| (format!("  {line}"), theme.dim)),
+                );
+            }
+
+            lines
+        }
+        ToolState::Error { input, error, .. } => {
+            let mut lines = vec![(
+                tool_heading(tool, "error", derive_title(input).as_deref()),
+                theme.error,
+            )];
+            if let Some(first) = error.lines().next().filter(|line| !line.is_empty()) {
+                lines.push((format!("  {first}"), theme.error));
+            }
+            lines
+        }
     }
 }
 
@@ -303,7 +440,7 @@ fn split_at_width(text: &str, width: usize) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use ganja_core::{Message, Part};
+    use ganja_core::{Message, Part, PartBody, PartId, ToolState};
     use ratatui::{buffer::Buffer, layout::Rect};
 
     use super::{Chat, split_at_width, wrap};
@@ -482,5 +619,219 @@ mod tests {
         chat.append_delta(&orphan.id, &part.id, "orphan");
 
         assert!(rendered(&mut chat, VIEWPORT).iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn a_pending_tool_call_names_the_tool() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part::tool("call_1", "shell"));
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        assert!(
+            lines.iter().any(|line| line.contains("[running] shell")),
+            "a pending call should read as running, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_running_tool_call_shows_a_title_derived_from_its_input() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "shell".to_owned(),
+                state: ToolState::Running {
+                    input: serde_json::json!({"command": "cargo test"}),
+                    started: 0,
+                },
+            },
+        });
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("[running] shell: cargo test")),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_completed_tool_call_shows_its_title_and_a_clamped_output_preview() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "read".to_owned(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({"filePath": "a.rs"}),
+                    output: "one\ntwo\nthree\nfour\nfive".to_owned(),
+                    title: "a.rs".to_owned(),
+                    metadata: serde_json::json!({}),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        assert!(
+            lines.iter().any(|line| line.contains("[done] read: a.rs")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("one")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("...")),
+            "five lines should clamp to four plus a marker, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("five")),
+            "the fifth line should have been clamped away, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_completed_tool_call_prefers_its_diff_over_plain_output() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "edit".to_owned(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({"filePath": "a.rs"}),
+                    output: "PLAIN_OUTPUT_MARKER".to_owned(),
+                    title: "a.rs".to_owned(),
+                    metadata: serde_json::json!({
+                        "diff": "+DIFF_ADDED_MARKER\n-DIFF_REMOVED_MARKER"
+                    }),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        assert!(lines.iter().any(|line| line.contains("DIFF_ADDED_MARKER")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("DIFF_REMOVED_MARKER"))
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("PLAIN_OUTPUT_MARKER")),
+            "a diff should be shown instead of the plain output, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_errored_tool_call_shows_only_the_first_line_of_the_error() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "shell".to_owned(),
+                state: ToolState::Error {
+                    input: serde_json::json!({"command": "rm -rf /"}),
+                    error: "refused: destructive command\nsecond line stays out of the transcript"
+                        .to_owned(),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        assert!(
+            lines.iter().any(|line| line.contains("[error] shell")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("refused")),
+            "got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("second line")),
+            "only the first line of the error should show, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn update_part_replaces_a_known_id_and_appends_an_unknown_one() {
+        let mut chat = Chat::default();
+        let reply = Message::assistant("canned");
+        let known = Part::tool("call_1", "shell");
+        chat.start_message(reply.clone());
+        chat.start_part(&reply.id, known.clone());
+
+        chat.update_part(
+            &reply.id,
+            Part {
+                id: known.id.clone(),
+                body: PartBody::Tool {
+                    call_id: "call_1".to_owned(),
+                    tool: "shell".to_owned(),
+                    state: ToolState::Completed {
+                        input: serde_json::json!({"command": "echo hi"}),
+                        output: "hi".to_owned(),
+                        title: "echo hi".to_owned(),
+                        metadata: serde_json::json!({}),
+                        started: 0,
+                        completed: 1,
+                    },
+                },
+            },
+        );
+        chat.update_part(
+            &reply.id,
+            Part {
+                id: PartId::from("prt_unseen".to_owned()),
+                body: PartBody::Tool {
+                    call_id: "call_2".to_owned(),
+                    tool: "read".to_owned(),
+                    state: ToolState::Pending,
+                },
+            },
+        );
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("[done] shell: echo hi")),
+            "the known id should be replaced in place, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("[running] read")),
+            "an update for an id never started should still append, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("[running] shell")),
+            "the pending block should have been replaced, not kept alongside, got {lines:?}"
+        );
     }
 }

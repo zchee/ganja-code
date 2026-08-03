@@ -14,8 +14,17 @@ use ratatui::crossterm::event::Event as TermEvent;
 pub enum AppEvent {
     /// The user pressed a key, moved the wheel, or resized the window.
     Term(TermEvent),
-    /// The engine reported progress on a turn.
-    Core(CoreEvent),
+    /// The engine reported progress on a turn. Boxed because engine events
+    /// dwarf the other variants, and every event crosses this enum.
+    Core(Box<CoreEvent>),
     /// The frame budget elapsed; nothing changed but the clock.
     Tick,
+}
+
+impl AppEvent {
+    /// Wraps an engine event, keeping the box at one call site.
+    #[must_use]
+    pub fn core(event: CoreEvent) -> Self {
+        Self::Core(Box::new(event))
+    }
 }

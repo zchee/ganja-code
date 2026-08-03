@@ -13,6 +13,12 @@ pub struct Theme {
     pub dim: Style,
     /// Whatever the eye should land on first.
     pub accent: Style,
+    /// A diff line that added text.
+    pub add: Style,
+    /// A diff line that removed text.
+    pub remove: Style,
+    /// A tool call that failed, or was refused.
+    pub error: Style,
 }
 
 impl Default for Theme {
@@ -21,6 +27,9 @@ impl Default for Theme {
             fg: Style::new().fg(Color::Reset),
             dim: Style::new().fg(Color::DarkGray),
             accent: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            add: Style::new().fg(Color::Green),
+            remove: Style::new().fg(Color::Red),
+            error: Style::new().fg(Color::Red),
         }
     }
 }

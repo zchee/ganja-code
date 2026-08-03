@@ -232,16 +232,77 @@ fn prompt() -> ChatRequest {
         model: "test-model".to_owned(),
         system: Some("be brief".to_owned()),
         messages: vec![ganja_core::Message::user("hello")],
+        tools: Vec::new(),
+    }
+}
+
+/// A request carrying both halves of tool support: the tools the model is
+/// offered, and a call it already made whose result it has to be shown again.
+fn tool_prompt() -> ChatRequest {
+    let mut assistant = ganja_core::Message::assistant("test-model");
+    assistant
+        .parts
+        .push(ganja_core::Part::text("Reading the file first."));
+    assistant.parts.push(ganja_core::Part {
+        id: ganja_core::PartId::ascending(),
+        body: ganja_core::PartBody::Tool {
+            call_id: "call_read".to_owned(),
+            tool: "read".to_owned(),
+            state: ganja_core::ToolState::Completed {
+                input: serde_json::json!({"filePath": "src/main.rs"}),
+                output: "fn main() {}".to_owned(),
+                title: "src/main.rs".to_owned(),
+                metadata: serde_json::json!({}),
+                started: 1,
+                completed: 2,
+            },
+        },
+    });
+
+    ChatRequest {
+        model: "test-model".to_owned(),
+        system: Some("be brief".to_owned()),
+        messages: vec![
+            ganja_core::Message::user("read src/main.rs"),
+            assistant,
+            ganja_core::Message::user("what does it do?"),
+        ],
+        tools: vec![ganja_core::ToolDefinition {
+            name: "read".to_owned(),
+            description: "Reads a file from disk.".to_owned(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {"filePath": {"type": "string"}},
+                "required": ["filePath"],
+            }),
+        }],
     }
 }
 
 /// Everything a provider streamed for [`prompt`].
 async fn turn(provider: &dyn Provider) -> Result<Vec<ProviderEvent>, ProviderError> {
+    ask(provider, prompt()).await
+}
+
+/// Everything a provider streamed for `request`.
+async fn ask(
+    provider: &dyn Provider,
+    request: ChatRequest,
+) -> Result<Vec<ProviderEvent>, ProviderError> {
     Ok(provider
-        .stream(prompt(), CancellationToken::new())
+        .stream(request, CancellationToken::new())
         .await?
         .collect()
         .await)
+}
+
+/// The JSON body of a request an endpoint was sent.
+fn sent(request: &str) -> serde_json::Value {
+    let (_head, body) = request
+        .split_once("\r\n\r\n")
+        .expect("a request with a body has a blank line before it");
+
+    serde_json::from_str(body).expect("a provider sends JSON")
 }
 
 /// The reply text a turn streamed.
@@ -292,6 +353,129 @@ async fn openai_streams_a_reply_over_a_real_socket() {
     assert_eq!(
         events.last(),
         Some(&ProviderEvent::Finish(FinishReason::Completed))
+    );
+}
+
+/// What the model is offered and what it is shown of its own calls are decided
+/// when the body is built, and everything after that point is `reqwest`'s. This
+/// reads the request off the socket to prove the two survive the trip.
+#[tokio::test]
+async fn anthropic_puts_its_tools_and_its_call_history_on_the_wire() {
+    let endpoint = record(vec![streamed(include_str!(
+        "fixtures/anthropic_happy_path.sse"
+    ))])
+    .await;
+    let provider = AnthropicProvider::new(CANARY)
+        .expect("a client builds")
+        .with_base_url(&endpoint.url);
+
+    let events = ask(&provider, tool_prompt())
+        .await
+        .expect("the endpoint answers");
+    assert_eq!(
+        events.last(),
+        Some(&ProviderEvent::Finish(FinishReason::Completed))
+    );
+
+    let seen = endpoint.seen();
+    let [request] = seen.as_slice() else {
+        panic!("one turn is one request, got {seen:?}");
+    };
+    let body = sent(request);
+
+    assert_eq!(
+        body["tools"],
+        serde_json::json!([{
+            "name": "read",
+            "description": "Reads a file from disk.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"filePath": {"type": "string"}},
+                "required": ["filePath"],
+            },
+        }]),
+        "got {body}"
+    );
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role": "user", "content": "read src/main.rs"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Reading the file first."},
+                {
+                    "type": "tool_use",
+                    "id": "call_read",
+                    "name": "read",
+                    "input": {"filePath": "src/main.rs"},
+                },
+            ]},
+            // The result belongs to the message after the one that called, and
+            // the API rejects the request outright if it is anywhere else.
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_read", "content": "fn main() {}"},
+            ]},
+            {"role": "user", "content": "what does it do?"},
+        ]),
+        "got {body}"
+    );
+}
+
+/// The same guarantee for the other spelling of it: calls beside the assistant
+/// message, results as messages of their own.
+#[tokio::test]
+async fn openai_puts_its_tools_and_its_call_history_on_the_wire() {
+    let endpoint = record(vec![streamed(include_str!(
+        "fixtures/openai_happy_path.sse"
+    ))])
+    .await;
+    let provider = OpenAiProvider::new(CANARY)
+        .expect("a client builds")
+        .with_base_url(&endpoint.url);
+
+    let events = ask(&provider, tool_prompt())
+        .await
+        .expect("the endpoint answers");
+    assert_eq!(
+        events.last(),
+        Some(&ProviderEvent::Finish(FinishReason::Completed))
+    );
+
+    let seen = endpoint.seen();
+    let [request] = seen.as_slice() else {
+        panic!("one turn is one request, got {seen:?}");
+    };
+    let body = sent(request);
+
+    assert_eq!(
+        body["tools"],
+        serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "read",
+                "description": "Reads a file from disk.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"filePath": {"type": "string"}},
+                    "required": ["filePath"],
+                },
+            },
+        }]),
+        "got {body}"
+    );
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": "read src/main.rs"},
+            {"role": "assistant", "content": "Reading the file first.", "tool_calls": [{
+                "id": "call_read",
+                "type": "function",
+                "function": {"name": "read", "arguments": r#"{"filePath":"src/main.rs"}"#},
+            }]},
+            {"role": "tool", "content": "fn main() {}", "tool_call_id": "call_read"},
+            {"role": "user", "content": "what does it do?"},
+        ]),
+        "got {body}"
     );
 }
 
@@ -659,7 +843,12 @@ async fn a_failure_mid_stream_finishes_the_turn_as_failed_and_keeps_the_text() {
     let provider = AnthropicProvider::new(CANARY)
         .expect("a client builds")
         .with_base_url(&endpoint.url);
-    let engine = Engine::new(Arc::new(provider), "test-model");
+    let engine = Engine::new(
+        Arc::new(provider),
+        "test-model",
+        Arc::new(ganja_core::Registry::new(Vec::new())),
+        ganja_core::Permissions::default(),
+    );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -703,7 +892,12 @@ async fn a_cancel_mid_stream_finishes_the_turn_as_cancelled() {
     let provider = AnthropicProvider::new(CANARY)
         .expect("a client builds")
         .with_base_url(&endpoint.url);
-    let engine = Engine::new(Arc::new(provider), "test-model");
+    let engine = Engine::new(
+        Arc::new(provider),
+        "test-model",
+        Arc::new(ganja_core::Registry::new(Vec::new())),
+        ganja_core::Permissions::default(),
+    );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
