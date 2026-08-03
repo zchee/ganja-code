@@ -10,8 +10,15 @@ repository.workspace = true
 [dependencies]
 # Only where dyn-safety demands it: `Provider` is used behind `Arc<dyn _>`.
 async-trait.workspace = true
+# Resolves `auth.json` under the XDG data directory on every platform, macOS
+# included, which is where upstream keeps its own credentials there.
+etcetera.workspace = true
 futures.workspace = true
+# The HTTP providers speak SSE, so only `stream` and `json` are load-bearing;
+# the workspace declaration pins rustls so no build here reaches for OpenSSL.
+reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -21,4 +28,13 @@ tracing.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
-serde_json.workspace = true
+# The credential tests write real files, with real permission bits, in a
+# directory that goes away afterwards.
+tempfile.workspace = true
+# `net` is for the provider tests only: they serve canned HTTP over a loopback
+# socket rather than mocking the client, so the request really is built, sent,
+# retried and streamed. The library itself needs no listener.
+tokio = { workspace = true, features = ["net"] }
+# Only to prove that a failed request logs nothing resembling an API key: the
+# secret-hygiene test needs a subscriber it can read back.
+tracing-subscriber.workspace = true

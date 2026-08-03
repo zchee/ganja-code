@@ -6,10 +6,14 @@
 //! be driven over a network transport. CI enforces the rule by asserting that
 //! `cargo tree -p ganja-core -e normal` never mentions `ratatui`.
 
+pub mod auth;
+pub mod catalog;
 pub mod engine;
 pub mod protocol;
 pub mod provider;
 
+pub use auth::{AuthError, Credential};
+pub use catalog::{Cost, ModelInfo};
 pub use engine::{Engine, EngineError};
 pub use protocol::{
     Command, Event, FinishReason, Message, MessageId, MessageTime, Part, PartBody, PartId, Role,
