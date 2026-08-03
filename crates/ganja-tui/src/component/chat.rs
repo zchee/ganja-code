@@ -61,6 +61,11 @@ struct Entry {
 #[derive(Debug)]
 struct Wrapped {
     width: u16,
+    /// The theme these lines carry the styles of. Cached lines hold their
+    /// styles, so a theme switch has to invalidate the cache exactly as a
+    /// resize does — otherwise the transcript keeps the old palette while
+    /// everything drawn fresh takes the new one.
+    revision: u64,
     lines: Vec<Line<'static>>,
 }
 
@@ -267,7 +272,7 @@ impl Entry {
         if self
             .wrapped
             .as_ref()
-            .is_some_and(|wrapped| wrapped.width == width)
+            .is_some_and(|wrapped| wrapped.width == width && wrapped.revision == theme.revision())
         {
             return;
         }
@@ -311,7 +316,11 @@ impl Entry {
         // Breathing room before the next entry.
         lines.push(Line::styled(String::new(), Style::default()));
 
-        self.wrapped = Some(Wrapped { width, lines });
+        self.wrapped = Some(Wrapped {
+            width,
+            revision: theme.revision(),
+            lines,
+        });
     }
 }
 
@@ -490,7 +499,7 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
 
     use super::{Chat, split_at_width, wrap};
-    use crate::theme::Theme;
+    use crate::theme::{Theme, Themes};
 
     const VIEWPORT: Rect = Rect {
         x: 0,
@@ -966,5 +975,35 @@ mod tests {
 
         assert!(rendered(&mut chat, VIEWPORT).iter().all(String::is_empty));
         assert!(chat.is_following_tail());
+    }
+
+    /// The wrap cache holds styled lines, so it is as stale after a theme
+    /// switch as it is after a resize. Both frames here are the same width:
+    /// only the revision can invalidate the cache.
+    #[test]
+    fn a_theme_switch_restyles_the_lines_the_cache_already_holds() {
+        let area = Rect::new(0, 0, 40, 6);
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("what color am I"));
+
+        let mut themes = Themes::builtin();
+        let first = themes.select("aura").expect("aura is builtin");
+        let mut buffer = Buffer::empty(area);
+        chat.render(area, &mut buffer, &first);
+        let before = buffer[(0, 1)].fg;
+
+        let second = themes.select("gruvbox").expect("gruvbox is builtin");
+        assert_ne!(
+            first.revision(),
+            second.revision(),
+            "a switch has to change the revision, or nothing below is tested"
+        );
+        chat.render(area, &mut buffer, &second);
+
+        assert_ne!(
+            before,
+            buffer[(0, 1)].fg,
+            "the cached line kept the old palette"
+        );
     }
 }

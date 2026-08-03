@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The three panes the layout draws — transcript, prompt editor, status bar — plus the modals that overlay them: the permission dialog while a tool call waits on the user, and the sessions picker while a stored conversation is being chosen.
+The three panes the layout draws — transcript, prompt editor, status bar — plus the modals that overlay them: the permission dialog while a tool call waits on the user, the sessions picker while a stored conversation is being chosen, and the theme list while a palette is being previewed.
 
 ## Key Files
 
@@ -17,6 +17,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 | `status.rs` | The status bar: what the engine is doing (`Activity`), what the session has spent (`Totals`), and the keys that matter. |
 | `permission.rs` | The centered modal blocking on one pending tool call. Spec: upstream `packages/tui/src/routes/session/permission.tsx`, trimmed to the one-shot shape `PermissionReply` offers today. |
 | `sessions.rs` | The centered modal listing this project's stored sessions to resume. Spec: upstream `packages/tui/src/routes/session/list.tsx`, trimmed to the columns a person picks by. |
+| `themes.rs` | The centered modal listing loadable themes. Owns only the cursor; the app applies the live preview on every move and reverts on Esc. Spec: upstream `packages/tui/src/component/dialog-theme-list.tsx`. |
 
 ## For AI Agents
 
@@ -31,11 +32,11 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 
 Components are exercised through `App::handle` and rendered into a `TestBackend` — no terminal, no running turn. Screen output is asserted with `insta` snapshots in `../snapshots/`. After an intentional visual change: `cargo insta review`.
 
-Snapshot coverage today: the permission dialog open and overflowing (the cut flagged, the reply keys kept), the sessions picker open and after moving the selection, and a tool call in each of its states (pending, running, completed with a diff, error). A new tool state or dialog needs its own snapshot.
+Snapshot coverage today: the permission dialog open and overflowing (the cut flagged, the reply keys kept), the sessions picker open and after moving the selection, a tool call in each of its states (pending, running, completed with a diff, error), the theme list open, and one style-aware frame per ported theme. A new tool state or dialog needs its own snapshot.
 
 ### Common Patterns
 
-Each component owns its own state struct and exposes methods the app calls (`scroll_pages`, `follow_tail`, …); none reaches back into the engine. Styling goes through `crate::theme` rather than literal colors, so P5 can make themes loadable data without touching component code.
+Each component owns its own state struct and exposes methods the app calls (`scroll_pages`, `follow_tail`, …); none reaches back into the engine. Styling goes through `crate::theme` rather than literal colors — themes are loadable data now, and that discipline is why a palette switch needs no component changes. The one exception it forced is explicit: the editor bakes styles into its `TextArea` at construction, so `Editor::restyle` must be called after any theme change.
 
 ## Dependencies
 

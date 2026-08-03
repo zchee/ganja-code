@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: styled_screen(&terminal)
+---
+ 0 ["you" Rgb(109, 109, 109) on Rgb(15, 15, 15)] ["                                                                             " Reset on Rgb(15, 15, 15)]
+ 1 ["show me every color you have" Rgb(162, 119, 255) on Rgb(15, 15, 15)] ["                                                    " Reset on Rgb(15, 15, 15)]
+ 2 ["                                                                                " Reset on Rgb(15, 15, 15)]
+ 3 ["ganja" Rgb(109, 109, 109) on Rgb(15, 15, 15)] ["                                                                           " Reset on Rgb(15, 15, 15)]
+ 4 ["One edit applied, one command refused." Rgb(237, 236, 238) on Rgb(15, 15, 15)] ["                                          " Reset on Rgb(15, 15, 15)]
+ 5 ["[done] edit: theme.rs" Rgb(237, 236, 238) on Rgb(15, 15, 15)] ["                                                           " Reset on Rgb(15, 15, 15)]
+ 6 ["@@ -1,2 +1,2 @@" Rgb(109, 109, 109) on Rgb(15, 15, 15)] ["                                                                 " Reset on Rgb(15, 15, 15)]
+ 7 ["-let theme = Theme::default();" Rgb(255, 103, 103) on Rgb(15, 15, 15)] ["                                                  " Reset on Rgb(15, 15, 15)]
+ 8 ["+let theme = themes.theme();" Rgb(97, 255, 202) on Rgb(15, 15, 15)] ["                                                    " Reset on Rgb(15, 15, 15)]
+ 9 ["context" Rgb(109, 109, 109) on Rgb(15, 15, 15)] ["                                                                         " Reset on Rgb(15, 15, 15)]
+10 ["[error] bash: rm -rf /" Rgb(255, 103, 103) on Rgb(15, 15, 15)] ["                                                          " Reset on Rgb(15, 15, 15)]
+11 ["refused: destructive command" Rgb(255, 103, 103) on Rgb(15, 15, 15)] ["                                                    " Reset on Rgb(15, 15, 15)]
+12 ["                                                                                " Reset on Rgb(15, 15, 15)]
+13 ["                                                                                " Reset on Rgb(15, 15, 15)]
+14 ["                                                                                " Reset on Rgb(15, 15, 15)]
+15 ["                                                                                " Reset on Rgb(15, 15, 15)]
+16 ["                                                                                " Reset on Rgb(15, 15, 15)]
+17 ["                                                                                " Reset on Rgb(15, 15, 15)]
+18 ["┌ message ─────────────────────────────────────────────────────────────────────┐" Rgb(109, 109, 109) on Rgb(15, 15, 15)]
+19 ["│" Rgb(109, 109, 109) on Rgb(15, 15, 15)] [" " Rgb(109, 109, 109) on Rgb(15, 15, 15) REVERSED] ["Ask ganja something...                                                       │" Rgb(109, 109, 109) on Rgb(15, 15, 15)]
+20 ["│                                                                              │" Rgb(109, 109, 109) on Rgb(15, 15, 15)]
+21 ["│                                                                              │" Rgb(109, 109, 109) on Rgb(15, 15, 15)]
+22 ["└──────────────────────────────────────────────────────────────────────────────┘" Rgb(109, 109, 109) on Rgb(15, 15, 15)]
+23 ["ready" Rgb(162, 119, 255) on Rgb(15, 15, 15)] ["                  " Reset on Rgb(15, 15, 15)] ["Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit" Rgb(109, 109, 109) on Rgb(15, 15, 15)]

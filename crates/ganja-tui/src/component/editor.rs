@@ -26,12 +26,27 @@ impl Editor {
     /// Builds an empty editor styled for `theme`.
     #[must_use]
     pub fn new(theme: &Theme) -> Self {
-        let mut area = TextArea::default();
-        area.set_block(Block::bordered().title(" message ").style(theme.dim));
-        area.set_style(theme.fg);
-        area.set_placeholder_text("Ask ganja something...");
+        let mut editor = Self {
+            area: TextArea::default(),
+        };
+        editor.area.set_placeholder_text("Ask ganja something...");
+        editor.restyle(theme);
 
-        Self { area }
+        editor
+    }
+
+    /// Repaints the editor for `theme`, keeping whatever is typed.
+    ///
+    /// The widget holds its own styles rather than being handed a theme at
+    /// draw time, so nothing else would notice a switch: without this, picking
+    /// a theme repaints the whole screen except the box the user is typing in.
+    pub fn restyle(&mut self, theme: &Theme) {
+        self.area
+            .set_block(Block::bordered().title(" message ").style(theme.dim));
+        self.area.set_style(theme.fg);
+        // Otherwise the widget's own default gray is the one color on screen a
+        // theme cannot reach.
+        self.area.set_placeholder_style(theme.dim);
     }
 
     /// The text worth submitting, or [`None`] when the buffer holds only
@@ -67,10 +82,14 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{
+        buffer::Buffer,
+        crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+        layout::Rect,
+    };
 
     use super::Editor;
-    use crate::theme::Theme;
+    use crate::theme::{Theme, Themes};
 
     fn typing(editor: &mut Editor, text: &str) {
         for character in text.chars() {
@@ -110,5 +129,42 @@ mod tests {
         typing(&mut editor, "second");
 
         assert_eq!(editor.prompt().as_deref(), Some("first\nsecond"));
+    }
+
+    /// The one component whose styles are set once rather than read per frame,
+    /// which is why a theme switch has to reach in and repaint it.
+    #[test]
+    fn restyling_repaints_the_box_without_disturbing_what_is_typed() {
+        const AREA: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 30,
+            height: 5,
+        };
+
+        let mut editor = Editor::new(&Theme::default());
+        typing(&mut editor, "a draft mid-switch");
+
+        let mut buffer = Buffer::empty(AREA);
+        editor.render(AREA, &mut buffer);
+        let before = buffer[(0, 0)].fg;
+
+        editor.restyle(
+            &Themes::builtin()
+                .select("gruvbox")
+                .expect("gruvbox is builtin"),
+        );
+        editor.render(AREA, &mut buffer);
+
+        assert_ne!(
+            before,
+            buffer[(0, 0)].fg,
+            "the border kept the styles it was built with"
+        );
+        assert_eq!(
+            editor.prompt().as_deref(),
+            Some("a draft mid-switch"),
+            "restyling must not touch the buffer"
+        );
     }
 }
