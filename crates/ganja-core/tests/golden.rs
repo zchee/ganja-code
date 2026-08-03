@@ -6,7 +6,19 @@
 //! `.omc/reference/`, and this crate's [`Engine`] over
 //! [`Registry::with_builtins`], and compares the one thing a user would notice
 //! if the port drifted — the ordered list of tool calls each side actually
-//! *executed*, and the arguments each ran with.
+//! *executed*, the arguments each ran with, and what each one handed back to the
+//! model.
+//!
+//! # The one forgiven difference
+//!
+//! Outputs are compared byte for byte, with a single named exception:
+//! [`without_upstreams_match_newlines`], which forgives the blank line upstream
+//! leaves after every grep match row because it never trims ripgrep's line
+//! terminator. That divergence is a shipped decision, recorded both there and at
+//! the trim in `tool/grep.rs`. Nothing else is normalized away — `edit` renders
+//! [`DEFERRED`] until somebody writes a diff normalizer, and an errored call
+//! compares on status alone, but both of those are visible in the assertion
+//! rather than silently skipped.
 //!
 //! # Why a replay server rather than a model
 //!
@@ -43,7 +55,7 @@
 //! the real user's stored permissions or spilled tool output.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -55,7 +67,7 @@ use std::{
 
 use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
-    Command, Engine, Event, FinishReason, PartBody, PermissionReply, Permissions, Registry,
+    Command, Engine, Event, FinishReason, PartBody, PartId, PermissionReply, Permissions, Registry,
     ToolState, provider::OpenAiProvider,
 };
 use serde::Deserialize;
@@ -129,9 +141,65 @@ struct Task {
     steps: Vec<Step>,
 }
 
-/// A tool call an agent executed: the tool's name and the arguments it ran
-/// with, normalized.
-type Executed = (String, Value);
+/// What a tool call settled as once it finished.
+///
+/// The error arm carries no message on purpose. This compares *status*, because
+/// the wording of a failure — `File not found: {path}` and every sibling of it —
+/// is unverified against upstream, and a comparison that fails on a string
+/// nobody has checked is one people learn to ignore. Widening this to the
+/// message is its own task, with its own evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Settled {
+    /// The tool returned, and this is what the model saw next.
+    Completed(String),
+    /// The tool failed, or was refused.
+    Errored,
+}
+
+/// A tool call an agent executed: the tool's name, the arguments it ran with,
+/// and what it settled as — all normalized.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Executed {
+    /// Tool the agent ran, by registry id.
+    tool: String,
+    /// The arguments it ran with.
+    input: Value,
+    /// What it settled as, or [`None`] for a call that started and never did.
+    ///
+    /// Only reachable on this crate's leg, and only if a call entered
+    /// `Running` and the turn ended without settling it — which the finish
+    /// assertion says cannot happen. It is kept distinguishable anyway,
+    /// rendering as [`NEVER_SETTLED`] rather than as an empty string, because an
+    /// empty string is exactly what a legitimately silent upstream call
+    /// compares as: the two must not be able to match.
+    output: Option<Settled>,
+}
+
+/// Tools whose output this compares.
+///
+/// `edit` is left out for now: its output is a unified diff, generated here by
+/// the `similar` crate and upstream by its own differ, so the two will not be
+/// byte-identical until somebody writes a normalizer for them. Left *out*
+/// rather than dropped — a deferred call still renders [`DEFERRED`] in place, so
+/// the comparison stays positional and the deferral is visible in any failure
+/// instead of looking like a call that was never made.
+const COMPARED_OUTPUTS: &[&str] = &["bash", "grep", "read", "write"];
+
+/// Stands in for the output of a tool in neither `COMPARED_OUTPUTS`.
+const DEFERRED: &str = "<deferred>";
+
+/// Stands in for a call that entered `Running` and never settled.
+const NEVER_SETTLED: &str = "<never settled>";
+
+/// Stands in for a call that failed, on either leg — see [`Settled`].
+const ERRORED: &str = "<errored>";
+
+/// How a grep match row begins, in both implementations.
+const MATCH_ROW: &str = "  Line ";
+
+/// Tool the one documented output exception belongs to — see
+/// [`without_upstreams_match_newlines`].
+const GREP: &str = "grep";
 
 /// A loopback endpoint speaking OpenAI chat completions from a script.
 struct Replay {
@@ -397,8 +465,16 @@ async fn ganja(task: &Task) -> Vec<Executed> {
 /// the loop has parsed its arguments, cleared the permission gate and handed it
 /// to the tool. A call that never gets that far never ran, and upstream would
 /// not report it either.
+///
+/// Its output arrives later, in a second update to the same part, so the two
+/// have to be tied together: `at` remembers which position a part's `Running`
+/// update took, and the settled update fills that position in. The index is
+/// local to this function and gone before anything is compared — execution
+/// *order* is what the first two assertions check, so the calls themselves stay
+/// an ordered list rather than becoming a map.
 async fn collect(engine: &Engine, events: &mut BoxStream<'static, Event>) -> Vec<Executed> {
-    let mut executed = Vec::new();
+    let mut executed: Vec<Executed> = Vec::new();
+    let mut at: HashMap<PartId, usize> = HashMap::new();
 
     loop {
         let event = events
@@ -417,13 +493,33 @@ async fn collect(engine: &Engine, events: &mut BoxStream<'static, Event>) -> Vec
                     .expect("a reply is always accepted");
             }
             Event::PartUpdated { part, .. } => {
-                if let PartBody::Tool {
-                    tool,
-                    state: ToolState::Running { input, .. },
-                    ..
-                } = part.body
-                {
-                    executed.push((tool, input));
+                // Read before the body is moved out of the part: this id is the
+                // only thing tying a call's settled state back to the row its
+                // `Running` update opened.
+                let id = part.id.clone();
+                if let PartBody::Tool { tool, state, .. } = part.body {
+                    match state {
+                        ToolState::Running { input, .. } => {
+                            at.insert(id, executed.len());
+                            executed.push(Executed {
+                                tool,
+                                input,
+                                output: None,
+                            });
+                        }
+                        ToolState::Completed { output, .. } => {
+                            if let Some(row) = at.get(&id) {
+                                executed[*row].output = Some(Settled::Completed(output));
+                            }
+                        }
+                        ToolState::Error { .. } => {
+                            if let Some(row) = at.get(&id) {
+                                executed[*row].output = Some(Settled::Errored);
+                            }
+                        }
+                        // Arguments still streaming; nothing has run yet.
+                        ToolState::Pending => {}
+                    }
                 }
             }
             Event::MessageFinished { reason, error, .. } => {
@@ -592,10 +688,36 @@ async fn upstream(directory: &Path, data_home: &Path, task: &Task) -> Vec<Execut
         .filter(|event| event["type"] == "tool_use")
         .filter_map(|event| {
             let part = &event["part"];
-            Some((
-                part["tool"].as_str()?.to_owned(),
-                part["state"]["input"].clone(),
-            ))
+            let state = &part["state"];
+            let tool = part["tool"].as_str()?.to_owned();
+            // Upstream emits `tool_use` only for a call that has settled
+            // (`cli/cmd/run.ts`), so the line already carries its final status
+            // and there is no earlier row to reconcile with.
+            let settled = if state["status"] == "error" {
+                Settled::Errored
+            } else {
+                // A completed call whose state carries no `output` compares as
+                // empty rather than being skipped: if that field ever moves, the
+                // move has to surface as a difference and not as a row that
+                // quietly stopped being compared.
+                let output = state["output"].as_str().unwrap_or_default();
+                // The one exception, applied to this leg only because the
+                // artifact is upstream's — see
+                // [`without_upstreams_match_newlines`]. Doing it to both legs
+                // would eat the blank line *this* port writes before a new path
+                // header, which is real output on both sides.
+                Settled::Completed(if tool == GREP {
+                    without_upstreams_match_newlines(output)
+                } else {
+                    output.to_owned()
+                })
+            };
+
+            Some(Executed {
+                tool,
+                input: state["input"].clone(),
+                output: Some(settled),
+            })
         })
         .collect()
 }
@@ -609,13 +731,7 @@ async fn upstream(directory: &Path, data_home: &Path, task: &Task) -> Vec<Execut
 /// its arguments reports the target.
 fn normalize(value: &Value, roots: &[String]) -> Value {
     match value {
-        Value::String(text) => {
-            let mut text = text.clone();
-            for root in roots {
-                text = text.replace(root, ROOT);
-            }
-            Value::String(text)
-        }
+        Value::String(text) => Value::String(normalize_text(text, roots)),
         Value::Array(items) => Value::Array(
             items
                 .iter()
@@ -630,6 +746,56 @@ fn normalize(value: &Value, roots: &[String]) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+/// Upstream's grep output with the line terminator each match row carries
+/// removed, so it can be compared against this port's trimmed rows.
+///
+/// **The only exception in this whole comparison, and it is grep's alone.**
+/// Upstream's `packages/core/src/ripgrep.ts:267` passes ripgrep's `lines.text`
+/// through verbatim — trailing newline included — and `tool/grep.ts` then joins
+/// its rows with `\n`, so upstream's output leaves a blank line after every
+/// match row, including between two consecutive matches in one file. This port
+/// trims per line (`tool/grep.rs`, at the `clamp_match_text` call, where the same
+/// divergence is recorded), and the trimmed shape was chosen as the shipped
+/// behaviour rather than treated as a bug.
+///
+/// Exactly one thing is forgiven: the empty line upstream's untrimmed text
+/// leaves after a [`MATCH_ROW`]. The blank line upstream writes *before a new
+/// path header* is real on both sides and survives — which is why this drops one
+/// empty line rather than collapsing runs of them. Every other byte of grep's
+/// output is still compared, and every other tool's output is compared with no
+/// normalization whatsoever.
+///
+/// Do not generalize this into a trailing-whitespace normalizer. A blanket rule
+/// would forgive the next tool that drifts, and catching that is the entire
+/// reason this comparison exists.
+fn without_upstreams_match_newlines(output: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut rows = output.split('\n').peekable();
+
+    while let Some(row) = rows.next() {
+        kept.push(row);
+        if row.starts_with(MATCH_ROW) && rows.peek() == Some(&"") {
+            rows.next();
+        }
+    }
+
+    kept.join("\n")
+}
+
+/// `text` with every mention of each root replaced by [`ROOT`].
+///
+/// Tool *output* needs this as much as the arguments do — `read` prints the file
+/// it read, and `grep` prints every file it matched — so without it every
+/// path-bearing output would differ by the directory its leg happened to run in.
+fn normalize_text(text: &str, roots: &[String]) -> String {
+    let mut text = text.to_owned();
+    for root in roots {
+        text = text.replace(root, ROOT);
+    }
+
+    text
 }
 
 /// The forms `directory` can appear in inside a tool argument, longest first so
@@ -649,7 +815,30 @@ fn roots(directory: &Path) -> Vec<String> {
 fn render(calls: &[Executed]) -> Vec<String> {
     calls
         .iter()
-        .map(|(tool, input)| format!("{tool} {input}"))
+        .map(|call| format!("{} {}", call.tool, call.input))
+        .collect()
+}
+
+/// What each call settled as, one line per call, for the output comparison.
+///
+/// A tool outside [`COMPARED_OUTPUTS`] renders [`DEFERRED`] on both legs, so the
+/// line stays in place and says why it is not being compared.
+fn outputs(calls: &[Executed]) -> Vec<String> {
+    calls
+        .iter()
+        .map(|call| {
+            let settled = if COMPARED_OUTPUTS.contains(&call.tool.as_str()) {
+                match &call.output {
+                    Some(Settled::Completed(output)) => output.as_str(),
+                    Some(Settled::Errored) => ERRORED,
+                    None => NEVER_SETTLED,
+                }
+            } else {
+                DEFERRED
+            };
+
+            format!("{}: {settled}", call.tool)
+        })
         .collect()
 }
 
@@ -658,14 +847,15 @@ fn render(calls: &[Executed]) -> Vec<String> {
 fn keys(calls: &[Executed]) -> Vec<(String, Vec<String>)> {
     calls
         .iter()
-        .map(|(tool, input)| {
-            let mut names: Vec<String> = input
+        .map(|call| {
+            let mut names: Vec<String> = call
+                .input
                 .as_object()
                 .map(|fields| fields.keys().cloned().collect())
                 .unwrap_or_default();
             names.sort();
 
-            (tool.clone(), names)
+            (call.tool.clone(), names)
         })
         .collect()
 }
@@ -716,7 +906,14 @@ async fn differential(name: &str, home: &Path) -> (Vec<String>, Vec<Executed>, V
         let roots = roots(root);
         calls
             .into_iter()
-            .map(|(tool, input)| (tool, normalize(&input, &roots)))
+            .map(|call| Executed {
+                tool: call.tool,
+                input: normalize(&call.input, &roots),
+                output: call.output.map(|settled| match settled {
+                    Settled::Completed(text) => Settled::Completed(normalize_text(&text, &roots)),
+                    Settled::Errored => Settled::Errored,
+                }),
+            })
             .collect()
     };
 
@@ -747,9 +944,9 @@ async fn ganja_executes_the_same_tool_calls_as_upstream_opencode() {
         let (upstream_names, ganja_names): (Vec<&str>, Vec<&str>) = (
             upstream_calls
                 .iter()
-                .map(|(tool, _)| tool.as_str())
+                .map(|call| call.tool.as_str())
                 .collect(),
-            ganja_calls.iter().map(|(tool, _)| tool.as_str()).collect(),
+            ganja_calls.iter().map(|call| call.tool.as_str()).collect(),
         );
 
         // Against the fixture first. Two agents that both stopped after the
@@ -776,6 +973,16 @@ async fn ganja_executes_the_same_tool_calls_as_upstream_opencode() {
             render(&ganja_calls),
             render(&upstream_calls),
             "{name}: the same tools ran with different argument values"
+        );
+
+        // The last one, and the only one that looks at what the tools actually
+        // *did*: the four above would all pass for two agents that ran the same
+        // calls and returned different things to the model, which is the whole
+        // of what the next request carries.
+        assert_eq!(
+            outputs(&ganja_calls),
+            outputs(&upstream_calls),
+            "{name}: the same tools returned different output"
         );
     }
 }
