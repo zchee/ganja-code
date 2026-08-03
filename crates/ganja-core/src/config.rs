@@ -117,8 +117,10 @@ pub enum ConfigError {
         #[source]
         source: io::Error,
     },
-    /// A config file was named explicitly and is not there. Discovery treats an
-    /// absent file as nothing to merge; an explicit one is a request.
+    /// A config file was named explicitly and is not there (**D26**).
+    /// Discovery treats an absent file as nothing to merge; an explicit one is
+    /// a request, and answering a request with the defaults would look like it
+    /// had been read.
     #[error("{} does not exist", path.display())]
     Missing {
         /// The file that was asked for by name.
