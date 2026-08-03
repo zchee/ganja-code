@@ -40,24 +40,25 @@ cargo run -- auth login         # also: auth list, auth logout, models
 # The gates CI runs, in order
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
-cargo test --workspace
+cargo nextest run --workspace       # the suite; each test in its own process
+cargo test --workspace --doc        # nextest skips doctests, so run them beside it
 ! cargo tree -p ganja-core -e normal | grep -q ratatui   # core stays terminal-free
 ```
 
 The last gate is inverted deliberately: a plain `grep -c` exits non-zero on zero matches and would fail exactly when the core is pure.
 
-Single tests:
+Single tests (nextest filters by name substring; `cargo test` still works and is what runs doctests):
 
 ```sh
-cargo test -p ganja-core --test golden               # one integration binary
-cargo test -p ganja-core permission::                # unit tests by module path
-cargo test -p ganja-tui --lib snapshot_tool_error    # one snapshot test
+cargo nextest run -E 'binary(golden)'                # one integration binary
+cargo nextest run -p ganja-core permission           # tests whose name matches "permission"
+cargo nextest run -p ganja-tui snapshot_tool_error   # one snapshot test
 cargo insta review                                   # TUI snapshots: crates/ganja-tui/src/snapshots/
 ```
 
 Two suites need setup, and both are documented in `crates/ganja-core/tests/AGENTS.md`:
 
-- **Golden differential** runs in the default `cargo test` and **hard-fails rather than skips** when its prerequisites are missing — a green run that compared against nothing would be worthless. It needs `bun` on `PATH` and an upstream checkout with `bun install` already run, at `.omc/reference/opencode-v1.18.11` or wherever `GANJA_OPENCODE_DIR` points (CI checks it out to `upstream/`).
+- **Golden differential** runs in the default test run (`cargo nextest run`, or `cargo test`) and **hard-fails rather than skips** when its prerequisites are missing — a green run that compared against nothing would be worthless. It needs `bun` on `PATH` and an upstream checkout with `bun install` already run, at `.omc/reference/opencode-v1.18.11` or wherever `GANJA_OPENCODE_DIR` points (CI checks it out to `upstream/`).
 - **Live provider tests** are `#[ignore]`d *and* inert unless opted in: `GANJA_LIVE_TEST=1 ANTHROPIC_API_KEY=… cargo test -p ganja-core --test live -- --ignored`.
 
 ## Environment
@@ -105,7 +106,7 @@ The four gates above, all green, before a phase is called done. Unit tests live 
 ### Common Patterns
 
 - Test names are sentences about behavior: `a_denied_edit_leaves_the_file_untouched`, `a_second_subscriber_is_refused`.
-- A test that mutates process-wide state gets its **own test binary**, because `cargo test` runs a binary's tests on parallel threads.
+- A test that mutates process-wide state gets its **own test binary**. nextest already gives each test its own process, but the separation still holds the line under a plain `cargo test` (which runs a binary's tests on parallel threads) and keeps the intent legible.
 - Anything touching stored state redirects `XDG_DATA_HOME` so it cannot read or write the real user's credentials, permissions or spilled output.
 - Nothing may render a whole API key; `crates/ganja-core/tests/secrets_env.rs` pins that with a canary.
 - Commit subjects are `scope: intent` — the crates touched, then why (`core,tui,cli: let the model act through permission-gated tools`).
