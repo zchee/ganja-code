@@ -7,8 +7,8 @@ use std::{
 
 use futures::StreamExt as _;
 use ganja_core::{
-    Command, Engine, Event, FinishReason, Permissions, Registry, provider::FakeProvider,
-    provider::fake,
+    Command, Engine, Event, FinishReason, Permissions, Registry,
+    provider::{FakeProvider, fake},
 };
 
 /// The plan's budget: a cancel is visible within a tenth of a second.

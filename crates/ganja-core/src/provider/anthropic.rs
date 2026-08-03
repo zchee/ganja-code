@@ -679,9 +679,8 @@ fn failure(error: &Value) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use futures::StreamExt as _;
-    use tokio_util::sync::CancellationToken;
-
     use serde_json::json;
+    use tokio_util::sync::CancellationToken;
 
     use super::{AnthropicProvider, Body, DEFAULT_MAX_TOKENS, Mapping, NO_RESULT};
     use crate::{

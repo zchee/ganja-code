@@ -26,14 +26,13 @@
 //! sibling is created exclusively, because its name is predictable and a
 //! symbolic link planted at it would otherwise redirect the write.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::{
     collections::BTreeMap,
     env, fmt, fs, io,
     path::{Path, PathBuf},
 };
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt as _;
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use secrecy::{ExposeSecret as _, SecretString, zeroize::Zeroize as _};
@@ -632,13 +631,12 @@ pub fn list_providers() -> Result<Vec<Entry>, AuthError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::{
         env, fs,
         sync::{Mutex, MutexGuard, PoisonError},
     };
-
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt as _;
 
     use secrecy::{ExposeSecret as _, SecretString};
     use tempfile::TempDir;

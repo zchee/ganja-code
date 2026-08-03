@@ -1,0 +1,17 @@
+# rustfmt configuration. The toolchain is nightly (see rust-toolchain.toml), so
+# the unstable options below are available; on a stable toolchain rustfmt would
+# ignore them with a warning rather than erroring.
+
+# Match the workspace edition so rustfmt applies 2024 idioms (e.g. the reordered
+# `use` prelude rules) rather than an older default.
+edition = "2024"
+
+# Group `use` blocks as standard library, then external crates, then this
+# crate's own modules, each separated by a blank line — the ordering the code
+# is already written in, now enforced instead of maintained by hand.
+group_imports = "StdExternalCrate"
+
+# Merge imports from the same crate into one nested `use` (`use std::{...}`),
+# which is the shape already used throughout; keeps a file's import surface to
+# one block per crate rather than a line per path.
+imports_granularity = "Crate"
