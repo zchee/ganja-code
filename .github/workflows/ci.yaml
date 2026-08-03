@@ -73,6 +73,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The suite runs under nextest, which gives each test its own process —
+      # the tests that mutate process-wide environment are isolated by that
+      # rather than by staying off one thread. Installed from a prebuilt
+      # binary rather than compiled.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       # The golden differential test drives the real upstream opencode at its
       # pinned tag, headless under bun, and hard-fails when the checkout is
       # missing rather than silently comparing against nothing — so CI has to
@@ -92,7 +100,7 @@ jobs:
           persist-credentials: false
 
       - name: cache the upstream dependency install
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: upstream/opencode-v1.18.11/node_modules
           key: opencode-v1.18.11-${{ runner.os }}-${{ hashFiles('upstream/opencode-v1.18.11/bun.lock') }}
@@ -102,6 +110,14 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: test
-        run: cargo test --workspace
+        run: cargo nextest run --workspace --profile ci
+        env:
+          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.11
+
+      # nextest does not run doctests, so they get their own step. There are
+      # none today, which makes this near-instant — but it means the first one
+      # added later is run rather than silently skipped.
+      - name: doc-tests
+        run: cargo test --workspace --doc
         env:
           GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.11

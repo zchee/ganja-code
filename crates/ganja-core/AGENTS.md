@@ -31,9 +31,10 @@ The engine: session orchestration, providers, tools, permissions, and the serde-
 ### Testing Requirements
 
 ```sh
-cargo test -p ganja-core                      # unit + integration
-cargo test -p ganja-core --lib permission::   # unit tests by module path
-cargo test -p ganja-core --test golden        # one integration binary
+cargo nextest run -p ganja-core               # unit + integration, each test its own process
+cargo nextest run -p ganja-core permission    # tests whose name matches "permission"
+cargo nextest run -E 'binary(golden)'         # one integration binary
+cargo test -p ganja-core --doc                # doctests, which nextest does not run
 ```
 
 Unit tests live in `#[cfg(test)] mod tests` at the bottom of the module they cover; anything that needs a real socket, a real filesystem layout, or process-wide environment mutation lives in `tests/` instead.
