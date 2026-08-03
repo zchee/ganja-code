@@ -28,7 +28,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput};
+use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, credential_store, is_same_file};
 
 /// Most matches a call returns. Upstream's `limit` in `tool/grep.ts`.
 const LIMIT: usize = 100;
@@ -110,8 +110,11 @@ impl Tool for GrepTool {
         let include = args.include;
         let cancel = ctx.cancel.clone();
         let searched = base_dir.clone();
+        // Resolved before the walk rather than inside it: the store cannot move
+        // while ganja runs, and the walk visits every file in the tree.
+        let store = credential_store();
         let matches = tokio::task::spawn_blocking(move || {
-            search(&searched, &pattern, include.as_deref(), &cancel)
+            search(&searched, &pattern, include.as_deref(), store, &cancel)
         })
         .await
         .map_err(|error| ToolError::Failed(format!("the grep search did not finish: {error}")))??;
@@ -187,6 +190,11 @@ fn resolve(cwd: &Path, path: Option<&str>) -> PathBuf {
 /// Searches every file under `base_dir` for `pattern`, honoring `include`
 /// when given, sorted by relative path and capped to [`LIMIT`] matches.
 ///
+/// `store` is ganja's own credential store, and the one file the walk steps
+/// over: `grep` runs without asking and prints the lines it matched, so a
+/// search that reached it would hand the model this machine's provider API keys
+/// one line at a time.
+///
 /// Runs on a blocking thread: the walk and `grep-searcher` are both
 /// synchronous. `cancel` is polled between batches — once per file while
 /// searching content, more often while just enumerating files, since listing
@@ -195,6 +203,7 @@ fn search(
     base_dir: &Path,
     pattern: &str,
     include: Option<&str>,
+    store: Option<&Path>,
     cancel: &CancellationToken,
 ) -> Result<Vec<Match>, ToolError> {
     let matcher = grep_regex::RegexMatcher::new(pattern)
@@ -225,7 +234,11 @@ fn search(
             .file_type()
             .is_some_and(|file_type| file_type.is_file())
         {
-            files.push(entry.into_path());
+            let path = entry.into_path();
+            if store.is_some_and(|store| is_same_file(&path, store)) {
+                continue;
+            }
+            files.push(path);
         }
     }
     files.sort_unstable();
@@ -295,7 +308,7 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::GrepTool;
+    use super::{GrepTool, search};
     use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
 
     /// A context rooted at `cwd`, with a cancel nobody has pulled.
@@ -528,5 +541,51 @@ mod tests {
                 "missing {name}: {schema}"
             );
         }
+    }
+
+    #[test]
+    fn the_credential_store_contributes_no_line_to_a_search() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let store = dir.path().join("auth.json");
+        std::fs::write(&store, "{ \"anthropic\": { \"key\": \"sk-canary-8842\" } }")
+            .expect("the fixture writes");
+        std::fs::write(dir.path().join("notes.md"), "sk-canary-8842 was rotated\n")
+            .expect("the fixture writes");
+
+        let found = search(
+            dir.path(),
+            "sk-canary-8842",
+            None,
+            Some(&store),
+            &CancellationToken::new(),
+        )
+        .expect("the search runs");
+
+        let hits: Vec<(&str, u64)> = found
+            .iter()
+            .map(|item| (item.path.as_str(), item.line))
+            .collect();
+
+        assert_eq!(
+            hits,
+            vec![("notes.md", 1)],
+            "the store must contribute nothing, and a sibling must still match"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_file_that_only_shares_the_stores_name_is_still_searched() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        std::fs::write(dir.path().join("auth.json"), "needle").expect("the fixture writes");
+
+        let out = GrepTool
+            .run(
+                serde_json::json!({ "pattern": "needle" }),
+                &ctx(dir.path().to_owned()),
+            )
+            .await
+            .expect("the guard is identity-based: any other auth.json is still searched");
+
+        assert!(out.output.contains("auth.json"), "got {:?}", out.output);
     }
 }
