@@ -16,6 +16,8 @@ use ganja_core::{Project, SessionInfo, Storage, Usage, auth, catalog};
 use secrecy::{SecretString, zeroize::Zeroize as _};
 use tracing_appender::non_blocking::WorkerGuard;
 
+mod import;
+
 /// Terminal-first AI coding agent.
 ///
 /// `args_conflicts_with_subcommands` is what stops `ganja --continue models`
@@ -68,10 +70,42 @@ enum Command {
         #[command(subcommand)]
         action: Auth,
     },
+    /// Work with ganja's configuration files.
+    Config {
+        #[command(subcommand)]
+        action: Config,
+    },
     /// List the models this build knows how to size and price.
     Models,
     /// List the stored sessions of the project this was run in.
     Sessions,
+}
+
+#[derive(Debug, Subcommand)]
+enum Config {
+    /// Translate an opencode config into a ganja one.
+    ///
+    /// Config keys only, in one direction: what maps is written to a new
+    /// `ganja.json`, and everything else is listed with the reason it was left
+    /// out. An API key is never written, and `{env:…}`/`{file:…}` is never
+    /// expanded.
+    ImportOpencode {
+        /// Import exactly this file, instead of looking for opencode's.
+        ///
+        /// Nothing else is read, so `--global` then only decides where the
+        /// result lands.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Read only opencode's global config, and write ganja's global one.
+        ///
+        /// Without this the project's own files are read too, and the result
+        /// lands at the project root.
+        #[arg(long)]
+        global: bool,
+        /// Print what would be imported and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -172,11 +206,22 @@ async fn main() -> Result<()> {
     match cli.command {
         None => ganja_tui::run(cli.resume.wanted()).await,
         Some(Command::Auth { action }) => auth_command(action),
+        Some(Command::Config { action }) => config_command(action),
         Some(Command::Models) => {
             models_command();
             Ok(())
         }
         Some(Command::Sessions) => sessions_command(),
+    }
+}
+
+fn config_command(action: Config) -> Result<()> {
+    match action {
+        Config::ImportOpencode {
+            file,
+            global,
+            dry_run,
+        } => import::import_opencode(file, global, dry_run),
     }
 }
 

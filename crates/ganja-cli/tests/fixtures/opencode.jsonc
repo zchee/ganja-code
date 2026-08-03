@@ -1,0 +1,74 @@
+{
+  // Every key here is one opencode v1.18.11 accepts. This is the importer's
+  // fixture rather than a config anyone runs: it exists to have one of each
+  // shape the mapping has a rule for, including the ones that must NOT survive.
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-5",
+  // Nothing but a token: opencode would have expanded it before parsing, so
+  // carrying it across would name a model that does not exist.
+  "small_model": "{env:OPENCODE_SMALL_MODEL}",
+  "default_agent": "plan",
+  "shell": "/bin/zsh",
+  "theme": "tokyonight",
+  "instructions": [
+    "AGENTS.md",
+    "{file:./docs/house.md}",
+    "docs/{env:TEAM}/style.md",
+    "https://example.invalid/house.md",
+  ],
+  // The legacy spelling of `permission`, which the explicit rules below
+  // partly override.
+  "tools": {
+    "webfetch": false,
+    "write": true,
+    "bash": true,
+  },
+  "permission": {
+    "bash": { "git status": "allow", "git *": "ask", "*": "deny" },
+    "edit": "ask",
+    "read": "allow",
+  },
+  "agent": {
+    "review": {
+      "model": "anthropic/claude-haiku-4-5",
+      "description": "reads a diff and complains",
+      "mode": "subagent",
+      "temperature": 0.2,
+      "top_p": 0.9,
+      "steps": 40,
+      "color": "#ff0000",
+      "variant": "thinking",
+      "options": { "reasoning": true },
+      "tools": { "edit": false },
+      "permission": { "webfetch": "allow" },
+    },
+  },
+  "mode": {
+    "ship": {
+      "prompt": "You ship what is already green.",
+      "hidden": false,
+    },
+  },
+  "command": {
+    "release": {
+      "template": "cut a release for $ARGUMENTS",
+      "description": "tag and push",
+      "agent": "build",
+      "variant": "fast",
+      "subtask": true,
+    },
+  },
+  "provider": {
+    "anthropic": {
+      "options": {
+        "apiKey": "sk-fixture-0000-not-a-real-key",
+        "baseURL": "https://example.invalid/v1",
+      },
+    },
+  },
+  "mcp": { "fs": { "type": "local", "command": ["mcp-fs"] } },
+  "compaction": { "auto": false, "tail_turns": 4 },
+  "autoshare": true,
+  "username": "nobody",
+  "definitely_not_an_opencode_key": 1,
+}

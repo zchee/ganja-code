@@ -5,13 +5,14 @@
 
 ## Purpose
 
-The binary's whole surface: clap parsing, the credential subcommands, the model listing, and the terminal prompt that reads an API key without echoing it.
+The binary's whole surface: clap parsing, the credential subcommands, the config importer, the model listing, and the terminal prompt that reads an API key without echoing it.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `main.rs` | `Cli`/`Command`/`Auth` clap types, `login`/`list`/`logout`, `models`, and the raw-mode key prompt. No subcommand delegates straight to `ganja_tui::run()`. |
+| `main.rs` | `Cli`/`Command`/`Auth`/`Config` clap types, `login`/`list`/`logout`, `models`, and the raw-mode key prompt. No subcommand delegates straight to `ganja_tui::run()`. |
+| `import.rs` | `ganja config import-opencode`: discovery of opencode's config tiers, the key mapping, the mapped/skipped table, and the JSON writer that produces a `ganja.json`. |
 
 ## For AI Agents
 
@@ -29,10 +30,21 @@ Every rule here exists because a secret passed through this code, and each is pi
 
 Prompts and diagnostics go to stderr so stdout stays a clean channel for whatever a caller is capturing. A piped key is read whole so `pass show … | ganja auth login` works.
 
+The importer inherits the same posture, for the same reason — it reads a file that may hold a credential:
+
+- **`provider.<id>.options.apiKey` is never written**, only reported, with a warning naming `ganja auth login`. Neither the table nor the warning repeats the key.
+- **`{env:VAR}`/`{file:path}` is never expanded**, in either direction. A value that *is* a token is left out (carrying it would name a model or a path that does not exist); a value that merely contains one is carried verbatim and warned about, because ganja will then read it literally.
+- **Every key is either mapped or reported.** A key that vanished without a row would be a setting its author still believes is in force — the table is the command's output and the file is a side effect of it.
+- **An existing `ganja.json` *or* `ganja.jsonc` at the destination is refused by name** rather than overwritten; the write itself uses `create_new`, because the check and the write are not the same moment.
+- **What is written is decoded back into `ganja_core::config::Config` before it lands**, so a mapping bug is an error at import time rather than a broken file discovered at the next launch.
+- Object keys keep the order they were written in throughout: `permission` is evaluated last-match-wins, so a reader or writer that sorted them would change which rule decides a call.
+
 ### Testing Requirements
 
 ```sh
 cargo test -p ganja-cli --test cli
+cargo test -p ganja-cli --bin ganja            # the mapping table lives beside the mapping
+cargo test -p ganja-cli --test import_opencode
 ```
 
 Adding a subcommand means adding its assertion there; adding anything that handles key material means proving the key does not reach stdout, stderr, or a stored file in the clear.
@@ -45,10 +57,10 @@ Adding a subcommand means adding its assertion there; adding anything that handl
 
 ### Internal
 
-`ganja_core::auth` (store, list, remove, redaction), `ganja_core::catalog` (the `models` table), `ganja_tui::run`.
+`ganja_core::auth` (store, list, remove, redaction), `ganja_core::catalog` (the `models` table), `ganja_core::config::Config` (what the importer's output has to decode as), `ganja_core::Project` (the import's project walk and destination), `ganja_tui::run`.
 
 ### External
 
-`clap`, `anyhow`, `tokio`, `secrecy` (+ `zeroize`), `ratatui`'s crossterm re-export for raw mode.
+`clap`, `anyhow`, `tokio`, `secrecy` (+ `zeroize`), `ratatui`'s crossterm re-export for raw mode, `jsonc-parser` (the importer reads someone else's config, in document order).
 
 <!-- MANUAL: -->
