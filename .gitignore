@@ -22,3 +22,7 @@ rustc-ice-*.txt
 
 # oh-my-claudecode operational state (plans, notepads, logs, handoffs)
 .omc/
+
+# CI's checkout of the upstream behavioral spec (.github/workflows/ci.yaml);
+# ignored so a machine reproducing the CI layout keeps a clean tree
+upstream/
