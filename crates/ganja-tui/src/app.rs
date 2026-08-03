@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
-use ganja_core::{Command, Engine, Event as CoreEvent, FinishReason};
+use ganja_core::{Command, Engine, Event as CoreEvent, FinishReason, Role};
 use ratatui::{
     DefaultTerminal, Terminal,
     backend::Backend,
@@ -26,7 +26,7 @@ use ratatui::{
 
 use crate::{
     component::{
-        chat::{Chat, Role, WHEEL_LINES},
+        chat::{Chat, WHEEL_LINES},
         editor::{self, Editor},
         status::{Activity, Status},
     },
@@ -218,22 +218,20 @@ impl App {
         Ok(())
     }
 
+    /// Hands the editor's contents to the engine.
+    ///
+    /// The prompt reaches the transcript as an engine event rather than being
+    /// pushed here, so what the screen shows is exactly what the engine will
+    /// send back to the model.
     async fn submit(&mut self) {
         let Some(prompt) = self.editor.prompt() else {
             return;
         };
 
-        match self
-            .engine
-            .send(Command::SendPrompt {
-                text: prompt.clone(),
-            })
-            .await
-        {
+        match self.engine.send(Command::SendPrompt { text: prompt }).await {
             Ok(()) => {
                 self.editor.clear();
                 self.status.set_notice(None);
-                self.chat.push(Role::User, prompt);
             }
             // The editor keeps the text, so a refused prompt is never lost.
             Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
@@ -242,15 +240,28 @@ impl App {
 
     fn handle_core(&mut self, event: CoreEvent) {
         match event {
-            CoreEvent::TurnStarted => {
-                self.status.set_activity(Activity::Streaming);
-                self.chat.push(Role::Assistant, String::new());
+            CoreEvent::MessageStarted { message } => {
+                if message.role == Role::Assistant {
+                    self.status.set_activity(Activity::Streaming);
+                }
+                self.chat.start_message(message);
             }
-            CoreEvent::TextDelta { text } => self.chat.extend_last(&text),
-            CoreEvent::TurnFinished { reason } => self.status.set_activity(match reason {
-                FinishReason::Completed => Activity::Ready,
-                FinishReason::Cancelled => Activity::Stopped,
-            }),
+            CoreEvent::PartStarted { message_id, part } => self.chat.start_part(&message_id, part),
+            CoreEvent::PartDelta {
+                message_id,
+                part_id,
+                delta,
+            } => self.chat.append_delta(&message_id, &part_id, &delta),
+            CoreEvent::MessageFinished { reason, error, .. } => {
+                self.status.set_activity(match reason {
+                    FinishReason::Completed => Activity::Ready,
+                    FinishReason::Cancelled => Activity::Stopped,
+                    FinishReason::Failed => Activity::Failed,
+                });
+                if error.is_some() {
+                    self.status.set_notice(error);
+                }
+            }
         }
     }
 
@@ -279,8 +290,11 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use futures::StreamExt as _;
-    use ganja_core::{Engine, Event as CoreEvent, FinishReason, provider::FakeProvider};
+    use futures::{StreamExt as _, stream::BoxStream};
+    use ganja_core::{
+        Engine, Event as CoreEvent, FinishReason, Message, Part,
+        provider::{FakeProvider, fake},
+    };
     use ratatui::{
         Terminal,
         backend::TestBackend,
@@ -291,10 +305,33 @@ mod tests {
     };
 
     use super::{App, FRAME};
-    use crate::{component::chat::Role, event::AppEvent};
+    use crate::event::AppEvent;
+
+    fn engine() -> Engine {
+        Engine::new(Arc::new(FakeProvider::default()), fake::MODEL)
+    }
 
     fn app() -> App {
-        App::new(Engine::new(Arc::new(FakeProvider::default())), None)
+        App::new(engine(), None)
+    }
+
+    /// An app plus the engine stream its own loop would read, for the tests
+    /// that need a prompt to travel the whole way and come back.
+    async fn wired() -> (App, BoxStream<'static, CoreEvent>) {
+        let engine = engine();
+        let events = engine.subscribe().await.expect("the test subscribes first");
+
+        (App::new(engine, None), events)
+    }
+
+    /// Feeds the app the next `count` engine events.
+    async fn pump(app: &mut App, events: &mut BoxStream<'static, CoreEvent>, count: usize) {
+        for _ in 0..count {
+            let event = events.next().await.expect("the engine keeps reporting");
+            app.handle(AppEvent::Core(event))
+                .await
+                .expect("an engine event is handled");
+        }
     }
 
     fn terminal(width: u16, height: u16) -> Terminal<TestBackend> {
@@ -324,9 +361,11 @@ mod tests {
             .map(|character| key(KeyCode::Char(character), KeyModifiers::NONE))
     }
 
+    /// The prompt reaches the transcript through the engine, not through the
+    /// editor: the frontend never invents an entry.
     #[tokio::test]
-    async fn enter_submits_the_prompt_and_empties_the_editor() {
-        let mut app = app();
+    async fn enter_submits_the_prompt_and_the_engine_puts_it_in_the_transcript() {
+        let (mut app, mut events) = wired().await;
         for event in typing("hello") {
             app.handle(event).await.expect("typing is handled");
         }
@@ -338,6 +377,15 @@ mod tests {
         assert!(app.editor.prompt().is_none(), "the editor should be empty");
 
         let mut terminal = terminal(40, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            !screen(&terminal).contains("hello"),
+            "the transcript should wait for the engine:\n{}",
+            screen(&terminal)
+        );
+
+        pump(&mut app, &mut events, 1).await;
+
         app.draw(&mut terminal).expect("a frame draws");
         assert!(
             screen(&terminal).contains("hello"),
@@ -399,16 +447,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_prompt_mid_turn_is_refused_without_losing_the_text() {
-        let mut app = app();
+        let (mut app, mut events) = wired().await;
         for event in typing("first") {
             app.handle(event).await.expect("typing is handled");
         }
         app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
             .await
             .expect("enter is handled");
-        app.handle(AppEvent::Core(CoreEvent::TurnStarted))
-            .await
-            .expect("a turn start is handled");
+        // Both message envelopes, so the turn is visibly under way.
+        pump(&mut app, &mut events, 2).await;
 
         for event in typing("second") {
             app.handle(event).await.expect("typing is handled");
@@ -439,9 +486,7 @@ mod tests {
     async fn escape_stops_a_streaming_turn_inside_the_budget() {
         const CANCEL_BUDGET: Duration = Duration::from_millis(100);
 
-        let engine = Engine::new(Arc::new(FakeProvider::default()));
-        let mut events = engine.subscribe().await.expect("the test subscribes first");
-        let mut app = App::new(engine, None);
+        let (mut app, mut events) = wired().await;
 
         for event in typing("hello") {
             app.handle(event).await.expect("typing is handled");
@@ -450,13 +495,9 @@ mod tests {
             .await
             .expect("enter is handled");
 
-        // Let the turn actually start streaming before interrupting it.
-        for _ in 0..4 {
-            let event = events.next().await.expect("the engine keeps reporting");
-            app.handle(AppEvent::Core(event))
-                .await
-                .expect("an engine event is handled");
-        }
+        // Both envelopes, the reply's part, and a fragment in it: the turn is
+        // actually streaming before it gets interrupted.
+        pump(&mut app, &mut events, 4).await;
         assert!(app.status.is_streaming());
 
         let issued = Instant::now();
@@ -502,12 +543,25 @@ mod tests {
     #[tokio::test]
     async fn streamed_fragments_land_in_one_entry() {
         let mut app = app();
-        app.handle(AppEvent::Core(CoreEvent::TurnStarted))
-            .await
-            .expect("a turn start is handled");
+        let reply = Message::assistant("canned");
+        let part = Part::text("");
+
+        app.handle(AppEvent::Core(CoreEvent::MessageStarted {
+            message: reply.clone(),
+        }))
+        .await
+        .expect("a message start is handled");
+        app.handle(AppEvent::Core(CoreEvent::PartStarted {
+            message_id: reply.id.clone(),
+            part: part.clone(),
+        }))
+        .await
+        .expect("a part start is handled");
         for fragment in ["stream", "ed ", "reply"] {
-            app.handle(AppEvent::Core(CoreEvent::TextDelta {
-                text: fragment.to_owned(),
+            app.handle(AppEvent::Core(CoreEvent::PartDelta {
+                message_id: reply.id.clone(),
+                part_id: part.id.clone(),
+                delta: fragment.to_owned(),
             }))
             .await
             .expect("a fragment is handled");
@@ -523,19 +577,51 @@ mod tests {
             screen(&terminal)
         );
 
-        app.handle(AppEvent::Core(CoreEvent::TurnFinished {
+        app.handle(AppEvent::Core(CoreEvent::MessageFinished {
+            message_id: reply.id,
             reason: FinishReason::Cancelled,
+            usage: None,
+            error: None,
+            completed: 0,
         }))
         .await
         .expect("a turn end is handled");
         assert!(!app.status.is_streaming());
     }
 
+    /// A turn the provider refused ends the same way any other does, with the
+    /// reason on screen.
+    #[tokio::test]
+    async fn a_failed_turn_reports_why_in_the_status_bar() {
+        let mut app = app();
+
+        app.handle(AppEvent::Core(CoreEvent::MessageFinished {
+            message_id: Message::assistant("canned").id,
+            reason: FinishReason::Failed,
+            usage: None,
+            error: Some("no usable credentials".to_owned()),
+            completed: 0,
+        }))
+        .await
+        .expect("a turn end is handled");
+
+        let mut terminal = terminal(80, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        assert!(!app.status.is_streaming());
+        assert!(
+            screen(&terminal).contains("no usable credentials"),
+            "the failure should be explained:\n{}",
+            screen(&terminal)
+        );
+    }
+
     #[tokio::test]
     async fn the_wheel_and_the_page_keys_move_the_viewport() {
         let mut app = app();
         for index in 0..60 {
-            app.chat.push(Role::Assistant, format!("entry {index}"));
+            app.chat
+                .start_message(Message::user(format!("entry {index}")));
         }
         let mut terminal = terminal(40, 12);
         app.draw(&mut terminal).expect("a frame draws");
@@ -596,11 +682,27 @@ mod tests {
     #[tokio::test]
     async fn engine_bursts_are_coalesced_but_keystrokes_are_not() {
         let mut app = app();
+        let reply = Message::assistant("canned");
+        let part = Part::text("");
+        app.handle(AppEvent::Core(CoreEvent::MessageStarted {
+            message: reply.clone(),
+        }))
+        .await
+        .expect("a message start is handled");
+        app.handle(AppEvent::Core(CoreEvent::PartStarted {
+            message_id: reply.id.clone(),
+            part: part.clone(),
+        }))
+        .await
+        .expect("a part start is handled");
+
         let mut terminal = terminal(40, 12);
         app.draw(&mut terminal).expect("a frame draws");
 
-        app.handle(AppEvent::Core(CoreEvent::TextDelta {
-            text: "burst".to_owned(),
+        app.handle(AppEvent::Core(CoreEvent::PartDelta {
+            message_id: reply.id,
+            part_id: part.id,
+            delta: "burst".to_owned(),
         }))
         .await
         .expect("a fragment is handled");
@@ -621,10 +723,9 @@ mod tests {
     fn a_resize_storm_rewraps_without_panicking() {
         let mut app = app();
         for index in 0..40 {
-            app.chat.push(
-                Role::Assistant,
-                format!("entry {index} carries enough words to wrap at every width tried here"),
-            );
+            app.chat.start_message(Message::user(format!(
+                "entry {index} carries enough words to wrap at every width tried here"
+            )));
         }
 
         let mut terminal = terminal(80, 24);
@@ -660,7 +761,7 @@ mod tests {
                 .map(|line| format!("entry {entry} line {line} of plain streamed transcript text"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            app.chat.push(Role::Assistant, body);
+            app.chat.start_message(Message::user(body));
         }
 
         let mut terminal = terminal(120, 40);
