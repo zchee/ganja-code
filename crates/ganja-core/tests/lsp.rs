@@ -56,11 +56,13 @@ const EDIT_BUDGET: Duration = Duration::from_millis(3_000);
 /// The override exists for machines whose scheduling is not the drill's to
 /// control: a shared CI runner under load adds whole seconds of queueing to
 /// an edit the same code answers in milliseconds on an idle machine. CI sets
-/// the client's own five-second ceiling — past that the client stops waiting
-/// and the missing diagnostics block fails the assertions ahead of the clock,
-/// so no value of this variable can turn a wedged pull into a green run. A
-/// value that does not parse falls back to the default, which is the strict
-/// direction to fail in.
+/// a budget just past the client's own five-second ceiling — at the ceiling
+/// the client stops waiting and the missing diagnostics block fails the
+/// assertions ahead of the clock, so no value of this variable can turn a
+/// wedged pull into a green run; the margin past it covers only this test's
+/// own bookkeeping around the call, which this clock includes and the
+/// client's does not. A value that does not parse falls back to the default,
+/// which is the strict direction to fail in.
 fn edit_budget() -> Duration {
     std::env::var("GANJA_LSP_EDIT_BUDGET_MS")
         .ok()

@@ -127,12 +127,15 @@ jobs:
         env:
           GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.11
           # A shared runner under load adds whole seconds of queueing to the
-          # lsp drill's timed edit, so CI holds the drill to the client's own
-          # 5s ceiling; the tighter 3s default stays what a development
-          # machine is held to. Past 5s the client itself stops waiting and
-          # the drill fails on the missing diagnostics block, so this cannot
-          # mask a wedge.
-          GANJA_LSP_EDIT_BUDGET_MS: "5000"
+          # lsp drill's timed edit, so CI holds the drill just past the
+          # client's own 5s ceiling; the tighter 3s default stays what a
+          # development machine is held to. At 5s the client itself stops
+          # waiting and the drill fails on the missing diagnostics block, so
+          # this cannot mask a wedge — the margin above the ceiling covers
+          # only the drill's own bookkeeping around the call, which its clock
+          # includes and the client's does not (a budget equal to the ceiling
+          # lost to exactly that, 5002ms with the complaint attached).
+          GANJA_LSP_EDIT_BUDGET_MS: "6000"
 
       # nextest does not run doctests, so they get their own step; the
       # testkit's builder examples are what it runs today.
