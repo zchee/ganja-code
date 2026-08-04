@@ -51,7 +51,7 @@ use crate::{
     session::{ChildParts, PendingReply, Persist, SessionState, Turn, TurnKind, run_turn},
     storage::{self, SessionId, SessionInfo},
     tool::{
-        Registry,
+        Credentials, Registry,
         task::{Delegated, Delegation, Offered, Subagents, Unanswered},
     },
 };
@@ -95,7 +95,7 @@ pub(crate) struct Host {
     /// The credential store the child's `read` and `grep` refuse, which is the
     /// parent's: a subagent runs unattended, so it is the last conversation
     /// that should be able to read a key out of the disk.
-    pub(crate) credentials: Option<PathBuf>,
+    pub(crate) credentials: Credentials,
     /// The session's language servers, shared rather than started again: a
     /// client is identified by `(root, server)`, so a child working in the
     /// same project reuses the server the parent already has warm.

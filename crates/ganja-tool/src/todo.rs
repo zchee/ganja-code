@@ -163,7 +163,7 @@ mod tests {
             cancel: CancellationToken::new(),
             call_id: "call-1".to_owned(),
             files: Arc::new(FileTimes::default()),
-            credentials: None,
+            credentials: crate::Credentials::Unguarded,
             spawn: None,
         }
     }

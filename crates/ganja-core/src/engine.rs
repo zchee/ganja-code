@@ -47,7 +47,7 @@ use crate::{
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
     subagent,
-    tool::{FileTimes, Registry, task},
+    tool::{Credentials, FileTimes, Registry, task},
     watch,
 };
 
@@ -253,7 +253,7 @@ pub struct Engine {
     /// would otherwise re-derive the path for every file it walks past.
     /// [`None`] is a machine with no home directory to resolve a store
     /// against, where there is nothing here to protect.
-    credentials: Option<PathBuf>,
+    credentials: Credentials,
     /// What reports changes to those files, once somebody started one.
     /// [`None`] is an engine nobody asked to watch — every scripted, golden
     /// and PTY run — where a file changed outside the session is noticed by
@@ -362,7 +362,11 @@ impl Engine {
             cwd,
             root,
             files: Arc::new(FileTimes::default()),
-            credentials: crate::auth::store_path().ok(),
+            // An engine whose store cannot be resolved has nothing to guard,
+            // and says so in a form a construction site cannot leave blank.
+            credentials: crate::auth::store_path()
+                .ok()
+                .map_or(Credentials::Unguarded, Credentials::Guarded),
             watcher: std::sync::Mutex::new(None),
             events,
             unclaimed: Mutex::new(Some(receiver)),

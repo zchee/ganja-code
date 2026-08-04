@@ -547,7 +547,7 @@ mod tests {
             cancel: CancellationToken::new(),
             call_id: "call-1".to_owned(),
             files: Arc::new(FileTimes::default()),
-            credentials: None,
+            credentials: crate::Credentials::Unguarded,
             spawn: None,
         }
     }
@@ -556,7 +556,7 @@ mod tests {
     /// hands every call, and the only thing the guard tests below need.
     fn guarding(cwd: PathBuf, store: &std::path::Path) -> ToolCtx {
         ToolCtx {
-            credentials: Some(store.to_owned()),
+            credentials: crate::Credentials::Guarded(store.to_owned()),
             ..ctx(cwd)
         }
     }

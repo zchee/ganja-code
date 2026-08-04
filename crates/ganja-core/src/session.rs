@@ -50,7 +50,7 @@ use crate::{
     },
     provider::{ChatRequest, Provider, ProviderEvent},
     storage::{SessionId, SessionInfo, Storage, StorageError},
-    tool::{FileTimes, Registry, ToolCtx, ToolError, shell},
+    tool::{Credentials, FileTimes, Registry, ToolCtx, ToolError, shell},
 };
 
 /// What the model reads when the user refuses a call, ported verbatim from
@@ -538,7 +538,7 @@ pub(crate) struct Turn {
     /// Where this build keeps its credentials, handed to every call this turn
     /// makes so that `read` and `grep` can refuse the file. [`None`] is a turn
     /// nobody named one to, which every scripted and golden run is.
-    pub(crate) credentials: Option<PathBuf>,
+    pub(crate) credentials: Credentials,
     /// Language servers this session may run. [`None`] is a session whose
     /// config asked for none, and every tool call then completes exactly as it
     /// did before this existed.
@@ -585,7 +585,7 @@ pub(crate) struct RootParts {
     pub(crate) cwd: PathBuf,
     pub(crate) root: PathBuf,
     pub(crate) files: Arc<FileTimes>,
-    pub(crate) credentials: Option<PathBuf>,
+    pub(crate) credentials: Credentials,
     pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
     pub(crate) snapshots: Option<Arc<crate::snapshot::Snapshots>>,
     pub(crate) prompt: String,
@@ -2724,7 +2724,7 @@ mod tests {
         protocol::Usage,
         provider::{FakeProvider, fake},
         subagent::{Host, Spawn},
-        tool::{FileTimes, Tool, ToolCtx, ToolError, ToolOutput},
+        tool::{Credentials, FileTimes, Tool, ToolCtx, ToolError, ToolOutput},
     };
 
     /// A tool that marks the filesystem the moment its body runs.
@@ -2789,7 +2789,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             root: std::env::temp_dir(),
             files: Arc::new(FileTimes::default()),
-            credentials: None,
+            credentials: Credentials::Unguarded,
             lsp: None,
             snapshots: None,
             prompt: "run it".to_owned(),
@@ -3062,7 +3062,7 @@ mod tests {
             prompt_suffix: None,
             cwd: std::env::temp_dir(),
             root: std::env::temp_dir(),
-            credentials: Some(PARENTS_STORE.into()),
+            credentials: Credentials::Guarded(PARENTS_STORE.into()),
             lsp,
             persistence: None,
         };
@@ -3191,7 +3191,7 @@ mod tests {
         let (turn, _events) = child_of(&spawn);
 
         assert_eq!(
-            turn.credentials.as_deref(),
+            turn.credentials.guarded(),
             Some(std::path::Path::new(PARENTS_STORE)),
             "a child handed no store would read one the parent refuses"
         );

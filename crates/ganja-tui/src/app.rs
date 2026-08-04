@@ -22,7 +22,7 @@ use ganja_protocol::{
     Command, Event as CoreEvent, FinishReason, Message, PartBody, PermissionReply, Role, ToolState,
     Usage,
 };
-use ganja_tool::{FileTimes, ToolCtx};
+use ganja_tool::{Credentials, FileTimes, ToolCtx};
 use ratatui::{
     DefaultTerminal, Terminal,
     backend::Backend,
@@ -1291,7 +1291,7 @@ impl App {
             files: Arc::new(FileTimes::default()),
             // The menu is a file walk, not a conversation: it has no
             // credentials to guard and nothing to delegate to.
-            credentials: None,
+            credentials: Credentials::Unguarded,
             spawn: None,
         };
 
