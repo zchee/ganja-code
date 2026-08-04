@@ -86,6 +86,13 @@ const UNSPOKEN_ERROR: &str = "MCP tool returned an error";
 /// spells it (`index.ts:443-455`).
 const CLOSED: &str = "Connection closed";
 
+/// How long a local server's process group is given to end itself after
+/// `SIGTERM` before `SIGKILL` follows — the same grace `tool/shell.rs`'s own
+/// kill sequence gives a command tree, and for the same reason: only the unix
+/// path signals a group at all.
+#[cfg(unix)]
+const KILL_GRACE: Duration = Duration::from_millis(200);
+
 /// Where one configured server stands.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "lowercase")]
@@ -129,6 +136,14 @@ pub struct Servers {
     /// Where the project starts, which a relative `cwd` resolves against.
     root: PathBuf,
     state: Mutex<BTreeMap<String, Server>>,
+    /// Set by [`Servers::shutdown`], and checked by [`Servers::connect`] at
+    /// the one place a connection lands in `state`. Both sides serialize
+    /// through the `state` lock — `shutdown` sets this before it takes the
+    /// lock to drain, `connect` reads it after taking the lock to insert —
+    /// so whichever runs second always sees what the other already did:
+    /// either the drain finds the connection `connect` just installed, or
+    /// `connect` finds shutdown already happened and never installs it.
+    closed: std::sync::atomic::AtomicBool,
     /// Bumped whenever the set of tools this would contribute changes. The
     /// engine compares it against what it last installed; nothing else about
     /// the rebuild needs a signal.
@@ -158,6 +173,7 @@ impl Servers {
             config,
             root: root.to_owned(),
             state: Mutex::new(state),
+            closed: std::sync::atomic::AtomicBool::new(false),
             generation: AtomicU64::new(0),
         })
     }
@@ -221,8 +237,29 @@ impl Servers {
             .map(|text| text.trim().to_owned())
             .filter(|text| !text.is_empty());
 
-        tracing::info!(server = name, tools = defs.len(), "an MCP server connected");
         let mut state = self.state();
+        // Checked under the same lock `shutdown` drains under: if `shutdown`
+        // already ran, installing this connection would revive a session
+        // that is over, with a live client and a live child nothing is ever
+        // going to cancel or kill again.
+        if self.closed.load(Ordering::Acquire) {
+            drop(state);
+            tracing::debug!(
+                server = name,
+                "an MCP connection finished after shutdown; ending it instead of installing it"
+            );
+            client.cancellation_token().cancel();
+            #[cfg(unix)]
+            if let Some(group) = group {
+                end_group(group, libc::SIGTERM);
+                tokio::time::sleep(KILL_GRACE).await;
+                end_group(group, libc::SIGKILL);
+            }
+
+            return;
+        }
+
+        tracing::info!(server = name, tools = defs.len(), "an MCP server connected");
         state.insert(
             name.to_owned(),
             Server {
@@ -552,6 +589,12 @@ impl Servers {
 
     /// Closes every connection and ends every local server's process group.
     pub async fn shutdown(&self) {
+        // Set before the lock below is taken, so a `connect` that checks
+        // this after it takes the same lock — the one place a connection
+        // lands in `state` — always sees a session that is over, whether it
+        // gets there before this drain or after it.
+        self.closed.store(true, Ordering::Release);
+
         let (clients, groups): (Vec<_>, Vec<_>) = {
             let mut state = self.state();
             let mut clients = Vec::new();
@@ -572,8 +615,22 @@ impl Servers {
             client.cancellation_token().cancel();
         }
         #[cfg(unix)]
-        for group in groups {
-            end_group(group);
+        {
+            // `SIGTERM` first, a shared grace, then `SIGKILL` for whichever
+            // groups ignored it — upstream's `killTree` sequence, the same
+            // one `tool/shell.rs` runs for a shell command's own tree. One
+            // `SIGTERM` and nothing after it, which is what this replaced,
+            // left a server's helpers running for as long as the server
+            // itself chose to ignore the signal.
+            for &group in &groups {
+                end_group(group, libc::SIGTERM);
+            }
+            if !groups.is_empty() {
+                tokio::time::sleep(KILL_GRACE).await;
+                for group in groups {
+                    end_group(group, libc::SIGKILL);
+                }
+            }
         }
         #[cfg(not(unix))]
         drop(groups);
@@ -625,13 +682,13 @@ impl Servers {
     }
 }
 
-/// Ends the process group `group` leads.
+/// Sends `signal` to the process group `group` leads.
 ///
 /// The same `killpg` the shell tool uses, and for the same reason spelled
 /// there: a server started with `process_group(0)` leads a group of its own,
 /// and signalling the leader alone leaves whatever it spawned running.
 #[cfg(unix)]
-fn end_group(group: u32) {
+fn end_group(group: u32, signal: libc::c_int) {
     let Ok(pid) = i32::try_from(group) else {
         return;
     };
@@ -640,7 +697,7 @@ fn end_group(group: u32) {
     // this process created with `process_group(0)`, so the signal cannot reach
     // a group that was never ours.
     unsafe {
-        libc::killpg(pid, libc::SIGTERM);
+        libc::killpg(pid, signal);
     }
 }
 
@@ -825,6 +882,14 @@ fn omitted(mime: &str, base64: &str) -> String {
 /// Four characters carry three bytes, less one per `=` of padding. Counted
 /// rather than decoded because the number is all that is wanted and the bytes
 /// may be megabytes.
+///
+/// Padding is optional on the wire — some servers emit the unpadded form
+/// RFC 4648 §3.2 allows — so a length that is not a multiple of four is not
+/// malformed, just a final partial group: two leftover characters carry one
+/// more byte, three carry two more. A padded string never leaves a
+/// remainder (padding always brings the total to a multiple of four), so
+/// this falls back to the plain `quads * 3 - padding` count for one exactly
+/// as before.
 fn decoded_len(base64: &str) -> usize {
     let length = base64.len();
     let padding = base64
@@ -832,8 +897,13 @@ fn decoded_len(base64: &str) -> usize {
         .rev()
         .take_while(|byte| *byte == b'=')
         .count();
+    let extra = match length % 4 {
+        2 => 1,
+        3 => 2,
+        _ => 0,
+    };
 
-    (length / 4 * 3).saturating_sub(padding)
+    (length / 4 * 3 + extra).saturating_sub(padding)
 }
 
 /// Which tools a set of listings contributes, and under which names.
@@ -1133,7 +1203,21 @@ mod tests {
 
     #[test]
     fn a_base64_length_is_counted_rather_than_decoded() {
-        let cases = [("", 0), ("MTIz", 3), ("MTI=", 2), ("MQ==", 1)];
+        let cases = [
+            // Padded, the common wire form.
+            ("", 0),
+            ("MTIz", 3),
+            ("MTI=", 2),
+            ("MQ==", 1),
+            // Unpadded (RFC 4648 §3.2), the same "f"/"fo"/"foob"/"fooba"
+            // vectors as above with their `=` stripped: a length that is not
+            // a multiple of four is a partial final group, not a malformed
+            // string.
+            ("Zg", 1),
+            ("Zm8", 2),
+            ("Zm9vYg", 4),
+            ("Zm9vYmE", 5),
+        ];
         for (encoded, expected) in cases {
             assert_eq!(decoded_len(encoded), expected, "{encoded:?}");
         }

@@ -267,6 +267,42 @@ fn fixture_server(name: &str, file: &str) -> Config {
     serde_json::from_value(config).expect("the fixture config is a config")
 }
 
+/// The reference fixture, run through a shell wrapper that writes its own pid
+/// to `pidfile` and then sleeps for `delay` before it execs the real server.
+///
+/// The delay is what makes the shutdown/connect race below deterministic
+/// without either side racing a sleep of its own: `shutdown` runs the
+/// instant `connect_all` is spawned, with nothing of its own to wait on, so
+/// it reliably finishes draining the (empty) map long before a shell `sleep`
+/// measured in hundreds of milliseconds does. The pid file is the only way
+/// to check the process this starts actually died — the whole point of the
+/// fix under test is that its group never reaches this session's own
+/// bookkeeping, which is where every other helper here would look for it.
+fn delayed_reference_server(name: &str, pidfile: &Path, delay: Duration) -> Config {
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp/reference-server.mjs");
+    assert!(script.is_file(), "{} is missing", script.display());
+
+    let sdk = reference_sdk();
+    let command = format!(
+        "echo $$ > {} && sleep {} && exec bun {}",
+        pidfile.display(),
+        delay.as_secs_f64(),
+        script.display(),
+    );
+    let config = json!({
+        "mcp": {
+            name: {
+                "type": "local",
+                "command": ["sh", "-c", command],
+                "environment": { "GANJA_MCP_SDK_DIR": sdk.to_str().expect("the SDK path is UTF-8") },
+            }
+        }
+    });
+
+    serde_json::from_value(config).expect("the fixture config is a config")
+}
+
 /// An engine over `provider` with `config`'s MCP servers connected and their
 /// tools installed.
 ///
@@ -881,4 +917,67 @@ async fn a_session_that_ends_without_shutting_down_leaves_no_server_running() {
     }
 
     panic!("the MCP server outlived the session that started it (pid {pid})");
+}
+
+/// **Regression, shutdown/connect race.** A `connect` still dialing when
+/// `shutdown` drains the map used to finish afterward and install a fresh
+/// `Connected` client and a fresh process group that nothing would ever
+/// cancel or kill again — `shutdown` had already run its once-only cleanup.
+///
+/// `delayed_reference_server` is what makes this deterministic rather than a
+/// sleep-based race: the fixture writes its own pid and then sleeps for
+/// 600ms before it execs the real server, so `connect_all` is reliably still
+/// awaiting the handshake — every run, not most runs — when `shutdown`
+/// follows it immediately after, with no sleep of its own to contend with.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_connect_that_finishes_after_shutdown_does_not_revive_the_session() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let pidfile = scratch.path().join("pid");
+    let config = delayed_reference_server("fixture", &pidfile, Duration::from_millis(600));
+    let servers = McpServers::new(config.mcp.clone(), Path::new("."));
+
+    let connecting = {
+        let servers = Arc::clone(&servers);
+        tokio::spawn(async move { servers.connect_all().await })
+    };
+    // No sleep here: the only clock this race depends on is the fixture's
+    // own, and shutdown's whole critical path — take the lock, drain an
+    // empty map, release it — is over long before that clock reads 600ms.
+    servers.shutdown().await;
+    connecting.await.expect("connect_all does not panic");
+
+    assert!(
+        !servers
+            .status()
+            .get("fixture")
+            .is_some_and(|status| matches!(status, McpStatus::Connected)),
+        "a connection that finishes after shutdown must never be installed"
+    );
+    assert!(
+        servers.process_groups().is_empty(),
+        "and its process group must not be reachable through this session either"
+    );
+
+    let pid: u32 = tokio::time::timeout(READY, async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&pidfile)
+                && let Ok(pid) = text.trim().parse()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the fixture always gets far enough to write its pid");
+
+    for _ in 0..100 {
+        if !running(pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("the MCP server outlived the shutdown that raced its connect (pid {pid})");
 }
