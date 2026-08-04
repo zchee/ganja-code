@@ -83,6 +83,7 @@ async fn a_slow_consumer_receives_every_event_in_order() {
     engine
         .send(Command::SendPrompt {
             text: "flood".to_owned(),
+            mentions: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

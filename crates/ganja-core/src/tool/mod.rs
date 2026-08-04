@@ -10,6 +10,7 @@ pub mod glob;
 pub mod grep;
 pub mod read;
 pub mod shell;
+pub mod task;
 pub mod todo;
 pub mod truncate;
 pub mod webfetch;
@@ -36,6 +37,14 @@ pub struct ToolCtx {
     pub call_id: String,
     /// Which files this session has read, shared by every call in it.
     pub files: Arc<FileTimes>,
+    /// What a call needs to run a whole second agent loop, which only
+    /// [`task::TaskTool`] does.
+    ///
+    /// [`None`] on every turn that has no agents to spawn — and on every
+    /// *child* turn, which is the entire depth guard stated a second way. Its
+    /// fields are private and it has no public constructor, so a frontend
+    /// building a [`ToolCtx`] of its own can only ever pass [`None`].
+    pub spawn: Option<task::Spawn>,
 }
 
 /// What a finished tool call hands back to the model.
@@ -133,6 +142,42 @@ impl Registry {
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.tools.iter().find(|tool| tool.id() == name)
+    }
+
+    /// The same set with `tool` on the end, replacing any tool already
+    /// registered under its id.
+    ///
+    /// What the engine builds when the session learns which agent it is running
+    /// as: the task tool's description is the roster *that* agent may delegate
+    /// to, so switching agents rebuilds the registry rather than mutating a
+    /// tool in place.
+    #[must_use]
+    pub fn with(&self, tool: Arc<dyn Tool>) -> Self {
+        let mut tools: Vec<Arc<dyn Tool>> = self
+            .tools
+            .iter()
+            .filter(|held| held.id() != tool.id())
+            .map(Arc::clone)
+            .collect();
+        tools.push(tool);
+
+        Self { tools }
+    }
+
+    /// The same set without the tool named `id`.
+    ///
+    /// A subagent's registry is this build's minus `task`, which is how the
+    /// depth limit is enforced: the tool is not refused, it is not offered.
+    #[must_use]
+    pub fn without(&self, id: &str) -> Self {
+        Self {
+            tools: self
+                .tools
+                .iter()
+                .filter(|tool| tool.id() != id)
+                .map(Arc::clone)
+                .collect(),
+        }
     }
 
     /// What a provider advertises to the model, in registration order.

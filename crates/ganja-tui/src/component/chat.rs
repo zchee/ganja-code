@@ -311,6 +311,13 @@ impl Entry {
                         );
                     }
                 }
+                // A file the user attached, rendered as the `@path` they typed
+                // rather than as its contents: the engine reads the file when
+                // it builds a request, and pasting it into the transcript
+                // would show the user their own file back.
+                PartBody::File { path, .. } => {
+                    lines.push(Line::styled(format!("@{path}"), theme.dim));
+                }
                 PartBody::StepStart | PartBody::StepFinish { .. } => {}
             }
         }
@@ -710,6 +717,7 @@ mod tests {
                 tool: "shell".to_owned(),
                 state: ToolState::Running {
                     input: serde_json::json!({"command": "cargo test"}),
+                    metadata: serde_json::Value::Null,
                     started: 0,
                 },
             },

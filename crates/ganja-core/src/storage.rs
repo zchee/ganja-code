@@ -131,6 +131,14 @@ pub struct SessionInfo {
     /// it, since the provider is fixed when the engine is built.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The session that delegated this one, when a `task` call created it.
+    ///
+    /// Present on subagent sessions and absent on every other, which is what
+    /// lets a listing tell a conversation somebody had from one a tool call
+    /// spawned. Absent from the wire when there is none, so an ordinary
+    /// session's bytes are what they always were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionId>,
 }
 
 /// A write the storage could not perform. Reads do not produce errors for
@@ -627,6 +635,7 @@ mod tests {
             summary: None,
             agent: None,
             model: None,
+            parent: None,
         }
     }
 
@@ -781,6 +790,7 @@ mod tests {
             summary: Some(MessageId::from("msg_2".to_owned())),
             agent: Some("plan".to_owned()),
             model: Some("claude-haiku-4.5".to_owned()),
+            parent: None,
             ..bare.clone()
         };
         storage.save_info(&filled).expect("the info stores");

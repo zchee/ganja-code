@@ -31,14 +31,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     agent::{self, Agent},
-    catalog,
+    command,
     config::AgentMode,
     permission::Permissions,
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
-    session::{LiveSession, Persist, SessionState, Turn, TurnHandle, run_turn},
+    session::{LiveSession, Persist, SessionState, Turn, TurnHandle, TurnKind, run_turn},
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
-    tool::{FileTimes, Registry},
+    tool::{FileTimes, Registry, task},
 };
 
 /// Events the engine queues before a producer has to wait for the subscriber.
@@ -100,6 +100,37 @@ pub enum EngineError {
         /// The provider that was asked for it.
         provider: String,
     },
+    /// [`Command::RunCommand`] named a command nothing answers to. The message
+    /// carries the roster, because the useful half of "no such command" is
+    /// which ones there are.
+    #[error("no command named /{name}; this session has {}", available.join(", "))]
+    UnknownCommand {
+        /// The name nothing answers to.
+        name: String,
+        /// Every command that would have worked, sorted.
+        available: Vec<String>,
+    },
+    /// [`Command::RunCommand`] named a command whose `agent` is a subagent.
+    /// Those exist to be spawned by the task tool, and a command running as one
+    /// would be a turn with no way back.
+    #[error("the /{name} command runs as {agent}, which only the task tool runs")]
+    CommandSubagent {
+        /// The command that cannot run.
+        name: String,
+        /// The subagent it named.
+        agent: String,
+    },
+}
+
+/// What one turn runs as, when it is not what the session runs as.
+///
+/// A `/command` naming an agent or a model is the only source: both are per
+/// message upstream, so neither changes what the session is.
+struct Overrides {
+    /// The agent this one turn runs as: its prompt, and its rules.
+    agent: Option<Agent>,
+    /// The model this one turn asks.
+    model: Option<String>,
 }
 
 /// What the next turn runs as.
@@ -139,13 +170,26 @@ pub struct Engine {
     /// prompt with no agent rules, which is what an engine built for a golden
     /// run wants.
     agents: Option<Arc<agent::Registry>>,
+    /// Tools as the caller handed them over, without the task tool. What a
+    /// subagent is offered, and what every rebuild below starts from.
+    base_tools: Arc<Registry>,
     /// Tools the model is offered, and the agent loop executes.
-    tools: Arc<Registry>,
+    ///
+    /// Behind a lock because the task tool's *description* is the roster of
+    /// agents the current one may delegate to, so switching agents rebuilds
+    /// the set rather than mutating a tool that several turns may be reading.
+    tools: std::sync::Mutex<Arc<Registry>>,
+    /// Slash commands this session can run: the builtins plus whatever the
+    /// config described.
+    commands: Arc<command::Registry>,
     /// Rules deciding which tool calls wait for the user.
     permissions: Arc<std::sync::Mutex<Permissions>>,
     /// Directory tool calls resolve relative paths against, captured once so
     /// every call in a session agrees on where it is.
     cwd: PathBuf,
+    /// Where the project starts. A `!` command runs here, a mentioned file is
+    /// named relative to here, and `/init`'s `${path}` is this.
+    root: PathBuf,
     /// Which files this session has read, shared by every tool call in it.
     files: Arc<FileTimes>,
     events: mpsc::Sender<Event>,
@@ -217,6 +261,11 @@ impl Engine {
         persistence: Option<Arc<SessionState>>,
     ) -> Self {
         let (events, receiver) = mpsc::channel(EVENT_CAPACITY);
+        // Captured at construction so a process whose directory later moves
+        // keeps resolving paths where the session began. A process with no
+        // readable directory falls back to relative resolution.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let root = crate::project::Project::resolve(&cwd).root().to_owned();
 
         Self {
             provider,
@@ -228,12 +277,15 @@ impl Engine {
             base_prompt: None,
             prompt_suffix: None,
             agents: None,
-            tools,
+            // The task tool is never one of these: it exists only once the
+            // engine knows which agents it may spawn, which is
+            // `with_agents`'s business.
+            base_tools: Arc::clone(&tools),
+            tools: std::sync::Mutex::new(tools),
+            commands: Arc::new(command::Registry::builtin(&root)),
             permissions: Arc::new(std::sync::Mutex::new(permissions)),
-            // Captured at construction so a process whose directory later
-            // moves keeps resolving paths where the session began. A process
-            // with no readable directory falls back to relative resolution.
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            cwd,
+            root,
             files: Arc::new(FileTimes::default()),
             events,
             unclaimed: Mutex::new(Some(receiver)),
@@ -286,6 +338,8 @@ impl Engine {
     /// running the agent's prompt under somebody else's rules.
     #[must_use]
     pub fn with_agents(mut self, agents: Arc<agent::Registry>) -> Self {
+        self.agents = Some(Arc::clone(&agents));
+
         let start = agents.default_agent().to_owned();
         if let Some(agent) = agents.get(&start) {
             self.install(agent);
@@ -295,9 +349,25 @@ impl Engine {
                 active.model = model;
             }
         }
-        self.agents = Some(agents);
 
         self
+    }
+
+    /// Sets the slash commands this session can run.
+    ///
+    /// Consuming for the same reason [`Engine::with_system`] is: the roster is
+    /// resolved once, before anything can be streaming.
+    #[must_use]
+    pub fn with_commands(mut self, commands: Arc<command::Registry>) -> Self {
+        self.commands = commands;
+
+        self
+    }
+
+    /// The commands this session can run, for a palette to list.
+    #[must_use]
+    pub fn commands(&self) -> &Arc<command::Registry> {
+        &self.commands
     }
 
     /// The permission rules this engine consults, shared with the agent loop
@@ -545,7 +615,10 @@ impl Engine {
     /// session cannot become.
     pub async fn send(&self, command: Command) -> Result<(), EngineError> {
         match command {
-            Command::SendPrompt { text } => self.start_turn(text).await,
+            Command::SendPrompt { text, mentions } => {
+                self.start_turn(text, TurnKind::Prompt { mentions }, None)
+                    .await
+            }
             Command::CancelTurn => {
                 self.cancel_turn().await;
                 Ok(())
@@ -556,7 +629,120 @@ impl Engine {
             }
             Command::SwitchAgent { name } => self.switch_agent(name).await,
             Command::SwitchModel { model } => self.switch_model(model).await,
+            Command::RunShell { command } => {
+                self.start_turn(command.clone(), TurnKind::Shell { command }, None)
+                    .await
+            }
+            Command::RunCommand { name, args } => self.run_command(&name, &args).await,
+            Command::Compact => {
+                self.start_turn(String::new(), TurnKind::Compact, None)
+                    .await
+            }
+            Command::NewSession => self.new_session().await,
         }
+    }
+
+    /// Expands the named command and starts a turn with the result.
+    async fn run_command(&self, name: &str, args: &str) -> Result<(), EngineError> {
+        let Some(definition) = self.commands.get(name) else {
+            return Err(EngineError::UnknownCommand {
+                name: name.to_owned(),
+                available: self.commands.names(),
+            });
+        };
+
+        // A command that names an agent runs as it for this turn only, without
+        // changing what the session is: upstream re-resolves the agent from
+        // each user message, so a command's choice reaches exactly the message
+        // it came with.
+        let agent = match &definition.agent {
+            None => None,
+            Some(name) => {
+                let registry = self.agents.as_ref().ok_or(EngineError::NoAgents)?;
+                let agent = registry
+                    .get(name)
+                    .ok_or_else(|| EngineError::UnknownAgent { name: name.clone() })?;
+                if agent.mode == AgentMode::Subagent {
+                    return Err(EngineError::CommandSubagent {
+                        name: definition.name.clone(),
+                        agent: name.clone(),
+                    });
+                }
+
+                Some(agent.clone())
+            }
+        };
+        // Upstream's precedence: the command's own model, then the model of the
+        // agent it named, then the session's.
+        let model = definition
+            .model
+            .as_deref()
+            .and_then(|model| self.model_named(model))
+            .or_else(|| {
+                agent
+                    .as_ref()
+                    .and_then(|agent| agent.model.clone())
+                    .filter(|model| self.serves(model))
+            });
+        let overrides = (agent.is_some() || model.is_some()).then_some(Overrides { agent, model });
+
+        self.start_turn(
+            definition.expand(args),
+            TurnKind::Prompt {
+                mentions: Vec::new(),
+            },
+            overrides,
+        )
+        .await
+    }
+
+    /// The model a config spelling names, when this provider serves it.
+    ///
+    /// Config spells a model `"provider/model"` and the provider is fixed at
+    /// construction, so what is left of that spelling is everything after the
+    /// first slash. A model this provider does not serve is a warning and no
+    /// override — the turn asks what the session was already asking, rather
+    /// than failing on a model that does not exist.
+    fn model_named(&self, spelled: &str) -> Option<String> {
+        let model = spelled.split_once('/').map_or(spelled, |(_, rest)| rest);
+        if self.serves(model) {
+            return Some(model.to_owned());
+        }
+
+        tracing::warn!(
+            model = spelled,
+            provider = self.provider.id(),
+            "the command asks for a model this provider does not serve; \
+             running it on the session's own"
+        );
+
+        None
+    }
+
+    /// Forgets the live session so the next prompt starts a fresh one.
+    async fn new_session(&self) -> Result<(), EngineError> {
+        // Held for the same reason `resume` holds it: a prompt arriving
+        // mid-clear must land on the new session, not race the old one.
+        let turn = self.turn.lock().await;
+        if turn.is_some() {
+            return Err(EngineError::Busy);
+        }
+
+        self.history.lock().await.clear();
+        if let Some(state) = &self.persistence {
+            let mut live = state
+                .live
+                .lock()
+                .expect("the live session is never poisoned");
+            live.info = None;
+            live.warned_uncataloged = false;
+        }
+        // Nothing before this turn to compare against, so the plan-to-build
+        // reminder does not fire on the first turn of a new session.
+        self.active().previous_agent = None;
+        drop(turn);
+
+        Ok(())
     }
 
     /// The active selection, which is never held across an await.
@@ -566,32 +752,59 @@ impl Engine {
             .expect("the active selection is never poisoned")
     }
 
-    /// Installs `agent`'s ruleset as the permission baseline.
+    /// Installs `agent`'s ruleset as the permission baseline, and rebuilds the
+    /// tool set the model is offered so the task tool lists what *this* agent
+    /// may delegate to.
     fn install(&self, agent: &Agent) {
         self.permissions
             .lock()
             .expect("the permission rules are never poisoned")
             .set_baseline(agent.rules.clone());
+
+        let Some(agents) = &self.agents else {
+            return;
+        };
+        let rebuilt = self
+            .base_tools
+            .with(Arc::new(task::TaskTool::new(agents, agent)));
+        *self
+            .tools
+            .lock()
+            .expect("the tool registry is never poisoned") = Arc::new(rebuilt);
+    }
+
+    /// The tools the next turn offers the model.
+    fn tools(&self) -> Arc<Registry> {
+        Arc::clone(
+            &self
+                .tools
+                .lock()
+                .expect("the tool registry is never poisoned"),
+        )
+    }
+
+    /// What a `task` call needs to run a child loop, or [`None`] when this
+    /// engine has no agents to spawn.
+    fn spawn_host(&self, model: String) -> Option<Arc<task::Host>> {
+        Some(Arc::new(task::Host {
+            provider: Arc::clone(&self.provider),
+            model,
+            agents: Arc::clone(self.agents.as_ref()?),
+            // A subagent is offered this build's tools minus the one that
+            // spawns subagents, which is the whole of the depth limit (D9).
+            tools: Arc::clone(&self.base_tools),
+            permissions: Arc::clone(&self.permissions),
+            base_prompt: self.base_prompt.clone(),
+            prompt_suffix: self.prompt_suffix.clone(),
+            cwd: self.cwd.clone(),
+            root: self.root.clone(),
+            persistence: self.persistence.clone(),
+        }))
     }
 
     /// Whether this engine's provider serves `model`.
-    ///
-    /// The catalog is the only thing that knows, and it does not know every
-    /// provider — the built-in fake one is not in it, and neither is whatever
-    /// a test drives. A provider the catalog says nothing about cannot be
-    /// contradicted, so any model it is asked for is taken at its word;
-    /// refusing every switch there would make the command untestable in
-    /// exactly the runs that are cheapest to run.
     fn serves(&self, model: &str) -> bool {
-        let provider = self.provider.id();
-        let mut known = catalog::models()
-            .filter(|known| known.provider_id == provider)
-            .peekable();
-
-        match known.peek() {
-            Some(_) => known.any(|known| known.id == model),
-            None => !model.trim().is_empty(),
-        }
+        crate::provider::serves(self.provider.id(), model)
     }
 
     /// Runs the rest of the session as `name`.
@@ -688,7 +901,12 @@ impl Engine {
         }
     }
 
-    async fn start_turn(&self, prompt: String) -> Result<(), EngineError> {
+    async fn start_turn(
+        &self,
+        prompt: String,
+        kind: TurnKind,
+        overrides: Option<Overrides>,
+    ) -> Result<(), EngineError> {
         let mut turn = self.turn.lock().await;
         if turn.is_some() {
             return Err(EngineError::Busy);
@@ -697,19 +915,46 @@ impl Engine {
         // Read once, and recorded as the previous turn's agent in the same
         // breath, so that the plan-to-build reminder fires for exactly one
         // turn however many follow it.
-        let (model, name, previous) = {
+        let (mut model, name, previous) = {
             let mut active = self.active();
             let name = active.agent.clone();
             let previous = std::mem::replace(&mut active.previous_agent, name.clone());
 
             (active.model.clone(), name, previous)
         };
-        let agent = self
+        let session_agent = self
             .agents
             .as_ref()
             .zip(name.as_deref())
             .and_then(|(registry, name)| registry.get(name));
+
+        // A command running as another agent gets that agent's prompt, model
+        // and rules for this turn alone. The rules travel as a ruleset of the
+        // turn's own rather than by installing a baseline that would have to be
+        // put back afterwards; both sets answer for the same project and share
+        // the same store, so an "always" given here still outlives the process —
+        // it just does not reach the session's own set until the store is read
+        // again (deviation: command-agent-derives-its-rules).
+        let (agent, permissions) = match overrides.as_ref().and_then(|it| it.agent.as_ref()) {
+            None => (session_agent, Arc::clone(&self.permissions)),
+            Some(agent) => {
+                let derived = self
+                    .permissions
+                    .lock()
+                    .expect("the permission rules are never poisoned")
+                    .derive(agent.rules.clone());
+
+                (Some(agent), Arc::new(std::sync::Mutex::new(derived)))
+            }
+        };
+        if let Some(asked) = overrides.as_ref().and_then(|it| it.model.clone()) {
+            model = asked;
+        }
+
         let system = self.system_for(agent);
+        // A command that runs as another agent is not the session switching to
+        // it, so the plan-to-build notice — which is about what the *user*
+        // switched to — is left to the session's own agent.
         let reminders = reminders(name.as_deref(), previous.as_deref());
 
         // The first prompt on a persistent engine mints the session, and its
@@ -752,12 +997,15 @@ impl Engine {
         // terminal event.
         tokio::spawn(run_turn(Turn {
             provider: Arc::clone(&self.provider),
+            spawn: self.spawn_host(model.clone()),
             model,
             system,
             reminders,
-            tools: Arc::clone(&self.tools),
-            permissions: Arc::clone(&self.permissions),
+            kind,
+            tools: self.tools(),
+            permissions,
             cwd: self.cwd.clone(),
+            root: self.root.clone(),
             files: Arc::clone(&self.files),
             prompt,
             cancel,
@@ -852,6 +1100,8 @@ fn fresh_session(storage: &Storage, agent: Option<String>, model: String) -> Ses
         summary: None,
         agent,
         model: Some(model),
+        // A session a person started, not one a tool call delegated.
+        parent: None,
     };
 
     if let Err(error) = storage.save_info(&info) {
@@ -1065,6 +1315,7 @@ mod tests {
         engine
             .send(Command::SendPrompt {
                 text: "hi".to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -1137,6 +1388,7 @@ mod tests {
             engine
                 .send(Command::SendPrompt {
                     text: prompt.to_owned(),
+                    mentions: Vec::new(),
                 })
                 .await
                 .expect("an idle engine accepts a prompt");
@@ -1192,6 +1444,7 @@ mod tests {
         engine
             .send(Command::SendPrompt {
                 text: "hi".to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -1212,6 +1465,7 @@ mod tests {
         engine
             .send(Command::SendPrompt {
                 text: "again".to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("a failed turn leaves the engine idle");
@@ -1230,6 +1484,7 @@ mod tests {
             engine
                 .send(Command::SendPrompt {
                     text: prompt.to_owned(),
+                    mentions: Vec::new(),
                 })
                 .await
                 .expect("an idle engine accepts a prompt");
@@ -1284,6 +1539,7 @@ mod tests {
             summary: None,
             agent: None,
             model: None,
+            parent: None,
         };
         storage.save_info(&info).expect("the seeded record writes");
         let earlier = Message::user("the objective");
@@ -1310,6 +1566,7 @@ mod tests {
         engine
             .send(Command::SendPrompt {
                 text: "next".to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -1350,6 +1607,7 @@ mod tests {
         engine
             .send(Command::SendPrompt {
                 text: "first".to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -1361,7 +1619,8 @@ mod tests {
         assert!(matches!(
             engine
                 .send(Command::SendPrompt {
-                    text: "second".to_owned()
+                    text: "second".to_owned(),
+                    mentions: Vec::new(),
                 })
                 .await,
             Err(EngineError::Busy)
@@ -1376,6 +1635,7 @@ mod tests {
         engine
             .send(Command::SendPrompt {
                 text: "first".to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -1385,6 +1645,7 @@ mod tests {
         engine
             .send(Command::SendPrompt {
                 text: "second".to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("a finished turn leaves the engine idle");

@@ -155,6 +155,7 @@ async fn a_request_discloses_the_directories_an_always_answer_would_cover() {
         engine
             .send(Command::SendPrompt {
                 text: "go".to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");

@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod auth;
 pub mod catalog;
+pub mod command;
 pub mod config;
 pub mod engine;
 pub mod instruction;
@@ -32,7 +33,7 @@ pub use instruction::system_prompt;
 pub use permission::{Decision, Permissions};
 pub use project::{Project, ProjectError};
 pub use protocol::{
-    Command, Event, FinishReason, Message, MessageId, MessageTime, Part, PartBody, PartId,
+    Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody, PartId,
     PermissionId, PermissionReply, Role, ToolState, Usage,
 };
 pub use storage::{SessionId, SessionInfo, Storage, StorageError};

@@ -23,6 +23,7 @@ The engine's modules. The shape to hold in mind: `engine.rs` accepts commands an
 | `catalog.rs` | Compiled-in models.dev snapshot: context windows, max output, pricing, per-provider default model. |
 | `storage.rs` | Versioned JSON session storage under the project data directory: envelopes with an explicit version, write-through, quarantine-on-corrupt. Session records carry the agent and model a resume restores. |
 | `config.rs` | `ganja.jsonc`/`ganja.json`: discovery (global dir, `GANJA_CONFIG`, project walk-up), JSONC decode of the curated keys, tier merge with flag overrides on top. Unknown top-level keys are refused by name; permission rule order survives exactly as written. |
+| `command.rs` | Slash commands: the builtin `/init` plus whatever `config.command` describes, and the `$1`/`$ARGUMENTS` expansion that turns one into a prompt. |
 | `instruction.rs` | The system prompt: a base prompt per model family (`prompt/*.txt`), the `<env>` block, and `AGENTS.md`-family instruction discovery, assembled in upstream's `Instructions from:` shape. Reaches the engine through `Engine::with_system`/`with_system_parts`. |
 | `agent.rs` | The agent roster: build, plan, general, explore (upstream's rulesets adapted to ganja's tool surface), config overlay, `default_agent` resolution. An agent is a name, a prompt that replaces the base prompt, and rules layered beneath the user's stored answers. |
 | `prompt/` | Upstream prompt texts, byte-verbatim — attributed in the root notices. |

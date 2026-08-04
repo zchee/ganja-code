@@ -20,6 +20,7 @@ What the model can do besides talk. Each tool lives in its own module and implem
 | `shell.rs` | `bash` — runs a command in a shell. 2 min default timeout, own process group, `killpg` on cancel with a 200ms grace and a 100ms output drain. |
 | `todo.rs` | `todowrite` — the task list a turn keeps for itself. Upstream registers exactly one todo tool. |
 | `webfetch.rs` | `webfetch` — reads a page and hands the model its text. |
+| `task.rs` | `task` — runs a whole second agent loop as a subagent and returns its last words. Registered only once the engine knows which agents it may spawn, so a child's registry (this one minus `task`) is the depth limit. |
 | `truncate.rs` | Shared output truncation so one tool call cannot flood the context window: 2,000 lines / 50 KB, with the overflow spilled to a file the notice names. |
 
 ## For AI Agents

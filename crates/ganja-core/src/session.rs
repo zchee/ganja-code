@@ -50,7 +50,7 @@ use crate::{
     },
     provider::{ChatRequest, Provider, ProviderEvent},
     storage::{SessionId, SessionInfo, Storage, StorageError},
-    tool::{FileTimes, Registry, ToolCtx, ToolError},
+    tool::{FileTimes, Registry, ToolCtx, ToolError, shell},
 };
 
 /// What the model reads when the user refuses a call, ported verbatim from
@@ -116,6 +116,17 @@ const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
 
 /// Characters a fallback title keeps of the first prompt.
 const FALLBACK_TITLE_CHARS: usize = 50;
+
+/// The whole of the synthetic user message a `!` passthrough writes, ported
+/// verbatim from upstream `packages/opencode/src/session/prompt.ts`
+/// (`shellImpl`). The model reads it as the reason a `bash` call it never made
+/// is sitting in the transcript.
+const SHELL_NOTICE: &str = "The following tool was executed by the user";
+
+/// What an `@`-mentioned file is labelled as. Every mention this build attaches
+/// is text: upstream also mints `application/x-directory` for a directory, which
+/// ganja does not attach at all (deviation: mentions-resolve-files-only).
+const MENTION_MIME: &str = "text/plain";
 
 /// Characters of a tool's output the summarize request is shown, upstream
 /// core's `TOOL_OUTPUT_MAX_CHARS`. Counted in characters where upstream
@@ -476,6 +487,30 @@ impl Persist {
     }
 }
 
+/// What a turn is for.
+///
+/// All three end the same way — one [`Event::MessageFinished`], the busy slot
+/// released — because a frontend's idle/busy state is the slot, and a turn that
+/// ended without saying so would leave it stuck.
+pub(crate) enum TurnKind {
+    /// The ordinary one: answer what the user said.
+    Prompt {
+        /// Files the user attached, which become [`PartBody::File`] parts on
+        /// their message and are read when a request is built.
+        mentions: Vec<crate::protocol::Mention>,
+    },
+    /// Run a command the *user* typed and put it and its output in the
+    /// transcript, without asking the model anything. Upstream's `!`
+    /// passthrough.
+    Shell {
+        /// What to run, verbatim.
+        command: String,
+    },
+    /// Summarize the conversation and continue from the summary, without
+    /// asking the model anything else.
+    Compact,
+}
+
 /// Everything one turn needs, gathered so the spawned task takes one argument.
 pub(crate) struct Turn {
     pub(crate) provider: Arc<dyn Provider>,
@@ -487,12 +522,17 @@ pub(crate) struct Turn {
     /// Synthetic user text this turn's requests carry, appended to the last
     /// user message; see [`stream_step`].
     pub(crate) reminders: Vec<String>,
+    /// What this turn is for; see [`TurnKind`].
+    pub(crate) kind: TurnKind,
     /// Tools the model is offered, and this loop executes.
     pub(crate) tools: Arc<Registry>,
     /// Rules deciding which calls wait for the user.
     pub(crate) permissions: Arc<std::sync::Mutex<Permissions>>,
     /// Directory tool calls resolve relative paths against.
     pub(crate) cwd: PathBuf,
+    /// Where the project starts. A mentioned file is named relative to it, and
+    /// a `!` command runs in it.
+    pub(crate) root: PathBuf,
     /// Which files this session has read, shared by every call in it.
     pub(crate) files: Arc<FileTimes>,
     pub(crate) prompt: String,
@@ -503,6 +543,10 @@ pub(crate) struct Turn {
     pub(crate) events: mpsc::Sender<Event>,
     pub(crate) slot: Arc<Mutex<Option<TurnHandle>>>,
     pub(crate) history: Arc<Mutex<Vec<Message>>>,
+    /// What a `task` call needs to run a whole second agent loop. [`None`] on a
+    /// turn with no agents to spawn, and on every turn a subagent runs — which
+    /// is the depth limit, stated where the loop can see it.
+    pub(crate) spawn: Option<Arc<crate::tool::task::Host>>,
     /// Write-through and session bookkeeping, when the engine persists.
     /// [`None`] is an in-memory engine, and every hook below is a no-op.
     pub(crate) persist: Option<Persist>,
@@ -581,13 +625,20 @@ struct BufferedCall {
 
 /// Runs one turn to its finish event.
 pub(crate) async fn run_turn(turn: Turn) {
-    let (mut assistant, outcome) = drive(&turn).await;
+    let (mut assistant, outcome) = match &turn.kind {
+        TurnKind::Prompt { .. } => drive(&turn).await,
+        TurnKind::Shell { command } => drive_shell(&turn, command.clone()).await,
+        TurnKind::Compact => drive_compact(&turn).await,
+    };
     let completed = assistant.complete();
 
     // A turn that died before its first fragment leaves nothing worth sending
     // back as context — and some providers reject an empty assistant message.
     // Step markers alone do not count; text or a tool call does.
-    if assistant.has_content() {
+    //
+    // A compacting turn is the exception: what it produced is the summary, and
+    // the summary is already the whole history by the time it returns.
+    if !matches!(turn.kind, TurnKind::Compact) && assistant.has_content() {
         turn.history.lock().await.push(assistant.clone());
     }
 
@@ -705,9 +756,20 @@ async fn spawn_title_if_untitled(turn: &Turn) {
             .find(|message| message.role == Role::User)
             .cloned()
     };
-    let Some(first_user) = first_user else {
+    let Some(mut first_user) = first_user else {
         return;
     };
+    // A title request is not a working request: it wants what the user *asked*,
+    // and a mentioned file is part of that as the `@path` they typed — which is
+    // exactly the shape upstream's title prompt is written against — rather
+    // than as the file's whole contents.
+    for part in &mut first_user.parts {
+        if let PartBody::File { path, .. } = &part.body {
+            part.body = PartBody::Text {
+                text: format!("@{path}"),
+            };
+        }
+    }
     let fallback = clip_title(
         first_user
             .parts
@@ -876,11 +938,20 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
     // Compaction runs before the user's message so the summary's id sorts
     // before it: a resumed window is "messages from the summary onward", and
     // the prompt that follows a compaction must land inside it.
-    if let ControlFlow::Break(stop) = compact_if_needed(turn).await {
+    if let ControlFlow::Break(stop) = compact_if_needed(turn, false).await {
         return (Message::assistant(turn.model.clone()), stop);
     }
 
-    let user = Message::user(turn.prompt.clone());
+    let mut user = Message::user(turn.prompt.clone());
+    // A mention is a reference and nothing more; what the file says is read
+    // when a request is built. See [`PartBody::File`].
+    if let TurnKind::Prompt { mentions } = &turn.kind {
+        user.parts.extend(
+            mentions
+                .iter()
+                .map(|mention| Part::file(mention.path.clone(), MENTION_MIME)),
+        );
+    }
     // The prompt reaches the disk before the provider hears it: a `kill -9`
     // mid-stream must still preserve what was asked.
     if let Some(persist) = &turn.persist {
@@ -962,6 +1033,223 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
     }
 }
 
+/// Runs the `!` passthrough: the user's own command, its output, and both of
+/// them in the transcript where the next model request will read them.
+///
+/// Spec: upstream `packages/opencode/src/session/prompt.ts` (`shellImpl`). Two
+/// messages go in — a synthetic user message saying what happened, and an
+/// assistant message carrying a `bash` tool part that never came from a model —
+/// and the output streams into that part as it arrives. **The exit code is
+/// awaited and discarded**, exactly as upstream discards it: what the model
+/// needs is what the command printed.
+///
+/// **No permission is checked, deliberately** (**D13**). Every other route to
+/// the shell is the model asking to run something; this one is the person at
+/// the terminal running it themselves, and putting a dialog in front of their
+/// own keystrokes would be asking them to approve their own intent. The command
+/// runs in the project root under ganja's own `sh -c` shape rather than
+/// upstream's login shell (**D14**).
+async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>) {
+    let user = Message::user(SHELL_NOTICE);
+    if let Some(persist) = &turn.persist {
+        persist.user(&user);
+    }
+    turn.history.lock().await.push(user.clone());
+    if turn
+        .events
+        .send(Event::MessageStarted { message: user })
+        .await
+        .is_err()
+    {
+        return (Message::assistant(turn.model.clone()), None);
+    }
+
+    let mut assistant = Message::assistant(turn.model.clone());
+    if let Some(persist) = &turn.persist {
+        persist.assistant_open(&assistant);
+    }
+    if turn
+        .events
+        .send(Event::MessageStarted {
+            message: assistant.clone(),
+        })
+        .await
+        .is_err()
+    {
+        return (assistant, None);
+    }
+
+    let input = serde_json::json!({ "command": command });
+    let started = now();
+    let part = Part {
+        id: PartId::ascending(),
+        body: PartBody::Tool {
+            // No model streamed this call, so there is no provider id to echo.
+            // The part's own id is the only identifier there is, and it is
+            // unique for the same reason a call id would be.
+            call_id: String::new(),
+            tool: shell::ShellTool::ID.to_owned(),
+            state: ToolState::Running {
+                input: input.clone(),
+                metadata: serde_json::Value::Null,
+                started,
+            },
+        },
+    };
+    let part_id = part.id.clone();
+    assistant.parts.push(part.clone());
+    turn.persist_part(&assistant, &part);
+    if let ControlFlow::Break(stop) = deliver(
+        turn,
+        Event::PartStarted {
+            message_id: assistant.id.clone(),
+            part,
+        },
+    )
+    .await
+    {
+        return (assistant, stop);
+    }
+
+    let (progress, mut chunks) = mpsc::unbounded_channel();
+    let ctx = ToolCtx {
+        // Upstream runs the user's command where the instance is; ganja runs it
+        // where the project is, which is what a person typing `!git status`
+        // means by "here".
+        cwd: turn.root.clone(),
+        cancel: turn.cancel.child_token(),
+        call_id: part_id.as_str().to_owned(),
+        files: Arc::clone(&turn.files),
+        spawn: None,
+    };
+    let tool = shell::ShellTool::new();
+    let running = tool.run_reporting(input.clone(), &ctx, Some(progress));
+    tokio::pin!(running);
+
+    let mut seen: Vec<u8> = Vec::new();
+    let mut streaming = true;
+    let result = loop {
+        let chunk = tokio::select! {
+            biased;
+            result = &mut running => break result,
+            // Disabled once the pumps have dropped their senders, so a command
+            // that has stopped writing but not yet exited does not spin here.
+            chunk = chunks.recv(), if streaming => chunk,
+        };
+        let Some(chunk) = chunk else {
+            streaming = false;
+            continue;
+        };
+
+        seen.extend_from_slice(&chunk);
+        // Whatever else already arrived goes into the same redraw: one event
+        // per burst rather than one per pipe read.
+        while let Ok(more) = chunks.try_recv() {
+            seen.extend_from_slice(&more);
+        }
+
+        // Progress only — deliberately not written through. What reaches the
+        // disk is the completed call, and rewriting the part's file for every
+        // burst would turn a chatty command into a disk benchmark.
+        if let Some(part) = set_tool_state(
+            &mut assistant,
+            &part_id,
+            ToolState::Running {
+                input: input.clone(),
+                metadata: serde_json::json!({ "output": String::from_utf8_lossy(&seen) }),
+                started,
+            },
+        ) && let ControlFlow::Break(stop) = deliver(
+            turn,
+            Event::PartUpdated {
+                message_id: assistant.id.clone(),
+                part,
+            },
+        )
+        .await
+        {
+            return (assistant, stop);
+        }
+    };
+
+    let completed = now();
+    let (state, outcome) = match result {
+        Ok(output) => (
+            ToolState::Completed {
+                input,
+                // Upstream's completion metadata is the output and nothing
+                // else. The exit code was awaited and dropped on the way here.
+                metadata: serde_json::json!({ "output": output.output }),
+                output: output.output,
+                // Upstream leaves this empty; the command is what a transcript
+                // row has to show, and it is what ganja's own `bash` tool
+                // titles a call with
+                // (deviation: passthrough-titles-the-command).
+                title: command,
+                started,
+                completed,
+            },
+            Some(Outcome::finished(FinishReason::Completed)),
+        ),
+        Err(error @ ToolError::Cancelled) => (
+            ToolState::Error {
+                input,
+                error: error.to_string(),
+                started,
+                completed,
+            },
+            Some(Outcome::cancelled()),
+        ),
+        // A command that could not be started is information like any other:
+        // the transcript says so and the next turn reads it.
+        Err(error) => (
+            ToolState::Error {
+                input,
+                error: error.to_string(),
+                started,
+                completed,
+            },
+            Some(Outcome::finished(FinishReason::Completed)),
+        ),
+    };
+
+    if let Some(part) = set_tool_state(&mut assistant, &part_id, state) {
+        turn.persist_part(&assistant, &part);
+        let _ = turn
+            .events
+            .send(Event::PartUpdated {
+                message_id: assistant.id.clone(),
+                part,
+            })
+            .await;
+    }
+
+    (assistant, outcome)
+}
+
+/// Runs a compaction the user asked for.
+///
+/// The same path the automatic one takes, with the fill-level question skipped:
+/// the user asked, and how full the window was is what they were judging. The
+/// summary the compaction announced is what the finish event names, so the one
+/// message this turn put on the stream is the one it closes.
+async fn drive_compact(turn: &Turn) -> (Message, Option<Outcome>) {
+    match compact_if_needed(turn, true).await {
+        ControlFlow::Break(stop) => (Message::assistant(turn.model.clone()), stop),
+        ControlFlow::Continue(Some(summary)) => {
+            (summary, Some(Outcome::finished(FinishReason::Completed)))
+        }
+        // Nothing to summarize — an in-memory engine, a session with no
+        // history, or a model the catalog cannot size. The turn still ends
+        // with a finish event, because the busy slot is released by that event
+        // reaching the frontend and by nothing else.
+        ControlFlow::Continue(None) => (
+            Message::assistant(turn.model.clone()),
+            Some(Outcome::finished(FinishReason::Completed)),
+        ),
+    }
+}
+
 /// Summarizes the live window into a fresh assistant message when the last
 /// request already filled 90% of the model's context window, then resets the
 /// window to that summary so the user's turn proceeds inside budget.
@@ -982,9 +1270,12 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
 /// cancelled, the provider died, or the subscriber is gone — and in every
 /// break path `SessionInfo::summary` is untouched: there is no half-installed
 /// window.
-async fn compact_if_needed(turn: &Turn) -> ControlFlow<Option<Outcome>> {
+async fn compact_if_needed(
+    turn: &Turn,
+    forced: bool,
+) -> ControlFlow<Option<Outcome>, Option<Message>> {
     let Some(persist) = &turn.persist else {
-        return ControlFlow::Continue(());
+        return ControlFlow::Continue(None);
     };
 
     let (summary_id, context_window) = {
@@ -994,8 +1285,16 @@ async fn compact_if_needed(turn: &Turn) -> ControlFlow<Option<Outcome>> {
             .lock()
             .expect("the live session is never poisoned");
         let Some(info) = live.info.as_ref() else {
-            return ControlFlow::Continue(());
+            return ControlFlow::Continue(None);
         };
+        // A subagent's turn writes through a `Persist` of its own while the
+        // engine stays live on the parent. Without this the child would read
+        // the parent's fill level, compact its own window against it, and
+        // stamp the parent's record with a summary belonging to a
+        // conversation nobody was having.
+        if info.id != persist.session {
+            return ControlFlow::Continue(None);
+        }
         let Some(model) = catalog::model(&turn.model) else {
             if !live.warned_uncataloged {
                 live.warned_uncataloged = true;
@@ -1005,13 +1304,18 @@ async fn compact_if_needed(turn: &Turn) -> ControlFlow<Option<Outcome>> {
                      this session will never auto-compact"
                 );
             }
-            return ControlFlow::Continue(());
+            // A manual compaction still has to know what fits, and only the
+            // catalog can say. Nothing to do but say so.
+            return ControlFlow::Continue(None);
         };
         // tokens × 10 ≥ window × 9 is "at least 90% full" without leaving
         // the integers; a saturated multiply only ever fails toward
-        // compacting sooner.
-        if info.context_tokens.saturating_mul(10) < model.context_window.saturating_mul(9) {
-            return ControlFlow::Continue(());
+        // compacting sooner. A manual compaction skips the question: the user
+        // asked, and how full the window is was their business to judge.
+        if !forced
+            && info.context_tokens.saturating_mul(10) < model.context_window.saturating_mul(9)
+        {
+            return ControlFlow::Continue(None);
         }
 
         (info.summary.clone(), model.context_window)
@@ -1030,7 +1334,7 @@ async fn compact_if_needed(turn: &Turn) -> ControlFlow<Option<Outcome>> {
     if previous.is_none() && serialized.is_empty() {
         // Nothing to summarize — a fresh window under an inherited
         // `context_tokens`. Upstream returns false here too.
-        return ControlFlow::Continue(());
+        return ControlFlow::Continue(None);
     }
 
     let prompt = build_summary_prompt(previous.as_deref(), &serialized);
@@ -1045,7 +1349,7 @@ async fn compact_if_needed(turn: &Turn) -> ControlFlow<Option<Outcome>> {
             context_window,
             "the history is too large to summarize; continuing uncompacted"
         );
-        return ControlFlow::Continue(());
+        return ControlFlow::Continue(None);
     }
 
     // The same system prompt the conversation was held under. Summarizing
@@ -1062,7 +1366,7 @@ async fn compact_if_needed(turn: &Turn) -> ControlFlow<Option<Outcome>> {
     let (text, usage) = summarize(turn, request).await?;
     if text.trim().is_empty() {
         tracing::warn!("the summarize request said nothing; continuing uncompacted");
-        return ControlFlow::Continue(());
+        return ControlFlow::Continue(None);
     }
 
     let mut summary = Message::assistant(turn.model.clone());
@@ -1112,7 +1416,7 @@ async fn compact_if_needed(turn: &Turn) -> ControlFlow<Option<Outcome>> {
         }
     }
 
-    ControlFlow::Continue(())
+    ControlFlow::Continue(Some(summary))
 }
 
 /// Runs the summarize request to completion, returning its text and reported
@@ -1202,8 +1506,14 @@ fn serialize_message(message: &Message) -> String {
         Role::User => message
             .parts
             .iter()
-            .filter_map(Part::as_text)
-            .map(|text| format!("[User]: {text}"))
+            .filter_map(|part| match &part.body {
+                PartBody::Text { text } => Some(format!("[User]: {text}")),
+                // What the user attached, named rather than pasted: the
+                // summary is about what the conversation was for, and a file
+                // the model can read again is not what it needs to remember.
+                PartBody::File { path, .. } => Some(format!("[User]: @{path}")),
+                PartBody::Tool { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => None,
+            })
             .collect(),
         Role::Assistant => message
             .parts
@@ -1228,7 +1538,9 @@ fn serialize_message(message: &Message) -> String {
                         None => vec![call],
                     }
                 }
-                PartBody::StepStart | PartBody::StepFinish { .. } => Vec::new(),
+                PartBody::File { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => {
+                    Vec::new()
+                }
             })
             .collect(),
     };
@@ -1338,6 +1650,12 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             user.parts
                 .extend(turn.reminders.iter().cloned().map(Part::text));
         }
+
+        // The one place a mention becomes content. Doing it here rather than
+        // when the user attached the file is what makes the model read the
+        // file as it is *now*: a mention is a reference, and a reference
+        // resolved at attach time would go stale the moment the user saved.
+        resolve_mentions(&mut messages, &turn.root);
 
         ChatRequest {
             model: turn.model.clone(),
@@ -1556,6 +1874,60 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     }
 }
 
+/// Turns every [`PartBody::File`] in `messages` into the text block the model
+/// reads, by reading the file it names **now**.
+///
+/// Called on the request's own copy of the history, never on the history
+/// itself: the transcript keeps the reference, so the next request reads the
+/// file again rather than replaying whatever it said the first time. That is
+/// upstream's shape — its file part carries a URL the server resolves per
+/// request — and it is what the `@`-mention promise actually is.
+///
+/// **A mention is not a read.** Nothing here touches
+/// [`FileTimes`](crate::tool::FileTimes), so a file the user attached is still
+/// a file the model has not opened, and `edit` still refuses it (R9).
+///
+/// The read is synchronous on the turn task, like every
+/// [`Persist`](Persist) write: these are small files, and the lane that absorbs
+/// backpressure is this one.
+fn resolve_mentions(messages: &mut [Message], root: &std::path::Path) {
+    for message in messages {
+        for part in &mut message.parts {
+            let PartBody::File { path, .. } = &part.body else {
+                continue;
+            };
+            let text = attached(root, path);
+            part.body = PartBody::Text { text };
+        }
+    }
+}
+
+/// One mentioned file as the model reads it: a tag naming where it came from,
+/// then whatever it says.
+///
+/// A path that cannot be read becomes a block saying so rather than nothing:
+/// the user attached it deliberately, and a silently missing attachment reads
+/// to the model as a user who never mentioned anything.
+fn attached(root: &std::path::Path, path: &str) -> String {
+    let resolved = root.join(path);
+    let body = if resolved.is_dir() {
+        // Upstream attaches a directory as a part of its own; this build
+        // resolves files only (deviation: mentions-resolve-files-only), and
+        // says so where the model can act on it.
+        "(this is a directory; name a file inside it, or use glob and grep)".to_owned()
+    } else {
+        match std::fs::read_to_string(&resolved) {
+            Ok(text) => crate::tool::truncate::clamp(&text).text,
+            Err(error) => format!("(could not be read: {error})"),
+        }
+    };
+
+    // Upstream hands the provider a file part and lets it decide; ganja has no
+    // such part, so the file arrives as text that says where it came from
+    // (deviation: mention-renders-as-a-tagged-block).
+    format!("<attached-file path=\"{path}\">\n{body}\n</attached-file>")
+}
+
 /// Resolves one buffered call: parse, gate, run, and put the result — or the
 /// reason there is none — where the model reads it next.
 ///
@@ -1641,6 +2013,9 @@ async fn resolve(
         &call.part_id,
         ToolState::Running {
             input: args.clone(),
+            // Nothing to report yet. A tool that reports progress — the task
+            // tool is the one that does — rewrites this as it goes.
+            metadata: serde_json::Value::Null,
             started,
         },
     ) {
@@ -1678,6 +2053,19 @@ async fn resolve(
             cancel: turn.cancel.child_token(),
             call_id: call.id.clone(),
             files: Arc::clone(&turn.files),
+            // Built per call because a subagent reports its progress on *this*
+            // part, and the part is what a frontend renders the child's one
+            // inline row from.
+            spawn: turn.spawn.as_ref().map(|host| crate::tool::task::Spawn {
+                host: Arc::clone(host),
+                events: turn.events.clone(),
+                // Shared with this turn: the parent is blocked inside the call
+                // for as long as the child runs, so the slot is the child's to
+                // ask through and a reply addressed to the parent reaches it.
+                pending: Arc::clone(&turn.pending),
+                message_id: assistant.id.clone(),
+                part_id: call.part_id.clone(),
+            }),
         };
         let running = tool.run(args.clone(), &ctx);
         tokio::pin!(running);
@@ -2071,7 +2459,9 @@ mod tests {
     use tokio::sync::{Mutex, mpsc};
     use tokio_util::sync::CancellationToken;
 
-    use super::{BufferedCall, Turn, add_usage, parse_args, resolve};
+    use super::{
+        BufferedCall, Turn, TurnKind, add_usage, attached, parse_args, resolve, resolve_mentions,
+    };
     use crate::{
         FinishReason, Message, Part, PartBody, Permissions, Registry, ToolState,
         protocol::Usage,
@@ -2133,9 +2523,13 @@ mod tests {
             model: fake::MODEL.to_owned(),
             system: None,
             reminders: Vec::new(),
+            kind: TurnKind::Prompt {
+                mentions: Vec::new(),
+            },
             tools: Arc::new(Registry::new(vec![tool])),
             permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
             cwd: std::env::temp_dir(),
+            root: std::env::temp_dir(),
             files: Arc::new(FileTimes::default()),
             prompt: "run it".to_owned(),
             cancel,
@@ -2143,6 +2537,7 @@ mod tests {
             events,
             slot: Arc::new(Mutex::new(None)),
             history: Arc::new(Mutex::new(Vec::new())),
+            spawn: None,
             persist: None,
         };
 
@@ -2315,6 +2710,67 @@ mod tests {
             .input_tokens,
             u64::MAX,
             "a sum never wraps into a tiny bill"
+        );
+    }
+
+    /// A mention's path is project-relative, and this is where that means
+    /// something: the integration suite uses absolute paths so its fixtures can
+    /// live in a temporary directory, so the join itself is pinned here.
+    #[test]
+    fn a_mentioned_path_resolves_against_the_project_root() {
+        let root = tempfile::tempdir().expect("a scratch directory");
+        let nested = root.path().join("src");
+        std::fs::create_dir(&nested).expect("the fixture nests");
+        std::fs::write(nested.join("main.rs"), "fn main() {}").expect("the fixture writes");
+
+        let block = attached(root.path(), "src/main.rs");
+        assert_eq!(
+            block, "<attached-file path=\"src/main.rs\">\nfn main() {}\n</attached-file>",
+            "the block names the path the user typed and carries what it says"
+        );
+
+        // An absolute path is already resolved, and joining leaves it alone.
+        let absolute = nested.join("main.rs");
+        assert!(
+            attached(root.path(), &absolute.to_string_lossy()).contains("fn main() {}"),
+            "an absolute mention resolves to itself"
+        );
+    }
+
+    /// Resolution replaces the reference in the request's own copy. What it
+    /// must never do is record the file as read — that is the model's act, not
+    /// the user's, and `edit` depends on the difference.
+    #[test]
+    fn resolving_a_mention_is_not_a_read() {
+        let root = tempfile::tempdir().expect("a scratch directory");
+        let path = root.path().join("a.txt");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        let mut messages = vec![Message {
+            id: crate::protocol::MessageId::ascending(),
+            role: crate::Role::User,
+            parts: vec![Part::file("a.txt", "text/plain")],
+            time: crate::MessageTime {
+                created: 1,
+                completed: Some(1),
+            },
+            model: None,
+            usage: None,
+        }];
+        resolve_mentions(&mut messages, root.path());
+
+        assert!(
+            messages[0].parts[0]
+                .as_text()
+                .is_some_and(|text| text.contains("one")),
+            "the reference became content: {:?}",
+            messages[0].parts[0]
+        );
+
+        let times = FileTimes::default();
+        assert!(
+            times.check_fresh(&path).is_err(),
+            "and nothing recorded the file as read"
         );
     }
 }

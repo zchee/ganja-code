@@ -132,6 +132,21 @@ pub fn suffix(config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
     suffix_from(&global_files(), config, cwd, model_id)
 }
 
+/// Puts the two halves of a system prompt together: the half an agent replaces,
+/// then the half none of them do.
+///
+/// Joined by a bare newline, as upstream's `session/llm/request.ts` joins them,
+/// and [`None`] only when neither half says anything — which is the engine
+/// nobody configured, and which every scripted and golden run depends on.
+#[must_use]
+pub(crate) fn joined(head: Option<&str>, suffix: Option<&str>) -> Option<String> {
+    match (head, suffix) {
+        (None, None) => None,
+        (Some(only), None) | (None, Some(only)) => Some(only.to_owned()),
+        (Some(head), Some(suffix)) => Some(format!("{head}\n{suffix}")),
+    }
+}
+
 /// [`system_prompt`], with the global instruction candidates handed in.
 ///
 /// The split is what lets the tests below prove the composition without the

@@ -939,7 +939,16 @@ impl App {
             return;
         }
 
-        match self.engine.send(Command::SendPrompt { text: prompt }).await {
+        match self
+            .engine
+            .send(Command::SendPrompt {
+                text: prompt,
+                // The composer has no `@` mentions yet; that lands with the
+                // rest of the prompt UI.
+                mentions: Vec::new(),
+            })
+            .await
+        {
             Ok(()) => {
                 self.editor.clear();
                 self.dropdown = None;
@@ -1156,6 +1165,7 @@ mod tests {
             summary: None,
             agent: None,
             model: None,
+            parent: None,
         };
         let message = Message::user("what the picker is choosing between");
 
@@ -2103,6 +2113,7 @@ mod tests {
                     tool: "shell".to_owned(),
                     state: ToolState::Running {
                         input: serde_json::json!({"command": "cargo test"}),
+                        metadata: serde_json::Value::Null,
                         started: 0,
                     },
                 },
@@ -2164,6 +2175,7 @@ mod tests {
                     tool: "read".to_owned(),
                     state: ToolState::Running {
                         input: serde_json::json!({"filePath": "a.rs"}),
+                        metadata: serde_json::Value::Null,
                         started: 0,
                     },
                 },
@@ -2365,6 +2377,7 @@ mod tests {
                 tool: "shell".to_owned(),
                 state: ToolState::Running {
                     input: serde_json::json!({"command": "cargo test"}),
+                    metadata: serde_json::Value::Null,
                     started: 0,
                 },
             },
