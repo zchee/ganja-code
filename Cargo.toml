@@ -121,3 +121,11 @@ insta = "1.48.0"
 predicates = "3.1.4"
 similar-asserts = "2.0.0"
 tempfile = "3.27.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug-assertions = false
+overflow-checks = false
