@@ -279,6 +279,10 @@ fn a_malformed_config_names_the_file_and_the_position() {
 }
 
 /// The table is printed, both sections, and nothing lands.
+///
+/// The rows named here are the ones a dry run exists for: each is a key that
+/// will *not* be in the file, and each names the sub-key that decided it rather
+/// than the branch it sat under.
 #[test]
 fn a_dry_run_prints_the_table_and_writes_nothing() {
     let home = temporary();
@@ -294,10 +298,22 @@ fn a_dry_run_prints_the_table_and_writes_nothing() {
             predicate::str::contains("mapped")
                 .and(predicate::str::contains("skipped"))
                 .and(predicate::str::contains("model"))
-                .and(predicate::str::contains("mcp"))
+                .and(predicate::str::contains("mcp.fs.command"))
+                .and(predicate::str::contains("mcp.docs.oauth"))
+                .and(predicate::str::contains("mcp.legacy"))
+                .and(predicate::str::contains("lsp.typescript"))
+                .and(predicate::str::contains("lsp.deno.extensions"))
+                .and(predicate::str::contains("snapshot"))
                 .and(predicate::str::contains("unsupported"))
                 .and(predicate::str::contains("dry run"))
                 .and(predicate::str::contains("wrote").not()),
+        )
+        // The warnings are the other half of a dry run: a row says a key was
+        // left out, and the line on stderr says what to do about it.
+        .stderr(
+            predicate::str::contains("headers")
+                .and(predicate::str::contains("typescript"))
+                .and(predicate::str::contains("nothing to switch off")),
         );
 
     assert!(

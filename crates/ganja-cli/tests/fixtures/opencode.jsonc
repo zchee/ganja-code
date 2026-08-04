@@ -72,7 +72,48 @@
       },
     },
   },
-  "mcp": { "fs": { "type": "local", "command": ["mcp-fs"] } },
+  "mcp": {
+    "fs": {
+      "type": "local",
+      "command": ["mcp-fs", "--root", "."],
+      "cwd": "./servers",
+      "environment": { "MCP_FS_MODE": "ro" },
+      "enabled": true,
+      "timeout": 45000,
+    },
+    "docs": {
+      "type": "remote",
+      "url": "https://mcp.example.invalid/mcp",
+      "headers": { "Authorization": "Bearer {env:DOCS_TOKEN}" },
+      // Ganja does not authenticate itself to an MCP server, so this is the
+      // one sub-key of a remote entry that must not survive.
+      "oauth": { "clientId": "opencode" },
+    },
+    // No `type`, so it describes no server: the shape somebody writes to
+    // switch off a server another tier defined, with nothing here to switch.
+    "legacy": { "enabled": false },
+  },
+  "lsp": {
+    // A server ganja ships too, switched off the one way that needs no
+    // command.
+    "rust": { "disabled": true },
+    // One opencode ships a definition for and ganja does not, and the entry
+    // leans on it: upstream lets a command stand alone because the extensions
+    // come from the builtin, and there is nothing here to inherit them from.
+    "typescript": { "command": ["typescript-language-server", "--stdio"] },
+    // Also one of opencode's builtins, but this entry leans on nothing: it
+    // names the program and the files, which is the whole of what a server is
+    // here, so it travels under its own name.
+    "deno": { "command": ["deno", "lsp"], "extensions": [".ts", ".tsx"] },
+    // A server that describes itself completely, which travels as it stands.
+    "nickel": {
+      "command": ["nls"],
+      "extensions": [".ncl"],
+      "env": { "NICKEL_LOG": "info" },
+      "initialization": { "eval": { "limit": 500 } },
+    },
+  },
+  "snapshot": false,
   "compaction": { "auto": false, "tail_turns": 4 },
   "autoshare": true,
   "username": "nobody",

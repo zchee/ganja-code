@@ -12,7 +12,7 @@
 //! the failure this command exists to prevent, so the table is the output and
 //! the file is a side effect of it.
 //!
-//! Two rules are load-bearing, and neither is a matter of taste:
+//! Three rules are load-bearing, and none of them is a matter of taste:
 //!
 //! * **A credential is never written.** `provider.<id>.options.apiKey` is
 //!   skipped with a warning naming `ganja auth login`. Ganja's keys travel the
@@ -24,15 +24,23 @@
 //!   inside a config file at all. A value that is nothing but a token is left
 //!   out and named; a value that merely contains one is carried verbatim,
 //!   because ganja will then read it literally and its author has to know that.
+//! * **Nothing is completed on a config's behalf.** An MCP server or a language
+//!   server whose entry does not describe something ganja could start is left
+//!   out and named, never given the field it is missing: a fabricated command
+//!   would start a program nobody chose. The refusals `ganja_core::config`
+//!   makes *after* decoding are therefore made here too — a file this wrote
+//!   that the next launch will not read is the failure the round trip exists to
+//!   prevent.
 
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write as _},
+    net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use ganja_core::{Project, config::Config};
+use ganja_core::{Project, config::Config, lsp::server::BUILTIN_IDS};
 
 /// Directory opencode keeps its global config in, under the XDG config home.
 const OPENCODE_DIRECTORY: &str = "opencode";
@@ -67,6 +75,62 @@ const MODES: [&str; 3] = ["primary", "subagent", "all"];
 /// this mode, whatever the entry said itself (`config.ts:536-543`).
 const PRIMARY: &str = "primary";
 
+/// The two shapes an `mcp` entry takes. Both sides spell them the same way and
+/// both discriminate on `type`, so the word travels as it stands.
+const LOCAL: &str = "local";
+/// See [`LOCAL`].
+const REMOTE: &str = "remote";
+
+/// upstream's `builtinServerIds` (`v1/config/lsp.ts:24-63`), verbatim.
+///
+/// Ganja ships two of these — [`BUILTIN_IDS`] — so an entry naming one of the
+/// others is written against a definition that is not in this build. What that
+/// costs depends on how much the entry was leaning on it: upstream lets such an
+/// entry name only a `command` (or only `disabled`) and inherit the extensions
+/// and the root strategy, and there is nothing here to inherit them from. An
+/// entry that names both its `command` and its `extensions` is leaning on
+/// nothing, and travels as what it already is — see [`stands_alone`].
+const UPSTREAM_LSP_SERVERS: [&str; 38] = [
+    "deno",
+    "typescript",
+    "vue",
+    "eslint",
+    "oxlint",
+    "biome",
+    "gopls",
+    "ruby-lsp",
+    "ty",
+    "pyright",
+    "elixir-ls",
+    "zls",
+    "csharp",
+    "razor",
+    "fsharp",
+    "sourcekit-lsp",
+    "rust",
+    "clangd",
+    "svelte",
+    "astro",
+    "jdtls",
+    "kotlin-ls",
+    "yaml-ls",
+    "lua-ls",
+    "php intelephense",
+    "prisma",
+    "dart",
+    "ocaml-lsp",
+    "bash",
+    "terraform",
+    "texlab",
+    "dockerfile",
+    "gleam",
+    "clojure-lsp",
+    "nixd",
+    "tinymist",
+    "haskell-language-server",
+    "julials",
+];
+
 /// Left column of both sections of the table.
 const HEADER: &str = "OPENCODE";
 
@@ -93,11 +157,14 @@ mod reason {
     pub const UNPUBLISHED: &str = "unpublished";
     /// The key exists in both, but its contents mean different things.
     pub const INCOMPATIBLE: &str = "incompatible";
+    /// Ganja would refuse the value at load, so writing it would produce a
+    /// config file that does not read back.
+    pub const REFUSED: &str = "refused";
 }
 
 /// Top-level keys that are carried nowhere, and the one word each is reported
 /// with. Everything not here and not handled explicitly is [`reason::UNKNOWN`].
-const SKIPPED: [(&str, &str); 26] = [
+const SKIPPED: [(&str, &str); 23] = [
     ("$schema", reason::UNPUBLISHED),
     ("attachment", reason::UNSUPPORTED),
     ("autoupdate", reason::UNSUPPORTED),
@@ -112,15 +179,12 @@ const SKIPPED: [(&str, &str); 26] = [
     ("keybinds", reason::INCOMPATIBLE),
     ("layout", reason::UNSUPPORTED),
     ("logLevel", reason::UNSUPPORTED),
-    ("lsp", reason::UNSUPPORTED),
-    ("mcp", reason::UNSUPPORTED),
     ("plugin", reason::UNSUPPORTED),
     ("reference", reason::UNSUPPORTED),
     ("references", reason::UNSUPPORTED),
     ("server", reason::UNSUPPORTED),
     ("share", reason::UNSUPPORTED),
     ("skills", reason::UNSUPPORTED),
-    ("snapshot", reason::UNSUPPORTED),
     ("subagent_depth", reason::UNSUPPORTED),
     ("tool_output", reason::UNSUPPORTED),
     ("tui", reason::INCOMPATIBLE),
@@ -239,8 +303,11 @@ fn parse_options() -> jsonc_parser::ParseOptions {
 enum Json {
     Null,
     Bool(bool),
-    /// Kept as it was written. Nothing ganja's config carries is a number, so
-    /// this exists to be *reported*, never re-emitted.
+    /// Kept as it was written, digits and all, so a value that is re-emitted
+    /// is the one that was read rather than one that went through a float.
+    /// Two keys carry a number across — an MCP server's `timeout` and whatever
+    /// sits inside an LSP entry's `initialization` — and every other number in
+    /// an opencode config exists here to be *reported*.
     Number(String),
     String(String),
     Array(Vec<Json>),
@@ -532,7 +599,28 @@ impl Report {
     fn warn(&mut self, warning: String) {
         self.warnings.push(warning);
     }
+
+    /// Takes everything `other` collected.
+    fn adopt(&mut self, other: Self) {
+        self.mapped.extend(other.mapped);
+        self.skipped.extend(other.skipped);
+        self.warnings.extend(other.warnings);
+    }
+
+    /// Takes only what `other` has to *say*.
+    ///
+    /// For an entry that was refused after its fields had already been read:
+    /// each of those rows names a key that landed somewhere, and none of them
+    /// did. The entry's own row covers everything under it, and the warnings
+    /// are what explain why.
+    fn adopt_warnings(&mut self, other: Self) {
+        self.warnings.extend(other.warnings);
+    }
 }
+
+/// Why an entry could not be written at all: the word its row carries, and the
+/// clause that says what about it was impossible.
+type Refusal = (&'static str, String);
 
 /// The ganja config being built, one slot per key it can carry.
 ///
@@ -550,6 +638,9 @@ struct Built {
     permission: Option<Json>,
     agent: Vec<(String, Json)>,
     command: Vec<(String, Json)>,
+    mcp: Vec<(String, Json)>,
+    lsp: Option<Json>,
+    snapshot: Option<bool>,
 }
 
 impl Built {
@@ -564,6 +655,9 @@ impl Built {
             && self.permission.is_none()
             && self.agent.is_empty()
             && self.command.is_empty()
+            && self.mcp.is_empty()
+            && self.lsp.is_none()
+            && self.snapshot.is_none()
     }
 
     fn document(self) -> Json {
@@ -593,6 +687,15 @@ impl Built {
         }
         if !self.command.is_empty() {
             entries.push(("command".to_owned(), Json::Object(self.command)));
+        }
+        if !self.mcp.is_empty() {
+            entries.push(("mcp".to_owned(), Json::Object(self.mcp)));
+        }
+        if let Some(lsp) = self.lsp {
+            entries.push(("lsp".to_owned(), lsp));
+        }
+        if let Some(snapshot) = self.snapshot {
+            entries.push(("snapshot".to_owned(), Json::Bool(snapshot)));
         }
 
         Json::Object(entries)
@@ -650,6 +753,9 @@ fn map_config(source: &Json) -> (Built, Report) {
             }
             "mode" => modes = Some(value),
             "command" => built.command = commands(&mut report, &at, value),
+            "mcp" => built.mcp = mcp(&mut report, &at, value),
+            "lsp" => built.lsp = lsp(&mut report, &at, value),
+            "snapshot" => built.snapshot = boolean(&mut report, &at, value),
             "provider" => providers(&mut report, &at, value),
             "autoshare" => {
                 report.skip(&at.from, reason::UNSUPPORTED);
@@ -715,6 +821,90 @@ fn agent_mode(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
     report.map(&at.from, &at.to);
 
     Some(Json::String(spelled.to_owned()))
+}
+
+/// A key whose value has to be a positive whole number.
+///
+/// Guarded here rather than left to [`validate`] because ganja types the one
+/// number it reads — an MCP server's `timeout` — as a `NonZeroU64`: a zero, a
+/// fraction or a negative would otherwise turn one line of somebody else's
+/// config into a failed import instead of a row.
+fn positive_integer(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
+    let Json::Number(spelled) = value else {
+        report.skip(&at.from, reason::MALFORMED);
+
+        return None;
+    };
+    // Re-emitted as the digits that were read, so the value that lands is the
+    // one the source wrote.
+    if spelled
+        .parse::<u64>()
+        .is_ok_and(|milliseconds| milliseconds > 0)
+    {
+        report.map(&at.from, &at.to);
+
+        return Some(Json::Number(spelled.clone()));
+    }
+
+    report.skip(&at.from, reason::MALFORMED);
+
+    None
+}
+
+/// A key whose value has to be a map of strings, each value guarded.
+///
+/// The map itself is carried even when nothing survives inside it: these are
+/// variables and headers layered over what a process already has, so an empty
+/// one adds nothing, which is exactly what a map whose every value was a token
+/// meant.
+fn string_map(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
+    let Some(entries) = value.as_object() else {
+        report.skip(&at.from, reason::MALFORMED);
+
+        return None;
+    };
+
+    let mut kept: Vec<(String, Json)> = Vec::new();
+    for (key, entry) in entries {
+        let child = at.child(key);
+        let Some(text) = entry.as_str() else {
+            report.skip(&child.from, reason::MALFORMED);
+            continue;
+        };
+        if let Some(text) = guard(report, &child.from, text) {
+            insert(&mut kept, key.clone(), Json::String(text));
+        }
+    }
+    report.map(&at.from, &at.to);
+
+    Some(Json::Object(kept))
+}
+
+/// An array of strings where every element survives or none does, reported as
+/// a [`Refusal`] word when one does not.
+///
+/// The strictness is the point, and it is where these part company with
+/// `instructions`: a command and an extension list are not collections of
+/// independent entries. A command missing one of its arguments runs a different
+/// program, and an extension list emptied of everything that could be carried
+/// is `[]`, which ganja reads as *every* file — the opposite of the narrowing
+/// it was. Leaving the whole entry out is the only answer that does not quietly
+/// mean something else.
+fn string_array(report: &mut Report, at: &At, value: &Json) -> Result<Vec<Json>, &'static str> {
+    let Some(elements) = value.as_array() else {
+        return Err(reason::MALFORMED);
+    };
+
+    let mut carried = Vec::with_capacity(elements.len());
+    for (index, element) in elements.iter().enumerate() {
+        let entry = at.index(index);
+        let text = element.as_str().ok_or(reason::MALFORMED)?;
+        let text = guard(report, &entry.from, text).ok_or(reason::TOKEN)?;
+        carried.push(Json::String(text));
+    }
+    report.map(&at.from, &at.to);
+
+    Ok(carried)
 }
 
 /// Copies a string, deciding what a `{env:}`/`{file:}` token in it means.
@@ -1085,6 +1275,493 @@ fn command(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
     fields.document()
 }
 
+/// Maps an `mcp` object into ganja's server entries.
+fn mcp(report: &mut Report, at: &At, value: &Json) -> Vec<(String, Json)> {
+    let Some(entries) = value.as_object() else {
+        report.skip(&at.from, reason::MALFORMED);
+
+        return Vec::new();
+    };
+
+    let mut servers = Vec::new();
+    for (name, entry) in entries {
+        if let Some(entry) = mcp_server(report, &at.child(name), entry) {
+            insert(&mut servers, name.clone(), entry);
+        }
+    }
+
+    servers
+}
+
+/// One MCP server's fields, in the order ganja writes them.
+///
+/// One struct for both shapes, because `type` already decides which fields are
+/// legal and a field belonging to the other shape is reported the same way an
+/// invented one is. The order below reads correctly for either: a local entry
+/// leaves the remote fields empty and a remote entry leaves the local ones.
+#[derive(Debug, Default)]
+struct McpFields {
+    command: Option<Json>,
+    url: Option<Json>,
+    cwd: Option<Json>,
+    environment: Option<Json>,
+    headers: Option<Json>,
+    enabled: Option<Json>,
+    timeout: Option<Json>,
+}
+
+impl McpFields {
+    fn document(self, kind: &str) -> Json {
+        let mut entries = vec![("type".to_owned(), Json::String(kind.to_owned()))];
+        for (key, value) in [
+            ("command", self.command),
+            ("url", self.url),
+            ("cwd", self.cwd),
+            ("environment", self.environment),
+            ("headers", self.headers),
+            ("enabled", self.enabled),
+            ("timeout", self.timeout),
+        ] {
+            if let Some(value) = value {
+                entries.push((key.to_owned(), value));
+            }
+        }
+
+        Json::Object(entries)
+    }
+}
+
+/// Maps one MCP server entry, which is written whole or not at all.
+///
+/// Whole or not at all is why the fields are read into a report of their own:
+/// a `mapped` row under an entry that was then refused would claim a setting is
+/// in force that was never written. Only what such a pass had to *say* survives
+/// the refusal.
+fn mcp_server(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
+    let Some(entries) = value.as_object() else {
+        report.skip(&at.from, reason::MALFORMED);
+
+        return None;
+    };
+
+    // `type` discriminates on both sides, and an entry without one describes no
+    // server at all: ganja refuses it by name at load, so carrying it would
+    // write a file that does not read back.
+    let kind = value.get("type").and_then(Json::as_str).unwrap_or_default();
+    if kind != LOCAL && kind != REMOTE {
+        report.skip(&at.from, reason::MALFORMED);
+        report.warn(format!(
+            "`{}` names no `type` ganja knows, so no server was written for it{}",
+            at.from,
+            if value.get("enabled").and_then(Json::as_bool) == Some(false) {
+                "; a stub that only switches a server off has nothing to switch off here"
+            } else {
+                ""
+            }
+        ));
+
+        return None;
+    }
+    let local = kind == LOCAL;
+
+    let mut collected = Report::default();
+    let mut fields = McpFields::default();
+    let mut refused: Option<Refusal> = None;
+    for (key, field) in entries {
+        let child = at.child(key);
+        match key.as_str() {
+            // Carried by the shape itself, and rowed like every other key so
+            // that nothing in the source is missing from the table.
+            "type" => collected.map(&child.from, &child.to),
+            "command" if local => match string_array(&mut collected, &child, field) {
+                // Refused empty by ganja, and rightly: upstream destructures it
+                // as `[cmd, ...args]`, so an entry with nothing to run is not a
+                // server.
+                Ok(command) if command.is_empty() => {
+                    refused = Some((
+                        reason::MALFORMED,
+                        format!("`{}` names no program", child.from),
+                    ));
+                }
+                Ok(command) => fields.command = Some(Json::Array(command)),
+                Err(reason) => {
+                    refused = Some((
+                        reason,
+                        format!("`{}` could not be carried across", child.from),
+                    ));
+                }
+            },
+            "url" if !local => match url(&mut collected, &child, field) {
+                Ok(url) => fields.url = Some(url),
+                Err(refusal) => refused = Some(refusal),
+            },
+            "cwd" if local => {
+                fields.cwd = string(&mut collected, &child, field).map(Json::String);
+            }
+            "environment" if local => {
+                fields.environment = string_map(&mut collected, &child, field);
+            }
+            "headers" if !local => fields.headers = string_map(&mut collected, &child, field),
+            "enabled" => fields.enabled = boolean(&mut collected, &child, field).map(Json::Bool),
+            "timeout" => fields.timeout = positive_integer(&mut collected, &child, field),
+            "oauth" if !local => {
+                collected.skip(&child.from, reason::UNSUPPORTED);
+                collected.warn(format!(
+                    "`{}` was left out: ganja does not authenticate itself to an MCP server yet, \
+                     so one that wants a token has to be given it through `headers`",
+                    child.from
+                ));
+            }
+            _ => collected.skip(&child.from, reason::UNKNOWN),
+        }
+    }
+
+    // The required field decides whether there is an entry at all, and an
+    // absent one is checked after the loop because absence has no key to hang a
+    // row on.
+    if refused.is_none() {
+        let missing = if local {
+            fields.command.is_none().then_some("command")
+        } else {
+            fields.url.is_none().then_some("url")
+        };
+        if let Some(missing) = missing {
+            refused = Some((
+                reason::MALFORMED,
+                format!("a {kind} server needs a `{missing}`"),
+            ));
+        }
+    }
+
+    if let Some((reason, explanation)) = refused {
+        report.skip(&at.from, reason);
+        report.adopt_warnings(collected);
+        report.warn(format!("`{}` was left out: {explanation}", at.from));
+
+        return None;
+    }
+    report.adopt(collected);
+
+    Some(fields.document(kind))
+}
+
+/// A remote server's endpoint.
+///
+/// Ganja refuses one that is neither `https` nor `http` to loopback, because a
+/// remote entry's `headers` are where somebody puts a token — the rule it
+/// applies to a provider's base URL, for that reason. Applied here so that what
+/// this writes is a file the next launch loads.
+///
+/// Neither the row nor the warning quotes the value: a URL may carry a
+/// credential in its userinfo, and echoing one back is how it reaches a log.
+fn url(report: &mut Report, at: &At, value: &Json) -> Result<Json, Refusal> {
+    let Some(text) = value.as_str() else {
+        return Err((reason::MALFORMED, format!("`{}` is not a URL", at.from)));
+    };
+    let Some(text) = guard(report, &at.from, text) else {
+        return Err((
+            reason::TOKEN,
+            format!(
+                "`{}` is nothing but a token opencode would have expanded",
+                at.from
+            ),
+        ));
+    };
+    if !reachable_in_the_clear(&text) {
+        return Err((
+            reason::REFUSED,
+            format!(
+                "`{}` is not one ganja will send headers to — a remote server has to be reached \
+                 over https, or over http to loopback",
+                at.from
+            ),
+        ));
+    }
+    report.map(&at.from, &at.to);
+
+    Ok(Json::String(text))
+}
+
+/// Whether a remote MCP endpoint is one ganja will speak to.
+///
+/// The conservative half of `ganja_core::config`'s own check, which parses the
+/// URL properly and is the authority — this one only decides whether to carry
+/// an entry. The asymmetry is what licenses it: answering "no" to a URL that
+/// would have been accepted costs a named row a user can act on, where
+/// answering "yes" to one that would not costs a config file that does not
+/// load. So every spelling this cannot resolve by itself — a host in an
+/// encoding, an IPv4 address written short — is a no.
+fn reachable_in_the_clear(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+
+    match scheme.to_ascii_lowercase().as_str() {
+        "https" => true,
+        "http" => is_loopback(host(rest)),
+        _ => false,
+    }
+}
+
+/// The host of an authority, without its userinfo or its port.
+fn host(rest: &str) -> &str {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // Userinfo runs to the *last* `@`: a password may hold one.
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+
+    // The colons inside a bracketed IPv6 literal are the address, not a port.
+    if let Some(address) = authority
+        .strip_prefix('[')
+        .and_then(|inside| inside.split_once(']'))
+        .map(|(address, _)| address)
+    {
+        return address;
+    }
+
+    authority
+        .rsplit_once(':')
+        .filter(|(_, port)| port.chars().all(|digit| digit.is_ascii_digit()))
+        .map_or(authority, |(host, _)| host)
+}
+
+/// Whether `host` names this machine.
+///
+/// Parsed rather than matched as text, for the reason `ganja_core` spells out
+/// where it makes the same decision: `127.0.0.1.example.invalid` is a hostname
+/// somebody else can register, and every cheap spelling of this check is beaten
+/// by one.
+fn is_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<Ipv4Addr>()
+            .is_ok_and(|address| address.is_loopback())
+        || host
+            .parse::<Ipv6Addr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+/// Maps an `lsp` value: the boolean, or the map of entries.
+fn lsp(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
+    match value {
+        Json::Bool(enabled) => {
+            report.map(&at.from, &at.to);
+            if *enabled {
+                report.warn(format!(
+                    "`lsp: true` starts the language servers this build ships, which are {}; \
+                     opencode's list is longer, and anything else has to be written out as an \
+                     entry with its own `command` and `extensions`",
+                    BUILTIN_IDS.join(" and ")
+                ));
+            }
+
+            Some(Json::Bool(*enabled))
+        }
+        Json::Object(entries) => {
+            let mut kept = Vec::new();
+            let mut absent = Vec::new();
+            for (name, entry) in entries {
+                let child = at.child(name);
+                if !BUILTIN_IDS.contains(&name.as_str())
+                    && UPSTREAM_LSP_SERVERS.contains(&name.as_str())
+                    && !stands_alone(entry)
+                {
+                    report.skip(&child.from, reason::UNSUPPORTED);
+                    absent.push(name.clone());
+                    continue;
+                }
+                if let Some(entry) = lsp_entry(report, &child, name, entry) {
+                    insert(&mut kept, name.clone(), entry);
+                }
+            }
+
+            if !absent.is_empty() {
+                report.warn(format!(
+                    "opencode ships a language server definition for {} and ganja ships only {}, \
+                     so there is nothing here to inherit a command, an extension list or a root \
+                     from; a server named under `lsp` has to bring its own `command` and \
+                     `extensions`",
+                    absent.join(", "),
+                    BUILTIN_IDS.join(" and ")
+                ));
+            }
+            if kept.is_empty() {
+                // An empty map is not "no servers": ganja merges a map *over*
+                // the servers it ships, so `{}` would switch them on. An absent
+                // key is the only spelling that means what a map nothing
+                // survived means.
+                report.warn(format!(
+                    "nothing under `{}` describes a server this build can start, so the key was \
+                     not written at all — an absent `lsp` is no language server, where an empty \
+                     map would start the built-in ones",
+                    at.from
+                ));
+
+                return None;
+            }
+
+            // No row for the key itself, for `agent`'s reason: a container is
+            // covered by the rows its entries carry.
+            Some(Json::Object(kept))
+        }
+        _ => {
+            report.skip(&at.from, reason::MALFORMED);
+
+            None
+        }
+    }
+}
+
+/// Whether an entry describes a server without help from a definition this
+/// build does not have.
+///
+/// Both fields decide it, because both are what a custom server in ganja is:
+/// the `command` to start, and the `extensions` it is asked about. An entry
+/// naming both is not leaning on the builtin its name refers to upstream — it
+/// already *is* a whole server description — so it imports under that name and
+/// does here what it did there. An entry naming less is leaning, and what it
+/// would lean on is not in this build.
+///
+/// Presence is read off the source rather than off a mapped entry on purpose:
+/// this decides only whether the name is a reason to stop, and whether the
+/// fields it names are usable is [`lsp_entry`]'s question, answered with a
+/// reason of its own.
+fn stands_alone(entry: &Json) -> bool {
+    entry.get("command").is_some() && entry.get("extensions").is_some()
+}
+
+/// One language server entry's fields, in the order ganja writes them.
+#[derive(Debug, Default)]
+struct LspFields {
+    command: Option<Json>,
+    extensions: Option<Json>,
+    disabled: Option<Json>,
+    env: Option<Json>,
+    initialization: Option<Json>,
+}
+
+impl LspFields {
+    fn document(self) -> Json {
+        let entries: Vec<(String, Json)> = [
+            ("command", self.command),
+            ("extensions", self.extensions),
+            ("disabled", self.disabled),
+            ("env", self.env),
+            ("initialization", self.initialization),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
+        .collect();
+
+        Json::Object(entries)
+    }
+}
+
+/// Maps one language server entry, whole or not at all — [`mcp_server`]'s rule,
+/// for its reason.
+///
+/// Ganja's own two refusals are made here rather than left to the file: a
+/// `command` is required except on a disabled entry, and a server this build
+/// ships no definition for has to name its `extensions`. Neither is invented on
+/// an entry's behalf — a fabricated command would be a program nobody chose.
+fn lsp_entry(report: &mut Report, at: &At, name: &str, value: &Json) -> Option<Json> {
+    let Some(entries) = value.as_object() else {
+        report.skip(&at.from, reason::MALFORMED);
+
+        return None;
+    };
+
+    let mut collected = Report::default();
+    let mut fields = LspFields::default();
+    let mut refused: Option<Refusal> = None;
+    for (key, field) in entries {
+        let child = at.child(key);
+        match key.as_str() {
+            "command" => match string_array(&mut collected, &child, field) {
+                Ok(command) if command.is_empty() => {
+                    refused = Some((
+                        reason::MALFORMED,
+                        format!("`{}` names no program", child.from),
+                    ));
+                }
+                Ok(command) => fields.command = Some(Json::Array(command)),
+                Err(reason) => {
+                    refused = Some((
+                        reason,
+                        format!("`{}` could not be carried across", child.from),
+                    ));
+                }
+            },
+            // An empty list is legal and means every file, which is why this
+            // one is not refused for being empty the way a command is.
+            "extensions" => match string_array(&mut collected, &child, field) {
+                Ok(extensions) => fields.extensions = Some(Json::Array(extensions)),
+                Err(reason) => {
+                    refused = Some((
+                        reason,
+                        format!("`{}` could not be carried across", child.from),
+                    ));
+                }
+            },
+            "disabled" => fields.disabled = boolean(&mut collected, &child, field).map(Json::Bool),
+            "env" => fields.env = string_map(&mut collected, &child, field),
+            "initialization" => {
+                fields.initialization = initialization(&mut collected, &child, field);
+            }
+            _ => collected.skip(&child.from, reason::UNKNOWN),
+        }
+    }
+
+    let disabled = fields.disabled == Some(Json::Bool(true));
+    if refused.is_none() && !disabled {
+        if fields.command.is_none() {
+            refused = Some((
+                reason::MALFORMED,
+                "only a disabled server may leave out its `command`, and nothing here says which \
+                 program to start"
+                    .to_owned(),
+            ));
+        } else if fields.extensions.is_none() && !BUILTIN_IDS.contains(&name) {
+            refused = Some((
+                reason::MALFORMED,
+                "a server this build ships no definition for has to name the `extensions` it is \
+                 asked about"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    if let Some((reason, explanation)) = refused {
+        report.skip(&at.from, reason);
+        report.adopt_warnings(collected);
+        report.warn(format!("`{}` was left out: {explanation}", at.from));
+
+        return None;
+    }
+    report.adopt(collected);
+
+    Some(fields.document())
+}
+
+/// The `initializationOptions` a language server is started with, carried as it
+/// stands.
+///
+/// Upstream types it as an object, and ganja answers a `workspace/configuration`
+/// request by walking a dotted path into it, so anything that is not an object
+/// describes nothing either side could use.
+fn initialization(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
+    if value.as_object().is_none() {
+        report.skip(&at.from, reason::MALFORMED);
+
+        return None;
+    }
+    let carried = guarded(report, at, value)?;
+    report.map(&at.from, &at.to);
+
+    Some(carried)
+}
+
 /// Reports a `provider` map, which is carried nowhere.
 ///
 /// Ganja sizes and prices models from a compiled-in catalog and takes an
@@ -1350,8 +2027,8 @@ fn write(path: &Path, document: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        At, Built, Json, Report, guard, map_config, parse, permission, tokens, validate,
-        write_string,
+        At, BUILTIN_IDS, Built, Json, Report, guard, map_config, parse, permission,
+        reachable_in_the_clear, tokens, validate, write_string,
     };
 
     /// One opencode config holding every shape the mapping has a rule for.
@@ -1405,6 +2082,28 @@ mod tests {
                 ("command.release.template", "command.release.template"),
                 ("command.release.description", "command.release.description"),
                 ("command.release.agent", "command.release.agent"),
+                // An MCP entry is ganja's shape already, `type` included.
+                ("mcp.fs.type", "mcp.fs.type"),
+                ("mcp.fs.command", "mcp.fs.command"),
+                ("mcp.fs.cwd", "mcp.fs.cwd"),
+                ("mcp.fs.environment", "mcp.fs.environment"),
+                ("mcp.fs.enabled", "mcp.fs.enabled"),
+                ("mcp.fs.timeout", "mcp.fs.timeout"),
+                ("mcp.docs.type", "mcp.docs.type"),
+                ("mcp.docs.url", "mcp.docs.url"),
+                ("mcp.docs.headers", "mcp.docs.headers"),
+                // A builtin ganja ships too, one of opencode's that describes
+                // itself whole, and a server of the user's own. The entry that
+                // leans on a definition this build does not have is the only
+                // one missing.
+                ("lsp.rust.disabled", "lsp.rust.disabled"),
+                ("lsp.deno.command", "lsp.deno.command"),
+                ("lsp.deno.extensions", "lsp.deno.extensions"),
+                ("lsp.nickel.command", "lsp.nickel.command"),
+                ("lsp.nickel.extensions", "lsp.nickel.extensions"),
+                ("lsp.nickel.env", "lsp.nickel.env"),
+                ("lsp.nickel.initialization", "lsp.nickel.initialization"),
+                ("snapshot", "snapshot"),
                 // A `mode` entry becomes an agent that only the user can pick.
                 ("mode.ship.prompt", "agent.ship.prompt"),
                 ("mode.ship.hidden", "agent.ship.hidden"),
@@ -1437,7 +2136,9 @@ mod tests {
                 ("command.release.subtask", "unsupported"),
                 ("provider.anthropic", "catalog"),
                 ("provider.anthropic.options.apiKey", "credential"),
-                ("mcp", "unsupported"),
+                ("mcp.docs.oauth", "unsupported"),
+                ("mcp.legacy", "malformed"),
+                ("lsp.typescript", "unsupported"),
                 ("compaction", "deferred"),
                 ("autoshare", "unsupported"),
                 ("username", "unsupported"),
@@ -1489,7 +2190,62 @@ mod tests {
       "description": "tag and push",
       "agent": "build"
     }
-  }
+  },
+  "mcp": {
+    "fs": {
+      "type": "local",
+      "command": [
+        "mcp-fs",
+        "--root",
+        "."
+      ],
+      "cwd": "./servers",
+      "environment": {
+        "MCP_FS_MODE": "ro"
+      },
+      "enabled": true,
+      "timeout": 45000
+    },
+    "docs": {
+      "type": "remote",
+      "url": "https://mcp.example.invalid/mcp",
+      "headers": {
+        "Authorization": "Bearer {env:DOCS_TOKEN}"
+      }
+    }
+  },
+  "lsp": {
+    "rust": {
+      "disabled": true
+    },
+    "deno": {
+      "command": [
+        "deno",
+        "lsp"
+      ],
+      "extensions": [
+        ".ts",
+        ".tsx"
+      ]
+    },
+    "nickel": {
+      "command": [
+        "nls"
+      ],
+      "extensions": [
+        ".ncl"
+      ],
+      "env": {
+        "NICKEL_LOG": "info"
+      },
+      "initialization": {
+        "eval": {
+          "limit": 500
+        }
+      }
+    }
+  },
+  "snapshot": false
 }
 "#
         );
@@ -1675,11 +2431,351 @@ mod tests {
     /// and the rows say why rather than the command claiming success.
     #[test]
     fn a_config_of_nothing_but_skipped_keys_produces_no_file() {
-        let (built, report) = imported(r#"{"mcp": {}, "lsp": true, "autoupdate": false}"#);
+        let (built, report) = imported(r#"{"plugin": [], "share": "auto", "autoupdate": false}"#);
 
         assert!(built.is_empty());
         assert!(report.mapped.is_empty(), "{:?}", report.mapped);
         assert_eq!(report.skipped.len(), 3);
+    }
+
+    /// An entry with no `type` describes no server ganja could connect to, and
+    /// the shape it usually takes is somebody switching off a server another
+    /// tier defined — which is why the warning says there is nothing here to
+    /// switch off, rather than leaving a user to conclude it worked.
+    #[test]
+    fn an_mcp_entry_with_no_type_writes_no_server_and_says_what_it_was() {
+        let (built, report) = imported(r#"{"mcp": {"legacy": {"enabled": false}}}"#);
+
+        assert!(built.mcp.is_empty());
+        assert_eq!(rows(&report.skipped), vec![("mcp.legacy", "malformed")]);
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].contains("nothing to switch off"),
+            "{}",
+            report.warnings[0]
+        );
+    }
+
+    /// A server is written whole or not at all: ganja needs the `command` (or
+    /// the `url`) and refuses an entry without one, so an import that wrote the
+    /// rest of it would produce a file the next launch will not read.
+    #[test]
+    fn an_mcp_entry_missing_the_field_that_names_the_server_is_left_out() {
+        let cases: [(&str, &str); 4] = [
+            (r#"{"type": "local"}"#, "malformed"),
+            (r#"{"type": "local", "command": []}"#, "malformed"),
+            (r#"{"type": "remote"}"#, "malformed"),
+            (r#"{"type": "remote", "url": 8080}"#, "malformed"),
+        ];
+
+        for (entry, reason) in cases {
+            let (built, report) = imported(&format!(r#"{{"mcp": {{"one": {entry}}}}}"#));
+
+            assert!(built.mcp.is_empty(), "{entry} was written");
+            assert_eq!(rows(&report.skipped), vec![("mcp.one", reason)], "{entry}");
+            assert!(!report.warnings.is_empty(), "{entry} was left out silently");
+        }
+    }
+
+    /// A command is one invocation rather than a list of independent entries,
+    /// so an argument that is only a token cannot be dropped the way an
+    /// instruction path is: what would run is a different program.
+    #[test]
+    fn a_command_argument_that_is_only_a_token_leaves_the_whole_server_out() {
+        let (built, report) = imported(
+            r#"{"mcp": {"fs": {"type": "local", "cwd": "./here", "command": ["node", "{env:SERVER}"]}}}"#,
+        );
+
+        assert!(built.mcp.is_empty());
+        // The rows the entry's other fields earned go with it: a `mapped` row
+        // under a server that was never written would name a setting its author
+        // still believes is in force.
+        assert!(report.mapped.is_empty(), "{:?}", report.mapped);
+        assert_eq!(rows(&report.skipped), vec![("mcp.fs", "token")]);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("{env:SERVER}")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    /// The rule ganja applies to a provider's base URL, applied to the one
+    /// place an MCP entry puts a token. The value is never repeated back: a URL
+    /// may carry a credential in its userinfo.
+    #[test]
+    fn a_remote_server_ganja_would_not_send_headers_to_is_left_out_unquoted() {
+        let (built, report) = imported(
+            r#"{"mcp": {"docs": {"type": "remote", "url": "http://mcp.example.invalid/mcp",
+               "headers": {"Authorization": "Bearer canary-4417"}}}}"#,
+        );
+
+        assert!(built.mcp.is_empty());
+        assert_eq!(rows(&report.skipped), vec![("mcp.docs", "refused")]);
+        for said in report.warnings.iter().chain(
+            report
+                .skipped
+                .iter()
+                .map(|(key, _)| key)
+                .chain(report.mapped.iter().map(|(key, _)| key)),
+        ) {
+            assert!(
+                !said.contains("mcp.example.invalid") && !said.contains("canary-4417"),
+                "the refusal repeated what it refused: {said}"
+            );
+        }
+    }
+
+    /// Which endpoints travel. Conservative on purpose: this decides whether to
+    /// carry an entry, and `ganja_core` parses the URL properly and is the
+    /// authority — a "no" here costs a row somebody can act on, where a wrong
+    /// "yes" costs a config file that does not load.
+    #[test]
+    fn only_an_endpoint_this_can_prove_is_https_or_this_machine_is_carried() {
+        let cases: [(&str, bool); 13] = [
+            ("https://mcp.example.invalid/mcp", true),
+            ("https://mcp.example.invalid:8443/mcp", true),
+            // A scheme is case-insensitive, and ganja's reader lowercases it.
+            ("HTTPS://mcp.example.invalid/mcp", true),
+            ("http://localhost:3000/mcp", true),
+            ("http://127.0.0.1/mcp", true),
+            ("http://user:p@ss@127.0.0.1:9/mcp", true),
+            ("http://[::1]:8080/mcp", true),
+            ("http://example.invalid/mcp", false),
+            // A hostname somebody else can register, which is the whole reason
+            // the host is parsed rather than matched as text.
+            ("http://127.0.0.1.example.invalid/mcp", false),
+            // Short-form IPv4 is a loopback address ganja's URL reader resolves
+            // and this one does not, so it is left out rather than guessed at.
+            ("http://127.1/mcp", false),
+            ("ws://localhost/mcp", false),
+            ("mcp-fs", false),
+            ("", false),
+        ];
+
+        for (url, carried) in cases {
+            assert_eq!(reachable_in_the_clear(url), carried, "judging {url:?}");
+        }
+    }
+
+    /// Ganja types the budget as a `NonZeroU64`, so anything that is not a
+    /// positive whole number is a row rather than an import that fails on one
+    /// line of somebody else's config.
+    #[test]
+    fn an_mcp_timeout_is_carried_only_when_it_is_a_positive_whole_number() {
+        let cases: [(&str, bool); 6] = [
+            ("45000", true),
+            ("1", true),
+            ("0", false),
+            ("-1", false),
+            ("1.5", false),
+            (r#""45000""#, false),
+        ];
+
+        for (spelled, carried) in cases {
+            let (built, report) = imported(&format!(
+                r#"{{"mcp": {{"fs": {{"type": "local", "command": ["s"], "timeout": {spelled}}}}}}}"#
+            ));
+
+            assert_eq!(
+                built.document().render().contains("\"timeout\""),
+                carried,
+                "carrying {spelled}"
+            );
+            assert_eq!(
+                report.skipped.is_empty(),
+                carried,
+                "reporting {spelled}: {:?}",
+                report.skipped
+            );
+        }
+    }
+
+    /// Ganja refuses an unknown field inside an MCP entry by name, so one
+    /// carried across would be a config file that does not load. It is reported
+    /// where it was written and dropped.
+    #[test]
+    fn a_field_an_mcp_entry_does_not_have_is_reported_rather_than_written() {
+        let (built, report) = imported(
+            r#"{"mcp": {"fs": {"type": "local", "command": ["s"], "sparkles": true,
+               "url": "https://elsewhere.invalid"}}}"#,
+        );
+
+        let rendered = built.document().render();
+        assert!(!rendered.contains("sparkles"), "{rendered}");
+        assert!(
+            !rendered.contains("elsewhere.invalid"),
+            "a remote field on a local server is not a field: {rendered}"
+        );
+        assert_eq!(
+            rows(&report.skipped),
+            vec![("mcp.fs.sparkles", "unknown"), ("mcp.fs.url", "unknown")]
+        );
+        validate(&rendered).expect("what survived is still a config ganja reads");
+    }
+
+    /// `true` means something narrower here than it does upstream, and a user
+    /// who is not told that will conclude their language servers are running.
+    #[test]
+    fn lsp_true_is_carried_and_names_the_servers_this_build_actually_ships() {
+        let (built, report) = imported(r#"{"lsp": true}"#);
+
+        assert_eq!(built.lsp, Some(Json::Bool(true)));
+        assert_eq!(rows(&report.mapped), vec![("lsp", "lsp")]);
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        for shipped in BUILTIN_IDS {
+            assert!(
+                report.warnings[0].contains(shipped),
+                "{}",
+                report.warnings[0]
+            );
+        }
+
+        // `false` is the same answer on both sides — no language server at all
+        // — so it travels without anything to say about it.
+        let (built, report) = imported(r#"{"lsp": false}"#);
+        assert_eq!(built.lsp, Some(Json::Bool(false)));
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    /// opencode ships a definition for thirty-eight language servers and ganja
+    /// ships two, so what decides an entry naming one of the other thirty-six
+    /// is how much of that definition it was relying on — not the name.
+    ///
+    /// An entry that names its own `command` *and* its own `extensions` is a
+    /// whole server description already: ganja loads it, starts it, and asks it
+    /// about the files it said, which is what it did upstream. An entry naming
+    /// less was leaning on the builtin, and the builtin is not in this build.
+    #[test]
+    fn an_upstream_language_server_travels_when_it_describes_itself_whole() {
+        let cases: [(&str, Vec<&str>); 6] = [
+            // Upstream lets a command stand alone because the extensions come
+            // from the builtin; here they would come from nowhere.
+            (
+                r#"{"typescript": {"command": ["typescript-language-server", "--stdio"]}}"#,
+                vec![],
+            ),
+            (r#"{"typescript": {"extensions": [".ts"]}}"#, vec![]),
+            // Nothing to switch off: this build ships no `typescript`.
+            (r#"{"typescript": {"disabled": true}}"#, vec![]),
+            // Leaning on nothing, so it travels under its own name.
+            (
+                r#"{"deno": {"command": ["deno", "lsp"], "extensions": [".ts"]}}"#,
+                vec!["deno"],
+            ),
+            // A builtin this build *does* ship needs neither field.
+            (r#"{"gopls": {"disabled": true}}"#, vec!["gopls"]),
+            (
+                r#"{"typescript": {"command": ["tsserver"], "extensions": [".ts"]},
+                   "vue": {"command": ["vls"]}}"#,
+                vec!["typescript"],
+            ),
+        ];
+
+        for (entries, kept) in cases {
+            let (built, report) = imported(&format!(r#"{{"lsp": {entries}}}"#));
+
+            let names: Vec<&str> = built
+                .lsp
+                .as_ref()
+                .and_then(Json::as_object)
+                .map(|entries| entries.iter().map(|(name, _)| name.as_str()).collect())
+                .unwrap_or_default();
+            assert_eq!(names, kept, "mapping {entries}");
+
+            // Whatever did not travel is named, in the row and in the line that
+            // says what to do about it.
+            for (key, _) in &report.skipped {
+                let name = key.rsplit('.').next().expect("a row names a key");
+                assert!(
+                    report.warnings.iter().any(|warning| warning.contains(name)),
+                    "{name} was dropped without a word: {:?}",
+                    report.warnings
+                );
+            }
+            assert!(
+                report
+                    .skipped
+                    .iter()
+                    .all(|(_, reason)| reason == "unsupported"),
+                "mapping {entries}: {:?}",
+                report.skipped
+            );
+        }
+    }
+
+    /// The two shapes ganja refuses at load, refused here instead — and never
+    /// repaired: a command invented on an entry's behalf would start a program
+    /// nobody chose.
+    #[test]
+    fn a_language_server_ganja_could_not_start_is_left_out_rather_than_completed() {
+        let cases: [(&str, Vec<&str>); 6] = [
+            // A server this build ships no definition for has nothing to
+            // inherit its extensions from.
+            (r#"{"nickel": {"command": ["nls"]}}"#, vec![]),
+            // Only a disabled entry may leave out its command.
+            (r#"{"nickel": {"extensions": [".ncl"]}}"#, vec![]),
+            (r#"{"rust": {}}"#, vec![]),
+            (r#"{"rust": {"disabled": true}}"#, vec!["rust"]),
+            (r#"{"nickel": {"disabled": true}}"#, vec!["nickel"]),
+            // An empty extension list is legal and means every file, which is
+            // why it is not refused the way an empty command is.
+            (
+                r#"{"nickel": {"command": ["nls"], "extensions": []}}"#,
+                vec!["nickel"],
+            ),
+        ];
+
+        for (entries, kept) in cases {
+            let (built, _) = imported(&format!(r#"{{"lsp": {entries}}}"#));
+
+            let names: Vec<&str> = built
+                .lsp
+                .as_ref()
+                .and_then(Json::as_object)
+                .map(|entries| entries.iter().map(|(name, _)| name.as_str()).collect())
+                .unwrap_or_default();
+            assert_eq!(names, kept, "mapping {entries}");
+        }
+    }
+
+    /// An empty map is not "no servers": ganja merges a map *over* the servers
+    /// it ships, so `{}` would start them. Writing nothing is the only spelling
+    /// that means what a map nothing survived means.
+    #[test]
+    fn an_lsp_map_nothing_survives_writes_no_key_at_all() {
+        let (built, report) = imported(r#"{"lsp": {"pyright": {"command": ["pyright"]}}}"#);
+
+        assert_eq!(built.lsp, None);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("empty map would start")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    /// Absent means on, on both sides, so only `false` is worth carrying — and
+    /// it has to be carried, because absent would switch snapshots back on and
+    /// `/undo` would then restore files its author had told opencode not to
+    /// track.
+    #[test]
+    fn snapshot_travels_as_the_boolean_it_is() {
+        let cases: [(&str, Option<bool>); 3] = [
+            (r#"{"snapshot": false}"#, Some(false)),
+            (r#"{"snapshot": true}"#, Some(true)),
+            (r#"{"snapshot": "yes"}"#, None),
+        ];
+
+        for (source, expected) in cases {
+            let (built, _) = imported(source);
+
+            assert_eq!(built.snapshot, expected, "mapping {source}");
+        }
     }
 
     /// Comments and trailing commas are legal in every opencode config file,

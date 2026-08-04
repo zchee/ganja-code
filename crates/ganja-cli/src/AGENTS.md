@@ -34,9 +34,13 @@ The importer inherits the same posture, for the same reason — it reads a file 
 
 - **`provider.<id>.options.apiKey` is never written**, only reported, with a warning naming `ganja auth login`. Neither the table nor the warning repeats the key.
 - **`{env:VAR}`/`{file:path}` is never expanded**, in either direction. A value that *is* a token is left out (carrying it would name a model or a path that does not exist); a value that merely contains one is carried verbatim and warned about, because ganja will then read it literally.
-- **Every key is either mapped or reported.** A key that vanished without a row would be a setting its author still believes is in force — the table is the command's output and the file is a side effect of it.
+- **Every key is either mapped or reported.** A key that vanished without a row would be a setting its author still believes is in force — the table is the command's output and the file is a side effect of it. A container (`agent`, `mcp`, an `lsp` map) is covered by the rows its entries carry rather than one of its own.
+- **An `mcp` or `lsp` entry is written whole or not at all**, so its fields are read into a report of their own and only adopted if it survives: a `mapped` row under an entry that was then refused would name a setting that was never written. Only what such a pass had to *say* outlives the refusal.
+- **An `lsp` entry is judged by what it leans on, not by its name.** opencode ships definitions for thirty-eight language servers and ganja ships two, but an entry naming one of the other thirty-six is only a problem when it relied on that definition: upstream lets an entry give just a `command` (or just `disabled`) and inherit the extensions and the root. An entry naming both its `command` and its `extensions` is a whole server description already, so it imports as a custom server under its own name and does here what it did there; anything less is named, skipped and explained.
+- **Nothing is completed on an entry's behalf.** A language server with no `command` is left out rather than given one — a fabricated command starts a program nobody chose — and the two shapes `ganja_core::config` refuses at load (a command-less server that is not disabled, a custom one that does not name its `extensions`) are refused here instead, because a file this wrote that the next launch will not read is the failure the round trip exists to prevent. The same holds for a remote MCP endpoint that is neither `https` nor loopback; the check here is deliberately the conservative half of core's, which parses the URL properly and is the authority.
+- **A command line and an extension list travel whole or not at all**, where `instructions` drops entries one by one: a command missing an argument runs a different program, and an extension list emptied of what could be carried is `[]`, which ganja reads as *every* file.
 - **An existing `ganja.json` *or* `ganja.jsonc` at the destination is refused by name** rather than overwritten; the write itself uses `create_new`, because the check and the write are not the same moment.
-- **What is written is decoded back into `ganja_core::config::Config` before it lands**, so a mapping bug is an error at import time rather than a broken file discovered at the next launch.
+- **What is written is decoded back into `ganja_core::config::Config` before it lands**, so a mapping bug is an error at import time rather than a broken file discovered at the next launch. Decoding is not the whole of what `Config::load` does — its `mcp` and `lsp` checks run after it — which is why `../tests/import_round_trip.rs` loads the imported file for real and is the assertion those two mappings answer to.
 - Object keys keep the order they were written in throughout: `permission` is evaluated last-match-wins, so a reader or writer that sorted them would change which rule decides a call.
 
 The two listings each have one rule that is not obvious from their code:
@@ -62,7 +66,7 @@ Adding a subcommand means adding its assertion there; adding anything that handl
 
 ### Internal
 
-`ganja_core::auth` (store, list, remove, redaction), `ganja_core::catalog` (the `models` table), `ganja_core::config::Config` (what the importer's output has to decode as), `ganja_core::Project` (the import's project walk and destination), `ganja_tui::run`.
+`ganja_core::auth` (store, list, remove, redaction), `ganja_core::catalog` (the `models` table), `ganja_core::config::Config` (what the importer's output has to decode as), `ganja_core::lsp::server::BUILTIN_IDS` (which language servers this build ships, so the CLI's answer and the engine's cannot drift), `ganja_core::Project` (the import's project walk and destination), `ganja_tui::run`.
 
 ### External
 
