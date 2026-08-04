@@ -32,7 +32,6 @@ use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
     process::Command,
-    thread,
     time::Duration,
 };
 
@@ -44,9 +43,13 @@ use tempfile::TempDir;
 
 const EXIT_DEADLINE: Duration = Duration::from_secs(10);
 
-/// Time for the app to enable raw mode and start reading events. A keystroke
-/// sent before that can be discarded by the line discipline.
-const STARTUP_GRACE: Duration = Duration::from_millis(500);
+/// The escape that opens the alternate screen. The app enables raw mode
+/// before it emits this, so a pty that has seen it holds a process the line
+/// discipline no longer speaks for — a keystroke sent earlier can be eaten by
+/// cooked-mode buffering, and a Ctrl-C can be a SIGINT instead of a key. A
+/// fixed grace period was the old guard here, and a loaded CI runner outran
+/// it.
+const ALT_SCREEN: &str = "\x1b[?1049h";
 
 /// Width every pty here is opened at. Wide enough that no line these tests
 /// wait for is wrapped.
@@ -128,7 +131,9 @@ impl Ganja {
             .set_window_size(COLUMNS, rows)
             .expect("failed to size the pty");
 
-        thread::sleep(STARTUP_GRACE);
+        session
+            .expect(ALT_SCREEN)
+            .expect("`ganja` never took the terminal over");
 
         Self {
             session: Some(session),
