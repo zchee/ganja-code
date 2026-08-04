@@ -434,7 +434,10 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
             //
             // `StepFinish` carries a step's bill rather than content, and
             // `StepStart` was consumed as the boundary this step was cut at.
-            PartBody::File { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => {}
+            PartBody::File { .. }
+            | PartBody::StepStart
+            | PartBody::StepFinish { .. }
+            | PartBody::Patch { .. } => {}
         }
     }
 

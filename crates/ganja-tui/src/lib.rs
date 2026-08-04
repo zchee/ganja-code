@@ -370,6 +370,7 @@ mod tests {
             agent: None,
             model: None,
             parent: None,
+            revert: None,
         };
         let message = Message::user(prompt);
 

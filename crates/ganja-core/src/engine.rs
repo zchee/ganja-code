@@ -38,6 +38,7 @@ use crate::{
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
     session::{LiveSession, Persist, SessionState, Turn, TurnHandle, TurnKind, run_turn},
+    snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
     tool::{FileTimes, Registry, task},
 };
@@ -121,6 +122,17 @@ pub enum EngineError {
         /// The subagent it named.
         agent: String,
     },
+    /// [`Command::Undo`] or [`Command::Redo`] reached a session that takes no
+    /// snapshots. Moving the transcript without putting the files back would
+    /// be an undo that only half happened, and saying so is the honest half.
+    #[error("this session takes no snapshots, so there is nothing to undo")]
+    NoSnapshots,
+    /// [`Command::Undo`] walked back past the first prompt of the session.
+    #[error("nothing to undo")]
+    NothingToUndo,
+    /// [`Command::Redo`] reached a session that is not reverted.
+    #[error("nothing to redo")]
+    NothingToRedo,
 }
 
 /// What one turn runs as, when it is not what the session runs as.
@@ -194,6 +206,17 @@ pub struct Engine {
     /// golden run. Nothing starts here: a server is spawned by the first touch
     /// of a file it claims, and nothing else ever touches one.
     lsp: Option<Arc<lsp::Lsp>>,
+    /// What every turn's file changes are recorded against, so `/undo` can put
+    /// them back. [`None`] is an engine nobody installed any on — every
+    /// scripted, golden and PTY run — where `/undo` refuses rather than
+    /// silently moving the transcript.
+    snapshots: Option<Arc<snapshot::Snapshots>>,
+    /// How far back an `/undo` has walked, when one has.
+    ///
+    /// Held here rather than only on the session record because an in-memory
+    /// engine has no record: the store is where this *outlives* the process,
+    /// not where it lives.
+    revert: std::sync::Mutex<Option<snapshot::RevertState>>,
     /// Tools the model is offered, and the agent loop executes.
     ///
     /// Behind a lock because the task tool's *description* is the roster of
@@ -306,6 +329,8 @@ impl Engine {
             mcp: None,
             mcp_installed: std::sync::Mutex::new(0),
             lsp: None,
+            snapshots: None,
+            revert: std::sync::Mutex::new(None),
             tools: std::sync::Mutex::new(tools),
             commands: Arc::new(command::Registry::builtin(&root)),
             permissions: Arc::new(std::sync::Mutex::new(permissions)),
@@ -458,6 +483,20 @@ impl Engine {
         if let Some(lsp) = &self.lsp {
             lsp.shutdown();
         }
+    }
+
+    /// Sets what this session's turns snapshot the working tree with.
+    ///
+    /// Consuming, like the other installers: what a session can undo is
+    /// decided once, before anything can be streaming. An engine given none
+    /// takes no snapshots and refuses [`Command::Undo`] — which is what every
+    /// scripted, golden and PTY run wants, since none of them should be
+    /// spawning git.
+    #[must_use]
+    pub fn with_snapshots(mut self, snapshots: Arc<snapshot::Snapshots>) -> Self {
+        self.snapshots = Some(snapshots);
+
+        self
     }
 
     /// Sets the slash commands this session can run.
@@ -617,6 +656,7 @@ impl Engine {
         // the session it replaced had open says nothing about these files.
         self.files.clear();
         self.restore_selection(&info);
+        let revert = info.revert.clone();
         {
             let mut live = state
                 .live
@@ -624,6 +664,26 @@ impl Engine {
                 .expect("the live session is never poisoned");
             live.info = Some(info);
             live.warned_uncataloged = false;
+        }
+        // A session left mid-undo reopens mid-undo. The event is the only way
+        // a frontend that has just started can learn which messages are hidden
+        // — the transcript it was handed above still holds every one of them.
+        // No prompt travels with it: reopening a conversation is not the
+        // moment to put words in somebody's editor. A session that was not
+        // reverted announces nothing, because a frontend seeding itself from
+        // that transcript is already hiding none of it.
+        *self
+            .revert
+            .lock()
+            .expect("the revert state is never poisoned") = revert.clone();
+        if let Some(revert) = &revert {
+            let _ = self
+                .events
+                .send(Event::RevertChanged {
+                    revert: Some(revert.info()),
+                    prompt: None,
+                })
+                .await;
         }
         drop(slot);
 
@@ -762,6 +822,8 @@ impl Engine {
                     .await
             }
             Command::NewSession => self.new_session().await,
+            Command::Undo => self.undo().await,
+            Command::Redo => self.redo().await,
         }
     }
 
@@ -865,9 +927,257 @@ impl Engine {
         // Read-before-write is a rule about one conversation. The files the
         // last one read are no argument for writing them in this one.
         self.files.clear();
+        // A revert is a position in a transcript, and this one has none. The
+        // files stay where the revert left them: starting a new conversation
+        // is not asking for the last one's work back.
+        *self
+            .revert
+            .lock()
+            .expect("the revert state is never poisoned") = None;
         drop(turn);
 
         Ok(())
+    }
+
+    /// Puts the working tree back to what it was before the last prompt, and
+    /// hides that prompt and everything after it.
+    async fn undo(&self) -> Result<(), EngineError> {
+        // Held across the whole revert, exactly as `resume` holds it: a turn
+        // must not begin on a transcript that is being rewritten under it. A
+        // turn already in flight is refused rather than aborted — upstream
+        // aborts and then reverts, where here the person at the terminal
+        // cancels and then undoes (**D119**).
+        let turn = self.turn.lock().await;
+        if turn.is_some() {
+            return Err(EngineError::Busy);
+        }
+        let snapshots = self.snapshotting()?;
+
+        let current = self.reverted();
+        let (anchor, prompt, patches) = {
+            let history = self.history.lock().await;
+            let anchor =
+                snapshot::undo_anchor(&history, current.as_ref().map(|state| &state.message_id))
+                    .ok_or(EngineError::NothingToUndo)?;
+            let prompt = snapshot::prompt_at(&history, &anchor);
+            let patches = snapshot::patches_from(&history, &anchor);
+
+            (anchor, prompt, patches)
+        };
+
+        self.revert_to(snapshots, current.as_ref(), anchor, prompt, &patches)
+            .await;
+        drop(turn);
+
+        Ok(())
+    }
+
+    /// Steps one prompt forward through what an undo hid.
+    async fn redo(&self) -> Result<(), EngineError> {
+        let turn = self.turn.lock().await;
+        if turn.is_some() {
+            return Err(EngineError::Busy);
+        }
+        let snapshots = self.snapshotting()?;
+        let current = self.reverted().ok_or(EngineError::NothingToRedo)?;
+
+        let forward = {
+            let history = self.history.lock().await;
+            snapshot::redo_anchor(&history, &current.message_id).map(|anchor| {
+                let prompt = snapshot::prompt_at(&history, &anchor);
+                let patches = snapshot::patches_from(&history, &anchor);
+
+                (anchor, prompt, patches)
+            })
+        };
+
+        match forward {
+            Some((anchor, prompt, patches)) => {
+                self.revert_to(snapshots, Some(&current), anchor, prompt, &patches)
+                    .await;
+            }
+            // Nothing left to step forward to, so the working tree goes back
+            // whole: every file the tree holds, whether or not a patch named
+            // it, because what is being undone is the undo itself.
+            None => {
+                if let Some(hash) = &current.snapshot {
+                    snapshots.restore(hash).await;
+                }
+                self.remember_revert(None);
+                let _ = self
+                    .events
+                    .send(Event::RevertChanged {
+                        revert: None,
+                        prompt: None,
+                    })
+                    .await;
+            }
+        }
+        drop(turn);
+
+        Ok(())
+    }
+
+    /// Reverts the working tree to the state `anchor`'s turn started from, and
+    /// records that the session is now reverted that far.
+    async fn revert_to(
+        &self,
+        snapshots: &snapshot::Snapshots,
+        current: Option<&snapshot::RevertState>,
+        anchor: crate::protocol::MessageId,
+        prompt: Option<String>,
+        patches: &[snapshot::Patch],
+    ) {
+        // Captured once per chain of undos and reused by every one after it. A
+        // second capture would be taken from a tree the first undo had already
+        // rewritten, and the redo would then restore a state that never
+        // existed.
+        let redo = match current.and_then(|state| state.snapshot.clone()) {
+            Some(existing) => {
+                // Back to the un-reverted tree first, so the deeper revert is
+                // applied to the whole conversation rather than to what the
+                // shallower one left behind.
+                snapshots.restore(&existing).await;
+                Some(existing)
+            }
+            None => snapshots.track().await,
+        };
+        snapshots.revert(patches).await;
+
+        // In the order the patches named them, which is the order the turn
+        // touched them in — what a marker row reads best in.
+        let mut files: Vec<String> = Vec::new();
+        for file in patches.iter().flat_map(|patch| &patch.files) {
+            if !files.contains(file) {
+                files.push(file.clone());
+            }
+        }
+
+        let state = snapshot::RevertState {
+            message_id: anchor,
+            snapshot: redo,
+            files,
+        };
+        let info = state.info();
+        self.remember_revert(Some(state));
+        let _ = self
+            .events
+            .send(Event::RevertChanged {
+                revert: Some(info),
+                prompt,
+            })
+            .await;
+    }
+
+    /// Deletes the messages a revert hid, because a prompt has just made the
+    /// choice permanent.
+    ///
+    /// **The anchor goes with them.** Upstream deletes it too when no part was
+    /// named, and ganja never names one: what the user took back is the prompt
+    /// itself, and a prompt left behind would ride into the very next request
+    /// as though it had been asked twice.
+    async fn truncate_reverted(&self) {
+        let Some(state) = self.reverted() else {
+            return;
+        };
+        let anchor = state.message_id;
+
+        self.history
+            .lock()
+            .await
+            .retain(|message| message.id < anchor);
+
+        if let Some(persistence) = &self.persistence {
+            let session = persistence
+                .live
+                .lock()
+                .expect("the live session is never poisoned")
+                .info
+                .as_ref()
+                .map(|info| info.id.clone());
+            if let Some(session) = session {
+                // Read back from the store rather than from the window that
+                // was just truncated: an assistant turn that died before its
+                // first fragment is kept on disk and left out of the window,
+                // and one inside the undone range has to go with the rest.
+                let stored = persistence
+                    .storage
+                    .load_transcript(&session)
+                    .unwrap_or_default();
+                for message in stored.iter().filter(|message| message.id >= anchor) {
+                    if let Err(error) = persistence.storage.delete_message(&session, &message.id) {
+                        tracing::warn!(
+                            session = session.as_str(),
+                            message = message.id.as_str(),
+                            %error,
+                            "a message the undo took back could not be deleted; \
+                             it will be back when the session is resumed"
+                        );
+                    }
+                }
+            }
+        }
+
+        self.remember_revert(None);
+        let _ = self
+            .events
+            .send(Event::RevertChanged {
+                revert: None,
+                prompt: None,
+            })
+            .await;
+    }
+
+    /// The snapshots this session takes, or the refusal that says why it
+    /// cannot undo.
+    ///
+    /// A session with none is refused rather than reverted: moving the
+    /// transcript while leaving the files where they are would be an undo that
+    /// only half happened, and nothing afterwards could tell.
+    fn snapshotting(&self) -> Result<&snapshot::Snapshots, EngineError> {
+        self.snapshots
+            .as_deref()
+            .filter(|snapshots| snapshots.enabled())
+            .ok_or(EngineError::NoSnapshots)
+    }
+
+    /// How far back this session is currently reverted.
+    fn reverted(&self) -> Option<snapshot::RevertState> {
+        self.revert
+            .lock()
+            .expect("the revert state is never poisoned")
+            .clone()
+    }
+
+    /// Records where the revert stands, and stores it when the engine
+    /// persists: the messages a revert hides are still on disk, so a session
+    /// reopened tomorrow has to be told it is looking at a hidden tail.
+    fn remember_revert(&self, state: Option<snapshot::RevertState>) {
+        *self
+            .revert
+            .lock()
+            .expect("the revert state is never poisoned") = state.clone();
+
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let mut live = persistence
+            .live
+            .lock()
+            .expect("the live session is never poisoned");
+        let Some(info) = live.info.as_mut() else {
+            return;
+        };
+        info.revert = state;
+        info.updated = now();
+
+        if let Err(error) = persistence.storage.save_info(info) {
+            tracing::warn!(
+                session = info.id.as_str(),
+                %error,
+                "the revert could not be stored; it holds for this process only"
+            );
+        }
     }
 
     /// The active selection, which is never held across an await.
@@ -1121,6 +1431,16 @@ impl Engine {
         // connection that died is withdrawn here.
         self.refresh_mcp();
 
+        // A prompt or a shell command after an `/undo` is the user keeping
+        // what the undo did. The messages it hid leave the transcript here,
+        // before this turn appends anything, which is what stops a prompt that
+        // was taken back from reaching the request that replaces it. A
+        // compaction is not that kind of turn — it says nothing new, so it
+        // decides nothing.
+        if matches!(kind, TurnKind::Prompt { .. } | TurnKind::Shell { .. }) {
+            self.truncate_reverted().await;
+        }
+
         // Read once, and recorded as the previous turn's agent in the same
         // breath, so that the plan-to-build reminder fires for exactly one
         // turn however many follow it. Only a prompt is that kind of turn: a
@@ -1226,6 +1546,7 @@ impl Engine {
             root: self.root.clone(),
             files: Arc::clone(&self.files),
             lsp: self.lsp.clone(),
+            snapshots: self.snapshots.clone(),
             prompt,
             cancel,
             pending,
@@ -1321,6 +1642,8 @@ fn fresh_session(storage: &Storage, agent: Option<String>, model: String) -> Ses
         model: Some(model),
         // A session a person started, not one a tool call delegated.
         parent: None,
+        // Nothing has been undone in a session that has not run a turn.
+        revert: None,
     };
 
     if let Err(error) = storage.save_info(&info) {
@@ -1515,7 +1838,8 @@ mod tests {
                 Event::MessageFinished { .. }
                 | Event::PartUpdated { .. }
                 | Event::PermissionRequested { .. }
-                | Event::PermissionReplied { .. } => {}
+                | Event::PermissionReplied { .. }
+                | Event::RevertChanged { .. } => {}
             }
         }
 
@@ -1759,6 +2083,7 @@ mod tests {
             agent: None,
             model: None,
             parent: None,
+            revert: None,
         };
         storage.save_info(&info).expect("the seeded record writes");
         let earlier = Message::user("the objective");
@@ -1844,6 +2169,67 @@ mod tests {
                 .await,
             Err(EngineError::Busy)
         ));
+    }
+
+    /// **D119.** Upstream aborts the running session and then reverts; here
+    /// the person at the terminal cancels first, so an undo is never something
+    /// that stopped work they were watching. Refused before anything else is
+    /// even looked at, which is why an engine with no snapshots still answers
+    /// `Busy` here rather than `NoSnapshots`.
+    #[tokio::test]
+    async fn an_undo_during_a_turn_is_refused_rather_than_stopping_it() {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        engine
+            .send(Command::SendPrompt {
+                text: "first".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        assert!(matches!(
+            events.next().await,
+            Some(Event::MessageStarted { .. })
+        ));
+
+        assert!(matches!(
+            engine.send(Command::Undo).await,
+            Err(EngineError::Busy)
+        ));
+        assert!(matches!(
+            engine.send(Command::Redo).await,
+            Err(EngineError::Busy)
+        ));
+    }
+
+    /// An engine that takes no snapshots says so rather than moving the
+    /// transcript: an undo that hid the messages and left every file where it
+    /// was would be an undo that only half happened, and nothing afterwards
+    /// could tell.
+    #[tokio::test]
+    async fn an_undo_without_snapshots_refuses_instead_of_half_happening() {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        engine
+            .send(Command::SendPrompt {
+                text: "first".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        drain(&mut events).await;
+
+        assert!(matches!(
+            engine.send(Command::Undo).await,
+            Err(EngineError::NoSnapshots)
+        ));
+        assert_eq!(
+            engine.history.lock().await.len(),
+            2,
+            "a refused undo leaves the conversation exactly as it was"
+        );
     }
 
     #[tokio::test]

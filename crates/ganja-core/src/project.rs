@@ -129,16 +129,26 @@ impl Project {
     /// Returns [`ProjectError::Home`] when there is no home directory to
     /// resolve the path against.
     pub fn data_dir(&self) -> Result<PathBuf, ProjectError> {
-        let base = Xdg::new().map_err(|source| ProjectError::Home {
-            source: io::Error::other(source),
-        })?;
-
-        Ok(base
-            .data_dir()
-            .join(DIRECTORY)
-            .join(PROJECTS)
-            .join(&self.slug))
+        Ok(data_home()?.join(PROJECTS).join(&self.slug))
     }
+}
+
+/// Where ganja keeps everything it stores: `<data home>/ganja`.
+///
+/// Per-project state hangs off [`Project::data_dir`] under here; what does not
+/// belong to one project — the model catalog's cache, the snapshot
+/// repositories — sits beside it. Nothing is created by asking.
+///
+/// # Errors
+///
+/// Returns [`ProjectError::Home`] when there is no home directory to resolve
+/// the path against.
+pub fn data_home() -> Result<PathBuf, ProjectError> {
+    let base = Xdg::new().map_err(|source| ProjectError::Home {
+        source: io::Error::other(source),
+    })?;
+
+    Ok(base.data_dir().join(DIRECTORY))
 }
 
 /// The working tree `cwd` sits in, or `cwd` itself when it sits in none.
@@ -202,7 +212,11 @@ fn readable(root: &Path) -> String {
 /// the platform's path representation. Two paths that differ only in bytes no
 /// encoding can express would collide, which costs them a shared directory and
 /// nothing else.
-fn digest(root: &Path) -> String {
+///
+/// Shared with [`crate::snapshot`], which names a worktree the same way and for
+/// the same reason: the value ends up in a directory name that has to keep
+/// meaning the same thing across upgrades.
+pub(crate) fn digest(root: &Path) -> String {
     let mut hash = FNV_BASIS;
     for byte in root.to_string_lossy().as_bytes() {
         hash ^= u64::from(*byte);

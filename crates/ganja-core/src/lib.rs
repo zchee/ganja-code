@@ -20,6 +20,7 @@ pub mod project;
 pub mod protocol;
 pub mod provider;
 pub mod session;
+pub mod snapshot;
 pub mod storage;
 pub mod tool;
 
@@ -38,7 +39,8 @@ pub use permission::{Decision, Permissions};
 pub use project::{Project, ProjectError};
 pub use protocol::{
     Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody, PartId,
-    PermissionId, PermissionReply, Role, ToolState, Usage,
+    PermissionId, PermissionReply, RevertInfo, Role, ToolState, Usage,
 };
+pub use snapshot::{RevertState, Snapshots};
 pub use storage::{SessionId, SessionInfo, Storage, StorageError};
 pub use tool::{Registry, Tool, ToolCtx, ToolDefinition, ToolError, ToolOutput};

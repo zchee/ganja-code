@@ -139,7 +139,10 @@ fn formatted(part: &Part) -> String {
 
             rendered
         }
-        PartBody::File { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => String::new(),
+        PartBody::File { .. }
+        | PartBody::StepStart
+        | PartBody::StepFinish { .. }
+        | PartBody::Patch { .. } => String::new(),
     }
 }
 
@@ -241,6 +244,7 @@ mod tests {
             agent: None,
             model: None,
             parent: None,
+            revert: None,
         }
     }
 

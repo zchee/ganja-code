@@ -139,6 +139,14 @@ pub struct SessionInfo {
     /// session's bytes are what they always were.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<SessionId>,
+    /// How far back an `/undo` walked, when one did.
+    ///
+    /// Stored rather than held in memory because a revert deletes nothing: the
+    /// messages it hid are still on disk, and a session reopened tomorrow has
+    /// to know that it is looking at a transcript with a hidden tail rather
+    /// than at the whole conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert: Option<crate::snapshot::RevertState>,
 }
 
 /// A write the storage could not perform. Reads do not produce errors for
@@ -308,6 +316,49 @@ impl Storage {
                 payload: part,
             },
         )
+    }
+
+    /// Removes one message and every part it owns.
+    ///
+    /// What the prompt after an `/undo` does to the messages the undo hid: a
+    /// transcript that kept them would hand the next request a conversation
+    /// the user has taken back. A message that is not there is not an error —
+    /// the caller is asking for it to be gone, and it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the filesystem refuses a removal for any
+    /// reason other than the file already being absent.
+    pub fn delete_message(
+        &self,
+        session: &SessionId,
+        message: &MessageId,
+    ) -> Result<(), StorageError> {
+        // Parts first: an envelope with no parts reads back as a message that
+        // said nothing, where parts with no envelope are never opened at all
+        // (`load_transcript`), so an interrupted deletion leaves the
+        // transcript short of a message rather than short of its content.
+        let parts = self.part_dir(session, message);
+        match fs::remove_dir_all(&parts) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(StorageError::Io {
+                    path: parts,
+                    source,
+                });
+            }
+        }
+
+        let envelope = self.message_path(session, message);
+        match fs::remove_file(&envelope) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StorageError::Io {
+                path: envelope,
+                source,
+            }),
+        }
     }
 
     /// Reads a session's whole transcript back: envelopes in id order, each
@@ -639,6 +690,7 @@ mod tests {
             agent: None,
             model: None,
             parent: None,
+            revert: None,
         }
     }
 
@@ -906,6 +958,48 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// What the prompt after an `/undo` does: the messages the undo hid leave
+    /// the transcript with their parts, and the ones before it are untouched.
+    #[test]
+    fn a_deleted_message_takes_its_parts_and_leaves_the_rest_of_the_transcript() {
+        let directory = temporary();
+        let storage = storage(&directory);
+        let session = session("ses_1");
+        for (id, part) in [("msg_1", "prt_1"), ("msg_2", "prt_2")] {
+            let message = message(id, Vec::new());
+            storage
+                .save_message(&session, &message)
+                .expect("the envelope stores");
+            storage
+                .save_part(&session, &message.id, &text(part, part))
+                .expect("the part stores");
+        }
+
+        let doomed = MessageId::from("msg_2".to_owned());
+        storage
+            .delete_message(&session, &doomed)
+            .expect("the message deletes");
+
+        assert_eq!(
+            shape(
+                &storage
+                    .load_transcript(&session)
+                    .expect("the transcript reads")
+            ),
+            vec![("msg_1".to_owned(), vec!["prt_1".to_owned()])]
+        );
+        assert!(
+            !directory
+                .path()
+                .join("storage/session/part/ses_1/msg_2")
+                .exists(),
+            "the parts of a deleted message have nowhere to belong"
+        );
+        storage
+            .delete_message(&session, &doomed)
+            .expect("deleting what is already gone is what the caller asked for");
     }
 
     /// A session whose info is unreadable must not take the listing with it,

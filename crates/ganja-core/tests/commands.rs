@@ -371,6 +371,7 @@ fn seeded(storage: &Storage) -> SessionId {
         agent: None,
         model: None,
         parent: None,
+        revert: None,
     };
     storage.save_info(&info).expect("the seeded record writes");
 
