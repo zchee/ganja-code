@@ -11,9 +11,11 @@ The frontend's event loop and the state it owns. One `tokio::select!` in `app.rs
 
 | File | Description |
 |------|-------------|
-| `lib.rs` | `run()`: selects a provider from the environment, builds the `Engine` with builtin tools and project permission rules, loads the theme set **before** the terminal is taken over (a bad theme file warns where it can be read), enters the alternate screen with mouse capture, and restores the terminal on every exit path including panic. |
+| `lib.rs` | `run(resume, overrides)`: reads the config, resolves the key bindings, selects a provider, builds the agent registry, builds the `Engine` with builtin tools, project permission rules, both halves of the system prompt and its agents, then loads the theme set and applies the configured theme over the stored pick — all **before** the terminal is taken over, so every refusal is readable. Enters the alternate screen with mouse capture and restores the terminal on every exit path including panic. |
 | `app.rs` | `App`: the `select!` loop, key handling, and the state every component renders from. Also holds the snapshot tests. |
 | `event.rs` | `AppEvent { Term, Core, Tick }` — the one enum every event source folds into. Engine events are boxed because they dwarf the other variants. |
+| `command.rs` | The commands both surfaces offer — upstream's names, plurals and aliases — and `nucleo-matcher` ranking over them. Ranking parity with upstream's `fuzzysort` is explicitly not a goal; a total, deterministic order is. |
+| `keybind.rs` | Which keys reach which actions, the five-action curated set, and the `keybinds` config map that rebinds them. An unknown action name and an unparseable key string both fail the run naming what was wrong. |
 | `theme/` | Loadable themes: upstream's JSON schema and resolver (`json.rs` — defs, dark/light variants, ANSI integers, cycle refusal), the builtin/custom registry with revisions (`registry.rs`), the persisted pick under the data home (`selection.rs`), and the `Theme` style slots (`mod.rs`). Four upstream themes ship verbatim from `../assets/themes/`; default is `opencode`. |
 | `component/` | The three panes plus the modals (see `component/AGENTS.md`). |
 | `snapshots/` | `insta` snapshots for the tests in `app.rs` (see `snapshots/AGENTS.md`). |
