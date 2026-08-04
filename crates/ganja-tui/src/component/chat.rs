@@ -38,6 +38,13 @@ pub const WHEEL_LINES: isize = 3;
 /// is actually false.
 const INTERRUPTED: &str = "[interrupted] the session ended before this reply finished";
 
+/// What introduces each file a revert put back.
+///
+/// A prefix rather than an indent: [`wrap`] lays every line out from its words,
+/// so leading whitespace is collapsed and an indent would be a claim the screen
+/// never honors — the same reason the task row's detail line carries an arrow.
+const REVERTED_FILE: &str = "\u{21b3} ";
+
 /// How an entry names who wrote it.
 fn label(role: Role) -> &'static str {
     match role {
@@ -46,14 +53,47 @@ fn label(role: Role) -> &'static str {
     }
 }
 
+/// The line a revert leaves in place of the messages it hid.
+///
+/// Upstream draws a hoverable, left-bordered panel here and makes clicking it
+/// the confirmed way back; ganja draws the row and points at `/redo`
+/// (**D106**). What is lost with the panel is upstream's per-file
+/// `+additions -deletions`, which it parses out of a unified diff the engine
+/// sends and ganja's [`RevertInfo`](ganja_core::RevertInfo) does not carry.
+fn reverted_headline(hidden: usize) -> String {
+    format!(
+        "{hidden} message{plural} reverted \u{2014} /redo to restore",
+        plural = if hidden == 1 { "" } else { "s" },
+    )
+}
+
 /// A scrollable transcript of plain-text entries.
 #[derive(Debug, Default)]
 pub struct Chat {
     entries: Vec<Entry>,
+    /// The revert this transcript is showing, while it is showing one.
+    ///
+    /// Nothing is removed while it is set: the messages an undo hid are still
+    /// in `entries`, because a redo brings them straight back and the engine
+    /// keeps them too until the next prompt makes the choice permanent.
+    revert: Option<Revert>,
     /// Where the viewport starts, or [`None`] to stay pinned to the tail.
     offset: Option<usize>,
     /// Height of the last viewport rendered; paging and clamping need it.
     height: usize,
+}
+
+/// What is hidden, and the row that says so.
+#[derive(Debug)]
+struct Revert {
+    /// The message the revert stopped at. It, and every entry after it, is
+    /// hidden — the engine hides at and after the anchor, so the hidden set is
+    /// always a tail and the marker always sits at the end of the viewport.
+    anchor: MessageId,
+    /// Files the revert put back, project-relative, in the order the undone
+    /// turns touched them.
+    files: Vec<String>,
+    wrapped: Option<Wrapped>,
 }
 
 #[derive(Debug)]
@@ -121,18 +161,75 @@ impl Chat {
     /// What the copy commands read. Deliberately the *rendered* transcript
     /// rather than the engine's history: what a person means by "copy this
     /// conversation" is the one they have been looking at, and the two agree
-    /// because every entry here arrived as an engine event.
+    /// because every entry here arrived as an engine event. Reverted entries
+    /// are left out for the same reason — they are not on the screen either,
+    /// and they are not in what the next request will carry.
     pub fn messages(&self) -> Vec<crate::transcript::Entry<'_>> {
-        self.entries
+        self.shown()
             .iter()
             .map(|entry| (entry.role, entry.parts.as_slice()))
             .collect()
     }
 
+    /// Hides everything from `anchor` on, and says so in one row naming
+    /// `files`.
+    ///
+    /// Nothing is dropped: an undo is reversible until the next prompt, so the
+    /// entries stay exactly where they are and only stop being drawn.
+    pub fn revert(&mut self, anchor: MessageId, files: Vec<String>) {
+        self.revert = Some(Revert {
+            anchor,
+            files,
+            wrapped: None,
+        });
+        self.follow_tail();
+    }
+
+    /// Shows the hidden entries again, which is what a redo past the newest
+    /// undone prompt does.
+    pub fn unrevert(&mut self) {
+        self.revert = None;
+        self.follow_tail();
+    }
+
+    /// Deletes the hidden entries, which is what a prompt or a shell command
+    /// after an undo does: the engine has just removed them from its history
+    /// and from storage, so there is nothing left for a redo to bring back.
+    pub fn drop_reverted(&mut self) {
+        if let Some(revert) = self.revert.take() {
+            self.entries.retain(|entry| entry.id < revert.anchor);
+        }
+        self.follow_tail();
+    }
+
+    /// Whether some tail of the transcript is currently hidden.
+    #[must_use]
+    pub fn is_reverted(&self) -> bool {
+        self.revert.is_some()
+    }
+
     /// Empties the transcript, which is what switching sessions does to it.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.revert = None;
         self.follow_tail();
+    }
+
+    /// The entries the viewport draws: everything before the revert anchor,
+    /// and everything when there is no revert.
+    fn shown(&self) -> &[Entry] {
+        &self.entries[..self.first_hidden()]
+    }
+
+    /// Index of the first entry a revert hid, which is `entries.len()` when
+    /// nothing is hidden.
+    fn first_hidden(&self) -> usize {
+        self.revert.as_ref().map_or(self.entries.len(), |revert| {
+            self.entries
+                .iter()
+                .position(|entry| entry.id >= revert.anchor)
+                .unwrap_or(self.entries.len())
+        })
     }
 
     /// Appends a part to the message that is streaming.
@@ -237,8 +334,13 @@ impl Chat {
         }
 
         self.height = usize::from(area.height);
-        for entry in &mut self.entries {
+        let first_hidden = self.first_hidden();
+        let hidden = self.entries.len() - first_hidden;
+        for entry in &mut self.entries[..first_hidden] {
             entry.wrap(area.width, theme);
+        }
+        if let Some(revert) = &mut self.revert {
+            revert.wrap(hidden, area.width, theme);
         }
 
         let offset = self
@@ -256,7 +358,13 @@ impl Chat {
 
     /// Lines the whole transcript wrapped to at the last rendered width.
     pub(crate) fn line_count(&self) -> usize {
-        self.entries.iter().map(|entry| entry.lines().len()).sum()
+        let entries: usize = self.shown().iter().map(|entry| entry.lines().len()).sum();
+
+        entries
+            + self
+                .revert
+                .as_ref()
+                .map_or(0, |revert| revert.lines().len())
     }
 
     /// Widths the entries are currently cached at, which is how a test tells
@@ -282,18 +390,68 @@ impl Chat {
 
     /// Yields the lines the viewport shows, skipping whole entries rather than
     /// stepping over every line above the offset.
+    ///
+    /// The marker row rides along as one more block at the end, which is where
+    /// it belongs: the entries a revert hides are always the tail of the
+    /// transcript, so what it stands in for is always below everything shown.
     fn visible(&self, offset: usize) -> impl Iterator<Item = &Line<'static>> {
         let mut left_to_skip = offset;
+        let marker: &[Line<'static>] = self.revert.as_ref().map_or(&[], Revert::lines);
 
-        self.entries
+        self.shown()
             .iter()
-            .flat_map(move |entry| {
-                let lines = entry.lines();
+            .map(Entry::lines)
+            .chain(std::iter::once(marker))
+            .flat_map(move |lines| {
                 let skip = left_to_skip.min(lines.len());
                 left_to_skip -= skip;
                 &lines[skip..]
             })
             .take(self.height)
+    }
+}
+
+impl Revert {
+    fn lines(&self) -> &[Line<'static>] {
+        self.wrapped
+            .as_ref()
+            .map_or(&[], |wrapped| wrapped.lines.as_slice())
+    }
+
+    /// Lays the marker out for `hidden` hidden entries.
+    ///
+    /// Keyed on width and theme like every other cached wrap, and on nothing
+    /// else: the count and the file list are fixed for the life of a revert —
+    /// a deeper undo replaces the whole [`Revert`] rather than editing this
+    /// one.
+    fn wrap(&mut self, hidden: usize, width: u16, theme: &Theme) {
+        if self
+            .wrapped
+            .as_ref()
+            .is_some_and(|wrapped| wrapped.width == width && wrapped.revision == theme.revision())
+        {
+            return;
+        }
+
+        let mut lines: Vec<Line<'static>> = wrap(&reverted_headline(hidden), usize::from(width))
+            .into_iter()
+            .map(|line| Line::styled(line, theme.warning))
+            .collect();
+        for file in &self.files {
+            lines.extend(
+                wrap(&format!("{REVERTED_FILE}{file}"), usize::from(width))
+                    .into_iter()
+                    .map(|line| Line::styled(line, theme.dim)),
+            );
+        }
+        // Breathing room, exactly as an entry leaves.
+        lines.push(Line::styled(String::new(), Style::default()));
+
+        self.wrapped = Some(Wrapped {
+            width,
+            revision: theme.revision(),
+            lines,
+        });
     }
 }
 
@@ -738,7 +896,7 @@ pub(crate) fn split_at_width(text: &str, width: usize) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use ganja_core::{Message, Part, PartBody, PartId, ToolState};
+    use ganja_core::{Message, MessageId, Part, PartBody, PartId, ToolState};
     use ratatui::{buffer::Buffer, layout::Rect};
 
     use super::{Chat, elapsed, split_at_width, wrap};
@@ -1512,5 +1670,182 @@ mod tests {
             buffer[(0, 1)].fg,
             "the cached line kept the old palette"
         );
+    }
+
+    /// A transcript of four entries, and the id of the third — which is what
+    /// an undo of the last exchange anchors on.
+    fn reverted_transcript() -> (Chat, MessageId) {
+        /// A reply saying `text`, which is a part rather than the model name
+        /// `Message::assistant` takes.
+        fn reply(text: &str) -> Message {
+            let mut message = Message::assistant("canned");
+            message.parts.push(Part::text(text));
+
+            message
+        }
+
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("the first question"));
+        chat.start_message(reply("the first answer"));
+        chat.start_message(Message::user("the second question"));
+        chat.start_message(reply("the second answer"));
+
+        let anchor = chat.entries[2].id.clone();
+
+        (chat, anchor)
+    }
+
+    #[test]
+    fn a_revert_hides_the_anchor_and_everything_after_it() {
+        let (mut chat, anchor) = reverted_transcript();
+
+        chat.revert(anchor, vec!["src/lib.rs".to_owned()]);
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+        let screen = lines.join("\n");
+
+        assert!(screen.contains("the first question"), "{screen}");
+        assert!(screen.contains("the first answer"), "{screen}");
+        assert!(
+            !screen.contains("the second question"),
+            "the anchor itself is hidden too:\n{screen}"
+        );
+        assert!(!screen.contains("the second answer"), "{screen}");
+    }
+
+    /// The whole of the row's job: how much went away, and the way back.
+    #[test]
+    fn the_marker_row_counts_what_it_hides_and_names_the_files() {
+        let (mut chat, anchor) = reverted_transcript();
+
+        chat.revert(
+            anchor,
+            vec!["src/lib.rs".to_owned(), "src/app.rs".to_owned()],
+        );
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "2 messages reverted \u{2014} /redo to restore"),
+            "got {lines:?}"
+        );
+        for file in ["src/lib.rs", "src/app.rs"] {
+            assert!(
+                lines.iter().any(|line| line.contains(file)),
+                "{file} should be named, got {lines:?}"
+            );
+        }
+    }
+
+    /// One hidden message is one message, not "1 messages".
+    #[test]
+    fn the_marker_row_counts_a_single_message_in_the_singular() {
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("kept"));
+        chat.start_message(Message::user("taken back"));
+        let anchor = chat.entries[1].id.clone();
+
+        chat.revert(anchor, Vec::new());
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "1 message reverted \u{2014} /redo to restore"),
+            "got {lines:?}"
+        );
+    }
+
+    /// A revert that put no file back is a revert of the conversation, and
+    /// still worth a row: the messages really are hidden.
+    #[test]
+    fn a_revert_that_moved_no_files_still_draws_its_row() {
+        let (mut chat, anchor) = reverted_transcript();
+
+        chat.revert(anchor, Vec::new());
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "2 messages reverted \u{2014} /redo to restore"),
+            "got {lines:?}"
+        );
+    }
+
+    /// What a redo past the newest undone prompt gets: the entries were never
+    /// gone.
+    #[test]
+    fn unreverting_shows_the_hidden_entries_again_and_takes_the_row_away() {
+        let (mut chat, anchor) = reverted_transcript();
+        chat.revert(anchor, vec!["src/lib.rs".to_owned()]);
+        rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        chat.unrevert();
+        let screen = rendered(&mut chat, Rect::new(0, 0, 60, 20)).join("\n");
+
+        assert!(!chat.is_reverted());
+        assert!(screen.contains("the second question"), "{screen}");
+        assert!(screen.contains("the second answer"), "{screen}");
+        assert!(!screen.contains("reverted"), "{screen}");
+    }
+
+    /// What a prompt after an undo gets: the engine deleted those messages, so
+    /// there is nothing left for a later redo to bring back.
+    #[test]
+    fn dropping_a_revert_removes_the_hidden_entries_for_good() {
+        let (mut chat, anchor) = reverted_transcript();
+        chat.revert(anchor, vec!["src/lib.rs".to_owned()]);
+
+        chat.drop_reverted();
+        chat.unrevert();
+        let screen = rendered(&mut chat, Rect::new(0, 0, 60, 20)).join("\n");
+
+        assert_eq!(chat.entries.len(), 2, "the hidden tail should be gone");
+        assert!(screen.contains("the first answer"), "{screen}");
+        assert!(
+            !screen.contains("the second question"),
+            "an unrevert after a drop has nothing to put back:\n{screen}"
+        );
+    }
+
+    /// A copy is of the conversation on screen, and the hidden tail is not on
+    /// it — nor in what the next request will carry.
+    #[test]
+    fn the_copy_surfaces_read_the_visible_transcript_and_not_the_hidden_tail() {
+        let (mut chat, anchor) = reverted_transcript();
+
+        assert_eq!(chat.messages().len(), 4);
+        chat.revert(anchor, Vec::new());
+        assert_eq!(chat.messages().len(), 2);
+    }
+
+    /// Scrolling has to agree with what was drawn, so the row it stands in for
+    /// counts as lines like everything else.
+    #[test]
+    fn the_marker_rows_lines_are_part_of_what_the_viewport_can_scroll() {
+        let (mut chat, anchor) = reverted_transcript();
+        rendered(&mut chat, Rect::new(0, 0, 60, 20));
+        let whole = chat.line_count();
+
+        chat.revert(anchor, vec!["src/lib.rs".to_owned()]);
+        rendered(&mut chat, Rect::new(0, 0, 60, 20));
+
+        // Two entries' lines are gone and the marker's three — a headline, one
+        // file and the blank line every block ends with — took their place.
+        assert_eq!(chat.line_count(), whole - 6 + 3);
+    }
+
+    /// Starting a fresh conversation ends the revert with it: the session the
+    /// undo happened in is not the one on screen any more.
+    #[test]
+    fn clearing_the_transcript_ends_the_revert_too() {
+        let (mut chat, anchor) = reverted_transcript();
+        chat.revert(anchor, Vec::new());
+
+        chat.clear();
+
+        assert!(!chat.is_reverted());
+        assert_eq!(chat.line_count(), 0);
     }
 }
