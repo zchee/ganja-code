@@ -6,15 +6,25 @@
 //!
 //! Each entry caches the lines it wrapped to at a given width, so a frame costs
 //! one wrap per entry that actually changed plus a walk over the entries the
-//! viewport crosses — never a reflow of the whole transcript. P2 renders plain
-//! text; P6 slots markdown parsing in ahead of the wrap as a second, width-
-//! independent cache stage.
+//! viewport crosses — never a reflow of the whole transcript. P6 fills the
+//! stage this doc reserved: an assistant text part is parsed into styled,
+//! width-independent markdown blocks by [`crate::markdown`] first, and only
+//! then wrapped here. The two caches invalidate on different things — stage 1
+//! on the part's source and the theme, stage 2 on the width and the theme —
+//! which is what keeps a resize off the markdown parser and a streamed delta
+//! off the blocks that already settled.
+//!
+//! Markdown reaches **assistant text only** (ruling R12): a user's own message,
+//! a tool's output and a file chip stay plain, so nothing a person typed is
+//! re-read as markup.
+
+use std::collections::HashMap;
 
 use ganja_core::{Message, MessageId, Part, PartBody, PartId, Role, ToolState};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Line};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
-use crate::theme::Theme;
+use crate::{markdown, theme::Theme};
 
 /// Lines one wheel notch moves the viewport.
 pub const WHEEL_LINES: isize = 3;
@@ -55,6 +65,10 @@ struct Entry {
     /// Only a resume can know this — a live message is equally unfinished
     /// while it streams, and there the absence means "still arriving".
     interrupted: bool,
+    /// Stage 1 of the cache: one parsed markdown document per assistant text
+    /// part. Deliberately *not* inside [`Wrapped`] — a resize and a streamed
+    /// delta both clear that, and neither is a reason to parse again.
+    markdown: HashMap<PartId, markdown::Document>,
     wrapped: Option<Wrapped>,
 }
 
@@ -96,6 +110,7 @@ impl Chat {
             role: message.role,
             parts: message.parts,
             interrupted,
+            markdown: HashMap::new(),
             wrapped: None,
         });
         self.follow_tail();
@@ -295,6 +310,18 @@ impl Entry {
         // style instead of the running text style around it.
         for part in &self.parts {
             match &part.body {
+                // A reply is markdown; a prompt is what the user typed. The
+                // split is the whole of R12's scope, and it is made here so
+                // that neither renderer has to ask who wrote the part.
+                PartBody::Text { text } if self.role == Role::Assistant => {
+                    let document = self.markdown.entry(part.id.clone()).or_default();
+                    document.update(text, theme);
+                    lines.extend(
+                        document
+                            .lines()
+                            .flat_map(|line| markdown::wrap(line, usize::from(width))),
+                    );
+                }
                 PartBody::Text { text } => {
                     lines.extend(
                         wrap(text, usize::from(width))
@@ -1403,6 +1430,45 @@ mod tests {
                 "{started}..{completed}"
             );
         }
+    }
+
+    /// R12's scope, from the seam's side: a reply is markdown.
+    #[test]
+    fn an_assistant_reply_is_rendered_as_markdown() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply
+            .parts
+            .push(Part::text("# Heading\n\nand **loud** text"));
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 40, 10));
+
+        assert!(
+            lines.iter().any(|line| line == "Heading"),
+            "the heading's marker should be concealed, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "and loud text"),
+            "and so should the emphasis markers, got {lines:?}"
+        );
+    }
+
+    /// The other half of the scope: what a person typed is never re-read as
+    /// markup, so their `#` and `**` stay on the screen.
+    #[test]
+    fn a_user_message_is_left_exactly_as_it_was_typed() {
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("# Heading and **loud** text"));
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 40, 10));
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "# Heading and **loud** text"),
+            "got {lines:?}"
+        );
     }
 
     /// The wrap cache holds styled lines, so it is as stale after a theme

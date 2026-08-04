@@ -10,6 +10,7 @@ pub mod component;
 pub mod event;
 pub mod external;
 pub mod keybind;
+pub(crate) mod markdown;
 pub mod mention;
 pub mod theme;
 

@@ -43,6 +43,7 @@
 - Filenames are generated from the module path and test name (`ganja_tui__app__tests__<test>`), so renaming a test orphans its snapshot — delete the stale file in the same change.
 - `.snap.new` files are unaccepted results; they must not be committed.
 - Two dump shapes exist: `screen()` captures symbols only (palette-independent — a theme change must NOT diff these), while `styled_screen()` captures symbol runs plus fg/bg/modifiers (the per-theme snapshots). Pick the one that matches what the test is pinning.
+- **These 25 snapshots are the markdown renderer's frozen regression harness.** Assistant body text routes through `markdown.rs`, whose plain-text semantics (newline = line break, text verbatim) are what keep every one of them byte-identical; the four theme snapshots and `themes_dialog_open` additionally pin which theme key paints the body. Re-blessing any of them requires the lead's sign-off per file, with the justification naming the actual markdown construct in the fixture.
 
 ### Testing Requirements
 

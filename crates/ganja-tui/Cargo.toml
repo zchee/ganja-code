@@ -26,12 +26,20 @@ ganja-core.workspace = true
 # matcher helix and nucleo use, so a fragment scores here the way it scores in
 # every other terminal picker the user already knows.
 nucleo-matcher.workspace = true
+# An assistant's reply is markdown. Parsed into block events rather than into
+# HTML — the transcript needs headings, fences and table cells as data it can
+# style, and there is no browser at the other end.
+pulldown-cmark.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 # Theme files decode into typed structures rather than being walked as raw
 # values, so a missing `theme` block is a decode error naming the file.
 serde.workspace = true
 serde_json.workspace = true
+# Fenced code inside a reply. Only the parser and the bundled syntax set are
+# used: syntect's own themes are ignored, because the nine `syntax*` keys the
+# active ganja theme already carries are what has to paint the tokens.
+syntect.workspace = true
 # `/editor` hands the buffer to `$EDITOR` through a file, and that file has to
 # be somewhere the editor can open and nothing else will collide with.
 tempfile.workspace = true
