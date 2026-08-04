@@ -125,7 +125,7 @@ impl Tool for GrepTool {
         // Owned before the walk rather than borrowed into it: the search runs
         // on a blocking thread that outlives this call's context, and the walk
         // compares every file in the tree against it.
-        let store = ctx.credentials.clone();
+        let store = ctx.credentials.guarded().map(Path::to_owned);
         let matches = tokio::task::spawn_blocking(move || {
             search(
                 &searched,
@@ -355,7 +355,7 @@ mod tests {
             cancel: CancellationToken::new(),
             call_id: "call-1".to_owned(),
             files: Arc::new(FileTimes::default()),
-            credentials: Some(credentials),
+            credentials: crate::Credentials::Guarded(credentials),
             spawn: None,
         }
     }
