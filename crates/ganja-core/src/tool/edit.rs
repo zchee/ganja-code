@@ -189,6 +189,13 @@ impl Tool for EditTool {
             })?,
         };
         let stamp = write_through(&anchor, join_bom(&content_new, bom)).await?;
+        // Recorded from the descriptor that was just written, and recorded
+        // here rather than anywhere later: this edit is about to arrive back
+        // as a filesystem event, and `crate::watch` decides staleness by
+        // comparing the file's stamp against the recorded one. Because the
+        // record happens inside the call that caused the event, the agent's
+        // own edit compares clean; a session that recorded afterwards would
+        // condemn its own work.
         ctx.files.record_stat(&path, stamp);
 
         // The patch describes the change, not the file's line endings, so both

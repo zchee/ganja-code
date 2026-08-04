@@ -181,10 +181,13 @@ async fn fetch(args: &Args, timeout: Duration) -> Result<ToolOutput, ToolError> 
     let content = String::from_utf8_lossy(&body);
     let html = mime.contains("text/html");
     let rendered = match args.format {
-        // Upstream converts HTML to markdown with turndown. Nothing here does
-        // yet, so an HTML body comes back as its readable text rather than as
-        // markup no reader would want.
-        Format::Markdown | Format::Text if html => strip_tags(&content),
+        // Upstream converts HTML to markdown with turndown; this is `htmd`,
+        // which is the same conversion by a different implementation — the
+        // headings, links and lists survive as markdown instead of being
+        // flattened into the text a stripper leaves behind. A text rendering
+        // is still a text rendering: `Format::Text` keeps the stripper.
+        Format::Markdown if html => to_markdown(&content),
+        Format::Text if html => strip_tags(&content),
         Format::Markdown | Format::Text | Format::Html => content.into_owned(),
     };
     let clamped = truncate::clamp(&rendered);
@@ -239,6 +242,32 @@ fn accept(format: Format) -> &'static str {
             "text/html;q=1.0, application/xhtml+xml;q=0.9, text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1"
         }
     }
+}
+
+/// `html` rendered as markdown.
+///
+/// The elements in [`SKIPPED`] are dropped whole, as they are by
+/// [`strip_tags`]: the converter treats a `<script>` as an ordinary block and
+/// would hand its source to the model as prose, which is the one thing both
+/// renderings agree must not happen (deviation:
+/// webfetch-markdown-skips-the-same-elements-the-stripper-does).
+///
+/// A conversion that fails falls back to the text rendering. Returning nothing
+/// because a renderer gave up would be a worse answer than the page's words in
+/// plain text, and the model asked for the page rather than for markdown.
+fn to_markdown(html: &str) -> String {
+    htmd::HtmlToMarkdown::builder()
+        .skip_tags(SKIPPED.to_vec())
+        .build()
+        .convert(html)
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                %error,
+                "the page would not convert to markdown; handing over its text instead"
+            );
+
+            strip_tags(html)
+        })
 }
 
 /// The text a reader would see in `html`.
@@ -538,6 +567,87 @@ mod tests {
             seen.contains("text/markdown;q=1.0"),
             "markdown is the default, and the request should say so: {seen}"
         );
+    }
+
+    /// A page with the constructs a stripper cannot represent: a heading is a
+    /// line of text to it, and a link's target is not text at all.
+    const STRUCTURED: &str = "<html><body><h1>Ganja</h1><p>See \
+                              <a href=\"https://example.com/docs\">the docs</a>.</p>\
+                              <ul><li>one</li><li>two</li></ul>\
+                              <style>body{color:red}</style>\
+                              <script>var x = 1 < 2;</script></body></html>";
+
+    /// **R17.** The markdown format is a markdown rendering, which is what
+    /// upstream's turndown call produces and what the tag stripper standing in
+    /// for it could not.
+    #[tokio::test]
+    async fn an_html_page_asked_for_as_markdown_comes_back_as_markdown() {
+        let endpoint = serve(Some(response("text/html; charset=utf-8", STRUCTURED))).await;
+
+        let out = WebfetchTool
+            .run(
+                serde_json::json!({ "url": endpoint.url, "format": "markdown" }),
+                &ctx(),
+            )
+            .await
+            .expect("the endpoint answers");
+
+        assert!(
+            out.output.contains("# Ganja"),
+            "a heading should be a heading: {:?}",
+            out.output
+        );
+        assert!(
+            out.output.contains("[the docs](https://example.com/docs)"),
+            "a link should keep the target a reader would follow: {:?}",
+            out.output
+        );
+        // Asserted by shape rather than by exact marker and spacing, which are
+        // the converter's style options and not the claim being made.
+        let bulleted: Vec<&str> = out
+            .output
+            .lines()
+            .filter(|line| line.trim_start().starts_with(['-', '*', '+']))
+            .collect();
+        assert!(
+            bulleted.len() == 2 && bulleted[0].contains("one") && bulleted[1].contains("two"),
+            "a list should be a list: {:?}",
+            out.output
+        );
+
+        // The other half of the claim: none of the above is something the
+        // stripper this replaced could ever have emitted, so the assertions
+        // are about the conversion and not about the page.
+        let stripped = super::strip_tags(STRUCTURED);
+        assert!(
+            !stripped.contains("# Ganja")
+                && !stripped.contains("example.com/docs")
+                && !stripped
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(['-', '*', '+'])),
+            "the stripper has no markdown to lose: {stripped:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn neither_rendering_hands_the_model_a_script_or_a_stylesheet() {
+        for format in ["markdown", "text"] {
+            let endpoint = serve(Some(response("text/html", STRUCTURED))).await;
+
+            let out = WebfetchTool
+                .run(
+                    serde_json::json!({ "url": endpoint.url, "format": format }),
+                    &ctx(),
+                )
+                .await
+                .expect("the endpoint answers");
+
+            assert!(
+                !out.output.contains("color:red") && !out.output.contains("var x"),
+                "{format} handed over machinery as prose: {:?}",
+                out.output
+            );
+        }
     }
 
     #[tokio::test]

@@ -53,6 +53,6 @@ None — this crate is the bottom of the dependency graph. `ganja-tui` and `ganj
 
 ### External
 
-`tokio` + `tokio-util` (runtime, `CancellationToken`), `reqwest`/rustls (provider HTTP), `futures` (stream combinators), `secrecy` (key material), `serde`/`serde_json`, `schemars` (tool schemas), `ignore`/`grep-searcher`/`grep-regex` (in-process glob and grep), `similar` (unified diffs), `etcetera` (XDG paths), `thiserror`, `tracing`, `url` (host comparison for endpoint checks), `async-trait`, `libc` (unix only).
+`tokio` + `tokio-util` (runtime, `CancellationToken`), `reqwest`/rustls (provider HTTP), `futures` (stream combinators), `secrecy` (key material), `serde`/`serde_json`, `schemars` (tool schemas), `ignore`/`grep-searcher`/`grep-regex` (in-process glob and grep), `similar` (unified diffs), `etcetera` (XDG paths), `rmcp` (MCP client transports), `lsp-types` (the LSP wire types), `notify` (the stale-read watcher), `htmd` (webfetch's markdown rendering), `thiserror`, `tracing`, `url` (host comparison for endpoint checks), `async-trait`, `libc` (unix only).
 
 <!-- MANUAL: -->
