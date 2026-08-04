@@ -195,6 +195,16 @@ impl Editor {
         self.area.insert_newline();
     }
 
+    /// Inserts `text` at the cursor, leaving it after what was inserted.
+    ///
+    /// What a paste does. Line breaks inside `text` break the buffer's lines,
+    /// which is the whole difference between this and feeding the characters
+    /// through [`Editor::input`] one at a time: Enter is a submit here, so a
+    /// pasted paragraph typed key by key would send its first line.
+    pub fn insert(&mut self, text: &str) {
+        self.area.insert_str(text);
+    }
+
     /// Hands `key` to the widget's own editing bindings.
     pub fn input(&mut self, key: KeyEvent) {
         self.area.input(key);

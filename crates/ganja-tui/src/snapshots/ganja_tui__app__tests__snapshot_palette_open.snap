@@ -6,16 +6,16 @@ you
 show me ┌ commands ────────────────────────────────────────────────────┐        
         │search commands                                               │        
 ganja   │suggested                                                     │        
-One edit│> /sessions  Switch session                             ctrl+s│        
-[done] e│  /models    Switch model                                     │        
+One edit│> /sessions      Switch session                         ctrl+s│        
+[done] e│  /models        Switch model                                 │        
 @@ -1,2 │session                                                       │        
--let the│  /sessions  Switch session                             ctrl+s│        
-+let the│  /new       New session                                      │        
-context │  /compact   Compact session                                  │        
-[error] │  /editor    Open editor                                      │        
+-let the│  /sessions      Switch session                         ctrl+s│        
++let the│  /new           New session                                  │        
+context │  /compact       Compact session                              │        
+[error] │  /editor        Open editor                                  │        
 refused:│agent                                                         │        
-        │  /models    Switch model                                     │        
-        │  /agents    Switch agent                                     │        
+        │  /models        Switch model                                 │        
+        │  /agents        Switch agent                                 │        
         │                                                              │        
         │[type] filter   [up/down] move   [Enter] run   [Esc] close    │        
         └──────────────────────────────────────────────────────────────┘        

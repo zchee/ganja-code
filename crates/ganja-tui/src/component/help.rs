@@ -187,11 +187,13 @@ mod tests {
     /// Tall enough for the whole card: nine commands, the keys that have no
     /// command row, and the chrome around them. A shorter window truncates,
     /// which is the behavior a tiny-area test covers rather than this one.
+    /// Tall enough for every row the card holds: the command list grew by the
+    /// two copy commands, and a shorter area clips the key section under it.
     const AREA: Rect = Rect {
         x: 0,
         y: 0,
         width: 76,
-        height: 20,
+        height: 22,
     };
 
     fn rendered(help: &Help) -> String {

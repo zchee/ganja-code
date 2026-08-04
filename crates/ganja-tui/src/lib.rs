@@ -5,6 +5,7 @@
 //! [`Event`](ganja_core::Event)s into frames.
 
 pub mod app;
+pub mod clipboard;
 pub mod command;
 pub mod component;
 pub mod event;
@@ -13,6 +14,7 @@ pub mod keybind;
 pub(crate) mod markdown;
 pub mod mention;
 pub mod theme;
+pub mod transcript;
 
 use std::{
     io::stdout,
@@ -27,7 +29,7 @@ use ganja_core::{
     instruction, provider,
 };
 use ratatui::crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
 };
 use tokio_util::sync::CancellationToken;
@@ -42,7 +44,7 @@ use crate::{
 const STORAGE: &str = "storage";
 
 /// Separates the things the status bar shows on its left.
-const NOTICE_SEPARATOR: &str = " \u{b7} ";
+pub(crate) const NOTICE_SEPARATOR: &str = " \u{b7} ";
 
 /// Which stored session a run opens, when it opens one.
 ///
@@ -69,9 +71,11 @@ pub enum Resume {
 /// a readable error rather than flashing past inside the alternate screen.
 ///
 /// The terminal is restored on every exit path, including a panic: the hook
-/// installed here undoes mouse capture and then defers to the one
-/// [`ratatui::try_init`] installed, which leaves raw mode and the alternate
-/// screen.
+/// installed here undoes bracketed paste and mouse capture and then defers to
+/// the one [`ratatui::try_init`] installed, which leaves raw mode and the
+/// alternate screen. MCP servers are **not** part of that hook — its work has
+/// to be synchronous and closing them is not — so a panic leaves a local
+/// server's process group standing until it notices its stdin has closed.
 ///
 /// # Errors
 ///
@@ -103,6 +107,12 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
         &config,
         project.root(),
     ));
+    // Configured MCP servers, none of them dialled yet. The **project root**
+    // is what a relative `cwd` in an entry resolves against, not the directory
+    // this process happens to have been started in: a server configured once
+    // for the project has to start in the same place whichever subdirectory
+    // its owner opened the terminal in.
+    let servers = ganja_core::McpServers::new(config.mcp.clone(), project.root());
     // The registry carries every builtin tool the agent loop can execute;
     // permission rules load for the project the terminal was opened in.
     let engine = Engine::persistent(
@@ -113,12 +123,19 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
         storage,
     )
     .with_agents(agents)
-    .with_commands(commands);
+    .with_commands(commands)
+    .with_mcp(Arc::clone(&servers));
     // Composed from the engine and not from the selection, and only once the
     // agents are on it: the default agent may have named a model of another
     // family, and the prompt has to be that model's.
     let (base, suffix) = system_parts(&engine, &config, &cwd);
     let engine = engine.with_system_parts(base, suffix);
+
+    // Dialled from here on, in the background: the first turn is offered
+    // whichever servers have answered by the time it starts, and a server
+    // that never answers costs its tools and a line of the status bar rather
+    // than the startup this call returns straight out of (**R3**).
+    engine.connect_mcp();
 
     let seed = match resume {
         Some(resume) => stored_transcript(&engine, resume).await?,
@@ -144,7 +161,7 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     ganja_core::tool::truncate::spawn_sweep_loop(background.clone());
 
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
-    let outcome = match capture_mouse() {
+    let outcome = match capture_input() {
         Ok(()) => {
             // The model is the engine's to answer for, not the selection's:
             // the default agent may have named one of its own, and a resumed
@@ -152,10 +169,14 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
             let mut app = App::new(engine, notice(selection.notice, theme_notice), themes)
                 .with_provider(provider_id)
                 .with_keybinds(keys)
+                // What a submitted `@path` is checked against, because it is
+                // what the engine resolves the attachment against.
+                .with_root(project.root())
                 // The `@` file menu walks from here, so a mention resolves against
                 // the directory the user opened rather than the project root: what
                 // they typed is relative to where they are standing.
-                .with_cwd(cwd);
+                .with_cwd(cwd)
+                .watching_mcp(config.mcp.len());
             app.seed(seed);
             app.run(&mut terminal).await
         }
@@ -164,6 +185,10 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     // Nothing is waiting on the loops, but a background task that outlives the
     // screen it was feeding is a leak whichever way the run ended.
     background.cancel();
+    // Every local server's process group ends here. Through this handle rather
+    // than through `Engine::shutdown_mcp`, which is the same call one layer
+    // down: the engine moved into the app, and `App::run` consumes it.
+    servers.shutdown().await;
     let restored = restore();
 
     outcome.and(restored)
@@ -263,12 +288,21 @@ async fn stored_transcript(engine: &Engine, resume: Resume) -> Result<Vec<Messag
         .context("failed to resume the session")
 }
 
-/// Turns on wheel reporting and extends the panic hook to turn it back off.
-fn capture_mouse() -> Result<()> {
+/// Turns on wheel reporting and bracketed paste, and extends the panic hook to
+/// turn both back off.
+///
+/// Bracketed paste is what makes a pasted paragraph one event instead of a
+/// stream of keystrokes — without it, the newline in the middle of a paste is
+/// an Enter, and Enter here sends the prompt. Left enabled on the way out it
+/// would leave the user's shell wrapping their pastes in escapes nothing there
+/// reads (**R13**).
+fn capture_input() -> Result<()> {
     execute!(stdout(), EnableMouseCapture).context("failed to enable mouse reporting")?;
+    execute!(stdout(), EnableBracketedPaste).context("failed to enable bracketed paste")?;
 
     let installed = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(stdout(), DisableBracketedPaste);
         let _ = execute!(stdout(), DisableMouseCapture);
         installed(info);
     }));
@@ -277,11 +311,13 @@ fn capture_mouse() -> Result<()> {
 }
 
 fn restore() -> Result<()> {
+    let paste =
+        execute!(stdout(), DisableBracketedPaste).context("failed to disable bracketed paste");
     let mouse =
         execute!(stdout(), DisableMouseCapture).context("failed to disable mouse reporting");
     let terminal = ratatui::try_restore().context("failed to restore the terminal");
 
-    mouse.and(terminal)
+    paste.and(mouse).and(terminal)
 }
 
 #[cfg(test)]

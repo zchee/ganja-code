@@ -13,6 +13,10 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+# `/copy`, `/copy-message` and the `ctrl+v` paste fallback reach the system
+# clipboard through it. Only ever constructed behind the seam in
+# `src/clipboard.rs`, so nothing in a test run talks to a real desktop.
+arboard.workspace = true
 # Not named in the source: it exists to enable crossterm's `event-stream`
 # feature on the crate instance `ratatui` re-exports.
 crossterm.workspace = true

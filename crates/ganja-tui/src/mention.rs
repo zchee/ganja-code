@@ -19,6 +19,8 @@
 //! file's content is resolved separately when the request is built.
 //! `#line-range` suffixes are not ported (**D12**).
 
+use std::path::Path;
+
 use ganja_core::Mention;
 
 /// A mention being typed, located in the buffer it was found in.
@@ -113,9 +115,40 @@ pub fn scan(text: &str) -> Vec<Mention> {
     found
 }
 
+/// Every file `text` mentions that is **actually there**, resolved against
+/// `root`.
+///
+/// [`scan`] is the lexer and this is the filter, and a submitted prompt goes
+/// through both (**D113**, **R15(a)**). The reason is that `@` in prose is
+/// older and more common than `@` as a file mention: "ask @alice about it"
+/// mentions a person, and attaching a `File` part for her would put an
+/// attachment-error block in front of the model instead of the sentence the
+/// user wrote. A path that does not resolve stays in the text verbatim, which
+/// is the same thing that happens to a mistyped one — the model reads it and
+/// can still act on it.
+///
+/// `root` is the **project root**, because that is what the engine resolves a
+/// `File` part against (`session.rs::resolve_mentions`). Filtering against
+/// anything else would drop mentions the engine would have read, or keep ones
+/// it could not.
+///
+/// Directories do not survive: upstream's menu offers files, the engine's
+/// attachment answers a directory with a note telling the model to name a file
+/// inside it, and a token that names one is more use to the model as the text
+/// the user typed.
+#[must_use]
+pub fn attachable(text: &str, root: &Path) -> Vec<Mention> {
+    scan(text)
+        .into_iter()
+        .filter(|mention| root.join(&mention.path).is_file())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Fragment, scan, trigger};
+    use std::path::Path;
+
+    use super::{Fragment, attachable, scan, trigger};
 
     /// The exact shape of the trigger, which is the whole difference between a
     /// file menu and a menu that pops up over an email address.
@@ -225,6 +258,90 @@ mod tests {
         ] {
             assert!(scan(text).is_empty(), "{text:?} mentions nothing");
         }
+    }
+
+    /// A project root holding `files`, each written with its own name.
+    fn project(files: &[&str]) -> tempfile::TempDir {
+        let root = tempfile::TempDir::new().expect("a temporary directory is creatable");
+
+        for file in files {
+            let path = root.path().join(file);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the parent directory is creatable");
+            }
+            std::fs::write(&path, file).expect("the fixture file is writable");
+        }
+
+        root
+    }
+
+    /// **D113's named case.** `@alice` is a person, not a file, and the whole
+    /// point of the filter is that the sentence reaches the model as a
+    /// sentence.
+    #[test]
+    fn a_word_that_names_no_file_is_carried_as_text_rather_than_attached() {
+        let root = project(&["src/lib.rs"]);
+
+        assert!(
+            attachable("ask @alice about it", root.path()).is_empty(),
+            "a name is not an attachment"
+        );
+        assert_eq!(
+            scan("ask @alice about it").len(),
+            1,
+            "the lexer still finds it, or the filter above proves nothing"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_there_still_attaches() {
+        let root = project(&["src/lib.rs"]);
+
+        assert_eq!(
+            attachable("look at @src/lib.rs please", root.path())
+                .iter()
+                .map(|mention| mention.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/lib.rs"]
+        );
+    }
+
+    /// A path that is nearly right is the case the filter must not swallow
+    /// silently: it stays in the prompt, where the model can see the typo.
+    #[test]
+    fn a_mistyped_path_rides_as_text_beside_the_one_that_resolved() {
+        let root = project(&["src/lib.rs"]);
+
+        let mentions = attachable("compare @src/lib.rs with @src/libb.rs", root.path());
+
+        assert_eq!(
+            mentions
+                .iter()
+                .map(|mention| mention.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/lib.rs"],
+            "only the file that exists attaches"
+        );
+    }
+
+    #[test]
+    fn a_directory_is_not_an_attachment() {
+        let root = project(&["src/lib.rs"]);
+
+        assert!(attachable("read @src", root.path()).is_empty());
+    }
+
+    /// The root is the project's, not the process's: the engine resolves the
+    /// part against the project root, so a filter reading anything else would
+    /// disagree with it.
+    #[test]
+    fn the_filter_resolves_against_the_root_it_is_given() {
+        let root = project(&["notes.md"]);
+        let elsewhere = project(&[]);
+
+        assert_eq!(attachable("@notes.md", root.path()).len(), 1);
+        assert!(attachable("@notes.md", elsewhere.path()).is_empty());
+        assert!(attachable("@notes.md", Path::new("/nonexistent-ganja-root")).is_empty());
     }
 
     #[test]
