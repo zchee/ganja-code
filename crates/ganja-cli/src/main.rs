@@ -671,7 +671,7 @@ fn models_command() {
 
     let mut defaulted = false;
     for model in catalog::models() {
-        let default = catalog::default_model(model.provider_id) == Some(model.id);
+        let default = catalog::default_model(&model.provider_id) == Some(model.id.as_str());
         defaulted |= default;
 
         println!(
