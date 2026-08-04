@@ -11,7 +11,7 @@ Assertions on the shipped binary rather than on library functions: the command-l
 
 | File | Description |
 |------|-------------|
-| `cli.rs` | The command-line surface — subcommands, credential storage, redaction. Every credential assertion is on the redacted tail: a test that printed a whole key would put it in CI output, which is the failure redaction exists to prevent. |
+| `cli.rs` | The command-line surface — subcommands, credential storage, redaction, the model listing and the session listing. Every credential assertion is on the redacted tail: a test that printed a whole key would put it in CI output, which is the failure redaction exists to prevent. |
 | `import_opencode.rs` | `ganja config import-opencode` through the built binary: which files discovery reads and in what order, where the result lands, and that a run which would overwrite or leak refuses to. What the *mapping* does with a key is settled beside the mapping, in `src/import.rs`. |
 | `import_round_trip.rs` | One env-mutating test in its own binary: import, then `Config::load` in-process, so what the importer wrote is proved to be what the next launch reads — permission order included. |
 | `fixtures/opencode.jsonc` | One opencode config holding every shape the mapping has a rule for. Shared with the table test in `src/import.rs`, so the two cannot drift apart. |
@@ -38,7 +38,7 @@ cargo test -p ganja-cli --test pty_smoke         # unix only, slower
 
 A pty run drives the binary through `GANJA_PROVIDER=fake` with a `GANJA_FAKE_SCRIPT` written into a temp directory, and `XDG_DATA_HOME` redirected so stored permission rules land in the fixture, not in the real user's data directory.
 
-Anything that reads or writes a *config* redirects `XDG_CONFIG_HOME` as well, so the machine running the suite cannot contribute a config of its own. Prefer a subprocess `.env()` over `set_var`: the former is per-invocation and lets tests share a binary, and only a test that must also read the environment in-process — `import_round_trip.rs` — earns a binary of its own.
+Anything that reads or writes a *config* redirects `XDG_CONFIG_HOME` as well, so the machine running the suite cannot contribute a config of its own. Anything that reads the model catalog redirects `XDG_CACHE_HOME` and switches fetching off for the same reason, one step further: `ganja models` adopts whatever catalog is cached there, so a run that inherited the developer's would assert on whatever their last session happened to fetch — and a run that inherited nothing would reach the published endpoint from CI. Prefer a subprocess `.env()` over `set_var`: the former is per-invocation and lets tests share a binary, and only a test that must also read the environment in-process — `import_round_trip.rs` — earns a binary of its own.
 
 ### Common Patterns
 

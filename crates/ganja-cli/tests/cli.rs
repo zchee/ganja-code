@@ -4,7 +4,16 @@
 //! whole key would put it in CI output, which is the failure the redaction
 //! exists to prevent.
 
+use std::{
+    fs,
+    io::{Read as _, Write as _},
+    net::{TcpListener, TcpStream},
+    path::Path,
+    thread,
+};
+
 use assert_cmd::Command;
+use ganja_core::{Project, SessionId, SessionInfo, Storage, Usage, storage::VERSION};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -197,21 +206,272 @@ fn an_environment_variable_outranks_the_stored_key_and_is_pointed_out() {
         );
 }
 
+/// A cache home of this test's own.
+///
+/// Load-bearing rather than tidy: the listing adopts whatever catalog is
+/// cached under the cache home, so a run that inherited the developer's would
+/// be asserting on whatever their last session happened to fetch.
+fn cache() -> TempDir {
+    TempDir::new().expect("a temporary directory is creatable")
+}
+
+/// An invocation whose catalog is only what the test put in front of it: this
+/// cache home, nothing fetched, and none of the developer's `GANJA_*` settings.
+///
+/// The variables are spelled out rather than imported from
+/// `ganja_core::catalog` for the reason the pty suite spells its own out: what
+/// a command-line test pins is the contract somebody types, and the contract
+/// is the name.
+fn offline(cache: &TempDir) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
+    command
+        .env("XDG_CACHE_HOME", cache.path())
+        .env("GANJA_DISABLE_MODELS_FETCH", "1")
+        .env_remove("GANJA_MODELS_URL")
+        .env_remove("GANJA_MODELS_PATH");
+
+    command
+}
+
+/// The same, with fetching on and pointed at `url` instead of at the published
+/// endpoint — which this suite must never reach.
+fn online(cache: &TempDir, url: &str) -> Command {
+    let mut command = offline(cache);
+    command
+        .env("GANJA_MODELS_URL", url)
+        .env_remove("GANJA_DISABLE_MODELS_FETCH");
+
+    command
+}
+
+/// Where the default endpoint's catalog is cached, under a cache home.
+fn cached_at(cache: &TempDir) -> std::path::PathBuf {
+    cache.path().join("ganja").join("models.json")
+}
+
+/// A catalog in the shape the endpoint publishes, naming a provider no build
+/// of this binary carries — so a row of it on screen can only have come from
+/// the file it was written into.
+const PLANTED: &str = r#"{
+  "planted": {
+    "id": "planted",
+    "models": {
+      "planted-one": {
+        "id": "planted-one",
+        "name": "Planted One",
+        "cost": { "input": 3.0, "output": 15.0 },
+        "limit": { "context": 321000, "output": 4000 }
+      }
+    }
+  }
+}"#;
+
+/// Two more of the same, served in order, so a second fetch can be told apart
+/// from a cache that was merely adopted.
+const SERVED: [&str; 2] = [
+    r#"{ "alpha": { "models": { "alpha-one": {
+        "cost": { "input": 1.0, "output": 2.0 },
+        "limit": { "context": 111000, "output": 1000 } } } } }"#,
+    r#"{ "beta": { "models": { "beta-one": {
+        "cost": { "input": 1.0, "output": 2.0 },
+        "limit": { "context": 222000, "output": 2000 } } } } }"#,
+];
+
+/// Answers each connection with the next of `bodies`, repeating the last, and
+/// says where it is listening.
+///
+/// A thread and the standard library's own listener rather than a runtime:
+/// this suite drives a built binary, and the only thing it needs of an HTTP
+/// server is that there is one.
+fn serve(bodies: &'static [&'static str]) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
+    let url = format!(
+        "http://{}",
+        listener
+            .local_addr()
+            .expect("a bound socket has an address")
+    );
+
+    thread::spawn(move || {
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { return };
+
+            read_head(&mut stream);
+            let body = bodies[index.min(bodies.len() - 1)];
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
+                 {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    url
+}
+
+/// Reads a request head off `stream` and discards it, so the client is never
+/// writing into a socket nobody is reading.
+fn read_head(stream: &mut TcpStream) {
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+
+    while !head.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return,
+        }
+    }
+}
+
+/// A port nothing is listening on, which is what an endpoint that refuses a
+/// connection looks like from here.
+///
+/// Bound and released rather than picked, because a number chosen by hand is a
+/// number somebody else's service may already have.
+fn closed_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
+
+    listener
+        .local_addr()
+        .expect("a bound socket has an address")
+        .port()
+}
+
 #[test]
 fn models_lists_the_catalog_and_marks_one_default_per_provider() {
-    Command::new(env!("CARGO_BIN_EXE_ganja"))
+    offline(&cache()).arg("models").assert().success().stdout(
+        predicate::str::contains("PROVIDER")
+            .and(predicate::str::contains("$/MTOK IN"))
+            .and(predicate::str::contains("claude-sonnet-5*"))
+            .and(predicate::str::contains("gpt-5.6*"))
+            .and(predicate::str::contains("claude-haiku-4-5"))
+            // The context window is compacted rather than spelled out.
+            .and(predicate::str::contains("1.0M"))
+            .and(predicate::str::contains("200.0k")),
+    );
+}
+
+/// The cache is a layer somebody installs, not one a lookup reaches for — so
+/// the listing has to install it, or it answers from the snapshot compiled
+/// into the binary however recently a session fetched something newer.
+#[test]
+fn a_cached_catalog_is_what_the_listing_reflects() {
+    let cache = cache();
+    let file = cached_at(&cache);
+    fs::create_dir_all(file.parent().expect("the cache file has a directory"))
+        .expect("the cache directory is creatable");
+    fs::write(&file, PLANTED).expect("the cache file is writable");
+
+    offline(&cache).arg("models").assert().success().stdout(
+        predicate::str::contains("planted-one")
+            .and(predicate::str::contains("321.0k"))
+            // A fetched catalog replaces the table rather than joining it,
+            // which is also what makes this assertion mean anything.
+            .and(predicate::str::contains("claude-sonnet-5").not()),
+    );
+}
+
+/// Fetching switched off is an ordinary answer to "refresh", not a failure:
+/// the tier below still has everything the question needed.
+#[test]
+fn a_refresh_with_fetching_switched_off_still_lists_and_says_why() {
+    offline(&cache())
+        .args(["models", "--refresh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-sonnet-5*"))
+        .stderr(predicate::str::contains("GANJA_DISABLE_MODELS_FETCH"));
+}
+
+/// Neither is an endpoint that cannot be reached. A `--refresh` that exited
+/// non-zero over a refused connection would make a table that is merely stale
+/// look like no table at all.
+#[test]
+fn a_refresh_the_network_refuses_degrades_to_the_table_already_in_hand() {
+    let cache = cache();
+    let nowhere = format!("http://127.0.0.1:{}", closed_port());
+
+    online(&cache, &nowhere)
+        .args(["models", "--refresh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-sonnet-5*"))
+        .stderr(predicate::str::contains("not refreshed"));
+}
+
+/// `--refresh` fetches, and it fetches *past* the debounce a background
+/// refresh honours — otherwise asking for the newest catalog would answer with
+/// whatever was fetched in the last five minutes.
+#[test]
+fn a_forced_refresh_fetches_past_the_cache_it_just_wrote() {
+    let cache = cache();
+    let url = serve(&SERVED);
+
+    // Nothing is cached yet, so these rows can only have come off the socket.
+    online(&cache, &url)
+        .args(["models", "--refresh"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("alpha-one")
+                .and(predicate::str::contains("claude-sonnet-5").not()),
+        );
+
+    // The cache that fetch wrote is far fresher than the debounce, so a second
+    // fetch happened because this run forced one.
+    online(&cache, &url)
+        .args(["models", "--refresh"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("beta-one").and(predicate::str::contains("alpha-one").not()),
+        );
+
+    // And with fetching off there is nowhere else the second catalog could be
+    // read from: what the fetch wrote, the next run adopts.
+    offline(&cache)
+        .env("GANJA_MODELS_URL", &url)
         .arg("models")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("beta-one"));
+}
+
+#[test]
+fn a_named_provider_is_the_only_one_the_listing_carries() {
+    let cache = cache();
+
+    offline(&cache)
+        .args(["models", "anthropic"])
         .assert()
         .success()
         .stdout(
             predicate::str::contains("PROVIDER")
-                .and(predicate::str::contains("$/MTOK IN"))
                 .and(predicate::str::contains("claude-sonnet-5*"))
-                .and(predicate::str::contains("gpt-5.6*"))
-                .and(predicate::str::contains("claude-haiku-4-5"))
-                // The context window is compacted rather than spelled out.
-                .and(predicate::str::contains("1.0M"))
-                .and(predicate::str::contains("200.0k")),
+                .and(predicate::str::contains("gpt-5.6").not()),
+        );
+
+    offline(&cache)
+        .args(["models", "openai"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gpt-5.6*").and(predicate::str::contains("claude").not()));
+}
+
+/// A header over no rows would read as "this provider serves nothing", which
+/// is indistinguishable from the typo it usually is.
+#[test]
+fn a_provider_this_table_does_not_carry_is_named_rather_than_listed_as_empty() {
+    offline(&cache())
+        .args(["models", "gemini"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("PROVIDER").not())
+        .stderr(
+            predicate::str::contains("gemini")
+                .and(predicate::str::contains("anthropic"))
+                .and(predicate::str::contains("openai")),
         );
 }
 
@@ -236,6 +496,96 @@ fn listing_sessions_in_a_project_with_none_invites_rather_than_fails() {
         .assert()
         .success()
         .stdout(predicate::str::contains("no sessions here yet"));
+}
+
+/// A project directory pinned by a checkout marker, so the store a run writes
+/// into is this directory's rather than that of whatever the temporary
+/// directory happens to sit inside.
+fn project() -> TempDir {
+    let directory = TempDir::new().expect("a temporary directory is creatable");
+    fs::create_dir(directory.path().join(".git")).expect("the checkout marker is creatable");
+
+    directory
+}
+
+/// The store a run in `project` with its state under `data` reads.
+///
+/// Composed rather than asked of `Project::data_dir`, which resolves the data
+/// home from *this* process's environment while the run under test is given
+/// its own. The slug is the part that has to agree between the two, and that
+/// is what `Project` answers here.
+fn session_storage(data: &TempDir, project: &Path) -> Storage {
+    Storage::open(
+        data.path()
+            .join("ganja")
+            .join("project")
+            .join(Project::resolve(project).slug())
+            .join("storage"),
+    )
+}
+
+/// Stores a session, which is a delegated one when `parent` names the session
+/// whose `task` call spawned it.
+fn store(storage: &Storage, id: &str, parent: Option<&str>) {
+    storage
+        .save_info(&SessionInfo {
+            id: SessionId::from(id.to_owned()),
+            version: VERSION,
+            title: Some(format!("work of {id}")),
+            created: 1,
+            updated: 1,
+            usage: Usage::default(),
+            context_tokens: 0,
+            summary: None,
+            agent: None,
+            model: None,
+            parent: parent.map(|parent| SessionId::from(parent.to_owned())),
+        })
+        .expect("a session stores");
+}
+
+/// A subagent's session is rendered on the tool-call row that spawned it, and
+/// resuming into one would open a delegated turn with nothing on screen saying
+/// what asked for it — so the listing shows roots, exactly as the picker in
+/// `ganja-tui` does.
+#[test]
+fn a_session_a_task_call_spawned_is_not_listed_beside_the_one_that_asked_for_it() {
+    let data = data();
+    let project = project();
+    let storage = session_storage(&data, project.path());
+    store(&storage, "ses_root", None);
+    store(&storage, "ses_delegated", Some("ses_root"));
+
+    ganja(&data)
+        .current_dir(project.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ses_root")
+                .and(predicate::str::contains("ses_delegated").not()),
+        );
+}
+
+/// And a project holding nothing but delegated sessions has nothing to list,
+/// which has to read as the same invitation an empty store does rather than as
+/// a table with no rows under it.
+#[test]
+fn a_project_whose_every_session_is_delegated_reads_as_one_with_none() {
+    let data = data();
+    let project = project();
+    let storage = session_storage(&data, project.path());
+    store(&storage, "ses_delegated", Some("ses_root"));
+
+    ganja(&data)
+        .current_dir(project.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("no sessions here yet")
+                .and(predicate::str::contains("SESSION").not()),
+        );
 }
 
 /// A first run has nothing to say on stderr.
