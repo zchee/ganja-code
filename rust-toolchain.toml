@@ -1,4 +1,4 @@
 [toolchain]
 channel = "nightly"
-components = ["clippy", "rustfmt", "rust-analysis", "rust-analyzer"]
+components = ["clippy", "rustfmt", "rust-analyzer"]
 profile = "default"
