@@ -640,4 +640,33 @@ mod tests {
 
         assert_eq!(roots.rebase(&root.join("a.txt")), root.join("a.txt"));
     }
+
+    /// The whole-tree recursive watch was tried once and reverted: on Linux,
+    /// `notify`'s inotify backend registers a recursive watch by walking the
+    /// entire directory synchronously, which is what timed out the pty
+    /// drills in CI once a checkout grew a `node_modules` or a warm
+    /// `target/`. Non-recursive versus recursive has no other footprint any
+    /// caller can observe — no return value changes, no event shape changes
+    /// — so no behavioral test can pin it; reading the argument straight out
+    /// of the source is the same trick the workspace's own purity check uses
+    /// to keep this crate free of `ratatui`.
+    #[test]
+    fn the_watch_taken_is_never_recursive() {
+        let source = include_str!("watch.rs");
+
+        assert!(
+            source.contains("RecursiveMode::NonRecursive"),
+            "the watch registration should still ask for the non-recursive mode"
+        );
+
+        // Assembled from two pieces rather than written as one literal, so
+        // this test's own source is never itself an occurrence of the thing
+        // it is checking for.
+        let banned = ["Recursive", "Mode::Recursive"].concat();
+        assert!(
+            !source.contains(&banned),
+            "the watch must never switch back to the mode that walks the \
+             whole tree synchronously"
+        );
+    }
 }
