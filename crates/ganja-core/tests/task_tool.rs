@@ -14,7 +14,7 @@ use std::sync::Arc;
 use ganja_core::{
     Tool as _, ToolCtx, ToolError,
     tool::{
-        FileTimes,
+        Credentials, FileTimes,
         task::{Delegated, Delegation, Offered, TaskTool, Unanswered},
     },
 };
@@ -43,7 +43,7 @@ fn ctx(answer: Result<Delegated, Unanswered>) -> (ToolCtx, Arc<std::sync::Mutex<
             cancel: CancellationToken::new(),
             call_id: "call_1".to_owned(),
             files: Arc::new(FileTimes::default()),
-            credentials: None,
+            credentials: Credentials::Unguarded,
             spawn: Some(subagents),
         },
         asked,
@@ -186,7 +186,7 @@ async fn a_call_with_nothing_to_delegate_through_says_so() {
         cancel: CancellationToken::new(),
         call_id: "call_1".to_owned(),
         files: Arc::new(FileTimes::default()),
-        credentials: None,
+        credentials: Credentials::Unguarded,
         spawn: None,
     };
 

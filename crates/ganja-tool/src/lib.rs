@@ -43,6 +43,36 @@ use std::{
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+/// The credential store a call must refuse, or the explicit statement that
+/// there is none to guard.
+///
+/// An `Option` would carry the same information and lose it at the one moment
+/// that matters: a new surface building a [`ToolCtx`] could write `None` by
+/// reflex — or by copying a test fixture — and ship tool calls with the guard
+/// off, silently. Spelling [`Credentials::Unguarded`] costs the same one line
+/// and cannot pretend to be an accident.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Credentials {
+    /// The store `read` and `grep` refuse, resolved by whoever built the
+    /// engine.
+    Guarded(PathBuf),
+    /// Nothing to guard, on purpose: a fixture, or a surface like the
+    /// frontend's file menu that never reads a file's contents at all.
+    Unguarded,
+}
+
+impl Credentials {
+    /// The guarded path, if there is one — the consumption half of the type,
+    /// where an option is the honest shape again.
+    #[must_use]
+    pub fn guarded(&self) -> Option<&Path> {
+        match self {
+            Self::Guarded(store) => Some(store),
+            Self::Unguarded => None,
+        }
+    }
+}
+
 /// What a tool call needs beyond its arguments.
 #[derive(Clone, Debug)]
 pub struct ToolCtx {
@@ -60,10 +90,10 @@ pub struct ToolCtx {
     /// Handed over rather than resolved here: which file holds this machine's
     /// keys is `ganja-core`'s `auth`'s answer, and a tool that went and asked
     /// for it would be a tool that has to know where credentials live.
-    /// [`None`] is a
-    /// caller that named none, and behaves exactly like a store that is not on
-    /// this disk — there is then nothing here to protect.
-    pub credentials: Option<PathBuf>,
+    /// [`Credentials::Unguarded`] behaves exactly like a store that is not on
+    /// this disk — there is then nothing here to protect — but it has to be
+    /// written where a reviewer will read it.
+    pub credentials: Credentials,
     /// What a call runs a whole second agent loop through, which only
     /// [`task::TaskTool`] does.
     ///
@@ -91,7 +121,7 @@ impl ToolCtx {
     #[must_use]
     pub fn is_credential_store(&self, path: &Path) -> bool {
         self.credentials
-            .as_deref()
+            .guarded()
             .is_some_and(|store| is_same_file(path, store))
     }
 }
@@ -539,7 +569,7 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::{FileTimes, Registry, ToolCtx, ToolError, is_same_file};
+    use super::{Credentials, FileTimes, Registry, ToolCtx, ToolError, is_same_file};
 
     /// A call whose credential store is `store`, which is the only thing the
     /// guard tests below vary.
@@ -549,7 +579,7 @@ mod tests {
             cancel: CancellationToken::new(),
             call_id: "call_1".to_owned(),
             files: Arc::new(FileTimes::default()),
-            credentials: store,
+            credentials: store.map_or(Credentials::Unguarded, Credentials::Guarded),
             spawn: None,
         }
     }
