@@ -4,7 +4,7 @@
 
 ## Purpose
 
-`ganja` is a terminal-first AI coding agent: a **behavioral port of [opencode](https://github.com/anomalyco/opencode) v1.18.11 to Rust**, with a ratatui TUI. Upstream's TypeScript is the *specification*, not source to translate — the port writes idiomatic Rust and matches observable behavior. The workspace is six crates: the protocol, the permission engine and the tools beneath an engine that carries no terminal dependency, then a ratatui frontend and the `ganja` binary that wires them together.
+`ganja` is a terminal-first AI coding agent: a **behavioral port of [opencode](https://github.com/anomalyco/opencode) v1.18.13 to Rust**, with a ratatui TUI. Upstream's TypeScript is the *specification*, not source to translate — the port writes idiomatic Rust and matches observable behavior. The workspace is six crates: the protocol, the permission engine and the tools beneath an engine that carries no terminal dependency, then a ratatui frontend and the `ganja` binary that wires them together.
 
 ## Key Files
 
@@ -27,7 +27,7 @@
 |-----------|---------|
 | `crates/` | The workspace members (see `crates/AGENTS.md`) |
 | `.github/` | CI configuration (see `.github/AGENTS.md`) |
-| `.omc/` | **Gitignored operational state**, not documented by this tree: `plans/` (the authoritative port plan), `handoffs/` (frozen per-phase contracts), `reference/opencode-v1.18.11/` (the upstream checkout the golden test drives). |
+| `.omc/` | **Gitignored operational state**, not documented by this tree: `plans/` (the authoritative port plan), `handoffs/` (frozen per-phase contracts), `reference/opencode-v1.18.13/` (the upstream checkout the golden test drives). |
 | `target/` | Cargo build output. Never read. |
 
 ## Commands
@@ -69,7 +69,7 @@ cargo insta review                                   # TUI snapshots: crates/gan
 
 Two suites need setup, and both are documented in `crates/ganja-core/tests/AGENTS.md`:
 
-- **Golden differential** runs in the default test run (`cargo nextest run`, or `cargo test`) and **hard-fails rather than skips** when its prerequisites are missing — a green run that compared against nothing would be worthless. It needs `bun` on `PATH` and an upstream checkout with `bun install` already run, at `.omc/reference/opencode-v1.18.11` or wherever `GANJA_OPENCODE_DIR` points (CI checks it out to `upstream/`). The MCP suite (`tests/mcp.rs`) shares those prerequisites — its reference server runs on the checkout's installed `@modelcontextprotocol/sdk` — and hard-fails the same way.
+- **Golden differential** runs in the default test run (`cargo nextest run`, or `cargo test`) and **hard-fails rather than skips** when its prerequisites are missing — a green run that compared against nothing would be worthless. It needs `bun` on `PATH` and an upstream checkout with `bun install` already run, at `.omc/reference/opencode-v1.18.13` or wherever `GANJA_OPENCODE_DIR` points (CI checks it out to `upstream/`). The MCP suite (`tests/mcp.rs`) shares those prerequisites — its reference server runs on the checkout's installed `@modelcontextprotocol/sdk` — and hard-fails the same way.
 - **Live provider tests** are `#[ignore]`d *and* inert unless opted in: `GANJA_LIVE_TEST=1 ANTHROPIC_API_KEY=… cargo test -p ganja-core --test live -- --ignored`.
 
 ## Environment
