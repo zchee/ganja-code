@@ -2566,6 +2566,132 @@ mod tests {
         );
     }
 
+    /// One reply of the frame-time fixture, **markdown-heavy by construction**.
+    ///
+    /// Every construct the renderer has a code path for is in here on purpose:
+    /// a heading, a paragraph long enough to wrap at 120 columns, a fenced
+    /// **Rust** block (so syntect actually parses and the nine `syntax*` slots
+    /// actually resolve), a grid table, a nested list carrying inline emphasis
+    /// and code, and a blockquote. A plain-text transcript would measure the
+    /// wrap and call it the renderer (R16(4)).
+    fn markdown_reply(index: usize) -> String {
+        format!(
+            "## Section {index}: what the step decided\n\
+             \n\
+             The engine hands the frontend an ordered event stream and nothing else, so a \
+             transcript that applied every event holds exactly what the next request will \
+             carry — which is the property a remote client will lean on, and the reason \
+             every message type is serde-derived from the first day rather than the day \
+             a socket appears.\n\
+             \n\
+             ```rust\n\
+             /// Counts the bytes that matter in `input`.\n\
+             fn weigh_{index}(input: &str) -> Result<usize, Error> {{\n\
+             \x20   let total = input.chars().filter(|c| !c.is_whitespace()).count();\n\
+             \x20   if total == 0 {{\n\
+             \x20       return Err(Error::Empty);\n\
+             \x20   }}\n\
+             \x20   Ok(total * {index})\n\
+             }}\n\
+             ```\n\
+             \n\
+             | field | kind | what it carries |\n\
+             | --- | --- | --- |\n\
+             | id | PartId | the part this body was written under |\n\
+             | body | PartBody | text, a tool call, a file, or a step marker |\n\
+             \n\
+             - the outer claim for step {index}\n\
+             \x20 - a nested one with **emphasis** and `inline_code()`\n\
+             \x20 - and another, so the marker column is exercised twice\n\
+             - a second outer claim, long enough that it has to wrap at a hundred and \
+             twenty columns and hang under its own marker\n\
+             \n\
+             > What the step above settled, said once more so the quote path runs.\n"
+        )
+    }
+
+    /// The transcript the frame-time accept measures.
+    fn markdown_transcript(replies: usize) -> Vec<Message> {
+        (0..replies)
+            .flat_map(|index| {
+                let mut reply = Message::assistant(fake::MODEL);
+                reply.parts.push(Part::text(markdown_reply(index)));
+                reply.complete();
+
+                [
+                    Message::user(format!("walk me through step {index}")),
+                    reply,
+                ]
+            })
+            .collect()
+    }
+
+    /// P6 acceptance (R16(4)): a 10,000-line markdown transcript scrolls at
+    /// 30 FPS or better on a 120×40 screen.
+    ///
+    /// `#[ignore]`d because it is a stopwatch, not a claim about behavior, and
+    /// a loaded CI box would make it flap. Run it with
+    /// `cargo nextest run -p ganja-tui --run-ignored all -E 'test(scrolls_a_ten_thousand_line)'`
+    /// and read the numbers off the log rather than off the green tick.
+    ///
+    /// What is measured is a frame: the transcript's cached-wrap walk, the
+    /// viewport blit and the backend's diff, over a transcript whose assistant
+    /// text is markdown (see [`markdown_reply`]). The first frame is called out
+    /// separately because it is the one that parses every block and runs
+    /// syntect over every fence; the ones after it are what scrolling costs.
+    #[test]
+    #[ignore = "a timing measurement, not a behavior"]
+    fn scrolls_a_ten_thousand_line_markdown_transcript_at_thirty_frames_a_second() {
+        const BUDGET: Duration = Duration::from_millis(33);
+        const LINES: usize = 10_000;
+        const REPLIES: usize = 320;
+        const STEPS: usize = 200;
+
+        let transcript = markdown_transcript(REPLIES);
+        let mut app = app();
+        let mut terminal = terminal(120, 40);
+        let mut frames = Vec::with_capacity(STEPS + 1);
+
+        app.seed(transcript);
+        let started = Instant::now();
+        app.draw(&mut terminal).expect("the first frame draws");
+        let first = started.elapsed();
+        frames.push(first);
+
+        let lines = app.chat.line_count();
+        assert!(
+            lines >= LINES,
+            "the accept is over {LINES} lines, and this fixture wrapped to {lines}"
+        );
+
+        // Top to bottom in even steps, so the walk crosses every entry rather
+        // than re-drawing one screenful that is already warm.
+        app.chat.scroll_to_top();
+        let step = isize::try_from(lines / STEPS).unwrap_or(1).max(1);
+        for _ in 0..STEPS {
+            app.chat.scroll_lines(step);
+            let started = Instant::now();
+            app.draw(&mut terminal).expect("a frame draws");
+            frames.push(started.elapsed());
+        }
+
+        frames.sort_unstable();
+        let at = |percent: usize| frames[(frames.len() - 1) * percent / 100];
+        let (p50, p95, worst) = (at(50), at(95), at(100));
+
+        eprintln!(
+            "{lines} markdown lines over {REPLIES} replies at 120x40, \
+             {frames} frames: first {first:?}, p50 {p50:?}, p95 {p95:?}, max {worst:?} \
+             (budget p95 {BUDGET:?})",
+            frames = frames.len()
+        );
+
+        assert!(
+            p95 <= BUDGET,
+            "p95 frame time was {p95:?}, budget is {BUDGET:?}"
+        );
+    }
+
     #[test]
     fn a_fresh_app_wants_its_first_frame() {
         let app = app();

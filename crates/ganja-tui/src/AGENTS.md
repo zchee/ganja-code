@@ -17,6 +17,7 @@ The frontend's event loop and the state it owns. One `tokio::select!` in `app.rs
 | `command.rs` | Both command populations — the UI `Entry` table (upstream's names, plurals and aliases) and the engine's `EngineCommand` roster — plus the `Choice` the `/` dropdown merges them into, and `nucleo-matcher` ranking over the result. Ranking parity with upstream's `fuzzysort` is explicitly not a goal; a total, deterministic order is. |
 | `mention.rs` | The `@` trigger and the submit-time scan, sharing one rule: the last `@` before the cursor, preceded by start-or-whitespace, with no whitespace up to it. A mention that could be typed but not read back would attach nothing. |
 | `external.rs` | `/editor`: seeds a temp file with the buffer, hands the terminal to `$EDITOR`, takes it back. Split so the seed/readback round trip is testable; the terminal hand-off itself is exercised by hand. |
+| `markdown.rs` | Assistant text only: pulldown-cmark → top-level blocks → width-independent styled lines, then a markdown-aware wrap. Carries the plain-text invariant by construction — a source newline is a hard line break, text renders verbatim, blocks separate by one blank line, and an unnamed `markdown*` key falls back to the body role. Syntect highlights fenced code by info string, mapping TextMate scopes onto the nine `syntax*` keys through a documented rule table; the syntax set loads lazily on the first known-language fence. Stage 1 of the transcript's two-stage cache, keyed `(block source hash, theme revision)`. |
 | `keybind.rs` | Which keys reach which actions, the five-action curated set, and the `keybinds` config map that rebinds them. An unknown action name and an unparseable key string both fail the run naming what was wrong. |
 | `theme/` | Loadable themes: upstream's JSON schema and resolver (`json.rs` — defs, dark/light variants, ANSI integers, cycle refusal), the builtin/custom registry with revisions (`registry.rs`), the persisted pick under the data home (`selection.rs`), and the `Theme` style slots (`mod.rs`). Four upstream themes ship verbatim from `../assets/themes/`; default is `opencode`. |
 | `component/` | The three panes plus the modals (see `component/AGENTS.md`). |
@@ -29,6 +30,7 @@ The frontend's event loop and the state it owns. One `tokio::select!` in `app.rs
 - **No `select!` arm may await work of unbounded duration.** A prompt is handed to the engine, which answers through the event stream, and the loop goes straight back to drawing. Anything long-running is the engine's job, reported back as events.
 - **`App::handle` is the only place that mutates state.** That is what lets components be tested without a terminal or a running turn — keep new state transitions inside it rather than pushing them into a component.
 - **Frames coalesce, keystrokes do not.** A burst of streamed fragments redraws at most once per `FRAME` (16ms, ~60 FPS); a keystroke always redraws immediately. Those two rules together are what keep streaming cheap without making typing feel laggy.
+- **A reply is markdown; a prompt is not.** Only assistant text parts reach `markdown.rs` — user messages, tool output, file chips and every dialog stay plain, so nothing a person typed is re-read as markup.
 - Nothing is shared with the engine but channels — no locks, no shared state.
 
 ### Testing Requirements
@@ -54,6 +56,6 @@ Tests build an `App`, feed it `AppEvent`s directly, and render into a `TestBacke
 
 ### External
 
-`ratatui` (+ `ratatui-textarea`), `tokio`, `futures`, `anyhow`, `unicode-width`, `serde_json`; `insta` for snapshots.
+`ratatui` (+ `ratatui-textarea`), `tokio`, `futures`, `anyhow`, `unicode-width`, `serde_json`, `pulldown-cmark` + `syntect` (markdown parsing and fenced-code highlighting, parser only — no syntect theme files); `insta` for snapshots.
 
 <!-- MANUAL: -->
