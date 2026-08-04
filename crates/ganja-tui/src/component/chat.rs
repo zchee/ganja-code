@@ -348,6 +348,23 @@ const TITLE_KEYS: [&str; 5] = ["command", "filePath", "path", "pattern", "url"];
 /// The full text is what the model saw; the transcript only needs the gist.
 const TOOL_PREVIEW_LINES: usize = 4;
 
+/// The tool whose call is a whole second agent loop, and which is drawn as one
+/// inline row rather than as a block of output.
+const TASK_TOOL: &str = "task";
+
+/// What marks a task row that is still running, and one that finished
+/// (upstream `routes/session/index.tsx:2213-2309`).
+const TASK_RUNNING: &str = "\u{2502}";
+/// See [`TASK_RUNNING`].
+const TASK_DONE: &str = "\u{2713}";
+
+/// What introduces the task row's second line.
+///
+/// The arrow alone, without the indent upstream draws in front of it: the
+/// transcript's wrap collapses leading whitespace on every line it lays out, so
+/// an indent here would be a claim the screen never honors.
+const TASK_DETAIL: &str = "\u{21b3} ";
+
 /// Picks a short, recognizable field out of a call's arguments, so a running
 /// or failed call can name what it is doing without repeating the raw JSON.
 fn derive_title(input: &serde_json::Value) -> Option<String> {
@@ -381,6 +398,27 @@ fn clamp_preview(text: &str) -> Vec<String> {
     preview
 }
 
+/// The **last** `TOOL_PREVIEW_LINES` lines of `text`, with a marker in front
+/// when earlier ones were cut.
+///
+/// The other end from [`clamp_preview`], and for the other case: output that
+/// is still arriving. A command's newest line is the one worth a row, where a
+/// finished call's first line is the one that says what it did.
+fn clamp_tail(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let skipped = lines.len().saturating_sub(TOOL_PREVIEW_LINES);
+
+    let mut tail: Vec<String> = lines[skipped..]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect();
+    if skipped > 0 {
+        tail.insert(0, "...".to_owned());
+    }
+
+    tail
+}
+
 /// Styles one line of a unified diff by its leading marker. Hunk headers and
 /// context lines recede like the rest of the chrome; only the change itself
 /// stands out.
@@ -398,12 +436,39 @@ fn diff_line_style(line: &str, theme: &Theme) -> Style {
 /// `Pending`/`Running` share a heading so a call reads the same before and
 /// after its arguments arrive; `StepStart`/`StepFinish` never reach here.
 fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<(String, Style)> {
+    // A delegated turn is one row, never a transcript of its own: everything
+    // the child said reaches the model inside the tool result, and repeating
+    // it here would show the same work twice.
+    if tool == TASK_TOOL && !matches!(state, ToolState::Error { .. }) {
+        return task_lines(state, theme);
+    }
+
     match state {
         ToolState::Pending => vec![(tool_heading(tool, "running", None), theme.dim)],
-        ToolState::Running { input, .. } => vec![(
-            tool_heading(tool, "running", derive_title(input).as_deref()),
-            theme.dim,
-        )],
+        ToolState::Running {
+            input, metadata, ..
+        } => {
+            let mut lines = vec![(
+                tool_heading(tool, "running", derive_title(input).as_deref()),
+                theme.dim,
+            )];
+            // A call that reports as it goes — the `!` passthrough streaming a
+            // command's output — redraws its tail every time the part is
+            // republished, so the newest lines are the ones on screen.
+            if let Some(output) = metadata
+                .get("output")
+                .and_then(serde_json::Value::as_str)
+                .filter(|output| !output.is_empty())
+            {
+                lines.extend(
+                    clamp_tail(output)
+                        .into_iter()
+                        .map(|line| (format!("  {line}"), theme.dim)),
+                );
+            }
+
+            lines
+        }
         ToolState::Completed {
             output,
             title,
@@ -442,6 +507,129 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<(String, Styl
             lines
         }
     }
+}
+
+/// The two lines a delegated turn gets, whatever it is doing.
+///
+/// Spec: upstream `routes/session/index.tsx:2213-2309`. Line one names the
+/// agent and what it was asked for; line two says what it is doing now, or
+/// what it did. **The child's own answer is never on the row** — it is inside
+/// the tool result the model reads, and a transcript that printed it would be
+/// showing the same work twice, once as prose and once as a result.
+fn task_lines(state: &ToolState, theme: &Theme) -> Vec<(String, Style)> {
+    match state {
+        ToolState::Pending => vec![(format!("{TASK_RUNNING} Task"), theme.dim)],
+        ToolState::Running {
+            input, metadata, ..
+        } => {
+            let agent = field(input, "subagent_type");
+            let mut lines = vec![(
+                task_heading(TASK_RUNNING, agent, field(input, "description")),
+                theme.dim,
+            )];
+            // Upstream's own priority: the tool the child is running right now
+            // says more than how many it has run.
+            let detail = match field(metadata, "current_tool") {
+                Some(current) => current.to_owned(),
+                None => format!("{} toolcalls", toolcalls(metadata)),
+            };
+            lines.push((format!("{TASK_DETAIL}{detail}"), theme.dim));
+
+            lines
+        }
+        ToolState::Completed {
+            input,
+            title,
+            metadata,
+            started,
+            completed,
+            ..
+        } => {
+            let agent = field(metadata, "agent").or_else(|| field(input, "subagent_type"));
+            let description = field(input, "description").or(Some(title.as_str()));
+
+            vec![
+                (task_heading(TASK_DONE, agent, description), theme.fg),
+                (
+                    format!(
+                        "{TASK_DETAIL}{calls} toolcalls \u{b7} {elapsed}",
+                        calls = toolcalls(metadata),
+                        elapsed = elapsed(*started, *completed),
+                    ),
+                    theme.dim,
+                ),
+            ]
+        }
+        // Never reached: a failed call keeps the shape every other failed call
+        // has, so a refusal reads the same wherever it came from.
+        ToolState::Error { .. } => Vec::new(),
+    }
+}
+
+/// One string field of a JSON object, when it is there and is not empty.
+fn field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|found| !found.is_empty())
+}
+
+/// How many tools the child has called, as its parent's part recorded it.
+fn toolcalls(metadata: &serde_json::Value) -> u64 {
+    metadata
+        .get("toolcalls")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// The task row's first line: a marker, the agent doing the work, and what it
+/// was asked for.
+fn task_heading(marker: &str, agent: Option<&str>, description: Option<&str>) -> String {
+    let mut heading = String::from(marker);
+    heading.push(' ');
+    if let Some(agent) = agent {
+        heading.push_str(&titlecase(agent));
+        heading.push(' ');
+    }
+    heading.push_str("Task");
+    if let Some(description) = description {
+        heading.push_str(" \u{2014} ");
+        heading.push_str(description);
+    }
+
+    heading
+}
+
+/// `name` with its first character upper-cased, which is how upstream renders
+/// an agent's name on this row.
+fn titlecase(name: &str) -> String {
+    let mut characters = name.chars();
+
+    characters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + characters.as_str()
+    })
+}
+
+/// How long a call took, from the two stamps its part carries.
+///
+/// Rounded to whatever unit reads as a duration rather than as a number: a
+/// child that ran for two minutes should not be reported in milliseconds.
+fn elapsed(started: u64, completed: u64) -> String {
+    let millis = completed.saturating_sub(started);
+    if millis < 1_000 {
+        return format!("{millis}ms");
+    }
+
+    let seconds = millis / 1_000;
+    if seconds < 60 {
+        return format!("{seconds}.{tenths}s", tenths = millis % 1_000 / 100);
+    }
+
+    format!(
+        "{minutes}m {rest}s",
+        minutes = seconds / 60,
+        rest = seconds % 60
+    )
 }
 
 /// Greedily wraps `text` to `width` display columns, preserving blank lines and
@@ -513,8 +701,26 @@ mod tests {
     use ganja_core::{Message, Part, PartBody, PartId, ToolState};
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    use super::{Chat, split_at_width, wrap};
+    use super::{Chat, elapsed, split_at_width, wrap};
     use crate::theme::{Theme, Themes};
+
+    /// A reply carrying one tool part in `state`, rendered wide enough that
+    /// nothing wraps.
+    fn tool_call(tool: &str, state: ToolState) -> Vec<String> {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: tool.to_owned(),
+                state,
+            },
+        });
+        chat.start_message(reply);
+
+        rendered(&mut chat, Rect::new(0, 0, 80, 20))
+    }
 
     const VIEWPORT: Rect = Rect {
         x: 0,
@@ -991,6 +1197,212 @@ mod tests {
 
         assert!(rendered(&mut chat, VIEWPORT).iter().all(String::is_empty));
         assert!(chat.is_following_tail());
+    }
+
+    /// The `!` passthrough streams its output into a running part, so the
+    /// transcript has to show what has arrived rather than waiting for the
+    /// command to end.
+    #[test]
+    fn a_running_call_that_reports_as_it_goes_shows_the_newest_of_it() {
+        let lines = tool_call(
+            "bash",
+            ToolState::Running {
+                input: serde_json::json!({"command": "cargo test"}),
+                metadata: serde_json::json!({
+                    "output": "compiling\nrunning 1 test\ntest a ... ok\ntest b ... ok\ntest c ... ok\nfinished"
+                }),
+                started: 0,
+            },
+        );
+
+        assert!(
+            lines.iter().any(|line| line.contains("finished")),
+            "the newest line has to be on screen, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("compiling")),
+            "the oldest lines are the ones that scroll off, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.trim() == "..."),
+            "and the cut has to be admitted, got {lines:?}"
+        );
+    }
+
+    /// The common case has no such field, and its rows must not change.
+    #[test]
+    fn a_running_call_that_reports_nothing_is_one_line_as_it_always_was() {
+        let lines = tool_call(
+            "read",
+            ToolState::Running {
+                input: serde_json::json!({"filePath": "a.rs"}),
+                metadata: serde_json::Value::Null,
+                started: 0,
+            },
+        );
+        let drawn: Vec<&String> = lines.iter().filter(|line| !line.is_empty()).collect();
+
+        assert_eq!(
+            drawn,
+            vec![&"ganja".to_owned(), &"[running] read: a.rs".to_owned()],
+            "got {lines:?}"
+        );
+    }
+
+    /// A delegated turn is one row: an icon, who is doing it, what they were
+    /// asked, and what they are doing about it now.
+    #[test]
+    fn a_running_task_names_the_agent_the_ask_and_the_tool_it_is_in() {
+        let lines = tool_call(
+            "task",
+            ToolState::Running {
+                input: serde_json::json!({
+                    "description": "find the parser",
+                    "subagent_type": "explore",
+                }),
+                metadata: serde_json::json!({"current_tool": "grep parser", "toolcalls": 3}),
+                started: 0,
+            },
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\u{2502} Explore Task \u{2014} find the parser")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\u{21b3} grep parser")),
+            "got {lines:?}"
+        );
+    }
+
+    /// Between tools there is no current one, so the count is what the row has
+    /// to say.
+    #[test]
+    fn a_running_task_between_tools_counts_them_instead() {
+        let lines = tool_call(
+            "task",
+            ToolState::Running {
+                input: serde_json::json!({"description": "find the parser"}),
+                metadata: serde_json::json!({"toolcalls": 3}),
+                started: 0,
+            },
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\u{21b3} 3 toolcalls")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Task \u{2014} find the parser")),
+            "an agent nobody named is left off rather than invented, got {lines:?}"
+        );
+    }
+
+    /// What the child actually said is inside the tool result the model reads.
+    /// Printing it here would show the same work twice — once as the row, once
+    /// as prose the user never asked to see.
+    #[test]
+    fn a_finished_task_reports_its_shape_and_never_the_childs_answer() {
+        let lines = tool_call(
+            "task",
+            ToolState::Completed {
+                input: serde_json::json!({
+                    "description": "find the parser",
+                    "subagent_type": "explore",
+                }),
+                output: "<task id=\"tsk_1\" state=\"completed\"><task_result>\
+                         THE CHILD'S OWN ANSWER</task_result></task>"
+                    .to_owned(),
+                title: "find the parser".to_owned(),
+                metadata: serde_json::json!({
+                    "session": "ses_child",
+                    "agent": "explore",
+                    "model": "fake",
+                    "toolcalls": 7,
+                }),
+                started: 1_000,
+                completed: 13_400,
+            },
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\u{2713} Explore Task \u{2014} find the parser")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\u{21b3} 7 toolcalls \u{b7} 12.4s")),
+            "got {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("THE CHILD'S OWN ANSWER")),
+            "the child's answer belongs to the model, not to the row, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("task_result")),
+            "and neither does the envelope it came in, got {lines:?}"
+        );
+    }
+
+    /// A refused delegation is a refused call, and reads like every other one.
+    #[test]
+    fn a_failed_task_keeps_the_shape_every_other_failure_has() {
+        let lines = tool_call(
+            "task",
+            ToolState::Error {
+                input: serde_json::json!({"description": "find the parser"}),
+                error: "no agent named parser-hunter".to_owned(),
+                started: 0,
+                completed: 1,
+            },
+        );
+
+        assert!(
+            lines.iter().any(|line| line.contains("[error] task")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("no agent named parser-hunter")),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_duration_is_reported_in_whatever_unit_reads_as_one() {
+        let cases = [
+            (0_u64, 1_u64, "1ms"),
+            (0, 999, "999ms"),
+            (0, 1_000, "1.0s"),
+            (1_000, 13_400, "12.4s"),
+            (0, 59_900, "59.9s"),
+            (0, 60_000, "1m 0s"),
+            (0, 3_723_000, "62m 3s"),
+            // A clock that moved backwards between the two stamps.
+            (5_000, 1_000, "0ms"),
+        ];
+
+        for (started, completed, expected) in cases {
+            assert_eq!(
+                elapsed(started, completed),
+                expected,
+                "{started}..{completed}"
+            );
+        }
     }
 
     /// The wrap cache holds styled lines, so it is as stale after a theme

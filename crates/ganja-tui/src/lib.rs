@@ -8,7 +8,9 @@ pub mod app;
 pub mod command;
 pub mod component;
 pub mod event;
+pub mod external;
 pub mod keybind;
+pub mod mention;
 pub mod theme;
 
 use std::{
@@ -19,7 +21,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use ganja_core::{
-    AgentRegistry, Engine, Message, Project, SessionId, Storage,
+    AgentRegistry, Engine, Message, Project, SessionId, Storage, catalog,
     config::{Config, Overrides, ThemeMode},
     instruction, provider,
 };
@@ -27,6 +29,7 @@ use ratatui::crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::App,
@@ -85,12 +88,20 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     let provider_id = selection.provider.id().to_owned();
     // Sessions live per project, so opening `src/` and opening the repository
     // root reach the same history.
+    let project = Project::resolve(&cwd);
     let storage = Storage::open(
-        Project::resolve(&cwd)
+        project
             .data_dir()
             .context("failed to locate the project's data directory")?
             .join(STORAGE),
     );
+    // `/init`'s template names the worktree it is being run in, so the roster
+    // is resolved against the project root rather than against whichever
+    // subdirectory the terminal happened to be opened in.
+    let commands = Arc::new(ganja_core::command::Registry::build(
+        &config,
+        project.root(),
+    ));
     // The frontend keeps its own copy of the model so that it can price a turn
     // without reaching into the engine for the model it was built with.
     //
@@ -103,7 +114,8 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
         ganja_core::Permissions::load(&cwd),
         storage,
     )
-    .with_agents(agents);
+    .with_agents(agents)
+    .with_commands(commands);
     let (base, suffix) = system_parts(&config, &cwd, &selection.model);
     let engine = engine.with_system_parts(base, suffix);
 
@@ -118,6 +130,14 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     let mut themes = Themes::load();
     let theme_notice = configure_themes(&mut themes, &config);
 
+    // Prices come off the disk before the first frame — adoption happens on
+    // this thread — and are kept current behind the loop for as long as the app
+    // runs. Deliberately not a refusal: a catalog that could not be fetched
+    // leaves the compiled-in snapshot standing, which is a session that prices
+    // slightly stale rather than a session that does not start.
+    let catalog_refresh = CancellationToken::new();
+    catalog::spawn_refresh_loop(catalog_refresh.clone());
+
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_mouse() {
         Ok(()) => {
@@ -128,12 +148,19 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
                 themes,
             )
             .with_provider(provider_id)
-            .with_keybinds(keys);
+            .with_keybinds(keys)
+            // The `@` file menu walks from here, so a mention resolves against
+            // the directory the user opened rather than the project root: what
+            // they typed is relative to where they are standing.
+            .with_cwd(cwd);
             app.seed(seed);
             app.run(&mut terminal).await
         }
         Err(error) => Err(error),
     };
+    // Nothing is waiting on the loop, but a background task that outlives the
+    // screen it was feeding is a leak whichever way the run ended.
+    catalog_refresh.cancel();
     let restored = restore();
 
     outcome.and(restored)

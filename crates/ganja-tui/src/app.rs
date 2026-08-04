@@ -9,13 +9,17 @@
 //! [`FRAME`], while a keystroke always redraws immediately — the two rules that
 //! keep streaming cheap without making typing feel laggy.
 
-use std::time::{Duration, Instant};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use ganja_core::{
     Command, Engine, Event as CoreEvent, FinishReason, Message, PartBody, PermissionReply, Role,
-    ToolState, Usage, catalog,
+    ToolCtx, ToolState, Usage, catalog, tool::FileTimes,
 };
 use ratatui::{
     DefaultTerminal, Terminal,
@@ -26,13 +30,15 @@ use ratatui::{
     },
     layout::{Constraint, Layout},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     command,
     component::{
         chat::{Chat, WHEEL_LINES},
         dropdown::{self, Dropdown},
-        editor::{self, Editor},
+        editor::{self, Editor, Mode},
+        files::Files,
         help::Help,
         list::{self, ListDialog},
         palette::Palette,
@@ -42,7 +48,9 @@ use crate::{
         themes::ThemeList,
     },
     event::AppEvent,
+    external,
     keybind::{self, Keybinds},
+    mention,
     theme::{Theme, Themes},
 };
 
@@ -58,6 +66,15 @@ const NEWLINE_MODIFIERS: KeyModifiers = KeyModifiers::SHIFT
 /// Modifiers that stop a printable key from reaching a filter line: they mean
 /// the key is a shortcut rather than a character.
 const SHORTCUT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL.union(KeyModifiers::ALT);
+
+/// Most files the `@` menu offers at once. Upstream's server default
+/// (`server/routes/instance/httpapi/handlers/file.ts:43-60`).
+const MAX_FILES: usize = 10;
+
+/// The call id the `@` menu's walk runs under. Nothing correlates it with a
+/// provider call — no model asked for it — but the field is not optional and a
+/// name is more use in a trace than a blank.
+const MENTION_CALL: &str = "mention";
 
 /// Which list a dialog is showing, and therefore what choosing a row sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +146,19 @@ pub struct App {
     help: Option<Help>,
     /// The inline command menu, while the buffer is a command being typed.
     dropdown: Option<Dropdown>,
+    /// The inline file menu, while the buffer is mentioning a file.
+    files: Option<Files>,
+    /// The commands the **engine** offers, resolved when the app was built.
+    /// Choosing one types its name rather than running it, because every one
+    /// of them expects arguments.
+    engine_commands: Vec<command::EngineCommand>,
+    /// Where a mention resolves from, and where the walk that offers files
+    /// starts.
+    cwd: PathBuf,
+    /// The tools the `@` menu drives. The registry rather than the glob tool
+    /// alone, so the menu asks for its walker by the name the engine knows it
+    /// by instead of holding a second copy of the decision.
+    tools: ganja_core::Registry,
     /// Every theme this run can switch to, and which one is active.
     themes: Themes,
     theme: Theme,
@@ -138,6 +168,9 @@ pub struct App {
     dirty: bool,
     /// The change came from the keyboard, which skips the coalescing gate.
     urgent: bool,
+    /// Something else had the terminal, so the next frame cannot trust the
+    /// diff against what was last drawn.
+    stale: bool,
     last_draw: Instant,
     quit: bool,
 }
@@ -159,6 +192,7 @@ impl App {
     ) -> Self {
         let theme = themes.theme();
         let agent = engine.agent();
+        let engine_commands = command::EngineCommand::roster(engine.commands());
         let mut status = Status::new(notice);
         status.set_agent(agent.clone());
 
@@ -179,14 +213,31 @@ impl App {
             palette_filter: String::new(),
             help: None,
             dropdown: None,
+            files: None,
+            engine_commands,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            tools: ganja_core::Registry::with_builtins(),
             themes,
             theme,
             totals: Totals::default(),
             dirty: true,
             urgent: true,
+            stale: false,
             last_draw: Instant::now(),
             quit: false,
         }
+    }
+
+    /// Resolves `@` mentions against `cwd` instead of the process's own.
+    ///
+    /// A builder because only the file menu reads it, and because every test
+    /// that does not raise one should not have to answer for where the machine
+    /// running it happened to be standing.
+    #[must_use]
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = cwd.into();
+
+        self
     }
 
     /// Names the provider the engine was built on.
@@ -310,6 +361,14 @@ impl App {
         B: Backend,
         B::Error: std::error::Error + Send + Sync + 'static,
     {
+        // Something else — the user's own editor — drew over the screen, so
+        // the backend's idea of what is on it is wrong and a diff against it
+        // would leave that program's last frame showing through.
+        if self.stale {
+            terminal.clear().context("failed to repaint the screen")?;
+            self.stale = false;
+        }
+
         terminal
             .draw(|frame| {
                 let area = frame.area();
@@ -333,6 +392,9 @@ impl App {
                 // than as another dialog.
                 if let Some(dropdown) = &self.dropdown {
                     dropdown.render(prompt, buffer, &self.theme);
+                }
+                if let Some(files) = &self.files {
+                    files.render(prompt, buffer, &self.theme);
                 }
                 // The permission dialog draws last so that it is on top: it is
                 // the one modal a turn is blocked on.
@@ -436,10 +498,26 @@ impl App {
             return Ok(());
         }
 
-        // Not a modal: the menu sits over the transcript while the editor
-        // keeps the cursor, so it claims only the keys that steer it and lets
-        // every other one through to carry on typing.
+        // Not a modal: the menus sit over the transcript while the editor keeps
+        // the cursor, so they claim only the keys that steer them and let every
+        // other one through to carry on typing.
         if self.dropdown.is_some() && self.handle_dropdown_key(key).await {
+            return Ok(());
+        }
+        if self.files.is_some() && self.handle_files_key(key).await {
+            return Ok(());
+        }
+
+        // Upstream's gate exactly: cursor at the very start, in the ordinary
+        // mode, with no menu open. The `!` itself is never inserted — what
+        // runs is the raw buffer, and a prefix nobody typed would end up in it
+        // (`component/prompt/index.tsx:815-840`).
+        if key.code == KeyCode::Char('!')
+            && !key.modifiers.intersects(SHORTCUT_MODIFIERS)
+            && self.editor.mode() == Mode::Prompt
+            && self.editor.cursor() == (0, 0)
+        {
+            self.set_shell(true);
             return Ok(());
         }
 
@@ -468,11 +546,22 @@ impl App {
         }
 
         match key.code {
+            // Shell mode's way out, which outranks the cancel: there is no
+            // turn to stop while the user is typing a command at their own
+            // prompt.
+            KeyCode::Esc if self.editor.mode() == Mode::Shell => self.set_shell(false),
             // A no-op while idle, which is exactly what Esc should do there.
             KeyCode::Esc => self.engine.send(Command::CancelTurn).await?,
+            // Backspacing off the front of a shell command is the other way
+            // out, and it deletes nothing on the way (`:850-859`).
+            KeyCode::Backspace
+                if self.editor.mode() == Mode::Shell && self.editor.cursor() == (0, 0) =>
+            {
+                self.set_shell(false);
+            }
             KeyCode::Enter if key.modifiers.intersects(NEWLINE_MODIFIERS) => {
                 self.editor.insert_newline();
-                self.sync_dropdown();
+                self.sync_menus().await;
             }
             KeyCode::Enter => self.submit().await,
             KeyCode::PageUp => self.chat.scroll_pages(-1),
@@ -482,16 +571,36 @@ impl App {
             // whether the composer has focus; ganja's composer always has it,
             // so what is left of the distinction is whether it holds anything.
             KeyCode::Home if self.editor.is_empty() => self.chat.scroll_to_top(),
-            KeyCode::Home => self.editor.line_home(),
+            // Both of these move the cursor, and both menus are about where
+            // the cursor is rather than about what was typed — jumping out of
+            // a mention has to close the list offering to complete it.
+            KeyCode::Home => {
+                self.editor.line_home();
+                self.sync_menus().await;
+            }
             KeyCode::End if self.editor.is_empty() => self.chat.follow_tail(),
-            KeyCode::End => self.editor.line_end(),
+            KeyCode::End => {
+                self.editor.line_end();
+                self.sync_menus().await;
+            }
             _ => {
                 self.editor.input(key);
-                self.sync_dropdown();
+                self.sync_menus().await;
             }
         }
 
         Ok(())
+    }
+
+    /// Switches the composer between sending prompts and running commands.
+    fn set_shell(&mut self, shell: bool) {
+        self.editor
+            .set_mode(if shell { Mode::Shell } else { Mode::Prompt });
+        self.status.set_shell(shell);
+        // A shell command is neither a slash command nor a mention, so
+        // whatever was being offered is not being offered any more.
+        self.dropdown = None;
+        self.files = None;
     }
 
     /// Whether `key` quits.
@@ -517,11 +626,58 @@ impl App {
     async fn run_command(&mut self, action: command::Action) {
         match action {
             command::Action::Sessions => self.open_picker().await,
+            command::Action::New => self.start_session().await,
+            command::Action::Compact => self.compact().await,
+            command::Action::Editor => self.compose_externally(),
             command::Action::Models => self.open_models(),
             command::Action::Agents => self.open_agents(),
             command::Action::Themes => self.open_themes(),
             command::Action::Help => self.help = Some(Help::new(self.keys.clone())),
             command::Action::Exit => self.quit = true,
+        }
+    }
+
+    /// Leaves this conversation for a fresh one.
+    ///
+    /// The screen is emptied only once the engine has actually let go of the
+    /// session: a refusal — mid-turn — has to leave the user looking at the
+    /// conversation they are still in. Nothing stored is touched either way,
+    /// so the old session is still in the picker.
+    async fn start_session(&mut self) {
+        match self.engine.send(Command::NewSession).await {
+            Ok(()) => {
+                self.chat.clear();
+                self.chooser = None;
+                self.status.set_activity(Activity::Ready);
+                self.status.set_notice(None);
+            }
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
+    }
+
+    /// Asks the engine to summarize what has been said and carry on from it.
+    async fn compact(&mut self) {
+        match self.engine.send(Command::Compact).await {
+            Ok(()) => self.status.set_notice(None),
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
+    }
+
+    /// Hands the buffer to the user's own editor and takes back whatever they
+    /// left in it.
+    ///
+    /// The terminal changes hands here, so the next frame cannot be a diff
+    /// against what this process last drew — the editor drew over it.
+    fn compose_externally(&mut self) {
+        let composed = external::edit(&self.editor.text());
+        self.stale = true;
+
+        match composed {
+            Ok(text) => {
+                self.editor.set_text(&text);
+                self.status.set_notice(None);
+            }
+            Err(refusal) => self.status.set_notice(Some(format!("{refusal:#}"))),
         }
     }
 
@@ -640,15 +796,24 @@ impl App {
                 true
             }
             KeyCode::Enter if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
-                let action = self.dropdown.as_ref().and_then(Dropdown::selected);
+                let choice = self.dropdown.as_ref().and_then(Dropdown::selected);
                 self.dropdown = None;
 
-                if let Some(action) = action {
-                    // The command runs, so the text that named it has done its
-                    // job; leaving it would mean the next Enter sent the
-                    // command's own name to the model.
-                    self.editor.clear();
-                    self.run_command(action).await;
+                match choice {
+                    Some(command::Choice::Ui(entry)) => {
+                        // The command runs, so the text that named it has done
+                        // its job; leaving it would mean the next Enter sent
+                        // the command's own name to the model.
+                        self.editor.clear();
+                        self.run_command(entry.action).await;
+                    }
+                    // An engine command takes arguments, so choosing it types
+                    // its name and waits — upstream rewrites the buffer here
+                    // for the same reason (`autocomplete.tsx:456-462`).
+                    Some(command::Choice::Engine(command)) => {
+                        self.editor.set_text(&format!("/{} ", command.name));
+                    }
+                    None => {}
                 }
 
                 true
@@ -657,18 +822,172 @@ impl App {
         }
     }
 
-    /// Opens, re-narrows or closes the command menu after the buffer changed.
-    fn sync_dropdown(&mut self) {
+    /// One keypress while the file menu is up, and whether it was one of the
+    /// menu's own.
+    async fn handle_files_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            // Keeps the text, exactly as the command menu does (**D11**).
+            KeyCode::Esc => {
+                self.files = None;
+
+                true
+            }
+            KeyCode::Up => {
+                if let Some(files) = &mut self.files {
+                    files.move_selection(-1);
+                }
+
+                true
+            }
+            KeyCode::Down => {
+                if let Some(files) = &mut self.files {
+                    files.move_selection(1);
+                }
+
+                true
+            }
+            KeyCode::Enter if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
+                let chosen = self
+                    .files
+                    .as_ref()
+                    .and_then(Files::selected)
+                    .map(str::to_owned);
+                if let Some(path) = chosen {
+                    self.insert_mention(&path);
+                } else {
+                    // Nothing matched, so there is nothing to insert; the menu
+                    // still goes away rather than swallowing every Enter.
+                    self.files = None;
+                }
+
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Replaces the `@fragment` the file menu was opened for with `path`.
+    ///
+    /// The literal `@path` **stays in the prompt**, with a space after it so
+    /// the mention is closed: it is what the user wrote, and the engine
+    /// resolves the file's content separately when it builds the request.
+    fn insert_mention(&mut self, path: &str) {
+        let Some(files) = self.files.take() else {
+            return;
+        };
+        let fragment = files.fragment();
+
+        let mut lines: Vec<String> = self.editor.text().split('\n').map(str::to_owned).collect();
+        let Some(line) = lines.get_mut(fragment.row) else {
+            return;
+        };
+
+        let characters: Vec<char> = line.chars().collect();
+        let head: String = characters[..fragment.start.min(characters.len())]
+            .iter()
+            .collect();
+        let rest = characters
+            .get(fragment.start + fragment.width()..)
+            .unwrap_or_default();
+        let tail: String = rest.iter().collect();
+        // A space after the mention closes it, so the menu does not reopen on
+        // the path that was just chosen — but only when there is not one
+        // already, or completing mid-sentence would widen the gap every time
+        // (upstream `autocomplete.tsx:172-240` makes the same exception).
+        let mention = match rest.first() {
+            Some(next) if next.is_whitespace() => format!("@{path}"),
+            _ => format!("@{path} "),
+        };
+        let column = head.chars().count() + mention.chars().count();
+        *line = format!("{head}{mention}{tail}");
+
+        let row = fragment.row;
+        self.editor.set_text_at(&lines.join("\n"), row, column);
+    }
+
+    /// Opens, re-narrows or closes the two inline menus after the buffer
+    /// changed.
+    ///
+    /// At most one is ever up. A leading `/` is checked first because it is the
+    /// cheaper question and because a buffer that starts with one is a command
+    /// being typed, whatever else is in it.
+    async fn sync_menus(&mut self) {
         let text = self.editor.text();
-        if !dropdown::triggered(&text, self.editor.cursor()) {
+        let cursor = self.editor.cursor();
+
+        // A shell command is neither: it is going to the user's own shell.
+        if self.editor.mode() == Mode::Shell {
             self.dropdown = None;
+            self.files = None;
             return;
         }
 
-        match &mut self.dropdown {
-            Some(dropdown) => dropdown.refresh(&text),
-            None => self.dropdown = Some(Dropdown::new(&text)),
+        if dropdown::triggered(&text, cursor) {
+            self.files = None;
+            match &mut self.dropdown {
+                Some(dropdown) => dropdown.refresh(&text),
+                None => {
+                    self.dropdown = Some(Dropdown::new(&text, self.engine_commands.clone()));
+                }
+            }
+            return;
         }
+        self.dropdown = None;
+
+        let Some(fragment) = mention::trigger(&text, cursor) else {
+            self.files = None;
+            return;
+        };
+        // The list depends on the fragment and on nothing else, so a keystroke
+        // that left it alone must not walk the project again.
+        if self
+            .files
+            .as_ref()
+            .is_some_and(|files| files.answers(&fragment))
+        {
+            return;
+        }
+
+        let paths = self.find_files(&fragment.text).await;
+        self.files = Some(Files::new(fragment, paths));
+    }
+
+    /// The files a mention fragment offers, relative to [`App::cwd`].
+    ///
+    /// Driven through the tool registry rather than through a walker of its
+    /// own, so the menu offers exactly the files `glob` would find: the same
+    /// ignore rules, the same hidden-file rule, the same order. It is also the
+    /// reason a mention is not a read — the context carries a
+    /// [`FileTimes`] of its own, so nothing this walk touches is recorded
+    /// against the session and `edit` still refuses a file the model has not
+    /// opened.
+    ///
+    /// The walk is synchronous work on a blocking thread and runs once per
+    /// change to the fragment. On a very large tree that is a visible pause
+    /// while typing; upstream answers from an index it keeps warm, which is a
+    /// P6-sized piece of machinery this build does not have.
+    async fn find_files(&self, fragment: &str) -> Vec<String> {
+        let Some(glob) = self.tools.get("glob") else {
+            return Vec::new();
+        };
+        let ctx = ToolCtx {
+            cwd: self.cwd.clone(),
+            cancel: CancellationToken::new(),
+            call_id: MENTION_CALL.to_owned(),
+            files: Arc::new(FileTimes::default()),
+            spawn: None,
+        };
+
+        // A fragment is typed, not written: half of one is a pattern that does
+        // not parse yet, and a menu is not the place to say so.
+        let Ok(found) = glob
+            .run(serde_json::json!({ "pattern": pattern(fragment) }), &ctx)
+            .await
+        else {
+            return Vec::new();
+        };
+
+        relative_paths(&self.cwd, &found.output)
     }
 
     /// Opens the model list over this provider's catalog entries.
@@ -861,7 +1180,19 @@ impl App {
     /// dialog would have nothing to say that the notice does not.
     async fn open_picker(&mut self) {
         match self.engine.sessions().await {
-            Ok(entries) => self.sessions = Some(Sessions::new(entries, sessions::now())),
+            Ok(entries) => {
+                // Roots only. A child session belongs to the task call that
+                // spawned it — it is rendered on that call's row, its title is
+                // the description the model wrote, and resuming into one would
+                // put the user inside a delegated turn with no way to see what
+                // asked for it (upstream lists `roots: true` here too).
+                let roots = entries
+                    .into_iter()
+                    .filter(|info| info.parent.is_none())
+                    .collect();
+
+                self.sessions = Some(Sessions::new(roots, sessions::now()));
+            }
             Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
         }
     }
@@ -928,6 +1259,14 @@ impl App {
     /// pushed here, so what the screen shows is exactly what the engine will
     /// send back to the model.
     async fn submit(&mut self) {
+        // Checked before anything else, as upstream checks it: the shell
+        // branch runs ahead of the slash branch, because in shell mode a `/`
+        // starts a path (`component/prompt/index.tsx:1058-1069`).
+        if self.editor.mode() == Mode::Shell {
+            self.submit_shell().await;
+            return;
+        }
+
         let Some(prompt) = self.editor.prompt() else {
             return;
         };
@@ -939,24 +1278,75 @@ impl App {
             return;
         }
 
-        match self
-            .engine
-            .send(Command::SendPrompt {
-                text: prompt,
-                // The composer has no `@` mentions yet; that lands with the
-                // rest of the prompt UI.
-                mentions: Vec::new(),
-            })
-            .await
-        {
+        // A buffer naming one of the engine's commands runs it; anything else
+        // starting with a slash is text, because a command this build does not
+        // have is not one the UI should intercept on the model's behalf.
+        let sent = match self.engine_command(&prompt) {
+            Some((name, args)) => self.engine.send(Command::RunCommand { name, args }).await,
+            None => {
+                let mentions = mention::scan(&prompt);
+
+                self.engine
+                    .send(Command::SendPrompt {
+                        // The `@path` tokens stay in the text: they are what
+                        // the user wrote, and the engine reads the files they
+                        // name when it builds the request.
+                        text: prompt,
+                        mentions,
+                    })
+                    .await
+            }
+        };
+
+        match sent {
             Ok(()) => {
                 self.editor.clear();
                 self.dropdown = None;
+                self.files = None;
                 self.status.set_notice(None);
             }
             // The editor keeps the text, so a refused prompt is never lost.
             Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
         }
+    }
+
+    /// Runs the buffer in the shell on the user's own behalf.
+    ///
+    /// Ungated by design (**D13**): this is the person at the terminal typing a
+    /// command, not the model asking to run one, and upstream runs it without a
+    /// dialog for exactly that reason.
+    async fn submit_shell(&mut self) {
+        let Some(command) = self.editor.prompt() else {
+            return;
+        };
+
+        match self.engine.send(Command::RunShell { command }).await {
+            Ok(()) => {
+                self.editor.clear();
+                self.set_shell(false);
+                self.status.set_notice(None);
+            }
+            // Text and mode both kept: a refused command is one to try again,
+            // and putting the composer back into prompt mode under it would
+            // send it to the model instead.
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
+    }
+
+    /// The engine command `prompt` names, and everything typed after it.
+    ///
+    /// Nothing is parsed out of the arguments here: the command's own template
+    /// decides what `$1` and `$ARGUMENTS` make of them.
+    fn engine_command(&self, prompt: &str) -> Option<(String, String)> {
+        let rest = prompt.strip_prefix('/')?;
+        let (name, args) = rest
+            .find(char::is_whitespace)
+            .map_or((rest, ""), |index| (&rest[..index], &rest[index..]));
+
+        self.engine_commands
+            .iter()
+            .any(|command| command.name == name)
+            .then(|| (name.to_owned(), args.trim_start().to_owned()))
     }
 
     fn handle_core(&mut self, event: CoreEvent) {
@@ -991,9 +1381,10 @@ impl App {
                 tool,
                 title,
                 args,
+                directories,
                 ..
             } => {
-                self.permission = Some(Permission::new(id, tool, title, args));
+                self.permission = Some(Permission::new(id, tool, title, args, directories));
                 self.status.set_activity(Activity::Permission);
             }
             CoreEvent::PermissionReplied { id, .. } => {
@@ -1072,6 +1463,54 @@ impl App {
     }
 }
 
+/// The glob a mention fragment searches with.
+///
+/// Anchored on whatever directories the fragment already names and matching
+/// the rest anywhere below them, which is the shape a path being typed has.
+/// `**/` in front lets the named directories sit at any depth, so `src/app`
+/// finds `crates/ganja-tui/src/app.rs` without the user spelling the way there.
+///
+/// Ported behavior stops at the trigger; the matching itself is ganja's own.
+/// Upstream scores whole paths through a purpose-built index; this matches file
+/// *names* under the directories named, which finds what a person is usually
+/// typing and cannot be mistaken for the same ranking (deviation:
+/// mention-matches-under-the-path-typed).
+fn pattern(fragment: &str) -> String {
+    let Some((directory, leaf)) = fragment.rsplit_once('/') else {
+        return if fragment.is_empty() {
+            "**/*".to_owned()
+        } else {
+            format!("**/*{fragment}*")
+        };
+    };
+
+    match (directory.is_empty(), leaf.is_empty()) {
+        // A leading slash names no directory, so there is nothing to anchor on.
+        (true, true) => "**/*".to_owned(),
+        (true, false) => format!("**/*{leaf}*"),
+        // A trailing slash: everything under what was named.
+        (false, true) => format!("**/{directory}/**"),
+        (false, false) => format!("**/{directory}/**/*{leaf}*"),
+    }
+}
+
+/// The paths `output` names, relative to `cwd` and capped to what a menu can
+/// show.
+///
+/// `glob` answers with absolute paths and, when it capped its own result, with
+/// a sentence saying so. Keeping only the lines that are under `cwd` drops that
+/// sentence and the "No files found" line without either of them having to be
+/// recognized by their text.
+fn relative_paths(cwd: &Path, output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| Path::new(line).strip_prefix(cwd).ok())
+        .map(|path| path.display().to_string())
+        .filter(|path| !path.is_empty())
+        .take(MAX_FILES)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1097,7 +1536,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use super::{App, Chooser, Dropdown, FRAME, Palette, Permission, permission_reply};
+    use super::{App, Chooser, Dropdown, FRAME, Mode, Palette, Permission, permission_reply};
     use crate::{
         component::sessions,
         event::AppEvent,
@@ -1178,6 +1617,26 @@ mod tests {
                 .save_part(&info.id, &message.id, part)
                 .expect("the part stores");
         }
+    }
+
+    /// Stores one session under `id` that a task call on `parent` spawned.
+    fn store_child(directory: &TempDir, id: &str, parent: &str) {
+        let storage = Storage::open(directory.path().join("storage"));
+        let info = SessionInfo {
+            id: SessionId::from(id.to_owned()),
+            version: VERSION,
+            title: Some("find the parser (@explore subagent)".to_owned()),
+            created: 1_000,
+            updated: 1_000,
+            usage: Usage::default(),
+            context_tokens: 0,
+            summary: None,
+            agent: Some("explore".to_owned()),
+            model: None,
+            parent: Some(SessionId::from(parent.to_owned())),
+        };
+
+        storage.save_info(&info).expect("the info stores");
     }
 
     /// The three sessions the picker snapshots render: one titled and recent,
@@ -2452,6 +2911,7 @@ mod tests {
             "shell".to_owned(),
             "cargo test".to_owned(),
             serde_json::json!({"command": "cargo test"}),
+            Vec::new(),
         ));
 
         let mut terminal = terminal(80, 24);
@@ -2478,6 +2938,7 @@ mod tests {
             "shell".to_owned(),
             command.clone(),
             serde_json::json!({ "command": command }),
+            Vec::new(),
         ));
 
         let mut terminal = terminal(80, 24);
@@ -3521,5 +3982,900 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
 
         insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// A project on disk for the `@` menu to walk, with one file in a
+    /// subdirectory so a mention has a path to complete rather than a name.
+    fn project() -> TempDir {
+        let directory = temporary();
+        std::fs::create_dir_all(directory.path().join("src")).expect("the fixture tree is made");
+        for path in ["README.md", "src/lib.rs", "src/app.rs"] {
+            std::fs::write(directory.path().join(path), "// a file worth mentioning\n")
+                .expect("the fixture file writes");
+        }
+
+        directory
+    }
+
+    /// An app whose `@` menu walks `directory`.
+    fn app_in(directory: &TempDir) -> App {
+        app().with_cwd(directory.path())
+    }
+
+    /// The paths the file menu is currently offering.
+    fn offered(app: &App) -> Vec<String> {
+        let mut listed = Vec::new();
+        let Some(files) = &app.files else {
+            return listed;
+        };
+        let mut cursor = files.clone();
+        cursor.move_selection(-99);
+        for _ in 0..16 {
+            if let Some(path) = cursor.selected() {
+                listed.push(path.to_owned());
+            }
+            cursor.move_selection(1);
+        }
+        listed.dedup();
+
+        listed
+    }
+
+    /// Types `text` into `app`, one key at a time, the way a person does.
+    async fn typed(app: &mut App, text: &str) {
+        for event in typing(text) {
+            app.handle(event).await.expect("typing is handled");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_at_raises_the_file_menu_over_what_the_project_holds() {
+        let directory = project();
+        let mut app = app_in(&directory);
+
+        typed(&mut app, "look at @lib").await;
+
+        assert!(app.files.is_some(), "the file menu should be open");
+        assert_eq!(offered(&app), vec!["src/lib.rs".to_owned()]);
+    }
+
+    /// A fragment naming directories anchors on them, which is what makes a
+    /// path typed from the root reach what is under it.
+    #[tokio::test]
+    async fn a_fragment_naming_a_directory_offers_what_is_inside_it() {
+        let directory = project();
+        let mut app = app_in(&directory);
+
+        typed(&mut app, "@src/").await;
+
+        let mut offered = offered(&app);
+        offered.sort();
+        assert_eq!(
+            offered,
+            vec!["src/app.rs".to_owned(), "src/lib.rs".to_owned()]
+        );
+    }
+
+    /// The exact trigger, at the level a person meets it. The shapes
+    /// themselves are pinned in `mention`; what this covers is that the app
+    /// asks the same question the scan will ask on submit.
+    #[tokio::test]
+    async fn the_file_menu_opens_on_exactly_the_mentions_a_submit_would_read() {
+        let cases = [
+            // Typed, and whether the menu should be up at the end of it.
+            ("@lib", true),
+            ("look at @lib", true),
+            ("mail me@example.com", false),
+            ("@lib and then", false),
+            ("nothing at all", false),
+            ("@", true),
+        ];
+
+        for (text, expected) in cases {
+            let directory = project();
+            let mut app = app_in(&directory);
+            typed(&mut app, text).await;
+
+            assert_eq!(
+                app.files.is_some(),
+                expected,
+                "{text:?} should {}have raised the menu",
+                if expected { "" } else { "not " }
+            );
+        }
+    }
+
+    /// Moving the cursor back out of a mention closes the menu, and moving it
+    /// back in opens it again — the trigger is about where the cursor is, not
+    /// about what was typed.
+    #[tokio::test]
+    async fn moving_the_cursor_out_of_a_mention_closes_the_menu() {
+        let directory = project();
+        let mut app = app_in(&directory);
+        typed(&mut app, "@lib").await;
+        assert!(app.files.is_some());
+
+        app.handle(key(KeyCode::Home, KeyModifiers::NONE))
+            .await
+            .expect("home is handled");
+
+        assert!(app.files.is_none(), "the cursor is in front of the `@` now");
+    }
+
+    #[tokio::test]
+    async fn choosing_a_file_writes_the_mention_into_the_buffer() {
+        let directory = project();
+        let mut app = app_in(&directory);
+        typed(&mut app, "compare @lib").await;
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("compare @src/lib.rs "),
+            "the fragment should have become the whole path, with room after it"
+        );
+        assert!(app.files.is_none(), "choosing closes the menu");
+        assert_eq!(
+            app.editor.cursor(),
+            (0, "compare @src/lib.rs ".chars().count()),
+            "the cursor follows what was inserted"
+        );
+    }
+
+    /// A mention in the middle of a sentence is replaced in place, and the
+    /// cursor stays where the user was writing rather than jumping to the end.
+    #[tokio::test]
+    async fn a_mention_mid_sentence_is_replaced_without_moving_the_rest() {
+        let directory = project();
+        let mut app = app_in(&directory);
+        typed(&mut app, "look at @lib and say why").await;
+        // Back into the mention: nine characters from the end.
+        for _ in 0.."and say why".chars().count() + 1 {
+            app.handle(key(KeyCode::Left, KeyModifiers::NONE))
+                .await
+                .expect("left is handled");
+        }
+        assert!(
+            app.files.is_some(),
+            "the cursor is inside the mention again"
+        );
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("look at @src/lib.rs and say why"),
+            "the space already after the mention is not doubled"
+        );
+        assert_eq!(
+            app.editor.cursor(),
+            (0, "look at @src/lib.rs".chars().count())
+        );
+    }
+
+    /// **Non-vacuity target for the submit scan.** Dropping `mention::scan`
+    /// from `submit` — sending `Vec::new()` the way the composer did before
+    /// mentions existed — fails this test on the `File` part.
+    #[tokio::test]
+    async fn a_submitted_prompt_carries_its_mentions_and_keeps_their_text() {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, fake::MODEL, None, Themes::builtin());
+
+        typed(&mut app, "compare @src/lib.rs with @README.md").await;
+        // The menu is still up over the mention the cursor is in, and it owns
+        // Enter — so the way to send this is the way a person sends it.
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let CoreEvent::MessageStarted { message } =
+            events.next().await.expect("the engine reports the prompt")
+        else {
+            panic!("the first event of a turn is the user's message");
+        };
+
+        let attached: Vec<&str> = message
+            .parts
+            .iter()
+            .filter_map(|part| match &part.body {
+                PartBody::File { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            attached,
+            vec!["src/lib.rs", "README.md"],
+            "both mentions should have reached the engine"
+        );
+
+        let text: String = message
+            .parts
+            .iter()
+            .filter_map(ganja_core::Part::as_text)
+            .collect();
+        assert_eq!(
+            text, "compare @src/lib.rs with @README.md",
+            "the literal tokens stay in the prompt, as upstream leaves them"
+        );
+    }
+
+    /// **D11** again, on the other menu: closing is not deleting.
+    #[tokio::test]
+    async fn escape_closes_the_file_menu_and_keeps_what_was_typed() {
+        let directory = project();
+        let mut app = app_in(&directory);
+        typed(&mut app, "look at @lib").await;
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+
+        assert!(app.files.is_none());
+        assert_eq!(app.editor.prompt().as_deref(), Some("look at @lib"));
+    }
+
+    /// **Non-vacuity target for the `!` consume.** Letting the keystroke fall
+    /// through to the editor — dropping the flip arm — leaves a `!` in the
+    /// buffer and fails the second assertion here.
+    #[tokio::test]
+    async fn an_exclamation_at_the_start_flips_to_shell_mode_and_is_never_typed() {
+        let mut app = app();
+
+        typed(&mut app, "!").await;
+
+        assert_eq!(app.editor.mode(), Mode::Shell);
+        assert!(
+            app.editor.is_empty(),
+            "the `!` is the mode switch, not a character: {:?}",
+            app.editor.text()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exclamation_anywhere_else_is_a_character_like_any_other() {
+        let mut app = app();
+
+        typed(&mut app, "wow!").await;
+
+        assert_eq!(app.editor.mode(), Mode::Prompt);
+        assert_eq!(app.editor.prompt().as_deref(), Some("wow!"));
+    }
+
+    /// Upstream's gate is the cursor, not the buffer: a `!` typed in front of
+    /// existing text flips the mode and keeps the text as the command.
+    #[tokio::test]
+    async fn an_exclamation_in_front_of_existing_text_still_flips() {
+        let mut app = app();
+        typed(&mut app, "ls -la").await;
+        app.handle(key(KeyCode::Home, KeyModifiers::NONE))
+            .await
+            .expect("home is handled");
+
+        typed(&mut app, "!").await;
+
+        assert_eq!(app.editor.mode(), Mode::Shell);
+        assert_eq!(app.editor.prompt().as_deref(), Some("ls -la"));
+    }
+
+    #[tokio::test]
+    async fn escape_and_backspace_at_the_start_are_the_two_ways_out_of_shell_mode() {
+        for leaving in [KeyCode::Esc, KeyCode::Backspace] {
+            let mut app = app();
+            typed(&mut app, "!").await;
+            typed(&mut app, "ls").await;
+            app.handle(key(KeyCode::Home, KeyModifiers::NONE))
+                .await
+                .expect("home is handled");
+
+            app.handle(key(leaving, KeyModifiers::NONE))
+                .await
+                .expect("the way out is handled");
+
+            assert_eq!(app.editor.mode(), Mode::Prompt, "{leaving:?}");
+            assert_eq!(
+                app.editor.prompt().as_deref(),
+                Some("ls"),
+                "{leaving:?} should leave the mode, not eat the command"
+            );
+        }
+    }
+
+    /// Backspace anywhere but the front is still backspace.
+    #[tokio::test]
+    async fn backspace_inside_a_shell_command_deletes_rather_than_leaving() {
+        let mut app = app();
+        typed(&mut app, "!").await;
+        typed(&mut app, "lsx").await;
+
+        app.handle(key(KeyCode::Backspace, KeyModifiers::NONE))
+            .await
+            .expect("backspace is handled");
+
+        assert_eq!(app.editor.mode(), Mode::Shell);
+        assert_eq!(app.editor.prompt().as_deref(), Some("ls"));
+    }
+
+    /// The whole passthrough, through the real engine: the command runs, the
+    /// synthetic user message upstream writes lands in the transcript, and the
+    /// composer comes back for the next prompt.
+    #[tokio::test]
+    async fn submitting_in_shell_mode_runs_the_command_and_comes_back() {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "!").await;
+        typed(&mut app, "echo hello").await;
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(
+            app.editor.mode(),
+            Mode::Prompt,
+            "a command that was accepted leaves the composer ready for a prompt"
+        );
+        assert!(app.editor.is_empty());
+
+        let CoreEvent::MessageStarted { message } =
+            events.next().await.expect("the engine reports the command")
+        else {
+            panic!("the first event of a passthrough is the synthetic user message");
+        };
+        let text: String = message
+            .parts
+            .iter()
+            .filter_map(ganja_core::Part::as_text)
+            .collect();
+        assert_eq!(text, "The following tool was executed by the user");
+
+        // Drain the rest so the test does not leave a turn streaming.
+        while let Some(event) = events.next().await {
+            if matches!(event, CoreEvent::MessageFinished { .. }) {
+                break;
+            }
+        }
+    }
+
+    /// A refusal has to leave both halves alone: the text so the command can
+    /// be tried again, and the mode so trying it again does not send it to the
+    /// model instead.
+    #[tokio::test]
+    async fn a_refused_shell_command_keeps_the_text_and_the_mode() {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "a turn to be busy with").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        pump(&mut app, &mut events, 2).await;
+
+        typed(&mut app, "!").await;
+        typed(&mut app, "echo hello").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.editor.mode(), Mode::Shell);
+        assert_eq!(app.editor.prompt().as_deref(), Some("echo hello"));
+
+        let mut terminal = terminal(120, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("already streaming"),
+            "the refusal should be readable:\n{}",
+            screen(&terminal)
+        );
+    }
+
+    /// Neither menu belongs in shell mode: a `/` there starts a path and an
+    /// `@` is whatever the shell makes of it.
+    #[tokio::test]
+    async fn shell_mode_offers_neither_commands_nor_files() {
+        let directory = project();
+        let mut app = app_in(&directory);
+        typed(&mut app, "!").await;
+
+        typed(&mut app, "/usr").await;
+        assert!(app.dropdown.is_none());
+
+        app.editor.clear();
+        typed(&mut app, "cat @lib").await;
+        assert!(app.files.is_none());
+    }
+
+    /// An engine command expects arguments, so choosing it types its name and
+    /// waits rather than running something with none.
+    #[tokio::test]
+    async fn choosing_an_engine_command_types_its_name_instead_of_running_it() {
+        let (mut app, _events) = wired().await;
+        typed(&mut app, "/init").await;
+
+        assert_eq!(
+            app.dropdown.as_ref().and_then(Dropdown::selected),
+            Some(crate::command::Choice::Engine(
+                crate::command::EngineCommand {
+                    name: "init".to_owned(),
+                    description: Some("guided AGENTS.md setup".to_owned()),
+                }
+            )),
+            "the engine's own command should be under the cursor"
+        );
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(
+            app.editor.text(),
+            "/init ",
+            "the name is typed, with room for the arguments it takes"
+        );
+        assert!(app.dropdown.is_none());
+    }
+
+    /// And the second Enter runs it, arguments and all.
+    #[tokio::test]
+    async fn submitting_an_engine_command_runs_it_with_what_was_typed_after_it() {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, fake::MODEL, None, Themes::builtin());
+
+        typed(&mut app, "/init focus on the test suite").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let CoreEvent::MessageStarted { message } =
+            events.next().await.expect("the engine reports the prompt")
+        else {
+            panic!("the first event of a turn is the user's message");
+        };
+        let text: String = message
+            .parts
+            .iter()
+            .filter_map(ganja_core::Part::as_text)
+            .collect();
+
+        assert!(
+            text.contains("AGENTS.md"),
+            "the template should have been expanded, got: {text}"
+        );
+        assert!(
+            text.contains("focus on the test suite"),
+            "and the arguments should be in it, got: {text}"
+        );
+        assert!(
+            app.editor.is_empty(),
+            "a command that ran clears the composer"
+        );
+    }
+
+    /// A slash this build does not know is not a command, so it is text. The
+    /// engine has its own answer for an unknown command on the wire; the UI
+    /// simply does not intercept what it cannot name.
+    #[tokio::test]
+    async fn an_unknown_slash_command_is_sent_as_the_text_it_is() {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, fake::MODEL, None, Themes::builtin());
+
+        // Trailing space, so the menu is closed and Enter reaches the submit.
+        typed(&mut app, "/nonesuch please ").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let CoreEvent::MessageStarted { message } =
+            events.next().await.expect("the engine reports the prompt")
+        else {
+            panic!("the first event of a turn is the user's message");
+        };
+        let text: String = message
+            .parts
+            .iter()
+            .filter_map(ganja_core::Part::as_text)
+            .collect();
+
+        assert_eq!(text, "/nonesuch please ");
+    }
+
+    #[tokio::test]
+    async fn new_session_empties_the_screen_the_old_one_filled() {
+        let mut app = app();
+        palette_transcript(&mut app);
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(screen(&terminal).contains("show me every color"));
+
+        app.run_command(crate::command::Action::New).await;
+
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            !screen(&terminal).contains("show me every color"),
+            "the previous conversation should be off the screen:\n{}",
+            screen(&terminal)
+        );
+    }
+
+    /// A refused reset leaves the user looking at the conversation they are
+    /// still in, rather than at a blank screen the engine never agreed to.
+    #[tokio::test]
+    async fn a_refused_new_session_leaves_the_transcript_alone() {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "a turn to be busy with").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        pump(&mut app, &mut events, 2).await;
+
+        app.run_command(crate::command::Action::New).await;
+
+        let mut terminal = terminal(120, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(screen.contains("a turn to be busy with"), "got:\n{screen}");
+        assert!(screen.contains("already streaming"), "got:\n{screen}");
+    }
+
+    /// A compaction is a turn like any other from out here, so what proves the
+    /// command reached the engine is that the engine ran one. This session has
+    /// nothing to summarize yet, which is why the turn it runs is one that
+    /// simply ends.
+    #[tokio::test]
+    async fn compact_reaches_the_engine_as_a_turn_of_its_own() {
+        let (mut app, mut events) = wired().await;
+
+        app.run_command(crate::command::Action::Compact).await;
+
+        let event = events.next().await.expect("the engine runs the turn");
+        assert!(
+            matches!(event, CoreEvent::MessageFinished { .. }),
+            "got {event:?}"
+        );
+        assert!(!app.status.is_streaming());
+    }
+
+    /// Both of the commands the palette gained reach something.
+    #[tokio::test]
+    async fn the_palette_reaches_the_commands_this_wave_added() {
+        // `/new` empties the screen the old conversation filled.
+        let (mut app, _events) = wired().await;
+        palette_transcript(&mut app);
+        app.draw(&mut terminal(80, 24)).expect("a frame draws");
+        assert_ne!(
+            app.chat.line_count(),
+            0,
+            "there has to be something to clear"
+        );
+
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        typed(&mut app, "new").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert_eq!(app.chat.line_count(), 0, "/new should have cleared it");
+
+        // `/compact` reaches the engine, which answers with a turn.
+        let (mut app, mut events) = wired().await;
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        typed(&mut app, "compact").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(
+            events.next().await.is_some(),
+            "/compact should have reached the engine"
+        );
+    }
+
+    /// A child session belongs to the task call that spawned it, and is
+    /// rendered on that call's row; offering it here would be offering a
+    /// resume into the middle of a delegated turn.
+    #[tokio::test]
+    async fn the_picker_lists_roots_only() {
+        let directory = temporary();
+        store_session(
+            &directory,
+            "ses_root",
+            Some("the conversation"),
+            1_000,
+            0,
+            10,
+        );
+        store_child(&directory, "ses_child", "ses_root");
+        let mut app = persistent_app(&directory);
+
+        app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-s is handled");
+
+        let listed: Vec<String> = app
+            .sessions
+            .as_ref()
+            .map(|sessions| {
+                let mut cursor = sessions.clone();
+                let mut seen = Vec::new();
+                cursor.move_selection(-99);
+                for _ in 0..8 {
+                    if let Some(info) = cursor.selected() {
+                        seen.push(info.id.as_str().to_owned());
+                    }
+                    cursor.move_selection(1);
+                }
+                seen.dedup();
+                seen
+            })
+            .unwrap_or_default();
+
+        assert_eq!(
+            listed,
+            vec!["ses_root".to_owned()],
+            "a delegated turn's session is not one to resume into"
+        );
+
+        // And the row it drew is the root's, by the title a person picks by.
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(screen.contains("the conversation"), "got:\n{screen}");
+        assert!(
+            !screen.contains("@explore subagent"),
+            "the child's own title has no business in the picker:\n{screen}"
+        );
+    }
+
+    /// A task tool part, in whichever state, on the message the engine
+    /// streamed it on.
+    async fn task_part(app: &mut App, state: ToolState) {
+        let reply = Message::assistant("canned");
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            message: reply.clone(),
+        }))
+        .await
+        .expect("a message start is handled");
+        app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            message_id: reply.id,
+            part: Part {
+                id: PartId::from("prt_1".to_owned()),
+                body: PartBody::Tool {
+                    call_id: "call_1".to_owned(),
+                    tool: "task".to_owned(),
+                    state,
+                },
+            },
+        }))
+        .await
+        .expect("a task update is handled");
+    }
+
+    /// The progress the task tool republishes on its own part is the only
+    /// window a frontend has into a child, so it has to reach the screen.
+    #[tokio::test]
+    async fn a_delegated_turns_progress_reaches_the_transcript() {
+        let mut app = app();
+        task_part(
+            &mut app,
+            ToolState::Running {
+                input: serde_json::json!({
+                    "description": "find the parser",
+                    "subagent_type": "explore",
+                }),
+                metadata: serde_json::json!({"current_tool": "grep parser", "toolcalls": 3}),
+                started: 0,
+            },
+        )
+        .await;
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+
+        assert!(screen.contains("Explore Task"), "got:\n{screen}");
+        assert!(screen.contains("find the parser"), "got:\n{screen}");
+        assert!(screen.contains("grep parser"), "got:\n{screen}");
+    }
+
+    #[tokio::test]
+    async fn snapshot_file_menu_open() {
+        let directory = project();
+        let mut app = app_in(&directory);
+        palette_transcript(&mut app);
+
+        typed(&mut app, "compare @lib").await;
+
+        assert!(
+            app.files.is_some(),
+            "the menu must be open, or the snapshot is of a bare screen"
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_shell_mode() {
+        let mut app = app();
+        palette_transcript(&mut app);
+
+        typed(&mut app, "!").await;
+        typed(&mut app, "cargo nextest run --workspace").await;
+
+        assert_eq!(app.editor.mode(), Mode::Shell, "the mode must have flipped");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_shell_output_streaming() {
+        let mut app = app();
+        let reply = Message::assistant("canned");
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            message: reply.clone(),
+        }))
+        .await
+        .expect("a message start is handled");
+        app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            message_id: reply.id,
+            part: Part {
+                id: PartId::from("prt_1".to_owned()),
+                body: PartBody::Tool {
+                    call_id: "call_1".to_owned(),
+                    tool: "bash".to_owned(),
+                    state: ToolState::Running {
+                        input: serde_json::json!({"command": "cargo nextest run"}),
+                        metadata: serde_json::json!({
+                            "output": "    Starting 517 tests\n\
+                                       PASS [   0.004s] ganja-core permission\n\
+                                       PASS [   0.006s] ganja-core storage\n\
+                                       PASS [   0.011s] ganja-tui app\n\
+                                       PASS [   0.012s] ganja-tui chat\n\
+                                       PASS [   0.019s] ganja-cli import"
+                        }),
+                        started: 0,
+                    },
+                },
+            },
+        }))
+        .await
+        .expect("a running update is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_task_running() {
+        let mut app = app();
+        task_part(
+            &mut app,
+            ToolState::Running {
+                input: serde_json::json!({
+                    "description": "find every caller of resolve",
+                    "subagent_type": "explore",
+                }),
+                metadata: serde_json::json!({"current_tool": "grep resolve", "toolcalls": 4}),
+                started: 0,
+            },
+        )
+        .await;
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_task_completed() {
+        let mut app = app();
+        task_part(
+            &mut app,
+            ToolState::Completed {
+                input: serde_json::json!({
+                    "description": "find every caller of resolve",
+                    "subagent_type": "explore",
+                }),
+                output: "<task id=\"tsk_1\" state=\"completed\"><task_result>\
+                         four callers, all in session.rs</task_result></task>"
+                    .to_owned(),
+                title: "find every caller of resolve".to_owned(),
+                metadata: serde_json::json!({
+                    "session": "ses_child",
+                    "agent": "explore",
+                    "model": fake::MODEL,
+                    "toolcalls": 9,
+                }),
+                started: 1_000,
+                completed: 24_500,
+            },
+        )
+        .await;
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_permission_dialog_with_directories() {
+        let mut app = app();
+        app.handle(AppEvent::core(CoreEvent::PermissionRequested {
+            id: PermissionId::from("perm_1".to_owned()),
+            call_id: "call_1".to_owned(),
+            tool: "bash".to_owned(),
+            title: "cp report.md /var/www/html".to_owned(),
+            args: serde_json::json!({"command": "cp report.md /var/www/html"}),
+            directories: vec!["/var/www/html".to_owned(), "/etc/nginx".to_owned()],
+        }))
+        .await
+        .expect("a permission request is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[test]
+    fn a_mention_fragment_anchors_on_whatever_directories_it_names() {
+        let cases = [
+            ("", "**/*"),
+            ("lib", "**/*lib*"),
+            ("src/", "**/src/**"),
+            ("src/li", "**/src/**/*li*"),
+            ("crates/ganja-tui/src/", "**/crates/ganja-tui/src/**"),
+            // A leading slash names no directory to anchor on.
+            ("/lib", "**/*lib*"),
+            ("/", "**/*"),
+        ];
+
+        for (fragment, expected) in cases {
+            assert_eq!(super::pattern(fragment), expected, "{fragment:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_paths_under_the_walk_are_offered_and_only_the_first_ten() {
+        let cwd = std::path::Path::new("/project");
+        let listed = (0..14)
+            .map(|index| format!("/project/src/file_{index:02}.rs"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // What `glob` appends when it capped its own result, and what it says
+        // when it found nothing — neither is a path.
+        let output = format!(
+            "{listed}\n\n(Results are truncated: showing first 100 results. \
+             Consider using a more specific path or pattern.)"
+        );
+
+        let offered = super::relative_paths(cwd, &output);
+
+        assert_eq!(offered.len(), 10, "got {offered:?}");
+        assert_eq!(offered[0], "src/file_00.rs");
+        assert!(
+            offered.iter().all(|path| path.starts_with("src/")),
+            "the sentence is not a path: {offered:?}"
+        );
+        assert!(super::relative_paths(cwd, "No files found").is_empty());
     }
 }

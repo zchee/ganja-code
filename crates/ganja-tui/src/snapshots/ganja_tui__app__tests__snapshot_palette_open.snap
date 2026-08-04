@@ -10,12 +10,12 @@ One edit│> /sessions  Switch session                             ctrl+s│
 [done] e│  /models    Switch model                                     │        
 @@ -1,2 │session                                                       │        
 -let the│  /sessions  Switch session                             ctrl+s│        
-+let the│agent                                                         │        
-context │  /models    Switch model                                     │        
-[error] │  /agents    Switch agent                                     │        
-refused:│system                                                        │        
-        │  /themes    Switch theme                               ctrl+t│        
-        │  /help      Help                                             │        
++let the│  /new       New session                                      │        
+context │  /compact   Compact session                                  │        
+[error] │  /editor    Open editor                                      │        
+refused:│agent                                                         │        
+        │  /models    Switch model                                     │        
+        │  /agents    Switch agent                                     │        
         │                                                              │        
         │[type] filter   [up/down] move   [Enter] run   [Esc] close    │        
         └──────────────────────────────────────────────────────────────┘        

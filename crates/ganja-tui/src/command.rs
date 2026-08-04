@@ -4,9 +4,11 @@
 //! Spec: upstream `packages/tui/src/component/command-palette.tsx` and
 //! `packages/tui/src/component/prompt/autocomplete.tsx`. Upstream has two
 //! disjoint command populations — UI actions that dispatch immediately, and
-//! engine commands that insert text and run on Enter — and only the first of
-//! them reaches the palette. This module is that first population; the engine
-//! half arrives with the commands that carry it.
+//! engine commands that insert text and run on Enter — and both live here:
+//! [`Entry`] is the first, [`EngineCommand`] the second, and [`Choice`] is
+//! what the `/` dropdown offers once they are merged. Only the first reaches
+//! the palette, because the palette has no way to take the arguments an
+//! engine command expects.
 //!
 //! The names are upstream's, **plurals and aliases included**: `/models` not
 //! `/model`, `mo` because upstream added it to bias a half-typed `/mo` toward
@@ -36,6 +38,12 @@ use crate::keybind;
 pub enum Action {
     /// Open the stored-session picker.
     Sessions,
+    /// Start a fresh session, and empty the screen the old one filled.
+    New,
+    /// Summarize the conversation so far and carry on from the summary.
+    Compact,
+    /// Compose the prompt in `$EDITOR`.
+    Editor,
     /// Open the model list for the provider this session runs on.
     Models,
     /// Open the list of agents the session may switch to.
@@ -60,7 +68,9 @@ impl Action {
             Self::Sessions => Some(keybind::Action::SessionsOpen),
             Self::Themes => Some(keybind::Action::ThemesOpen),
             Self::Exit => Some(keybind::Action::AppExit),
-            Self::Models | Self::Agents | Self::Help => None,
+            Self::New | Self::Compact | Self::Editor | Self::Models | Self::Agents | Self::Help => {
+                None
+            }
         }
     }
 }
@@ -118,11 +128,12 @@ impl Entry {
     }
 }
 
-/// Every command both surfaces offer.
+/// Every UI command both surfaces offer.
 ///
-/// `/new`, `/compact`, `/editor` and the engine-side commands are deliberately
-/// absent rather than stubbed: a palette row that does nothing is worse than a
-/// palette that does not claim to have the feature.
+/// The engine's own commands — `/init` and whatever a config file adds — are
+/// deliberately not here: they take arguments, so choosing one types its name
+/// into the buffer instead of running it, and a palette has nowhere to type.
+/// They reach the dropdown as [`EngineCommand`]s instead.
 pub const COMMANDS: &[Entry] = &[
     Entry {
         action: Action::Sessions,
@@ -132,6 +143,33 @@ pub const COMMANDS: &[Entry] = &[
         description: "Reopen a conversation this project has stored",
         category: Category::Session,
         suggested: true,
+    },
+    Entry {
+        action: Action::New,
+        name: "new",
+        aliases: &["clear"],
+        title: "New session",
+        description: "Leave this conversation and start an empty one",
+        category: Category::Session,
+        suggested: false,
+    },
+    Entry {
+        action: Action::Compact,
+        name: "compact",
+        aliases: &["summarize"],
+        title: "Compact session",
+        description: "Summarize the conversation so far and carry on from it",
+        category: Category::Session,
+        suggested: false,
+    },
+    Entry {
+        action: Action::Editor,
+        name: "editor",
+        aliases: &[],
+        title: "Open editor",
+        description: "Write the prompt in $EDITOR instead of the composer",
+        category: Category::Session,
+        suggested: false,
     },
     Entry {
         action: Action::Models,
@@ -208,6 +246,136 @@ pub fn lookup(name: &str) -> Option<&'static Entry> {
         .find(|entry| entry.name == wanted || entry.aliases.contains(&wanted))
 }
 
+/// One command the **engine** offers, as the dropdown lists it.
+///
+/// Owned rather than borrowed because this half of the roster is resolved at
+/// runtime: `/init` is compiled in, but everything beside it comes out of the
+/// user's config file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineCommand {
+    /// What the user types after the slash.
+    pub name: String,
+    /// The one line the engine had to say about it, where it said anything.
+    pub description: Option<String>,
+}
+
+impl EngineCommand {
+    /// Every command `registry` holds, in the order it lists them.
+    #[must_use]
+    pub fn roster(registry: &ganja_core::command::Registry) -> Vec<Self> {
+        registry
+            .commands()
+            .iter()
+            .map(|definition| Self {
+                name: definition.name.clone(),
+                description: definition.description.clone(),
+            })
+            .collect()
+    }
+}
+
+/// One row the `/` dropdown offers, from either population.
+///
+/// The two halves differ in what choosing them does, which is the whole reason
+/// upstream keeps them apart: a UI command runs, an engine command is typed
+/// into the buffer and waits for the arguments its template expects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// A UI command, which runs the moment it is chosen.
+    Ui(&'static Entry),
+    /// An engine command, which is inserted as `/name ` and runs on Enter.
+    Engine(EngineCommand),
+}
+
+impl Choice {
+    /// How the row is spelled, the leading slash included.
+    #[must_use]
+    pub fn slash(&self) -> String {
+        match self {
+            Self::Ui(entry) => entry.slash(),
+            Self::Engine(command) => format!("/{}", command.name),
+        }
+    }
+
+    /// The line shown beside the name.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        match self {
+            Self::Ui(entry) => entry.description,
+            Self::Engine(command) => command.description.as_deref().unwrap_or_default(),
+        }
+    }
+
+    /// The name a row sorts under, which is the name without its slash.
+    fn name(&self) -> &str {
+        match self {
+            Self::Ui(entry) => entry.name,
+            Self::Engine(command) => &command.name,
+        }
+    }
+}
+
+/// The rows `query` narrows to across both populations, best match first.
+///
+/// An empty query is every row: the UI commands in table order, then the
+/// engine's in the order the registry lists them. The dropdown re-sorts that
+/// case by name, because with nothing typed there is no ranking to show.
+#[must_use]
+pub fn dropdown_matches(query: &str, engine: &[EngineCommand]) -> Vec<Choice> {
+    let needle = query.trim().trim_start_matches('/');
+    if needle.is_empty() {
+        return COMMANDS
+            .iter()
+            .map(Choice::Ui)
+            .chain(engine.iter().cloned().map(Choice::Engine))
+            .collect();
+    }
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let atom = fragment(needle);
+
+    let mut scored: Vec<(u32, Choice)> = COMMANDS
+        .iter()
+        .filter_map(|entry| {
+            score(&atom, &mut matcher, entry, Surface::Dropdown)
+                .map(|score| (score, Choice::Ui(entry)))
+        })
+        .collect();
+    scored.extend(engine.iter().filter_map(|command| {
+        score_engine(&atom, &mut matcher, command)
+            .map(|score| (score, Choice::Engine(command.clone())))
+    }));
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.name().cmp(right.1.name()))
+    });
+
+    scored.into_iter().map(|(_, choice)| choice).collect()
+}
+
+/// The best score `atom` gets against an engine command's name or its
+/// description — the same two fields, and the same weights, the dropdown
+/// scores a UI command by.
+fn score_engine(atom: &Atom, matcher: &mut Matcher, command: &EngineCommand) -> Option<u32> {
+    let mut buffer = Vec::new();
+    let mut best = None;
+    let mut consider = |text: &str, weight: u32| {
+        if let Some(score) = atom.score(Utf32Str::new(text, &mut buffer), matcher) {
+            let scaled = u32::from(score) * weight;
+            best = Some(best.map_or(scaled, |current: u32| current.max(scaled)));
+        }
+    };
+
+    consider(&command.name, 2);
+    if let Some(description) = &command.description {
+        consider(description, 1);
+    }
+
+    best
+}
+
 /// Which surface is matching, and therefore what a fragment is compared
 /// against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,16 +400,7 @@ pub fn matches(query: &str, surface: Surface) -> Vec<&'static Entry> {
     }
 
     let mut matcher = Matcher::new(Config::DEFAULT);
-    // `Atom::new` rather than `Atom::parse`: a fragment the user typed is a
-    // fragment, not a query language, so a leading `^` or a trailing `$`
-    // should narrow by those characters instead of changing the match mode.
-    let atom = Atom::new(
-        needle,
-        CaseMatching::Ignore,
-        Normalization::Smart,
-        AtomKind::Fuzzy,
-        false,
-    );
+    let atom = fragment(needle);
 
     let mut scored: Vec<(u32, &'static Entry)> = COMMANDS
         .iter()
@@ -258,6 +417,21 @@ pub fn matches(query: &str, surface: Surface) -> Vec<&'static Entry> {
     });
 
     scored.into_iter().map(|(_, entry)| entry).collect()
+}
+
+/// The needle a typed fragment becomes.
+///
+/// `Atom::new` rather than `Atom::parse`: a fragment the user typed is a
+/// fragment, not a query language, so a leading `^` or a trailing `$` should
+/// narrow by those characters instead of changing the match mode.
+fn fragment(needle: &str) -> Atom {
+    Atom::new(
+        needle,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+        false,
+    )
 }
 
 /// The best score `atom` gets against any of `entry`'s matchable fields.
@@ -292,7 +466,19 @@ fn score(atom: &Atom, matcher: &mut Matcher, entry: &Entry, surface: Surface) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, COMMANDS, Category, Surface, is_bare_exit, lookup, matches};
+    use super::{
+        Action, COMMANDS, Category, Choice, EngineCommand, Surface, dropdown_matches, is_bare_exit,
+        lookup, matches,
+    };
+
+    /// The commands the engine offers a session that loaded no config: one,
+    /// and its description is upstream's own string.
+    fn engine() -> Vec<EngineCommand> {
+        vec![EngineCommand {
+            name: "init".to_owned(),
+            description: Some("guided AGENTS.md setup".to_owned()),
+        }]
+    }
 
     /// The plurals are the whole point of porting the names rather than
     /// inventing them: `/model` is upstream's *feature*, `/models` is its
@@ -301,6 +487,9 @@ mod tests {
     fn the_command_names_are_upstreams_plurals_with_upstreams_aliases() {
         let cases = [
             ("sessions", &["resume", "continue"][..], Action::Sessions),
+            ("new", &["clear"][..], Action::New),
+            ("compact", &["summarize"][..], Action::Compact),
+            ("editor", &[][..], Action::Editor),
             ("models", &["mo"][..], Action::Models),
             ("agents", &[][..], Action::Agents),
             ("themes", &[][..], Action::Themes),
@@ -316,17 +505,80 @@ mod tests {
         assert_eq!(
             COMMANDS.len(),
             cases.len(),
-            "the table should hold exactly the commands this wave ships"
+            "the table should hold exactly the UI commands this build ships"
         );
     }
 
-    /// The ones this wave deliberately does not ship. A row that opened
-    /// nothing would be worse than no row.
+    /// The engine's own commands are not UI commands, however they are
+    /// spelled: choosing one has to type its name into the buffer so that the
+    /// arguments its template expects can follow.
     #[test]
-    fn the_commands_whose_engine_half_is_missing_are_absent_rather_than_inert() {
-        for name in ["new", "clear", "compact", "summarize", "editor", "init"] {
-            assert!(lookup(name).is_none(), "/{name} should not be listed yet");
+    fn an_engine_command_is_not_in_the_ui_table() {
+        for name in ["init", "review"] {
+            assert!(
+                lookup(name).is_none(),
+                "/{name} is the engine's, not a UI row"
+            );
         }
+    }
+
+    #[test]
+    fn the_dropdown_offers_both_populations() {
+        let rows = dropdown_matches("", &engine());
+
+        assert_eq!(
+            rows.len(),
+            COMMANDS.len() + 1,
+            "every UI command plus the engine's one"
+        );
+        assert!(
+            rows.contains(&Choice::Engine(engine().remove(0))),
+            "the engine's command should be listed: {rows:?}"
+        );
+    }
+
+    /// Both fields, and the weights are the UI table's: a fragment that is
+    /// part of a name outranks one that is only part of a description, which
+    /// is why the description case here uses a word no command is named after.
+    #[test]
+    fn a_fragment_reaches_an_engine_command_by_name_and_by_description() {
+        for fragment in ["ini", "guided"] {
+            assert_eq!(
+                dropdown_matches(fragment, &engine())
+                    .first()
+                    .map(Choice::slash),
+                Some("/init".to_owned()),
+                "{fragment:?} should rank /init first"
+            );
+        }
+    }
+
+    /// A row has to say which population it came from, because that is what
+    /// decides whether choosing it runs something or types something.
+    #[test]
+    fn a_ui_row_and_an_engine_row_are_told_apart_by_their_own_shape() {
+        let rows = dropdown_matches("", &engine());
+        let engine_rows: Vec<&Choice> = rows
+            .iter()
+            .filter(|row| matches!(row, Choice::Engine(_)))
+            .collect();
+
+        assert_eq!(engine_rows.len(), 1);
+        assert_eq!(engine_rows[0].slash(), "/init");
+        assert_eq!(engine_rows[0].description(), "guided AGENTS.md setup");
+    }
+
+    #[test]
+    fn an_engine_command_with_nothing_to_say_still_lists() {
+        let roster = vec![EngineCommand {
+            name: "silent".to_owned(),
+            description: None,
+        }];
+
+        let rows = dropdown_matches("silent", &roster);
+
+        assert_eq!(rows.first().map(Choice::slash), Some("/silent".to_owned()));
+        assert_eq!(rows[0].description(), "");
     }
 
     #[test]
