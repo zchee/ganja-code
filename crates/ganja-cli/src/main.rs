@@ -32,6 +32,8 @@ struct Cli {
     command: Option<Command>,
     #[command(flatten)]
     resume: ResumeArgs,
+    #[command(flatten)]
+    select: SelectArgs,
 }
 
 /// Which stored session the UI opens, if any.
@@ -60,6 +62,35 @@ impl ResumeArgs {
         }
 
         self.session.map(ganja_tui::Resume::Session)
+    }
+}
+
+/// Which model, agent and config file the interactive UI starts from.
+///
+/// The flag tier of the config precedence: these outrank the environment,
+/// which outranks the files — `ganja-core` owns that ordering, these only
+/// carry the words in.
+#[derive(Debug, Args)]
+struct SelectArgs {
+    /// Ask this model, spelled "provider/model" the way the config's `model` key is.
+    #[arg(long, value_name = "PROVIDER/MODEL")]
+    model: Option<String>,
+    /// Start on this agent instead of the roster's default.
+    #[arg(long, value_name = "NAME")]
+    agent: Option<String>,
+    /// Merge exactly this config file, outranking `GANJA_CONFIG` and discovery.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+}
+
+impl SelectArgs {
+    /// The flag tier, in the shape `ganja-core` merges above everything else.
+    fn overrides(self) -> ganja_core::config::Overrides {
+        ganja_core::config::Overrides {
+            model: self.model,
+            agent: self.agent,
+            config_file: self.config,
+        }
     }
 }
 
@@ -204,13 +235,7 @@ async fn main() -> Result<()> {
     let _logging = install_logging();
 
     match cli.command {
-        None => {
-            ganja_tui::run(
-                cli.resume.wanted(),
-                ganja_core::config::Overrides::default(),
-            )
-            .await
-        }
+        None => ganja_tui::run(cli.resume.wanted(), cli.select.overrides()).await,
         Some(Command::Auth { action }) => auth_command(action),
         Some(Command::Config { action }) => config_command(action),
         Some(Command::Models) => {
@@ -685,9 +710,44 @@ fn per_mtok(price: f64) -> String {
 /// tests only, so that one assertion belongs in `tests/` instead.
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use ganja_core::{SessionId, SessionInfo, Usage, storage::VERSION};
 
-    use super::{UNTITLED, age, billed_tokens, per_mtok, title};
+    use super::{Cli, UNTITLED, age, billed_tokens, per_mtok, title};
+
+    #[test]
+    fn the_ui_flags_map_onto_the_override_tier() {
+        let cli = Cli::parse_from([
+            "ganja",
+            "--model",
+            "anthropic/claude-sonnet-5",
+            "--agent",
+            "plan",
+            "--config",
+            "/tmp/override.jsonc",
+        ]);
+
+        let overrides = cli.select.overrides();
+        assert_eq!(
+            overrides.model.as_deref(),
+            Some("anthropic/claude-sonnet-5")
+        );
+        assert_eq!(overrides.agent.as_deref(), Some("plan"));
+        assert_eq!(
+            overrides.config_file.as_deref(),
+            Some(std::path::Path::new("/tmp/override.jsonc"))
+        );
+    }
+
+    #[test]
+    fn a_subcommand_given_the_ui_flags_is_refused_not_ignored() {
+        // `args_conflicts_with_subcommands` covers the new flags the same way
+        // it already covered the resume pair: the shape fails to parse.
+        assert!(
+            Cli::try_parse_from(["ganja", "--model", "x/y", "models"]).is_err(),
+            "a listing that read like it honored --model would be lying"
+        );
+    }
 
     const SECOND: u64 = 1_000;
     const MINUTE: u64 = 60 * SECOND;
