@@ -252,8 +252,9 @@ pub struct FileTimes {
     log: Mutex<Log>,
 }
 
-/// The read log's contents, under one lock: what is known about each file, and
-/// which files the model still has to be told about.
+/// The read log's contents, under one lock: what is known about each file,
+/// which files the model still has to be told about, and where a new read is
+/// announced.
 #[derive(Debug, Default)]
 struct Log {
     /// What was read, and what became of it.
@@ -262,6 +263,14 @@ struct Log {
     /// order they went. Drained by [`FileTimes::take_stale`] at the top of the
     /// next turn that asks the model anything.
     unannounced: Vec<PathBuf>,
+    /// Where each newly recorded path is announced, so [`crate::watch`] can
+    /// take a watch on the directory holding it. [`None`] on every session
+    /// nobody started a watcher for, which is every scripted and golden run.
+    ///
+    /// Under the same lock as the map rather than beside it: a record is one
+    /// critical section, and the send is a queue push that cannot block, so
+    /// nothing here puts a tool call behind a reader.
+    reads: Option<tokio::sync::mpsc::UnboundedSender<PathBuf>>,
 }
 
 impl FileTimes {
@@ -288,6 +297,32 @@ impl FileTimes {
         // say: the model is about to be handed the current contents, and
         // "re-read it" is advice it has already taken.
         log.unannounced.retain(|held| held != path);
+
+        // A queue push, never a syscall: which directory this file lives in
+        // and whether it is worth watching are decided on the watcher's own
+        // task, so that a tool call costs the same whether or not a session
+        // is watching. A closed receiver is a watcher that has gone away.
+        if let Some(reads) = &log.reads {
+            let _ = reads.send(path.to_owned());
+        }
+    }
+
+    /// Announces every path recorded from now on, so a watcher can take a
+    /// watch on the directory holding it.
+    ///
+    /// One announcer per log: a second call replaces the first, which is what
+    /// makes restarting a watcher leave nothing behind talking to a channel
+    /// nobody drains. Unbounded on purpose — the alternative is a `record`
+    /// that waits on a background task, and a tool call may never wait for
+    /// bookkeeping.
+    pub fn announce_reads(&self) -> tokio::sync::mpsc::UnboundedReceiver<PathBuf> {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.log
+            .lock()
+            .expect("the read log is never poisoned")
+            .reads = Some(sender);
+
+        receiver
     }
 
     /// Forgets every read, so that what the model may write is judged against
