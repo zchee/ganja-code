@@ -1,0 +1,33 @@
+//! Shared scaffolding for `ganja-core`'s integration suites.
+//!
+//! `crates/ganja-core/tests/*.rs` is a family of standalone binaries, several
+//! of them deliberately one-test-per-binary (see
+//! `ganja-core/tests/AGENTS.md`). Before this crate existed, each one
+//! rebuilt the same handful of fixtures from scratch: a [`Provider`] double
+//! that plays back a script and records what it was asked, a [`Tool`] double
+//! that records a call or blocks until cancelled, the drain loop that
+//! collects a turn's events (optionally answering permission dialogs along
+//! the way), and the storage builders that seed a session directly on disk.
+//!
+//! This crate exists to hold exactly that — nothing that is genuinely
+//! specific to one suite (a bun fixture's own spawn helper, a
+//! provider-failure-and-repeat schedule only one file needs) belongs here;
+//! it stays in the file that needs it. See each module for what moved and
+//! why.
+//!
+//! [`Provider`]: ganja_core::provider::Provider
+//! [`Tool`]: ganja_core::Tool
+
+mod agent;
+mod drain;
+mod fs;
+mod provider;
+mod session;
+mod tool;
+
+pub use agent::agent_registry;
+pub use drain::{drain, drain_allowing, drain_answering};
+pub use fs::{redirect_xdg_data_home, temp_dir};
+pub use provider::{OnExhausted, ScriptedProvider, says, tool_call};
+pub use session::{seed_message, seed_session, seeded_session_info};
+pub use tool::{BlockingTool, RecorderTool, placeholder_schema};

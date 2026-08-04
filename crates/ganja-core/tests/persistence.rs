@@ -178,37 +178,6 @@ fn request_text(request: &ChatRequest) -> String {
         .join("\n")
 }
 
-/// Writes a message the way the engine does: envelope, then each part.
-fn seed_message(storage: &Storage, session: &SessionId, message: &Message) {
-    storage
-        .save_message(session, message)
-        .expect("the seeded envelope writes");
-    for part in &message.parts {
-        storage
-            .save_part(session, &message.id, part)
-            .expect("the seeded part writes");
-    }
-}
-
-/// A session record for seeding, pre-titled so the title machinery stays out
-/// of tests that are not about it.
-fn seed_info(id: &SessionId, context_tokens: u64) -> SessionInfo {
-    SessionInfo {
-        id: id.clone(),
-        version: storage::VERSION,
-        title: Some("seeded".to_owned()),
-        created: 1,
-        updated: 2,
-        usage: Usage::default(),
-        context_tokens,
-        summary: None,
-        agent: None,
-        model: None,
-        parent: None,
-        revert: None,
-    }
-}
-
 /// The stored info for `id`, read back through the same API the picker uses.
 fn stored_info(storage: &Storage, id: &SessionId) -> SessionInfo {
     storage
@@ -304,11 +273,11 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
     // tool call still Running and another still Pending.
     let sid = SessionId::ascending();
     storage
-        .save_info(&seed_info(&sid, 9))
+        .save_info(&ganja_testkit::seeded_session_info(sid.clone(), 9))
         .expect("the seeded info writes");
 
     let user = Message::user("please read x");
-    seed_message(&storage, &sid, &user);
+    ganja_testkit::seed_message(&storage, &sid, &user);
 
     let mut aborted = Message::assistant("canned");
     aborted.parts.push(Part::text("I was about to"));
@@ -336,7 +305,7 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
         aborted.time.completed.is_none(),
         "the crash marker is the seed"
     );
-    seed_message(&storage, &sid, &aborted);
+    ganja_testkit::seed_message(&storage, &sid, &aborted);
 
     let provider = LaneProvider::new("scripted", vec![Ok(reply("understood", 42))]);
     let engine = persistent(
@@ -601,14 +570,14 @@ async fn an_over_budget_session_is_summarized_before_the_turn() {
     // claude-haiku-4-5's window is 200k; 180k stored is exactly the 90% line.
     let sid = SessionId::ascending();
     storage
-        .save_info(&seed_info(&sid, 180_000))
+        .save_info(&ganja_testkit::seeded_session_info(sid.clone(), 180_000))
         .expect("the seeded info writes");
     let old_user = Message::user("the old objective was pruning the catalog");
-    seed_message(&storage, &sid, &old_user);
+    ganja_testkit::seed_message(&storage, &sid, &old_user);
     let mut old_reply = Message::assistant("claude-haiku-4-5");
     old_reply.parts.push(Part::text("we removed three rows"));
     old_reply.complete();
-    seed_message(&storage, &sid, &old_reply);
+    ganja_testkit::seed_message(&storage, &sid, &old_reply);
 
     let provider = LaneProvider::new(
         "anthropic",
@@ -737,14 +706,14 @@ async fn a_cancel_during_compaction_leaves_the_window_uninstalled() {
 
     let sid = SessionId::ascending();
     storage
-        .save_info(&seed_info(&sid, 180_000))
+        .save_info(&ganja_testkit::seeded_session_info(sid.clone(), 180_000))
         .expect("the seeded info writes");
     let old_user = Message::user("seed prompt");
-    seed_message(&storage, &sid, &old_user);
+    ganja_testkit::seed_message(&storage, &sid, &old_user);
     let mut old_reply = Message::assistant("claude-haiku-4-5");
     old_reply.parts.push(Part::text("seed reply"));
     old_reply.complete();
-    seed_message(&storage, &sid, &old_reply);
+    ganja_testkit::seed_message(&storage, &sid, &old_reply);
 
     // Forty fragments at 25ms give the cancel a full second of summarize to
     // land inside.
@@ -980,14 +949,14 @@ async fn an_unsummarizable_history_skips_compaction_instead_of_failing() {
     // reserved output, so the fit guard must refuse to even ask.
     let sid = SessionId::ascending();
     storage
-        .save_info(&seed_info(&sid, 180_000))
+        .save_info(&ganja_testkit::seeded_session_info(sid.clone(), 180_000))
         .expect("the seeded info writes");
     let old_user = Message::user("start");
-    seed_message(&storage, &sid, &old_user);
+    ganja_testkit::seed_message(&storage, &sid, &old_user);
     let mut huge = Message::assistant("claude-haiku-4-5");
     huge.parts.push(Part::text("y".repeat(800_000)));
     huge.complete();
-    seed_message(&storage, &sid, &huge);
+    ganja_testkit::seed_message(&storage, &sid, &huge);
 
     let provider = LaneProvider::new("anthropic", vec![Ok(reply("fine", 5))]);
     let engine = persistent(

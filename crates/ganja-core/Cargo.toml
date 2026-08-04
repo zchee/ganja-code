@@ -76,6 +76,9 @@ tokio-util = { workspace = true, features = ["rt"] }
 libc.workspace = true
 
 [dev-dependencies]
+# The scripted-provider/recorder-tool/storage-seeding scaffolding
+# `tests/*.rs` shares across binaries — see `crates/ganja-testkit`.
+ganja-testkit.workspace = true
 # The credential tests write real files, with real permission bits, in a
 # directory that goes away afterwards.
 tempfile.workspace = true

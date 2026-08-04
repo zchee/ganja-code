@@ -7,150 +7,24 @@
 //! dialog, that a switch lands on the *next* request and not the one in
 //! flight, and that a session reopened tomorrow is the session that was left.
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
-use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::StreamExt as _;
 use ganja_core::{
-    AgentConfig, AgentRegistry, Command, Config, Decision, Engine, EngineError, Event,
-    FinishReason, PartBody, Permissions, Registry, Role, SessionId, SessionInfo, Storage, Tool,
-    ToolCtx, ToolError, ToolOutput, ToolState, Usage,
+    AgentConfig, Command, Config, Decision, Engine, EngineError, Event, FinishReason, PartBody,
+    Permissions, Registry, Role, Storage, ToolState,
     agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER},
-    provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake},
-    storage,
+    provider::{ChatRequest, FakeProvider, ProviderEvent, fake},
 };
+use ganja_testkit::{RecorderTool, ScriptedProvider, drain, says};
 use serde_json::json;
-use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
-
-/// Answers each request with the next script, and records what it was asked.
-///
-/// Its id defaults to one the catalog has never heard of: a provider the
-/// catalog does not cover cannot have a model switch validated against it, and
-/// most of these tests are about the switch rather than about the catalog. The
-/// one that *is* about the catalog names itself after a provider the catalog
-/// covers ([`Recorder::named`]).
-struct Recorder {
-    id: &'static str,
-    scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
-    seen: Arc<Mutex<Vec<ChatRequest>>>,
-}
-
-impl Recorder {
-    fn new(scripts: Vec<Vec<ProviderEvent>>) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
-        Self::named("recorder", scripts)
-    }
-
-    /// The same, answering to a name of the caller's choosing — which decides
-    /// whether the catalog has anything to say about the models it is asked
-    /// for.
-    fn named(
-        id: &'static str,
-        scripts: Vec<Vec<ProviderEvent>>,
-    ) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
-        let seen: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
-        (
-            Arc::new(Self {
-                id,
-                scripts: Mutex::new(scripts.into()),
-                seen: Arc::clone(&seen),
-            }),
-            seen,
-        )
-    }
-}
-
-#[async_trait]
-impl Provider for Recorder {
-    fn id(&self) -> &str {
-        self.id
-    }
-
-    async fn stream(
-        &self,
-        request: ChatRequest,
-        _cancel: CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
-
-        let script = self
-            .scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .pop_front()
-            .unwrap_or_else(|| vec![ProviderEvent::Finish(FinishReason::Completed)]);
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
-/// Arguments the test tools nominally take.
-#[derive(schemars::JsonSchema)]
-#[allow(dead_code)]
-struct Args {
-    #[serde(rename = "filePath")]
-    file_path: Option<String>,
-}
-
-/// Records every invocation and answers with a canned output, so that "the
-/// call never ran" is a fact rather than an inference.
-struct RecorderTool {
-    id: &'static str,
-    calls: Arc<Mutex<Vec<serde_json::Value>>>,
-}
-
-impl RecorderTool {
-    fn new(id: &'static str) -> (Arc<Self>, Arc<Mutex<Vec<serde_json::Value>>>) {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        (
-            Arc::new(Self {
-                id,
-                calls: Arc::clone(&calls),
-            }),
-            calls,
-        )
-    }
-}
-
-#[async_trait]
-impl Tool for RecorderTool {
-    fn id(&self) -> &str {
-        self.id
-    }
-
-    fn description(&self) -> &str {
-        "records what it was asked"
-    }
-
-    fn schema(&self) -> schemars::Schema {
-        schemars::schema_for!(Args)
-    }
-
-    async fn run(&self, args: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
-        self.calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .push(args);
-
-        Ok(ToolOutput {
-            title: self.id.to_owned(),
-            output: "done".to_owned(),
-            metadata: json!({}),
-        })
-    }
-}
 
 /// A step that calls `tool` once and stops.
+///
+/// Kept local rather than folded into `ganja_testkit::tool_call`: it never
+/// closes the call with a [`ProviderEvent::ToolCallEnd`], which is the point
+/// of several tests here — the loop has to finalize a call from `Finish`
+/// alone.
 fn calls(tool: &str, args: serde_json::Value) -> Vec<ProviderEvent> {
     vec![
         ProviderEvent::ToolCallStart {
@@ -163,31 +37,6 @@ fn calls(tool: &str, args: serde_json::Value) -> Vec<ProviderEvent> {
         },
         ProviderEvent::Finish(FinishReason::Completed),
     ]
-}
-
-/// A step that says `text` and stops.
-fn says(text: &str) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::TextDelta(text.to_owned()),
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
-/// Drains events until the turn finishes, returning everything seen.
-async fn drain(events: &mut BoxStream<'static, Event>) -> Vec<Event> {
-    let mut seen = Vec::new();
-
-    loop {
-        let Some(event) = events.next().await else {
-            return seen;
-        };
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-
-        if finished {
-            return seen;
-        }
-    }
 }
 
 /// The error text of every tool part that failed.
@@ -206,53 +55,22 @@ fn refusals(seen: &[Event]) -> Vec<String> {
         .collect()
 }
 
-fn agents(config: &Config) -> Arc<AgentRegistry> {
-    Arc::new(AgentRegistry::build(config).expect("the fixture config resolves an agent"))
-}
-
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
-}
-
-/// A stored session that already has a title, so the title machinery stays out
-/// of tests that are not about it and cannot spend a scripted request.
-fn seeded(storage: &Storage) -> SessionId {
-    let id = SessionId::ascending();
-    let info = SessionInfo {
-        id: id.clone(),
-        version: storage::VERSION,
-        title: Some("seeded".to_owned()),
-        created: 1,
-        updated: 2,
-        usage: Usage::default(),
-        context_tokens: 0,
-        summary: None,
-        agent: None,
-        model: None,
-        parent: None,
-        revert: None,
-    };
-    storage.save_info(&info).expect("the seeded record writes");
-
-    id
-}
-
 /// A planning session may read and search all it likes; the two tools that
 /// write are refused by a rule, so nobody is asked and the turn carries on.
 #[tokio::test]
 async fn the_planning_agent_refuses_an_edit_without_asking_anyone() {
-    let (provider, _) = Recorder::new(vec![
+    let (provider, _) = ScriptedProvider::new(vec![
         calls("edit", json!({ "filePath": "src/main.rs" })),
         says("I will not, but here is the plan"),
     ]);
-    let (edit, edits) = RecorderTool::new("edit");
+    let (edit, edits) = RecorderTool::new("edit", "edit", "done");
     let engine = Engine::new(
         provider,
         "recorder-model",
         Arc::new(Registry::new(vec![edit])),
         Permissions::default(),
     )
-    .with_agents(agents(&Config::default()));
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -306,11 +124,11 @@ async fn the_planning_agent_refuses_an_edit_without_asking_anyone() {
 /// The same session under the agent that may act runs the same call.
 #[tokio::test]
 async fn the_building_agent_runs_what_the_planning_one_refused() {
-    let (provider, _) = Recorder::new(vec![
+    let (provider, _) = ScriptedProvider::new(vec![
         calls("edit", json!({ "filePath": "src/main.rs" })),
         says("done"),
     ]);
-    let (edit, edits) = RecorderTool::new("edit");
+    let (edit, edits) = RecorderTool::new("edit", "edit", "done");
     // A config allowing edits outright, so the run is about the agent rather
     // than about whether anybody answered a dialog.
     let config = Config {
@@ -324,7 +142,7 @@ async fn the_building_agent_runs_what_the_planning_one_refused() {
         Arc::new(Registry::new(vec![edit])),
         Permissions::default(),
     )
-    .with_agents(agents(&config));
+    .with_agents(ganja_testkit::agent_registry(&config));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -355,7 +173,7 @@ async fn a_config_rule_decides_and_a_stored_answer_outranks_it() {
         ..Config::default()
     };
     let baseline = |config: &Config| {
-        agents(config)
+        ganja_testkit::agent_registry(config)
             .get("build")
             .expect("build is builtin")
             .rules
@@ -395,7 +213,7 @@ async fn switching_agents_swaps_the_prompt_and_keeps_the_environment() {
     const SUFFIX: &str = "<env>cwd: /work</env>";
     const SCRIBE: &str = "you write things down";
 
-    let (provider, seen) = Recorder::new(vec![says("one"), says("two"), says("three")]);
+    let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two"), says("three")]);
     let mut agent = std::collections::BTreeMap::new();
     agent.insert(
         "scribe".to_owned(),
@@ -416,7 +234,7 @@ async fn switching_agents_swaps_the_prompt_and_keeps_the_environment() {
         Permissions::default(),
     )
     .with_system_parts(Some(BASE.to_owned()), Some(SUFFIX.to_owned()))
-    .with_agents(agents(&config));
+    .with_agents(ganja_testkit::agent_registry(&config));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     let mut ask = async |engine: &Engine, text: &str| {
@@ -471,11 +289,11 @@ async fn switching_agents_swaps_the_prompt_and_keeps_the_environment() {
 /// never delivered.
 #[tokio::test]
 async fn a_shell_passthrough_does_not_consume_the_notice_that_planning_is_over() {
-    let directory = temporary();
+    let directory = ganja_testkit::temp_dir();
     let storage = Storage::open(directory.path().join("storage"));
-    let session = seeded(&storage);
+    let session = ganja_testkit::seed_session(&storage, 0);
 
-    let (provider, seen) = Recorder::new(vec![says("one"), says("two")]);
+    let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two")]);
     let engine = Engine::persistent(
         provider,
         "recorder-model",
@@ -483,7 +301,7 @@ async fn a_shell_passthrough_does_not_consume_the_notice_that_planning_is_over()
         Permissions::default(),
         Storage::open(directory.path().join("storage")),
     )
-    .with_agents(agents(&Config::default()));
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.resume(&session).await.expect("the session loads");
 
@@ -555,11 +373,11 @@ async fn a_shell_passthrough_does_not_consume_the_notice_that_planning_is_over()
 /// the one that says planning is over is said once.
 #[tokio::test]
 async fn the_plan_reminders_reach_the_request_and_not_the_stored_history() {
-    let directory = temporary();
+    let directory = ganja_testkit::temp_dir();
     let storage = Storage::open(directory.path().join("storage"));
-    let session = seeded(&storage);
+    let session = ganja_testkit::seed_session(&storage, 0);
 
-    let (provider, seen) = Recorder::new(vec![says("one"), says("two"), says("three")]);
+    let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two"), says("three")]);
     let engine = Engine::persistent(
         provider,
         "recorder-model",
@@ -567,7 +385,7 @@ async fn the_plan_reminders_reach_the_request_and_not_the_stored_history() {
         Permissions::default(),
         Storage::open(directory.path().join("storage")),
     )
-    .with_agents(agents(&Config::default()));
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.resume(&session).await.expect("the session loads");
 
@@ -653,11 +471,11 @@ async fn the_plan_reminders_reach_the_request_and_not_the_stored_history() {
 /// session comes back as after the process that made it is gone.
 #[tokio::test]
 async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
-    let directory = temporary();
+    let directory = ganja_testkit::temp_dir();
     let storage = Storage::open(directory.path().join("storage"));
-    let session = seeded(&storage);
+    let session = ganja_testkit::seed_session(&storage, 0);
 
-    let (provider, seen) = Recorder::new(vec![says("one"), says("two")]);
+    let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two")]);
     let engine = Engine::persistent(
         provider,
         "first-model",
@@ -665,7 +483,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
         Permissions::default(),
         Storage::open(directory.path().join("storage")),
     )
-    .with_agents(agents(&Config::default()));
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.resume(&session).await.expect("the session loads");
 
@@ -724,7 +542,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
     drop(engine);
 
     // A new process over the same store, as `ganja --continue` builds one.
-    let (provider, _) = Recorder::new(Vec::new());
+    let (provider, _) = ScriptedProvider::new(Vec::new());
     let reopened = Engine::persistent(
         provider,
         "first-model",
@@ -732,7 +550,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
         Permissions::default(),
         Storage::open(directory.path().join("storage")),
     )
-    .with_agents(agents(&Config::default()));
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
     let _events = reopened
         .subscribe()
         .await
@@ -756,7 +574,7 @@ async fn a_switch_sent_mid_turn_is_refused() {
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
     )
-    .with_agents(agents(&Config::default()));
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -812,7 +630,7 @@ async fn a_switch_that_cannot_be_honoured_says_which_half_refused() {
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
     )
-    .with_agents(agents(&Config::default()));
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
 
     assert!(matches!(
         engine
@@ -904,14 +722,14 @@ async fn an_agents_model_is_adopted_from_the_spelling_a_config_writes() {
     }))
     .expect("the fixture is a config");
 
-    let (provider, seen) = Recorder::named("anthropic", vec![says("reviewed")]);
+    let (provider, seen) = ScriptedProvider::named("anthropic", vec![says("reviewed")]);
     let engine = Engine::new(
         provider,
         &start,
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
     )
-    .with_agents(agents(&config));
+    .with_agents(ganja_testkit::agent_registry(&config));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
