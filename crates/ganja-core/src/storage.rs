@@ -435,7 +435,10 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), StorageError> 
 /// It sits beside the target so the rename stays within one filesystem, and it
 /// carries an extension no listing reads, so a write that dies before its
 /// rename cannot be mistaken for stored data.
-fn temporary_beside(path: &Path) -> PathBuf {
+///
+/// Shared with [`crate::catalog`], which writes a fetched catalog into the
+/// cache directory under the same rule.
+pub(crate) fn temporary_beside(path: &Path) -> PathBuf {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
 
     path.with_file_name(format!(
@@ -451,7 +454,7 @@ fn temporary_beside(path: &Path) -> PathBuf {
 /// the final component: the name is predictable enough for someone sharing the
 /// machine to plant one, and an open that followed it would write through to
 /// wherever it led and then rename that file over the stored session.
-fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
 
     let mut file = match fs::OpenOptions::new()
