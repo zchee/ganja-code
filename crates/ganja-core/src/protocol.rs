@@ -237,6 +237,27 @@ pub enum PartBody {
         /// What this request cost, as the provider reported it.
         usage: Usage,
     },
+    /// What one step of the turn changed on disk, and the snapshot it changed
+    /// it from. Appended after the step's [`PartBody::StepFinish`] when the
+    /// tools it ran moved any file, and absent entirely from a step that
+    /// changed nothing.
+    ///
+    /// This is the whole of what `/undo` consumes: checking `files` out of
+    /// `hash` is undoing the step. Nothing renders it — it is bookkeeping the
+    /// transcript carries so that a session reopened tomorrow can still be
+    /// undone.
+    Patch {
+        /// The snapshot taken **before** the step, which the files are
+        /// restored from.
+        hash: String,
+        /// What the step changed, relative to the project root.
+        ///
+        /// Upstream stores these absolute; a stored transcript that named
+        /// somebody's home directory would stop working the moment the
+        /// checkout moved (deviation: patch-files-are-project-relative), and
+        /// every other path on this wire is already relative to the root.
+        files: Vec<String>,
+    },
 }
 
 /// Where a tool call stands, mirroring upstream's `pending → running →
@@ -350,7 +371,8 @@ impl Part {
             PartBody::Tool { .. }
             | PartBody::File { .. }
             | PartBody::StepStart
-            | PartBody::StepFinish { .. } => None,
+            | PartBody::StepFinish { .. }
+            | PartBody::Patch { .. } => None,
         }
     }
 
@@ -361,7 +383,8 @@ impl Part {
             PartBody::Tool { .. }
             | PartBody::File { .. }
             | PartBody::StepStart
-            | PartBody::StepFinish { .. } => None,
+            | PartBody::StepFinish { .. }
+            | PartBody::Patch { .. } => None,
         }
     }
 }
@@ -442,12 +465,17 @@ impl Message {
     /// Whether the message carries anything worth keeping. An assistant turn
     /// that failed before its first fragment does not, and neither do bare
     /// step markers: what counts is text the model said or a tool it called.
+    ///
+    /// A [`PartBody::Patch`] does not count either, for the step markers'
+    /// reason: it records what a tool did rather than being something the
+    /// model said, and a message holding one always holds the tool call that
+    /// earned it.
     #[must_use]
     pub fn has_content(&self) -> bool {
         self.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !text.is_empty(),
             PartBody::Tool { .. } | PartBody::File { .. } => true,
-            PartBody::StepStart | PartBody::StepFinish { .. } => false,
+            PartBody::StepStart | PartBody::StepFinish { .. } | PartBody::Patch { .. } => false,
         })
     }
 }
@@ -460,6 +488,23 @@ impl Message {
 pub struct Mention {
     /// Where the file is, relative to the project root.
     pub path: String,
+}
+
+/// How much of a session is currently reverted, as a frontend sees it.
+///
+/// The engine keeps more than this — the snapshot a redo restores from — but
+/// a frontend's whole job here is to hide a range and say which files moved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevertInfo {
+    /// The user message the revert stopped at. It, and everything after it,
+    /// is hidden: still in the transcript, still restorable, and no longer
+    /// part of what the next request will carry.
+    pub message_id: MessageId,
+    /// Files the revert put back, relative to the project root. Empty — and
+    /// absent from the wire — for a turn that changed none, which is a revert
+    /// of the conversation and not of the checkout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 /// A request from a frontend to the engine.
@@ -531,6 +576,28 @@ pub enum Command {
     /// one. Nothing stored is touched: the old session is still there to
     /// resume.
     NewSession,
+    /// Puts the files back to what they were before the last prompt, and hides
+    /// that prompt and everything after it. Sending it again walks one prompt
+    /// further back.
+    ///
+    /// No payload: the engine owns the transcript, so it is the engine that
+    /// works out which message to stop at. Upstream's client computes the same
+    /// message and names it in the request; collapsing that into the engine
+    /// changes nothing observable and keeps a frontend from having to hold the
+    /// history to undo.
+    ///
+    /// Refused while a turn is streaming. Upstream aborts the turn and then
+    /// reverts; here the person at the terminal cancels first, so an undo is
+    /// never something that stopped work they were watching (**D119**).
+    ///
+    /// **Nothing is deleted.** The hidden messages stay in the transcript, and
+    /// stay restorable by [`Command::Redo`], until the next prompt or shell
+    /// command makes the choice permanent.
+    Undo,
+    /// Steps one prompt forward through what [`Command::Undo`] hid, restoring
+    /// the files that prompt's turn changed. Past the newest one, the whole
+    /// working tree goes back to what it was before the first undo.
+    Redo,
 }
 
 /// What the user decided about one permission request.
@@ -620,6 +687,32 @@ pub enum Event {
         /// What was decided.
         reply: PermissionReply,
     },
+    /// How much of the transcript is currently reverted, and what the editor
+    /// should hold.
+    ///
+    /// Sent when [`Command::Undo`] or [`Command::Redo`] moves the anchor, when
+    /// a revert is cleared, and when a resumed session turns out to have been
+    /// left in one — a frontend that starts fresh learns the hidden range from
+    /// this event and from nowhere else.
+    ///
+    /// A `revert` of [`None`] means the hidden range is over. It arrives in
+    /// exactly two situations, and a frontend tells them apart by what it
+    /// asked for: a [`Command::Redo`] that stepped past the newest reverted
+    /// message — where those messages are still in the transcript and come
+    /// back — and the prompt or shell command that follows an undo, where they
+    /// have just been deleted and the frontend drops them. The engine draws no
+    /// distinction because the frontend's own command already did.
+    RevertChanged {
+        /// Where the revert stands, or [`None`] when there is none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revert: Option<RevertInfo>,
+        /// The prompt the revert took back, for the editor to offer again.
+        /// [`None`] when there is nothing to offer: a cleared revert, and a
+        /// resumed session — reopening a conversation is not the moment to put
+        /// words in somebody's editor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
     /// The turn ended and the engine is idle again. Always the last event of a
     /// turn, whatever went wrong during it.
     MessageFinished {
@@ -656,7 +749,7 @@ pub enum FinishReason {
 mod tests {
     use super::{
         Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody,
-        PartId, PermissionId, PermissionReply, Role, ToolState, Usage,
+        PartId, PermissionId, PermissionReply, RevertInfo, Role, ToolState, Usage,
     };
 
     /// Builds a completed tool part with pinned ids and times, the richest
@@ -785,6 +878,8 @@ mod tests {
             },
             Command::Compact,
             Command::NewSession,
+            Command::Undo,
+            Command::Redo,
         ];
 
         for command in cases {
@@ -838,6 +933,17 @@ mod tests {
             Event::PermissionReplied {
                 id: PermissionId::from("perm_1".to_owned()),
                 reply: PermissionReply::Reject,
+            },
+            Event::RevertChanged {
+                revert: Some(RevertInfo {
+                    message_id: message.id.clone(),
+                    files: vec!["src/main.rs".to_owned()],
+                }),
+                prompt: Some("rename the thing".to_owned()),
+            },
+            Event::RevertChanged {
+                revert: None,
+                prompt: None,
             },
         ];
 
@@ -902,6 +1008,35 @@ mod tests {
             (
                 serde_json::to_string(&Command::NewSession),
                 r#"{"type":"new_session"}"#,
+            ),
+            (serde_json::to_string(&Command::Undo), r#"{"type":"undo"}"#),
+            (serde_json::to_string(&Command::Redo), r#"{"type":"redo"}"#),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::Patch {
+                        hash: "4b825dc".to_owned(),
+                        files: vec!["src/main.rs".to_owned()],
+                    },
+                }),
+                r#"{"id":"prt_1","type":"patch","hash":"4b825dc","files":["src/main.rs"]}"#,
+            ),
+            (
+                serde_json::to_string(&Event::RevertChanged {
+                    revert: Some(RevertInfo {
+                        message_id: MessageId::from("msg_1".to_owned()),
+                        files: vec!["src/main.rs".to_owned()],
+                    }),
+                    prompt: Some("rename it".to_owned()),
+                }),
+                r#"{"type":"revert_changed","revert":{"message_id":"msg_1","files":["src/main.rs"]},"prompt":"rename it"}"#,
+            ),
+            (
+                serde_json::to_string(&Event::RevertChanged {
+                    revert: None,
+                    prompt: None,
+                }),
+                r#"{"type":"revert_changed"}"#,
             ),
             (
                 serde_json::to_string(&Part {
