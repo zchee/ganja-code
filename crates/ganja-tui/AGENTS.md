@@ -48,6 +48,6 @@ Widget state lives in the component struct, never in a global; components expose
 
 ### External
 
-`ratatui` 0.30 + `ratatui-textarea` (editor widget), `crossterm` (feature enablement only), `tokio`, `futures`, `anyhow`, `unicode-width` (the chat viewport measures its own wrap widths rather than leaning on `Paragraph`), `serde_json` (rendering tool metadata), `pulldown-cmark` + `syntect` (assistant-reply markdown and fenced-code highlighting), `insta` (dev).
+`ratatui` 0.30 + `ratatui-textarea` (editor widget), `crossterm` (feature enablement only), `tokio`, `futures`, `anyhow`, `unicode-width` (the chat viewport measures its own wrap widths rather than leaning on `Paragraph`), `serde_json` (rendering tool metadata), `pulldown-cmark` + `syntect` (assistant-reply markdown and fenced-code highlighting), `arboard` (clipboard, text only), `insta` (dev).
 
 <!-- MANUAL: -->

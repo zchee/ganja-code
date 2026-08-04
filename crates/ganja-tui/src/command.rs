@@ -54,6 +54,10 @@ pub enum Action {
     Help,
     /// Leave.
     Exit,
+    /// Put the whole conversation on the clipboard.
+    Copy,
+    /// Put the model's last reply on the clipboard.
+    CopyMessage,
 }
 
 impl Action {
@@ -68,9 +72,14 @@ impl Action {
             Self::Sessions => Some(keybind::Action::SessionsOpen),
             Self::Themes => Some(keybind::Action::ThemesOpen),
             Self::Exit => Some(keybind::Action::AppExit),
-            Self::New | Self::Compact | Self::Editor | Self::Models | Self::Agents | Self::Help => {
-                None
-            }
+            Self::New
+            | Self::Compact
+            | Self::Editor
+            | Self::Models
+            | Self::Agents
+            | Self::Help
+            | Self::Copy
+            | Self::CopyMessage => None,
         }
     }
 }
@@ -215,6 +224,29 @@ pub const COMMANDS: &[Entry] = &[
         aliases: &["quit", "q"],
         title: "Exit the app",
         description: "Leave ganja",
+        category: Category::System,
+        suggested: false,
+    },
+    // Upstream files both of these under its `Session` category; here they are
+    // `System`, because ganja's `Session` is documented as *things done to the
+    // conversation* and taking a copy does nothing to it (deviation:
+    // copy-commands-categorised-system). Upstream's own titles and slash names
+    // are kept exactly.
+    Entry {
+        action: Action::Copy,
+        name: "copy",
+        aliases: &[],
+        title: "Copy session transcript",
+        description: "Put the whole conversation on the clipboard, as markdown",
+        category: Category::System,
+        suggested: false,
+    },
+    Entry {
+        action: Action::CopyMessage,
+        name: "copy-message",
+        aliases: &[],
+        title: "Copy message",
+        description: "Put the model's last reply on the clipboard",
         category: Category::System,
         suggested: false,
     },
@@ -495,6 +527,8 @@ mod tests {
             ("themes", &[][..], Action::Themes),
             ("help", &[][..], Action::Help),
             ("exit", &["quit", "q"][..], Action::Exit),
+            ("copy", &[][..], Action::Copy),
+            ("copy-message", &[][..], Action::CopyMessage),
         ];
 
         for (name, aliases, action) in cases {
@@ -506,6 +540,47 @@ mod tests {
             COMMANDS.len(),
             cases.len(),
             "the table should hold exactly the UI commands this build ships"
+        );
+    }
+
+    /// **R13**: two distinct copy commands, each reachable from *both*
+    /// surfaces. One command set and two views of it is the architecture
+    /// rule, so a row that reached only the dropdown would be a second set.
+    #[test]
+    fn both_copy_commands_are_offered_by_the_palette_and_by_the_dropdown() {
+        let cases = [
+            ("copy", "Copy session transcript"),
+            ("copy-message", "Copy message"),
+        ];
+
+        for (name, title) in cases {
+            let entry = lookup(name).unwrap_or_else(|| panic!("/{name} should exist"));
+            assert_eq!(entry.title, title, "/{name} is titled upstream's way");
+
+            for surface in [Surface::Palette, Surface::Dropdown] {
+                assert!(
+                    matches(name, surface)
+                        .iter()
+                        .any(|found| found.name == name),
+                    "/{name} should be offered on {surface:?}"
+                );
+            }
+            assert!(
+                dropdown_matches(name, &engine())
+                    .iter()
+                    .any(|choice| choice.slash() == format!("/{name}")),
+                "/{name} should be offered by the merged dropdown roster"
+            );
+        }
+    }
+
+    /// The two are distinct commands rather than one with an argument, which
+    /// is what makes each of them a single row to choose.
+    #[test]
+    fn copying_the_transcript_and_copying_a_message_are_different_commands() {
+        assert_ne!(
+            lookup("copy").map(|entry| entry.action),
+            lookup("copy-message").map(|entry| entry.action)
         );
     }
 
