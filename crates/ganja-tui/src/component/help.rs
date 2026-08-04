@@ -184,11 +184,14 @@ mod tests {
     use super::Help;
     use crate::{command::COMMANDS, keybind::Keybinds, theme::Theme};
 
+    /// Tall enough for the whole card: nine commands, the keys that have no
+    /// command row, and the chrome around them. A shorter window truncates,
+    /// which is the behavior a tiny-area test covers rather than this one.
     const AREA: Rect = Rect {
         x: 0,
         y: 0,
         width: 76,
-        height: 16,
+        height: 20,
     };
 
     fn rendered(help: &Help) -> String {

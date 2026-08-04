@@ -6,17 +6,17 @@ you
 show me ┌ commands ────────────────────────────────────────────────────┐        
         │s                                                             │        
 ganja   │session                                                       │        
-One edit│> /sessions  Switch session                             ctrl+s│        
-[done] e│agent                                                         │        
-@@ -1,2 │  /agents    Switch agent                                     │        
--let the│  /models    Switch model                                     │        
-+let the│system                                                        │        
-context │  /themes    Switch theme                               ctrl+t│        
-[error] │                                                              │        
-refused:│[type] filter   [up/down] move   [Enter] run   [Esc] close    │        
+One edit│> /compact   Compact session                                  │        
+[done] e│  /sessions  Switch session                             ctrl+s│        
+@@ -1,2 │agent                                                         │        
+-let the│  /agents    Switch agent                                     │        
++let the│  /models    Switch model                                     │        
+context │session                                                       │        
+[error] │  /new       New session                                      │        
+refused:│system                                                        │        
+        │  /themes    Switch theme                               ctrl+t│        
         │                                                              │        
-        │                                                              │        
-        │                                                              │        
+        │[type] filter   [up/down] move   [Enter] run   [Esc] close    │        
         │                                                              │        
         └──────────────────────────────────────────────────────────────┘        
                                                                                 

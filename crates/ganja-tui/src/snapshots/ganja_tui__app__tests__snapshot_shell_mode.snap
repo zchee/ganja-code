@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+you                                                                             
+show me every color you have                                                    
+                                                                                
+ganja                                                                           
+One edit applied, one command refused.                                          
+[done] edit: theme.rs                                                           
+@@ -1,2 +1,2 @@                                                                 
+-let theme = Theme::default();                                                  
++let theme = themes.theme();                                                    
+context                                                                         
+[error] bash: rm -rf /                                                          
+refused: destructive command                                                    
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+┌ Shell ───────────────────────────────────────────────────────────────────────┐
+│cargo nextest run --workspace                                                 │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready                              Enter run · Esc exit shell mode · Ctrl-C quit

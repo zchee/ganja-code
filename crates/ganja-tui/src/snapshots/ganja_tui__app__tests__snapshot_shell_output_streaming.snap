@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+ganja                                                                           
+[running] bash: cargo nextest run                                               
+...                                                                             
+PASS [ 0.006s] ganja-core storage                                               
+PASS [ 0.011s] ganja-tui app                                                    
+PASS [ 0.012s] ganja-tui chat                                                   
+PASS [ 0.019s] ganja-cli import                                                 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+tool: bash             Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit

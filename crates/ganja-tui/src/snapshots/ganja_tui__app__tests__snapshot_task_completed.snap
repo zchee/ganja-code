@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+ganja                                                                           
+✓ Explore Task — find every caller of resolve                                   
+↳ 9 toolcalls · 23.5s                                                           
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+⠋ streaming            Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit
