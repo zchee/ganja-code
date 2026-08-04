@@ -325,6 +325,23 @@ impl Servers {
         if let Some(cwd) = &local.cwd {
             command.current_dir(self.root.join(cwd));
         }
+        // The backstop under an exit that never reaches `shutdown` — a panic, a
+        // `?` on some future path out of startup, a frontend that is killed.
+        //
+        // Two other things already end a child in the ordinary case, and this
+        // is here because neither covers the last moment of the process.
+        // Closing stdin ends a stdio server that respects EOF, but only once
+        // something drops the transport, and a server that ignores EOF is
+        // unmoved. `rmcp`'s own `ChildWithCleanup::drop` kills the child — but
+        // it does so from a `tokio::spawn`, so it needs a runtime that is still
+        // scheduling; a runtime being torn down may never poll that task.
+        // `kill_on_drop` is the tokio-level guarantee that does not: the kill
+        // rides the child handle's own destructor.
+        //
+        // It ends the spawned process, not the group below: killing a group is
+        // `shutdown`'s job, because it needs the pid and a `killpg` that no
+        // destructor can make. Belt and braces, in that order.
+        command.kill_on_drop(true);
         #[cfg(unix)]
         {
             // The same call `tool/shell.rs` makes, for the same reason: a
@@ -394,6 +411,18 @@ impl Servers {
         self.state()
             .iter()
             .filter_map(|(name, server)| Some((name.clone(), server.status.clone()?)))
+            .collect()
+    }
+
+    /// The process group of every local server currently running.
+    ///
+    /// Exists for the test that pins the no-orphan rule; nothing in the engine
+    /// asks, and a frontend has no use for a pid it must not signal.
+    #[must_use]
+    pub fn process_groups(&self) -> Vec<u32> {
+        self.state()
+            .values()
+            .filter_map(|server| server.group)
             .collect()
     }
 

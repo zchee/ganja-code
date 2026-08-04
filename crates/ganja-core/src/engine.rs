@@ -33,7 +33,7 @@ use crate::{
     agent::{self, Agent},
     command,
     config::AgentMode,
-    mcp,
+    lsp, mcp,
     permission::Permissions,
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
@@ -189,6 +189,11 @@ pub struct Engine {
     /// Which [`mcp::Servers::generation`] the registries above were built
     /// from, so a rebuild happens exactly when the tool surface moved.
     mcp_installed: std::sync::Mutex<u64>,
+    /// Language servers this session may run. [`None`] is a session whose
+    /// config asked for none, which is the default and every scripted and
+    /// golden run. Nothing starts here: a server is spawned by the first touch
+    /// of a file it claims, and nothing else ever touches one.
+    lsp: Option<Arc<lsp::Lsp>>,
     /// Tools the model is offered, and the agent loop executes.
     ///
     /// Behind a lock because the task tool's *description* is the roster of
@@ -300,6 +305,7 @@ impl Engine {
             lent_tools: std::sync::Mutex::new(Arc::clone(&tools)),
             mcp: None,
             mcp_installed: std::sync::Mutex::new(0),
+            lsp: None,
             tools: std::sync::Mutex::new(tools),
             commands: Arc::new(command::Registry::builtin(&root)),
             permissions: Arc::new(std::sync::Mutex::new(permissions)),
@@ -427,6 +433,30 @@ impl Engine {
     pub async fn shutdown_mcp(&self) {
         if let Some(servers) = &self.mcp {
             servers.shutdown().await;
+        }
+    }
+
+    /// Sets the language servers this session may run.
+    ///
+    /// There is no `connect` beside this one, as there is for MCP: a language
+    /// server is started by the first touch of a file it claims, so installing
+    /// the service is the whole of the wiring. An engine given none — which is
+    /// every engine whose config did not ask — does no LSP work at all rather
+    /// than doing inert LSP work.
+    #[must_use]
+    pub fn with_lsp(mut self, lsp: Arc<lsp::Lsp>) -> Self {
+        self.lsp = Some(lsp);
+
+        self
+    }
+
+    /// Ends every language server this session started.
+    ///
+    /// Dropping the engine does this too; the method exists so a frontend can
+    /// stop them at a moment it chooses.
+    pub fn shutdown_lsp(&self) {
+        if let Some(lsp) = &self.lsp {
+            lsp.shutdown();
         }
     }
 
@@ -960,6 +990,7 @@ impl Engine {
             prompt_suffix: self.prompt_suffix.clone(),
             cwd: self.cwd.clone(),
             root: self.root.clone(),
+            lsp: self.lsp.clone(),
             persistence: self.persistence.clone(),
         }))
     }
@@ -1194,6 +1225,7 @@ impl Engine {
             cwd: self.cwd.clone(),
             root: self.root.clone(),
             files: Arc::clone(&self.files),
+            lsp: self.lsp.clone(),
             prompt,
             cancel,
             pending,

@@ -304,6 +304,79 @@ fn connect_by_default() -> bool {
     true
 }
 
+/// What the `lsp` key asked for.
+///
+/// **Absent means no language server at all**, which is why the field holding
+/// this is an [`Option`] and why `false` and absent are the same answer:
+/// upstream treats a falsy `lsp` as "all LSPs are disabled" (`lsp/lsp.ts:151`),
+/// and an agent that starts a language server nobody asked for has taken over
+/// somebody's machine to be helpful.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LspConfig {
+    /// `true` for the builtins, `false` for none.
+    Enabled(bool),
+    /// Entries merged over the builtins by name.
+    Servers(BTreeMap<String, LspEntry>),
+}
+
+impl<'de> Deserialize<'de> for LspConfig {
+    /// Hand-written rather than `#[serde(untagged)]`, and for one reason:
+    /// `untagged` discards the error every variant produced and reports only
+    /// that nothing matched. A config misspelling a key inside an entry would
+    /// then fail with "data did not match any variant" and never name the key
+    /// — which is exactly the failure this crate refuses everywhere else.
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Accepts either spelling the `lsp` key may take.
+        struct Shape;
+
+        impl<'de> Visitor<'de> for Shape {
+            type Value = LspConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("true, false, or a map of language server names to entries")
+            }
+
+            fn visit_bool<E: de::Error>(self, enabled: bool) -> Result<Self::Value, E> {
+                Ok(LspConfig::Enabled(enabled))
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+                BTreeMap::deserialize(de::value::MapAccessDeserializer::new(map))
+                    .map(LspConfig::Servers)
+            }
+        }
+
+        deserializer.deserialize_any(Shape)
+    }
+}
+
+/// One language server, as a config file describes it.
+///
+/// `command` is required except on a disabled entry, and that is enforced at
+/// load rather than in the type: the two shapes upstream spells as a union
+/// (`config/lsp.ts:5-17`) would otherwise need a hand-written `Deserialize`
+/// whose only job is to produce a worse error message than the check does.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LspEntry {
+    /// The program and its arguments. Replaces a builtin's spawn entirely —
+    /// it is not extra arguments for the builtin's binary.
+    pub command: Option<Vec<String>>,
+    /// Extensions this server is asked about, each with its leading dot. An
+    /// empty list matches every file. Absent inherits the builtin's, and a
+    /// server with no builtin to inherit from must say.
+    pub extensions: Option<Vec<String>>,
+    /// Switches a server off. The one legal shape with no `command`.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Variables layered over the ones this process already has.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// `initializationOptions`, and what a `workspace/configuration` request
+    /// is answered out of.
+    pub initialization: Option<serde_json::Value>,
+}
+
 /// One custom command, as a config file describes it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct CommandConfig {
@@ -553,6 +626,9 @@ pub struct Config {
     /// written against.
     #[serde(default)]
     pub mcp: BTreeMap<String, McpServer>,
+    /// Language servers this session may run. **Absent is none of them**; see
+    /// [`LspConfig`].
+    pub lsp: Option<LspConfig>,
     /// What the caller decided before any of this was read. Not a config key —
     /// `deny_unknown_fields` would reject one — and above every tier here.
     #[serde(skip)]
@@ -631,6 +707,7 @@ impl Config {
         // closer tier turning a `local` server into a `remote` one would
         // otherwise leave the command it no longer has behind.
         self.mcp.extend(other.mcp);
+        merge_lsp(&mut self.lsp, other.lsp);
         self.permission.merge(&other.permission);
 
         for instruction in other.instructions {
@@ -656,6 +733,24 @@ fn merge_files(paths: &[PathBuf]) -> Result<Config, ConfigError> {
     }
 
     Ok(config)
+}
+
+/// Overlays one tier's `lsp` onto the tier below it.
+///
+/// Upstream's `mergeDeep` read at this key: two maps merge entry by entry, and
+/// anything else replaces. A closer tier writing `false` therefore switches
+/// LSP off outright rather than being quietly merged into a `true` above it,
+/// and a project adding one server does not lose the global tier's.
+fn merge_lsp(slot: &mut Option<LspConfig>, incoming: Option<LspConfig>) {
+    let Some(incoming) = incoming else {
+        return;
+    };
+    match (slot.as_mut(), incoming) {
+        (Some(LspConfig::Servers(existing)), LspConfig::Servers(entries)) => {
+            existing.extend(entries);
+        }
+        (_, incoming) => *slot = Some(incoming),
+    }
 }
 
 /// Replaces `slot` when `incoming` says something.
@@ -788,8 +883,48 @@ fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
         path: path.to_owned(),
         message,
     })?;
+    check_lsp(config.lsp.as_ref()).map_err(|message| ConfigError::Parse {
+        path: path.to_owned(),
+        message,
+    })?;
 
     Ok(Some(config))
+}
+
+/// Refuses an `lsp` entry that describes a server nothing could start.
+///
+/// Two rules, both upstream's. A `command` is required, because a server is a
+/// program and an entry with no program is not one — with the single exception
+/// of a `disabled` entry, which is how a builtin is switched off and is the
+/// only command-less shape there is. And a server this build ships no
+/// definition for must bring its own `extensions`, because there is nothing
+/// for it to inherit them from; the message is upstream's, word for word
+/// (`v1/config/lsp.ts:62-75`).
+///
+/// Checked per file for [`check_mcp`]'s reason: the complaint names the file
+/// that said it.
+fn check_lsp(config: Option<&LspConfig>) -> Result<(), String> {
+    let Some(LspConfig::Servers(entries)) = config else {
+        return Ok(());
+    };
+
+    for (name, entry) in entries {
+        if entry.disabled {
+            continue;
+        }
+        if entry.command.is_none() {
+            return Err(format!(
+                "lsp server \"{name}\" has no command; only a disabled server may leave it out"
+            ));
+        }
+        if entry.extensions.is_none() && !crate::lsp::server::BUILTIN_IDS.contains(&name.as_str()) {
+            return Err(format!(
+                "lsp server \"{name}\": For custom LSP servers, 'extensions' array is required."
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Refuses an MCP entry that describes a server nothing could connect to.
@@ -850,8 +985,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ANY, AgentMode, Config, ConfigError, McpServer, NonZeroU64, Overrides, ThemeMode, existing,
-        merge_files, project_files, read, split_model,
+        ANY, AgentMode, Config, ConfigError, LspConfig, McpServer, NonZeroU64, Overrides,
+        ThemeMode, existing, merge_files, project_files, read, split_model,
     };
     use crate::permission::Action;
 
@@ -932,6 +1067,124 @@ mod tests {
             panic!("expected a parse failure, got {error:?}");
         };
         assert!(message.contains("modle"), "{message}");
+    }
+
+    #[test]
+    fn an_absent_lsp_key_is_no_language_servers_at_all() {
+        let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+
+        assert_eq!(
+            config.lsp, None,
+            "LSP is opt-in, and this config did not opt in"
+        );
+    }
+
+    #[test]
+    fn the_lsp_key_takes_a_bare_boolean() {
+        for (text, expected) in [("true", true), ("false", false)] {
+            let config = parse(&format!(r#"{{"lsp": {text}}}"#)).expect("a boolean is a shape");
+
+            assert_eq!(config.lsp, Some(LspConfig::Enabled(expected)), "for {text}");
+        }
+    }
+
+    #[test]
+    fn an_lsp_entry_carries_every_field_it_may_hold() {
+        let config = parse(
+            r#"{"lsp": {
+                "zls": {
+                    "command": ["zls", "--enable-debug-log"],
+                    "extensions": [".zig", ".zon"],
+                    "env": {"ZLS_HOME": "/opt/zls"},
+                    "initialization": {"zls": {"enable_build_on_save": true}}
+                }
+            }}"#,
+        )
+        .expect("a full entry parses");
+
+        let Some(LspConfig::Servers(entries)) = &config.lsp else {
+            panic!("the value is a map of servers");
+        };
+        let zls = &entries["zls"];
+        assert_eq!(
+            zls.command.as_deref(),
+            Some(["zls".to_owned(), "--enable-debug-log".to_owned()].as_slice())
+        );
+        assert_eq!(
+            zls.extensions.as_deref(),
+            Some([".zig".to_owned(), ".zon".to_owned()].as_slice())
+        );
+        assert!(!zls.disabled);
+        assert_eq!(zls.env["ZLS_HOME"], "/opt/zls");
+        assert_eq!(
+            zls.initialization,
+            Some(serde_json::json!({"zls": {"enable_build_on_save": true}}))
+        );
+    }
+
+    #[test]
+    fn disabling_a_builtin_is_the_one_legal_entry_with_no_command() {
+        let config = parse(r#"{"lsp": {"rust": {"disabled": true}}}"#)
+            .expect("this is how a builtin is switched off");
+
+        let Some(LspConfig::Servers(entries)) = &config.lsp else {
+            panic!("the value is a map of servers");
+        };
+        assert!(entries["rust"].disabled);
+        assert_eq!(entries["rust"].command, None);
+    }
+
+    #[test]
+    fn an_lsp_entry_with_no_command_is_refused_by_name() {
+        let error = parse(r#"{"lsp": {"rust": {"extensions": [".rs"]}}}"#)
+            .expect_err("a server with no program is not a server");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("rust"), "{message}");
+        assert!(message.contains("command"), "{message}");
+    }
+
+    #[test]
+    fn a_custom_lsp_server_without_extensions_is_refused_in_upstreams_words() {
+        let error = parse(r#"{"lsp": {"zls": {"command": ["zls"]}}}"#)
+            .expect_err("nothing tells ganja which files zls claims");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(
+            message.contains("For custom LSP servers, 'extensions' array is required."),
+            "{message}"
+        );
+        assert!(
+            message.contains("zls"),
+            "the message names the entry: {message}"
+        );
+    }
+
+    #[test]
+    fn a_builtin_without_extensions_inherits_them_instead_of_being_refused() {
+        let config = parse(r#"{"lsp": {"rust": {"command": ["ra-multiplex"]}}}"#)
+            .expect("a builtin has extensions to inherit");
+
+        let Some(LspConfig::Servers(entries)) = &config.lsp else {
+            panic!("the value is a map of servers");
+        };
+        assert_eq!(entries["rust"].extensions, None, "inherited, not written");
+    }
+
+    #[test]
+    fn an_unknown_field_inside_an_lsp_entry_is_refused_by_name() {
+        let error =
+            parse(r#"{"lsp": {"rust": {"command": ["x"], "rootMarkers": ["Cargo.toml"]}}}"#)
+                .expect_err("upstream has no such key either");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("rootMarkers"), "{message}");
     }
 
     #[test]
