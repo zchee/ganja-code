@@ -38,6 +38,12 @@ jobs:
       - name: ganja-tool never reaches back into the engine
         run: '! cargo tree -p ganja-tool -e normal | grep -q ganja-core'
 
+      # tail strips the crate's own header line, which would match the grep.
+      - name: the bottom crates stay leaves
+        run: |
+          ! cargo tree -p ganja-permission -e normal | tail -n +2 | grep -q ganja-
+          ! cargo tree -p ganja-protocol -e normal | tail -n +2 | grep -q ganja-
+
   deny:
     name: deny
     # Advisories, licenses, bans and source-registry checks are static
@@ -128,9 +134,8 @@ jobs:
           # mask a wedge.
           GANJA_LSP_EDIT_BUDGET_MS: "5000"
 
-      # nextest does not run doctests, so they get their own step. There are
-      # none today, which makes this near-instant — but it means the first one
-      # added later is run rather than silently skipped.
+      # nextest does not run doctests, so they get their own step; the
+      # testkit's builder examples are what it runs today.
       - name: doc-tests
         run: cargo test --workspace --doc
         env:

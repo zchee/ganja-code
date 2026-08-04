@@ -23,7 +23,7 @@ Container for the workspace members. The split is architectural, not cosmetic. T
 
 ### Working In This Directory
 
-The dependency direction is one-way and enforced, top to bottom: `ganja-cli` → `ganja-tui` → `ganja-core` → `ganja-tool` → `ganja-permission` → `ganja-protocol`. Three rules follow.
+The dependency direction is one-way, and every load-bearing edge of it is asserted in CI: frontends sit on `ganja-core`, core sits on `ganja-tool`, tool sits on `ganja-permission` — while `ganja-protocol` is a leaf that core and the frontends consume directly and that tool and permission never touch, and the two bottom crates name nothing else of ours at all. Three rules follow.
 
 - **`ganja-core` may never depend on a terminal crate.** CI asserts `cargo tree -p ganja-core -e normal` never mentions `ratatui`. If core needs to describe something the UI will draw, it does so in serde-serializable protocol types, not in ratatui types.
 - **Nothing below the engine may name the engine.** `! cargo tree -p ganja-tool -e normal | grep -q ganja-core` is the assertion; `ganja-permission` and `ganja-protocol` name nothing of ours at all. What a tool needs from its caller arrives as a value in `ToolCtx`, which is why that type is a bag of values rather than a session handle.
