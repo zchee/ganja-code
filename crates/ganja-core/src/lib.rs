@@ -23,6 +23,7 @@ pub mod session;
 pub mod snapshot;
 pub mod storage;
 pub mod tool;
+pub mod watch;
 
 pub use agent::{Agent, AgentError, Registry as AgentRegistry};
 pub use auth::{AuthError, Credential};
