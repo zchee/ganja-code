@@ -20,14 +20,19 @@
 //!   [`crate::auth`] and [`crate::project`] already resolve their own
 //!   state — same crate, same `ganja` directory under the XDG data
 //!   home — landing on `<XDG data home>/ganja/tool-output/`.
-//! - **The file name, and the 7-day cleanup sweep.** Upstream names the file
-//!   with a `ToolID` (a sortable identifier tied to session bookkeeping this
-//!   crate does not have yet) and prunes the directory hourly from a forked
-//!   background fiber. Files here are named `tool_<hex timestamp>_<hex
-//!   counter>` — unique and creation-ordered, which is all a stray file on
-//!   disk actually needs — and nothing here deletes old ones; a periodic
-//!   sweep is a background-job concern for whichever part of the engine ends
-//!   up owning one, not a pure clamp function.
+//! - **The file name.** Upstream names the file with a `ToolID` (a sortable
+//!   identifier tied to session bookkeeping this crate does not have yet).
+//!   Files here are named `tool_<hex timestamp>_<hex counter>` — unique and
+//!   creation-ordered, which is all a stray file on disk actually needs — and
+//!   they carry upstream's `tool_` prefix, because that prefix is what a sweep
+//!   recognises as its own.
+//!
+//! The sweep itself *is* ported ([`sweep`], [`spawn_sweep_loop`]): upstream
+//! prunes the directory hourly from a forked background fiber, and a spill
+//! directory nothing ever empties grows for as long as the machine lives.
+//! It is deliberately not part of the clamp — a pure function that deletes
+//! files as a side effect would be a surprise — so the frontend starts the
+//! loop and cancels it on the way out, exactly as it does the catalog's.
 //!
 //! A truncating clamp tries the ganja data directory first and a process
 //! temp directory second — the "app data path" upstream anchors under has no
@@ -43,10 +48,11 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
+use tokio_util::sync::CancellationToken;
 
 /// Upper bound on the bytes a tool result may carry. Upstream's `MAX_BYTES`
 /// (`50 * 1024`); named `MAX_CHARS` because other tools in this crate quote
@@ -64,6 +70,21 @@ const DIRECTORY: &str = "ganja";
 /// Where a truncating clamp spills its full text, under [`DIRECTORY`].
 /// Upstream's `TRUNCATION_DIR`.
 const TOOL_OUTPUT: &str = "tool-output";
+
+/// What every spilled file is called first, and the only thing [`sweep`] will
+/// delete. Upstream's own prefix, and its own sweep's filter.
+const PREFIX: &str = "tool_";
+
+/// How old a spill has to be before [`sweep`] removes it. Upstream's seven
+/// days.
+///
+/// Age is read from the modification stamp, which is the one question worth
+/// asking: a spill still being appended to by a running command was modified a
+/// moment ago, so a live file cannot be swept out from under its writer.
+const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// How long [`spawn_sweep_loop`] waits between rounds. Upstream's hour.
+const SWEEP_REPEAT: Duration = Duration::from_secs(60 * 60);
 
 /// Mode a spilled file is created with: its owner, and nobody else.
 ///
@@ -335,9 +356,103 @@ fn candidate_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// A name unique within a process and ordered by creation, `tool_`-prefixed
-/// to match the prefix upstream's own cleanup sweep looks for (see this
-/// module's doc comment for why the sweep itself is not ported).
+/// Deletes spilled output older than [`MAX_AGE`] from every directory a clamp
+/// might have written one to, and answers with how many files went.
+///
+/// There is nothing here to report as an error. A directory that does not
+/// exist has nothing to sweep; a file that refuses to be deleted belongs to
+/// somebody else, and the next round will try it again. Failing a session over
+/// either would be absurd — this is housekeeping.
+#[must_use]
+pub fn sweep() -> usize {
+    candidate_dirs().into_iter().map(|dir| sweep_in(&dir)).sum()
+}
+
+/// The same sweep over exactly `dir` — no XDG resolution and no temp-dir
+/// fallback — so a test can assert on what a sweep removes without reaching
+/// into a real person's data directory. Mirrors [`clamp_with`] and
+/// [`open_spill_in`], which exist for the same reason.
+pub(crate) fn sweep_in(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = SystemTime::now();
+    let mut removed = 0;
+
+    for entry in entries.flatten() {
+        // The prefix is the whole permission this sweep has. A directory it
+        // shares with anything else — the temp fallback is `/tmp` on a machine
+        // with no data directory — holds files that are none of its business,
+        // and it may not so much as stat them by mistake.
+        if !entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(PREFIX.as_bytes())
+        {
+            continue;
+        }
+        let path = entry.path();
+        // A link's own stamp decides a link's fate, never its target's, and
+        // removing the name leaves whatever it pointed at exactly as it was.
+        let Ok(metadata) = path.symlink_metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            // Nothing this module creates, so nothing this sweep understands.
+            continue;
+        }
+        // No stamp, or a stamp in the future, reads as "not old enough" — a
+        // sweep that cannot tell how old a file is does not delete it.
+        let stale = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > MAX_AGE);
+        if !stale {
+            continue;
+        }
+
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) => {
+                tracing::debug!(%error, file = %path.display(), "a spilled tool output stayed");
+            }
+        }
+    }
+
+    removed
+}
+
+/// Sweeps once, then once an hour, until `cancel` fires.
+///
+/// Shaped after [`crate::catalog::spawn_refresh_loop`], with one difference:
+/// the first round runs inside the spawned task rather than on the calling
+/// thread. The catalog's first step installs the table a frontend's first
+/// frame prices against; nothing at all waits on a sweep, so nothing is gained
+/// by making a startup path wait for a directory scan.
+///
+/// # Panics
+///
+/// Through [`tokio::spawn`], when called outside a runtime.
+pub fn spawn_sweep_loop(cancel: CancellationToken) {
+    tokio::spawn(async move {
+        loop {
+            match tokio::task::spawn_blocking(sweep).await {
+                Ok(0) => {}
+                Ok(removed) => tracing::info!(removed, "old spilled tool output was deleted"),
+                Err(error) => tracing::warn!(%error, "the spilled output was not swept"),
+            }
+
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(SWEEP_REPEAT) => {}
+            }
+        }
+    });
+}
+
+/// A name unique within a process and ordered by creation, carrying the
+/// [`PREFIX`] upstream's cleanup sweep looks for and [`sweep`] ports.
 ///
 /// The counter is what keeps two clamps in the same nanosecond from
 /// colliding — a real possibility on a coarser clock, and free insurance
@@ -355,9 +470,91 @@ fn overflow_filename() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        time::{Duration, SystemTime},
+    };
 
     use super::{MAX_CHARS, MAX_LINES, Truncated, clamp, clamp_with};
+
+    /// A day, for ages a person can read.
+    const DAY: u64 = 24 * 60 * 60;
+
+    /// Writes a file under `dir` and backdates it by `age`.
+    fn plant(dir: &Path, name: &str, age: Duration) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "spilled").expect("the fixture writes");
+        let when = SystemTime::now()
+            .checked_sub(age)
+            .expect("a representable stamp");
+        std::fs::File::open(&path)
+            .and_then(|file| file.set_modified(when))
+            .expect("the fixture can move the stamp");
+
+        path
+    }
+
+    /// What a sweep may and may not delete, in one table: the `tool_` prefix
+    /// and nothing else, past the week and not before it.
+    #[test]
+    fn a_sweep_deletes_old_spills_and_leaves_everything_else_alone() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let cases = [
+            ("tool_1a2b_0", Duration::from_secs(8 * DAY), false),
+            ("tool_3c4d_1", Duration::from_secs(6 * DAY), true),
+            ("tool_5e6f_2", Duration::ZERO, true),
+            ("notes.txt", Duration::from_secs(400 * DAY), true),
+            ("tool-output.log", Duration::from_secs(400 * DAY), true),
+            ("TOOL_shouting", Duration::from_secs(400 * DAY), true),
+        ];
+        for (name, age, _) in cases {
+            plant(dir.path(), name, age);
+        }
+
+        assert_eq!(
+            super::sweep_in(dir.path()),
+            1,
+            "exactly the one stale spill goes"
+        );
+
+        for (name, age, survives) in cases {
+            assert_eq!(
+                dir.path().join(name).exists(),
+                survives,
+                "{name}, {} days old",
+                age.as_secs() / DAY
+            );
+        }
+    }
+
+    /// Age is the entry's own, never its target's — which is what keeps a
+    /// sweep from reaching through a name somebody planted at it.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_link_is_judged_by_its_own_age_and_never_followed() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let ancient = plant(dir.path(), "ancient.txt", Duration::from_secs(400 * DAY));
+        let planted = dir.path().join("tool_planted");
+        std::os::unix::fs::symlink(&ancient, &planted).expect("the link is creatable");
+
+        assert_eq!(
+            super::sweep_in(dir.path()),
+            0,
+            "a link created a moment ago is not a week old, whatever it points at"
+        );
+        assert!(
+            std::fs::symlink_metadata(&planted).is_ok(),
+            "the link itself is still there"
+        );
+        assert!(ancient.exists(), "and so is what it pointed at");
+    }
+
+    #[test]
+    fn sweeping_a_directory_that_is_not_there_is_not_a_failure() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+
+        assert_eq!(super::sweep_in(&dir.path().join("never-created")), 0);
+    }
 
     /// The one file `dir` holds, panicking if that is not exactly true.
     fn only_entry(dir: &Path) -> PathBuf {

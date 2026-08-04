@@ -11,22 +11,29 @@
 //!
 //! Nothing is written until the whole replacement has succeeded, so a refused
 //! or failed edit leaves the file byte for byte as it was.
+//!
+//! The read and the write that bracket that replacement both go through one
+//! directory this call holds open (`tool/anchor.rs`) rather than through the
+//! path twice, so what is written back is the file that was read — and a link
+//! at the file's own name is refused rather than followed.
 
 use std::{
     borrow::Cow,
     collections::HashMap,
+    io::{Read as _, Write as _},
     ops::Range,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex},
+    time::SystemTime,
 };
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 
-use crate::{
-    project::Project,
-    tool::{Tool, ToolCtx, ToolError, ToolOutput},
+use crate::tool::{
+    Tool, ToolCtx, ToolError, ToolOutput,
+    anchor::{self, Anchor},
 };
 
 /// What the model is told about the tool: upstream's prompt file, verbatim.
@@ -157,29 +164,32 @@ impl Tool for EditTool {
         let path = resolve(&ctx.cwd, &args.file_path);
         // Before the lock, and long before anything is written: a refused path
         // has no business holding up another call to the same file.
-        refuse_link_escape(&ctx.cwd, &path)?;
+        anchor::refuse_link_escape(&ctx.cwd, &path)?;
         let guard = lock(&path);
         let _held = guard.lock().await;
 
-        let (content_old, content_new, bom) = prepare(&path, &args, ctx).await?;
+        // From here the file is addressed through a directory this call holds
+        // open (`tool/anchor.rs`), so the read below and the write further down
+        // reach the same file whatever happens to the name in between. Parents
+        // are not made yet: an edit that fails has no business leaving
+        // directories behind, and it is `prepare` that decides whether there is
+        // a file to create at all.
+        let anchor = open_anchor(&ctx.cwd, &path, false).await?;
+        let (content_old, content_new, bom) = prepare(anchor.clone(), &path, &args, ctx).await?;
 
         if ctx.cancel.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                ToolError::Failed(format!(
-                    "{} could not be created: {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        tokio::fs::write(&path, join_bom(&content_new, bom))
-            .await
-            .map_err(|error| {
-                ToolError::Failed(format!("{} could not be written: {error}", path.display()))
-            })?;
-        ctx.files.record(&path);
+        // The one case that anchors a second time: a file being created whose
+        // parents are not there yet, made under the same rules.
+        let anchor = match anchor {
+            Some(anchor) => anchor,
+            None => open_anchor(&ctx.cwd, &path, true).await?.ok_or_else(|| {
+                ToolError::Failed(format!("{} could not be created", path.display()))
+            })?,
+        };
+        let stamp = write_through(&anchor, join_bom(&content_new, bom)).await?;
+        ctx.files.record_stat(&path, stamp);
 
         // The patch describes the change, not the file's line endings, so both
         // sides go in normalized and a CRLF file does not read as one long
@@ -206,17 +216,132 @@ impl Tool for EditTool {
     }
 }
 
-/// Works out what the file should contain, without touching it.
+/// What the anchored file held when it was opened.
+struct Opened {
+    /// Whether the name is a directory, which is not a thing to edit.
+    is_dir: bool,
+    /// The modification stamp, from an `fstat` on the descriptor that was
+    /// read — never a second look at the path.
+    stamp: Option<SystemTime>,
+    /// The bytes, empty for a directory.
+    bytes: Vec<u8>,
+}
+
+/// Opens the anchor for `path`, and refuses it if the directory it really
+/// landed on is one a link led out of the project to.
+///
+/// [`None`] means the parent does not exist and this call was not asked to
+/// make it — which, for an edit, is one of the ways a file turns out not to be
+/// there.
+async fn open_anchor(
+    cwd: &Path,
+    path: &Path,
+    create_parents: bool,
+) -> Result<Option<Arc<Anchor>>, ToolError> {
+    let owned = path.to_owned();
+    let opened = blocking(move || match Anchor::open(&owned, create_parents) {
+        Ok(anchor) => Ok(Some(anchor)),
+        Err(error) if error.is_missing() => Ok(None),
+        Err(error) => Err(error.into()),
+    })
+    .await?;
+
+    let Some(anchor) = opened else {
+        return Ok(None);
+    };
+    anchor::refuse_anchor_escape(cwd, path, &anchor)?;
+
+    Ok(Some(Arc::new(anchor)))
+}
+
+/// Reads the anchored file, or reports that there is nothing at the name.
+async fn read_through(anchor: &Arc<Anchor>) -> Result<Option<Opened>, ToolError> {
+    let anchor = Arc::clone(anchor);
+
+    blocking(move || {
+        let mut file = match anchor.read() {
+            Ok(file) => file,
+            Err(error) if error.is_missing() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let path = anchor.path();
+        let failed = |error: std::io::Error| {
+            ToolError::Failed(format!("{} could not be read: {error}", path.display()))
+        };
+
+        let meta = file.metadata().map_err(failed)?;
+        if meta.is_dir() {
+            return Ok(Some(Opened {
+                is_dir: true,
+                stamp: None,
+                bytes: Vec::new(),
+            }));
+        }
+
+        let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or_default());
+        file.read_to_end(&mut bytes).map_err(failed)?;
+
+        Ok(Some(Opened {
+            is_dir: false,
+            stamp: meta.modified().ok(),
+            bytes,
+        }))
+    })
+    .await
+}
+
+/// Writes `content` through the anchor and hands back the stamp the file
+/// carries afterwards, read from the same descriptor that wrote it.
+async fn write_through(
+    anchor: &Arc<Anchor>,
+    content: String,
+) -> Result<Option<SystemTime>, ToolError> {
+    let anchor = Arc::clone(anchor);
+
+    blocking(move || {
+        let path = anchor.path();
+        let failed = |error: std::io::Error| {
+            ToolError::Failed(format!("{} could not be written: {error}", path.display()))
+        };
+
+        let (mut file, _existed) = anchor.write()?;
+        file.set_len(0).map_err(failed)?;
+        file.write_all(content.as_bytes()).map_err(failed)?;
+
+        Ok(anchor::stamp(&file))
+    })
+    .await
+}
+
+/// Runs one blocking filesystem step on the pool tokio keeps for exactly that,
+/// so the reactor is never held while a file is opened, read or written.
+///
+/// This is what `tokio::fs` does internally; the anchored calls simply cannot
+/// be spelled through it, since what they operate on is a descriptor rather
+/// than a path.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, ToolError> + Send + 'static,
+) -> Result<T, ToolError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| ToolError::Failed(format!("the edit could not be run: {error}")))?
+}
+
+/// Works out what the file should contain, without changing it.
 ///
 /// Returns the old text, the new text and whether the file carries a byte
 /// order mark, all with the mark itself stripped so no strategy has to reason
 /// about an invisible first character.
 async fn prepare(
+    anchor: Option<Arc<Anchor>>,
     path: &Path,
     args: &Args,
     ctx: &ToolCtx,
 ) -> Result<(String, String, bool), ToolError> {
-    let existing = tokio::fs::metadata(path).await.ok();
+    let existing = match &anchor {
+        Some(anchor) => read_through(anchor).await?,
+        None => None,
+    };
 
     if args.old_string.is_empty() {
         if existing.is_some() {
@@ -232,20 +357,17 @@ async fn prepare(
             path.display()
         )));
     };
-    if existing.is_dir() {
+    if existing.is_dir {
         return Err(ToolError::Failed(format!(
             "Path is a directory, not a file: {}",
             path.display()
         )));
     }
-    ctx.files.check_fresh(path)?;
+    ctx.files.check_fresh_stat(path, existing.stamp)?;
 
-    let raw = tokio::fs::read(path).await.map_err(|error| {
-        ToolError::Failed(format!("{} could not be read: {error}", path.display()))
-    })?;
     // Decoding is strict: a lossy decode would replace whatever it could not
     // read and then write the replacement characters back over the file.
-    let text = String::from_utf8(raw).map_err(|_| {
+    let text = String::from_utf8(existing.bytes).map_err(|_| {
         ToolError::Failed(format!(
             "{} is not valid UTF-8; edit cannot change it without corrupting it",
             path.display()
@@ -289,124 +411,6 @@ fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
 /// directory, or whole when it lies outside.
 fn relative(cwd: &Path, path: &Path) -> String {
     path.strip_prefix(cwd).unwrap_or(path).display().to_string()
-}
-
-/// Refuses a path that is inside the project by its text but lands outside it
-/// once the filesystem has its say — that is, one a symbolic link redirects.
-///
-/// The permission gate resolves the same path and asks about it
-/// (`permission.rs`, `outside`), but it answers *before* the call runs: a link
-/// planted between the answer and the write redirects it afterwards, and a
-/// [`crate::permission::Permissions::default`] set has no project to compare
-/// anything against at all. `fs::write` follows links, so this is the check
-/// the write itself makes, immediately before opening the file.
-///
-/// Only a link that *escapes* is refused. A call that openly names somewhere
-/// outside the project is the gate's business and not this function's — the
-/// user was asked about that directory and may well have allowed it — so the
-/// rule is precisely the one this tool's contract states: do not follow a link
-/// out of the project. Text inside plus reality outside is that link and
-/// nothing else.
-///
-/// Resolution mirrors `permission::resolve` deliberately, so the gate and the
-/// tool cannot disagree about where a path goes: canonicalise what exists, so
-/// every link along it and every `..` is already applied, then apply what does
-/// not exist yet by text — a `..` there cannot cross a link, because nothing
-/// it names is on the disk to be one.
-///
-/// The window between this check and the open is narrowed, not closed. Only
-/// opening the canonical parent with `O_NOFOLLOW` would close it, which this
-/// port does not do yet; what is refused here is the escape that exists when
-/// the call is made, which is the shape a planted link takes.
-///
-/// The twin of this lives in `tool/write.rs`. The two are deliberately
-/// duplicated rather than shared: exactly two tools write, and the alternative
-/// is a module whose only job is to hold one function.
-fn refuse_link_escape(cwd: &Path, path: &Path) -> Result<(), ToolError> {
-    let root = Project::resolve(cwd).root().to_owned();
-    let real = real_path(path);
-    if real.starts_with(&root) {
-        return Ok(());
-    }
-    if !claimed(cwd, path).starts_with(&root) {
-        return Ok(());
-    }
-
-    Err(ToolError::Failed(format!(
-        "{} is inside the project but resolves to {}, which is not: a symbolic \
-         link on that path leads out of {}. Refusing to write through it — name \
-         the real path if that is what you meant.",
-        path.display(),
-        real.display(),
-        root.display()
-    )))
-}
-
-/// Where `path` really lands: canonical for as much of it as exists, lexical
-/// for whatever does not exist yet.
-fn real_path(path: &Path) -> PathBuf {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical;
-    }
-
-    let mut ancestors: Vec<Component> = path.components().collect();
-    let mut rest: Vec<Component> = Vec::new();
-    while let Some(component) = ancestors.pop() {
-        rest.push(component);
-        let existing: PathBuf = ancestors.iter().collect();
-        if existing.as_os_str().is_empty() {
-            continue;
-        }
-        if let Ok(canonical) = std::fs::canonicalize(&existing) {
-            return apply(canonical, rest.iter().rev().copied());
-        }
-    }
-
-    lexical(path)
-}
-
-/// What the call claimed the path was, before any link was followed: the
-/// session directory in canonical form, with everything the call added applied
-/// by text.
-///
-/// Only the anchor is canonicalised, and that asymmetry is the whole point —
-/// the anchor is the one part of the path the model did not choose. Comparing
-/// raw text against a canonical root would be wrong in the other direction on
-/// any machine where the session directory is reached through a link, which on
-/// macOS is every temporary directory there is (`/var` -> `/private/var`):
-/// every path under it would read as "outside the project" and every edit
-/// would be refused.
-fn claimed(cwd: &Path, path: &Path) -> PathBuf {
-    let anchor = std::fs::canonicalize(cwd).unwrap_or_else(|_| lexical(cwd));
-
-    match path.strip_prefix(cwd) {
-        Ok(rest) => apply(anchor, rest.components()),
-        Err(_) => lexical(path),
-    }
-}
-
-/// `path` made absolute with its `.` and `..` applied by text alone, which is
-/// what it claims to be before the filesystem is consulted.
-fn lexical(path: &Path) -> PathBuf {
-    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
-
-    apply(PathBuf::new(), absolute.components())
-}
-
-/// `base` with `rest` applied by text: `.` ignored, `..` popped, anything else
-/// pushed.
-fn apply<'a>(mut base: PathBuf, rest: impl Iterator<Item = Component<'a>>) -> PathBuf {
-    for component in rest {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                base.pop();
-            }
-            other => base.push(other.as_os_str()),
-        }
-    }
-
-    base
 }
 
 // ---------------------------------------------------------------------------
@@ -1408,6 +1412,59 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&file).expect("the file is readable"),
             "omega\n"
+        );
+    }
+
+    /// The window the guard could only narrow, now closed — the edit half of
+    /// the same story `write` tells.
+    ///
+    /// The link stays *inside* the project, so the lexical guard passes it,
+    /// which is asserted rather than assumed: without that, the refusal below
+    /// would prove nothing about where it came from. The old code read this
+    /// file through the link and wrote back through it. `openat` with
+    /// `O_NOFOLLOW` refuses the name outright, at the read, before any
+    /// replacement is even attempted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_planted_at_the_name_is_refused_by_the_open_not_by_the_guard() {
+        let (project, _elsewhere) = project_and_elsewhere();
+        let target = project.path().join("real.txt");
+        std::fs::write(&target, "alpha\n").expect("the fixture writes");
+        let planted = project.path().join("notes.txt");
+        std::os::unix::fs::symlink(&target, &planted).expect("the link is creatable");
+
+        crate::tool::anchor::refuse_link_escape(project.path(), &planted).expect(
+            "a link that stays inside the project is no escape — if this starts \
+             failing, the refusal below stops proving anything about the open",
+        );
+
+        let context = ctx(project.path());
+        context.files.record(&planted);
+        let refused = failure(
+            &context,
+            serde_json::json!({
+                "filePath": "notes.txt",
+                "oldString": "alpha",
+                "newString": "omega",
+            }),
+        )
+        .await;
+
+        assert!(
+            refused.contains("symbolic link"),
+            "a link at the final component is refused by the open: {refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("the target still exists"),
+            "alpha\n",
+            "the edit followed a link planted at the name"
+        );
+        assert!(
+            std::fs::symlink_metadata(&planted)
+                .expect("the link is still there")
+                .file_type()
+                .is_symlink(),
+            "the link is refused, not replaced"
         );
     }
 
