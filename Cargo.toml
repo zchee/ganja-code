@@ -9,13 +9,21 @@ rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/zchee/ganja-code"
 
-# Every dependency the port is expected to need through P5 is declared here so
+# Every dependency the port is expected to need through P6 is declared here so
 # that member crates only ever opt in, never choose a version.
 [workspace.dependencies]
 ganja-core = { path = "crates/ganja-core" }
 ganja-tui = { path = "crates/ganja-tui" }
 
 anyhow = "1.0.104"
+# Clipboard read and write through each platform's native surface. Text only
+# on purpose: `image-data` (the one default feature) would pull the `image`
+# stack for content the protocol cannot carry yet.
+arboard = { version = "3.6.1", default-features = false, features = [
+    # Wayland sessions have no X11 selection to fall back on; this opts the
+    # Linux build into speaking wl-clipboard directly.
+    "wayland-data-control",
+] }
 async-trait = "0.1.91"
 clap = { version = "4.6.5", features = ["derive"] }
 # `ratatui` re-exports this exact crate; depending on it here is what turns on
@@ -25,6 +33,9 @@ etcetera = "0.11.0"
 futures = "0.3.33"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
+# webfetch's markdown format is a real HTML→markdown conversion (upstream
+# uses turndown); before this the markdown answer was tag-stripped text.
+htmd = "0.5.5"
 ignore = "0.4.31"
 # Config files take comments and trailing commas, the way upstream's do; this
 # parses that dialect into a value `serde` can then decode strictly.
@@ -32,9 +43,19 @@ jsonc-parser = "0.33.1"
 # `killpg`, so cancelling a shell command takes its whole process group with
 # it without shelling out to `kill(1)`.
 libc = "0.2.189"
+# The LSP wire types the diagnostics client speaks to rust-analyzer and
+# gopls, so requests and notifications are typed instead of hand-built JSON.
+lsp-types = "0.97.0"
 # The command palette and @-file mention rank candidates in-process with the
 # same matcher helix uses, instead of hand-rolling a scorer.
 nucleo-matcher = "0.3.1"
+# Filesystem events behind the stale-read watcher: a file read this session
+# and then changed outside it is flagged before the next turn trusts it.
+notify = "8.2.0"
+# Markdown parsed into block events the chat renderer styles; the default
+# `html` renderer and the example binary's `getopts` stay off — parsing is
+# the only piece the TUI consumes.
+pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"
 ratatui-textarea = "0.9.2"
 reqwest = { version = "0.13.4", default-features = false, features = [
@@ -45,6 +66,19 @@ reqwest = { version = "0.13.4", default-features = false, features = [
     "stream",
     "system-proxy",
 ] }
+# The official MCP SDK: config-named servers over stdio and streamable HTTP.
+# Client-side only — the default `server` feature stays off here, and the
+# test fixture that needs it opts in as a dev-dependency.
+rmcp = { version = "3.1.0", default-features = false, features = [
+    "client",
+    # Derive macros for the dev-only fixture server's tool router.
+    "macros",
+    # Spawns and speaks to a config-named local server as a child process.
+    "transport-child-process",
+    # The remote transport, over the same reqwest/rustls stack the providers
+    # already use.
+    "transport-streamable-http-client-reqwest",
+] }
 schemars = "1.2.2"
 # Key material is held in `SecretString` so that it is wiped on drop and cannot
 # reach a `Debug` rendering; `serde` is what lets `auth.json` decode into one.
@@ -52,6 +86,13 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 similar = "3.1.1"
+# Fenced-code highlighting for the markdown renderer. The regex backend is
+# the pure-Rust `fancy-regex` — `default-onig` would put a C library in
+# every build — and the bundled syntax set is the language table.
+syntect = { version = "5.3.0", default-features = false, features = [
+    "default-syntaxes",
+    "regex-fancy",
+] }
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = [
     "fs",
