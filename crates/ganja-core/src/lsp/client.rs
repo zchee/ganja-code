@@ -80,6 +80,13 @@ pub const DIAGNOSTICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long the `initialize` handshake may take (`client.ts:17`).
 pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// How long a server's process group is given to end itself after `SIGTERM`
+/// before `SIGKILL` follows — the same grace `tool/shell.rs`'s own kill
+/// sequence gives a command tree, and for the same reason: only the unix path
+/// signals a group at all.
+#[cfg(unix)]
+const KILL_GRACE: Duration = Duration::from_millis(200);
+
 /// What went wrong starting or speaking to a server.
 ///
 /// Every one of these ends the same way — the `(root, id)` pair is marked
@@ -146,6 +153,31 @@ pub enum ClientError {
 /// that went away into a `Disconnected` at each call site rather than a task
 /// parked for the life of the process.
 type Pending = Arc<std::sync::Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
+
+/// Removes one id from [`Pending`] when dropped.
+///
+/// An answer removes its own entry in [`Reader::dispatch`], and that removal
+/// races nothing this drops afterward — `HashMap::remove` on an already-gone
+/// key is a no-op. What this exists for is every path that is *not* an
+/// answer: `pull`'s `tokio::time::timeout` drops [`Client::request`]'s future
+/// outright once a request runs long, and a plain `async fn` has no way to
+/// run cleanup when it is dropped mid-`await` rather than returned from.
+/// Without this, a request the caller stopped waiting on leaves its sender in
+/// the map for the rest of the client's life — one leaked entry per timed-out
+/// pull, for a session that may pull diagnostics thousands of times.
+struct PendingGuard {
+    pending: Pending,
+    id: i64,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .expect("the pending requests are never poisoned")
+            .remove(&self.id);
+    }
+}
 
 /// When a publish for one path arrived, and which document version it claimed.
 #[derive(Clone, Copy, Debug)]
@@ -444,7 +476,8 @@ impl Client {
                     id: spec.id.clone(),
                 })?;
 
-        let mut child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .args(arguments)
             .current_dir(root)
             .envs(&spec.env)
@@ -453,12 +486,19 @@ impl Client {
             .stderr(Stdio::piped())
             // A language server outlives nothing: if this handle goes, so does
             // the process.
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|source| ClientError::Spawn {
-                id: spec.id.clone(),
-                source,
-            })?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            // The same call `mcp.rs` and `tool/shell.rs` make, for the same
+            // reason: rust-analyzer forks cargo and rustc of its own, and
+            // only a process group can be ended as one.
+            command.process_group(0);
+        }
+
+        let mut child = command.spawn().map_err(|source| ClientError::Spawn {
+            id: spec.id.clone(),
+            source,
+        })?;
 
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -720,15 +760,44 @@ impl Client {
     }
 
     /// Ends the server's process.
+    ///
+    /// On unix this ends the whole **group**, not just the direct child:
+    /// rust-analyzer forks cargo and rustc while it works, and signalling the
+    /// leader alone would leave those running. The `SIGTERM` goes out
+    /// immediately; the grace and the `SIGKILL` that follows it run on a
+    /// spawned task because `shutdown` is called from `Drop::drop`, which
+    /// cannot await — the same reason `mcp.rs`'s `spawn` gives for why
+    /// `rmcp`'s own child cleanup is spawned rather than awaited there.
+    /// `kill_on_drop` on the handle is still armed (it moves into that task
+    /// and drops with it), and is the whole mechanism on a platform with no
+    /// process groups to signal.
     pub fn shutdown(&self) {
         let child = self
             .child
             .lock()
             .expect("the language server handle is never poisoned")
             .take();
-        if let Some(mut child) = child
-            && let Err(error) = child.start_kill()
+        let Some(mut child) = child else {
+            return;
+        };
+
+        #[cfg(unix)]
         {
+            let Some(pid) = child.id() else {
+                // Already reaped; there is no group left to signal.
+                return;
+            };
+            signal_group(pid, libc::SIGTERM);
+
+            tokio::spawn(async move {
+                tokio::time::sleep(KILL_GRACE).await;
+                if matches!(child.try_wait(), Ok(None)) {
+                    signal_group(pid, libc::SIGKILL);
+                }
+            });
+        }
+        #[cfg(not(unix))]
+        if let Err(error) = child.start_kill() {
             tracing::debug!(
                 server = self.id.as_str(),
                 %error,
@@ -769,6 +838,14 @@ impl Client {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         self.locked_pending().insert(id, sender);
+        // Armed the moment the entry exists, so every way out of this
+        // function — the early return below, the ordinary answer, a
+        // connection dying, or this future being dropped before either —
+        // clears the same entry exactly once.
+        let _guard = PendingGuard {
+            pending: Arc::clone(&self.pending),
+            id,
+        };
 
         let sent = self.outgoing.send(json!({
             "jsonrpc": "2.0",
@@ -777,8 +854,6 @@ impl Client {
             "params": params,
         }));
         if sent.is_err() {
-            self.locked_pending().remove(&id);
-
             return Err(ClientError::Disconnected {
                 id: self.id.clone(),
             });
@@ -801,6 +876,28 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// Sends `signal` to the process group led by `pid`.
+///
+/// The same call `tool/shell.rs` and `mcp.rs` make, for the same reason:
+/// `pid` comes from `Child::id` for a child spawned with `process_group(0)`,
+/// which makes it the leader of a fresh group holding the server and
+/// everything it forked, and a signal to the leader alone would leave the
+/// rest running.
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: libc::c_int) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+
+    // SAFETY: `killpg` reads no memory and owns no resource — it takes two
+    // integers and returns one. `pid` names a group this process created
+    // with `process_group(0)` and has not yet reaped, so it cannot have been
+    // recycled onto some unrelated process.
+    unsafe {
+        libc::killpg(pid, signal);
     }
 }
 
@@ -1128,8 +1225,8 @@ mod tests {
     use tokio::time::Instant;
 
     use super::{
-        DIAGNOSTICS_DEBOUNCE, DOCUMENT_WAIT_TIMEOUT, Store, configuration, end_position, file_path,
-        split_lines, sync_kind, uri,
+        Client, DIAGNOSTICS_DEBOUNCE, DIAGNOSTICS_REQUEST_TIMEOUT, DOCUMENT_WAIT_TIMEOUT, Pending,
+        Store, configuration, end_position, file_path, split_lines, sync_kind, uri,
     };
 
     /// One error diagnostic, so a publish carries something.
@@ -1277,6 +1374,53 @@ mod tests {
             !store
                 .wait_fresh(&path(), 0, Instant::now(), Duration::ZERO)
                 .await
+        );
+    }
+
+    /// **Regression, pending-map leak.** A request nobody ever answers used
+    /// to leave its `id -> oneshot::Sender` entry in [`Pending`] forever once
+    /// the caller stopped waiting on it — `pull`'s own `tokio::time::timeout`
+    /// drops [`Client::request`]'s future the moment a request runs past
+    /// [`DIAGNOSTICS_REQUEST_TIMEOUT`], and a plain `async fn` has no way to
+    /// clean up when it is dropped mid-`await` instead of returned from. One
+    /// entry leaked per timed-out pull, for the rest of the client's life.
+    ///
+    /// Built directly rather than through [`Client::start`]: nothing here
+    /// needs a real process, only the channel a request goes out on and the
+    /// map its id is tracked in, and every `Client` field is visible to a
+    /// test in this same module. The outgoing queue's receiver is bound to
+    /// `_queue` and held for the whole test — dropping it would fail the
+    /// request immediately instead of leaving it pending, which is not the
+    /// case this is proving.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_request_leaves_no_trace_in_the_pending_map() {
+        let (outgoing, _queue) = tokio::sync::mpsc::unbounded_channel();
+        let pending = Pending::default();
+        let client = Client {
+            id: "fake".to_owned(),
+            root: PathBuf::from("/"),
+            store: std::sync::Arc::new(Store::default()),
+            outgoing,
+            pending: std::sync::Arc::clone(&pending),
+            next_id: std::sync::atomic::AtomicI64::new(1),
+            documents: tokio::sync::Mutex::default(),
+            incremental: false,
+            child: std::sync::Mutex::new(None),
+        };
+
+        let answered = tokio::time::timeout(
+            DIAGNOSTICS_REQUEST_TIMEOUT,
+            client.request("textDocument/diagnostic", json!({})),
+        )
+        .await;
+
+        assert!(answered.is_err(), "nothing in this test ever answers");
+        assert!(
+            pending
+                .lock()
+                .expect("the pending requests are never poisoned")
+                .is_empty(),
+            "a request the caller stopped waiting on must not leave its sender behind"
         );
     }
 
