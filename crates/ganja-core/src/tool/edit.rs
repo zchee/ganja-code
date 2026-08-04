@@ -1205,6 +1205,7 @@ mod tests {
             cancel: CancellationToken::new(),
             call_id: "call_edit".to_owned(),
             files: Arc::new(FileTimes::default()),
+            credentials: None,
             spawn: None,
         }
     }

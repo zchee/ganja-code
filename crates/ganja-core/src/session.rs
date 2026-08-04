@@ -535,6 +535,10 @@ pub(crate) struct Turn {
     pub(crate) root: PathBuf,
     /// Which files this session has read, shared by every call in it.
     pub(crate) files: Arc<FileTimes>,
+    /// Where this build keeps its credentials, handed to every call this turn
+    /// makes so that `read` and `grep` can refuse the file. [`None`] is a turn
+    /// nobody named one to, which every scripted and golden run is.
+    pub(crate) credentials: Option<PathBuf>,
     /// Language servers this session may run. [`None`] is a session whose
     /// config asked for none, and every tool call then completes exactly as it
     /// did before this existed.
@@ -557,7 +561,7 @@ pub(crate) struct Turn {
     /// What a `task` call needs to run a whole second agent loop. [`None`] on a
     /// turn with no agents to spawn, and on every turn a subagent runs — which
     /// is the depth limit, stated where the loop can see it.
-    pub(crate) spawn: Option<Arc<crate::tool::task::Host>>,
+    pub(crate) spawn: Option<Arc<crate::subagent::Host>>,
     /// Write-through and session bookkeeping, when the engine persists.
     /// [`None`] is an in-memory engine, and every hook below is a no-op.
     pub(crate) persist: Option<Persist>,
@@ -581,6 +585,7 @@ pub(crate) struct RootParts {
     pub(crate) cwd: PathBuf,
     pub(crate) root: PathBuf,
     pub(crate) files: Arc<FileTimes>,
+    pub(crate) credentials: Option<PathBuf>,
     pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
     pub(crate) snapshots: Option<Arc<crate::snapshot::Snapshots>>,
     pub(crate) prompt: String,
@@ -589,7 +594,7 @@ pub(crate) struct RootParts {
     pub(crate) events: mpsc::Sender<Event>,
     pub(crate) slot: Arc<Mutex<Option<TurnHandle>>>,
     pub(crate) history: Arc<Mutex<Vec<Message>>>,
-    pub(crate) spawn: Option<Arc<crate::tool::task::Host>>,
+    pub(crate) spawn: Option<Arc<crate::subagent::Host>>,
     pub(crate) persist: Option<Persist>,
 }
 
@@ -636,6 +641,7 @@ impl Turn {
             cwd: parts.cwd,
             root: parts.root,
             files: parts.files,
+            credentials: parts.credentials,
             lsp: parts.lsp,
             snapshots: parts.snapshots,
             prompt: parts.prompt,
@@ -662,9 +668,9 @@ impl Turn {
     /// identified by `(root, server)` and a child in the same project should
     /// reuse what the parent already has warm (see [`Host::lsp`]).
     ///
-    /// [`Spawn::pending`]: crate::tool::task::Spawn::pending
-    /// [`Host::lsp`]: crate::tool::task::Host::lsp
-    pub(crate) fn child(spawn: &crate::tool::task::Spawn, parts: ChildParts) -> Self {
+    /// [`Spawn::pending`]: crate::subagent::Spawn::pending
+    /// [`Host::lsp`]: crate::subagent::Host::lsp
+    pub(crate) fn child(spawn: &crate::subagent::Spawn, parts: ChildParts) -> Self {
         let host = &spawn.host;
 
         Self {
@@ -682,6 +688,9 @@ impl Turn {
             // A fresh read log: what the parent read is not what the child may
             // write over, and the read-before-write rule is per conversation.
             files: Arc::new(FileTimes::default()),
+            // The same store the parent refuses, for the same reason and one
+            // more: nobody is watching a subagent's turn.
+            credentials: host.credentials.clone(),
             lsp: host.lsp.clone(),
             // No snapshots of its own: a patch is a diff of the working tree
             // rather than a record of who wrote to it, so the step of the
@@ -1339,6 +1348,7 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
         cancel: turn.cancel.child_token(),
         call_id: part_id.as_str().to_owned(),
         files: Arc::clone(&turn.files),
+        credentials: turn.credentials.clone(),
         spawn: None,
     };
     let tool = shell::ShellTool::new();
@@ -2284,18 +2294,22 @@ async fn resolve(
             cancel: turn.cancel.child_token(),
             call_id: call.id.clone(),
             files: Arc::clone(&turn.files),
+            credentials: turn.credentials.clone(),
             // Built per call because a subagent reports its progress on *this*
             // part, and the part is what a frontend renders the child's one
             // inline row from.
-            spawn: turn.spawn.as_ref().map(|host| crate::tool::task::Spawn {
-                host: Arc::clone(host),
-                events: turn.events.clone(),
-                // Shared with this turn: the parent is blocked inside the call
-                // for as long as the child runs, so the slot is the child's to
-                // ask through and a reply addressed to the parent reaches it.
-                pending: Arc::clone(&turn.pending),
-                message_id: assistant.id.clone(),
-                part_id: call.part_id.clone(),
+            spawn: turn.spawn.as_ref().map(|host| {
+                Arc::new(crate::subagent::Spawn {
+                    host: Arc::clone(host),
+                    events: turn.events.clone(),
+                    // Shared with this turn: the parent is blocked inside the
+                    // call for as long as the child runs, so the slot is the
+                    // child's to ask through and a reply addressed to the
+                    // parent reaches it.
+                    pending: Arc::clone(&turn.pending),
+                    message_id: assistant.id.clone(),
+                    part_id: call.part_id.clone(),
+                }) as Arc<dyn crate::tool::task::Subagents>
             }),
         };
         let running = tool.run(args.clone(), &ctx);
@@ -2709,10 +2723,8 @@ mod tests {
         FinishReason, Message, Part, PartBody, Permissions, Registry, ToolState,
         protocol::Usage,
         provider::{FakeProvider, fake},
-        tool::{
-            FileTimes, Tool, ToolCtx, ToolError, ToolOutput,
-            task::{Host, Spawn},
-        },
+        subagent::{Host, Spawn},
+        tool::{FileTimes, Tool, ToolCtx, ToolError, ToolOutput},
     };
 
     /// A tool that marks the filesystem the moment its body runs.
@@ -2777,6 +2789,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             root: std::env::temp_dir(),
             files: Arc::new(FileTimes::default()),
+            credentials: None,
             lsp: None,
             snapshots: None,
             prompt: "run it".to_owned(),
@@ -3022,6 +3035,11 @@ mod tests {
         );
     }
 
+    /// Where the fixture parent's credentials sit, which is nowhere: the guard
+    /// compares paths, and what the child must inherit is the *answer*, not a
+    /// file.
+    const PARENTS_STORE: &str = "/nonexistent/ganja/auth.json";
+
     /// A [`Spawn`] as a `task` call hands one over. The parent is blocked
     /// inside that call, which is what makes its pending-reply cell free for
     /// the child to use and its language servers worth reusing.
@@ -3044,6 +3062,7 @@ mod tests {
             prompt_suffix: None,
             cwd: std::env::temp_dir(),
             root: std::env::temp_dir(),
+            credentials: Some(PARENTS_STORE.into()),
             lsp,
             persistence: None,
         };
@@ -3160,6 +3179,21 @@ mod tests {
         assert!(
             turn.spawn.is_none(),
             "one level, fixed — and fixed here rather than asked about later"
+        );
+    }
+
+    /// A subagent runs unattended, so it is the last conversation that should
+    /// be able to read a key off the disk: it refuses the same store its parent
+    /// does, and refuses it because it was told which one that is.
+    #[test]
+    fn a_child_turn_refuses_the_same_credential_store_the_parent_does() {
+        let (spawn, _parent) = parent_spawn(None);
+        let (turn, _events) = child_of(&spawn);
+
+        assert_eq!(
+            turn.credentials.as_deref(),
+            Some(std::path::Path::new(PARENTS_STORE)),
+            "a child handed no store would read one the parent refuses"
         );
     }
 

@@ -467,8 +467,8 @@ mod tests {
 
     use super::{Agent, AgentError, BUILD, EXPLORE, EXPLORE_PROMPT, GENERAL, PLAN, Registry};
     use crate::{
-        config::{AgentConfig, AgentMode, Config, Overrides, PermissionConfig},
-        permission::{Action, Rule},
+        config::{AgentConfig, AgentMode, Config, Overrides},
+        permission::{Action, PermissionConfig, Rule},
     };
 
     /// The agents a config defines, by name — the type [`Config::agent`] holds,

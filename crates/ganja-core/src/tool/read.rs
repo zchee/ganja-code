@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, is_credential_store, truncate};
+use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
 
 /// How many lines a call reads when it names no `limit`. Upstream's
 /// `DEFAULT_READ_LIMIT`.
@@ -94,7 +94,7 @@ impl Tool for ReadTool {
         // Checked before the file is stat'ed, so a store that has not been
         // written yet is refused exactly like one that has: what the model
         // learns must not depend on whether this machine is logged in.
-        if is_credential_store(&filepath) {
+        if ctx.is_credential_store(&filepath) {
             return Err(credential_refusal(&filepath));
         }
         let title = display(&ctx.cwd, &filepath);
@@ -537,17 +537,35 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::ReadTool;
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError, credential_store};
+    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
 
-    /// A context rooted at `cwd`, with a fresh, empty read log.
+    /// A context rooted at `cwd`, with a fresh, empty read log and no
+    /// credential store to refuse.
     fn ctx(cwd: PathBuf) -> ToolCtx {
         ToolCtx {
             cwd,
             cancel: CancellationToken::new(),
             call_id: "call-1".to_owned(),
             files: Arc::new(FileTimes::default()),
+            credentials: None,
             spawn: None,
         }
+    }
+
+    /// The same, told where the credentials are — which is what the engine
+    /// hands every call, and the only thing the guard tests below need.
+    fn guarding(cwd: PathBuf, store: &std::path::Path) -> ToolCtx {
+        ToolCtx {
+            credentials: Some(store.to_owned()),
+            ..ctx(cwd)
+        }
+    }
+
+    /// Where a fixture's credential store sits. Deliberately never written:
+    /// what the model learns must not depend on whether this machine is logged
+    /// in, so the guard answers for a store that is not there yet.
+    fn store_in(dir: &std::path::Path) -> PathBuf {
+        dir.join("ganja").join("auth.json")
     }
 
     #[tokio::test]
@@ -849,12 +867,12 @@ mod tests {
     #[tokio::test]
     async fn ganjas_credential_store_is_refused_by_absolute_path() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        let store = credential_store().expect("this machine has a home directory");
+        let store = store_in(dir.path());
 
         let refused = ReadTool
             .run(
                 serde_json::json!({ "filePath": store.to_str().unwrap() }),
-                &ctx(dir.path().to_owned()),
+                &guarding(dir.path().to_owned(), &store),
             )
             .await
             .expect_err("the credential store is never readable");
@@ -875,14 +893,15 @@ mod tests {
 
     #[tokio::test]
     async fn ganjas_credential_store_is_refused_through_a_relative_route_onto_it() {
-        let store = credential_store().expect("this machine has a home directory");
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let store = store_in(dir.path());
         let directory = store.parent().expect("the store lives in a directory");
         let name = store.file_name().expect("the store is a file");
 
         let refused = ReadTool
             .run(
                 serde_json::json!({ "filePath": name.to_str().unwrap() }),
-                &ctx(directory.to_owned()),
+                &guarding(directory.to_owned(), &store),
             )
             .await
             .expect_err("a relative route onto the store is still the store");
@@ -905,7 +924,7 @@ mod tests {
         let out = ReadTool
             .run(
                 serde_json::json!({ "filePath": namesake.to_str().unwrap() }),
-                &ctx(dir.path().to_owned()),
+                &guarding(dir.path().to_owned(), &store_in(dir.path())),
             )
             .await
             .expect("the guard is identity-based: any other auth.json still reads");
