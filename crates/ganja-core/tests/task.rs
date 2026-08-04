@@ -504,6 +504,78 @@ async fn delegating_asks_about_the_named_subagent_and_an_always_covers_the_tool(
     );
 }
 
+/// An "always" is an answer about the turn the person was watching. It must
+/// not travel down to a subagent: the whole point of delegating is that nobody
+/// is watching the child, and a stored allow reaching it would turn one
+/// supervised "yes" into standing permission for every later delegation.
+///
+/// The tool here is one the child's own agent says nothing about, so the only
+/// thing that could authorize the child's call is the answer given about the
+/// parent's.
+#[tokio::test]
+async fn an_always_the_parent_was_given_does_not_authorize_the_child() {
+    let (provider, _) = Recorder::new(vec![
+        // The parent's own call, answered "always".
+        calls("webfetch", json!({ "url": "https://example.test" })),
+        says("fetched it"),
+        // A later turn delegates, and the child tries the same call.
+        delegates("general"),
+        calls("webfetch", json!({ "url": "https://example.test" })),
+        says("the child is done"),
+        says("so is the parent"),
+    ]);
+    let (webfetch, fetches) = Canned::new("webfetch");
+    let engine = engine(provider, vec![webfetch], &Config::default());
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "fetch it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain_answering(&engine, &mut events, PermissionReply::Always).await;
+
+    let stored = engine
+        .permissions()
+        .lock()
+        .expect("the rules are never poisoned")
+        .relevant("webfetch");
+    assert!(
+        stored
+            .iter()
+            .any(|rule| rule.permission == "webfetch" && rule.pattern == "*"),
+        "the parent really is holding an always-allow, or this proves nothing: {stored:?}"
+    );
+    assert_eq!(
+        *fetches.lock().expect("the call log"),
+        1,
+        "the parent's own call ran"
+    );
+
+    engine
+        .send(Command::SendPrompt {
+            text: "delegate it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("a finished turn leaves the engine idle");
+    let seen = drain_answering(&engine, &mut events, PermissionReply::Once).await;
+
+    let asked: Vec<String> = seen
+        .iter()
+        .filter_map(|event| match event {
+            Event::PermissionRequested { tool, .. } => Some(tool.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        asked.iter().any(|tool| tool == "webfetch"),
+        "the child's call had to be asked about on its own: {asked:?}"
+    );
+}
+
 /// A refusal the parent session is under has to reach what the parent
 /// delegates. Otherwise "take this tool away" would mean "take it away unless
 /// you ask somebody else to use it".
