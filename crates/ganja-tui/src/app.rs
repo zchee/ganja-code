@@ -1048,7 +1048,7 @@ impl App {
             .saturating_add(usage.output_tokens);
 
         if let Some(model) = catalog::model(&self.model) {
-            *self.totals.cost_usd.get_or_insert(0.0) += catalog::cost(usage, model).total_usd;
+            *self.totals.cost_usd.get_or_insert(0.0) += catalog::cost(usage, &model).total_usd;
         }
 
         self.status.set_totals(self.totals);

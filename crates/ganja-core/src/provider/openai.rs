@@ -764,7 +764,7 @@ mod tests {
             ..corrected
         };
 
-        let billed = catalog::cost(&corrected, model).total_usd;
+        let billed = catalog::cost(&corrected, &model).total_usd;
         let expected = model.pricing.input * 0.2 + model.pricing.cache_read * 0.8;
 
         assert!(
@@ -774,7 +774,7 @@ mod tests {
             model.pricing.cache_read,
         );
         assert!(
-            catalog::cost(&doubled, model).total_usd > billed * 3.0,
+            catalog::cost(&doubled, &model).total_usd > billed * 3.0,
             "the old counts over-reported by more than a factor of three, which is \
              the size of the error this pins"
         );

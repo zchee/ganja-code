@@ -31,6 +31,9 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 | `passthrough.rs` | `!` passthrough: the exact synthetic user text, the `bash` part completing with the output and no exit code, ungated even where a rule refuses the model, and a cancel that stops the command. |
 | `commands.rs` | Slash commands, compaction on demand, and starting over: `/init` writing `AGENTS.md` through the ordinary loop, argument expansion reaching the prompt, a configured command, and `NewSession` leaving the old session on disk. |
 | `mentions.rs` | `@file`: the reference on the message, the content in the request, read at **send** time (a file rewritten between two turns reaches the model rewritten), and never recorded as a read. |
+| `catalog_fetch.rs` | The catalog against a real socket: the startup loop fetches, the payload parses through fields this build has never heard of, the table is replaced wholesale, the body is cached verbatim under a name derived from the source, and the five-minute debounce keeps a second refresh off the wire. Mutates environment variables — one test, one binary. |
+| `catalog_offline.rs` | Fetching disabled and nothing cached: the compiled-in snapshot answers every question, and a loopback listener that would have counted a request counts none. Mutates environment variables — one test, one binary. |
+| `catalog_retry.rs` | A refused catalog request is retried twice and then reported as the status it gave up on, and a refresh that failed leaves the table it started with. Mutates environment variables — one test, one binary. |
 
 ## Subdirectories
 

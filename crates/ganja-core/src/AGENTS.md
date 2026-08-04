@@ -20,7 +20,7 @@ The engine's modules. The shape to hold in mind: `engine.rs` accepts commands an
 | `permission.rs` | Decides which tool calls run unasked, which wait for the user, and which are refused outright (`deny`); layers builtin defaults < agent rules < config rules < stored "always" answers, last match winning; persists "always" answers per project. |
 | `auth.rs` | Provider credentials: environment first, then `auth.json` under the XDG data directory. |
 | `project.rs` | Which project a working directory belongs to (walk up for `.git`), and where its state lives. |
-| `catalog.rs` | Compiled-in models.dev snapshot: context windows, max output, pricing, per-provider default model. |
+| `catalog.rs` | Context windows, max output and pricing, from a fetched catalog cached under the XDG **cache** directory, falling back to a compiled-in snapshot that never fails. `RwLock<Arc<_>>` behind the accessor functions, so `refresh` swaps the whole table. Per-provider default models stay compiled in — the published catalog has no such concept. |
 | `storage.rs` | Versioned JSON session storage under the project data directory: envelopes with an explicit version, write-through, quarantine-on-corrupt. Session records carry the agent and model a resume restores. |
 | `config.rs` | `ganja.jsonc`/`ganja.json`: discovery (global dir, `GANJA_CONFIG`, project walk-up), JSONC decode of the curated keys, tier merge with flag overrides on top. Unknown top-level keys are refused by name; permission rule order survives exactly as written. |
 | `command.rs` | Slash commands: the builtin `/init` plus whatever `config.command` describes, and the `$1`/`$ARGUMENTS` expansion that turns one into a prompt. |
