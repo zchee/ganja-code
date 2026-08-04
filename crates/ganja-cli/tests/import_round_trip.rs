@@ -12,12 +12,12 @@
 //! `XDG_DATA_HOME` are redirected into a temporary tree, so the machine running
 //! the suite cannot contribute a config of its own.
 
-use std::{env, fs};
+use std::{env, fs, num::NonZeroU64};
 
 use assert_cmd::Command;
 use ganja_core::{
     Config,
-    config::{AgentMode, CONFIG_ENV},
+    config::{AgentMode, CONFIG_ENV, LspConfig, McpServer},
     permission::Action,
 };
 
@@ -128,4 +128,72 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
     assert_eq!(release.description.as_deref(), Some("tag and push"));
     assert_eq!(release.agent.as_deref(), Some("build"));
     assert_eq!(release.model, None);
+
+    // The MCP and LSP entries are the half `validate` cannot prove on its own:
+    // decoding is not the whole of what `Config::load` does to them, and the
+    // rules it applies beyond decoding — a server with no program, a custom
+    // language server with no extensions, an endpoint whose headers would go
+    // out in the clear — are refusals this file has already got past by being
+    // read at all.
+    let McpServer::Local(fs) = &config.mcp["fs"] else {
+        panic!("the local server stayed local: {:?}", config.mcp["fs"]);
+    };
+    assert_eq!(fs.command, ["mcp-fs", "--root", "."]);
+    assert_eq!(fs.cwd.as_deref(), Some("./servers"));
+    assert_eq!(fs.environment["MCP_FS_MODE"], "ro");
+    assert!(fs.enabled);
+    assert_eq!(fs.timeout.map(NonZeroU64::get), Some(45_000));
+
+    let McpServer::Remote(docs) = &config.mcp["docs"] else {
+        panic!("the remote server stayed remote: {:?}", config.mcp["docs"]);
+    };
+    assert_eq!(docs.url, "https://mcp.example.invalid/mcp");
+    assert_eq!(
+        docs.headers["Authorization"], "Bearer {env:DOCS_TOKEN}",
+        "a header holding a token is carried verbatim, never expanded"
+    );
+    assert!(
+        !config.mcp.contains_key("legacy"),
+        "an entry naming no type described no server"
+    );
+
+    let Some(LspConfig::Servers(servers)) = &config.lsp else {
+        panic!("the lsp map survived as a map: {:?}", config.lsp);
+    };
+    assert!(servers["rust"].disabled);
+    assert_eq!(servers["rust"].command, None);
+    assert_eq!(
+        servers["nickel"].command.as_deref(),
+        Some(&["nls".to_owned()][..])
+    );
+    assert_eq!(
+        servers["nickel"].extensions.as_deref(),
+        Some(&[".ncl".to_owned()][..])
+    );
+    assert_eq!(servers["nickel"].env["NICKEL_LOG"], "info");
+    assert_eq!(
+        servers["nickel"].initialization,
+        Some(serde_json::json!({"eval": {"limit": 500}})),
+        "an initialization block travels as the document it is"
+    );
+    // What separates these two is not the name — both name one of opencode's
+    // builtins — but whether the entry needed that builtin to mean anything.
+    assert_eq!(
+        servers["deno"].command.as_deref(),
+        Some(&["deno".to_owned(), "lsp".to_owned()][..]),
+        "an entry that describes itself whole is a custom server here"
+    );
+    assert_eq!(
+        servers["deno"].extensions.as_deref(),
+        Some(&[".ts".to_owned(), ".tsx".to_owned()][..])
+    );
+    assert!(
+        !servers.contains_key("typescript"),
+        "an entry leaning on a definition this build does not have was written anyway"
+    );
+
+    assert!(
+        !config.snapshots_enabled(),
+        "an author who told opencode not to track files has not been overruled"
+    );
 }
