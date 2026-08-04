@@ -361,9 +361,13 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
                 });
                 results.push(Turn::answered(call_id, result(state)));
             }
+            // A mentioned file is a *reference*, resolved into a text block
+            // before a request is built (`session::resolve_mentions`); see the
+            // same arm in `anthropic.rs`.
+            //
             // `StepFinish` carries a step's bill rather than content, and
             // `StepStart` was consumed as the boundary this step was cut at.
-            PartBody::StepStart | PartBody::StepFinish { .. } => {}
+            PartBody::File { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => {}
         }
     }
 
@@ -1376,6 +1380,7 @@ mod tests {
             ToolState::Pending,
             ToolState::Running {
                 input: json!({"filePath": "src/main.rs"}),
+                metadata: serde_json::Value::Null,
                 started: 1,
             },
         ] {

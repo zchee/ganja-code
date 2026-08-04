@@ -854,6 +854,7 @@ async fn a_failure_mid_stream_finishes_the_turn_as_failed_and_keeps_the_text() {
     engine
         .send(Command::SendPrompt {
             text: "hi".to_owned(),
+            mentions: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -903,6 +904,7 @@ async fn a_cancel_mid_stream_finishes_the_turn_as_cancelled() {
     engine
         .send(Command::SendPrompt {
             text: "hi".to_owned(),
+            mentions: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

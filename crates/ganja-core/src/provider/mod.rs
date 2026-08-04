@@ -584,6 +584,25 @@ fn require_credential(provider_id: &str, variable: &str) -> Result<ApiKey, Provi
     })
 }
 
+/// Whether the provider `provider_id` serves a model called `model`.
+///
+/// The catalog is the only thing that knows, and it does not know every
+/// provider — the built-in fake one is not in it, and neither is whatever a test
+/// drives. A provider the catalog says nothing about cannot be contradicted, so
+/// any model it is asked for is taken at its word; refusing every switch there
+/// would make the command untestable in exactly the runs that are cheapest to
+/// run.
+pub(crate) fn serves(provider_id: &str, model: &str) -> bool {
+    let mut known = crate::catalog::models()
+        .filter(|known| known.provider_id == provider_id)
+        .peekable();
+
+    match known.peek() {
+        Some(_) => known.any(|known| known.id == model),
+        None => !model.trim().is_empty(),
+    }
+}
+
 /// Reads `variable`, treating an empty value as unset.
 fn setting(variable: &str) -> Option<String> {
     env::var(variable)

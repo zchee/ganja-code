@@ -142,10 +142,15 @@ pub const ASK_BY_DEFAULT: &[&str] = &[
     "edit",
     EXTERNAL_DIRECTORY,
     "shell",
+    TASK,
     "webfetch",
     "websearch",
     "write",
 ];
+
+/// Tool that runs a whole second agent loop, which is why it asks: everything
+/// the subagent goes on to do is done under an answer given here.
+pub const TASK: &str = "task";
 
 /// Tools whose argument is a shell command, and which therefore get a rule per
 /// command rather than one for the whole tool.
@@ -173,6 +178,11 @@ const WORKDIR: &str = "workdir";
 
 /// Argument carrying the URL a fetch would reach.
 const URL: &str = "url";
+
+/// Argument carrying the agent a task call would spawn. Upstream asks with
+/// `patterns: [subagent_type]` (`tool/task.ts`), so a rule can name one
+/// subagent without naming the rest.
+const SUBAGENT_TYPE: &str = "subagent_type";
 
 /// Argument carrying the file a write or an edit would change. Upstream's
 /// camelCase spelling, because the model is what sends it.
@@ -497,6 +507,56 @@ impl Permissions {
         self.baseline = rules;
     }
 
+    /// A second ruleset for the same project, judging by `baseline` instead of
+    /// this one's.
+    ///
+    /// Everything a person decided comes across unchanged, and so does the
+    /// store, so an "always" given inside the derived set outlives the process
+    /// exactly as one given outside it would. What does *not* come across is
+    /// the baseline: the caller is running as somebody else — a subagent, or a
+    /// command that named its own agent — and that is the whole point of
+    /// deriving rather than sharing.
+    #[must_use]
+    pub(crate) fn derive(&self, baseline: Vec<Rule>) -> Self {
+        Self {
+            baseline,
+            rules: self.rules.clone(),
+            store: self.store.clone(),
+            root: self.root.clone(),
+            cwd: self.cwd.clone(),
+        }
+    }
+
+    /// The rules a subagent inherits from the session that spawned it.
+    ///
+    /// Upstream's `deriveSubagentSessionPermission`
+    /// (`agent/subagent-permissions.ts`): only refusals and the location gate
+    /// travel down. A parent's *allows* deliberately do not — a subagent runs
+    /// unattended, and inheriting "yes, run cargo" from a dialog the user
+    /// answered about the parent's own work would hand that answer to work
+    /// nobody watched.
+    ///
+    /// Ganja reads the whole ordered set rather than upstream's session tier
+    /// alone (deviation: subagent-inherits-every-deny), because a ganja session
+    /// has no way to hold a deny of its own: config denies land in the agent's
+    /// baseline, and a config that took `webfetch` away from the session has to
+    /// take it away from what the session delegates.
+    #[must_use]
+    pub(crate) fn inherited_by_subagent(&self) -> Vec<Rule> {
+        self.ordered()
+            .filter(|rule| rule.action == Action::Deny || rule.permission == EXTERNAL_DIRECTORY)
+            .cloned()
+            .collect()
+    }
+
+    /// Whether any rule here has an opinion about `permission`, which is what
+    /// decides whether a subagent's ruleset gets the `task`/`todowrite` denials
+    /// appended (upstream's "unless the set mentions it").
+    #[must_use]
+    pub(crate) fn baseline_mentions(rules: &[Rule], permission: &str) -> bool {
+        rules.iter().any(|rule| rule.permission == permission)
+    }
+
     /// What to do with a call to `tool` carrying `args`.
     #[must_use]
     pub fn check(&self, tool: &str, args: &serde_json::Value) -> Decision {
@@ -751,6 +811,9 @@ impl Permissions {
         if FILE_LIKE.contains(&tool) {
             return vec![self.file_pattern(args).unwrap_or_else(|| ANY.to_owned())];
         }
+        if tool == TASK {
+            return vec![argument(SUBAGENT_TYPE).unwrap_or_else(|| ANY.to_owned())];
+        }
 
         vec![ANY.to_owned()]
     }
@@ -830,7 +893,12 @@ enum StoreError {
 }
 
 /// The file a project's rules live in.
-#[derive(Debug)]
+///
+/// Cloneable because a derived ruleset — a subagent's, or a command running as
+/// another agent — answers for the same project and persists an "always" to the
+/// same file. Two handles on one path is what the file format already tolerates:
+/// [`Store::remember`] re-reads before it writes.
+#[derive(Clone, Debug)]
 struct Store {
     path: PathBuf,
 }
