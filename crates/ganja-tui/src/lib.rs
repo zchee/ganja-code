@@ -5,23 +5,40 @@
 //! [`Event`](ganja_core::Event)s into frames.
 
 pub mod app;
+pub mod command;
 pub mod component;
 pub mod event;
+pub mod keybind;
 pub mod theme;
 
-use std::io::stdout;
+use std::{
+    io::stdout,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context as _, Result};
-use ganja_core::{Engine, Message, Project, SessionId, Storage, provider};
+use ganja_core::{
+    AgentRegistry, Engine, Message, Project, SessionId, Storage,
+    config::{Config, Overrides, ThemeMode},
+    instruction, provider,
+};
 use ratatui::crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
 };
 
-use crate::{app::App, theme::Themes};
+use crate::{
+    app::App,
+    keybind::Keybinds,
+    theme::{Mode, Themes},
+};
 
 /// Directory the session store lives in, under the project's data directory.
 const STORAGE: &str = "storage";
+
+/// Separates the things the status bar shows on its left.
+const NOTICE_SEPARATOR: &str = " \u{b7} ";
 
 /// Which stored session a run opens, when it opens one.
 ///
@@ -37,10 +54,15 @@ pub enum Resume {
 
 /// Runs the interactive terminal UI until the user quits.
 ///
-/// `resume` opens a stored session instead of starting a fresh one. It is
-/// resolved *before* the terminal is taken over, so a resume that cannot be
-/// honored reaches the shell as a readable error rather than flashing past
-/// inside the alternate screen.
+/// `resume` opens a stored session instead of starting a fresh one, and
+/// `overrides` carries what the command line decided — the tier above every
+/// config file and above the environment between them.
+///
+/// Everything that can refuse does so *before* the terminal is taken over: a
+/// config file that will not parse, a key binding this build cannot read, a
+/// provider it does not ship, an agent roster that leaves nothing to start on,
+/// a resume naming a session that is not there. All of them reach the shell as
+/// a readable error rather than flashing past inside the alternate screen.
 ///
 /// The terminal is restored on every exit path, including a panic: the hook
 /// installed here undoes mouse capture and then defers to the one
@@ -49,12 +71,18 @@ pub enum Resume {
 ///
 /// # Errors
 ///
-/// Returns an error if `GANJA_PROVIDER` names a provider this build does not
-/// have, if `resume` names a session this project's store does not hold, or if
-/// the terminal cannot be initialized, drawn to, read from, or restored.
-pub async fn run(resume: Option<Resume>) -> Result<()> {
-    let selection = provider::from_env().context("failed to select a provider")?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+/// Returns an error for any of the refusals above, and if the terminal cannot
+/// be initialized, drawn to, read from, or restored.
+pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = Config::load_with(&cwd, &overrides).context("failed to read the configuration")?;
+    let keys =
+        Keybinds::from_config(&config.keybinds).context("failed to read the key bindings")?;
+    let selection = provider::select(&config).context("failed to select a provider")?;
+    let agents = Arc::new(AgentRegistry::build(&config).context("failed to resolve the agents")?);
+    // Captured before the provider is handed to the engine: the model list is
+    // narrowed to this provider, and `Selection` gives it up on the move.
+    let provider_id = selection.provider.id().to_owned();
     // Sessions live per project, so opening `src/` and opening the repository
     // root reach the same history.
     let storage = Storage::open(
@@ -71,26 +99,36 @@ pub async fn run(resume: Option<Resume>) -> Result<()> {
     let engine = Engine::persistent(
         selection.provider,
         selection.model.clone(),
-        std::sync::Arc::new(ganja_core::Registry::with_builtins()),
+        Arc::new(ganja_core::Registry::with_builtins()),
         ganja_core::Permissions::load(&cwd),
         storage,
-    );
+    )
+    .with_agents(agents);
+    let (base, suffix) = system_parts(&config, &cwd, &selection.model);
+    let engine = engine.with_system_parts(base, suffix);
 
     let seed = match resume {
         Some(resume) => stored_transcript(&engine, resume).await?,
         None => Vec::new(),
     };
 
-    // The builtins, the user's own themes, and the theme they last picked.
-    // Resolved before the terminal is taken over, like the resume above: a
-    // warning about a theme file that would not load is worth reading, and it
-    // is unreadable once the alternate screen is up.
-    let themes = Themes::load();
+    // The builtins, the user's own themes, and the theme they last picked —
+    // then whatever the config asks for on top, because a `theme` written in a
+    // file outranks a runtime pick permanently rather than until the next one.
+    let mut themes = Themes::load();
+    let theme_notice = configure_themes(&mut themes, &config);
 
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_mouse() {
         Ok(()) => {
-            let mut app = App::new(engine, selection.model, selection.notice, themes);
+            let mut app = App::new(
+                engine,
+                selection.model,
+                notice(selection.notice, theme_notice),
+                themes,
+            )
+            .with_provider(provider_id)
+            .with_keybinds(keys);
             app.seed(seed);
             app.run(&mut terminal).await
         }
@@ -99,6 +137,61 @@ pub async fn run(resume: Option<Resume>) -> Result<()> {
     let restored = restore();
 
     outcome.and(restored)
+}
+
+/// The two halves of the system prompt a session runs under.
+///
+/// The base half is handed over **explicitly** rather than left to [`None`].
+/// `Engine::system_for` resolves an agent's own prompt *or* the base one, and
+/// both agents a session can start on — `build` and `plan` — deliberately have
+/// no prompt of their own: what makes `plan` plan is a reminder injected per
+/// turn, not a system prompt. Passing [`None`] here would leave every one of
+/// their turns carrying the environment block and nothing else.
+///
+/// The suffix is the half no agent replaces, so a switch swaps the first and
+/// keeps this one.
+fn system_parts(config: &Config, cwd: &Path, model: &str) -> (Option<String>, Option<String>) {
+    (
+        Some(instruction::base_prompt(model).to_owned()),
+        instruction::suffix(config, cwd, model),
+    )
+}
+
+/// Applies `config`'s theme and mode, answering with anything worth saying
+/// about it.
+///
+/// A `theme` naming something this build does not have leaves the default in
+/// place and says so, rather than failing the run: a custom theme file the
+/// user deleted should cost them that theme, exactly as a malformed one does,
+/// and not their session (deviation: config-theme-unknown-is-a-notice).
+fn configure_themes(themes: &mut Themes, config: &Config) -> Option<String> {
+    // The mode goes first so that the selection below resolves in the arm the
+    // config asked for rather than in the default one.
+    if let Some(mode) = config.theme_mode {
+        themes.set_mode(match mode {
+            ThemeMode::Dark => Mode::Dark,
+            ThemeMode::Light => Mode::Light,
+        });
+    }
+
+    let name = config.theme.as_deref()?;
+    if themes.select(name).is_none() {
+        return Some(format!(
+            "no theme named {name:?}; using {}",
+            themes.active()
+        ));
+    }
+
+    None
+}
+
+/// The status bar's opening line: whatever startup had to say, in one string.
+fn notice(provider: Option<String>, theme: Option<String>) -> Option<String> {
+    match (provider, theme) {
+        (None, None) => None,
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (Some(provider), Some(theme)) => Some(format!("{provider}{NOTICE_SEPARATOR}{theme}")),
+    }
 }
 
 /// Installs the session `resume` names and hands back its transcript.
@@ -154,11 +247,13 @@ mod tests {
 
     use ganja_core::{
         Engine, Message, Storage,
+        config::{Config, ThemeMode},
         provider::{FakeProvider, fake},
     };
     use tempfile::TempDir;
 
-    use super::{Resume, stored_transcript};
+    use super::{Resume, configure_themes, notice, stored_transcript, system_parts};
+    use crate::theme::{Mode, Themes};
 
     /// A persistent engine over an empty store in `directory`.
     fn engine(directory: &TempDir) -> Engine {
@@ -294,5 +389,142 @@ mod tests {
                 .collect::<String>(),
             "the older conversation"
         );
+    }
+
+    /// A registry whose stored pick is `stored`, read back through the same
+    /// file a previous run would have written.
+    fn with_stored_pick(directory: &TempDir, stored: &str) -> Themes {
+        let store = directory.path().join("tui.json");
+
+        let mut previous = Themes::builtin();
+        previous.adopt_store(store.clone());
+        previous
+            .select(stored)
+            .unwrap_or_else(|| panic!("{stored} should be a builtin theme"));
+        previous.persist().expect("the pick stores");
+
+        let mut themes = Themes::builtin();
+        themes.adopt_store(store);
+
+        themes
+    }
+
+    /// The whole point of resolving the config after the store: a `theme`
+    /// written in a file is a standing instruction, where a pick made in the
+    /// dialog is what to do until told otherwise. Dropping the `select` in
+    /// `configure_themes` fails this test.
+    #[test]
+    fn a_theme_named_in_the_config_outranks_the_one_that_was_last_picked() {
+        let directory = temporary();
+        let mut themes = with_stored_pick(&directory, "gruvbox");
+        assert_eq!(themes.active(), "gruvbox", "the stored pick should load");
+
+        let complaint = configure_themes(
+            &mut themes,
+            &Config {
+                theme: Some("tokyonight".to_owned()),
+                ..Config::default()
+            },
+        );
+
+        assert_eq!(complaint, None);
+        assert_eq!(themes.active(), "tokyonight");
+    }
+
+    #[test]
+    fn a_stored_pick_stands_when_the_config_names_no_theme() {
+        let directory = temporary();
+        let mut themes = with_stored_pick(&directory, "aura");
+
+        assert_eq!(configure_themes(&mut themes, &Config::default()), None);
+        assert_eq!(themes.active(), "aura");
+    }
+
+    /// **D3**: ganja has no terminal auto-detection, so the config key is the
+    /// only thing that moves off dark.
+    #[test]
+    fn the_configured_mode_is_the_arm_themes_resolve_in_and_dark_is_the_default() {
+        let mut themes = Themes::builtin();
+        assert_eq!(themes.mode(), Mode::Dark);
+
+        configure_themes(
+            &mut themes,
+            &Config {
+                theme_mode: Some(ThemeMode::Light),
+                ..Config::default()
+            },
+        );
+
+        assert_eq!(themes.mode(), Mode::Light);
+    }
+
+    /// A custom theme the user deleted should cost them that theme, not their
+    /// session — the same call the loader makes for one that will not parse.
+    #[test]
+    fn a_configured_theme_this_build_does_not_have_is_reported_rather_than_fatal() {
+        let mut themes = Themes::builtin();
+
+        let complaint = configure_themes(
+            &mut themes,
+            &Config {
+                theme: Some("a-theme-nobody-shipped".to_owned()),
+                ..Config::default()
+            },
+        )
+        .expect("an unknown theme should be worth saying something about");
+
+        assert!(
+            complaint.contains("a-theme-nobody-shipped"),
+            "the complaint should name it: {complaint}"
+        );
+        assert_eq!(themes.active(), crate::theme::DEFAULT_THEME);
+    }
+
+    /// The engine resolves an agent's own prompt *or* the base one, and the
+    /// two agents a session can start on have no prompt of their own — so the
+    /// base half has to be handed over rather than left to [`None`], which
+    /// would leave their turns carrying the environment block alone.
+    #[test]
+    fn the_system_prompt_carries_the_base_half_a_promptless_agent_falls_back_to() {
+        let directory = temporary();
+
+        for model in ["claude-sonnet-5", "gpt-5.6", "something-else"] {
+            let (base, suffix) = system_parts(&Config::default(), directory.path(), model);
+
+            assert_eq!(
+                base.as_deref(),
+                Some(ganja_core::instruction::base_prompt(model)),
+                "{model} should carry its family's prompt"
+            );
+            assert!(
+                base.is_some_and(|base| !base.trim().is_empty()),
+                "{model}: an empty base prompt would pass the check above and say nothing"
+            );
+            assert!(
+                suffix.is_some(),
+                "{model}: the environment block always says something"
+            );
+        }
+    }
+
+    #[test]
+    fn the_opening_notice_carries_whatever_startup_had_to_say() {
+        let cases = [
+            (None, None, None),
+            (Some("provider"), None, Some("provider")),
+            (None, Some("theme"), Some("theme")),
+            (
+                Some("provider"),
+                Some("theme"),
+                Some("provider \u{b7} theme"),
+            ),
+        ];
+
+        for (provider, theme, expected) in cases {
+            assert_eq!(
+                notice(provider.map(str::to_owned), theme.map(str::to_owned)).as_deref(),
+                expected
+            );
+        }
     }
 }

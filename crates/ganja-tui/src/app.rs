@@ -28,15 +28,21 @@ use ratatui::{
 };
 
 use crate::{
+    command,
     component::{
         chat::{Chat, WHEEL_LINES},
+        dropdown::{self, Dropdown},
         editor::{self, Editor},
+        help::Help,
+        list::{self, ListDialog},
+        palette::Palette,
         permission::Permission,
         sessions::{self, Sessions},
         status::{Activity, Status, Totals},
         themes::ThemeList,
     },
     event::AppEvent,
+    keybind::{self, Keybinds},
     theme::{Theme, Themes},
 };
 
@@ -48,6 +54,30 @@ pub const FRAME: Duration = Duration::from_millis(16);
 const NEWLINE_MODIFIERS: KeyModifiers = KeyModifiers::SHIFT
     .union(KeyModifiers::ALT)
     .union(KeyModifiers::CONTROL);
+
+/// Modifiers that stop a printable key from reaching a filter line: they mean
+/// the key is a shortcut rather than a character.
+const SHORTCUT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL.union(KeyModifiers::ALT);
+
+/// Which list a dialog is showing, and therefore what choosing a row sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chooser {
+    /// The provider's catalog models.
+    Models,
+    /// The agents this session may run as.
+    Agents,
+}
+
+/// Whether the editor itself would do something with `key`.
+///
+/// The one exit binding that is also an editing key. Upstream gates its whole
+/// exit binding on an empty-or-unfocused prompt; ganja gates the half that
+/// would otherwise take a keystroke away from typing, and leaves Ctrl-C and
+/// Ctrl-Q the unconditional interrupts they have always been here
+/// (deviation: exit-gate-only-for-editing-keys).
+fn edits(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('d') && key.modifiers == KeyModifiers::CONTROL
+}
 
 /// The reply a key sends while the permission dialog is open, or [`None`]
 /// for a key the dialog swallows without acting on it. Pulled out of
@@ -64,12 +94,22 @@ fn permission_reply(code: KeyCode) -> Option<PermissionReply> {
 /// The whole terminal application.
 pub struct App {
     engine: Engine,
+    /// Provider this session runs on, which is what the model list is narrowed
+    /// to: switching model is same-provider only, so offering the rest of the
+    /// catalog would be offering refusals.
+    provider: String,
     /// Model the engine asks for, kept here because pricing a turn needs it and
     /// the engine's copy is not the frontend's business.
     model: String,
+    /// Agent the next turn runs as, [`None`] on a session built without a
+    /// registry. Tracked here rather than read back per frame because this is
+    /// the side that issues the switches.
+    agent: Option<String>,
     chat: Chat,
     editor: Editor,
     status: Status,
+    /// Which keys reach which actions this run.
+    keys: Keybinds,
     /// The tool call currently waiting on the user's decision, if any.
     permission: Option<Permission>,
     /// The stored sessions the user is choosing between, while the picker is
@@ -77,6 +117,18 @@ pub struct App {
     sessions: Option<Sessions>,
     /// The themes the user is choosing between, while that picker is open.
     theme_list: Option<ThemeList>,
+    /// The models or agents the user is choosing between, and which of the two
+    /// the list is.
+    chooser: Option<(Chooser, ListDialog)>,
+    /// The command palette, while it is open.
+    palette: Option<Palette>,
+    /// What was typed into the palette's filter, kept across a close so that
+    /// reopening does not mean typing it again.
+    palette_filter: String,
+    /// The reference card, while it is open.
+    help: Option<Help>,
+    /// The inline command menu, while the buffer is a command being typed.
+    dropdown: Option<Dropdown>,
     /// Every theme this run can switch to, and which one is active.
     themes: Themes,
     theme: Theme,
@@ -106,16 +158,27 @@ impl App {
         mut themes: Themes,
     ) -> Self {
         let theme = themes.theme();
+        let agent = engine.agent();
+        let mut status = Status::new(notice);
+        status.set_agent(agent.clone());
 
         Self {
             engine,
+            provider: String::new(),
             model: model.into(),
+            agent,
             chat: Chat::default(),
             editor: Editor::new(&theme),
-            status: Status::new(notice),
+            status,
+            keys: Keybinds::defaults(),
             permission: None,
             sessions: None,
             theme_list: None,
+            chooser: None,
+            palette: None,
+            palette_filter: String::new(),
+            help: None,
+            dropdown: None,
             themes,
             theme,
             totals: Totals::default(),
@@ -124,6 +187,26 @@ impl App {
             last_draw: Instant::now(),
             quit: false,
         }
+    }
+
+    /// Names the provider the engine was built on.
+    ///
+    /// A builder rather than a constructor argument because it is exactly one
+    /// dialog's business — the model list — and every test that does not open
+    /// that dialog should not have to answer for it.
+    #[must_use]
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = provider.into();
+
+        self
+    }
+
+    /// Uses `keys` instead of the compiled-in bindings.
+    #[must_use]
+    pub fn with_keybinds(mut self, keys: Keybinds) -> Self {
+        self.keys = keys;
+
+        self
     }
 
     /// Fills the transcript from a resumed session's stored `transcript`.
@@ -245,6 +328,12 @@ impl App {
                 // all — showing (upstream `context/theme.tsx:269`).
                 buffer.set_style(area, self.theme.background);
                 self.chat.render(transcript, buffer, &self.theme);
+                // Anchored to the editor and drawn over the transcript, which
+                // is what makes it read as part of what is being typed rather
+                // than as another dialog.
+                if let Some(dropdown) = &self.dropdown {
+                    dropdown.render(prompt, buffer, &self.theme);
+                }
                 // The permission dialog draws last so that it is on top: it is
                 // the one modal a turn is blocked on.
                 if let Some(sessions) = &self.sessions {
@@ -252,6 +341,15 @@ impl App {
                 }
                 if let Some(themes) = &self.theme_list {
                     themes.render(transcript, buffer, &self.theme);
+                }
+                if let Some((_, chooser)) = &self.chooser {
+                    chooser.render(transcript, buffer, &self.theme);
+                }
+                if let Some(palette) = &self.palette {
+                    palette.render(transcript, buffer, &self.theme);
+                }
+                if let Some(help) = &self.help {
+                    help.render(transcript, buffer, &self.theme);
                 }
                 if let Some(permission) = &self.permission {
                     permission.render(transcript, buffer, &self.theme);
@@ -285,9 +383,7 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        if matches!(key.code, KeyCode::Char('c' | 'q'))
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
+        if self.exits(key) {
             self.quit = true;
             return Ok(());
         }
@@ -306,6 +402,16 @@ impl App {
             return Ok(());
         }
 
+        if self.help.is_some() {
+            // Nothing to choose, so both of the keys that mean "done" close
+            // it and everything else is swallowed like any other modal.
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                self.help = None;
+            }
+
+            return Ok(());
+        }
+
         if self.sessions.is_some() {
             self.handle_picker_key(key.code).await;
 
@@ -318,33 +424,369 @@ impl App {
             return Ok(());
         }
 
-        match key.code {
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        if self.chooser.is_some() {
+            self.handle_chooser_key(key.code).await;
+
+            return Ok(());
+        }
+
+        if self.palette.is_some() {
+            self.handle_palette_key(key).await;
+
+            return Ok(());
+        }
+
+        // Not a modal: the menu sits over the transcript while the editor
+        // keeps the cursor, so it claims only the keys that steer it and lets
+        // every other one through to carry on typing.
+        if self.dropdown.is_some() && self.handle_dropdown_key(key).await {
+            return Ok(());
+        }
+
+        match self.keys.action(key) {
+            Some(keybind::Action::PaletteOpen) => {
+                self.open_palette();
+                return Ok(());
+            }
+            Some(keybind::Action::SessionsOpen) => {
                 self.open_picker().await;
+                return Ok(());
             }
-            // Temporary: the command palette is what opens this dialog once it
-            // lands, at which point `/themes` replaces the binding.
-            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(keybind::Action::ThemesOpen) => {
                 self.open_themes();
+                return Ok(());
             }
+            // Tab means "next agent" on an empty buffer only; with something
+            // typed it is the editor's own key, as it is in every editor.
+            Some(keybind::Action::AgentCycle) if self.editor.is_empty() => {
+                self.cycle_agent().await;
+                return Ok(());
+            }
+            // Including an exit binding whose gate said no, which falls
+            // through to the editor below and deletes forward there.
+            _ => {}
+        }
+
+        match key.code {
             // A no-op while idle, which is exactly what Esc should do there.
             KeyCode::Esc => self.engine.send(Command::CancelTurn).await?,
             KeyCode::Enter if key.modifiers.intersects(NEWLINE_MODIFIERS) => {
                 self.editor.insert_newline();
+                self.sync_dropdown();
             }
             KeyCode::Enter => self.submit().await,
             KeyCode::PageUp => self.chat.scroll_pages(-1),
             KeyCode::PageDown => self.chat.scroll_pages(1),
-            KeyCode::End => self.chat.follow_tail(),
-            _ => self.editor.input(key),
+            // The two ends of the line while there is a line, and the two ends
+            // of the conversation while there is not. Upstream layers these on
+            // whether the composer has focus; ganja's composer always has it,
+            // so what is left of the distinction is whether it holds anything.
+            KeyCode::Home if self.editor.is_empty() => self.chat.scroll_to_top(),
+            KeyCode::Home => self.editor.line_home(),
+            KeyCode::End if self.editor.is_empty() => self.chat.follow_tail(),
+            KeyCode::End => self.editor.line_end(),
+            _ => {
+                self.editor.input(key);
+                self.sync_dropdown();
+            }
         }
 
         Ok(())
     }
 
+    /// Whether `key` quits.
+    ///
+    /// A bound key the editor also uses only quits on an empty buffer, so
+    /// Ctrl-D deletes forward while there is something to delete and leaves
+    /// once there is not.
+    fn exits(&self, key: KeyEvent) -> bool {
+        self.keys.binds(keybind::Action::AppExit, key) && (!edits(key) || self.editor.is_empty())
+    }
+
     /// Whether a modal is claiming the keys and the wheel.
     fn modal_open(&self) -> bool {
-        self.permission.is_some() || self.sessions.is_some() || self.theme_list.is_some()
+        self.permission.is_some()
+            || self.sessions.is_some()
+            || self.theme_list.is_some()
+            || self.chooser.is_some()
+            || self.palette.is_some()
+            || self.help.is_some()
+    }
+
+    /// Runs the command a palette row or a menu row named.
+    async fn run_command(&mut self, action: command::Action) {
+        match action {
+            command::Action::Sessions => self.open_picker().await,
+            command::Action::Models => self.open_models(),
+            command::Action::Agents => self.open_agents(),
+            command::Action::Themes => self.open_themes(),
+            command::Action::Help => self.help = Some(Help::new(self.keys.clone())),
+            command::Action::Exit => self.quit = true,
+        }
+    }
+
+    /// Opens the palette on whatever filter it was last closed with.
+    fn open_palette(&mut self) {
+        self.palette = Some(Palette::reopened(
+            self.keys.clone(),
+            self.palette_filter.clone(),
+        ));
+    }
+
+    /// Closes the palette, remembering what had been typed into it.
+    fn close_palette(&mut self) {
+        if let Some(palette) = self.palette.take() {
+            self.palette_filter = palette.filter().to_owned();
+        }
+    }
+
+    /// One keypress while the palette is open, which owns every key: its
+    /// filter line is what the keyboard is pointed at.
+    async fn handle_palette_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_palette(),
+            KeyCode::Up => self.move_palette(-1),
+            KeyCode::Down => self.move_palette(1),
+            KeyCode::Backspace => {
+                if let Some(palette) = &mut self.palette {
+                    palette.backspace();
+                }
+            }
+            KeyCode::Enter => {
+                let action = self.palette.as_ref().and_then(Palette::selected);
+                self.close_palette();
+                if let Some(action) = action {
+                    self.run_command(action).await;
+                }
+            }
+            // Everything printable is filter text — j and k included, which is
+            // why this dialog does not take them as movement the way the ones
+            // without a filter line do.
+            KeyCode::Char(character) if !key.modifiers.intersects(SHORTCUT_MODIFIERS) => {
+                if let Some(palette) = &mut self.palette {
+                    palette.push(character);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Moves the palette's cursor by `delta` commands.
+    fn move_palette(&mut self, delta: isize) {
+        if let Some(palette) = &mut self.palette {
+            palette.move_selection(delta);
+        }
+    }
+
+    /// One keypress while the model or agent list is open.
+    async fn handle_chooser_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.chooser = None,
+            KeyCode::Up | KeyCode::Char('k') => self.move_chooser(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_chooser(1),
+            KeyCode::Enter => self.apply_chooser().await,
+            _ => {}
+        }
+    }
+
+    /// Moves the open list's cursor by `delta` rows.
+    fn move_chooser(&mut self, delta: isize) {
+        if let Some((_, chooser)) = &mut self.chooser {
+            chooser.move_selection(delta);
+        }
+    }
+
+    /// Sends what the open list has under its cursor.
+    async fn apply_chooser(&mut self) {
+        let Some((kind, value)) = self
+            .chooser
+            .as_ref()
+            .and_then(|(kind, chooser)| chooser.selected().map(|value| (*kind, value.to_owned())))
+        else {
+            // An empty list has nothing under the cursor; Enter means nothing.
+            return;
+        };
+
+        match kind {
+            Chooser::Models => self.switch_model(value).await,
+            Chooser::Agents => self.switch_agent(value).await,
+        }
+    }
+
+    /// One keypress while the command menu is up, and whether it was one of
+    /// the menu's own.
+    async fn handle_dropdown_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            // Closes the menu and **keeps what was typed**. Upstream deletes
+            // the whole `/xyz` here, which is the one sharp edge in its
+            // autocomplete that nobody would ask for (**D11**).
+            KeyCode::Esc => {
+                self.dropdown = None;
+
+                true
+            }
+            KeyCode::Up => {
+                if let Some(dropdown) = &mut self.dropdown {
+                    dropdown.move_selection(-1);
+                }
+
+                true
+            }
+            KeyCode::Down => {
+                if let Some(dropdown) = &mut self.dropdown {
+                    dropdown.move_selection(1);
+                }
+
+                true
+            }
+            KeyCode::Enter if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
+                let action = self.dropdown.as_ref().and_then(Dropdown::selected);
+                self.dropdown = None;
+
+                if let Some(action) = action {
+                    // The command runs, so the text that named it has done its
+                    // job; leaving it would mean the next Enter sent the
+                    // command's own name to the model.
+                    self.editor.clear();
+                    self.run_command(action).await;
+                }
+
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Opens, re-narrows or closes the command menu after the buffer changed.
+    fn sync_dropdown(&mut self) {
+        let text = self.editor.text();
+        if !dropdown::triggered(&text, self.editor.cursor()) {
+            self.dropdown = None;
+            return;
+        }
+
+        match &mut self.dropdown {
+            Some(dropdown) => dropdown.refresh(&text),
+            None => self.dropdown = Some(Dropdown::new(&text)),
+        }
+    }
+
+    /// Opens the model list over this provider's catalog entries.
+    ///
+    /// This provider's only: a switch is same-provider by construction, so a
+    /// row for anything else would be a refusal with a nice label on it.
+    fn open_models(&mut self) {
+        let rows: Vec<list::Row> = catalog::models()
+            .filter(|model| model.provider_id == self.provider)
+            .map(|model| list::Row {
+                value: model.id.to_owned(),
+                label: model.id.to_owned(),
+                detail: Some(model.name.to_owned()),
+                active: model.id == self.model,
+            })
+            .collect();
+
+        self.chooser = Some((Chooser::Models, ListDialog::new(" models ", rows)));
+    }
+
+    /// Opens the agent list over the agents a user may switch to.
+    ///
+    /// Subagents and hidden agents are left out: the first are the task tool's
+    /// to spawn and the second exist precisely so as not to be offered.
+    fn open_agents(&mut self) {
+        let rows: Vec<list::Row> = self
+            .engine
+            .agents()
+            .map(|registry| {
+                registry
+                    .agents()
+                    .iter()
+                    .filter(|agent| agent.selectable())
+                    .map(|agent| list::Row {
+                        value: agent.name.clone(),
+                        label: agent.name.clone(),
+                        detail: agent.description.clone(),
+                        active: self.agent.as_deref() == Some(agent.name.as_str()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        self.chooser = Some((Chooser::Agents, ListDialog::new(" agents ", rows)));
+    }
+
+    /// Moves to the next agent a user may switch to, wrapping.
+    ///
+    /// Wrapping where every list here clamps, because this is not a cursor in
+    /// a list: it is one key pressed repeatedly to get somewhere, and stopping
+    /// at the end would mean reaching for the mouse.
+    async fn cycle_agent(&mut self) {
+        let names: Vec<String> = self
+            .engine
+            .agents()
+            .map(|registry| {
+                registry
+                    .agents()
+                    .iter()
+                    .filter(|agent| agent.selectable())
+                    .map(|agent| agent.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if names.is_empty() {
+            return;
+        }
+
+        let next = self
+            .agent
+            .as_deref()
+            .and_then(|current| names.iter().position(|name| name == current))
+            .map_or(0, |index| (index + 1) % names.len());
+
+        self.switch_agent(names[next].clone()).await;
+    }
+
+    /// Runs the rest of the session as `name`.
+    ///
+    /// A refusal — a switch mid-turn, a name the registry does not hold —
+    /// lands in the status bar and leaves the list open, so the user still has
+    /// what they were choosing from.
+    async fn switch_agent(&mut self, name: String) {
+        match self
+            .engine
+            .send(Command::SwitchAgent { name: name.clone() })
+            .await
+        {
+            Ok(()) => {
+                self.agent = Some(name);
+                self.status.set_agent(self.agent.clone());
+                // An agent may name a model of its own, which the engine
+                // adopts on the switch; pricing follows the engine's answer
+                // rather than what the frontend last remembered.
+                self.model = self.engine.model();
+                self.chooser = None;
+                self.status.set_notice(None);
+            }
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
+    }
+
+    /// Asks the rest of the session of `model`.
+    async fn switch_model(&mut self, model: String) {
+        match self
+            .engine
+            .send(Command::SwitchModel {
+                model: model.clone(),
+            })
+            .await
+        {
+            Ok(()) => {
+                self.model = model;
+                self.chooser = None;
+                self.status.set_notice(None);
+            }
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
     }
 
     /// Opens the theme picker with the cursor on the theme already in use.
@@ -468,6 +910,12 @@ impl App {
                 self.sessions = None;
                 self.chat.clear();
                 self.seed(transcript);
+                // A stored session carries the agent and the model it was left
+                // on, and the engine restores both; the bar would otherwise go
+                // on naming whatever the previous session was using.
+                self.agent = self.engine.agent();
+                self.status.set_agent(self.agent.clone());
+                self.model = self.engine.model();
                 self.status.set_notice(None);
             }
             Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
@@ -484,9 +932,17 @@ impl App {
             return;
         };
 
+        // Checked before the engine hears about it, as upstream checks it:
+        // `exit` on its own is a person leaving, not a question about the word.
+        if command::is_bare_exit(&prompt) {
+            self.quit = true;
+            return;
+        }
+
         match self.engine.send(Command::SendPrompt { text: prompt }).await {
             Ok(()) => {
                 self.editor.clear();
+                self.dropdown = None;
                 self.status.set_notice(None);
             }
             // The editor keeps the text, so a refused prompt is never lost.
@@ -632,7 +1088,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use super::{App, FRAME, Permission, permission_reply};
+    use super::{App, Chooser, Dropdown, FRAME, Palette, Permission, permission_reply};
     use crate::{
         component::sessions,
         event::AppEvent,
@@ -2328,6 +2784,725 @@ mod tests {
             Some("ses_middle"),
             "j should move down one row rather than reaching the editor"
         );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// An engine carrying the four builtin agents, which is what the agent
+    /// list and Tab both read.
+    fn agentic_app() -> App {
+        let registry = Arc::new(
+            ganja_core::AgentRegistry::build(&ganja_core::config::Config::default())
+                .expect("the builtin agents resolve"),
+        );
+        let engine = Engine::new(
+            Arc::new(FakeProvider::default()),
+            fake::MODEL,
+            Arc::new(ganja_core::Registry::new(Vec::new())),
+            ganja_core::Permissions::default(),
+        )
+        .with_agents(registry);
+
+        App::new(engine, fake::MODEL, None, Themes::builtin())
+    }
+
+    /// The whole point of `ctrl+p`: it reaches the list of everything else.
+    #[tokio::test]
+    async fn control_p_opens_the_palette_and_escape_closes_it() {
+        let mut app = app();
+
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        assert!(app.palette.is_some(), "the palette should be open");
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.palette.is_none(), "escape should close it");
+    }
+
+    #[tokio::test]
+    async fn typing_in_the_palette_filters_it_rather_than_reaching_the_editor() {
+        let mut app = app();
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+
+        // `j` and `k` are movement in the dialogs with no filter line; here
+        // they have to be text, or half the alphabet cannot be searched for.
+        for event in typing("jk") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        assert_eq!(
+            app.palette.as_ref().map(Palette::filter),
+            Some("jk"),
+            "the keys should have reached the filter"
+        );
+        assert!(
+            app.editor.prompt().is_none(),
+            "and not the editor underneath"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_palette_runs_the_command_under_its_cursor() {
+        let mut app = app();
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        for event in typing("themes") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(
+            app.palette.is_none(),
+            "running a command closes the palette"
+        );
+        assert!(app.theme_list.is_some(), "and opens what it named");
+    }
+
+    /// Closing is not forgetting: a glance at the screen mid-search should not
+    /// cost the search.
+    #[tokio::test]
+    async fn a_reopened_palette_still_holds_what_was_typed_into_it() {
+        let mut app = app();
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        for event in typing("mo") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+
+        assert_eq!(app.palette.as_ref().map(Palette::filter), Some("mo"));
+    }
+
+    #[tokio::test]
+    async fn the_palette_reaches_every_command_it_lists() {
+        let cases = [
+            ("help", (|app: &App| app.help.is_some()) as fn(&App) -> bool),
+            ("themes", |app: &App| app.theme_list.is_some()),
+            ("models", |app: &App| app.chooser.is_some()),
+            ("agents", |app: &App| app.chooser.is_some()),
+            ("exit", |app: &App| app.quit),
+        ];
+
+        for (typed, opened) in cases {
+            let mut app = agentic_app().with_provider("anthropic");
+            app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+                .await
+                .expect("control-p is handled");
+            for event in typing(typed) {
+                app.handle(event).await.expect("typing is handled");
+            }
+            app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+                .await
+                .expect("enter is handled");
+
+            assert!(opened(&app), "/{typed} should have done something");
+        }
+    }
+
+    /// The trigger, at the level the user meets it: a slash that starts the
+    /// buffer raises the menu and a slash anywhere else does not.
+    #[tokio::test]
+    async fn the_command_menu_opens_on_a_leading_slash_and_on_nothing_else() {
+        let mut leading = app();
+        for event in typing("/") {
+            leading.handle(event).await.expect("typing is handled");
+        }
+        assert!(leading.dropdown.is_some(), "a leading slash should open it");
+
+        let mut midway = app();
+        for event in typing("what about /tmp") {
+            midway.handle(event).await.expect("typing is handled");
+        }
+        assert!(
+            midway.dropdown.is_none(),
+            "a slash mid-sentence is a path, not a command"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_command_menu_closes_once_the_slash_is_backspaced_away() {
+        let mut app = app();
+        for event in typing("/mo") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert!(app.dropdown.is_some());
+
+        for _ in 0..3 {
+            app.handle(key(KeyCode::Backspace, KeyModifiers::NONE))
+                .await
+                .expect("backspace is handled");
+        }
+
+        assert!(app.dropdown.is_none(), "an empty buffer is not a command");
+    }
+
+    /// **D11**: upstream deletes the typed `/xyz` whenever the menu closes.
+    /// Reverting that divergence — wiping the buffer in `handle_dropdown_key`'s
+    /// escape arm — fails this test.
+    #[tokio::test]
+    async fn escape_closes_the_command_menu_and_keeps_what_was_typed() {
+        let mut app = app();
+        for event in typing("/models") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+
+        assert!(app.dropdown.is_none(), "the menu should have closed");
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("/models"),
+            "the text must survive, where upstream deletes it"
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_on_the_command_menu_runs_the_command_and_empties_the_editor() {
+        let mut app = app();
+        for event in typing("/themes") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(app.theme_list.is_some(), "the command should have run");
+        assert!(
+            app.editor.prompt().is_none(),
+            "the text that named it has done its job"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_arrow_keys_steer_the_command_menu_instead_of_the_transcript() {
+        let mut app = app();
+        for event in typing("/") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        let first = app
+            .dropdown
+            .as_ref()
+            .and_then(Dropdown::selected)
+            .expect("a menu with rows");
+
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE))
+            .await
+            .expect("down is handled");
+
+        assert_ne!(
+            app.dropdown.as_ref().and_then(Dropdown::selected),
+            Some(first),
+            "down should have moved the cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_model_list_holds_the_running_providers_models_and_marks_the_active_one() {
+        let mut served = app().with_provider("anthropic");
+        served.open_models();
+
+        let dialog = served.chooser.as_ref().expect("the list should be open");
+        assert_eq!(dialog.0, Chooser::Models);
+        assert!(
+            !dialog.1.is_empty(),
+            "anthropic has models in the compiled-in catalog"
+        );
+
+        let mut unknown = app().with_provider("a-provider-nothing-ships");
+        unknown.open_models();
+        assert!(
+            unknown
+                .chooser
+                .as_ref()
+                .is_some_and(|(_, list)| list.is_empty()),
+            "a provider with no catalog entries has nothing to offer"
+        );
+    }
+
+    #[tokio::test]
+    async fn choosing_a_model_switches_the_session_to_it() {
+        let mut app = app().with_provider("anthropic");
+        app.open_models();
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(app.chooser.is_none(), "a switch that took closes the list");
+        assert_eq!(
+            app.model,
+            app.engine.model(),
+            "the frontend prices what the engine will ask for"
+        );
+        assert_ne!(app.model, fake::MODEL, "and it is no longer the old model");
+    }
+
+    /// A switch mid-turn is exactly what the engine refuses, and a refusal has
+    /// one place to be seen.
+    #[tokio::test]
+    async fn a_refused_model_switch_reaches_the_status_bar_and_leaves_the_list_up() {
+        let (mut app, mut events) = wired().await;
+        app = app.with_provider("anthropic");
+        for event in typing("a turn to be busy with") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        app.open_models();
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(
+            app.chooser.is_some(),
+            "a refused switch keeps the list the user was choosing from"
+        );
+        let mut terminal = terminal(120, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("already streaming"),
+            "the refusal should be readable:\n{}",
+            screen(&terminal)
+        );
+
+        // Drain the turn so the test does not leave one streaming.
+        pump(&mut app, &mut events, 1).await;
+    }
+
+    /// Subagents are the task tool's to spawn; a picker offering them would be
+    /// offering a switch the engine refuses.
+    #[tokio::test]
+    async fn the_agent_list_holds_only_the_agents_a_user_may_switch_to() {
+        let mut app = agentic_app();
+        app.open_agents();
+
+        let (kind, dialog) = app.chooser.as_ref().expect("the list should be open");
+        assert_eq!(*kind, Chooser::Agents);
+
+        let mut listed = Vec::new();
+        let mut cursor = dialog.clone();
+        cursor.move_selection(-99);
+        for _ in 0..8 {
+            if let Some(value) = cursor.selected() {
+                listed.push(value.to_owned());
+            }
+            cursor.move_selection(1);
+        }
+        listed.dedup();
+
+        assert_eq!(
+            listed,
+            vec!["build".to_owned(), "plan".to_owned()],
+            "general and explore are subagents"
+        );
+    }
+
+    #[tokio::test]
+    async fn choosing_an_agent_switches_the_session_and_the_status_bar_says_so() {
+        let mut app = agentic_app();
+        assert_eq!(
+            app.agent.as_deref(),
+            Some("build"),
+            "sessions start on build"
+        );
+
+        app.open_agents();
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE))
+            .await
+            .expect("down is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.agent.as_deref(), Some("plan"));
+        assert_eq!(app.engine.agent().as_deref(), Some("plan"));
+
+        let mut terminal = terminal(80, 8);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("plan"),
+            "the bar should name the agent:\n{}",
+            screen(&terminal)
+        );
+    }
+
+    #[tokio::test]
+    async fn tab_on_an_empty_editor_cycles_the_agents_and_wraps() {
+        let mut app = agentic_app();
+        let mut seen = vec![app.agent.clone()];
+
+        for _ in 0..3 {
+            app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+                .await
+                .expect("tab is handled");
+            seen.push(app.agent.clone());
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                Some("build".to_owned()),
+                Some("plan".to_owned()),
+                Some("build".to_owned()),
+                Some("plan".to_owned()),
+            ],
+            "two selectable agents, cycled and wrapped"
+        );
+    }
+
+    #[tokio::test]
+    async fn tab_with_something_typed_reaches_the_editor_instead_of_the_agents() {
+        let mut app = agentic_app();
+        for event in typing("half a thought") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .expect("tab is handled");
+
+        assert_eq!(
+            app.agent.as_deref(),
+            Some("build"),
+            "a Tab inside a sentence is not a request to change agent"
+        );
+        assert_ne!(
+            app.editor.prompt().as_deref(),
+            Some("half a thought"),
+            "it should have reached the editor"
+        );
+    }
+
+    /// The one key that means two things, and the gate that decides which.
+    #[tokio::test]
+    async fn control_d_exits_on_an_empty_editor_and_deletes_forward_otherwise() {
+        let mut bare = app();
+        bare.handle(key(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-d is handled");
+        assert!(bare.quit, "an empty editor has nothing to delete");
+
+        let mut typed = app();
+        for event in typing("abc") {
+            typed.handle(event).await.expect("typing is handled");
+        }
+        typed
+            .handle(key(KeyCode::Home, KeyModifiers::NONE))
+            .await
+            .expect("home is handled");
+        typed
+            .handle(key(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-d is handled");
+
+        assert!(!typed.quit, "there was something to delete");
+        assert_eq!(
+            typed.editor.prompt().as_deref(),
+            Some("bc"),
+            "and it was deleted"
+        );
+    }
+
+    /// Ganja's own interrupts, which stay unconditional where Ctrl-D is gated.
+    #[tokio::test]
+    async fn control_c_and_control_q_quit_whatever_is_typed() {
+        for code in [KeyCode::Char('c'), KeyCode::Char('q')] {
+            let mut app = app();
+            for event in typing("a draft nobody asked to keep") {
+                app.handle(event).await.expect("typing is handled");
+            }
+
+            app.handle(key(code, KeyModifiers::CONTROL))
+                .await
+                .expect("a quit key is handled");
+
+            assert!(app.quit, "{code:?} with Control should quit");
+        }
+    }
+
+    #[tokio::test]
+    async fn home_and_end_move_in_the_buffer_while_there_is_one_and_in_the_transcript_otherwise() {
+        let mut written = app();
+        for event in typing("a line to move around in") {
+            written.handle(event).await.expect("typing is handled");
+        }
+
+        written
+            .handle(key(KeyCode::Home, KeyModifiers::NONE))
+            .await
+            .expect("home is handled");
+        assert_eq!(
+            written.editor.cursor(),
+            (0, 0),
+            "home reached the line's start"
+        );
+
+        written
+            .handle(key(KeyCode::End, KeyModifiers::NONE))
+            .await
+            .expect("end is handled");
+        assert_eq!(
+            written.editor.cursor(),
+            (0, "a line to move around in".chars().count()),
+            "end reached the line's end"
+        );
+
+        // Empty editor: the same keys are the transcript's.
+        let mut empty = app();
+        empty.seed(stored_transcript(80));
+        let mut terminal = terminal(40, 12);
+        empty.draw(&mut terminal).expect("a frame draws");
+
+        empty
+            .handle(key(KeyCode::Home, KeyModifiers::NONE))
+            .await
+            .expect("home is handled");
+        assert!(
+            !empty.chat.is_following_tail(),
+            "home should have gone to the oldest message"
+        );
+
+        empty
+            .handle(key(KeyCode::End, KeyModifiers::NONE))
+            .await
+            .expect("end is handled");
+        assert!(
+            empty.chat.is_following_tail(),
+            "end should have come back to the newest"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_exit_word_submitted_on_its_own_quits() {
+        for word in ["exit", "quit", ":q"] {
+            let (mut app, _events) = wired().await;
+            for event in typing(word) {
+                app.handle(event).await.expect("typing is handled");
+            }
+
+            app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+                .await
+                .expect("enter is handled");
+
+            assert!(app.quit, "{word:?} on its own should quit");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exit_word_inside_a_sentence_is_a_prompt_like_any_other() {
+        let (mut app, mut events) = wired().await;
+        for event in typing("does exit mean anything here") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(!app.quit, "the word only quits when it is the whole prompt");
+        pump(&mut app, &mut events, 1).await;
+    }
+
+    /// The keys the config file moved are the keys that work; the ones it
+    /// replaced are not.
+    #[tokio::test]
+    async fn a_rebound_key_opens_what_it_was_bound_to_and_the_default_stops_working() {
+        let configured: std::collections::BTreeMap<String, String> =
+            [("palette_open".to_owned(), "f5".to_owned())].into();
+        let keys = crate::keybind::Keybinds::from_config(&configured).expect("a legible binding");
+        let mut app = app().with_keybinds(keys);
+
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        assert!(
+            app.palette.is_none(),
+            "the replaced default should be inert"
+        );
+
+        app.handle(key(KeyCode::F(5), KeyModifiers::NONE))
+            .await
+            .expect("f5 is handled");
+        assert!(app.palette.is_some(), "and f5 should open it");
+    }
+
+    #[tokio::test]
+    async fn the_help_card_opens_from_the_palette_and_closes_on_escape() {
+        let mut app = app();
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        for event in typing("help") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert!(app.help.is_some());
+
+        // Every other key is swallowed, like any modal here.
+        for event in typing("x") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert!(app.help.is_some(), "typing should not close it");
+        assert!(app.editor.prompt().is_none(), "nor reach the editor");
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.help.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_wheel_does_not_reach_the_transcript_while_the_palette_is_open() {
+        let mut app = app();
+        app.seed(stored_transcript(80));
+        let mut terminal = terminal(40, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        app.handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })))
+        .await
+        .expect("the wheel is handled");
+
+        assert!(
+            app.chat.is_following_tail(),
+            "a modal claims the wheel as well as the keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_palette_open() {
+        let mut app = app();
+        palette_transcript(&mut app);
+
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+
+        assert!(
+            app.palette.is_some(),
+            "the palette must be open, or the snapshot is of a bare screen"
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_palette_filtered() {
+        let mut app = app();
+        palette_transcript(&mut app);
+
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        for event in typing("s") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        assert_eq!(
+            app.palette.as_ref().map(Palette::filter),
+            Some("s"),
+            "the fragment must have landed, or the snapshot is of an unfiltered list"
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// The selected row is filled rather than tinted, which is the one part of
+    /// the palette a symbol-only dump cannot pin.
+    #[tokio::test]
+    async fn snapshot_palette_selection_styling() {
+        let mut app = themed_app("tokyonight");
+        palette_transcript(&mut app);
+
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE))
+            .await
+            .expect("down is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(styled_screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_command_menu_open() {
+        let mut app = app();
+        palette_transcript(&mut app);
+
+        for event in typing("/s") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        assert!(
+            app.dropdown.is_some(),
+            "the menu must be open, or the snapshot is of a bare screen"
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_agents_dialog_open() {
+        let mut app = agentic_app();
+        palette_transcript(&mut app);
+        app.open_agents();
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_help_dialog_open() {
+        let mut app = app();
+        palette_transcript(&mut app);
+        app.run_command(crate::command::Action::Help).await;
 
         let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");

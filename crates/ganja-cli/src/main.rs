@@ -204,7 +204,13 @@ async fn main() -> Result<()> {
     let _logging = install_logging();
 
     match cli.command {
-        None => ganja_tui::run(cli.resume.wanted()).await,
+        None => {
+            ganja_tui::run(
+                cli.resume.wanted(),
+                ganja_core::config::Overrides::default(),
+            )
+            .await
+        }
         Some(Command::Auth { action }) => auth_command(action),
         Some(Command::Config { action }) => config_command(action),
         Some(Command::Models) => {

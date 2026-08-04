@@ -188,6 +188,14 @@ impl Chat {
         self.offset = None;
     }
 
+    /// Moves the viewport to the oldest line.
+    ///
+    /// The other half of [`Chat::follow_tail`]: Home and End mean the two ends
+    /// of the conversation the way they mean the two ends of a line.
+    pub fn scroll_to_top(&mut self) {
+        self.set_offset(0);
+    }
+
     /// Whether new text will scroll into view on its own.
     #[must_use]
     pub fn is_following_tail(&self) -> bool {

@@ -9,7 +9,7 @@ use ratatui::{
     layout::Rect,
     widgets::{Block, Widget as _},
 };
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{CursorMove, TextArea};
 
 use crate::theme::Theme;
 
@@ -57,6 +57,50 @@ impl Editor {
         let text = area.lines().join("\n");
 
         (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Everything in the buffer, whitespace included.
+    ///
+    /// Distinct from [`Editor::prompt`] on purpose: what decides whether a `/`
+    /// raises the command menu is the literal buffer, where what decides
+    /// whether there is anything to send is the buffer with its whitespace
+    /// discounted.
+    #[must_use]
+    pub fn text(&self) -> String {
+        let area: &TextArea<'_> = &self.area;
+
+        area.lines().join("\n")
+    }
+
+    /// Whether the buffer holds no characters at all.
+    ///
+    /// The gate on every key that means two things — Ctrl-D exits or deletes
+    /// forward, Tab cycles agents or indents, Home and End move in the buffer
+    /// or in the transcript. A buffer holding only spaces is *not* empty here:
+    /// the user typed those, and a key that quietly quit on top of them would
+    /// be throwing work away.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.area.is_empty()
+    }
+
+    /// Where the cursor is, as a zero-based (row, column) pair counted in
+    /// characters.
+    #[must_use]
+    pub fn cursor(&self) -> (usize, usize) {
+        let cursor = self.area.cursor();
+
+        (cursor.0, cursor.1)
+    }
+
+    /// Moves the cursor to the start of the line it is on.
+    pub fn line_home(&mut self) {
+        self.area.move_cursor(CursorMove::Head);
+    }
+
+    /// Moves the cursor to the end of the line it is on.
+    pub fn line_end(&mut self) {
+        self.area.move_cursor(CursorMove::End);
     }
 
     /// Empties the buffer, which happens once a prompt has been accepted.
@@ -119,6 +163,50 @@ mod tests {
 
         editor.clear();
         assert_eq!(editor.prompt(), None);
+    }
+
+    /// The gate on every key that means two things.
+    #[test]
+    fn an_editor_holding_only_spaces_is_not_empty_even_though_it_has_nothing_to_submit() {
+        let mut editor = Editor::new(&Theme::default());
+        assert!(editor.is_empty(), "a fresh editor is empty");
+
+        typing(&mut editor, "  ");
+
+        assert!(
+            !editor.is_empty(),
+            "typed spaces are text, however unsubmittable"
+        );
+        assert_eq!(editor.prompt(), None);
+    }
+
+    #[test]
+    fn the_cursor_reports_where_typing_left_it_and_home_and_end_move_it() {
+        let mut editor = Editor::new(&Theme::default());
+        typing(&mut editor, "first");
+        editor.insert_newline();
+        typing(&mut editor, "second");
+
+        assert_eq!(editor.cursor(), (1, 6));
+
+        editor.line_home();
+        assert_eq!(editor.cursor(), (1, 0), "home moves within the line");
+
+        editor.line_end();
+        assert_eq!(editor.cursor(), (1, 6));
+    }
+
+    #[test]
+    fn the_whole_buffer_reads_back_with_its_whitespace_intact() {
+        let mut editor = Editor::new(&Theme::default());
+        typing(&mut editor, "/models ");
+
+        assert_eq!(editor.text(), "/models ");
+        assert_eq!(
+            editor.prompt().as_deref(),
+            Some("/models "),
+            "prompt only discounts whitespace, it does not strip it"
+        );
     }
 
     #[test]
