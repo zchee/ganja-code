@@ -165,7 +165,7 @@ impl Default for ShellTool {
 
 #[async_trait]
 impl Tool for ShellTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         Self::ID
     }
 

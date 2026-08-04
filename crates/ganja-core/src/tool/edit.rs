@@ -117,7 +117,7 @@ pub struct EditTool;
 
 #[async_trait]
 impl Tool for EditTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "edit"
     }
 

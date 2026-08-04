@@ -70,7 +70,7 @@ pub struct WebfetchTool;
 
 #[async_trait]
 impl Tool for WebfetchTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "webfetch"
     }
 

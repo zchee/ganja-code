@@ -124,7 +124,7 @@ impl RecorderTool {
 
 #[async_trait]
 impl Tool for RecorderTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         self.id
     }
 

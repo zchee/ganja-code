@@ -25,6 +25,7 @@ Recorded inputs the test suites replay. Two kinds: `.sse` files are captured `te
 | Directory | Purpose |
 |-----------|---------|
 | `golden/` | Canned tasks for the upstream differential (see `golden/AGENTS.md`) |
+| `mcp/` | `reference-server.mjs`: an MCP server on the upstream checkout's `@modelcontextprotocol/sdk`, spawned by `tests/mcp.rs` so the client is certified against somebody else's implementation rather than against rmcp talking to itself. |
 
 ## For AI Agents
 

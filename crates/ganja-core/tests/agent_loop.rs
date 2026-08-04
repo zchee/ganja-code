@@ -101,7 +101,7 @@ impl RecorderTool {
 
 #[async_trait]
 impl Tool for RecorderTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         self.id
     }
 
@@ -132,7 +132,7 @@ struct FailingTool;
 
 #[async_trait]
 impl Tool for FailingTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "lookup"
     }
 
@@ -156,7 +156,7 @@ struct StallTool {
 
 #[async_trait]
 impl Tool for StallTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "lookup"
     }
 
