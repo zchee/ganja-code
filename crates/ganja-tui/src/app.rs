@@ -68,6 +68,11 @@ const NEWLINE_MODIFIERS: KeyModifiers = KeyModifiers::SHIFT
 /// the key is a shortcut rather than a character.
 const SHORTCUT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL.union(KeyModifiers::ALT);
 
+/// Rows a Page key moves the reference card. A fixed step rather than the
+/// card's own height: the card sizes itself inside the render and nothing out
+/// here has seen the result.
+const HELP_PAGE: isize = 8;
+
 /// Most files the `@` menu offers at once. Upstream's server default
 /// (`server/routes/instance/httpapi/handlers/file.ts:43-60`).
 const MAX_FILES: usize = 10;
@@ -129,6 +134,23 @@ fn mcp_notice(
         .collect();
 
     (!failures.is_empty()).then(|| failures.join(NOTICE_SEPARATOR))
+}
+
+/// What a `RevertChanged` carrying no revert means for the messages this
+/// frontend has hidden.
+///
+/// The engine sends the same event for two different things and says so: a
+/// redo that stepped past the newest undone prompt, where the messages come
+/// back, and the prompt or shell command that followed an undo, where they
+/// have just been deleted from history and from storage. It draws no
+/// distinction because the frontend's own last command already did — this is
+/// where that command is remembered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cleared {
+    /// Show the hidden entries again.
+    Unhide,
+    /// Drop them: nothing is left to bring them back.
+    Drop,
 }
 
 /// Which list a dialog is showing, and therefore what choosing a row sends.
@@ -207,6 +229,9 @@ pub struct App {
     /// Choosing one types its name rather than running it, because every one
     /// of them expects arguments.
     engine_commands: Vec<command::EngineCommand>,
+    /// What the next `RevertChanged { revert: None }` means, decided by the
+    /// last command this frontend sent that could produce one. See [`Cleared`].
+    cleared: Cleared,
     /// Where a mention resolves from, and where the walk that offers files
     /// starts.
     cwd: PathBuf,
@@ -290,6 +315,13 @@ impl App {
             dropdown: None,
             files: None,
             engine_commands,
+            // Nothing has been sent yet, and the one `RevertChanged` that can
+            // arrive before anything is — a resumed session's — carries a
+            // revert rather than clearing one. Unhide is the reading that
+            // keeps a transcript replayable if that ever stops being true:
+            // showing entries the engine still holds is recoverable, and
+            // dropping entries it holds is not.
+            cleared: Cleared::Unhide,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             clipboard: Box::new(clipboard::System::default()),
@@ -562,7 +594,7 @@ impl App {
                 if let Some(palette) = &self.palette {
                     palette.render(transcript, buffer, &self.theme);
                 }
-                if let Some(help) = &self.help {
+                if let Some(help) = &mut self.help {
                     help.render(transcript, buffer, &self.theme);
                 }
                 if let Some(permission) = &self.permission {
@@ -658,11 +690,22 @@ impl App {
             return Ok(());
         }
 
-        if self.help.is_some() {
+        if let Some(help) = &mut self.help {
             // Nothing to choose, so both of the keys that mean "done" close
-            // it and everything else is swallowed like any other modal.
-            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
-                self.help = None;
+            // it; the movement keys reach the rows the window cannot show at
+            // once, and everything else is swallowed like any other modal.
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => self.help = None,
+                KeyCode::Up | KeyCode::Char('k') => help.scroll(-1),
+                KeyCode::Down | KeyCode::Char('j') => help.scroll(1),
+                KeyCode::PageUp => help.scroll(-HELP_PAGE),
+                KeyCode::PageDown => help.scroll(HELP_PAGE),
+                KeyCode::Home => help.scroll_to_top(),
+                // Further than the card can ever be; the render clamps it to
+                // the last row rather than this having to know how many rows
+                // there are at this width.
+                KeyCode::End => help.scroll(isize::MAX),
+                _ => {}
             }
 
             return Ok(());
@@ -840,6 +883,34 @@ impl App {
             command::Action::Exit => self.quit = true,
             command::Action::Copy => self.copy_transcript(),
             command::Action::CopyMessage => self.copy_last_reply(),
+            command::Action::Undo => self.undo().await,
+            command::Action::Redo => self.redo().await,
+        }
+    }
+
+    /// Takes back the last prompt and the file changes its turn made.
+    ///
+    /// Nothing is hidden here: the engine answers with `RevertChanged`, and
+    /// that event is the only thing that moves the transcript — the same rule
+    /// every other entry follows. What a refusal costs is a line of the status
+    /// bar: the engine's own words for a turn still streaming (**D119**), a
+    /// session that takes no snapshots, or a conversation with nothing left to
+    /// take back.
+    async fn undo(&mut self) {
+        // An undo never produces a cleared revert, so this only matters for
+        // whatever arrives after it — and after an undo, the next clear is a
+        // redo's unless a prompt intervenes and says otherwise.
+        self.cleared = Cleared::Unhide;
+        if let Err(refusal) = self.engine.send(Command::Undo).await {
+            self.status.set_notice(Some(refusal.to_string()));
+        }
+    }
+
+    /// Steps forward through what an undo took back.
+    async fn redo(&mut self) {
+        self.cleared = Cleared::Unhide;
+        if let Err(refusal) = self.engine.send(Command::Redo).await {
+            self.status.set_notice(Some(refusal.to_string()));
         }
     }
 
@@ -1519,6 +1590,13 @@ impl App {
             return;
         }
 
+        // Set before the send rather than after it: a prompt after an undo is
+        // the user keeping what the undo did, and the engine deletes those
+        // messages *inside* this call — before the event announcing it can be
+        // read back. A refusal restores it below, because a refused prompt
+        // truncated nothing.
+        let previously = std::mem::replace(&mut self.cleared, Cleared::Drop);
+
         // A buffer naming one of the engine's commands runs it; anything else
         // starting with a slash is text, because a command this build does not
         // have is not one the UI should intercept on the model's behalf.
@@ -1551,7 +1629,10 @@ impl App {
                 self.status.set_notice(None);
             }
             // The editor keeps the text, so a refused prompt is never lost.
-            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+            Err(refusal) => {
+                self.cleared = previously;
+                self.status.set_notice(Some(refusal.to_string()));
+            }
         }
     }
 
@@ -1565,6 +1646,10 @@ impl App {
             return;
         };
 
+        // A shell command after an undo makes it permanent too; see
+        // [`App::submit`] for why this is set before the send.
+        let previously = std::mem::replace(&mut self.cleared, Cleared::Drop);
+
         match self.engine.send(Command::RunShell { command }).await {
             Ok(()) => {
                 self.editor.clear();
@@ -1574,7 +1659,10 @@ impl App {
             // Text and mode both kept: a refused command is one to try again,
             // and putting the composer back into prompt mode under it would
             // send it to the model instead.
-            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+            Err(refusal) => {
+                self.cleared = previously;
+                self.status.set_notice(Some(refusal.to_string()));
+            }
         }
     }
 
@@ -1642,9 +1730,32 @@ impl App {
                     self.status.set_activity(Activity::Streaming);
                 }
             }
-            // W3 landed the engine protocol; the hidden range, the marker row
-            // and the editor refill are the tui-revert lane's.
-            CoreEvent::RevertChanged { .. } => {}
+            // The one event that moves the transcript backwards. What it does
+            // not say — and does not have to — is whether a cleared revert
+            // means "show those messages again" or "they are gone": this
+            // frontend sent the command that decides it, and remembered which
+            // (**R10**).
+            CoreEvent::RevertChanged { revert, prompt } => {
+                match revert {
+                    Some(info) => self.chat.revert(info.message_id, info.files),
+                    None => match self.cleared {
+                        Cleared::Unhide => self.chat.unrevert(),
+                        Cleared::Drop => self.chat.drop_reverted(),
+                    },
+                }
+                // Upstream repopulates the composer with the message it just
+                // took back, so undoing and retyping a prompt is editing it.
+                // A resumed session carries no prompt on purpose: reopening a
+                // conversation is not the moment to put words in somebody's
+                // editor.
+                if let Some(prompt) = prompt {
+                    // Out of shell mode first: what came back is a prompt, and
+                    // dropping it into a composer that runs its contents in a
+                    // shell would change what Enter does to it.
+                    self.set_shell(false);
+                    self.editor.set_text(&prompt);
+                }
+            }
             CoreEvent::MessageFinished {
                 reason,
                 usage,
@@ -1790,7 +1901,9 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use super::{App, Chooser, Dropdown, FRAME, Mode, Palette, Permission, permission_reply};
+    use super::{
+        App, Chooser, Cleared, Dropdown, FRAME, Mode, Palette, Permission, permission_reply,
+    };
     use crate::{
         clipboard, command,
         component::sessions,
@@ -5835,5 +5948,373 @@ mod tests {
             assert_eq!(super::mcp_notice(&status).as_deref(), expected);
         }
         assert_eq!(super::mcp_notice(&std::collections::BTreeMap::new()), None);
+    }
+
+    /// A conversation of two exchanges, and the id of the prompt an undo of
+    /// the last one anchors on.
+    fn two_exchanges(app: &mut App) -> ganja_core::MessageId {
+        app.chat
+            .start_message(Message::user("the question that stands"));
+        let mut first = Message::assistant("canned");
+        first.parts.push(Part::text("the answer that stands"));
+        app.chat.start_message(first);
+
+        let taken_back = Message::user("the question that is taken back");
+        let anchor = taken_back.id.clone();
+        app.chat.start_message(taken_back);
+        let mut second = Message::assistant("canned");
+        second
+            .parts
+            .push(Part::text("the answer that goes with it"));
+        app.chat.start_message(second);
+
+        anchor
+    }
+
+    /// The event the engine sends after an undo.
+    fn reverted(anchor: &ganja_core::MessageId, prompt: Option<&str>) -> AppEvent {
+        AppEvent::core(CoreEvent::RevertChanged {
+            revert: Some(ganja_core::RevertInfo {
+                message_id: anchor.clone(),
+                files: vec!["src/lib.rs".to_owned()],
+            }),
+            prompt: prompt.map(str::to_owned),
+        })
+    }
+
+    /// The event the engine sends when a revert ends, whichever way it ended.
+    fn unreverted() -> AppEvent {
+        AppEvent::core(CoreEvent::RevertChanged {
+            revert: None,
+            prompt: None,
+        })
+    }
+
+    /// The transcript pane alone: everything above the composer's box.
+    ///
+    /// A revert puts the prompt it took back into the composer, so a whole
+    /// screen holds that text whether or not the transcript still shows the
+    /// message — which is exactly the thing under test.
+    fn transcript_pane(terminal: &Terminal<TestBackend>) -> String {
+        let whole = screen(terminal);
+
+        whole
+            .split_once("\u{250c} message")
+            .map_or(whole.clone(), |(above, _)| above.to_owned())
+    }
+
+    /// **R10**, the whole of the TUI half in one pass: what an undo hid stops
+    /// being drawn, one row says how much and which files moved, and the
+    /// prompt it took back is offered again for editing.
+    #[tokio::test]
+    async fn an_undo_hides_what_it_took_back_shows_one_marker_row_and_refills_the_editor() {
+        let mut app = app();
+        let anchor = two_exchanges(&mut app);
+
+        app.handle(reverted(&anchor, Some("the question that is taken back")))
+            .await
+            .expect("a revert is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let pane = transcript_pane(&terminal);
+
+        assert!(pane.contains("the question that stands"), "{pane}");
+        assert!(
+            !pane.contains("the question that is taken back"),
+            "the anchor is hidden with everything after it:\n{pane}"
+        );
+        assert!(!pane.contains("the answer that goes with it"), "{pane}");
+        assert!(
+            pane.contains("2 messages reverted \u{2014} /redo to restore"),
+            "{pane}"
+        );
+        assert!(pane.contains("src/lib.rs"), "{pane}");
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("the question that is taken back"),
+            "undoing and retyping a prompt is editing it"
+        );
+    }
+
+    /// The disambiguation the engine deliberately leaves to the frontend: the
+    /// same `revert: None` means two different things, and which one is
+    /// decided by the command this side last sent (**R10**).
+    #[tokio::test]
+    async fn a_redo_past_the_newest_reverted_prompt_puts_those_messages_back() {
+        let mut app = app();
+        let anchor = two_exchanges(&mut app);
+        app.handle(reverted(&anchor, Some("the question that is taken back")))
+            .await
+            .expect("a revert is handled");
+
+        app.run_command(command::Action::Redo).await;
+        app.handle(unreverted())
+            .await
+            .expect("a cleared revert is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let pane = transcript_pane(&terminal);
+
+        assert!(
+            pane.contains("the question that is taken back"),
+            "a redo past the newest one restores them:\n{pane}"
+        );
+        assert!(pane.contains("the answer that goes with it"), "{pane}");
+        assert!(!pane.contains("reverted"), "{pane}");
+    }
+
+    /// The other reading of the same event: the engine has just deleted those
+    /// messages from history and from storage, so nothing is coming back and
+    /// leaving them on screen would be showing a conversation that no longer
+    /// exists.
+    #[tokio::test]
+    async fn a_prompt_after_an_undo_drops_the_messages_it_hid_for_good() {
+        let (mut app, _events) = wired().await;
+        let anchor = two_exchanges(&mut app);
+        app.handle(reverted(&anchor, Some("the question that is taken back")))
+            .await
+            .expect("a revert is handled");
+
+        // Through the editor, so what marks the clear as permanent is the same
+        // submit path a person takes.
+        app.editor.set_text("a different question");
+        app.submit().await;
+        app.handle(unreverted())
+            .await
+            .expect("a cleared revert is handled");
+        // A second `/redo` has nothing left to show.
+        app.run_command(command::Action::Redo).await;
+        app.handle(unreverted())
+            .await
+            .expect("a cleared revert is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let pane = transcript_pane(&terminal);
+
+        assert!(pane.contains("the question that stands"), "{pane}");
+        assert!(
+            !pane.contains("the question that is taken back"),
+            "a prompt after an undo makes it permanent:\n{pane}"
+        );
+    }
+
+    /// A refused prompt truncated nothing, so it must not leave this side
+    /// believing the next cleared revert is a deletion — which would drop
+    /// messages the engine still holds, and no later event could put back.
+    #[tokio::test]
+    async fn a_refused_prompt_leaves_the_revert_still_undoable() {
+        let (mut app, mut events) = wired().await;
+        let anchor = two_exchanges(&mut app);
+        app.handle(reverted(&anchor, None))
+            .await
+            .expect("a revert is handled");
+        assert_eq!(app.cleared, Cleared::Unhide);
+
+        // A turn already streaming, which is what refuses the prompt below —
+        // and, being accepted itself, what makes this undo permanent.
+        app.editor.set_text("the turn that is already running");
+        app.submit().await;
+        pump(&mut app, &mut events, 2).await;
+        assert_eq!(
+            app.cleared,
+            Cleared::Drop,
+            "an accepted prompt is the user keeping what the undo did"
+        );
+
+        // A redo puts the reading back...
+        app.run_command(command::Action::Redo).await;
+        assert_eq!(app.cleared, Cleared::Unhide);
+
+        // ...and a prompt the engine refuses must not take it away again.
+        app.editor.set_text("the prompt the engine will refuse");
+        app.submit().await;
+
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("the prompt the engine will refuse"),
+            "the fixture only proves anything while the prompt really is refused"
+        );
+        assert_eq!(
+            app.cleared,
+            Cleared::Unhide,
+            "a refusal must put the reading back"
+        );
+    }
+
+    /// **Resume.** A frontend that has just started learns the hidden range
+    /// from this event and from nowhere else — and learns it without anything
+    /// arriving in the editor, because reopening a conversation is not the
+    /// moment to put words in somebody's.
+    #[tokio::test]
+    async fn a_resumed_session_reconstructs_the_hidden_range_without_refilling_the_editor() {
+        let mut app = app();
+        let anchor = two_exchanges(&mut app);
+        app.editor.set_text("what was already being typed");
+
+        app.handle(reverted(&anchor, None))
+            .await
+            .expect("a seeded revert is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let pane = transcript_pane(&terminal);
+
+        assert!(
+            pane.contains("2 messages reverted \u{2014} /redo to restore"),
+            "the marker is reconstructed from the event alone:\n{pane}"
+        );
+        assert!(!pane.contains("the question that is taken back"), "{pane}");
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("what was already being typed"),
+            "a resume leaves the composer alone"
+        );
+    }
+
+    /// Both halves are engine commands with no key of their own (**D4**), so
+    /// the palette row *is* the way to them: this asserts the row reaches the
+    /// engine, by the refusal only `Command::Undo` can earn here.
+    #[tokio::test]
+    async fn the_palette_rows_send_undo_and_redo_to_the_engine() {
+        for typed in ["undo", "redo"] {
+            let mut app = app();
+            app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+                .await
+                .expect("control-p is handled");
+            for event in typing(typed) {
+                app.handle(event).await.expect("typing is handled");
+            }
+            app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+                .await
+                .expect("enter is handled");
+
+            let mut terminal = terminal(80, 12);
+            app.draw(&mut terminal).expect("a frame draws");
+
+            assert!(
+                screen(&terminal).contains("takes no snapshots"),
+                "/{typed} should have reached an engine that cannot do it:\n{}",
+                screen(&terminal)
+            );
+        }
+    }
+
+    /// The `/` menu is the second view of the same command set, and a person
+    /// who types `/undo` and presses Enter has named the same row.
+    #[tokio::test]
+    async fn the_command_menu_reaches_undo_too() {
+        let mut app = app();
+        for event in typing("/undo") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let mut terminal = terminal(80, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        assert!(
+            screen(&terminal).contains("takes no snapshots"),
+            "{}",
+            screen(&terminal)
+        );
+        assert!(
+            app.editor.is_empty(),
+            "a UI command runs rather than being typed"
+        );
+    }
+
+    #[test]
+    fn snapshot_reverted_transcript() {
+        let mut app = app();
+        let anchor = two_exchanges(&mut app);
+        app.chat.revert(
+            anchor,
+            vec![
+                "crates/ganja-tui/src/app.rs".to_owned(),
+                "README.md".to_owned(),
+            ],
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// The W2 follow-up, at the size it was reported at: two command rows had
+    /// already pushed the `keys` section off a stock terminal and `/undo` and
+    /// `/redo` push it further, so the card scrolls (deviation:
+    /// help-card-scrolls) and every row is reachable with the arrow keys.
+    #[tokio::test]
+    async fn the_help_card_reaches_all_of_itself_on_a_stock_terminal() {
+        let mut app = app();
+        app.run_command(command::Action::Help).await;
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let opening = screen(&terminal);
+        assert!(
+            opening.contains("[up/down] scroll"),
+            "the card does not fit, so it must say how to see the rest:\n{opening}"
+        );
+        assert!(
+            !opening.contains("agent_cycle"),
+            "the fixture only proves anything while the tail really is off screen:\n{opening}"
+        );
+
+        let mut seen = opening;
+        for _ in 0..20 {
+            app.handle(key(KeyCode::Down, KeyModifiers::NONE))
+                .await
+                .expect("down is handled");
+            app.draw(&mut terminal).expect("a frame draws");
+            seen.push('\n');
+            seen.push_str(&screen(&terminal));
+        }
+
+        assert!(app.help.is_some(), "scrolling must not close the card");
+        for row in ["/undo", "/redo", "keys", "agent_cycle"] {
+            assert!(seen.contains(row), "{row} should be reachable:\n{seen}");
+        }
+    }
+
+    /// A modal owns the keyboard: the keys that scroll the card must not also
+    /// reach the composer beneath it.
+    #[tokio::test]
+    async fn scrolling_the_help_card_does_not_type_into_the_editor() {
+        let mut app = app();
+        app.run_command(command::Action::Help).await;
+
+        for code in [KeyCode::Down, KeyCode::Char('j'), KeyCode::Char('k')] {
+            app.handle(key(code, KeyModifiers::NONE))
+                .await
+                .expect("a key is handled");
+        }
+
+        assert!(app.help.is_some());
+        assert!(app.editor.is_empty(), "nothing should have been typed");
+    }
+
+    /// A window with room for the whole card is still a window with room for
+    /// the whole card: the scrolling is what a clip costs, not a permanent
+    /// change of shape.
+    #[tokio::test]
+    async fn a_tall_terminal_shows_the_whole_help_card_at_once() {
+        let mut app = app();
+        app.run_command(command::Action::Help).await;
+
+        let mut terminal = terminal(90, 40);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+
+        for row in ["/undo", "/redo", "keys", "agent_cycle"] {
+            assert!(screen.contains(row), "{row} should be listed:\n{screen}");
+        }
+        assert!(!screen.contains("[up/down] scroll"), "{screen}");
     }
 }

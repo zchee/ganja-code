@@ -113,9 +113,22 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     // for the project has to start in the same place whichever subdirectory
     // its owner opened the terminal in.
     let servers = ganja_core::McpServers::new(config.mcp.clone(), project.root());
+    // The **project root** again, and for the same reason: a language server's
+    // idea of a workspace has to be the project's, not whichever subdirectory
+    // the terminal was opened in. `None` when the config asked for no LSP,
+    // which leaves the engine doing no LSP work rather than inert LSP work.
+    let lsp = ganja_core::Lsp::new(config.lsp.as_ref(), project.root());
+    // Probed here, before the first frame: whether this project can be
+    // snapshotted at all decides what the status bar has to say about `/undo`,
+    // and the answer costs one synchronous `git` probe.
+    let snapshots = Arc::new(ganja_core::Snapshots::new(
+        &project,
+        config.snapshots_enabled(),
+    ));
+    let snapshot_notice = snapshots.notice().map(str::to_owned);
     // The registry carries every builtin tool the agent loop can execute;
     // permission rules load for the project the terminal was opened in.
-    let engine = Engine::persistent(
+    let mut engine = Engine::persistent(
         selection.provider,
         selection.model,
         Arc::new(ganja_core::Registry::with_builtins()),
@@ -124,7 +137,11 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     )
     .with_agents(agents)
     .with_commands(commands)
-    .with_mcp(Arc::clone(&servers));
+    .with_mcp(Arc::clone(&servers))
+    .with_snapshots(snapshots);
+    if let Some(lsp) = lsp {
+        engine = engine.with_lsp(lsp);
+    }
     // Composed from the engine and not from the selection, and only once the
     // agents are on it: the default agent may have named a model of another
     // family, and the prompt has to be that model's.
@@ -166,17 +183,21 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
             // The model is the engine's to answer for, not the selection's:
             // the default agent may have named one of its own, and a resumed
             // session restores the one it was left on.
-            let mut app = App::new(engine, notice(selection.notice, theme_notice), themes)
-                .with_provider(provider_id)
-                .with_keybinds(keys)
-                // What a submitted `@path` is checked against, because it is
-                // what the engine resolves the attachment against.
-                .with_root(project.root())
-                // The `@` file menu walks from here, so a mention resolves against
-                // the directory the user opened rather than the project root: what
-                // they typed is relative to where they are standing.
-                .with_cwd(cwd)
-                .watching_mcp(config.mcp.len());
+            let mut app = App::new(
+                engine,
+                notice(&[selection.notice, theme_notice, snapshot_notice]),
+                themes,
+            )
+            .with_provider(provider_id)
+            .with_keybinds(keys)
+            // What a submitted `@path` is checked against, because it is
+            // what the engine resolves the attachment against.
+            .with_root(project.root())
+            // The `@` file menu walks from here, so a mention resolves against
+            // the directory the user opened rather than the project root: what
+            // they typed is relative to where they are standing.
+            .with_cwd(cwd)
+            .watching_mcp(config.mcp.len());
             app.seed(seed);
             app.run(&mut terminal).await
         }
@@ -254,12 +275,15 @@ fn configure_themes(themes: &mut Themes, config: &Config) -> Option<String> {
 }
 
 /// The status bar's opening line: whatever startup had to say, in one string.
-fn notice(provider: Option<String>, theme: Option<String>) -> Option<String> {
-    match (provider, theme) {
-        (None, None) => None,
-        (Some(only), None) | (None, Some(only)) => Some(only),
-        (Some(provider), Some(theme)) => Some(format!("{provider}{NOTICE_SEPARATOR}{theme}")),
-    }
+///
+/// Everything that has something to say gets a say, in the order it is passed:
+/// a session can start on the fake provider, in a theme it could not find, in
+/// a directory it cannot snapshot, and none of those three is a reason to
+/// swallow the others.
+fn notice(parts: &[Option<String>]) -> Option<String> {
+    let said: Vec<&str> = parts.iter().filter_map(Option::as_deref).collect();
+
+    (!said.is_empty()).then(|| said.join(NOTICE_SEPARATOR))
 }
 
 /// Installs the session `resume` names and hands back its transcript.
@@ -647,22 +671,26 @@ mod tests {
 
     #[test]
     fn the_opening_notice_carries_whatever_startup_had_to_say() {
-        let cases = [
-            (None, None, None),
-            (Some("provider"), None, Some("provider")),
-            (None, Some("theme"), Some("theme")),
+        let cases: [(&[Option<&str>], Option<&str>); 6] = [
+            (&[None, None, None], None),
+            (&[Some("provider"), None, None], Some("provider")),
+            (&[None, Some("theme"), None], Some("theme")),
+            (&[None, None, Some("no git")], Some("no git")),
             (
-                Some("provider"),
-                Some("theme"),
+                &[Some("provider"), Some("theme"), None],
                 Some("provider \u{b7} theme"),
+            ),
+            (
+                &[Some("provider"), Some("theme"), Some("no git")],
+                Some("provider \u{b7} theme \u{b7} no git"),
             ),
         ];
 
-        for (provider, theme, expected) in cases {
-            assert_eq!(
-                notice(provider.map(str::to_owned), theme.map(str::to_owned)).as_deref(),
-                expected
-            );
+        for (parts, expected) in cases {
+            let owned: Vec<Option<String>> =
+                parts.iter().map(|part| part.map(str::to_owned)).collect();
+
+            assert_eq!(notice(&owned).as_deref(), expected, "{parts:?}");
         }
     }
 }

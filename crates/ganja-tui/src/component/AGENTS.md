@@ -12,7 +12,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 | File | Description |
 |------|-------------|
 | `mod.rs` | Module list. |
-| `chat.rs` | The transcript viewport: message and part rendering, wrapping, scrolling, tail-following, wheel handling (`WHEEL_LINES`). |
+| `chat.rs` | The transcript viewport: message and part rendering, wrapping, scrolling, tail-following, wheel handling (`WHEEL_LINES`), and the revert state — `revert`/`unrevert`/`drop_reverted` hide, restore or delete the tail an `/undo` took back, with one marker row (`N message(s) reverted — /redo to restore` plus the files) standing in its place. |
 | `editor.rs` | The prompt editor — a `ratatui-textarea` `TextArea` with ganja's submit rules layered on top. |
 | `status.rs` | The status bar: what the engine is doing (`Activity`), what the session has spent (`Totals`), and the keys that matter. |
 | `permission.rs` | The centered modal blocking on one pending tool call. Spec: upstream `packages/tui/src/routes/session/permission.tsx`, trimmed to the one-shot shape `PermissionReply` offers today. |
@@ -22,7 +22,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 | `palette.rs` | The command palette, grouped by category with a filter line and a block of suggested commands pinned while nothing is typed. Spec: upstream `packages/tui/src/component/command-palette.tsx`. |
 | `dropdown.rs` | The inline command menu, anchored above the editor. Opens only when `/` is the first character of the buffer and the cursor has not left the first whitespace-free span; matches descriptions as well as names, which the palette does not. Spec: upstream `packages/tui/src/component/prompt/autocomplete.tsx`. |
 | `files.rs` | The inline file menu, raised by an `@`. The same box `dropdown.rs` draws, over paths the core `glob` tool walked — and **not re-ranked**, because upstream says twice in comments to trust the backend's order. |
-| `help.rs` | The reference card: every command with its key, then the bindings no command row shows, named as a config file rebinds them. |
+| `help.rs` | The reference card: every command with its key, then the bindings no command row shows, named as a config file rebinds them. Sizes itself to its content and **scrolls** when the window cannot hold it — upstream's card is one sentence and never needed to (deviation: `help-card-scrolls`); the footer counts which rows are showing, so a clip is never silent. |
 
 ## For AI Agents
 
@@ -37,7 +37,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 
 Components are exercised through `App::handle` and rendered into a `TestBackend` — no terminal, no running turn. Screen output is asserted with `insta` snapshots in `../snapshots/`. After an intentional visual change: `cargo insta review`.
 
-Snapshot coverage today: the permission dialog open and overflowing (the cut flagged, the reply keys kept), the sessions picker open and after moving the selection, a tool call in each of its states (pending, running, completed with a diff, error), the theme list open, one style-aware frame per ported theme, the palette open and filtered plus one style-aware frame pinning its selection fill, the inline command menu, the agent list, and the reference card. A new tool state or dialog needs its own snapshot.
+Snapshot coverage today: the permission dialog open and overflowing (the cut flagged, the reply keys kept), the sessions picker open and after moving the selection, a tool call in each of its states (pending, running, completed with a diff, error), the theme list open, one style-aware frame per ported theme, the palette open and filtered plus one style-aware frame pinning its selection fill, the inline command menu, the agent list, the reference card, and a transcript with a revert marker in place of the messages an `/undo` hid. A new tool state or dialog needs its own snapshot.
 
 ### Common Patterns
 

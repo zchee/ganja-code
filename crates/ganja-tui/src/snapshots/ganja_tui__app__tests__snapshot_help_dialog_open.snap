@@ -15,9 +15,9 @@ cont│/help          Help                                                   │
 [err│/exit          Exit the app                     ctrl+c, ctrl+q, ctrl+d│    
 refu│/copy          Copy session transcript                                │    
     │/copy-message  Copy message                                           │    
+    │/undo          Undo previous message                                  │    
     │                                                                      │    
-    │                                                                      │    
-    │[Esc] close                                                           │    
+    │[up/down] scroll   [Esc] close                              1-12 of 17│    
     └──────────────────────────────────────────────────────────────────────┘    
                                                                                 
 ┌ message ─────────────────────────────────────────────────────────────────────┐

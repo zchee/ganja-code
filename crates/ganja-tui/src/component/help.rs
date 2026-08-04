@@ -7,9 +7,18 @@
 //! commands the dialog *is* the list, and pointing somewhere else for it would
 //! be a redirection to nowhere.
 //!
-//! Stateless: there is nothing to choose, so there is nothing to remember
-//! between frames. Escape closes it, which [`crate::app::App`] handles like
-//! every other modal.
+//! The card **scrolls**, which upstream's does not need to: its dialog is one
+//! sentence pointing at the palette, and one sentence cannot outgrow a stock
+//! terminal. Ganja's card is the list, the list grew past the 15 rows an 80×24
+//! window leaves it, and a card that silently dropped its tail would be a
+//! reference missing exactly the part nobody has memorized (deviation:
+//! help-card-scrolls). The mechanism is the one `list.rs` already uses — an
+//! offset the render clamps, so a key that would scroll past either end
+//! settles at it — plus a counter along the bottom edge saying how much of the
+//! card is on screen, so what is off it is never a surprise.
+//!
+//! Escape closes it and the arrow keys move it; both are
+//! [`crate::app::App`]'s, like every other modal's keys.
 
 use ratatui::{
     buffer::Buffer,
@@ -32,6 +41,9 @@ const CHROME: usize = 2;
 /// The keys the dialog answers to, shown along its bottom edge.
 const HINTS: &str = "[Esc] close";
 
+/// The same, for a card with more rows than the window can show.
+const SCROLL_HINTS: &str = "[up/down] scroll   [Esc] close";
+
 /// Widest the modal grows, whatever the terminal offers.
 const MAX_WIDTH: u16 = 72;
 
@@ -44,38 +56,76 @@ pub struct Help {
     /// The bindings this run is using, which is what makes the card true of
     /// *this* run rather than of the defaults.
     keys: Keybinds,
+    /// First row on screen. Clamped by the render, which is the only place
+    /// that knows how many rows there are and how many fit.
+    offset: usize,
 }
 
 impl Help {
     /// Builds the card over `keys`.
     #[must_use]
     pub fn new(keys: Keybinds) -> Self {
-        Self { keys }
+        Self { keys, offset: 0 }
+    }
+
+    /// Moves the card by `delta` rows, negative being towards the top.
+    ///
+    /// Deliberately unclamped at the far end: how far down the card can go
+    /// depends on a width and a height only the render has seen, so it is the
+    /// render that pins the offset — and it writes the clamped value back, so
+    /// a Page Down at the bottom does not have to be undone by ten Page Ups.
+    pub fn scroll(&mut self, delta: isize) {
+        self.offset = if delta < 0 {
+            self.offset.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.offset.saturating_add(delta.unsigned_abs())
+        };
+    }
+
+    /// Moves the card to its first row.
+    pub fn scroll_to_top(&mut self) {
+        self.offset = 0;
     }
 
     /// Draws the modal centered over `area`.
-    pub fn render(&self, area: Rect, buffer: &mut Buffer, theme: &Theme) {
+    pub fn render(&mut self, area: Rect, buffer: &mut Buffer, theme: &Theme) {
         if area.is_empty() {
             return;
         }
 
         let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
-        let height = area.height.saturating_sub(2).clamp(1, 20);
+        let inner_width = usize::from(width).saturating_sub(2);
+
+        let mut body = self.rows(inner_width, theme);
+        body.extend(self.unlisted_keys(inner_width, theme));
+        let total = body.len();
+
+        // As tall as the card needs, and no taller: the sibling dialogs cap at
+        // a round number because their lists are unbounded, where this one is
+        // exactly as long as the build's command table. A window with room for
+        // all of it gets all of it and no trailing blank rows; a window
+        // without gets as much as it can hold, and the footer says so.
+        let wanted = u16::try_from(total.saturating_add(CHROME + 2)).unwrap_or(u16::MAX);
+        let height = area.height.saturating_sub(2).clamp(1, wanted.max(1));
         let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
 
         Clear.render(popup, buffer);
 
-        let inner_width = usize::from(width).saturating_sub(2);
         let rows = usize::from(height)
             .saturating_sub(2)
             .saturating_sub(CHROME)
             .max(1);
+        // Written back so the offset never runs away past the end: the next
+        // scroll up starts from the last row actually shown.
+        self.offset = self.offset.min(total.saturating_sub(rows));
+        let offset = self.offset;
 
-        let mut lines = self.rows(inner_width, theme);
-        lines.extend(self.unlisted_keys(inner_width, theme));
-        lines.truncate(rows);
+        let mut lines: Vec<Line<'static>> = body.into_iter().skip(offset).take(rows).collect();
         lines.push(Line::raw(""));
-        lines.push(Line::styled(clip(HINTS, inner_width), theme.dim));
+        lines.push(Line::styled(
+            clip(&footer(offset, rows, total, inner_width), inner_width),
+            theme.dim,
+        ));
 
         Paragraph::new(Text::from(lines))
             .block(Block::bordered().title(" help "))
@@ -166,6 +216,31 @@ impl Help {
     }
 }
 
+/// The bottom edge: which keys work, and — when the card does not fit — which
+/// of its rows are on screen.
+///
+/// The counter is what keeps the clip honest. A card cut off with no sign that
+/// it was cut reads as a complete list, and the rows most worth reading are
+/// the ones a person has not memorized, which is to say the ones at the end.
+fn footer(offset: usize, rows: usize, total: usize, width: usize) -> String {
+    if total <= rows {
+        return HINTS.to_owned();
+    }
+
+    let last = (offset + rows).min(total);
+    let counter = format!("{first}-{last} of {total}", first = offset + 1);
+    let room = width
+        .saturating_sub(SCROLL_HINTS.width())
+        .saturating_sub(counter.width());
+    if room == 0 {
+        // Too narrow to say both; the counter is the half that cannot be
+        // guessed from the keys.
+        return counter;
+    }
+
+    format!("{SCROLL_HINTS}{gap}{counter}", gap = " ".repeat(room))
+}
+
 /// `text` cut to `width` display columns.
 fn clip(text: &str, width: usize) -> String {
     if text.width() <= width {
@@ -184,25 +259,36 @@ mod tests {
     use super::Help;
     use crate::{command::COMMANDS, keybind::Keybinds, theme::Theme};
 
-    /// Tall enough for the whole card: nine commands, the keys that have no
-    /// command row, and the chrome around them. A shorter window truncates,
-    /// which is the behavior a tiny-area test covers rather than this one.
-    /// Tall enough for every row the card holds: the command list grew by the
-    /// two copy commands, and a shorter area clips the key section under it.
+    /// Tall enough for every row the card holds at once, which is what makes
+    /// this the area for "is it listed at all" questions. What a *stock*
+    /// terminal shows — and how the rest is reached there — is the 80×24 test
+    /// below, and the app-level one beside it.
     const AREA: Rect = Rect {
         x: 0,
         y: 0,
         width: 76,
-        height: 22,
+        height: 30,
     };
 
-    fn rendered(help: &Help) -> String {
-        let mut buffer = Buffer::empty(AREA);
-        help.render(AREA, &mut buffer, &Theme::default());
+    /// What an 80×24 terminal actually hands this dialog: the app draws it
+    /// over the transcript pane, which is the window less the composer's five
+    /// rows and the status bar's one. That is the area the card outgrew, and
+    /// asserting against the whole 80×24 window here would test a size nothing
+    /// ever renders into.
+    const STOCK: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 18,
+    };
 
-        (0..AREA.height)
+    fn drawn(help: &mut Help, area: Rect) -> String {
+        let mut buffer = Buffer::empty(area);
+        help.render(area, &mut buffer, &Theme::default());
+
+        (0..area.height)
             .map(|row| {
-                (0..AREA.width)
+                (0..area.width)
                     .map(|column| buffer[(column, row)].symbol())
                     .collect::<String>()
             })
@@ -210,9 +296,26 @@ mod tests {
             .join("\n")
     }
 
+    fn rendered(help: &mut Help) -> String {
+        drawn(help, AREA)
+    }
+
+    /// Everything the card holds, gathered by scrolling to the bottom of it —
+    /// which is exactly what a person at an 80×24 terminal does.
+    fn reachable(help: &mut Help, area: Rect) -> String {
+        let mut seen = drawn(help, area);
+        for _ in 0..40 {
+            help.scroll(1);
+            seen.push('\n');
+            seen.push_str(&drawn(help, area));
+        }
+
+        seen
+    }
+
     #[test]
     fn the_card_lists_every_command() {
-        let screen = rendered(&Help::new(Keybinds::defaults()));
+        let screen = rendered(&mut Help::new(Keybinds::defaults()));
 
         for entry in COMMANDS {
             assert!(
@@ -223,6 +326,86 @@ mod tests {
         }
     }
 
+    /// The follow-up W2 left open: two command rows pushed the `keys` section
+    /// off a stock terminal, and `/undo` and `/redo` push it further. Nothing
+    /// is dropped — it is scrolled to (deviation: help-card-scrolls).
+    #[test]
+    fn every_row_is_reachable_on_a_stock_terminal() {
+        let mut help = Help::new(Keybinds::defaults());
+
+        let screen = reachable(&mut help, STOCK);
+
+        for entry in COMMANDS {
+            assert!(
+                screen.contains(&entry.slash()),
+                "{} should be reachable at 80x24:\n{screen}",
+                entry.slash()
+            );
+        }
+        for name in ["keys", "palette_open", "agent_cycle"] {
+            assert!(
+                screen.contains(name),
+                "{name} should be reachable at 80x24:\n{screen}"
+            );
+        }
+    }
+
+    /// A card cut off with no sign of it reads as the whole list, which is the
+    /// one reading that is false.
+    #[test]
+    fn a_card_that_does_not_fit_says_how_much_of_it_is_showing() {
+        let mut help = Help::new(Keybinds::defaults());
+
+        let first = drawn(&mut help, STOCK);
+        assert!(
+            first.contains("1-"),
+            "the counter should start at the first row:\n{first}"
+        );
+        assert!(
+            first.contains("[up/down] scroll"),
+            "and say which keys move it:\n{first}"
+        );
+
+        help.scroll(1);
+        let moved = drawn(&mut help, STOCK);
+        assert!(moved.contains("2-"), "and follow the rows:\n{moved}");
+    }
+
+    /// The other side of it: a window with room for everything says nothing
+    /// about scrolling, because there is nowhere to scroll to.
+    #[test]
+    fn a_card_that_fits_offers_no_scrolling() {
+        let screen = rendered(&mut Help::new(Keybinds::defaults()));
+
+        assert!(screen.contains("[Esc] close"), "{screen}");
+        assert!(!screen.contains("[up/down] scroll"), "{screen}");
+        assert!(!screen.contains(" of "), "{screen}");
+    }
+
+    /// The render is what knows how far down the card goes, so it is the
+    /// render that clamps — and it writes the clamped value back, or one
+    /// overshoot would cost a scroll up per row overshot.
+    #[test]
+    fn scrolling_past_the_end_settles_on_the_last_row_rather_than_running_away() {
+        let mut help = Help::new(Keybinds::defaults());
+
+        help.scroll(isize::MAX);
+        let bottom = drawn(&mut help, STOCK);
+        help.scroll(-1);
+        let stepped_back = drawn(&mut help, STOCK);
+
+        assert_ne!(
+            bottom, stepped_back,
+            "one step up from the bottom should move the card"
+        );
+        help.scroll(-isize::MAX);
+        assert_eq!(
+            drawn(&mut help, STOCK),
+            drawn(&mut Help::new(Keybinds::defaults()), STOCK),
+            "and scrolling up forever is the top"
+        );
+    }
+
     /// The card describes the run it is shown in, not the build's defaults.
     #[test]
     fn a_rebound_key_is_the_one_the_card_shows() {
@@ -230,7 +413,7 @@ mod tests {
             [("themes_open".to_owned(), "f7".to_owned())].into();
         let keys = Keybinds::from_config(&configured).expect("a legible binding loads");
 
-        let screen = rendered(&Help::new(keys));
+        let screen = rendered(&mut Help::new(keys));
 
         assert!(screen.contains("f7"), "{screen}");
         assert!(
@@ -242,7 +425,7 @@ mod tests {
     /// A key with no command of its own has nowhere else to be documented.
     #[test]
     fn the_card_lists_the_bindings_no_command_row_shows() {
-        let screen = rendered(&Help::new(Keybinds::defaults()));
+        let screen = rendered(&mut Help::new(Keybinds::defaults()));
 
         for name in ["palette_open", "agent_cycle"] {
             assert!(screen.contains(name), "{name} should be listed:\n{screen}");
@@ -258,8 +441,10 @@ mod tests {
         for (width, height) in [(1, 1), (4, 3), (20, 5)] {
             let area = Rect::new(0, 0, width, height);
             let mut buffer = Buffer::empty(area);
+            let mut help = Help::new(Keybinds::defaults());
 
-            Help::new(Keybinds::defaults()).render(area, &mut buffer, &Theme::default());
+            help.scroll(isize::MAX);
+            help.render(area, &mut buffer, &Theme::default());
         }
     }
 }
