@@ -513,14 +513,43 @@ impl Permissions {
     /// Everything a person decided comes across unchanged, and so does the
     /// store, so an "always" given inside the derived set outlives the process
     /// exactly as one given outside it would. What does *not* come across is
-    /// the baseline: the caller is running as somebody else — a subagent, or a
-    /// command that named its own agent — and that is the whole point of
-    /// deriving rather than sharing.
+    /// the baseline: the caller is running as somebody else — a command that
+    /// named its own agent — and that is the whole point of deriving rather
+    /// than sharing.
+    ///
+    /// This is the *attended* derivation: the person who answered those
+    /// dialogs is watching the turn it is used for. Anything unattended wants
+    /// [`Permissions::derive_subagent`] instead.
     #[must_use]
     pub(crate) fn derive(&self, baseline: Vec<Rule>) -> Self {
         Self {
             baseline,
             rules: self.rules.clone(),
+            store: self.store.clone(),
+            root: self.root.clone(),
+            cwd: self.cwd.clone(),
+        }
+    }
+
+    /// The same, for work nobody is watching: the answers a person gave stay
+    /// behind.
+    ///
+    /// [`Permissions::inherited_by_subagent`] describes which of the parent's
+    /// rules a subagent is bound by, and allows are deliberately not among
+    /// them — but carrying the stored tier across would have put them back,
+    /// and at the *top* of the order, where they outrank the subagent's own
+    /// rules and every refusal inherited beneath them. One "always, run
+    /// `cargo`" answered about a supervised turn would then quietly authorize
+    /// every later delegation, which is the opposite of what the dialog asked.
+    ///
+    /// The store still comes across, so a dialog the *child* raises can be
+    /// answered "always" and outlive the process the same way — what is
+    /// dropped is the parent's answers, not the ability to give one.
+    #[must_use]
+    pub(crate) fn derive_subagent(&self, baseline: Vec<Rule>) -> Self {
+        Self {
+            baseline,
+            rules: Vec::new(),
             store: self.store.clone(),
             root: self.root.clone(),
             cwd: self.cwd.clone(),
