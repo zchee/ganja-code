@@ -9,7 +9,7 @@
 //! session layer owns the transcript rewind; ganja's does not, yet.
 //!
 //! The delays are ported from upstream `packages/opencode/src/session/retry.ts`
-//! (v1.18.11): 2s initial, doubling, capped at 30s, with `retry-after-ms` and
+//! (v1.18.13): 2s initial, doubling, capped at 30s, with `retry-after-ms` and
 //! `retry-after` honoured ahead of the schedule.
 
 use std::{

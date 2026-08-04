@@ -97,7 +97,7 @@ fn reference_sdk() -> PathBuf {
     let checkout = std::env::var_os(CHECKOUT_ENV).map_or_else(
         || {
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../.omc/reference/opencode-v1.18.11")
+                .join("../../.omc/reference/opencode-v1.18.13")
                 .to_owned()
         },
         PathBuf::from,
@@ -106,7 +106,7 @@ fn reference_sdk() -> PathBuf {
     assert!(
         checkout.join("packages/opencode/src/index.ts").is_file(),
         "the upstream checkout is not where this expects it: {}. \
-         Vendor opencode v1.18.11 there, or point {CHECKOUT_ENV} at it.",
+         Vendor opencode v1.18.13 there, or point {CHECKOUT_ENV} at it.",
         checkout.display()
     );
 

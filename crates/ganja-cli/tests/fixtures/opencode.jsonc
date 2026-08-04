@@ -1,5 +1,5 @@
 {
-  // Every key here is one opencode v1.18.11 accepts. This is the importer's
+  // Every key here is one opencode v1.18.13 accepts. This is the importer's
   // fixture rather than a config anyone runs: it exists to have one of each
   // shape the mapping has a rule for, including the ones that must NOT survive.
   "$schema": "https://opencode.ai/config.json",

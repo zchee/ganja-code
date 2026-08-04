@@ -2,7 +2,7 @@
 
 ## opencode
 
-This repository is a behavioral port to Rust of [opencode](https://github.com/anomalyco/opencode), pinned at reference tag **v1.18.11** (released 2026-08-01).
+This repository is a behavioral port to Rust of [opencode](https://github.com/anomalyco/opencode), pinned at reference tag **v1.18.13** (released 2026-08-04).
 
 What is ported from the upstream specification:
 - **Behavior**: streaming chat, tool calling, permission gating, session persistence, configuration loading

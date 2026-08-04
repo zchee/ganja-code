@@ -22,6 +22,6 @@ What is *not* here: a tool's own description. Those live beside the tool in `gan
 
 ## For AI Agents
 
-- **These are byte-verbatim copies** of upstream files at v1.18.11 — the base prompts and reminders from `packages/opencode/src/session/prompt/`, `explore.txt` from `packages/opencode/src/agent/prompt/` — attributed in the root `THIRD_PARTY_NOTICES.md`. Do not edit, reflow, or "fix" them; a byte diff against upstream must stay empty, because that is what the notices claim.
+- **These are byte-verbatim copies** of upstream files at v1.18.13 — the base prompts and reminders from `packages/opencode/src/session/prompt/`, `explore.txt` from `packages/opencode/src/agent/prompt/` — attributed in the root `THIRD_PARTY_NOTICES.md`. Do not edit, reflow, or "fix" them; a byte diff against upstream must stay empty, because that is what the notices claim.
 - Base-prompt selection lives in `../instruction.rs` (`base_prompt`, substring match on the model id, first match wins). An agent's own `prompt` replaces the base prompt entirely. Reminder injection lives in the engine/session loop, request-side only — reminders never enter stored history.
 - Porting another upstream text takes three coordinated changes: the verbatim file here, its consumer (`../instruction.rs` or `../agent.rs`), and a notices entry.
