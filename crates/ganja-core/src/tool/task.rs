@@ -393,7 +393,7 @@ impl Child {
                 .permissions
                 .lock()
                 .expect("the permission rules are never poisoned");
-            parent.derive(subagent_rules(agent, &parent))
+            parent.derive_subagent(subagent_rules(agent, &parent))
         };
 
         // The child's own channel. Its events never reach the frontend — see
@@ -464,6 +464,11 @@ impl Child {
 /// appends `task`/`todowrite` denials unless the subagent's own set already
 /// mentions them, which is how `general`'s explicit `todowrite: deny` and an
 /// agent that deliberately re-enables it both survive.
+///
+/// This is the child's whole ruleset. It reaches the child through
+/// [`Permissions::derive_subagent`], which leaves the parent's stored answers
+/// behind — a set assembled this carefully would mean nothing under a tier
+/// that outranks all of it.
 fn subagent_rules(agent: &Agent, parent: &Permissions) -> Vec<Rule> {
     let mut rules = agent.rules.clone();
     rules.extend(parent.inherited_by_subagent());
