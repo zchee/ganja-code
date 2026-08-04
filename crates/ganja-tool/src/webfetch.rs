@@ -17,7 +17,7 @@ use futures::StreamExt as _;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
 
 /// Most bytes a response may carry before it is refused. Upstream's 5 MB.
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
@@ -423,7 +423,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{MAX_RESPONSE_SIZE, WebfetchTool};
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{FileTimes, Tool, ToolCtx, ToolError};
 
     /// A loopback endpoint answering one connection with canned bytes.
     ///

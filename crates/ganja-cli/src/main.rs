@@ -13,7 +13,9 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ganja_core::{Project, SessionInfo, Storage, Usage, auth, catalog};
+use ganja_core::{SessionInfo, Storage, auth, catalog};
+use ganja_permission::Project;
+use ganja_protocol::Usage;
 use secrecy::{SecretString, zeroize::Zeroize as _};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -346,7 +348,8 @@ fn log_directory() -> Result<PathBuf> {
     use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 
     // XDG conventions on every platform, macOS included, matching how
-    // `ganja_core::auth` and `ganja_core::project` resolve their own paths.
+    // `ganja_core::auth` and `ganja_permission::project` resolve their own
+    // paths.
     let base = Xdg::new().context("the home directory holding the log could not be located")?;
 
     Ok(base.data_dir().join(DIRECTORY).join(LOGS))
@@ -824,10 +827,11 @@ mod tests {
 
     use clap::Parser;
     use ganja_core::{
-        SessionId, SessionInfo, Usage,
+        SessionId, SessionInfo,
         catalog::{ModelInfo, ModelStatus, Pricing},
         storage::VERSION,
     };
+    use ganja_protocol::Usage;
 
     use super::{Cli, Command, UNTITLED, age, billed_tokens, matching, per_mtok, providers, title};
 

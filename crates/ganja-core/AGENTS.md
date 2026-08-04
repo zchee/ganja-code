@@ -1,17 +1,19 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-04 | Updated: 2026-08-04 -->
+<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
 
 # ganja-core
 
 ## Purpose
 
-The engine: session orchestration, providers, tools, permissions, and the serde-serializable command/event protocol frontends speak. This crate carries **no terminal-backend dependency** — no `ratatui`, no `crossterm` — so the engine stays testable without a terminal and can later be driven over a network transport.
+The engine: session orchestration, providers, and the agent loop that drives them. This crate carries **no terminal-backend dependency** — no `ratatui`, no `crossterm` — so the engine stays testable without a terminal and can later be driven over a network transport.
+
+Three things it is built on are crates of their own — `ganja-protocol`, `ganja-permission`, `ganja-tool` — and this crate re-exports each under the module name it always had, so `ganja_core::protocol`, `ganja_core::permission`, `ganja_core::project`, `ganja_core::tool` and `ganja_core::watch` all keep resolving. A caller that only wants one of the three should depend on it directly; the facade is for the callers that want the engine.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `Cargo.toml` | Member manifest. Every dependency entry carries the reason it is there — read the comments before adding or removing one. `libc` is unix-only (process-group kill); dev-dependencies enable `tokio/net` for tests that serve real HTTP over loopback. |
+| `Cargo.toml` | Member manifest. Every dependency entry carries the reason it is there — read the comments before adding or removing one. `libc` is unix-only (signalling a spawned server's process group); dev-dependencies enable `tokio/net` for tests that serve real HTTP over loopback. |
 
 ## Subdirectories
 
@@ -24,15 +26,16 @@ The engine: session orchestration, providers, tools, permissions, and the serde-
 
 ### Working In This Directory
 
-- **The purity rule is the crate's reason to exist.** CI asserts `cargo tree -p ganja-core -e normal` never mentions `ratatui`. Anything the UI must render is expressed as a serde type in `src/protocol.rs`, never as a widget or a style.
-- **Everything on the protocol is serde-derived from day one.** That serialization constraint — not a trait — is what preserves the path to `ganja serve` (P7) and to persisted transcripts (P4). A new field or variant should be considered wire-visible even though nothing serves it yet.
+- **The purity rule is the crate's reason to exist.** CI asserts `cargo tree -p ganja-core -e normal` never mentions `ratatui`. Anything the UI must render is expressed as a serde type in `ganja-protocol`, never as a widget or a style.
+- **The three crates beneath this one may not name it.** `ganja-tool` in particular is asserted the same inverted way: `! cargo tree -p ganja-tool -e normal | grep -q ganja-core`. A tool that appears to need something from the engine needs a value in its `ToolCtx` instead.
+- **Everything on the protocol is serde-derived from day one.** That serialization constraint — not a trait — is what preserves the path to serving the engine and to persisted transcripts. A new field or variant should be considered wire-visible even though nothing serves it yet.
 - The public surface is re-exported from `src/lib.rs`; a new module that frontends use should re-export its types there alongside the rest.
 
 ### Testing Requirements
 
 ```sh
 cargo nextest run -p ganja-core               # unit + integration, each test its own process
-cargo nextest run -p ganja-core permission    # tests whose name matches "permission"
+cargo nextest run --workspace permission      # tests whose name matches "permission", wherever they live
 cargo nextest run -E 'binary(golden)'         # one integration binary
 cargo test -p ganja-core --doc                # doctests, which nextest does not run
 ```
@@ -49,10 +52,10 @@ Unit tests live in `#[cfg(test)] mod tests` at the bottom of the module they cov
 
 ### Internal
 
-None — this crate is the bottom of the dependency graph. `ganja-tui` and `ganja-cli` depend on it.
+`ganja-protocol`, `ganja-permission` and `ganja-tool`, all re-exported from `src/lib.rs`. `ganja-tui` and `ganja-cli` depend on this crate, and additionally on the protocol (and, for the frontend's `@` file menu, on the tool crate) where they name those types directly.
 
 ### External
 
-`tokio` + `tokio-util` (runtime, `CancellationToken`), `reqwest`/rustls (provider HTTP), `futures` (stream combinators), `secrecy` (key material), `serde`/`serde_json`, `schemars` (tool schemas), `ignore`/`grep-searcher`/`grep-regex` (in-process glob and grep), `similar` (unified diffs), `etcetera` (XDG paths), `rmcp` (MCP client transports), `lsp-types` (the LSP wire types), `notify` (the stale-read watcher), `htmd` (webfetch's markdown rendering), `thiserror`, `tracing`, `url` (host comparison for endpoint checks), `async-trait`, `libc` (unix only).
+`tokio` + `tokio-util` (runtime, `CancellationToken`), `reqwest`/rustls (provider HTTP), `futures` (stream combinators), `secrecy` (key material), `serde`/`serde_json`, `schemars` (the two schemas the engine builds rather than derives), `ignore` (the `AGENTS.md` walk, under the same ignore rules the tools search by), `etcetera` (XDG paths), `rmcp` (MCP client transports), `lsp-types` (the LSP wire types), `jsonc-parser` (config files in upstream's dialect), `thiserror`, `tracing`, `url` (host comparison for endpoint checks), `async-trait`, `libc` (unix only). `similar`, `notify`, `htmd` and the ripgrep search crates left with the tools that used them.
 
 <!-- MANUAL: -->

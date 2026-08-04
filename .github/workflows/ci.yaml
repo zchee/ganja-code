@@ -35,6 +35,9 @@ jobs:
       - name: ganja-core stays free of terminal dependencies
         run: '! cargo tree -p ganja-core -e normal | grep -q ratatui'
 
+      - name: ganja-tool never reaches back into the engine
+        run: '! cargo tree -p ganja-tool -e normal | grep -q ganja-core'
+
   deny:
     name: deny
     # Advisories, licenses, bans and source-registry checks are static

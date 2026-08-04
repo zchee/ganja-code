@@ -21,14 +21,14 @@
 //! on every turn a subagent runs, so a child that somehow held this tool would
 //! have nothing to delegate through.
 //!
-//! [`ToolCtx::spawn`]: crate::tool::ToolCtx::spawn
+//! [`ToolCtx::spawn`]: crate::ToolCtx::spawn
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput};
 
 /// The tool id, which is also the permission key. Both are a permanent
 /// commitment: a rule stored under this name has to keep meaning what it meant.
@@ -36,11 +36,11 @@ pub const ID: &str = "task";
 
 /// What the model is told the tool is for, ported verbatim from upstream
 /// `packages/opencode/src/tool/task.txt` (MIT; see `THIRD_PARTY_NOTICES.md`).
-pub(crate) const DESCRIPTION: &str = include_str!("../prompt/task.txt");
+pub const DESCRIPTION: &str = include_str!("task.txt");
 
 /// Header upstream appends the per-caller agent roster under
 /// (`tool/registry.ts`, `describeTask`).
-pub(crate) const ROSTER_HEADER: &str = "Available agent types and the tools they have access to:";
+pub const ROSTER_HEADER: &str = "Available agent types and the tools they have access to:";
 
 /// What upstream shows for an agent that describes itself nowhere.
 const NO_DESCRIPTION: &str = "This subagent should only be called manually by the user.";
@@ -273,7 +273,7 @@ fn render(session: &str, state: &str, tag: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{DESCRIPTION, Offered, ROSTER_HEADER, TaskTool, render};
-    use crate::tool::Tool as _;
+    use crate::Tool as _;
 
     /// The order agents are handed over in is nobody's business but this
     /// function's: upstream sorts them, and a registry does not promise one.

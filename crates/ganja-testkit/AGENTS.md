@@ -47,7 +47,7 @@ cargo nextest run --workspace         # ganja-core's suites, rewired onto this c
 
 ### Internal
 
-`ganja-core` (path dependency) — every type here is built on its public `Provider`/`Tool`/`Engine`/`Storage` surface.
+`ganja-core` (path dependency) — every type here is built on its public `Provider`/`Engine`/`Storage` surface, and on the `Tool` trait it re-exports from `ganja-tool`.
 
 ### External
 

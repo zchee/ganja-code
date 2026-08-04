@@ -40,7 +40,8 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use ganja_core::{Project, config::Config, lsp::server::BUILTIN_IDS};
+use ganja_core::{config::Config, lsp::server::BUILTIN_IDS};
+use ganja_permission::Project;
 
 /// Directory opencode keeps its global config in, under the XDG config home.
 const OPENCODE_DIRECTORY: &str = "opencode";

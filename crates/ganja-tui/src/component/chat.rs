@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use ganja_core::{Message, MessageId, Part, PartBody, PartId, Role, ToolState};
+use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Line};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
@@ -59,7 +59,7 @@ fn label(role: Role) -> &'static str {
 /// the confirmed way back; ganja draws the row and points at `/redo`
 /// (**D106**). What is lost with the panel is upstream's per-file
 /// `+additions -deletions`, which it parses out of a unified diff the engine
-/// sends and ganja's [`RevertInfo`](ganja_core::RevertInfo) does not carry.
+/// sends and ganja's [`RevertInfo`](ganja_protocol::RevertInfo) does not carry.
 fn reverted_headline(hidden: usize) -> String {
     format!(
         "{hidden} message{plural} reverted \u{2014} /redo to restore",
@@ -896,7 +896,7 @@ pub(crate) fn split_at_width(text: &str, width: usize) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use ganja_core::{Message, MessageId, Part, PartBody, PartId, ToolState};
+    use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, ToolState};
     use ratatui::{buffer::Buffer, layout::Rect};
 
     use super::{Chat, elapsed, split_at_width, wrap};

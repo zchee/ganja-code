@@ -26,6 +26,17 @@ crossterm.workspace = true
 etcetera.workspace = true
 futures.workspace = true
 ganja-core.workspace = true
+# The types this crate turns into frames, named directly rather than through
+# `ganja-core`'s re-export: a frontend needs the protocol and nothing else about
+# the engine to render a transcript, and depending on it that way is what keeps
+# that true.
+ganja-protocol.workspace = true
+# The `@` file menu runs the glob tool in-process, which is why the frontend
+# links the tool crate rather than asking the engine to walk the tree for it: it
+# preserves today's documented behavior at no latency cost. Rerouting the menu
+# through an engine API is the work of the phase that grows a remote frontend,
+# which cannot link this crate at all.
+ganja-tool.workspace = true
 # The palette and the `/` dropdown rank commands by a typed fragment. The same
 # matcher helix and nucleo use, so a fragment scores here the way it scores in
 # every other terminal picker the user already knows.
@@ -49,7 +60,7 @@ syntect.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-# The `@` file menu drives the core glob tool, whose `ToolCtx` carries the
+# The `@` file menu drives the glob tool, whose `ToolCtx` carries the
 # cancellation token a turn would have handed it.
 tokio-util.workspace = true
 # A custom theme that will not load is skipped rather than fatal, which is only

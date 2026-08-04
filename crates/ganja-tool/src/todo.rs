@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput};
 
 /// Where a task has got to.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -154,7 +154,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{TodoItem, TodoPriority, TodoStatus, TodoWriteTool};
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{FileTimes, Tool, ToolCtx, ToolError};
 
     /// A context no todo call looks at, since the list is not on disk.
     fn ctx() -> ToolCtx {

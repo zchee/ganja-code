@@ -294,10 +294,29 @@ fn check_base_url(base_url: &str) -> Result<(), ProviderError> {
     let parsed = Url::parse(base_url)
         .map_err(|error| ProviderError::Transport(format!("the base URL is not a URL: {error}")))?;
 
+    if reachable_in_the_clear(&parsed) {
+        return Ok(());
+    }
+
+    Err(ProviderError::Transport(
+        "the base URL must be https, or http to loopback; anything else puts the \
+         API key on the wire in the clear"
+            .to_owned(),
+    ))
+}
+
+/// Whether `url` may be spoken to at all, given that the request will carry a
+/// secret — an API key in a header here, a configured token in `headers` there.
+///
+/// Shared with [`crate::config`], which asks this about an MCP server's
+/// endpoint. What is shared is the predicate and not the refusal: each caller
+/// keeps its own parse and its own message, because the message is the part a
+/// person reads and the two are about different things.
+pub(crate) fn reachable_in_the_clear(url: &Url) -> bool {
     // `Url` has already done the parsing that makes this safe: whatever sits
     // before an `@` is userinfo and never reaches `host()`, and a host that
     // merely contains an address is a domain, not that address.
-    let loopback = match parsed.host() {
+    let loopback = match url.host() {
         Some(Host::Ipv4(address)) => address.is_loopback(),
         Some(Host::Ipv6(address)) => address.is_loopback(),
         // Only the exact name. RFC 6761 reserves everything under `.localhost`
@@ -308,15 +327,7 @@ fn check_base_url(base_url: &str) -> Result<(), ProviderError> {
         None => false,
     };
 
-    if parsed.scheme() == "https" || (parsed.scheme() == "http" && loopback) {
-        return Ok(());
-    }
-
-    Err(ProviderError::Transport(
-        "the base URL must be https, or http to loopback; anything else puts the \
-         API key on the wire in the clear"
-            .to_owned(),
-    ))
+    url.scheme() == "https" || (url.scheme() == "http" && loopback)
 }
 
 /// A base URL as it may be shown.

@@ -28,7 +28,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, is_same_file};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, is_same_file};
 
 /// Most matches a call returns. Upstream's `limit` in `tool/grep.ts`.
 const LIMIT: usize = 100;
@@ -343,7 +343,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{GrepTool, search};
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError, read::ReadTool};
+    use crate::{FileTimes, Tool, ToolCtx, ToolError, read::ReadTool};
 
     /// A context rooted at `cwd`, with a cancel nobody has pulled and the
     /// credential store the engine would have named sitting under it.

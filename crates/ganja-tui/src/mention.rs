@@ -21,7 +21,7 @@
 
 use std::path::Path;
 
-use ganja_core::Mention;
+use ganja_protocol::Mention;
 
 /// A mention being typed, located in the buffer it was found in.
 #[derive(Clone, Debug, PartialEq, Eq)]

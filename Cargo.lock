@@ -1051,6 +1051,8 @@ dependencies = [
  "etcetera",
  "expectrl",
  "ganja-core",
+ "ganja-permission",
+ "ganja-protocol",
  "ganja-tui",
  "jsonc-parser",
  "predicates",
@@ -1071,22 +1073,20 @@ dependencies = [
  "async-trait",
  "etcetera",
  "futures",
+ "ganja-permission",
+ "ganja-protocol",
  "ganja-testkit",
- "grep-regex",
- "grep-searcher",
- "htmd",
+ "ganja-tool",
  "ignore",
  "jsonc-parser",
  "libc",
  "lsp-types",
- "notify",
  "reqwest",
  "rmcp",
  "schemars",
  "secrecy",
  "serde",
  "serde_json",
- "similar 3.1.1",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -1095,6 +1095,26 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "ganja-permission"
+version = "0.1.0"
+dependencies = [
+ "etcetera",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
+name = "ganja-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1112,6 +1132,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ganja-tool"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "etcetera",
+ "futures",
+ "ganja-permission",
+ "grep-regex",
+ "grep-searcher",
+ "htmd",
+ "ignore",
+ "libc",
+ "notify",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "similar 3.1.1",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "ganja-tui"
 version = "0.1.0"
 dependencies = [
@@ -1121,6 +1167,8 @@ dependencies = [
  "etcetera",
  "futures",
  "ganja-core",
+ "ganja-protocol",
+ "ganja-tool",
  "insta",
  "nucleo-matcher",
  "pulldown-cmark",
