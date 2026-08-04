@@ -7,6 +7,7 @@
 use std::{
     io::{self, IsTerminal as _, Read as _, Write as _},
     path::PathBuf,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -107,7 +108,14 @@ enum Command {
         action: Config,
     },
     /// List the models this build knows how to size and price.
-    Models,
+    Models {
+        /// List only the models this provider serves.
+        #[arg(value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// Fetch the published catalog first, however recently it was fetched.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// List the stored sessions of the project this was run in.
     Sessions,
 }
@@ -238,10 +246,7 @@ async fn main() -> Result<()> {
         None => ganja_tui::run(cli.resume.wanted(), cli.select.overrides()).await,
         Some(Command::Auth { action }) => auth_command(action),
         Some(Command::Config { action }) => config_command(action),
-        Some(Command::Models) => {
-            models_command();
-            Ok(())
-        }
+        Some(Command::Models { provider, refresh }) => models_command(provider, refresh).await,
         Some(Command::Sessions) => sessions_command(),
     }
 }
@@ -344,10 +349,20 @@ fn log_directory() -> Result<PathBuf> {
 /// The store is read directly rather than through an [`ganja_core::Engine`],
 /// because building one selects a provider and a provider wants a credential:
 /// asking what was worked on yesterday is not a reason to need an API key.
+///
+/// Roots only, as the picker in `ganja-tui` lists them: a session carrying a
+/// parent belongs to the `task` call that spawned it, and resuming into one
+/// would open a delegated turn with nothing on the screen saying what asked
+/// for it. Filtering before the count is what makes a project whose every
+/// session is a child read as one that has none, rather than as a table with
+/// no rows.
 fn sessions_command() -> Result<()> {
-    let sessions = session_storage()?
+    let sessions: Vec<SessionInfo> = session_storage()?
         .list_sessions()
-        .context("failed to read the stored sessions")?;
+        .context("failed to read the stored sessions")?
+        .into_iter()
+        .filter(|session| session.parent.is_none())
+        .collect();
 
     if sessions.is_empty() {
         println!("no sessions here yet; run `ganja` in this project and send a prompt");
@@ -663,14 +678,46 @@ fn read_unechoed() -> Result<Option<SecretString>> {
     }
 }
 
-fn models_command() {
+/// Lists what this build can size and price, filtered to `provider` when one
+/// was named.
+///
+/// The cached catalog is adopted here rather than left to the first lookup:
+/// the disk tier is a layer somebody installs, and a listing that skipped
+/// installing it would answer from the compiled-in snapshot however recently
+/// the UI had fetched a newer one.
+///
+/// # Errors
+///
+/// When `provider` names nobody in the table. Nothing else here fails: the
+/// catalog always answers, at worst from the snapshot compiled into the
+/// binary.
+async fn models_command(provider: Option<String>, refresh: bool) -> Result<()> {
+    catalog::load_cached();
+    if refresh {
+        refreshed().await;
+    }
+
+    let table: Vec<Arc<catalog::ModelInfo>> = catalog::models().collect();
+    let listed = matching(&table, provider.as_deref());
+    if let Some(wanted) = provider.as_deref()
+        && listed.is_empty()
+    {
+        // A header over no rows would read as "this provider serves nothing",
+        // which is indistinguishable from the typo it usually is. Naming what
+        // the table does carry makes the fix one keystroke.
+        bail!(
+            "no models here are served by `{wanted}`; this table carries {}",
+            providers(&table).join(", ")
+        );
+    }
+
     println!(
         "{:<10}  {:<17}  {:>8}  {:>8}  {:>10}  {:>10}",
         "PROVIDER", "MODEL", "CONTEXT", "MAX OUT", "$/MTOK IN", "$/MTOK OUT"
     );
 
     let mut defaulted = false;
-    for model in catalog::models() {
+    for model in listed {
         let default = catalog::default_model(&model.provider_id) == Some(model.id.as_str());
         defaulted |= default;
 
@@ -688,6 +735,61 @@ fn models_command() {
     if defaulted {
         println!("\n* the model its provider is asked for when none is named");
     }
+
+    Ok(())
+}
+
+/// Fetches the catalog before a listing reads it, saying why when it could
+/// not.
+///
+/// Never fatal, whichever way it fails: every tier beneath the fetch still
+/// answers, so what follows is at worst as current as the cache — and a
+/// `--refresh` that exited non-zero over an unreachable endpoint would make a
+/// table that is merely stale look like no table at all.
+async fn refreshed() {
+    match catalog::refresh(true).await {
+        Ok(true) => {}
+        // Forced, so the cache's five-minute debounce cannot be the reason
+        // nothing was fetched; the switch is the only one left.
+        Ok(false) => eprintln!(
+            "note: {} is set, so the catalog was not fetched",
+            catalog::DISABLE_FETCH_ENV
+        ),
+        Err(error) => eprintln!("note: the catalog was not refreshed: {error}"),
+    }
+}
+
+/// The rows a listing shows: every one, or only those `provider` serves.
+///
+/// The match is exact, as upstream's is. Provider ids are published in
+/// lowercase and the refusal above names them, so a forgiving comparison would
+/// buy a little convenience at the price of a lookup that answers questions it
+/// was not asked.
+fn matching(
+    table: &[Arc<catalog::ModelInfo>],
+    provider: Option<&str>,
+) -> Vec<Arc<catalog::ModelInfo>> {
+    table
+        .iter()
+        .filter(|model| provider.is_none_or(|wanted| model.provider_id == wanted))
+        .cloned()
+        .collect()
+}
+
+/// The providers a table carries, each once and in the order it lists them.
+///
+/// Order rather than sorted: this is read back to somebody who asked for a
+/// provider that is not here, and listing them as the table would have listed
+/// them is what makes the answer checkable against the table itself.
+fn providers(table: &[Arc<catalog::ModelInfo>]) -> Vec<String> {
+    let mut named: Vec<String> = Vec::new();
+    for model in table {
+        if !named.iter().any(|provider| *provider == model.provider_id) {
+            named.push(model.provider_id.clone());
+        }
+    }
+
+    named
 }
 
 /// Renders a price per million tokens.
@@ -710,10 +812,16 @@ fn per_mtok(price: f64) -> String {
 /// tests only, so that one assertion belongs in `tests/` instead.
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-    use ganja_core::{SessionId, SessionInfo, Usage, storage::VERSION};
+    use std::sync::Arc;
 
-    use super::{Cli, UNTITLED, age, billed_tokens, per_mtok, title};
+    use clap::Parser;
+    use ganja_core::{
+        SessionId, SessionInfo, Usage,
+        catalog::{ModelInfo, ModelStatus, Pricing},
+        storage::VERSION,
+    };
+
+    use super::{Cli, Command, UNTITLED, age, billed_tokens, matching, per_mtok, providers, title};
 
     #[test]
     fn the_ui_flags_map_onto_the_override_tier() {
@@ -747,6 +855,94 @@ mod tests {
             Cli::try_parse_from(["ganja", "--model", "x/y", "models"]).is_err(),
             "a listing that read like it honored --model would be lying"
         );
+    }
+
+    #[test]
+    fn the_models_arguments_parse_as_a_filter_and_a_forced_fetch() {
+        let cli = Cli::parse_from(["ganja", "models", "anthropic", "--refresh"]);
+
+        let Some(Command::Models { provider, refresh }) = cli.command else {
+            panic!("`models` has to parse as itself");
+        };
+        assert_eq!(provider.as_deref(), Some("anthropic"));
+        assert!(refresh);
+
+        // Both are optional, and the bare form is the one every earlier
+        // invocation of this command used.
+        let cli = Cli::parse_from(["ganja", "models"]);
+        let Some(Command::Models { provider, refresh }) = cli.command else {
+            panic!("`models` has to parse as itself");
+        };
+        assert_eq!(provider, None);
+        assert!(!refresh);
+    }
+
+    /// A table row, differing from the next only in what a listing filters on.
+    fn model(provider_id: &str, id: &str) -> Arc<ModelInfo> {
+        Arc::new(ModelInfo {
+            id: id.to_owned(),
+            provider_id: provider_id.to_owned(),
+            name: id.to_owned(),
+            context_window: 200_000,
+            max_output: 8_000,
+            input_limit: None,
+            pricing: Pricing {
+                input: 1.0,
+                output: 2.0,
+                cache_read: 0.1,
+                cache_write: None,
+            },
+            family: None,
+            release_date: None,
+            tool_call: true,
+            status: ModelStatus::Active,
+        })
+    }
+
+    /// Two providers, one of them serving two models, so a filter that matched
+    /// on the wrong field or kept the first row of each provider would show.
+    fn table() -> Vec<Arc<ModelInfo>> {
+        vec![
+            model("anthropic", "claude-sonnet-5"),
+            model("anthropic", "claude-haiku-4-5"),
+            model("openai", "gpt-5.6"),
+        ]
+    }
+
+    #[test]
+    fn a_named_provider_is_the_only_one_a_listing_shows() {
+        let listed = matching(&table(), Some("anthropic"));
+
+        assert_eq!(listed.len(), 2, "both of that provider's rows are listed");
+        assert!(
+            listed.iter().all(|model| model.provider_id == "anthropic"),
+            "another provider's rows reached a filtered listing"
+        );
+    }
+
+    #[test]
+    fn naming_no_provider_lists_the_whole_table_in_the_order_it_came_in() {
+        let table = table();
+        let listed = matching(&table, None);
+
+        let ids: Vec<&str> = listed.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, ["claude-sonnet-5", "claude-haiku-4-5", "gpt-5.6"]);
+    }
+
+    /// A provider that serves nothing here has to be told apart from one that
+    /// serves nothing at all — the refusal this feeds is the whole difference.
+    #[test]
+    fn a_provider_the_table_never_heard_of_matches_nothing() {
+        assert!(matching(&table(), Some("anthropi")).is_empty());
+        // The comparison is on the provider, not on anything that merely looks
+        // like one: a model id is not a provider id.
+        assert!(matching(&table(), Some("gpt-5.6")).is_empty());
+    }
+
+    #[test]
+    fn the_providers_a_table_carries_are_named_once_each_in_listing_order() {
+        assert_eq!(providers(&table()), ["anthropic", "openai"]);
+        assert!(providers(&[]).is_empty());
     }
 
     const SECOND: u64 = 1_000;

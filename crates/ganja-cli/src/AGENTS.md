@@ -39,6 +39,11 @@ The importer inherits the same posture, for the same reason — it reads a file 
 - **What is written is decoded back into `ganja_core::config::Config` before it lands**, so a mapping bug is an error at import time rather than a broken file discovered at the next launch.
 - Object keys keep the order they were written in throughout: `permission` is evaluated last-match-wins, so a reader or writer that sorted them would change which rule decides a call.
 
+The two listings each have one rule that is not obvious from their code:
+
+- **`models` calls `catalog::load_cached()` before it reads the table.** The disk tier is a layer somebody installs, not one a lookup reaches for, so a listing that skipped installing it would answer from the compiled-in snapshot however recently a session had fetched something newer. `--refresh` fetches on top of that and is never fatal — fetching switched off and an endpoint that refuses the connection both leave the table standing and say so on stderr. Only a named provider the table does not carry is a failure, because a header over no rows is indistinguishable from the typo it usually is.
+- **`sessions` lists roots.** A session carrying a `parent` belongs to the `task` call that spawned it; the picker in `ganja-tui` filters the same way, and filtering before the count is what makes a project whose every session is delegated read as one with none.
+
 ### Testing Requirements
 
 ```sh
