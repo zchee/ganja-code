@@ -32,6 +32,14 @@ const ARGS_PREVIEW_LINES: usize = 8;
 /// pty suite waits on this exact line to know the dialog is up.
 const REPLY_KEYS: &str = "[y] allow once   [a] always allow   [n]/[Esc] reject";
 
+/// What introduces the directories a call would reach outside the project.
+///
+/// Said in terms of what the *answer* covers rather than of what the call
+/// does: an "always" here is remembered per directory, so a dialog that showed
+/// the command and not these would be asking about something narrower than
+/// what it is about to grant.
+const OUTSIDE: &str = "grants access outside the project:";
+
 /// A tool call waiting on the user's decision, and what to show about it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Permission {
@@ -39,17 +47,27 @@ pub struct Permission {
     tool: String,
     title: String,
     args: serde_json::Value,
+    /// Directories outside the project this call would work in. Usually
+    /// empty, and the dialog says nothing when it is.
+    directories: Vec<String>,
 }
 
 impl Permission {
     /// Builds the dialog state for one `PermissionRequested` event.
     #[must_use]
-    pub fn new(id: PermissionId, tool: String, title: String, args: serde_json::Value) -> Self {
+    pub fn new(
+        id: PermissionId,
+        tool: String,
+        title: String,
+        args: serde_json::Value,
+        directories: Vec<String>,
+    ) -> Self {
         Self {
             id,
             tool,
             title,
             args,
+            directories,
         }
     }
 
@@ -93,8 +111,21 @@ impl Permission {
         let mut body = vec![
             (format!("tool: {}", self.tool), theme.accent),
             (self.title.clone(), theme.fg),
-            (String::new(), theme.fg),
         ];
+        // Inside the body, so these rows are spent out of the same budget the
+        // call itself is and the overflow count stays true of the whole
+        // dialog. A call that stays in the checkout adds nothing here, which is
+        // what keeps the common dialog drawing exactly as it always did.
+        if !self.directories.is_empty() {
+            body.push((String::new(), theme.fg));
+            body.push((OUTSIDE.to_owned(), theme.warning));
+            body.extend(
+                self.directories
+                    .iter()
+                    .map(|directory| (format!("  {directory}"), theme.dim)),
+            );
+        }
+        body.push((String::new(), theme.fg));
         body.extend(
             self.args_preview()
                 .into_iter()
@@ -219,6 +250,7 @@ mod tests {
             "shell".to_owned(),
             "cargo test".to_owned(),
             serde_json::json!({"command": "cargo test"}),
+            Vec::new(),
         )
     }
 
@@ -265,6 +297,7 @@ mod tests {
             "shell".to_owned(),
             "many args".to_owned(),
             serde_json::Value::Object(object),
+            Vec::new(),
         );
 
         let screen = rendered(&permission, Rect::new(0, 0, 60, 18));
@@ -303,6 +336,7 @@ mod tests {
             "shell".to_owned(),
             command.clone(),
             serde_json::json!({ "command": command }),
+            Vec::new(),
         );
 
         let screen = rendered(&permission, Rect::new(0, 0, 60, 18));
@@ -315,6 +349,39 @@ mod tests {
         // what the pty suite waits on to know the dialog is up.
         assert!(screen.contains("[y] allow once"), "got:\n{screen}");
         assert!(screen.contains("[n]/[Esc] reject"), "got:\n{screen}");
+    }
+
+    /// An "always" answer is remembered per directory, so the dialog has to
+    /// name the directories it would be remembered for. Without them the user
+    /// answers a question about a command and grants a standing permission
+    /// over somewhere else on their disk.
+    #[test]
+    fn a_call_reaching_outside_the_project_lists_where_it_would_reach() {
+        let permission = Permission::new(
+            PermissionId::from("perm_1".to_owned()),
+            "shell".to_owned(),
+            "ls /etc".to_owned(),
+            serde_json::json!({"command": "ls /etc"}),
+            vec!["/etc".to_owned(), "/var/tmp/scratch".to_owned()],
+        );
+
+        let screen = rendered(&permission, Rect::new(0, 0, 60, 18));
+
+        assert!(
+            screen.contains("grants access outside the project:"),
+            "got:\n{screen}"
+        );
+        assert!(screen.contains("/etc"), "got:\n{screen}");
+        assert!(screen.contains("/var/tmp/scratch"), "got:\n{screen}");
+    }
+
+    /// The common call stays inside the checkout, and its dialog must not
+    /// sprout a heading with nothing under it.
+    #[test]
+    fn a_call_that_stays_in_the_project_says_nothing_about_directories() {
+        let screen = rendered(&permission(), Rect::new(0, 0, 60, 18));
+
+        assert!(!screen.contains("outside the project"), "got:\n{screen}");
     }
 
     /// The count has to be worth trusting, so it is pinned twice: against the
@@ -331,6 +398,7 @@ mod tests {
             "shell".to_owned(),
             "x".repeat(54 * 6),
             serde_json::json!({}),
+            Vec::new(),
         );
 
         let cramped = rendered(&permission, Rect::new(0, 0, 60, 12));
@@ -343,6 +411,39 @@ mod tests {
         assert!(
             !roomier.contains("not shown"),
             "four more rows is exactly what the marker asked for:\n{roomier}"
+        );
+    }
+
+    /// The directory rows are spent out of the same budget, so the count has
+    /// to grow by them. A dialog that reported four hidden rows while eight
+    /// were off the bottom would be a dialog whose warning is worth nothing.
+    #[test]
+    fn the_overflow_count_counts_the_directory_rows_too() {
+        // The same body as above — "tool: shell", six rows of title, a blank
+        // and "{}" — plus a blank, the heading and two directories: thirteen
+        // rows into the same six of room, one of which the marker takes.
+        let permission = Permission::new(
+            PermissionId::from("perm_1".to_owned()),
+            "shell".to_owned(),
+            "x".repeat(54 * 6),
+            serde_json::json!({}),
+            vec!["/etc".to_owned(), "/var/tmp/scratch".to_owned()],
+        );
+
+        let cramped = rendered(&permission, Rect::new(0, 0, 60, 12));
+        assert!(
+            cramped.contains("... +8 lines not shown"),
+            "four more rows to hide than without the directories:\n{cramped}"
+        );
+
+        let roomier = rendered(&permission, Rect::new(0, 0, 60, 12 + 8));
+        assert!(
+            !roomier.contains("not shown"),
+            "eight more rows is exactly what the marker asked for:\n{roomier}"
+        );
+        assert!(
+            roomier.contains("/var/tmp/scratch"),
+            "and the directories are what those rows carry:\n{roomier}"
         );
     }
 
@@ -400,6 +501,7 @@ mod tests {
             "shell".to_owned(),
             "\u{1b}[2J\u{1b}[31mrm -rf /\u{7}".to_owned(),
             serde_json::json!({ "command": "\u{1b}[2Jrm -rf /" }),
+            Vec::new(),
         );
 
         let screen = rendered(&permission, Rect::new(0, 0, 60, 18));

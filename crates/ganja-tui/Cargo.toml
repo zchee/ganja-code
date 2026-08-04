@@ -32,8 +32,14 @@ ratatui-textarea.workspace = true
 # values, so a missing `theme` block is a decode error naming the file.
 serde.workspace = true
 serde_json.workspace = true
+# `/editor` hands the buffer to `$EDITOR` through a file, and that file has to
+# be somewhere the editor can open and nothing else will collide with.
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+# The `@` file menu drives the core glob tool, whose `ToolCtx` carries the
+# cancellation token a turn would have handed it.
+tokio-util.workspace = true
 # A custom theme that will not load is skipped rather than fatal, which is only
 # defensible if the run says which file it dropped and why.
 tracing.workspace = true
@@ -41,7 +47,3 @@ unicode-width.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
-# The resume tests drive a real session store, because what they pin is that a
-# resume either finds the session it was asked for or fails loudly — which a
-# stubbed store could only assert about itself.
-tempfile.workspace = true

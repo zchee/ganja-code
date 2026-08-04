@@ -27,6 +27,12 @@ const SPINNER_PERIOD: Duration = Duration::from_millis(80);
 /// Key reminders, dropped whole when the terminal is too narrow for them.
 const HINTS: &str = "Enter send \u{b7} Alt+Enter newline \u{b7} Esc cancel \u{b7} Ctrl-C quit";
 
+/// The same reminders while the composer is running shell commands. Upstream
+/// replaces its whole footer too (`component/prompt/index.tsx:1680-1682`):
+/// half of what the normal one offers does not apply, and the one key a user
+/// needs here is the way out.
+const SHELL_HINTS: &str = "Enter run \u{b7} Esc exit shell mode \u{b7} Ctrl-C quit";
+
 /// What the engine is doing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activity {
@@ -101,6 +107,9 @@ pub struct Status {
     /// registry — which is every scripted and golden run, and is why the bar
     /// says nothing rather than saying "none".
     agent: Option<String>,
+    /// Whether the composer is running shell commands, which changes which
+    /// keys are worth reminding the user about.
+    shell: bool,
 }
 
 impl Status {
@@ -113,12 +122,18 @@ impl Status {
             notice,
             totals: None,
             agent: None,
+            shell: false,
         }
     }
 
     /// Names the agent the next turn runs as.
     pub fn set_agent(&mut self, agent: Option<String>) {
         self.agent = agent;
+    }
+
+    /// Records whether the composer is running shell commands.
+    pub fn set_shell(&mut self, shell: bool) {
+        self.shell = shell;
     }
 
     /// Records what the engine is doing now.
@@ -176,14 +191,20 @@ impl Status {
             left.push_str(notice);
         }
 
-        let gap = usize::from(area.width).saturating_sub(left.width() + HINTS.width());
+        let hints = self.hints();
+        let gap = usize::from(area.width).saturating_sub(left.width() + hints.width());
         let mut spans = vec![Span::styled(left, theme.accent)];
         if gap > 0 {
             spans.push(Span::raw(" ".repeat(gap)));
-            spans.push(Span::styled(HINTS, theme.dim));
+            spans.push(Span::styled(hints, theme.dim));
         }
 
         buffer.set_line(area.x, area.y, &Line::from(spans), area.width);
+    }
+
+    /// The reminders this mode is worth showing.
+    fn hints(&self) -> &'static str {
+        if self.shell { SHELL_HINTS } else { HINTS }
     }
 
     fn spinner(&self) -> &'static str {
@@ -197,7 +218,7 @@ impl Status {
 mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    use super::{Activity, HINTS, Status, Totals};
+    use super::{Activity, HINTS, SHELL_HINTS, Status, Totals};
     use crate::theme::Theme;
 
     fn rendered(status: &Status, width: u16) -> String {
@@ -379,5 +400,23 @@ mod tests {
         status.set_activity(Activity::Permission);
 
         assert!(rendered(&status, 100).contains("waiting on permission"));
+    }
+
+    /// Half of what the normal footer offers does not apply while the buffer
+    /// is a shell command, and the one key that does — the way out — is not on
+    /// it at all.
+    #[test]
+    fn shell_mode_reminds_the_user_of_the_way_out_instead() {
+        let mut status = Status::new(None);
+        assert!(rendered(&status, 120).contains(HINTS));
+
+        status.set_shell(true);
+
+        let line = rendered(&status, 120);
+        assert!(line.contains(SHELL_HINTS), "got {line:?}");
+        assert!(!line.contains("Enter send"), "got {line:?}");
+
+        status.set_shell(false);
+        assert!(rendered(&status, 120).contains(HINTS));
     }
 }

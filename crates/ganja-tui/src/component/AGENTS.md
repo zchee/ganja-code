@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The three panes the layout draws — transcript, prompt editor, status bar — plus the modals that overlay them: the permission dialog while a tool call waits on the user, the sessions picker while a stored conversation is being chosen, the theme list while a palette is being previewed, the model and agent lists while a session is being pointed somewhere else, the command palette, the reference card, and the inline command menu the editor raises on a leading slash.
+The three panes the layout draws — transcript, prompt editor, status bar — plus the modals that overlay them: the permission dialog while a tool call waits on the user, the sessions picker while a stored conversation is being chosen, the theme list while a palette is being previewed, the model and agent lists while a session is being pointed somewhere else, the command palette, the reference card, and the two inline menus the editor raises — one on a leading slash, one on an `@`.
 
 ## Key Files
 
@@ -21,6 +21,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 | `list.rs` | `ListDialog`: one centered modal for choosing a model or an agent — the same dialog over two lists, because what differs between them is the rows and the command Enter sends, and neither of those is drawing. Marks the row the session is already on; previews nothing. |
 | `palette.rs` | The command palette, grouped by category with a filter line and a block of suggested commands pinned while nothing is typed. Spec: upstream `packages/tui/src/component/command-palette.tsx`. |
 | `dropdown.rs` | The inline command menu, anchored above the editor. Opens only when `/` is the first character of the buffer and the cursor has not left the first whitespace-free span; matches descriptions as well as names, which the palette does not. Spec: upstream `packages/tui/src/component/prompt/autocomplete.tsx`. |
+| `files.rs` | The inline file menu, raised by an `@`. The same box `dropdown.rs` draws, over paths the core `glob` tool walked — and **not re-ranked**, because upstream says twice in comments to trust the backend's order. |
 | `help.rs` | The reference card: every command with its key, then the bindings no command row shows, named as a config file rebinds them. |
 
 ## For AI Agents

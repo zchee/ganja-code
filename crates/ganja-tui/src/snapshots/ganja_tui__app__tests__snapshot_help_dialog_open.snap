@@ -5,19 +5,19 @@ expression: screen(&terminal)
 you                                                                             
 show┌ help ────────────────────────────────────────────────────────────────┐    
     │/sessions  Switch session                                       ctrl+s│    
-ganj│/models    Switch model                                               │    
-One │/agents    Switch agent                                               │    
-[don│/themes    Switch theme                                         ctrl+t│    
-@@ -│/help      Help                                                       │    
--let│/exit      Exit the app                         ctrl+c, ctrl+q, ctrl+d│    
-+let│                                                                      │    
-cont│keys                                                                  │    
-[err│palette_open  ctrl+p                                                  │    
-refu│agent_cycle   tab                                                     │    
+ganj│/new       New session                                                │    
+One │/compact   Compact session                                            │    
+[don│/editor    Open editor                                                │    
+@@ -│/models    Switch model                                               │    
+-let│/agents    Switch agent                                               │    
++let│/themes    Switch theme                                         ctrl+t│    
+cont│/help      Help                                                       │    
+[err│/exit      Exit the app                         ctrl+c, ctrl+q, ctrl+d│    
+refu│                                                                      │    
+    │keys                                                                  │    
+    │palette_open  ctrl+p                                                  │    
     │                                                                      │    
     │[Esc] close                                                           │    
-    │                                                                      │    
-    │                                                                      │    
     └──────────────────────────────────────────────────────────────────────┘    
                                                                                 
 ┌ message ─────────────────────────────────────────────────────────────────────┐

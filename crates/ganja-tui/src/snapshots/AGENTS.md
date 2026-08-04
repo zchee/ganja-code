@@ -27,6 +27,12 @@
 | `ganja_tui__app__tests__snapshot_command_menu_open.snap` | The inline command menu above the editor, raised by a leading slash. |
 | `ganja_tui__app__tests__snapshot_agents_dialog_open.snap` | The agent list, the running agent marked and the status bar naming it. |
 | `ganja_tui__app__tests__snapshot_help_dialog_open.snap` | The reference card: commands with their keys, then the bindings no command shows. |
+| `ganja_tui__app__tests__snapshot_file_menu_open.snap` | The inline file menu above the editor, raised by an `@` and offering what the project holds. |
+| `ganja_tui__app__tests__snapshot_shell_mode.snap` | The composer flipped to shell mode: the box titled `Shell`, the footer offering the way out. |
+| `ganja_tui__app__tests__snapshot_shell_output_streaming.snap` | A `!` passthrough mid-command, its newest output redrawn under the running row. |
+| `ganja_tui__app__tests__snapshot_task_running.snap` | A delegated turn as one inline row: the agent, the ask, and the tool the child is in. |
+| `ganja_tui__app__tests__snapshot_task_completed.snap` | The same row finished — count and duration, and never the child's own answer. |
+| `ganja_tui__app__tests__snapshot_permission_dialog_with_directories.snap` | The permission modal for a call that reaches outside the project, listing where. |
 
 ## For AI Agents
 

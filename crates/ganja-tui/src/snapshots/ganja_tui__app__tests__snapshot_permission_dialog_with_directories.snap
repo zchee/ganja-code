@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+                                                                                
+  ┌ permission ──────────────────────────────────────────────────────────────┐  
+  │tool: bash                                                                │  
+  │cp report.md /var/www/html                                                │  
+  │                                                                          │  
+  │grants access outside the project:                                        │  
+  │  /var/www/html                                                           │  
+  │  /etc/nginx                                                              │  
+  │                                                                          │  
+  │{                                                                         │  
+  │  "command": "cp report.md /var/www/html"                                 │  
+  │}                                                                         │  
+  │                                                                          │  
+  │[y] allow once   [a] always allow   [n]/[Esc] reject                      │  
+  │                                                                          │  
+  │                                                                          │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+waiting on permission  Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit
