@@ -148,6 +148,18 @@ pub const ASK_BY_DEFAULT: &[&str] = &[
     "write",
 ];
 
+/// What every tool an MCP server contributed is named with.
+///
+/// A prefix rather than a list, because the names are not known until a
+/// server has been connected and asked. Anything wearing it asks by default,
+/// which is what closes the "an id nobody listed runs unasked" default for the
+/// whole namespace: an MCP tool is somebody else's code, reached over somebody
+/// else's transport, and the build has no idea what it does.
+///
+/// Upstream reaches the same answer by a different road — nothing matched, and
+/// its default for nothing-matched is `ask` (`permission/index.ts:28-38`).
+pub const MCP_PREFIX: &str = "mcp__";
+
 /// Tool that runs a whole second agent loop, which is why it asks: everything
 /// the subagent goes on to do is done under an answer given here.
 pub const TASK: &str = "task";
@@ -878,6 +890,10 @@ impl Permissions {
         match matched {
             Some(rule) => rule.action.decision(),
             None if ASK_BY_DEFAULT.contains(&tool) => Decision::Ask,
+            // The one default decided by shape rather than by name; see
+            // [`MCP_PREFIX`]. Below the rules, so a config that answered for
+            // `"mcp__github__*"` still answers.
+            None if tool.starts_with(MCP_PREFIX) => Decision::Ask,
             None => Decision::Allow,
         }
     }
@@ -1677,6 +1693,86 @@ mod tests {
     /// tool resolves and nobody was gating.
     fn shell_in(command: &str, workdir: impl AsRef<Path>) -> serde_json::Value {
         json!({ "command": command, "workdir": workdir.as_ref().to_string_lossy() })
+    }
+
+    /// The whole `mcp__` namespace asks, without anything having listed the
+    /// names: an MCP tool is somebody else's code and the build cannot know
+    /// what it does.
+    #[test]
+    fn every_mcp_tool_asks_by_default() {
+        let permissions = memory();
+        let none = json!({});
+
+        for tool in [
+            "mcp__github__create_issue",
+            "mcp__fixture__echo",
+            // Even a name that says nothing else.
+            "mcp__",
+        ] {
+            assert_eq!(permissions.check(tool, &none), Decision::Ask, "{tool}");
+        }
+
+        // Not the prefix, not the rule: a builtin-shaped name is judged as it
+        // always was.
+        assert_eq!(permissions.check("mcp_github", &none), Decision::Allow);
+        assert_eq!(permissions.check("readmcp__x", &none), Decision::Allow);
+    }
+
+    /// An MCP call names itself and nothing else, so an "always" answer is one
+    /// rule about the whole tool.
+    #[test]
+    fn an_always_answer_to_an_mcp_call_remembers_the_whole_tool() {
+        let mut permissions = memory();
+        let call = json!({ "owner": "zchee", "title": "it broke" });
+
+        permissions.remember_always("mcp__github__create_issue", &call);
+
+        assert_eq!(
+            permissions.rules,
+            vec![Rule {
+                permission: "mcp__github__create_issue".to_owned(),
+                pattern: "*".to_owned(),
+                action: Action::Allow,
+            }]
+        );
+        assert_eq!(
+            permissions.check("mcp__github__create_issue", &call),
+            Decision::Allow
+        );
+        // And only that tool: the answer is about the tool it was given for.
+        assert_eq!(
+            permissions.check("mcp__github__delete_repo", &call),
+            Decision::Ask
+        );
+    }
+
+    /// A wildcard in a rule's *tool* key already worked; this pins that it
+    /// survives the config tier, which is where a normalizer would eat it.
+    #[test]
+    fn a_config_wildcard_over_a_server_travels_intact_to_the_decision() {
+        let config: crate::config::PermissionConfig = serde_json::from_value(json!({
+            "mcp__*": "deny",
+            "mcp__github__*": "allow",
+            "mcp__github__delete_repo": "ask",
+        }))
+        .expect("the fixture config parses");
+
+        let mut permissions = memory();
+        permissions.set_baseline(config.rules());
+
+        let none = json!({});
+        let cases = [
+            // Last match wins, so the narrower rule written later decides.
+            ("mcp__github__create_issue", Decision::Allow),
+            ("mcp__github__delete_repo", Decision::Ask),
+            // Covered only by the widest rule.
+            ("mcp__jira__create_issue", Decision::Deny),
+            // Outside the namespace entirely.
+            ("read", Decision::Allow),
+        ];
+        for (tool, expected) in cases {
+            assert_eq!(permissions.check(tool, &none), expected, "{tool}");
+        }
     }
 
     #[test]

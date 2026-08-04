@@ -13,6 +13,7 @@ pub mod command;
 pub mod config;
 pub mod engine;
 pub mod instruction;
+pub mod mcp;
 pub mod permission;
 pub mod project;
 pub mod protocol;
@@ -25,11 +26,12 @@ pub use agent::{Agent, AgentError, Registry as AgentRegistry};
 pub use auth::{AuthError, Credential};
 pub use catalog::{Cost, ModelInfo};
 pub use config::{
-    AgentConfig, AgentMode, CommandConfig, Config, ConfigError, Overrides, PermissionConfig,
-    ThemeMode,
+    AgentConfig, AgentMode, CommandConfig, Config, ConfigError, McpLocal, McpRemote, McpServer,
+    Overrides, PermissionConfig, ThemeMode,
 };
 pub use engine::{Engine, EngineError};
 pub use instruction::system_prompt;
+pub use mcp::{Servers as McpServers, Status as McpStatus};
 pub use permission::{Decision, Permissions};
 pub use project::{Project, ProjectError};
 pub use protocol::{

@@ -28,6 +28,7 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 | `agents.rs` | Agents at the engine level: the planning agent's refusals, config rules deciding unasked, prompt swap on switch, plan reminders reaching requests and not history, switch persistence across a resume, mid-turn refusal, an agent's model adopted from the `provider/model` spelling a config writes, and a passthrough between the switch and the next prompt not spending the build-switch notice. |
 | `permission_directories.rs` | A shell call naming a directory outside the project surfaces that directory in the permission event. Mutates `XDG_DATA_HOME` — one test, one binary. |
 | `task.rs` | The task tool end to end: one ordered script drives the parent *and* the child, the child's transcript stays off the frontend's stream, its progress arrives as metadata on the parent's tool part, its registry has no task tool, a parent's denial reaches it while a parent's stored "always" does not, a `task_id` naming a root session starts a fresh child, and a delegated child is stored as its own session naming its parent. |
+| `mcp.rs` | MCP end to end against a **reference** `@modelcontextprotocol/sdk` server (not an rmcp one): the stdio round-trip, the namespaced names, the permission gate (ask → once, ask → always, a config `deny` wildcard), `isError`, structuredContent-only, binary omission, a server that dies mid-session losing its tools, the `<mcp_instructions>` block, the remote streamable-HTTP transport over a loopback socket, and a check that no golden fixture has gained MCP anything. |
 | `passthrough.rs` | `!` passthrough: the exact synthetic user text, the `bash` part completing with the output and no exit code, ungated even where a rule refuses the model, running at the project root rather than the process directory, and a cancel that stops the command. |
 | `commands.rs` | Slash commands, compaction on demand, and starting over: `/init` writing `AGENTS.md` through the ordinary loop, argument expansion reaching the prompt, a configured command, and `NewSession` leaving the old session on disk. |
 | `mentions.rs` | `@file`: the reference on the message, the content in the request, read at **send** time (a file rewritten between two turns reaches the model rewritten), and never recorded as a read. |
@@ -49,6 +50,7 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 **Know which suites need setup before concluding a failure is a regression.**
 
 - `golden.rs` needs `bun` on `PATH` and an upstream opencode v1.18.11 checkout with `bun install` already run — at `.omc/reference/opencode-v1.18.11` or wherever `GANJA_OPENCODE_DIR` points. A missing checkout or missing `bun` is a **failure, not a skip**: this suite exists to hold the port to upstream's behavior, and a green run that silently compared against nothing would be worth less than no run. Each upstream leg gets 180s.
+- `mcp.rs` needs the same `bun` + upstream checkout `golden.rs` does, and additionally that checkout's installed `@modelcontextprotocol/sdk` (resolved at `packages/opencode/node_modules/@modelcontextprotocol/sdk`, with the hoisted copy as fallback). Missing is a **failure, not a skip**, for golden's reason: the whole point is that the server is somebody else's implementation, so a run that talked to nothing would prove nothing.
 - `live.rs` / `live_agent.rs` are `#[ignore]`d *and* inert unless `GANJA_LIVE_TEST=1` plus the provider key are both set:
   ```sh
   GANJA_LIVE_TEST=1 ANTHROPIC_API_KEY=… cargo test -p ganja-core --test live -- --ignored
@@ -78,6 +80,6 @@ cargo nextest run -E 'binary(golden)' --no-capture
 
 ### External
 
-`tokio` (with `net`), `futures`, `tempfile`, `tracing-subscriber` (the secrets canary needs a subscriber it can read back), `serde_json`, and `bun` as an external binary for `golden.rs`.
+`tokio` (with `net`), `futures`, `tempfile`, `tracing-subscriber` (the secrets canary needs a subscriber it can read back), `serde_json`, and `bun` as an external binary for `golden.rs` and `mcp.rs`.
 
 <!-- MANUAL: -->

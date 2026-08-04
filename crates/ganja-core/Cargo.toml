@@ -37,6 +37,10 @@ jsonc-parser = { workspace = true, features = ["serde"] }
 # The HTTP providers speak SSE, so only `stream` and `json` are load-bearing;
 # the workspace declaration pins rustls so no build here reaches for OpenSSL.
 reqwest.workspace = true
+# Config-named MCP servers are spoken to through the official SDK rather than
+# a second hand-rolled JSON-RPC client: the workspace declaration carries the
+# stdio and streamable-HTTP transports this module connects over.
+rmcp.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

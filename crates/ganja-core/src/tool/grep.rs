@@ -66,7 +66,7 @@ pub struct GrepTool;
 
 #[async_trait]
 impl Tool for GrepTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "grep"
     }
 

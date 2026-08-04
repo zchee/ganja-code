@@ -121,7 +121,7 @@ impl Canned {
 
 #[async_trait]
 impl Tool for Canned {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         self.id
     }
 
@@ -150,7 +150,7 @@ struct Blocking;
 
 #[async_trait]
 impl Tool for Blocking {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "blocking"
     }
 

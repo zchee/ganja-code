@@ -44,7 +44,7 @@ pub struct WriteTool;
 
 #[async_trait]
 impl Tool for WriteTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "write"
     }
 

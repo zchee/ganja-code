@@ -44,7 +44,7 @@ pub struct GlobTool;
 
 #[async_trait]
 impl Tool for GlobTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "glob"
     }
 
