@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The ratatui frontend. It owns every pixel and no engine logic: terminal events become `ganja_core::Command`s, engine `Event`s become frames. Entry point is `run()` in `src/lib.rs`, which selects a provider from the environment, builds the `Engine` with the builtin tool registry and the project's permission rules, and hands both to the `App` loop.
+The ratatui frontend. It owns every pixel and no engine logic: terminal events become `ganja_core::Command`s, engine `Event`s become frames. Entry point is `run()` in `src/lib.rs`, which reads the config, resolves the key bindings, selects a provider, builds the `Engine` with the builtin tools, the project's permission rules, the agent roster and both halves of the system prompt, loads the theme set — all before the terminal is taken over, so every refusal is readable — and then hands the engine to the `App` loop.
 
 ## Key Files
 
