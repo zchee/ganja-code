@@ -511,21 +511,18 @@ impl Engine {
     /// is a read-before-write gate that notices a change when a write asks
     /// about it. Calling this twice replaces the watch rather than adding a
     /// second one.
+    ///
+    /// **Nothing here touches the filesystem**, so a startup path may call it
+    /// whatever the project contains: the platform watcher is built, and every
+    /// directory registered, on the watcher's own task. That is not a detail —
+    /// registering a recursive watch on Linux is a synchronous walk of the
+    /// whole tree, and this call sits before a terminal takeover.
     pub fn watch_files(&self) {
-        match watch::Watcher::new(&self.root, Arc::clone(&self.files)) {
-            Ok(watcher) => {
-                *self
-                    .watcher
-                    .lock()
-                    .expect("the watcher slot is never poisoned") = Some(watcher);
-            }
-            Err(error) => tracing::warn!(
-                %error,
-                root = %self.root.display(),
-                "no filesystem watcher; a file changed outside the session will be noticed \
-                 when something writes to it"
-            ),
-        }
+        *self
+            .watcher
+            .lock()
+            .expect("the watcher slot is never poisoned") =
+            Some(watch::Watcher::new(&self.root, Arc::clone(&self.files)));
     }
 
     /// Sets what this session's turns snapshot the working tree with.
