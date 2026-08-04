@@ -847,7 +847,7 @@ mod tests {
     fn flattened(config: &Config) -> Vec<(&str, &str, Action)> {
         config
             .permission
-            .entries
+            .entries()
             .iter()
             .flat_map(|(tool, set)| match set {
                 RuleSet::All(action) => vec![(tool.as_str(), "*", action.clone())],
