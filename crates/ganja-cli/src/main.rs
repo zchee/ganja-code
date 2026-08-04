@@ -19,14 +19,22 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 mod import;
 
+// A plain comment, and above the doc comment rather than below it: clap
+// renders a doc comment as the help a person reads — every line of it — and
+// why a flag combination is refused is a note to whoever edits this file. A
+// comment between the doc comment and the derive would break the association
+// clap needs and drop the summary below to the manifest's description.
+//
+// `args_conflicts_with_subcommands` is what stops `ganja --continue models`
+// from parsing: a resume flag describes the session a UI run opens, so an
+// invocation that is not a UI run has no use for one, and quietly ignoring it
+// would look like it had been honored.
 /// Terminal-first AI coding agent.
-///
-/// `args_conflicts_with_subcommands` is what stops `ganja --continue models`
-/// from parsing: a resume flag describes the session a UI run opens, so an
-/// invocation that is not a UI run has no use for one, and quietly ignoring it
-/// would look like it had been honored.
 #[derive(Debug, Parser)]
-#[command(name = "ganja", version, about, args_conflicts_with_subcommands = true)]
+// No bare `about`: that spelling takes the manifest's `description`, which
+// says what the crate *is* to a package index, where `--help` should say what
+// the binary is for. The doc comment above is that sentence, and the only one.
+#[command(name = "ganja", version, args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Absent means the interactive UI, which is the point of the binary.
     #[command(subcommand)]
