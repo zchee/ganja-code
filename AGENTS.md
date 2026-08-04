@@ -57,6 +57,7 @@ Single tests (nextest filters by name substring; `cargo test` still works and is
 ```sh
 cargo nextest run -E 'binary(golden)'                # one integration binary
 cargo nextest run -E 'binary(mcp)'                   # shares golden's bun + upstream-checkout prerequisites
+cargo nextest run -E 'binary(lsp)'                   # needs rust-analyzer on PATH (rustup component); hard-fails without it
 cargo nextest run -p ganja-core permission           # tests whose name matches "permission"
 cargo nextest run -p ganja-tui snapshot_tool_error   # one snapshot test
 cargo insta review                                   # TUI snapshots: crates/ganja-tui/src/snapshots/
@@ -95,6 +96,7 @@ Three crates, and the boundary between the first two is load-bearing.
 - `tool/` — `Tool` trait + `Registry::with_builtins()` (read, edit, write, glob, grep, `bash`, todowrite, webfetch), plus `task`, which the engine registers once it knows which agents this session may spawn. Schemas generated from the argument structs; `FileTimes` enforces read-before-write; glob/grep run in-process on the ripgrep crates. `write` and `edit` reach the disk through a directory descriptor (`anchor.rs`), never twice through a path, so a link swapped in after the permission dialog has nothing to redirect.
 - `permission.rs` — a call becomes one or more patterns; the **last matching rule wins**, and **every** pattern must be allowed for the call to run unasked. Rules layer builtin defaults < the agent's < the config's < the answers a person stored. Shell "always" answers remember the *kind* of command via upstream's arity table. A subagent inherits the refusals and never the allows: nobody is watching its turn.
 - `mcp.rs` — config-named MCP servers, dialled concurrently in the background at startup and never reconnected. Their tools join the registry as `mcp__<server>__<tool>`, every one of them asking by default.
+- `lsp/` — language servers, opt-in by config and spawned lazily by the first touch of a file they claim. Diagnostics — errors only, pushed and pulled, merged and deduped — are appended to `edit`/`write` results at one seam in `session.rs`; no LSP failure may fail a tool call or a turn.
 - `agent.rs` / `instruction.rs` / `command.rs` — who a turn runs as (build, plan, general, explore, plus whatever the config adds), the system prompt it runs under (a base prompt per model family, the `<env>` block, the `AGENTS.md` family), and the slash commands it can run.
 - `config.rs` — `ganja.jsonc`/`ganja.json` across three tiers, under the environment and the flags. Unknown top-level keys are refused by name.
 - `auth.rs` / `project.rs` / `catalog.rs` / `storage.rs` — credentials (env beats file, `SecretString` throughout), project resolution by walking up to `.git`, model sizing and pricing (fetched, cached under the XDG cache home, falling back to a compiled-in snapshot that never fails), and versioned session storage.
