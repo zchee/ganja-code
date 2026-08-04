@@ -49,9 +49,11 @@ cargo nextest run --workspace       # the suite; each test in its own process
 cargo test --workspace --doc        # nextest skips doctests, so run them beside it
 ! cargo tree -p ganja-core -e normal | grep -q ratatui   # core stays terminal-free
 ! cargo tree -p ganja-tool -e normal | grep -q ganja-core # tools never reach back
+! cargo tree -p ganja-permission -e normal | tail -n +2 | grep -q ganja-  # the rules need nothing of ours
+! cargo tree -p ganja-protocol -e normal | tail -n +2 | grep -q ganja-    # the wire types even less
 ```
 
-The last two gates are inverted deliberately: a plain `grep -c` exits non-zero on zero matches and would fail exactly when the boundary holds. They assert the two directions that matter — the engine reaches no terminal, and nothing beneath the engine reaches the engine.
+The inverted gates are deliberate: a plain `grep -c` exits non-zero on zero matches and would fail exactly when the boundary holds. Together they assert every direction that matters — the engine reaches no terminal, nothing beneath the engine reaches the engine, and the bottom crates stay leaves.
 
 Single tests (nextest filters by name substring; `cargo test` still works and is what runs doctests):
 
@@ -88,7 +90,7 @@ Two suites need setup, and both are documented in `crates/ganja-core/tests/AGENT
 
 ## Architecture
 
-Six crates. Two boundaries are load-bearing, and both are asserted rather than trusted: nothing in the engine may reach a terminal, and nothing beneath the engine may reach the engine. The dependency direction runs `ganja-cli` → `ganja-tui` → `ganja-core` → `ganja-tool` → `ganja-permission` → `ganja-protocol`.
+Six crates. The load-bearing boundaries are asserted rather than trusted: nothing in the engine may reach a terminal, nothing beneath the engine may reach the engine, and the two bottom crates name nothing else of ours. The graph is a DAG, not a chain — frontends sit on `ganja-core`, core on `ganja-tool`, tool on `ganja-permission`, while `ganja-protocol` is a leaf that core and both frontends consume directly and that tool and permission never touch.
 
 **`ganja-protocol`** — the types every side of the app speaks: `Command`, `Event`, `Message`/`Part`, `ToolState`, `Usage`, and the ids that sort in creation order. Serde-derived from day one; that serialization constraint — not a trait — is what preserves the path to serving the engine over a socket and to transcripts that replay from disk. Its dependency list is `serde` and the value type a tool call's arguments arrive as, which is the whole reason it is a crate: a frontend that renders a transcript builds nothing else.
 
