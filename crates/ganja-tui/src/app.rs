@@ -33,7 +33,7 @@ use ratatui::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    command,
+    NOTICE_SEPARATOR, clipboard, command,
     component::{
         chat::{Chat, WHEEL_LINES},
         dropdown::{self, Dropdown},
@@ -52,6 +52,7 @@ use crate::{
     keybind::{self, Keybinds},
     mention,
     theme::{Theme, Themes},
+    transcript,
 };
 
 /// Shortest gap between frames: roughly 60 FPS.
@@ -75,6 +76,60 @@ const MAX_FILES: usize = 10;
 /// provider call — no model asked for it — but the field is not optional and a
 /// name is more use in a trace than a blank.
 const MENTION_CALL: &str = "mention";
+
+/// What the copy commands say when they worked, in upstream's own words
+/// (`routes/session/index.tsx:906`, `:935`).
+const MESSAGE_COPIED: &str = "Message copied to clipboard!";
+/// See [`MESSAGE_COPIED`].
+const TRANSCRIPT_COPIED: &str = "Session transcript copied to clipboard!";
+/// Upstream's failure toasts. The reason the clipboard gave is appended
+/// (deviation: copy-failure-notice-names-the-reason) — upstream swallows it,
+/// and "Failed to copy to clipboard" on a machine with no display is a
+/// sentence that leaves the user with nothing to do about it.
+const MESSAGE_COPY_FAILED: &str = "Failed to copy to clipboard";
+/// See [`MESSAGE_COPY_FAILED`].
+const TRANSCRIPT_COPY_FAILED: &str = "Failed to copy session transcript";
+/// What `/copy` says before there is a conversation to copy. Upstream returns
+/// silently here (deviation: copy-with-no-session-says-so).
+const NOTHING_TO_COPY: &str = "there is no session to copy yet";
+
+/// What a clipboard holding anything but text is answered with (**D111**).
+///
+/// The interesting half of that class is an image, which is what the message
+/// names. It is not the only half: `arboard` without its `image-data` feature
+/// — the workspace pins it that way deliberately — reports an empty clipboard
+/// and an image-only one identically, so this covers both (deviation:
+/// image-notice-covers-any-non-text-clipboard).
+const IMAGE_PASTE: &str = "image paste is not supported yet";
+
+/// The one-line notice a failed MCP server earns in the status bar, or [`None`]
+/// while every configured server is either connected, disabled, or still being
+/// dialled.
+///
+/// The fake-provider-notice pattern (**R3**): a server that could not be
+/// reached costs its tools and a line of the status bar, never the session. A
+/// server still dialling has no entry in the map at all, so it says nothing
+/// until it has something to say.
+///
+/// Only the first line of the error travels. The status bar is one row, and a
+/// transport that failed with a stack of context would otherwise take the row
+/// away from everything else on it.
+fn mcp_notice(
+    status: &std::collections::BTreeMap<String, ganja_core::McpStatus>,
+) -> Option<String> {
+    let failures: Vec<String> = status
+        .iter()
+        .filter_map(|(name, status)| match status {
+            ganja_core::McpStatus::Failed { error } => Some(format!(
+                "mcp {name}: {}",
+                error.lines().next().unwrap_or(error).trim()
+            )),
+            ganja_core::McpStatus::Connected | ganja_core::McpStatus::Disabled => None,
+        })
+        .collect();
+
+    (!failures.is_empty()).then(|| failures.join(NOTICE_SEPARATOR))
+}
 
 /// Which list a dialog is showing, and therefore what choosing a row sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +210,22 @@ pub struct App {
     /// Where a mention resolves from, and where the walk that offers files
     /// starts.
     cwd: PathBuf,
+    /// Where the project starts. What a submitted `@path` is checked against,
+    /// because that is what the engine resolves an attachment against — see
+    /// [`mention::attachable`].
+    root: PathBuf,
+    /// Where a copy goes. Behind a trait so a test asserts what ganja decided
+    /// to copy rather than what the machine running it has for a desktop.
+    clipboard: Box<dyn clipboard::Clipboard>,
+    /// How many MCP servers this run configured, and therefore how many
+    /// statuses there are still to wait for. Zero means nothing to watch, and
+    /// the poll below never runs.
+    mcp_servers: usize,
+    /// The MCP notice the status bar is already carrying, so a poll that finds
+    /// nothing new touches nothing.
+    mcp_notice: Option<String>,
+    /// How many of them have answered.
+    mcp_resolved: usize,
     /// The tools the `@` menu drives. The registry rather than the glob tool
     /// alone, so the menu asks for its walker by the name the engine knows it
     /// by instead of holding a second copy of the decision.
@@ -220,6 +291,11 @@ impl App {
             files: None,
             engine_commands,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            clipboard: Box::new(clipboard::System::default()),
+            mcp_servers: 0,
+            mcp_notice: None,
+            mcp_resolved: 0,
             tools: ganja_core::Registry::with_builtins(),
             themes,
             theme,
@@ -240,6 +316,42 @@ impl App {
     #[must_use]
     pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = cwd.into();
+
+        self
+    }
+
+    /// Checks submitted `@path` mentions against `root` instead of the
+    /// process's own directory.
+    ///
+    /// Separate from [`App::with_cwd`] because the two are different questions
+    /// and can legitimately differ: the menu offers files from where the user
+    /// is standing, and an attachment is resolved from where the project
+    /// starts.
+    #[must_use]
+    pub fn with_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.root = root.into();
+
+        self
+    }
+
+    /// Copies through `clipboard` instead of the system's.
+    #[must_use]
+    pub fn with_clipboard(mut self, clipboard: Box<dyn clipboard::Clipboard>) -> Self {
+        self.clipboard = clipboard;
+
+        self
+    }
+
+    /// Watches `servers` MCP connections come up, and says so when one fails.
+    ///
+    /// The count is handed over rather than asked of the engine because the
+    /// engine's status map is deliberately silent about a server that is still
+    /// being dialled: knowing how many there are is what tells "all still
+    /// connecting" from "none configured", and therefore when the loop can
+    /// stop waking up to look.
+    #[must_use]
+    pub fn watching_mcp(mut self, servers: usize) -> Self {
+        self.mcp_servers = servers;
 
         self
     }
@@ -349,10 +461,46 @@ impl App {
                 self.handle_core(*event);
                 self.dirty = true;
             }
-            AppEvent::Tick => {}
+            AppEvent::Tick => self.poll_mcp(),
         }
 
         Ok(())
+    }
+
+    /// Looks at where the MCP servers stand, and says so if one failed.
+    ///
+    /// Polled rather than pushed: the engine dials in the background and has
+    /// no event for it, and a status map that has not changed costs a lock and
+    /// a small clone.
+    ///
+    /// This runs on every tick the loop takes, which is what catches a server
+    /// whose transport goes away mid-session — `mcp_status` reaps those. What
+    /// [`App::pending_mcp`] adds is only the *extra* ticks during startup, when
+    /// an otherwise idle app would not be waking up at all.
+    fn poll_mcp(&mut self) {
+        if self.mcp_servers == 0 {
+            return;
+        }
+
+        let status = self.engine.mcp_status();
+        self.mcp_resolved = status.len();
+
+        let notice = mcp_notice(&status);
+        if notice.is_none() || notice == self.mcp_notice {
+            return;
+        }
+
+        self.mcp_notice.clone_from(&notice);
+        self.status.set_notice(notice);
+        self.dirty = true;
+    }
+
+    /// Whether a configured server has yet to report where it stands.
+    ///
+    /// Nothing is ever retried (**R3**), so every server answers exactly once
+    /// and this settles for good a moment after startup.
+    fn pending_mcp(&self) -> bool {
+        self.mcp_resolved < self.mcp_servers
     }
 
     /// Renders one frame.
@@ -442,10 +590,52 @@ impl App {
                 MouseEventKind::ScrollDown => self.chat.scroll_lines(WHEEL_LINES),
                 _ => {}
             },
+            // The terminal wrapped a paste in its brackets, so this arrives as
+            // content rather than as the keystrokes it would otherwise be
+            // mistaken for — which is the whole point of turning bracketed
+            // paste on: an Enter inside pasted text is a line, not a submit.
+            // A modal owns the keyboard while it is up, and it owns this too.
+            TermEvent::Paste(text) if !self.modal_open() => self.paste(&text).await,
             _ => {}
         }
 
         Ok(())
+    }
+
+    /// Inserts pasted `text` at the cursor.
+    ///
+    /// Both line endings a terminal may send become `\n` before anything sees
+    /// them: a CRLF paste is what Windows terminals produce, and a lone CR is
+    /// what ConPTY sends (upstream normalizes the same pair,
+    /// `component/prompt/index.tsx:1395-1420`). Left alone they would reach the
+    /// buffer as stray characters rather than as the line breaks they are.
+    ///
+    /// The text goes in **raw**: upstream would collapse a long paste behind a
+    /// `[Pasted ~N lines]` placeholder, which is deferred with the image half
+    /// of the same ruling (**D111**).
+    async fn paste(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.editor.insert(&normalized);
+        // The cursor moved, and both inline menus are about where it is.
+        self.sync_menus().await;
+    }
+
+    /// Pastes whatever the clipboard holds, for a terminal that did not send
+    /// the paste itself.
+    ///
+    /// Upstream binds `ctrl+v` to the same fallback; there it is the only
+    /// path for the image case, which this build has no parts to carry
+    /// (**D111**).
+    async fn paste_from_clipboard(&mut self) {
+        match self.clipboard.read() {
+            Ok(text) => self.paste(&text).await,
+            Err(clipboard::Error::NotText) => {
+                self.status.set_notice(Some(IMAGE_PASTE.to_owned()));
+            }
+            // A machine with no clipboard costs a notice and never the
+            // keystroke: nothing here may eat what was being typed.
+            Err(error) => self.status.set_notice(Some(error.to_string())),
+        }
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -549,6 +739,16 @@ impl App {
             _ => {}
         }
 
+        // After the bindings, so a user who binds ctrl+v to something else
+        // gets what they asked for. Not a binding of its own (deviation:
+        // ctrl-v-not-a-bound-action): bracketed paste is the path that
+        // actually runs, and this is the fallback for terminals that do not
+        // speak it — an editing key rather than a command.
+        if key.code == KeyCode::Char('v') && key.modifiers == KeyModifiers::CONTROL {
+            self.paste_from_clipboard().await;
+            return Ok(());
+        }
+
         match key.code {
             // Shell mode's way out, which outranks the cancel: there is no
             // turn to stop while the user is typing a command at their own
@@ -638,7 +838,44 @@ impl App {
             command::Action::Themes => self.open_themes(),
             command::Action::Help => self.help = Some(Help::new(self.keys.clone())),
             command::Action::Exit => self.quit = true,
+            command::Action::Copy => self.copy_transcript(),
+            command::Action::CopyMessage => self.copy_last_reply(),
         }
+    }
+
+    /// Puts the whole conversation on the clipboard, as markdown.
+    ///
+    /// The transcript is built from what is on screen rather than from the
+    /// store: they hold the same messages — every entry arrived as an engine
+    /// event — and the one the user is looking at is the one they mean.
+    fn copy_transcript(&mut self) {
+        let Some(session) = self.engine.current_session() else {
+            self.status.set_notice(Some(NOTHING_TO_COPY.to_owned()));
+            return;
+        };
+
+        let text = transcript::format(&session, &self.chat.messages());
+        self.copy(&text, TRANSCRIPT_COPIED, TRANSCRIPT_COPY_FAILED);
+    }
+
+    /// Puts the model's last reply on the clipboard.
+    fn copy_last_reply(&mut self) {
+        match transcript::last_reply(&self.chat.messages()) {
+            Ok(text) => self.copy(&text, MESSAGE_COPIED, MESSAGE_COPY_FAILED),
+            // Upstream's three refusals, spelled its way; see
+            // [`transcript::Missing`].
+            Err(missing) => self.status.set_notice(Some(missing.to_string())),
+        }
+    }
+
+    /// Hands `text` to the clipboard and says which way it went.
+    fn copy(&mut self, text: &str, done: &str, failed: &str) {
+        let notice = match self.clipboard.write(text) {
+            Ok(()) => done.to_owned(),
+            Err(error) => format!("{failed}: {error}"),
+        };
+
+        self.status.set_notice(Some(notice));
     }
 
     /// Leaves this conversation for a fresh one.
@@ -1288,7 +1525,11 @@ impl App {
         let sent = match self.engine_command(&prompt) {
             Some((name, args)) => self.engine.send(Command::RunCommand { name, args }).await,
             None => {
-                let mentions = mention::scan(&prompt);
+                // Only the tokens that name a file which is really there
+                // (**D113**). `@alice` in a sentence is a person, and
+                // attaching her would put an attachment-error block in front
+                // of the model instead of what the user wrote.
+                let mentions = mention::attachable(&prompt, &self.root);
 
                 self.engine
                     .send(Command::SendPrompt {
@@ -1458,8 +1699,14 @@ impl App {
         }
     }
 
+    /// Whether the loop should wake itself rather than wait for something to
+    /// happen.
+    ///
+    /// The third arm is the MCP dial: nothing else would wake an idle app
+    /// while servers connect in the background, so without it a failed server
+    /// would sit unreported until the user's next keystroke.
     fn wants_wakeup(&self) -> bool {
-        self.dirty || self.status.is_streaming()
+        self.dirty || self.status.is_streaming() || self.pending_mcp()
     }
 
     fn until_next_frame(&self) -> Duration {
@@ -1522,7 +1769,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use futures::{StreamExt as _, stream::BoxStream};
+    use futures::{FutureExt as _, StreamExt as _, stream::BoxStream};
     use ganja_core::{
         Engine, Event as CoreEvent, FinishReason, Message, Part, PartBody, PartId, PermissionId,
         PermissionReply, SessionId, SessionInfo, Storage, ToolState, Usage,
@@ -1542,6 +1789,7 @@ mod tests {
 
     use super::{App, Chooser, Dropdown, FRAME, Mode, Palette, Permission, permission_reply};
     use crate::{
+        clipboard, command,
         component::sessions,
         event::AppEvent,
         theme::{DEFAULT_THEME, Themes},
@@ -4335,11 +4583,18 @@ mod tests {
     /// **Non-vacuity target for the submit scan.** Dropping `mention::scan`
     /// from `submit` — sending `Vec::new()` the way the composer did before
     /// mentions existed — fails this test on the `File` part.
+    ///
+    /// The fixture project is what both mentions name, because the scan is now
+    /// filtered by whether the file is there (**D113**): before that, this
+    /// test read whichever directory the runner happened to start in.
     #[tokio::test]
     async fn a_submitted_prompt_carries_its_mentions_and_keeps_their_text() {
+        let directory = project();
         let engine = engine();
         let mut events = engine.subscribe().await.expect("the test subscribes first");
-        let mut app = App::new(engine, None, Themes::builtin());
+        let mut app = App::new(engine, None, Themes::builtin())
+            .with_cwd(directory.path())
+            .with_root(directory.path());
 
         typed(&mut app, "compare @src/lib.rs with @README.md").await;
         // The menu is still up over the mention the cursor is in, and it owns
@@ -5051,5 +5306,529 @@ mod tests {
             "the sentence is not a path: {offered:?}"
         );
         assert!(super::relative_paths(cwd, "No files found").is_empty());
+    }
+
+    // ---- clipboard, paste, and the mention filter ----
+
+    /// A project root holding `files`, each written with its own name.
+    fn project_holding(files: &[&str]) -> TempDir {
+        let root = temporary();
+
+        for file in files {
+            let path = root.path().join(file);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the parent directory is creatable");
+            }
+            std::fs::write(&path, file).expect("the fixture file is writable");
+        }
+
+        root
+    }
+
+    /// Everything the status bar is currently saying.
+    fn status_line(app: &mut App) -> String {
+        let mut terminal = terminal(120, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        screen(&terminal)
+            .lines()
+            .next_back()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Submits `text` and hands back every `File` part the engine put on the
+    /// user message it made of it.
+    async fn submitted_files(root: &TempDir, text: &str) -> Vec<String> {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, None, Themes::builtin())
+            .with_cwd(root.path())
+            .with_root(root.path());
+
+        for event in typing(text) {
+            app.handle(event).await.expect("typing is handled");
+        }
+        // A menu the last token raised owns Enter until it is closed; Esc
+        // means "cancel the turn" when there is no menu, so it is only sent
+        // when there is one.
+        if app.files.is_some() {
+            app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+                .await
+                .expect("escape is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let CoreEvent::MessageStarted { message } =
+            events.next().await.expect("the engine reports the prompt")
+        else {
+            panic!("the first event of a turn is the user's message");
+        };
+
+        message
+            .parts
+            .iter()
+            .filter_map(|part| match &part.body {
+                PartBody::File { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **D113 / R15(a)**, at the seam a person actually types into: `@alice`
+    /// is a person, and attaching her would put an attachment-error block in
+    /// front of the model in place of the sentence that was written.
+    #[tokio::test]
+    async fn a_word_that_names_no_file_is_submitted_as_text_and_attaches_nothing() {
+        let root = project_holding(&["notes.md"]);
+
+        assert!(
+            submitted_files(&root, "ask @alice about it")
+                .await
+                .is_empty(),
+            "a name should attach nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mention_that_names_a_real_file_still_attaches_it() {
+        let root = project_holding(&["notes.md"]);
+
+        assert_eq!(
+            submitted_files(&root, "read @notes.md please").await,
+            vec!["notes.md".to_owned()]
+        );
+    }
+
+    /// The degradation the ruling asks for: the typo rides into the prompt as
+    /// text the model can see and act on, beside the mention that resolved.
+    #[tokio::test]
+    async fn a_mistyped_path_rides_as_visible_text_beside_the_one_that_resolved() {
+        let root = project_holding(&["notes.md"]);
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, None, Themes::builtin())
+            .with_cwd(root.path())
+            .with_root(root.path());
+
+        for event in typing("compare @notes.md with @notez.md") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        // The cursor is still inside the second mention, so the file menu owns
+        // Enter — closing it is how a person sends this.
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let CoreEvent::MessageStarted { message } =
+            events.next().await.expect("the engine reports the prompt")
+        else {
+            panic!("the first event of a turn is the user's message");
+        };
+
+        let attached: Vec<&str> = message
+            .parts
+            .iter()
+            .filter_map(|part| match &part.body {
+                PartBody::File { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        let text: String = message.parts.iter().filter_map(Part::as_text).collect();
+
+        assert_eq!(attached, vec!["notes.md"], "only the file that exists");
+        assert!(
+            text.contains("@notez.md"),
+            "the typo has to reach the model as text: {text}"
+        );
+    }
+
+    /// A pasted paragraph is content, not keystrokes — which is the whole
+    /// reason bracketed paste is enabled. Both line endings a terminal may
+    /// send become the line breaks they mean.
+    #[tokio::test]
+    async fn a_bracketed_paste_lands_at_the_cursor_with_its_line_breaks_intact() {
+        let mut app = app();
+        for event in typing("see: ") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(AppEvent::Term(TermEvent::Paste(
+            "one\r\ntwo\rthree".to_owned(),
+        )))
+        .await
+        .expect("a paste is handled");
+
+        assert_eq!(
+            app.editor.text(),
+            "see: one\ntwo\nthree",
+            "CRLF and a lone CR both mean a line break"
+        );
+    }
+
+    /// The failure this replaces: fed through the key handler, the newline in
+    /// the middle of a paste is an Enter, and Enter here sends the prompt.
+    #[tokio::test]
+    async fn a_multi_line_paste_does_not_submit_the_prompt() {
+        let (mut app, mut events) = wired().await;
+
+        app.handle(AppEvent::Term(TermEvent::Paste(
+            "first line\nsecond line".to_owned(),
+        )))
+        .await
+        .expect("a paste is handled");
+
+        assert_eq!(app.editor.text(), "first line\nsecond line");
+        assert!(
+            events.next().now_or_never().is_none(),
+            "nothing should have been sent to the engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_paste_while_a_dialog_is_up_does_not_reach_the_composer_behind_it() {
+        let mut app = app();
+        app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-p is handled");
+
+        app.handle(AppEvent::Term(TermEvent::Paste("pasted".to_owned())))
+            .await
+            .expect("a paste is handled");
+
+        assert!(app.palette.is_some(), "the palette is still up");
+        assert!(app.editor.is_empty(), "the composer behind it is untouched");
+    }
+
+    #[tokio::test]
+    async fn control_v_pastes_what_the_clipboard_holds() {
+        let mut app = app().with_clipboard(Box::new(clipboard::Recording::holding(
+            "pasted\nfrom the clipboard",
+        )));
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+
+        assert_eq!(app.editor.text(), "pasted\nfrom the clipboard");
+    }
+
+    /// **D111**. There are no image parts to carry one, so the paste says so
+    /// rather than doing nothing.
+    #[tokio::test]
+    async fn a_clipboard_holding_no_text_says_images_are_not_supported_yet() {
+        let mut app = app().with_clipboard(Box::new(clipboard::Recording::default()));
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+
+        assert!(
+            status_line(&mut app).contains("image paste is not supported yet"),
+            "got: {}",
+            status_line(&mut app)
+        );
+        assert!(app.editor.is_empty(), "and nothing was inserted");
+    }
+
+    /// A machine with no clipboard costs a notice, never the keystroke.
+    #[tokio::test]
+    async fn a_clipboard_that_cannot_be_reached_is_a_notice_and_not_a_lost_prompt() {
+        let mut app = app().with_clipboard(Box::new(clipboard::Recording::refusing_reads(
+            clipboard::Error::Unavailable("no display".to_owned()),
+        )));
+        for event in typing("half a thought") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+
+        assert!(status_line(&mut app).contains("no display"));
+        assert_eq!(
+            app.editor.text(),
+            "half a thought",
+            "what was being typed survives"
+        );
+    }
+
+    /// A user who bound `ctrl+v` to something else gets what they asked for:
+    /// the paste fallback is checked after the bindings, not before them.
+    #[tokio::test]
+    async fn a_rebound_control_v_reaches_its_binding_rather_than_the_clipboard() {
+        let keys = crate::keybind::Keybinds::from_config(
+            &[("app_exit".to_owned(), "ctrl+v".to_owned())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("the binding parses");
+        let mut app = app()
+            .with_keybinds(keys)
+            .with_clipboard(Box::new(clipboard::Recording::holding("not this")));
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+
+        assert!(app.quit, "the binding wins");
+        assert!(app.editor.is_empty());
+    }
+
+    /// An assistant message carrying `texts`, as the transcript holds one.
+    fn replied(texts: &[&str]) -> Message {
+        Message {
+            id: ganja_core::MessageId::ascending(),
+            role: ganja_core::Role::Assistant,
+            parts: texts.iter().map(|text| Part::text(*text)).collect(),
+            time: ganja_core::MessageTime {
+                created: 1,
+                completed: Some(2),
+            },
+            model: Some(fake::MODEL.to_owned()),
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn copying_a_message_hands_over_the_last_reply_alone() {
+        let clipboard = clipboard::Recording::default();
+        let log = clipboard.log();
+        let mut app = app().with_clipboard(Box::new(clipboard));
+        app.seed(vec![
+            replied(&["an older answer"]),
+            Message::user("and then?"),
+            replied(&["  the newest answer", "in two parts  "]),
+        ]);
+
+        app.run_command(command::Action::CopyMessage).await;
+
+        assert_eq!(
+            *log.lock().expect("the lock holds"),
+            vec!["the newest answer\nin two parts".to_owned()],
+            "the parts join on a newline and the whole is trimmed"
+        );
+        assert!(
+            status_line(&mut app).contains("Message copied to clipboard!"),
+            "got: {}",
+            status_line(&mut app)
+        );
+    }
+
+    #[tokio::test]
+    async fn copying_a_message_with_nothing_to_copy_says_which_kind_of_nothing() {
+        let clipboard = clipboard::Recording::default();
+        let log = clipboard.log();
+        let mut app = app().with_clipboard(Box::new(clipboard));
+
+        app.run_command(command::Action::CopyMessage).await;
+
+        assert!(
+            status_line(&mut app).contains("No assistant messages found"),
+            "got: {}",
+            status_line(&mut app)
+        );
+        assert!(
+            log.lock().expect("the lock holds").is_empty(),
+            "nothing was copied"
+        );
+    }
+
+    #[tokio::test]
+    async fn copying_the_transcript_hands_over_the_whole_conversation() {
+        let directory = temporary();
+        store_session(
+            &directory,
+            "ses_copied",
+            Some("a stored talk"),
+            10_000,
+            0,
+            0,
+        );
+        let clipboard = clipboard::Recording::default();
+        let log = clipboard.log();
+        let mut app = persistent_app(&directory).with_clipboard(Box::new(clipboard));
+        let stored = app
+            .engine
+            .resume(&SessionId::from("ses_copied".to_owned()))
+            .await
+            .expect("the stored session resumes");
+        app.seed(stored);
+
+        app.run_command(command::Action::Copy).await;
+
+        let copied = log.lock().expect("the lock holds").join("");
+        assert!(copied.starts_with("# a stored talk\n\n"), "got: {copied}");
+        assert!(
+            copied.contains("**Session ID:** ses_copied\n"),
+            "got: {copied}"
+        );
+        assert!(
+            copied.contains("## User\n\nwhat the picker is choosing between\n\n---\n\n"),
+            "the conversation itself has to be in it: {copied}"
+        );
+        assert!(
+            status_line(&mut app).contains("Session transcript copied to clipboard!"),
+            "got: {}",
+            status_line(&mut app)
+        );
+    }
+
+    /// Upstream returns silently here; a person who asked for a copy is owed
+    /// an answer (deviation: copy-with-no-session-says-so).
+    #[tokio::test]
+    async fn copying_the_transcript_before_there_is_one_says_so() {
+        let mut app = app().with_clipboard(Box::new(clipboard::Recording::default()));
+
+        app.run_command(command::Action::Copy).await;
+
+        assert!(
+            status_line(&mut app).contains("there is no session to copy yet"),
+            "got: {}",
+            status_line(&mut app)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clipboard_that_refuses_a_copy_says_so_in_upstreams_words() {
+        let mut app = app().with_clipboard(Box::new(clipboard::Recording::refusing_writes(
+            clipboard::Error::Unavailable("no display".to_owned()),
+        )));
+        app.seed(vec![replied(&["an answer"])]);
+
+        app.run_command(command::Action::CopyMessage).await;
+
+        let line = status_line(&mut app);
+        assert!(line.contains("Failed to copy to clipboard"), "got: {line}");
+        assert!(
+            line.contains("no display"),
+            "and it names the reason: {line}"
+        );
+    }
+
+    // ---- the MCP status notice ----
+
+    /// An engine holding one MCP server named `broken`, whose command is a
+    /// path nothing can spawn.
+    fn engine_dialling_a_missing_server(root: &TempDir) -> Engine {
+        let config: std::collections::BTreeMap<String, ganja_core::config::McpServer> =
+            serde_json::from_value(serde_json::json!({
+                "broken": { "type": "local", "command": ["/nonexistent-ganja-fixture"] }
+            }))
+            .expect("the fixture is a config");
+
+        engine().with_mcp(ganja_core::McpServers::new(config, root.path()))
+    }
+
+    /// **R3's fake-provider-notice pattern.** A server that cannot be reached
+    /// costs its tools and one line of the status bar, and never the session.
+    #[tokio::test]
+    async fn a_server_that_cannot_be_reached_is_named_in_the_status_bar() {
+        let root = temporary();
+        let engine = engine_dialling_a_missing_server(&root);
+        engine.connect_mcp();
+        let mut app = App::new(engine, None, Themes::builtin()).watching_mcp(1);
+
+        // Nothing is said while it is still being dialled: a server with no
+        // status yet is one nothing has finished trying.
+        let mut line = status_line(&mut app);
+        for _ in 0..400 {
+            if line.contains("mcp broken") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            app.handle(AppEvent::Tick).await.expect("a tick is handled");
+            line = status_line(&mut app);
+        }
+
+        assert!(
+            line.contains("mcp broken"),
+            "the failed server should be named: {line}"
+        );
+        assert!(
+            !app.pending_mcp(),
+            "and once it has answered there is nothing left to wait for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_mcp_servers_says_nothing_about_them() {
+        let mut app = app();
+
+        for _ in 0..8 {
+            app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        }
+
+        assert!(
+            !status_line(&mut app).contains("mcp"),
+            "got: {}",
+            status_line(&mut app)
+        );
+        assert!(
+            !app.pending_mcp(),
+            "and nothing keeps the loop awake looking for one"
+        );
+    }
+
+    /// Without this, an idle app never wakes: `wants_wakeup` is what schedules
+    /// the tick the poll rides on, and a failed server would sit unreported
+    /// until the user's next keystroke.
+    #[tokio::test]
+    async fn a_session_still_dialling_keeps_waking_up_to_look() {
+        let root = temporary();
+        let mut app = App::new(
+            engine_dialling_a_missing_server(&root),
+            None,
+            Themes::builtin(),
+        )
+        .watching_mcp(1);
+        app.draw(&mut terminal(80, 24)).expect("a frame draws");
+
+        assert!(!app.dirty, "the frame above cleared it");
+        assert!(app.wants_wakeup(), "the dial is what keeps it awake");
+    }
+
+    #[test]
+    fn only_a_failed_server_earns_a_notice_and_it_is_one_line() {
+        let cases = [
+            (vec![("fs", ganja_core::McpStatus::Connected)], None),
+            (vec![("fs", ganja_core::McpStatus::Disabled)], None),
+            (
+                vec![(
+                    "fs",
+                    ganja_core::McpStatus::Failed {
+                        error: "no such file\n  while spawning".to_owned(),
+                    },
+                )],
+                Some("mcp fs: no such file"),
+            ),
+            (
+                vec![
+                    ("fs", ganja_core::McpStatus::Connected),
+                    (
+                        "hub",
+                        ganja_core::McpStatus::Failed {
+                            error: "connection refused".to_owned(),
+                        },
+                    ),
+                ],
+                Some("mcp hub: connection refused"),
+            ),
+        ];
+
+        for (status, expected) in cases {
+            let status: std::collections::BTreeMap<String, ganja_core::McpStatus> = status
+                .into_iter()
+                .map(|(name, status)| (name.to_owned(), status))
+                .collect();
+
+            assert_eq!(super::mcp_notice(&status).as_deref(), expected);
+        }
+        assert_eq!(super::mcp_notice(&std::collections::BTreeMap::new()), None);
     }
 }

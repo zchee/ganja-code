@@ -4,18 +4,18 @@ expression: screen(&terminal)
 ---
 you                                                                             
 show┌ help ────────────────────────────────────────────────────────────────┐    
-    │/sessions  Switch session                                       ctrl+s│    
-ganj│/new       New session                                                │    
-One │/compact   Compact session                                            │    
-[don│/editor    Open editor                                                │    
-@@ -│/models    Switch model                                               │    
--let│/agents    Switch agent                                               │    
-+let│/themes    Switch theme                                         ctrl+t│    
-cont│/help      Help                                                       │    
-[err│/exit      Exit the app                         ctrl+c, ctrl+q, ctrl+d│    
-refu│                                                                      │    
-    │keys                                                                  │    
-    │palette_open  ctrl+p                                                  │    
+    │/sessions      Switch session                                   ctrl+s│    
+ganj│/new           New session                                            │    
+One │/compact       Compact session                                        │    
+[don│/editor        Open editor                                            │    
+@@ -│/models        Switch model                                           │    
+-let│/agents        Switch agent                                           │    
++let│/themes        Switch theme                                     ctrl+t│    
+cont│/help          Help                                                   │    
+[err│/exit          Exit the app                     ctrl+c, ctrl+q, ctrl+d│    
+refu│/copy          Copy session transcript                                │    
+    │/copy-message  Copy message                                           │    
+    │                                                                      │    
     │                                                                      │    
     │[Esc] close                                                           │    
     └──────────────────────────────────────────────────────────────────────┘    

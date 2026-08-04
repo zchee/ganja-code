@@ -8,17 +8,17 @@ show me every color you have
 ganja                                                                           
 One edit applied, one command refused.                                          
 [done] edit: theme.rs                                                           
-@@ -1,2 +1,2 @@                                                                 
 ┌ commands ────────────────────────────────────────────────────────────────────┐
-│> /compact   Summarize the conversation so far and carry on from it           │
-│  /sessions  Reopen a conversation this project has stored                    │
-│  /agents    Run the rest of this session as a different agent                │
-│  /init      guided AGENTS.md setup                                           │
-│  /models    Ask the rest of this session of a different model                │
-│  /new       Leave this conversation and start an empty one                   │
-│  /themes    Repaint the screen in another palette                            │
-│  /editor    Write the prompt in $EDITOR instead of the composer              │
-│  /help      List the commands and the keys that reach them                   │
+│> /compact       Summarize the conversation so far and carry on from it       │
+│  /sessions      Reopen a conversation this project has stored                │
+│  /agents        Run the rest of this session as a different agent            │
+│  /copy          Put the whole conversation on the clipboard, as markdown     │
+│  /init          guided AGENTS.md setup                                       │
+│  /models        Ask the rest of this session of a different model            │
+│  /new           Leave this conversation and start an empty one               │
+│  /themes        Repaint the screen in another palette                        │
+│  /copy-message  Put the model's last reply on the clipboard                  │
+│  /editor        Write the prompt in $EDITOR instead of the composer          │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ message ─────────────────────────────────────────────────────────────────────┐
 │/s                                                                            │

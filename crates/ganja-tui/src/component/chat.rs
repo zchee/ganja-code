@@ -116,6 +116,19 @@ impl Chat {
         self.follow_tail();
     }
 
+    /// Every entry on screen, oldest first, as its role and its parts.
+    ///
+    /// What the copy commands read. Deliberately the *rendered* transcript
+    /// rather than the engine's history: what a person means by "copy this
+    /// conversation" is the one they have been looking at, and the two agree
+    /// because every entry here arrived as an engine event.
+    pub fn messages(&self) -> Vec<crate::transcript::Entry<'_>> {
+        self.entries
+            .iter()
+            .map(|entry| (entry.role, entry.parts.as_slice()))
+            .collect()
+    }
+
     /// Empties the transcript, which is what switching sessions does to it.
     pub fn clear(&mut self) {
         self.entries.clear();
