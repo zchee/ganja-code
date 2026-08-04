@@ -2,14 +2,19 @@
 //! puts it forward again, and the prompt that follows an undo carries none of
 //! what the undo took back.
 //!
-//! One test, in its own binary, because it redirects `XDG_DATA_HOME` for the
-//! whole process — the snapshot repository and the session store both hang off
-//! it, and neither may land in the real user's data directory.
+//! The main drill is the only test here that redirects `XDG_DATA_HOME`, so it
+//! is the only one that has to mind the process it shares with the rest of
+//! this binary — the snapshot repository and the session store both hang off
+//! that variable, and neither may land in the real user's data directory.
+//! nextest already gives every test its own process; this file's other tests
+//! stay env-mutation-free so a plain `cargo test` run of this binary is safe
+//! too.
 //!
-//! The turn is driven by the **fake provider playing a script**, wrapped in a
-//! recorder so the requests it was handed can be read back afterwards: the
-//! worktree comparison alone is blind to history, and half of what an undo has
-//! to do is keep a prompt the user took back out of the next request.
+//! The main drill's turn is driven by the **fake provider playing a
+//! script**, wrapped in a recorder so the requests it was handed can be read
+//! back afterwards: the worktree comparison alone is blind to history, and
+//! half of what an undo has to do is keep a prompt the user took back out of
+//! the next request.
 //!
 //! `git` on `PATH` is a prerequisite rather than a skip, for the golden
 //! suite's reason: a run that snapshotted nothing would prove nothing.
@@ -263,6 +268,102 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
             Err(EngineError::NothingToRedo)
         ),
         "a prompt after an undo makes the undo permanent"
+    );
+}
+
+/// What the checkout-refusal drill's scripted turn writes into a file that
+/// did not exist before the turn.
+const CHECKOUT_REFUSAL_WRITE: &str = "a file this drill's turn invented\n";
+
+/// A one-turn script: write one new file, done. There is nothing here for an
+/// undo to plausibly need beyond the file it wrote — this drill is about
+/// whether `Command::Undo` is reachable at all, not about what it restores.
+fn single_write_turn(fresh: &Path) -> String {
+    serde_json::json!({
+        "cadence_ms": 0,
+        "turns": [
+            {
+                "text": "Writing it.",
+                "tool_calls": [
+                    {"name": "write", "args": {
+                        "filePath": fresh.to_string_lossy(),
+                        "content": CHECKOUT_REFUSAL_WRITE,
+                    }},
+                ],
+            },
+        ]
+    })
+    .to_string()
+}
+
+/// **Contrapositive of the drill above.** That one proves an engine that
+/// *is* handed a `Snapshots` can undo inside a checkout; this proves an
+/// engine that never was cannot — regardless of how real the checkout
+/// underneath it is. `seed_repository` gives this one an actual commit, and
+/// the engine is built with `Engine::new`, the same constructor the golden
+/// harness's own engine uses, with no `.with_snapshots(...)` call anywhere
+/// in reach. If `Command::Undo` ever became reachable by some path other
+/// than an explicitly wired `Snapshots`, this is what would catch it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_never_handed_snapshots_refuses_an_undo_even_in_a_checkout() {
+    let project = tempfile::tempdir().expect("a temporary project");
+    let root = project.path();
+    let fresh = root.join("invented.txt");
+    // `seed_repository` commits whatever is on disk; an empty tree has
+    // nothing to commit, so this checkout needs a file before it has a
+    // commit to be real.
+    std::fs::write(root.join("README"), "the state before anything\n")
+        .expect("the fixture file is writable");
+    seed_repository(root);
+
+    let script = root.join("script.json");
+    std::fs::write(&script, single_write_turn(&fresh)).expect("the script is writable");
+    let provider = Arc::new(FakeProvider::default().with_script(&script));
+
+    let mut permissions = Permissions::default();
+    permissions.set_baseline(
+        ["write"]
+            .into_iter()
+            .map(|tool| Rule {
+                permission: tool.to_owned(),
+                pattern: "*".to_owned(),
+                action: Action::Allow,
+            })
+            .collect(),
+    );
+
+    let engine = Engine::new(
+        provider,
+        "canned",
+        Arc::new(Registry::with_builtins()),
+        permissions,
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    settled(
+        &engine,
+        Command::SendPrompt {
+            text: "write the file".to_owned(),
+            mentions: Vec::new(),
+        },
+    )
+    .await
+    .expect("an idle engine accepts a prompt");
+    finish(&mut events).await;
+
+    assert_eq!(
+        read(&fresh),
+        CHECKOUT_REFUSAL_WRITE,
+        "the scripted turn ran and left something an undo could plausibly restore"
+    );
+
+    assert!(
+        matches!(
+            settled(&engine, Command::Undo).await,
+            Err(EngineError::NoSnapshots)
+        ),
+        "an engine nobody handed a Snapshots instance must refuse an undo even though \
+         the directory underneath it is a real, committed git checkout"
     );
 }
 
