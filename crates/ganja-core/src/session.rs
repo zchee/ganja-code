@@ -2053,35 +2053,43 @@ async fn resolve(
         return fail_call(turn, assistant, call, args, &message).await;
     };
 
+    // The one consultation this call gets. What a refusal quotes, what the
+    // dialog discloses and what an "always" writes down are all read off the
+    // same call in the same moment — three separate derivations, the last of
+    // them after a person has answered, are three chances to disagree about
+    // which call was being decided.
     let decision = turn
         .permissions
         .lock()
         .expect("the permission rules are never poisoned")
-        .check(&call.name, &args);
+        .gate(&call.name, &args);
 
-    match decision {
+    match decision.action {
         Decision::Allow => {}
         // A rule already answered this one, so there is nothing to put in
         // front of anybody. Like a refusal, it is information: the model reads
         // why, and the turn carries on.
         Decision::Deny => {
-            let rules = turn
-                .permissions
-                .lock()
-                .expect("the permission rules are never poisoned")
-                .relevant(&call.name);
-            let message = denied(&rules);
+            let message = denied(&decision.rules);
 
             return fail_call(turn, assistant, call, args, &message).await;
         }
         Decision::Ask => {
-            match wait_permission(turn, call, tool.describe(&args), &args).await? {
+            match wait_permission(
+                turn,
+                call,
+                tool.describe(&args),
+                &args,
+                &decision.directories,
+            )
+            .await?
+            {
                 PermissionReply::Once => {}
                 PermissionReply::Always => turn
                     .permissions
                     .lock()
                     .expect("the permission rules are never poisoned")
-                    .remember_always(&call.name, &args),
+                    .remember(&decision),
                 // A refusal is information, not a turn abort: the model reads
                 // it as the call's result and decides what to do next.
                 PermissionReply::Reject => {
@@ -2292,6 +2300,7 @@ async fn wait_permission(
     call: &BufferedCall,
     title: String,
     args: &serde_json::Value,
+    outside: &[PathBuf],
 ) -> ControlFlow<Option<Outcome>, PermissionReply> {
     let (sender, receiver) = oneshot::channel();
     let id = PermissionId::ascending();
@@ -2303,15 +2312,12 @@ async fn wait_permission(
         sender,
     });
 
-    // The directories an "always" answer would also remember, disclosed with
-    // the request so the dialog can say what it is really asking about.
-    // Collected here rather than at `check` because this is the one place a
-    // person is about to read them.
-    let directories = turn
-        .permissions
-        .lock()
-        .expect("the permission rules are never poisoned")
-        .outside_dirs(&call.name, args)
+    // The directories outside the project this call would work in, disclosed
+    // with the request so the dialog can say what it is really asking about.
+    // They arrive from the decision that judged the call rather than being
+    // read off the rules again here: what the person is shown has to be what
+    // the judgement was made on, and what an "always" would then remember.
+    let directories = outside
         .iter()
         .map(|directory| directory.to_string_lossy().into_owned())
         .collect();

@@ -342,7 +342,8 @@ async fn delegating_asks_about_the_named_subagent_and_an_always_covers_the_tool(
         .permissions()
         .lock()
         .expect("the rules are never poisoned")
-        .relevant("task");
+        .gate("task", &json!({}))
+        .rules;
     assert!(
         stored
             .iter()
@@ -404,7 +405,8 @@ async fn an_always_the_parent_was_given_does_not_authorize_the_child() {
         .permissions()
         .lock()
         .expect("the rules are never poisoned")
-        .relevant("webfetch");
+        .gate("webfetch", &json!({}))
+        .rules;
     assert!(
         stored
             .iter()

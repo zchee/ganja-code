@@ -39,11 +39,12 @@ fn an_answer_is_stored_per_project_under_the_data_home() {
 
     // Nothing is stored, so the defaults decide.
     let mut permissions = Permissions::load(&nested);
-    assert_eq!(permissions.check("shell", &command), Decision::Ask);
-    assert_eq!(permissions.check("read", &json!({})), Decision::Allow);
+    assert_eq!(permissions.gate("shell", &command).action, Decision::Ask);
+    assert_eq!(permissions.gate("read", &json!({})).action, Decision::Allow);
 
-    permissions.remember_always("shell", &command);
-    assert_eq!(permissions.check("shell", &command), Decision::Allow);
+    let decision = permissions.gate("shell", &command);
+    permissions.remember(&decision);
+    assert_eq!(permissions.gate("shell", &command).action, Decision::Allow);
     drop(permissions);
 
     // The answer landed where the project says its state belongs.
@@ -69,7 +70,9 @@ fn an_answer_is_stored_per_project_under_the_data_home() {
     // belongs to the project, not to the directory it was given in.
     for directory in [api.as_path(), nested.as_path()] {
         assert_eq!(
-            Permissions::load(directory).check("shell", &json!({ "command": "cargo test --lib" })),
+            Permissions::load(directory)
+                .gate("shell", &json!({ "command": "cargo test --lib" }))
+                .action,
             Decision::Allow,
             "{}",
             directory.display()
@@ -78,7 +81,7 @@ fn an_answer_is_stored_per_project_under_the_data_home() {
 
     // Another project is another set of rules.
     assert_eq!(
-        Permissions::load(&other).check("shell", &command),
+        Permissions::load(&other).gate("shell", &command).action,
         Decision::Ask,
         "an answer given in one project must not answer for another"
     );
@@ -91,8 +94,9 @@ fn an_answer_is_stored_per_project_under_the_data_home() {
             let nested = Arc::clone(&nested);
             thread::spawn(move || {
                 let mut permissions = Permissions::load(&nested);
-                permissions
-                    .remember_always("shell", &json!({ "command": format!("tool{index} run") }));
+                let decision =
+                    permissions.gate("shell", &json!({ "command": format!("tool{index} run") }));
+                permissions.remember(&decision);
             })
         })
         .collect();
