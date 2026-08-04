@@ -10,119 +10,14 @@
 //! directory rather than in whatever checkout the suite is running in; the
 //! relative case is unit-tested where the join happens (`src/session.rs`).
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
-use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
 use ganja_core::{
-    Command, Engine, Event, FinishReason, Mention, PartBody, PermissionReply, Permissions,
-    Registry, Role, ToolState,
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
+    Command, Engine, Event, Mention, PartBody, Permissions, Registry, Role, ToolState,
+    provider::{ChatRequest, Provider},
 };
+use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
 use serde_json::json;
-use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
-
-/// Answers each request with the next script, and records what it was asked.
-struct Recorder {
-    scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
-    seen: Arc<Mutex<Vec<ChatRequest>>>,
-}
-
-impl Recorder {
-    fn new(scripts: Vec<Vec<ProviderEvent>>) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
-        let seen: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
-        (
-            Arc::new(Self {
-                scripts: Mutex::new(scripts.into()),
-                seen: Arc::clone(&seen),
-            }),
-            seen,
-        )
-    }
-}
-
-#[async_trait]
-impl Provider for Recorder {
-    fn id(&self) -> &str {
-        "recorder"
-    }
-
-    async fn stream(
-        &self,
-        request: ChatRequest,
-        _cancel: CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
-
-        let script = self
-            .scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .pop_front()
-            .unwrap_or_else(|| vec![ProviderEvent::Finish(FinishReason::Completed)]);
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
-fn says(text: &str) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::TextDelta(text.to_owned()),
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
-fn calls(tool: &str, args: serde_json::Value) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::ToolCallStart {
-            id: "call".to_owned(),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: "call".to_owned(),
-            json: args.to_string(),
-        },
-        ProviderEvent::ToolCallEnd {
-            id: "call".to_owned(),
-        },
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
-async fn drain_allowing(engine: &Engine, events: &mut BoxStream<'static, Event>) -> Vec<Event> {
-    let mut seen = Vec::new();
-
-    loop {
-        let Some(event) = events.next().await else {
-            return seen;
-        };
-        if let Event::PermissionRequested { id, .. } = &event {
-            engine
-                .send(Command::ReplyPermission {
-                    id: id.clone(),
-                    reply: PermissionReply::Once,
-                })
-                .await
-                .expect("a reply is never refused");
-        }
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-
-        if finished {
-            return seen;
-        }
-    }
-}
 
 /// Everything the user side of `request` says, blocks and all.
 fn user_text(request: &ChatRequest) -> String {
@@ -145,17 +40,13 @@ fn engine(provider: Arc<dyn Provider>, tools: Registry) -> Engine {
     )
 }
 
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
-}
-
 #[tokio::test]
 async fn a_mention_becomes_a_file_part_on_the_message_and_content_in_the_request() {
-    let workspace = temporary();
+    let workspace = ganja_testkit::temp_dir();
     let path = workspace.path().join("notes.md");
     std::fs::write(&path, "the objective is to ship").expect("the fixture writes");
 
-    let (provider, requests) = Recorder::new(vec![says("noted")]);
+    let (provider, requests) = ScriptedProvider::new(vec![says("noted")]);
     let engine = engine(provider, Registry::new(Vec::new()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -188,11 +79,11 @@ async fn a_mention_becomes_a_file_part_on_the_message_and_content_in_the_request
 
 #[tokio::test]
 async fn the_users_message_carries_the_mention_as_a_reference() {
-    let workspace = temporary();
+    let workspace = ganja_testkit::temp_dir();
     let path = workspace.path().join("notes.md");
     std::fs::write(&path, "contents").expect("the fixture writes");
 
-    let (provider, _) = Recorder::new(vec![says("noted")]);
+    let (provider, _) = ScriptedProvider::new(vec![says("noted")]);
     let engine = engine(provider, Registry::new(Vec::new()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -238,11 +129,11 @@ async fn the_users_message_carries_the_mention_as_a_reference() {
 /// attach time would send the stale text and fail here.
 #[tokio::test]
 async fn a_mentioned_file_is_read_when_the_request_is_built_not_when_it_was_attached() {
-    let workspace = temporary();
+    let workspace = ganja_testkit::temp_dir();
     let path = workspace.path().join("notes.md");
     std::fs::write(&path, "the first draft").expect("the fixture writes");
 
-    let (provider, requests) = Recorder::new(vec![says("noted"), says("noted again")]);
+    let (provider, requests) = ScriptedProvider::new(vec![says("noted"), says("noted again")]);
     let engine = engine(provider, Registry::new(Vec::new()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -288,12 +179,12 @@ async fn a_mentioned_file_is_read_when_the_request_is_built_not_when_it_was_atta
 /// *model* has opened, and attaching a file is the user's act, not the model's.
 #[tokio::test]
 async fn a_mention_does_not_let_the_model_edit_a_file_it_never_read() {
-    let workspace = temporary();
+    let workspace = ganja_testkit::temp_dir();
     let path = workspace.path().join("notes.md");
     std::fs::write(&path, "the original").expect("the fixture writes");
 
-    let (provider, _) = Recorder::new(vec![
-        calls(
+    let (provider, _) = ScriptedProvider::new(vec![
+        tool_call(
             "edit",
             json!({
                 "filePath": path.to_string_lossy(),
@@ -344,11 +235,11 @@ async fn a_mention_does_not_let_the_model_edit_a_file_it_never_read() {
 
 #[tokio::test]
 async fn a_mention_naming_something_unreadable_says_so_rather_than_vanishing() {
-    let workspace = temporary();
+    let workspace = ganja_testkit::temp_dir();
     let directory = workspace.path().join("src");
     std::fs::create_dir(&directory).expect("the fixture makes a directory");
 
-    let (provider, requests) = Recorder::new(vec![says("noted")]);
+    let (provider, requests) = ScriptedProvider::new(vec![says("noted")]);
     let engine = engine(provider, Registry::new(Vec::new()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 

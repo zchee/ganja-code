@@ -4,123 +4,14 @@
 //! special-cased in code, so what proves it works is a scripted loop that
 //! actually writes `AGENTS.md` with the ordinary `write` tool.
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
-use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
 use ganja_core::{
-    Command, Config, Engine, EngineError, Event, FinishReason, PartBody, PermissionReply,
-    Permissions, Registry, Role, SessionId, SessionInfo, Storage, ToolState, Usage, command,
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
-    storage,
+    Command, Config, Engine, EngineError, Event, FinishReason, Message, PartBody, Permissions,
+    Registry, Role, SessionId, Storage, ToolState, command, provider::ChatRequest,
 };
+use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
 use serde_json::json;
-use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
-
-/// Answers each request with the next script, and records what it was asked.
-struct Recorder {
-    scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
-    seen: Arc<Mutex<Vec<ChatRequest>>>,
-}
-
-impl Recorder {
-    fn new(scripts: Vec<Vec<ProviderEvent>>) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
-        let seen: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
-        (
-            Arc::new(Self {
-                scripts: Mutex::new(scripts.into()),
-                seen: Arc::clone(&seen),
-            }),
-            seen,
-        )
-    }
-}
-
-#[async_trait]
-impl Provider for Recorder {
-    fn id(&self) -> &str {
-        "recorder"
-    }
-
-    async fn stream(
-        &self,
-        request: ChatRequest,
-        _cancel: CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
-
-        let script = self
-            .scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .pop_front()
-            .unwrap_or_else(|| vec![ProviderEvent::Finish(FinishReason::Completed)]);
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
-/// A step that calls `tool` with `args` and stops.
-fn calls(tool: &str, args: serde_json::Value) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::ToolCallStart {
-            id: "call".to_owned(),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: "call".to_owned(),
-            json: args.to_string(),
-        },
-        ProviderEvent::ToolCallEnd {
-            id: "call".to_owned(),
-        },
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
-/// A step that says `text` and stops.
-fn says(text: &str) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::TextDelta(text.to_owned()),
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
-/// Drains until the turn finishes, answering every permission with `Once`.
-async fn drain_allowing(engine: &Engine, events: &mut BoxStream<'static, Event>) -> Vec<Event> {
-    let mut seen = Vec::new();
-
-    loop {
-        let Some(event) = events.next().await else {
-            return seen;
-        };
-        if let Event::PermissionRequested { id, .. } = &event {
-            engine
-                .send(Command::ReplyPermission {
-                    id: id.clone(),
-                    reply: PermissionReply::Once,
-                })
-                .await
-                .expect("a reply is never refused");
-        }
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-
-        if finished {
-            return seen;
-        }
-    }
-}
 
 /// What the user message of `request` said.
 fn prompt_of(request: &ChatRequest) -> String {
@@ -133,10 +24,6 @@ fn prompt_of(request: &ChatRequest) -> String {
         .collect()
 }
 
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
-}
-
 /// `/init` is a template and nothing else: it reaches the model as an ordinary
 /// prompt, and `AGENTS.md` appears because the model reached for `write`.
 ///
@@ -144,10 +31,10 @@ fn temporary() -> TempDir {
 /// than into whatever checkout the suite is running in.
 #[tokio::test]
 async fn the_init_command_produces_an_agents_file_through_the_ordinary_loop() {
-    let workspace = temporary();
+    let workspace = ganja_testkit::temp_dir();
     let target = workspace.path().join("AGENTS.md");
-    let (provider, requests) = Recorder::new(vec![
-        calls(
+    let (provider, requests) = ScriptedProvider::new(vec![
+        tool_call(
             "write",
             json!({
                 "filePath": target.to_string_lossy(),
@@ -199,7 +86,7 @@ async fn the_init_command_produces_an_agents_file_through_the_ordinary_loop() {
 /// asked for it.
 #[tokio::test]
 async fn a_commands_arguments_reach_the_prompt_it_sends() {
-    let (provider, requests) = Recorder::new(vec![says("noted")]);
+    let (provider, requests) = ScriptedProvider::new(vec![says("noted")]);
     let engine = Engine::new(
         provider,
         "recorder-model",
@@ -226,7 +113,7 @@ async fn a_commands_arguments_reach_the_prompt_it_sends() {
 
 #[tokio::test]
 async fn a_command_nothing_answers_to_says_what_would_have_worked() {
-    let (provider, _) = Recorder::new(Vec::new());
+    let (provider, _) = ScriptedProvider::new(Vec::new());
     let engine = Engine::new(
         provider,
         "recorder-model",
@@ -259,7 +146,7 @@ async fn a_configured_command_runs_like_a_builtin() {
         }
     }))
     .expect("the fixture is a config");
-    let (provider, requests) = Recorder::new(vec![says("looks fine")]);
+    let (provider, requests) = ScriptedProvider::new(vec![says("looks fine")]);
     let engine = Engine::new(
         provider,
         "recorder-model",
@@ -303,7 +190,7 @@ async fn a_command_that_names_an_agent_runs_as_it_for_one_turn() {
         "command": { "review": { "template": "review it", "agent": "reviewer" } }
     }))
     .expect("the fixture is a config");
-    let (provider, requests) = Recorder::new(vec![says("looks fine"), says("hello")]);
+    let (provider, requests) = ScriptedProvider::new(vec![says("looks fine"), says("hello")]);
     let engine = Engine::new(
         provider,
         "recorder-model",
@@ -358,32 +245,8 @@ async fn a_command_that_names_an_agent_runs_as_it_for_one_turn() {
 /// A stored session with one message in it, already titled so the title
 /// machinery stays out of a test that is not about it.
 fn seeded(storage: &Storage) -> SessionId {
-    let id = SessionId::ascending();
-    let info = SessionInfo {
-        id: id.clone(),
-        version: storage::VERSION,
-        title: Some("seeded".to_owned()),
-        created: 1,
-        updated: 2,
-        usage: Usage::default(),
-        context_tokens: 0,
-        summary: None,
-        agent: None,
-        model: None,
-        parent: None,
-        revert: None,
-    };
-    storage.save_info(&info).expect("the seeded record writes");
-
-    let earlier = ganja_core::Message::user("the objective");
-    storage
-        .save_message(&id, &earlier)
-        .expect("the seeded envelope writes");
-    for part in &earlier.parts {
-        storage
-            .save_part(&id, &earlier.id, part)
-            .expect("the seeded part writes");
-    }
+    let id = ganja_testkit::seed_session(storage, 0);
+    ganja_testkit::seed_message(storage, &id, &Message::user("the objective"));
 
     id
 }
@@ -392,13 +255,13 @@ fn seeded(storage: &Storage) -> SessionId {
 /// fill-level question skipped — and the window afterwards is the summary.
 #[tokio::test]
 async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
-    let directory = temporary();
+    let directory = ganja_testkit::temp_dir();
     let storage = Storage::open(directory.path().join("storage"));
     let session = seeded(&storage);
     let model = ganja_core::catalog::default_model("anthropic")
         .expect("the catalog has a default for a provider this build ships");
 
-    let (provider, requests) = Recorder::new(vec![says("## Objective\n- find the thing")]);
+    let (provider, requests) = ScriptedProvider::new(vec![says("## Objective\n- find the thing")]);
     let engine = Engine::persistent(
         provider,
         model,
@@ -477,9 +340,9 @@ async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
 
 #[tokio::test]
 async fn starting_a_new_session_leaves_the_old_one_on_disk_and_the_next_prompt_fresh() {
-    let directory = temporary();
+    let directory = ganja_testkit::temp_dir();
     let storage = Storage::open(directory.path().join("storage"));
-    let (provider, _) = Recorder::new(vec![says("one"), says("two")]);
+    let (provider, _) = ScriptedProvider::new(vec![says("one"), says("two")]);
     let engine = Engine::persistent(
         provider,
         "recorder-model",
@@ -543,15 +406,15 @@ async fn starting_a_new_session_leaves_the_old_one_on_disk_and_the_next_prompt_f
 /// could do is overwrite a file it never opened.
 #[tokio::test]
 async fn a_new_session_does_not_inherit_what_the_last_one_had_read() {
-    let directory = temporary();
+    let directory = ganja_testkit::temp_dir();
     let target = directory.path().join("notes.md");
     std::fs::write(&target, "what was there before\n").expect("the fixture file is writable");
     let path = target.display().to_string();
 
-    let (provider, _) = Recorder::new(vec![
-        calls("read", json!({ "filePath": path })),
+    let (provider, _) = ScriptedProvider::new(vec![
+        tool_call("read", json!({ "filePath": path })),
         says("read it"),
-        calls(
+        tool_call(
             "write",
             json!({ "filePath": path, "content": "something else\n" }),
         ),

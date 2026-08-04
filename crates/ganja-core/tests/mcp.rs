@@ -31,29 +31,23 @@
 //! is about the parts that need another process.
 
 use std::{
-    collections::VecDeque,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::stream::BoxStream;
 use ganja_core::{
     Command, Config, Engine, Event, FinishReason, McpServers, McpStatus, PartBody, PermissionReply,
-    Permissions, Registry, ToolState,
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
+    Permissions, Registry, ToolState, provider::Provider,
 };
+use ganja_testkit::{ScriptedProvider, drain_answering, says, tool_call};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
 };
-use tokio_util::sync::CancellationToken;
 
 /// Environment variable naming the upstream checkout, shared with the golden
 /// suite so one vendored copy serves both.
@@ -62,108 +56,6 @@ const CHECKOUT_ENV: &str = "GANJA_OPENCODE_DIR";
 /// How long a connect and its listing may take before the test gives up on
 /// the fixture. Generous: a cold `bun` start is seconds.
 const READY: Duration = Duration::from_secs(30);
-
-/// Answers each request with the next script, and records what it was asked.
-struct Recorder {
-    scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
-    seen: Arc<Mutex<Vec<ChatRequest>>>,
-}
-
-impl Recorder {
-    fn new(scripts: Vec<Vec<ProviderEvent>>) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
-        let seen: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
-        (
-            Arc::new(Self {
-                scripts: Mutex::new(scripts.into()),
-                seen: Arc::clone(&seen),
-            }),
-            seen,
-        )
-    }
-}
-
-#[async_trait]
-impl Provider for Recorder {
-    fn id(&self) -> &str {
-        "recorder"
-    }
-
-    async fn stream(
-        &self,
-        request: ChatRequest,
-        _cancel: CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
-
-        let script = self
-            .scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .pop_front()
-            .unwrap_or_else(|| vec![ProviderEvent::Finish(FinishReason::Completed)]);
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
-/// A step that calls `tool` with `args` and stops.
-fn calls(tool: &str, args: Value) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::ToolCallStart {
-            id: format!("call-{tool}"),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: format!("call-{tool}"),
-            json: args.to_string(),
-        },
-        ProviderEvent::ToolCallEnd {
-            id: format!("call-{tool}"),
-        },
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
-/// A step that says `text` and stops.
-fn says(text: &str) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::TextDelta(text.to_owned()),
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
-/// Drains until the turn finishes, answering every permission with `reply`.
-async fn drain_answering(
-    engine: &Engine,
-    events: &mut BoxStream<'static, Event>,
-    reply: PermissionReply,
-) -> Vec<Event> {
-    let mut seen = Vec::new();
-
-    loop {
-        let Some(event) = events.next().await else {
-            return seen;
-        };
-        if let Event::PermissionRequested { id, .. } = &event {
-            engine
-                .send(Command::ReplyPermission {
-                    id: id.clone(),
-                    reply,
-                })
-                .await
-                .expect("a reply is never refused");
-        }
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-
-        if finished {
-            return seen;
-        }
-    }
-}
 
 /// The final state of the tool part named `tool`, whatever it finally was.
 fn tool_part(seen: &[Event], tool: &str) -> ToolState {
@@ -357,8 +249,8 @@ async fn turn(
 /// fires, because the model's call finds no such tool.
 #[tokio::test]
 async fn the_reference_server_round_trips_a_call_the_model_made() {
-    let (provider, requests) = Recorder::new(vec![
-        calls("mcp__reference__echo", json!({ "text": "the argument" })),
+    let (provider, requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__reference__echo", json!({ "text": "the argument" })),
         says("it came back"),
     ]);
     let config = reference_server("reference");
@@ -409,7 +301,7 @@ async fn the_reference_server_round_trips_a_call_the_model_made() {
 /// The server's own instructions reach the system prompt, in upstream's block.
 #[tokio::test]
 async fn a_connected_servers_instructions_reach_the_system_prompt() {
-    let (provider, requests) = Recorder::new(vec![says("nothing to do")]);
+    let (provider, requests) = ScriptedProvider::new(vec![says("nothing to do")]);
     let config = reference_server("reference");
     let engine = engine_with(provider, &config).await;
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -443,10 +335,10 @@ async fn a_connected_servers_instructions_reach_the_system_prompt() {
 /// answer the next call, which only an end-to-end turn can show.
 #[tokio::test]
 async fn an_mcp_call_asks_once_and_an_always_answer_is_not_asked_again() {
-    let (provider, _requests) = Recorder::new(vec![
-        calls("mcp__reference__echo", json!({ "text": "first" })),
+    let (provider, _requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__reference__echo", json!({ "text": "first" })),
         says("one"),
-        calls("mcp__reference__echo", json!({ "text": "second" })),
+        tool_call("mcp__reference__echo", json!({ "text": "second" })),
         says("two"),
     ]);
     let config = reference_server("reference");
@@ -481,8 +373,8 @@ async fn an_mcp_call_asks_once_and_an_always_answer_is_not_asked_again() {
 /// refusal is information: the turn carries on and the model answers.
 #[tokio::test]
 async fn a_config_wildcard_over_a_server_denies_its_tools_without_ending_the_turn() {
-    let (provider, _requests) = Recorder::new(vec![
-        calls("mcp__reference__echo", json!({ "text": "let me in" })),
+    let (provider, _requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__reference__echo", json!({ "text": "let me in" })),
         says("it said no"),
     ]);
     let mut config = reference_server("reference");
@@ -533,8 +425,8 @@ async fn a_config_wildcard_over_a_server_denies_its_tools_without_ending_the_tur
 /// the turn carries on.
 #[tokio::test]
 async fn an_error_result_becomes_error_text_the_model_reads() {
-    let (provider, _requests) = Recorder::new(vec![
-        calls("mcp__reference__explode", json!({})),
+    let (provider, _requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__reference__explode", json!({})),
         says("noted"),
     ]);
     let config = reference_server("reference");
@@ -564,9 +456,9 @@ async fn an_error_result_becomes_error_text_the_model_reads() {
 /// A structured-only answer and an image answer both reach the model as text.
 #[tokio::test]
 async fn structured_and_binary_answers_are_rendered_for_a_model_that_reads_text() {
-    let (provider, _requests) = Recorder::new(vec![
-        calls("mcp__reference__structured", json!({})),
-        calls("mcp__reference__picture", json!({})),
+    let (provider, _requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__reference__structured", json!({})),
+        tool_call("mcp__reference__picture", json!({})),
         says("seen both"),
     ]);
     let config = reference_server("reference");
@@ -592,8 +484,8 @@ async fn structured_and_binary_answers_are_rendered_for_a_model_that_reads_text(
 /// offered at the next turn — there is no reconnect, by design.
 #[tokio::test]
 async fn a_server_that_dies_mid_session_fails_and_loses_its_tools() {
-    let (provider, requests) = Recorder::new(vec![
-        calls("mcp__reference__vanish", json!({})),
+    let (provider, requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__reference__vanish", json!({})),
         says("it is gone"),
         says("still here"),
     ]);
@@ -667,8 +559,8 @@ async fn a_remote_server_is_reached_over_streamable_http() {
     }))
     .expect("the fixture config is a config");
 
-    let (provider, _requests) = Recorder::new(vec![
-        calls("mcp__hub__ping", json!({ "text": "over http" })),
+    let (provider, _requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__hub__ping", json!({ "text": "over http" })),
         says("answered"),
     ]);
     let engine = engine_with(provider, &config).await;

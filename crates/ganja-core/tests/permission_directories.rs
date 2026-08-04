@@ -11,59 +11,16 @@
 //! and a test that reached the real one could read or write a person's own
 //! answers. Everything in this file is therefore one test.
 
-use std::{
-    collections::VecDeque,
-    fs,
-    sync::{Arc, Mutex},
-};
+use std::{fs, sync::Arc};
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
     Command, Engine, Event, FinishReason, PermissionReply, Permissions, Registry, Tool, ToolCtx,
-    ToolError, ToolOutput,
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
+    ToolError, ToolOutput, provider::ProviderEvent,
 };
 use serde_json::json;
 use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
-
-/// Answers each request with the next script, in order.
-struct Scripted {
-    scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
-}
-
-#[async_trait]
-impl Provider for Scripted {
-    fn id(&self) -> &str {
-        "scripted"
-    }
-
-    async fn stream(
-        &self,
-        _request: ChatRequest,
-        _cancel: CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let script = self
-            .scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .pop_front()
-            .unwrap_or_else(|| vec![ProviderEvent::Finish(FinishReason::Completed)]);
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
-/// Arguments the stand-in shell tool takes.
-#[derive(schemars::JsonSchema)]
-#[allow(dead_code)]
-struct Args {
-    command: Option<String>,
-}
 
 /// A tool registered under the shell's id, so the gate treats its argument as
 /// a command. It never runs here — every call in this test is refused.
@@ -80,7 +37,7 @@ impl Tool for Shell {
     }
 
     fn schema(&self) -> schemars::Schema {
-        schemars::schema_for!(Args)
+        ganja_testkit::placeholder_schema()
     }
 
     async fn run(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
@@ -109,10 +66,11 @@ fn runs(command: &str) -> Vec<ProviderEvent> {
 
 #[tokio::test]
 async fn a_request_discloses_the_directories_an_always_answer_would_cover() {
-    let home = TempDir::new().expect("a temporary directory is creatable");
     // SAFETY: nothing else runs yet — this is the only test in this binary, and
     // it has not started a thread.
-    unsafe { std::env::set_var("XDG_DATA_HOME", home.path()) };
+    // Kept alive for the whole test: dropping it would delete the directory
+    // XDG_DATA_HOME now points at.
+    let _home = unsafe { ganja_testkit::redirect_xdg_data_home() };
 
     let project = TempDir::new().expect("a temporary directory is creatable");
     fs::create_dir(project.path().join(".git")).expect("the fixture repository is creatable");
@@ -127,20 +85,12 @@ async fn a_request_discloses_the_directories_an_always_answer_would_cover() {
     // Two turns of two requests each: the call, then the step that reads its
     // refusal and says so. Without the second script the loop would take the
     // *next* turn's call inside this one.
-    let provider = Arc::new(Scripted {
-        scripts: Mutex::new(VecDeque::from(vec![
-            runs("cargo test"),
-            vec![
-                ProviderEvent::TextDelta("refused".to_owned()),
-                ProviderEvent::Finish(FinishReason::Completed),
-            ],
-            runs(&format!("cat {}", named.display())),
-            vec![
-                ProviderEvent::TextDelta("refused".to_owned()),
-                ProviderEvent::Finish(FinishReason::Completed),
-            ],
-        ])),
-    });
+    let (provider, _requests) = ganja_testkit::ScriptedProvider::new(vec![
+        runs("cargo test"),
+        ganja_testkit::says("refused"),
+        runs(&format!("cat {}", named.display())),
+        ganja_testkit::says("refused"),
+    ]);
     let engine = Engine::new(
         provider,
         "scripted-model",

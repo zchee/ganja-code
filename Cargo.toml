@@ -13,6 +13,11 @@ repository = "https://github.com/zchee/ganja-code"
 # that member crates only ever opt in, never choose a version.
 [workspace.dependencies]
 ganja-core = { path = "crates/ganja-core" }
+# Dev-only: the scripted-provider/recorder-tool/storage-seeding scaffolding
+# `ganja-core`'s own `tests/*.rs` binaries pulled in as a path dev-dependency,
+# so the duplication across those files has one place to live instead of
+# eleven.
+ganja-testkit = { path = "crates/ganja-testkit" }
 ganja-tui = { path = "crates/ganja-tui" }
 
 anyhow = "1.0.104"

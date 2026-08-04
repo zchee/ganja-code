@@ -5,23 +5,17 @@
 //! Providers and tools here are test doubles scripted per request, because
 //! the loop under test is the engine's, not theirs.
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
     Command, Decision, Engine, EngineError, Event, FinishReason, PartBody, PermissionId,
     PermissionReply, Permissions, Registry, Role, Tool, ToolCtx, ToolError, ToolOutput, ToolState,
     Usage,
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
+    provider::{ChatRequest, ProviderError, ProviderEvent},
 };
-use tokio_util::sync::CancellationToken;
+use ganja_testkit::{BlockingTool, RecorderTool, ScriptedProvider, drain};
 
 /// The rejection text the model reads, pinned to upstream
 /// `packages/core/src/v1/permission.ts`.
@@ -29,103 +23,6 @@ const REJECTED: &str = "The user rejected permission to use this specific tool c
 
 /// The invalid-call prefix, pinned to upstream `tool/invalid.ts`.
 const INVALID_PREFIX: &str = "The arguments provided to the tool are invalid:";
-
-/// Answers each request with the next script, and records what it was asked.
-struct StepProvider {
-    scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
-    seen: Arc<Mutex<Vec<ChatRequest>>>,
-}
-
-impl StepProvider {
-    fn new(scripts: Vec<Vec<ProviderEvent>>) -> Self {
-        Self {
-            scripts: Mutex::new(scripts.into()),
-            seen: Arc::default(),
-        }
-    }
-}
-
-#[async_trait]
-impl Provider for StepProvider {
-    fn id(&self) -> &str {
-        "step-scripted"
-    }
-
-    async fn stream(
-        &self,
-        request: ChatRequest,
-        _cancel: CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
-
-        let script = self
-            .scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .pop_front()
-            .expect("the script has a step for every request");
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
-/// Arguments every test tool nominally takes; the loop never validates them
-/// against the schema, but the registry has to advertise one.
-#[derive(schemars::JsonSchema)]
-#[allow(dead_code)]
-struct Args {
-    key: Option<String>,
-}
-
-/// Records every invocation and answers with a canned output.
-struct RecorderTool {
-    id: &'static str,
-    calls: Arc<Mutex<Vec<serde_json::Value>>>,
-}
-
-impl RecorderTool {
-    fn new(id: &'static str) -> (Arc<Self>, Arc<Mutex<Vec<serde_json::Value>>>) {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        (
-            Arc::new(Self {
-                id,
-                calls: Arc::clone(&calls),
-            }),
-            calls,
-        )
-    }
-}
-
-#[async_trait]
-impl Tool for RecorderTool {
-    fn id(&self) -> &str {
-        self.id
-    }
-
-    fn description(&self) -> &str {
-        "records what it was asked"
-    }
-
-    fn schema(&self) -> schemars::Schema {
-        schemars::schema_for!(Args)
-    }
-
-    async fn run(&self, args: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
-        self.calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .push(args);
-
-        Ok(ToolOutput {
-            title: format!("{} ran", self.id),
-            output: "found it".to_owned(),
-            metadata: serde_json::json!({}),
-        })
-    }
-}
 
 /// Fails every invocation with a message the model is meant to read.
 struct FailingTool;
@@ -141,38 +38,11 @@ impl Tool for FailingTool {
     }
 
     fn schema(&self) -> schemars::Schema {
-        schemars::schema_for!(Args)
+        ganja_testkit::placeholder_schema()
     }
 
     async fn run(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
         Err(ToolError::Failed("the index is corrupt".to_owned()))
-    }
-}
-
-/// Announces that it started, then waits for the cancel it expects.
-struct StallTool {
-    entered: tokio::sync::mpsc::Sender<()>,
-}
-
-#[async_trait]
-impl Tool for StallTool {
-    fn id(&self) -> &str {
-        "lookup"
-    }
-
-    fn description(&self) -> &str {
-        "waits to be cancelled"
-    }
-
-    fn schema(&self) -> schemars::Schema {
-        schemars::schema_for!(Args)
-    }
-
-    async fn run(&self, _args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
-        let _ = self.entered.send(()).await;
-        ctx.cancel.cancelled().await;
-
-        Err(ToolError::Cancelled)
     }
 }
 
@@ -268,24 +138,6 @@ fn shape(event: &Event) -> String {
     }
 }
 
-/// Drains events until the turn finishes, returning everything seen.
-async fn drain(events: &mut BoxStream<'static, Event>) -> Vec<Event> {
-    let mut seen = Vec::new();
-
-    loop {
-        let event = events
-            .next()
-            .await
-            .expect("the turn should finish before the stream ends");
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-
-        if finished {
-            return seen;
-        }
-    }
-}
-
 /// Drains until a permission request arrives, returning its id and everything
 /// seen so far.
 async fn until_permission(events: &mut BoxStream<'static, Event>) -> (PermissionId, Vec<Event>) {
@@ -377,9 +229,9 @@ async fn a_turn_spans_steps_until_a_request_ends_without_tool_calls() {
         ProviderEvent::Finish(FinishReason::Completed),
     ];
 
-    let provider = Arc::new(StepProvider::new(vec![step_one, step_two]));
-    let seen_requests = Arc::clone(&provider.seen);
-    let (tool, calls) = RecorderTool::new("lookup");
+    let (provider, seen_requests) =
+        ScriptedProvider::strict("step-scripted", vec![step_one, step_two]);
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -473,20 +325,23 @@ async fn a_turn_spans_steps_until_a_request_ends_without_tool_calls() {
 
 #[tokio::test]
 async fn a_call_with_no_arguments_runs_with_an_empty_object() {
-    let provider = Arc::new(StepProvider::new(vec![
+    let (provider, _requests) = ScriptedProvider::strict(
+        "step-scripted",
         vec![
-            ProviderEvent::ToolCallStart {
-                id: "call_1".to_owned(),
-                name: "lookup".to_owned(),
-            },
-            ProviderEvent::ToolCallEnd {
-                id: "call_1".to_owned(),
-            },
-            ProviderEvent::Finish(FinishReason::Completed),
+            vec![
+                ProviderEvent::ToolCallStart {
+                    id: "call_1".to_owned(),
+                    name: "lookup".to_owned(),
+                },
+                ProviderEvent::ToolCallEnd {
+                    id: "call_1".to_owned(),
+                },
+                ProviderEvent::Finish(FinishReason::Completed),
+            ],
+            vec![ProviderEvent::Finish(FinishReason::Completed)],
         ],
-        vec![ProviderEvent::Finish(FinishReason::Completed)],
-    ]));
-    let (tool, calls) = RecorderTool::new("lookup");
+    );
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -509,11 +364,14 @@ async fn a_call_with_no_arguments_runs_with_an_empty_object() {
 async fn a_permission_answered_once_runs_the_call() {
     let mut step_one = call("call_1", "shell", r#"{"key":"a"}"#);
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
-    let provider = Arc::new(StepProvider::new(vec![
-        step_one,
-        vec![ProviderEvent::Finish(FinishReason::Completed)],
-    ]));
-    let (tool, calls) = RecorderTool::new("shell");
+    let (provider, _requests) = ScriptedProvider::strict(
+        "step-scripted",
+        vec![
+            step_one,
+            vec![ProviderEvent::Finish(FinishReason::Completed)],
+        ],
+    );
+    let (tool, calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -583,13 +441,11 @@ async fn a_permission_answered_always_stops_the_asking() {
     second_turn.push(ProviderEvent::Finish(FinishReason::Completed));
     let done = vec![ProviderEvent::Finish(FinishReason::Completed)];
 
-    let provider = Arc::new(StepProvider::new(vec![
-        first_turn,
-        done.clone(),
-        second_turn,
-        done,
-    ]));
-    let (tool, calls) = RecorderTool::new("shell");
+    let (provider, _requests) = ScriptedProvider::strict(
+        "step-scripted",
+        vec![first_turn, done.clone(), second_turn, done],
+    );
+    let (tool, calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -645,9 +501,9 @@ async fn a_rejected_call_does_not_run_and_the_turn_continues() {
         ProviderEvent::TextDelta("understood".to_owned()),
         ProviderEvent::Finish(FinishReason::Completed),
     ];
-    let provider = Arc::new(StepProvider::new(vec![step_one, step_two]));
-    let seen_requests = Arc::clone(&provider.seen);
-    let (tool, calls) = RecorderTool::new("shell");
+    let (provider, seen_requests) =
+        ScriptedProvider::strict("step-scripted", vec![step_one, step_two]);
+    let (tool, calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -706,11 +562,14 @@ async fn a_rejected_call_does_not_run_and_the_turn_continues() {
 async fn cancelling_while_a_permission_waits_refuses_it() {
     let mut step_one = call("call_1", "shell", r#"{"key":"a"}"#);
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
-    let provider = Arc::new(StepProvider::new(vec![
-        step_one,
-        vec![ProviderEvent::Finish(FinishReason::Completed)],
-    ]));
-    let (tool, calls) = RecorderTool::new("shell");
+    let (provider, _requests) = ScriptedProvider::strict(
+        "step-scripted",
+        vec![
+            step_one,
+            vec![ProviderEvent::Finish(FinishReason::Completed)],
+        ],
+    );
+    let (tool, calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -761,11 +620,14 @@ async fn cancelling_while_a_permission_waits_refuses_it() {
 async fn a_prompt_is_refused_while_a_permission_waits() {
     let mut step_one = call("call_1", "shell", r#"{"key":"a"}"#);
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
-    let provider = Arc::new(StepProvider::new(vec![
-        step_one,
-        vec![ProviderEvent::Finish(FinishReason::Completed)],
-    ]));
-    let (tool, _calls) = RecorderTool::new("shell");
+    let (provider, _requests) = ScriptedProvider::strict(
+        "step-scripted",
+        vec![
+            step_one,
+            vec![ProviderEvent::Finish(FinishReason::Completed)],
+        ],
+    );
+    let (tool, _calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -796,11 +658,14 @@ async fn a_prompt_is_refused_while_a_permission_waits() {
 async fn a_stale_permission_reply_is_ignored() {
     let mut step_one = call("call_1", "shell", r#"{"key":"a"}"#);
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
-    let provider = Arc::new(StepProvider::new(vec![
-        step_one,
-        vec![ProviderEvent::Finish(FinishReason::Completed)],
-    ]));
-    let (tool, calls) = RecorderTool::new("shell");
+    let (provider, _requests) = ScriptedProvider::strict(
+        "step-scripted",
+        vec![
+            step_one,
+            vec![ProviderEvent::Finish(FinishReason::Completed)],
+        ],
+    );
+    let (tool, calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -850,9 +715,9 @@ async fn an_unknown_tool_becomes_an_error_the_model_reads() {
     let mut step_one = call("call_1", "no_such_tool", r#"{"key":"a"}"#);
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let step_two = vec![ProviderEvent::Finish(FinishReason::Completed)];
-    let provider = Arc::new(StepProvider::new(vec![step_one, step_two]));
-    let seen_requests = Arc::clone(&provider.seen);
-    let (tool, calls) = RecorderTool::new("lookup");
+    let (provider, seen_requests) =
+        ScriptedProvider::strict("step-scripted", vec![step_one, step_two]);
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -911,9 +776,9 @@ async fn malformed_arguments_become_an_error_the_model_reads() {
         ProviderEvent::Finish(FinishReason::Completed),
     ];
     let step_two = vec![ProviderEvent::Finish(FinishReason::Completed)];
-    let provider = Arc::new(StepProvider::new(vec![step_one, step_two]));
-    let seen_requests = Arc::clone(&provider.seen);
-    let (tool, calls) = RecorderTool::new("lookup");
+    let (provider, seen_requests) =
+        ScriptedProvider::strict("step-scripted", vec![step_one, step_two]);
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -957,8 +822,8 @@ async fn a_tool_failure_is_a_result_not_a_turn_abort() {
     let mut step_one = call("call_1", "lookup", r#"{"key":"a"}"#);
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let step_two = vec![ProviderEvent::Finish(FinishReason::Completed)];
-    let provider = Arc::new(StepProvider::new(vec![step_one, step_two]));
-    let seen_requests = Arc::clone(&provider.seen);
+    let (provider, seen_requests) =
+        ScriptedProvider::strict("step-scripted", vec![step_one, step_two]);
     let engine = Engine::new(
         provider,
         "scripted-model",
@@ -992,15 +857,22 @@ async fn a_tool_failure_is_a_result_not_a_turn_abort() {
 async fn cancelling_mid_execution_errors_the_call_and_finishes_cancelled() {
     let mut step_one = call("call_1", "lookup", r#"{"key":"a"}"#);
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
-    let provider = Arc::new(StepProvider::new(vec![
-        step_one,
-        vec![ProviderEvent::Finish(FinishReason::Completed)],
-    ]));
+    let (provider, _requests) = ScriptedProvider::strict(
+        "step-scripted",
+        vec![
+            step_one,
+            vec![ProviderEvent::Finish(FinishReason::Completed)],
+        ],
+    );
     let (entered, mut wait_entered) = tokio::sync::mpsc::channel(1);
     let engine = Engine::new(
         provider,
         "scripted-model",
-        Arc::new(Registry::new(vec![Arc::new(StallTool { entered })])),
+        Arc::new(Registry::new(vec![BlockingTool::with_entry_signal(
+            "lookup",
+            "waits to be cancelled",
+            entered,
+        )])),
         Permissions::default(),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -1058,8 +930,8 @@ async fn a_provider_failure_mid_loop_strands_the_buffered_call() {
         },
         ProviderEvent::Failed(ProviderError::Transport("connection reset".to_owned())),
     ];
-    let provider = Arc::new(StepProvider::new(vec![step_one]));
-    let (tool, calls) = RecorderTool::new("lookup");
+    let (provider, _requests) = ScriptedProvider::strict("step-scripted", vec![step_one]);
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
     let engine = Engine::new(
         provider,
         "scripted-model",

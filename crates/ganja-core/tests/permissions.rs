@@ -23,10 +23,9 @@ const OVERLAPPING: usize = 16;
 
 #[test]
 fn an_answer_is_stored_per_project_under_the_data_home() {
-    let home = TempDir::new().expect("a temporary directory is creatable");
     // SAFETY: nothing else runs yet — this is the only test in this binary, and
     // it has not started a thread.
-    unsafe { std::env::set_var("XDG_DATA_HOME", home.path()) };
+    let home = unsafe { ganja_testkit::redirect_xdg_data_home() };
 
     let workspace = TempDir::new().expect("a temporary directory is creatable");
     let api = workspace.path().join("api");
