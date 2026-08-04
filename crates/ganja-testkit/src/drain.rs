@@ -6,19 +6,19 @@ use ganja_core::{Command, Engine, Event, PermissionReply};
 
 /// Collects every event up to and including the turn's finish.
 ///
-/// Returns whatever was collected if the stream ends first, rather than
-/// panicking: a turn that never reaches [`Event::MessageFinished`] fails
-/// whatever the test asserts about `seen.last()` next, which is a clearer
-/// signal in a healthy suite than a panic at the drain site — and the
-/// distinction is otherwise unobservable, since the stream never actually
-/// closes early in a passing run.
+/// A stream that ends before [`Event::MessageFinished`] is a broken fixture —
+/// a dropped engine, a turn task that died — and panics right here, at the
+/// drain site. Handing back the partial collection instead would let a
+/// negative assertion pass vacuously: "no permission was ever requested" is
+/// trivially true of a transcript that never happened.
 pub async fn drain(events: &mut BoxStream<'static, Event>) -> Vec<Event> {
     let mut seen = Vec::new();
 
     loop {
-        let Some(event) = events.next().await else {
-            return seen;
-        };
+        let event = events
+            .next()
+            .await
+            .expect("the turn should finish before the stream ends");
         let finished = matches!(event, Event::MessageFinished { .. });
         seen.push(event);
 
@@ -37,9 +37,10 @@ pub async fn drain_answering(
     let mut seen = Vec::new();
 
     loop {
-        let Some(event) = events.next().await else {
-            return seen;
-        };
+        let event = events
+            .next()
+            .await
+            .expect("the turn should finish before the stream ends");
         if let Event::PermissionRequested { id, .. } = &event {
             engine
                 .send(Command::ReplyPermission {
