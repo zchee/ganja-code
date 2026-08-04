@@ -36,7 +36,7 @@ pub use engine::{Engine, EngineError};
 pub use instruction::system_prompt;
 pub use lsp::Lsp;
 pub use mcp::{Servers as McpServers, Status as McpStatus};
-pub use permission::{Decision, Permissions};
+pub use permission::{CallDecision, Decision, Permissions};
 pub use project::{Project, ProjectError};
 pub use protocol::{
     Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody, PartId,

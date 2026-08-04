@@ -471,7 +471,8 @@ async fn a_permission_answered_always_stops_the_asking() {
             .permissions()
             .lock()
             .expect("the permission rules are never poisoned")
-            .check("shell", &serde_json::json!({"key": "b"})),
+            .gate("shell", &serde_json::json!({"key": "b"}))
+            .action,
         Decision::Allow
     );
 

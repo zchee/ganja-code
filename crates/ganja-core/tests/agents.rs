@@ -183,23 +183,28 @@ async fn a_config_rule_decides_and_a_stored_answer_outranks_it() {
 
     let mut denied = Permissions::default();
     denied.set_baseline(baseline(&deny));
-    assert_eq!(denied.check("bash", &command), Decision::Deny);
+    assert_eq!(denied.gate("bash", &command).action, Decision::Deny);
 
     let mut allowed = Permissions::default();
     allowed.set_baseline(baseline(&allow));
-    assert_eq!(allowed.check("bash", &command), Decision::Allow);
+    assert_eq!(allowed.gate("bash", &command).action, Decision::Allow);
 
     // The answer came first in time and sits last in precedence, which is what
     // stops a config edit from silently revoking it.
     let mut answered = Permissions::default();
-    answered.remember_always("bash", &command);
+    let decision = answered.gate("bash", &command);
+    answered.remember(&decision);
     answered.set_baseline(baseline(&deny));
     assert_eq!(
-        answered.check("bash", &json!({ "command": "cargo test --release" })),
+        answered
+            .gate("bash", &json!({ "command": "cargo test --release" }))
+            .action,
         Decision::Allow
     );
     assert_eq!(
-        answered.check("bash", &json!({ "command": "npm run dev" })),
+        answered
+            .gate("bash", &json!({ "command": "npm run dev" }))
+            .action,
         Decision::Deny,
         "the config still decides everything nobody answered for"
     );
