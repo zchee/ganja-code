@@ -135,8 +135,12 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     // runs. Deliberately not a refusal: a catalog that could not be fetched
     // leaves the compiled-in snapshot standing, which is a session that prices
     // slightly stale rather than a session that does not start.
-    let catalog_refresh = CancellationToken::new();
-    catalog::spawn_refresh_loop(catalog_refresh.clone());
+    let background = CancellationToken::new();
+    catalog::spawn_refresh_loop(background.clone());
+
+    // Spilled tool output older than a week is nobody's context any more, and
+    // nothing else on this machine ever deletes it.
+    ganja_core::tool::truncate::spawn_sweep_loop(background.clone());
 
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_mouse() {
@@ -158,9 +162,9 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
         }
         Err(error) => Err(error),
     };
-    // Nothing is waiting on the loop, but a background task that outlives the
+    // Nothing is waiting on the loops, but a background task that outlives the
     // screen it was feeding is a leak whichever way the run ended.
-    catalog_refresh.cancel();
+    background.cancel();
     let restored = restore();
 
     outcome.and(restored)
