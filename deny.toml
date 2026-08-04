@@ -79,6 +79,14 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# The palette's fuzzy matcher is MPL-2.0 — file-level weak copyleft, satisfied
+# by depending on the crate unmodified from the registry. A named exception
+# rather than an entry in the allow list above: the next MPL arrival should be
+# a decision, not a precedent this one silently set.
+[[licenses.exceptions]]
+name = "nucleo-matcher"
+allow = ["MPL-2.0"]
+
 [licenses.private]
 ignore = false
 
