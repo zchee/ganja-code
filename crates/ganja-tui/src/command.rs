@@ -58,6 +58,10 @@ pub enum Action {
     Copy,
     /// Put the model's last reply on the clipboard.
     CopyMessage,
+    /// Take back the last prompt, and the file changes its turn made.
+    Undo,
+    /// Put back what an undo took, one prompt at a time.
+    Redo,
 }
 
 impl Action {
@@ -72,6 +76,9 @@ impl Action {
             Self::Sessions => Some(keybind::Action::SessionsOpen),
             Self::Themes => Some(keybind::Action::ThemesOpen),
             Self::Exit => Some(keybind::Action::AppExit),
+            // `/undo` and `/redo` are upstream's `<leader>u` and `<leader>r`,
+            // and ganja has no leader (**D4**) — so both are reached by name,
+            // from the palette or the `/` menu, and by nothing else.
             Self::New
             | Self::Compact
             | Self::Editor
@@ -79,7 +86,9 @@ impl Action {
             | Self::Agents
             | Self::Help
             | Self::Copy
-            | Self::CopyMessage => None,
+            | Self::CopyMessage
+            | Self::Undo
+            | Self::Redo => None,
         }
     }
 }
@@ -248,6 +257,29 @@ pub const COMMANDS: &[Entry] = &[
         title: "Copy message",
         description: "Put the model's last reply on the clipboard",
         category: Category::System,
+        suggested: false,
+    },
+    // Upstream's titles and slash names, in upstream's own `Session` category:
+    // taking a prompt back is the plainest thing there is to do *to* the
+    // conversation. Both sit at the end of the table on purpose — the palette
+    // lists it in order, and the rows a stock terminal can show are the ones
+    // above the clip.
+    Entry {
+        action: Action::Undo,
+        name: "undo",
+        aliases: &[],
+        title: "Undo previous message",
+        description: "Take back the last prompt and the file changes its turn made",
+        category: Category::Session,
+        suggested: false,
+    },
+    Entry {
+        action: Action::Redo,
+        name: "redo",
+        aliases: &[],
+        title: "Redo",
+        description: "Put back what an undo took, one prompt at a time",
+        category: Category::Session,
         suggested: false,
     },
 ];
@@ -529,6 +561,8 @@ mod tests {
             ("exit", &["quit", "q"][..], Action::Exit),
             ("copy", &[][..], Action::Copy),
             ("copy-message", &[][..], Action::CopyMessage),
+            ("undo", &[][..], Action::Undo),
+            ("redo", &[][..], Action::Redo),
         ];
 
         for (name, aliases, action) in cases {
@@ -556,6 +590,45 @@ mod tests {
         for (name, title) in cases {
             let entry = lookup(name).unwrap_or_else(|| panic!("/{name} should exist"));
             assert_eq!(entry.title, title, "/{name} is titled upstream's way");
+
+            for surface in [Surface::Palette, Surface::Dropdown] {
+                assert!(
+                    matches(name, surface)
+                        .iter()
+                        .any(|found| found.name == name),
+                    "/{name} should be offered on {surface:?}"
+                );
+            }
+            assert!(
+                dropdown_matches(name, &engine())
+                    .iter()
+                    .any(|choice| choice.slash() == format!("/{name}")),
+                "/{name} should be offered by the merged dropdown roster"
+            );
+        }
+    }
+
+    /// **R10**: both halves of the revert reach the palette *and* the `/`
+    /// dropdown. There is no key that reaches either (**D4**), so a row that
+    /// made it to only one surface would leave the other command unreachable
+    /// from that surface entirely.
+    #[test]
+    fn undo_and_redo_are_offered_by_the_palette_and_by_the_dropdown() {
+        let cases = [("undo", "Undo previous message"), ("redo", "Redo")];
+
+        for (name, title) in cases {
+            let entry = lookup(name).unwrap_or_else(|| panic!("/{name} should exist"));
+            assert_eq!(entry.title, title, "/{name} is titled upstream's way");
+            assert_eq!(
+                entry.category,
+                Category::Session,
+                "/{name} does something to the conversation"
+            );
+            assert_eq!(
+                entry.action.keybind(),
+                None,
+                "/{name} has no binding: `<leader>` is unported"
+            );
 
             for surface in [Surface::Palette, Surface::Dropdown] {
                 assert!(

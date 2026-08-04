@@ -26,7 +26,8 @@
 | `ganja_tui__app__tests__snapshot_palette_selection_styling.snap` | One style-aware frame of the palette: the selected row is filled rather than tinted, which a symbol-only dump cannot pin. |
 | `ganja_tui__app__tests__snapshot_command_menu_open.snap` | The inline command menu above the editor, raised by a leading slash. |
 | `ganja_tui__app__tests__snapshot_agents_dialog_open.snap` | The agent list, the running agent marked and the status bar naming it. |
-| `ganja_tui__app__tests__snapshot_help_dialog_open.snap` | The reference card: commands with their keys, then the bindings no command shows. |
+| `ganja_tui__app__tests__snapshot_help_dialog_open.snap` | The reference card at 80×24, where it no longer fits: as many command rows as the pane holds, and a footer counting which of them are showing. |
+| `ganja_tui__app__tests__snapshot_reverted_transcript.snap` | A transcript after an `/undo`: the messages it took back are gone from the pane, and one marker row counts them and names the files that moved. |
 | `ganja_tui__app__tests__snapshot_file_menu_open.snap` | The inline file menu above the editor, raised by an `@` and offering what the project holds. |
 | `ganja_tui__app__tests__snapshot_shell_mode.snap` | The composer flipped to shell mode: the box titled `Shell`, the footer offering the way out. |
 | `ganja_tui__app__tests__snapshot_shell_output_streaming.snap` | A `!` passthrough mid-command, its newest output redrawn under the running row. |
@@ -43,7 +44,7 @@
 - Filenames are generated from the module path and test name (`ganja_tui__app__tests__<test>`), so renaming a test orphans its snapshot — delete the stale file in the same change.
 - `.snap.new` files are unaccepted results; they must not be committed.
 - Two dump shapes exist: `screen()` captures symbols only (palette-independent — a theme change must NOT diff these), while `styled_screen()` captures symbol runs plus fg/bg/modifiers (the per-theme snapshots). Pick the one that matches what the test is pinning.
-- **These 25 snapshots are the markdown renderer's frozen regression harness.** Assistant body text routes through `markdown.rs`, whose plain-text semantics (newline = line break, text verbatim) are what keep every one of them byte-identical; the four theme snapshots and `themes_dialog_open` additionally pin which theme key paints the body. Re-blessing any of them requires the lead's sign-off per file, with the justification naming the actual markdown construct in the fixture.
+- **These 26 snapshots are the markdown renderer's frozen regression harness.** Assistant body text routes through `markdown.rs`, whose plain-text semantics (newline = line break, text verbatim) are what keep every one of them byte-identical; the four theme snapshots and `themes_dialog_open` additionally pin which theme key paints the body. Re-blessing any of them requires the lead's sign-off per file, with the justification naming the actual markdown construct in the fixture.
 
 ### Testing Requirements
 
