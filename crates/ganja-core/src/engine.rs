@@ -345,7 +345,7 @@ impl Engine {
             self.install(agent);
             let mut active = self.active();
             active.agent = Some(start);
-            if let Some(model) = agent.model.clone().filter(|model| self.serves(model)) {
+            if let Some(model) = agent.model.as_deref().and_then(|model| self.adopt(model)) {
                 active.model = model;
             }
         }
@@ -506,6 +506,9 @@ impl Engine {
             .collect();
 
         *self.history.lock().await = window;
+        // A resumed conversation has read nothing yet in this process: what
+        // the session it replaced had open says nothing about these files.
+        self.files.clear();
         self.restore_selection(&info);
         {
             let mut live = state
@@ -681,8 +684,8 @@ impl Engine {
             .or_else(|| {
                 agent
                     .as_ref()
-                    .and_then(|agent| agent.model.clone())
-                    .filter(|model| self.serves(model))
+                    .and_then(|agent| agent.model.as_deref())
+                    .and_then(|model| self.adopt(model))
             });
         let overrides = (agent.is_some() || model.is_some()).then_some(Overrides { agent, model });
 
@@ -704,9 +707,8 @@ impl Engine {
     /// override — the turn asks what the session was already asking, rather
     /// than failing on a model that does not exist.
     fn model_named(&self, spelled: &str) -> Option<String> {
-        let model = spelled.split_once('/').map_or(spelled, |(_, rest)| rest);
-        if self.serves(model) {
-            return Some(model.to_owned());
+        if let Some(model) = self.adopt(spelled) {
+            return Some(model);
         }
 
         tracing::warn!(
@@ -740,6 +742,9 @@ impl Engine {
         // Nothing before this turn to compare against, so the plan-to-build
         // reminder does not fire on the first turn of a new session.
         self.active().previous_agent = None;
+        // Read-before-write is a rule about one conversation. The files the
+        // last one read are no argument for writing them in this one.
+        self.files.clear();
         drop(turn);
 
         Ok(())
@@ -802,9 +807,20 @@ impl Engine {
         }))
     }
 
-    /// Whether this engine's provider serves `model`.
+    /// Whether this engine's provider serves `model`, which must already be
+    /// a bare catalog id.
     fn serves(&self, model: &str) -> bool {
         crate::provider::serves(self.provider.id(), model)
+    }
+
+    /// The model a config spelling names, when this provider serves it.
+    ///
+    /// Every model that reaches the engine from a config file — an agent's
+    /// own, a command's — arrives spelled `"provider/model"` and has to be
+    /// split before it means anything to the catalog. See
+    /// [`crate::provider::adopt`].
+    fn adopt(&self, spelled: &str) -> Option<String> {
+        crate::provider::adopt(self.provider.id(), spelled)
     }
 
     /// Runs the rest of the session as `name`.
@@ -835,7 +851,7 @@ impl Engine {
             // one that prefers a model switches the model with it. A model the
             // provider does not serve is not a reason to refuse the agent —
             // the session simply keeps asking the model it was already asking.
-            if let Some(model) = agent.model.clone().filter(|model| self.serves(model)) {
+            if let Some(model) = agent.model.as_deref().and_then(|model| self.adopt(model)) {
                 active.model = model;
             }
         }

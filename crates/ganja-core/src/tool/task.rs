@@ -338,14 +338,24 @@ impl Child {
     fn open(spawn: &Spawn, agent: &Agent, task_id: Option<&str>) -> Self {
         let model = agent
             .model
-            .clone()
-            .filter(|model| crate::provider::serves(spawn.host.provider.id(), model))
+            .as_deref()
+            .and_then(|model| crate::provider::adopt(spawn.host.provider.id(), model))
             .unwrap_or_else(|| spawn.host.model.clone());
 
         let resumed = task_id.zip(spawn.host.persistence.as_ref()).and_then(
             |(id, state)| -> Option<(SessionId, Vec<crate::protocol::Message>)> {
                 let id = SessionId::from(id.to_owned());
-                state.storage.load_info(&id).ok().flatten()?;
+                // Only a session some earlier call left behind. A root id —
+                // the live conversation's own, most of all — names a
+                // transcript somebody is having, and appending a child's turns
+                // into it would interleave two conversations in one record;
+                // the unanswerable id starts a fresh child instead.
+                state
+                    .storage
+                    .load_info(&id)
+                    .ok()
+                    .flatten()
+                    .filter(|info| info.parent.is_some())?;
                 let transcript = state.storage.load_transcript(&id).unwrap_or_default();
 
                 Some((id, transcript))

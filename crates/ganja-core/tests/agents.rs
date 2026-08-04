@@ -32,19 +32,33 @@ use tokio_util::sync::CancellationToken;
 
 /// Answers each request with the next script, and records what it was asked.
 ///
-/// Its id is deliberately one the catalog has never heard of: a provider the
+/// Its id defaults to one the catalog has never heard of: a provider the
 /// catalog does not cover cannot have a model switch validated against it, and
-/// these tests are about the switch rather than about the catalog.
+/// most of these tests are about the switch rather than about the catalog. The
+/// one that *is* about the catalog names itself after a provider the catalog
+/// covers ([`Recorder::named`]).
 struct Recorder {
+    id: &'static str,
     scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
     seen: Arc<Mutex<Vec<ChatRequest>>>,
 }
 
 impl Recorder {
     fn new(scripts: Vec<Vec<ProviderEvent>>) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
+        Self::named("recorder", scripts)
+    }
+
+    /// The same, answering to a name of the caller's choosing — which decides
+    /// whether the catalog has anything to say about the models it is asked
+    /// for.
+    fn named(
+        id: &'static str,
+        scripts: Vec<Vec<ProviderEvent>>,
+    ) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
         let seen: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
         (
             Arc::new(Self {
+                id,
                 scripts: Mutex::new(scripts.into()),
                 seen: Arc::clone(&seen),
             }),
@@ -56,7 +70,7 @@ impl Recorder {
 #[async_trait]
 impl Provider for Recorder {
     fn id(&self) -> &str {
-        "recorder"
+        self.id
     }
 
     async fn stream(
@@ -774,4 +788,59 @@ async fn a_model_the_provider_does_not_serve_is_refused() {
             .await,
         Err(EngineError::UnknownModel { .. })
     ));
+}
+
+/// A config spells an agent's model `"provider/model"`, and the catalog knows
+/// only the half after the slash. A provider the catalog covers is the only
+/// place that difference is visible: there the whole spelling matches nothing,
+/// and an agent naming a real model would keep the session's instead.
+#[tokio::test]
+async fn an_agents_model_is_adopted_from_the_spelling_a_config_writes() {
+    let mut served = ganja_core::catalog::models()
+        .filter(|model| model.provider_id == "anthropic")
+        .map(|model| model.id.clone());
+    let start = served
+        .next()
+        .expect("the compiled-in catalog covers anthropic");
+    let wanted = served
+        .next()
+        .expect("and covers more than one model of theirs");
+
+    let config: Config = serde_json::from_value(json!({
+        "agent": {
+            "review": { "mode": "primary", "model": format!("anthropic/{wanted}") }
+        }
+    }))
+    .expect("the fixture is a config");
+
+    let (provider, seen) = Recorder::named("anthropic", vec![says("reviewed")]);
+    let engine = Engine::new(
+        provider,
+        &start,
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+    )
+    .with_agents(agents(&config));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SwitchAgent {
+            name: "review".to_owned(),
+        })
+        .await
+        .expect("the config names review a primary agent");
+    engine
+        .send(Command::SendPrompt {
+            text: "look at it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let seen = seen.lock().expect("the request log is never poisoned");
+    assert_eq!(
+        seen[0].model, wanted,
+        "the request carries the catalog id the agent named, not the spelling it was written in"
+    );
 }
