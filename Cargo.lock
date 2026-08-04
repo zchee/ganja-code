@@ -1071,6 +1071,7 @@ dependencies = [
  "async-trait",
  "etcetera",
  "futures",
+ "ganja-testkit",
  "grep-regex",
  "grep-searcher",
  "htmd",
@@ -1094,6 +1095,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "ganja-testkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "ganja-core",
+ "schemars",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

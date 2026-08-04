@@ -1,0 +1,32 @@
+[package]
+name = "ganja-testkit"
+description = "Shared scaffolding for ganja-core's integration suites: scripted providers, recorder tools, and the storage/session builders `tests/*.rs` otherwise reimplements per file."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Dev-only: nothing outside a crate's `[dev-dependencies]` should ever depend
+# on this one. Also load-bearing for deny.toml the way every other member's
+# `publish = false` is: `allow-wildcard-paths` exempts the workspace's own
+# path dependencies from `wildcards = "deny"`.
+publish = false
+
+[dependencies]
+# `Provider` and `Tool` are dyn-safe async traits; every scripted double here
+# implements one or the other, for the same reason ganja-core itself does.
+async-trait.workspace = true
+futures.workspace = true
+ganja-core.workspace = true
+# `RecorderTool`/`BlockingTool` advertise a schema the same way a real tool
+# does — the loop never validates a call's arguments against it, but the
+# registry still has to have one to offer.
+schemars.workspace = true
+serde_json.workspace = true
+# One temporary directory per test, for the storage- and XDG-redirect
+# builders — deleted with the handle, never the real user's state.
+tempfile.workspace = true
+tokio.workspace = true
+# `CancellationToken` lives behind `rt`, the same feature ganja-core itself
+# enables it with.
+tokio-util = { workspace = true, features = ["rt"] }

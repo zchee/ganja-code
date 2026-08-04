@@ -15,92 +15,29 @@
 //! both asserted below.
 
 use std::{
-    collections::VecDeque,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::StreamExt as _;
 use ganja_core::{
     AgentRegistry, Command, Config, Engine, Event, FinishReason, PartBody, PermissionReply,
     Permissions, Registry, SessionId, SessionInfo, Storage, Tool, ToolCtx, ToolError, ToolOutput,
     ToolState, Usage,
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
+    provider::{ChatRequest, Provider},
     storage,
 };
+use ganja_testkit::{BlockingTool, ScriptedProvider, drain_answering, says, tool_call};
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
-
-/// Answers each request with the next script, and records what it was asked.
-///
-/// Shared by the parent loop and every child loop, which is what makes one
-/// ordered script able to drive both.
-struct Recorder {
-    scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
-    seen: Arc<Mutex<Vec<ChatRequest>>>,
-}
-
-impl Recorder {
-    fn new(scripts: Vec<Vec<ProviderEvent>>) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
-        let seen: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
-        (
-            Arc::new(Self {
-                scripts: Mutex::new(scripts.into()),
-                seen: Arc::clone(&seen),
-            }),
-            seen,
-        )
-    }
-
-    /// Adds a step to the end of the script, for a test whose next answer
-    /// depends on what the first turn produced.
-    fn push(&self, script: Vec<ProviderEvent>) {
-        self.scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .push_back(script);
-    }
-}
-
-#[async_trait]
-impl Provider for Recorder {
-    fn id(&self) -> &str {
-        "recorder"
-    }
-
-    async fn stream(
-        &self,
-        request: ChatRequest,
-        _cancel: CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
-
-        let script = self
-            .scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .pop_front()
-            .unwrap_or_else(|| vec![ProviderEvent::Finish(FinishReason::Completed)]);
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
-/// Arguments the test tools nominally take.
-#[derive(schemars::JsonSchema)]
-#[allow(dead_code)]
-struct Args {
-    url: Option<String>,
-}
 
 /// Answers with a canned output and records that it ran.
+///
+/// Kept local rather than folded into `ganja_testkit::RecorderTool`: its
+/// handle is a call *count*, not a log of arguments, which every assertion
+/// against it (`assert_eq!(*fetches.lock()…, 1)`) is written against — a
+/// shared type would have to change that handle's shape, and the assertions
+/// with it.
 struct Canned {
     id: &'static str,
     calls: Arc<Mutex<usize>>,
@@ -130,7 +67,7 @@ impl Tool for Canned {
     }
 
     fn schema(&self) -> schemars::Schema {
-        schemars::schema_for!(Args)
+        ganja_testkit::placeholder_schema()
     }
 
     async fn run(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
@@ -144,60 +81,9 @@ impl Tool for Canned {
     }
 }
 
-/// Blocks until the turn is cancelled, so a test can watch a cancel travel
-/// from the parent's token down into the child's tool.
-struct Blocking;
-
-#[async_trait]
-impl Tool for Blocking {
-    fn id(&self) -> &str {
-        "blocking"
-    }
-
-    fn description(&self) -> &str {
-        "blocks until it is cancelled"
-    }
-
-    fn schema(&self) -> schemars::Schema {
-        schemars::schema_for!(Args)
-    }
-
-    async fn run(&self, _args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
-        ctx.cancel.cancelled().await;
-
-        Err(ToolError::Cancelled)
-    }
-}
-
-/// A step that calls `tool` with `args` and stops.
-fn calls(tool: &str, args: serde_json::Value) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::ToolCallStart {
-            id: "call".to_owned(),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: "call".to_owned(),
-            json: args.to_string(),
-        },
-        ProviderEvent::ToolCallEnd {
-            id: "call".to_owned(),
-        },
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
-/// A step that says `text` and stops.
-fn says(text: &str) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::TextDelta(text.to_owned()),
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
 /// A step that delegates to `subagent`.
-fn delegates(subagent: &str) -> Vec<ProviderEvent> {
-    calls(
+fn delegates(subagent: &str) -> Vec<ganja_core::provider::ProviderEvent> {
+    tool_call(
         "task",
         json!({
             "description": "find the thing",
@@ -205,40 +91,6 @@ fn delegates(subagent: &str) -> Vec<ProviderEvent> {
             "subagent_type": subagent,
         }),
     )
-}
-
-/// Drains until the turn finishes, answering every permission with `reply`.
-async fn drain_answering(
-    engine: &Engine,
-    events: &mut BoxStream<'static, Event>,
-    reply: PermissionReply,
-) -> Vec<Event> {
-    let mut seen = Vec::new();
-
-    loop {
-        let Some(event) = events.next().await else {
-            return seen;
-        };
-        if let Event::PermissionRequested { id, .. } = &event {
-            engine
-                .send(Command::ReplyPermission {
-                    id: id.clone(),
-                    reply,
-                })
-                .await
-                .expect("a reply is never refused");
-        }
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-
-        if finished {
-            return seen;
-        }
-    }
-}
-
-fn agents(config: &Config) -> Arc<AgentRegistry> {
-    Arc::new(AgentRegistry::build(config).expect("the fixture config resolves an agent"))
 }
 
 /// An engine over `provider` offering `tools`, running the builtin agents.
@@ -249,7 +101,7 @@ fn engine(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>, config: &Confi
         Arc::new(Registry::new(tools)),
         Permissions::default(),
     )
-    .with_agents(agents(config))
+    .with_agents(ganja_testkit::agent_registry(config))
 }
 
 /// The task tool part as it finally stood, whatever it finally was.
@@ -271,10 +123,10 @@ fn task_part(seen: &[Event]) -> ToolState {
 /// answer from its own.
 #[tokio::test]
 async fn a_task_call_runs_a_child_loop_and_hands_back_its_last_words() {
-    let (provider, requests) = Recorder::new(vec![
+    let (provider, requests) = ScriptedProvider::new(vec![
         delegates("general"),
         // The child's own turn: one tool call, then its answer.
-        calls("webfetch", json!({ "url": "https://example.test" })),
+        tool_call("webfetch", json!({ "url": "https://example.test" })),
         says("the thing is in src/main.rs"),
         says("thanks, it is in src/main.rs"),
     ]);
@@ -345,9 +197,9 @@ async fn a_task_call_runs_a_child_loop_and_hands_back_its_last_words() {
 /// progress has to arrive as metadata on that part and as nothing else.
 #[tokio::test]
 async fn a_running_child_reports_its_progress_on_the_parents_tool_part() {
-    let (provider, _) = Recorder::new(vec![
+    let (provider, _) = ScriptedProvider::new(vec![
         delegates("general"),
-        calls("webfetch", json!({ "url": "https://example.test" })),
+        tool_call("webfetch", json!({ "url": "https://example.test" })),
         says("done"),
         says("thanks"),
     ]);
@@ -407,7 +259,7 @@ async fn a_running_child_reports_its_progress_on_the_parents_tool_part() {
 /// is never offered the tool that would let it delegate again (**D9**).
 #[tokio::test]
 async fn a_subagent_is_never_offered_the_tool_that_spawned_it() {
-    let (provider, requests) = Recorder::new(vec![
+    let (provider, requests) = ScriptedProvider::new(vec![
         delegates("general"),
         says("nothing to delegate"),
         says("thanks"),
@@ -451,7 +303,7 @@ async fn a_subagent_is_never_offered_the_tool_that_spawned_it() {
 /// `always: ["*"]`.
 #[tokio::test]
 async fn delegating_asks_about_the_named_subagent_and_an_always_covers_the_tool() {
-    let (provider, _) = Recorder::new(vec![
+    let (provider, _) = ScriptedProvider::new(vec![
         delegates("explore"),
         says("found it"),
         says("thanks"),
@@ -525,13 +377,13 @@ async fn delegating_asks_about_the_named_subagent_and_an_always_covers_the_tool(
 /// parent's.
 #[tokio::test]
 async fn an_always_the_parent_was_given_does_not_authorize_the_child() {
-    let (provider, _) = Recorder::new(vec![
+    let (provider, _) = ScriptedProvider::new(vec![
         // The parent's own call, answered "always".
-        calls("webfetch", json!({ "url": "https://example.test" })),
+        tool_call("webfetch", json!({ "url": "https://example.test" })),
         says("fetched it"),
         // A later turn delegates, and the child tries the same call.
         delegates("general"),
-        calls("webfetch", json!({ "url": "https://example.test" })),
+        tool_call("webfetch", json!({ "url": "https://example.test" })),
         says("the child is done"),
         says("so is the parent"),
     ]);
@@ -612,10 +464,10 @@ async fn a_refusal_the_parent_is_under_reaches_the_child() {
         "the subagent's own rules must say nothing about it, or this proves nothing"
     );
 
-    let (provider, requests) = Recorder::new(vec![
+    let (provider, requests) = ScriptedProvider::new(vec![
         delegates("general"),
         // The child tries the tool its parent may not use.
-        calls("webfetch", json!({ "url": "https://example.test" })),
+        tool_call("webfetch", json!({ "url": "https://example.test" })),
         says("I could not fetch it"),
         says("neither could I"),
     ]);
@@ -663,12 +515,19 @@ async fn a_refusal_the_parent_is_under_reaches_the_child() {
 /// child of the parent call's, so one cancel travels the whole way down.
 #[tokio::test]
 async fn cancelling_the_parent_turn_ends_the_child_promptly() {
-    let (provider, _) = Recorder::new(vec![
+    let (provider, _) = ScriptedProvider::new(vec![
         delegates("general"),
-        calls("blocking", json!({})),
+        tool_call("blocking", json!({})),
         says("unreachable"),
     ]);
-    let engine = engine(provider, vec![Arc::new(Blocking)], &Config::default());
+    let engine = engine(
+        provider,
+        vec![BlockingTool::new(
+            "blocking",
+            "blocks until it is cancelled",
+        )],
+        &Config::default(),
+    );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -741,7 +600,7 @@ async fn cancelling_the_parent_turn_ends_the_child_promptly() {
 #[tokio::test]
 async fn delegating_to_an_agent_that_does_not_exist_is_information_not_an_abort() {
     let (provider, requests) =
-        Recorder::new(vec![delegates("nope"), says("I will do it myself then")]);
+        ScriptedProvider::new(vec![delegates("nope"), says("I will do it myself then")]);
     let engine = engine(provider, Vec::new(), &Config::default());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -775,7 +634,7 @@ async fn delegating_to_an_agent_that_does_not_exist_is_information_not_an_abort(
 /// task-spawns-subagents-only).
 #[tokio::test]
 async fn a_primary_agent_may_not_be_run_as_a_subagent() {
-    let (provider, _) = Recorder::new(vec![delegates("build"), says("fine, myself then")]);
+    let (provider, _) = ScriptedProvider::new(vec![delegates("build"), says("fine, myself then")]);
     let engine = engine(provider, Vec::new(), &Config::default());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -827,7 +686,7 @@ async fn a_delegated_child_is_stored_as_a_session_of_its_own_naming_its_parent()
         })
         .expect("the seeded record writes");
 
-    let (provider, _) = Recorder::new(vec![
+    let (provider, _) = ScriptedProvider::new(vec![
         delegates("general"),
         says("the child's own answer"),
         says("and the parent signs off"),
@@ -839,7 +698,7 @@ async fn a_delegated_child_is_stored_as_a_session_of_its_own_naming_its_parent()
         Permissions::default(),
         Storage::open(directory.path().join("storage")),
     )
-    .with_agents(agents(&Config::default()));
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.resume(&parent).await.expect("the session loads");
 
@@ -900,7 +759,7 @@ async fn a_delegated_child_is_stored_as_a_session_of_its_own_naming_its_parent()
 async fn a_task_id_naming_a_root_session_starts_a_fresh_child_instead() {
     let directory = tempfile::TempDir::new().expect("a temporary directory is creatable");
     let storage = Storage::open(directory.path().join("storage"));
-    let (recorder, _) = Recorder::new(vec![says("noted")]);
+    let (recorder, _) = ScriptedProvider::new(vec![says("noted")]);
     let provider: Arc<dyn Provider> = Arc::clone(&recorder) as Arc<dyn Provider>;
     let engine = Engine::persistent(
         provider,
@@ -909,7 +768,7 @@ async fn a_task_id_naming_a_root_session_starts_a_fresh_child_instead() {
         Permissions::default(),
         Storage::open(directory.path().join("storage")),
     )
-    .with_agents(agents(&Config::default()));
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -927,7 +786,7 @@ async fn a_task_id_naming_a_root_session_starts_a_fresh_child_instead() {
         .id;
 
     // The model hands back the id of the conversation it is having.
-    recorder.push(calls(
+    recorder.push(tool_call(
         "task",
         json!({
             "description": "find the thing",

@@ -14,6 +14,7 @@ Container for the three workspace members. The split is architectural, not cosme
 | `ganja-core/` | Engine: sessions, providers, tools, permissions, the serde protocol (see `ganja-core/AGENTS.md`) |
 | `ganja-tui/` | ratatui frontend (see `ganja-tui/AGENTS.md`) |
 | `ganja-cli/` | The `ganja` binary (see `ganja-cli/AGENTS.md`) |
+| `ganja-testkit/` | Dev-only scaffolding shared by `ganja-core`'s integration suites: scripted providers, recorder/blocking tools, drain and storage-seeding builders (see `ganja-testkit/AGENTS.md`) |
 
 ## For AI Agents
 
