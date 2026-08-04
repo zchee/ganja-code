@@ -358,7 +358,7 @@ impl Entry {
                 PartBody::File { path, .. } => {
                     lines.push(Line::styled(format!("@{path}"), theme.dim));
                 }
-                PartBody::StepStart | PartBody::StepFinish { .. } => {}
+                PartBody::StepStart | PartBody::StepFinish { .. } | PartBody::Patch { .. } => {}
             }
         }
         if self.interrupted {

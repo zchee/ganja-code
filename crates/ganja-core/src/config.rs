@@ -629,6 +629,15 @@ pub struct Config {
     /// Language servers this session may run. **Absent is none of them**; see
     /// [`LspConfig`].
     pub lsp: Option<LspConfig>,
+    /// Whether this session snapshots the working tree, which is what `/undo`
+    /// restores from.
+    ///
+    /// **Absent is on.** Upstream's check is `snapshot !== false`, so only
+    /// writing `false` switches it off — which is also what makes the option
+    /// mergeable: a tier that says nothing leaves the tier below it alone,
+    /// where a plain `bool` would have every tier assert a default.
+    /// [`Config::snapshots_enabled`] is what reads it.
+    pub snapshot: Option<bool>,
     /// What the caller decided before any of this was read. Not a config key —
     /// `deny_unknown_fields` would reject one — and above every tier here.
     #[serde(skip)]
@@ -636,6 +645,13 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether this session snapshots the working tree; see
+    /// [`Config::snapshot`].
+    #[must_use]
+    pub fn snapshots_enabled(&self) -> bool {
+        self.snapshot != Some(false)
+    }
+
     /// Loads the config for a session working in `cwd`.
     ///
     /// # Errors
@@ -689,6 +705,7 @@ impl Config {
         overlay(&mut self.theme, other.theme);
         overlay(&mut self.theme_mode, other.theme_mode);
         overlay(&mut self.shell, other.shell);
+        overlay(&mut self.snapshot, other.snapshot);
 
         for (name, incoming) in other.agent {
             self.agent.entry(name).or_default().merge(incoming);
@@ -1067,6 +1084,37 @@ mod tests {
             panic!("expected a parse failure, got {error:?}");
         };
         assert!(message.contains("modle"), "{message}");
+    }
+
+    /// The one key here whose absence means *yes*. Upstream reads it as
+    /// `snapshot !== false`, so a config that never heard of it still snapshots
+    /// — which is what makes `/undo` work without anybody configuring it.
+    #[test]
+    fn snapshots_are_on_until_a_config_says_false() {
+        let absent = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        assert_eq!(absent.snapshot, None);
+        assert!(absent.snapshots_enabled());
+
+        let asked = parse(r#"{"snapshot": true}"#).expect("it parses");
+        assert_eq!(asked.snapshot, Some(true));
+        assert!(asked.snapshots_enabled());
+
+        let refused = parse(r#"{"snapshot": false}"#).expect("it parses");
+        assert_eq!(refused.snapshot, Some(false));
+        assert!(!refused.snapshots_enabled());
+    }
+
+    /// A tier that says nothing about snapshots leaves the tier below it
+    /// alone; one that says `false` outranks a `true` above it.
+    #[test]
+    fn a_closer_tier_decides_snapshots_only_when_it_mentions_them() {
+        let mut merged = parse(r#"{"snapshot": true}"#).expect("it parses");
+        merged.merge(parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses"));
+        assert_eq!(merged.snapshot, Some(true));
+
+        merged.merge(parse(r#"{"snapshot": false}"#).expect("it parses"));
+        assert_eq!(merged.snapshot, Some(false));
+        assert!(!merged.snapshots_enabled());
     }
 
     #[test]

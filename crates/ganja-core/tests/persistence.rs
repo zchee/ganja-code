@@ -205,6 +205,7 @@ fn seed_info(id: &SessionId, context_tokens: u64) -> SessionInfo {
         agent: None,
         model: None,
         parent: None,
+        revert: None,
     }
 }
 

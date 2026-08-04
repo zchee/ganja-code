@@ -1642,6 +1642,9 @@ impl App {
                     self.status.set_activity(Activity::Streaming);
                 }
             }
+            // W3 landed the engine protocol; the hidden range, the marker row
+            // and the editor refill are the tui-revert lane's.
+            CoreEvent::RevertChanged { .. } => {}
             CoreEvent::MessageFinished {
                 reason,
                 usage,
@@ -1863,6 +1866,7 @@ mod tests {
             agent: None,
             model: None,
             parent: None,
+            revert: None,
         };
         let message = Message::user("what the picker is choosing between");
 
@@ -1892,6 +1896,7 @@ mod tests {
             agent: Some("explore".to_owned()),
             model: None,
             parent: Some(SessionId::from(parent.to_owned())),
+            revert: None,
         };
 
         storage.save_info(&info).expect("the info stores");

@@ -446,6 +446,11 @@ impl Child {
             // write over, and the read-before-write rule is per conversation.
             files: Arc::new(FileTimes::default()),
             lsp: host.lsp.clone(),
+            // No snapshots of its own: a patch is a diff of the working tree
+            // rather than a record of who wrote to it, so the step of the
+            // *parent* that made this call already covers everything the child
+            // changed — and covers it in the session an `/undo` can reach.
+            snapshots: None,
             prompt: args.prompt.clone(),
             cancel,
             pending: Arc::clone(&spawn.pending),
@@ -527,6 +532,7 @@ fn create(state: &SessionState, session: &SessionId, agent: &Agent, what: &str, 
         agent: Some(agent.name.clone()),
         model: Some(model.to_owned()),
         parent,
+        revert: None,
     };
 
     if let Err(error) = state.storage.save_info(&info) {
@@ -632,7 +638,10 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                     outcome.toolcalls += 1;
                     report(&watched, current.as_deref(), outcome.toolcalls).await;
                 }
-                PartBody::File { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => {}
+                PartBody::File { .. }
+                | PartBody::StepStart
+                | PartBody::StepFinish { .. }
+                | PartBody::Patch { .. } => {}
             },
             Event::PartDelta { part_id, delta, .. } => {
                 if open.as_ref() == Some(&part_id) {
@@ -672,6 +681,10 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                     ),
                 };
             }
+            // A child takes no snapshots of its own, so nothing here ever
+            // reverts; the arm exists because the parent's watcher reads the
+            // whole event stream and must not be surprised by one of them.
+            Event::RevertChanged { .. } => {}
         }
     }
 

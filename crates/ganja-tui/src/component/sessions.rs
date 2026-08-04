@@ -285,6 +285,7 @@ mod tests {
             agent: None,
             model: None,
             parent: None,
+            revert: None,
         }
     }
 

@@ -539,6 +539,13 @@ pub(crate) struct Turn {
     /// config asked for none, and every tool call then completes exactly as it
     /// did before this existed.
     pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
+    /// What this turn's file changes are recorded against, so `/undo` can put
+    /// them back. [`None`] on a turn nobody gave snapshots — every scripted and
+    /// golden run — and on every turn a subagent runs: the parent's own patch
+    /// covers whatever a child changed, because a patch is a diff of the
+    /// working tree rather than a record of who wrote to it (deviation:
+    /// subagents-take-no-snapshots-of-their-own).
+    pub(crate) snapshots: Option<Arc<crate::snapshot::Snapshots>>,
     pub(crate) prompt: String,
     pub(crate) cancel: CancellationToken,
     /// Where an open permission request waits for its reply; the same cell the
@@ -993,6 +1000,10 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
     // reports one, so a provider that says nothing yields a message that says
     // nothing, rather than a fabricated zero.
     let mut total: Option<Usage> = None;
+    // The working tree as this turn found it, taken before the first provider
+    // byte and replaced after every step that ran tools. What `/undo` puts the
+    // files back to.
+    let mut before = track(turn).await;
 
     loop {
         let step = stream_step(turn, &mut assistant).await;
@@ -1008,11 +1019,20 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
         }
 
         match step.end {
-            StepEnd::Interrupted(stop) => return (assistant, stop),
+            StepEnd::Interrupted(stop) => {
+                // A turn that was cancelled or died having already written
+                // files is still a turn worth being able to undo, which is
+                // what upstream's own cleanup does with a snapshot the step
+                // loop never closed. The cost is the git call, paid once,
+                // after the cancel has already stopped everything else.
+                record_patch(turn, &mut assistant, before.take()).await;
+                return (assistant, stop);
+            }
             StepEnd::Finished { reason, mut calls } => {
                 if calls.is_empty() {
                     // A request that ended without calling anything is the
                     // model done talking, and its reason is the turn's.
+                    record_patch(turn, &mut assistant, before.take()).await;
                     return (assistant, Some(Outcome::finished(reason)));
                 }
 
@@ -1029,12 +1049,68 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
                         close_unresolved(turn, &mut assistant, &call, &error).await;
                         calls.reverse();
                         fail_buffered(turn, &mut assistant, &mut calls, &error).await;
+                        record_patch(turn, &mut assistant, before.take()).await;
                         return (assistant, stop);
                     }
                 }
+
+                // The step is over once its calls have run — which is where
+                // this loop differs from upstream's, whose tools run inside
+                // the stream and whose patch is therefore computed at the
+                // `step-finish` event. Both put the part in the same place:
+                // after the step's tool parts, naming the tree the step
+                // started from.
+                record_patch(turn, &mut assistant, before.take()).await;
+                before = track(turn).await;
             }
         }
     }
+}
+
+/// The working tree as it stands, when this turn takes snapshots.
+async fn track(turn: &Turn) -> Option<String> {
+    match &turn.snapshots {
+        Some(snapshots) => snapshots.track().await,
+        None => None,
+    }
+}
+
+/// Records what changed since `before` as a [`PartBody::Patch`] on the
+/// assistant message, when anything did.
+///
+/// Nothing here can end a turn: a snapshot that failed reports no files, and a
+/// step with no files reports no part. The part is delivered as a
+/// [`Event::PartStarted`] like every other, so a frontend that has been
+/// applying events holds what `/undo` will act on.
+async fn record_patch(turn: &Turn, assistant: &mut Message, before: Option<String>) {
+    let (Some(snapshots), Some(before)) = (&turn.snapshots, before) else {
+        return;
+    };
+
+    let patch = snapshots.patch(&before).await;
+    if patch.files.is_empty() {
+        return;
+    }
+
+    let part = Part {
+        id: PartId::ascending(),
+        body: PartBody::Patch {
+            hash: patch.hash,
+            files: patch.files,
+        },
+    };
+    assistant.parts.push(part.clone());
+    turn.persist_part(assistant, &part);
+    // Delivered without minding a refusal: this runs on the paths that are
+    // already returning, and a subscriber that has gone away has nothing left
+    // to be told.
+    let _ = turn
+        .events
+        .send(Event::PartStarted {
+            message_id: assistant.id.clone(),
+            part,
+        })
+        .await;
 }
 
 /// Runs the `!` passthrough: the user's own command, its output, and both of
@@ -1516,7 +1592,10 @@ fn serialize_message(message: &Message) -> String {
                 // summary is about what the conversation was for, and a file
                 // the model can read again is not what it needs to remember.
                 PartBody::File { path, .. } => Some(format!("[User]: @{path}")),
-                PartBody::Tool { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => None,
+                PartBody::Tool { .. }
+                | PartBody::StepStart
+                | PartBody::StepFinish { .. }
+                | PartBody::Patch { .. } => None,
             })
             .collect(),
         Role::Assistant => message
@@ -1542,9 +1621,10 @@ fn serialize_message(message: &Message) -> String {
                         None => vec![call],
                     }
                 }
-                PartBody::File { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => {
-                    Vec::new()
-                }
+                PartBody::File { .. }
+                | PartBody::StepStart
+                | PartBody::StepFinish { .. }
+                | PartBody::Patch { .. } => Vec::new(),
             })
             .collect(),
     };
@@ -2549,6 +2629,7 @@ mod tests {
             root: std::env::temp_dir(),
             files: Arc::new(FileTimes::default()),
             lsp: None,
+            snapshots: None,
             prompt: "run it".to_owned(),
             cancel,
             pending: Arc::new(std::sync::Mutex::new(None)),

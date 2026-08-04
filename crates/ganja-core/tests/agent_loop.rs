@@ -232,6 +232,7 @@ fn shape(event: &Event) -> String {
             PartBody::Tool { call_id, state, .. } => {
                 format!("part:tool_{}:{call_id}", state_tag(state))
             }
+            PartBody::Patch { files, .. } => format!("part:patch:{}", files.join(",")),
         },
         Event::PartDelta { delta, .. } => format!("delta:{delta}"),
         Event::PartUpdated { part, .. } => match &part.body {
@@ -255,6 +256,13 @@ fn shape(event: &Event) -> String {
                 FinishReason::Completed => "completed",
                 FinishReason::Cancelled => "cancelled",
                 FinishReason::Failed => "failed",
+            }
+        ),
+        Event::RevertChanged { revert, .. } => format!(
+            "revert:{}",
+            match revert {
+                Some(revert) => revert.message_id.as_str(),
+                None => "cleared",
             }
         ),
     }

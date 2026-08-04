@@ -540,6 +540,7 @@ fn store(storage: &Storage, id: &str, parent: Option<&str>) {
             agent: None,
             model: None,
             parent: parent.map(|parent| SessionId::from(parent.to_owned())),
+            revert: None,
         })
         .expect("a session stores");
 }
