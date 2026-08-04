@@ -41,7 +41,9 @@ use crate::{
     permission::Permissions,
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
-    session::{LiveSession, Persist, SessionState, Turn, TurnHandle, TurnKind, run_turn},
+    session::{
+        LiveSession, Persist, RootParts, SessionState, Turn, TurnHandle, TurnKind, run_turn,
+    },
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
     tool::{FileTimes, Registry, task},
@@ -1582,7 +1584,7 @@ impl Engine {
         // engine has to kill from outside. Aborting the task instead would
         // skip the cleanup that releases the busy slot and guarantees a
         // terminal event.
-        tokio::spawn(run_turn(Turn {
+        let turn = Turn::root(RootParts {
             provider: Arc::clone(&self.provider),
             spawn: self.spawn_host(model.clone()),
             model,
@@ -1603,7 +1605,8 @@ impl Engine {
             slot: Arc::clone(&self.turn),
             history: Arc::clone(&self.history),
             persist,
-        }));
+        });
+        tokio::spawn(run_turn(turn));
 
         Ok(())
     }
