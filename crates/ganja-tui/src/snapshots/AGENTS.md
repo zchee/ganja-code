@@ -21,6 +21,12 @@
 | `ganja_tui__app__tests__snapshot_sessions_picker_after_moving_the_selection.snap` | The same picker after `j`, proving the marker follows the selection. |
 | `ganja_tui__app__tests__snapshot_themes_dialog_open.snap` | The theme list over a transcript, active theme marked. |
 | `ganja_tui__app__tests__snapshot_theme_{opencode,tokyonight,gruvbox,aura}.snap` | One style-aware frame per ported theme — symbol runs with fg/bg/modifiers, which is what actually pins a palette. |
+| `ganja_tui__app__tests__snapshot_palette_open.snap` | The command palette over a transcript: the suggested block pinned above the groups, keys on the right. |
+| `ganja_tui__app__tests__snapshot_palette_filtered.snap` | The same palette after one character, proving the pinned block drops out and the list narrows. |
+| `ganja_tui__app__tests__snapshot_palette_selection_styling.snap` | One style-aware frame of the palette: the selected row is filled rather than tinted, which a symbol-only dump cannot pin. |
+| `ganja_tui__app__tests__snapshot_command_menu_open.snap` | The inline command menu above the editor, raised by a leading slash. |
+| `ganja_tui__app__tests__snapshot_agents_dialog_open.snap` | The agent list, the running agent marked and the status bar naming it. |
+| `ganja_tui__app__tests__snapshot_help_dialog_open.snap` | The reference card: commands with their keys, then the bindings no command shows. |
 
 ## For AI Agents
 

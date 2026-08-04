@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The three panes the layout draws — transcript, prompt editor, status bar — plus the modals that overlay them: the permission dialog while a tool call waits on the user, the sessions picker while a stored conversation is being chosen, and the theme list while a palette is being previewed.
+The three panes the layout draws — transcript, prompt editor, status bar — plus the modals that overlay them: the permission dialog while a tool call waits on the user, the sessions picker while a stored conversation is being chosen, the theme list while a palette is being previewed, the model and agent lists while a session is being pointed somewhere else, the command palette, the reference card, and the inline command menu the editor raises on a leading slash.
 
 ## Key Files
 
@@ -18,6 +18,10 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 | `permission.rs` | The centered modal blocking on one pending tool call. Spec: upstream `packages/tui/src/routes/session/permission.tsx`, trimmed to the one-shot shape `PermissionReply` offers today. |
 | `sessions.rs` | The centered modal listing this project's stored sessions to resume. Spec: upstream `packages/tui/src/routes/session/list.tsx`, trimmed to the columns a person picks by. |
 | `themes.rs` | The centered modal listing loadable themes. Owns only the cursor; the app applies the live preview on every move and reverts on Esc. Spec: upstream `packages/tui/src/component/dialog-theme-list.tsx`. |
+| `list.rs` | `ListDialog`: one centered modal for choosing a model or an agent — the same dialog over two lists, because what differs between them is the rows and the command Enter sends, and neither of those is drawing. Marks the row the session is already on; previews nothing. |
+| `palette.rs` | The command palette, grouped by category with a filter line and a block of suggested commands pinned while nothing is typed. Spec: upstream `packages/tui/src/component/command-palette.tsx`. |
+| `dropdown.rs` | The inline command menu, anchored above the editor. Opens only when `/` is the first character of the buffer and the cursor has not left the first whitespace-free span; matches descriptions as well as names, which the palette does not. Spec: upstream `packages/tui/src/component/prompt/autocomplete.tsx`. |
+| `help.rs` | The reference card: every command with its key, then the bindings no command row shows, named as a config file rebinds them. |
 
 ## For AI Agents
 
@@ -32,7 +36,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 
 Components are exercised through `App::handle` and rendered into a `TestBackend` — no terminal, no running turn. Screen output is asserted with `insta` snapshots in `../snapshots/`. After an intentional visual change: `cargo insta review`.
 
-Snapshot coverage today: the permission dialog open and overflowing (the cut flagged, the reply keys kept), the sessions picker open and after moving the selection, a tool call in each of its states (pending, running, completed with a diff, error), the theme list open, and one style-aware frame per ported theme. A new tool state or dialog needs its own snapshot.
+Snapshot coverage today: the permission dialog open and overflowing (the cut flagged, the reply keys kept), the sessions picker open and after moving the selection, a tool call in each of its states (pending, running, completed with a diff, error), the theme list open, one style-aware frame per ported theme, the palette open and filtered plus one style-aware frame pinning its selection fill, the inline command menu, the agent list, and the reference card. A new tool state or dialog needs its own snapshot.
 
 ### Common Patterns
 

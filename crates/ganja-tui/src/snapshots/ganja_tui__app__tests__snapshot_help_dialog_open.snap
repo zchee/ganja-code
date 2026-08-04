@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+you                                                                             
+show┌ help ────────────────────────────────────────────────────────────────┐    
+    │/sessions  Switch session                                       ctrl+s│    
+ganj│/models    Switch model                                               │    
+One │/agents    Switch agent                                               │    
+[don│/themes    Switch theme                                         ctrl+t│    
+@@ -│/help      Help                                                       │    
+-let│/exit      Exit the app                         ctrl+c, ctrl+q, ctrl+d│    
++let│                                                                      │    
+cont│keys                                                                  │    
+[err│palette_open  ctrl+p                                                  │    
+refu│agent_cycle   tab                                                     │    
+    │                                                                      │    
+    │[Esc] close                                                           │    
+    │                                                                      │    
+    │                                                                      │    
+    └──────────────────────────────────────────────────────────────────────┘    
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready                  Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit

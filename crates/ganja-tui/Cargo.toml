@@ -22,6 +22,10 @@ crossterm.workspace = true
 etcetera.workspace = true
 futures.workspace = true
 ganja-core.workspace = true
+# The palette and the `/` dropdown rank commands by a typed fragment. The same
+# matcher helix and nucleo use, so a fragment scores here the way it scores in
+# every other terminal picker the user already knows.
+nucleo-matcher.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 # Theme files decode into typed structures rather than being walked as raw

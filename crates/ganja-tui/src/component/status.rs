@@ -97,6 +97,10 @@ pub struct Status {
     notice: Option<String>,
     /// Absent until a provider reports what a turn spent.
     totals: Option<Totals>,
+    /// The agent the next turn runs as, absent on a session that has no agent
+    /// registry — which is every scripted and golden run, and is why the bar
+    /// says nothing rather than saying "none".
+    agent: Option<String>,
 }
 
 impl Status {
@@ -108,7 +112,13 @@ impl Status {
             since: Instant::now(),
             notice,
             totals: None,
+            agent: None,
         }
+    }
+
+    /// Names the agent the next turn runs as.
+    pub fn set_agent(&mut self, agent: Option<String>) {
+        self.agent = agent;
     }
 
     /// Records what the engine is doing now.
@@ -145,6 +155,14 @@ impl Status {
         if self.is_streaming() {
             left.push_str(self.spinner());
             left.push(' ');
+        }
+        // The agent comes first because it is the one part of the bar that
+        // says what the *next* turn will be, rather than what the last one
+        // did — and because a switch is otherwise invisible until a reply
+        // arrives written in a different voice.
+        if let Some(agent) = &self.agent {
+            left.push_str(agent);
+            left.push_str(SEPARATOR);
         }
         left.push_str(&self.activity.label());
         // Spend sits beside the state, where its width is predictable; the
@@ -212,6 +230,23 @@ mod tests {
         assert!(status.is_streaming());
         assert!(line.contains("streaming"), "got {line:?}");
         assert!(!line.starts_with("streaming"), "got {line:?}");
+    }
+
+    /// A session with no agent registry — every scripted and golden run — says
+    /// nothing rather than saying "none", which is what keeps the layout
+    /// snapshots taken over those runs unchanged.
+    #[test]
+    fn the_bar_names_the_agent_only_once_there_is_one() {
+        let mut status = Status::new(None);
+        assert!(rendered(&status, 100).starts_with("ready"));
+
+        status.set_agent(Some("plan".to_owned()));
+
+        assert!(
+            rendered(&status, 100).starts_with("plan"),
+            "got {:?}",
+            rendered(&status, 100)
+        );
     }
 
     #[test]
