@@ -18,13 +18,13 @@ use std::{
     path::{Path, PathBuf},
     process::Command as Process,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
-    Command, Engine, Event, Permissions, Project, Registry, Role, Snapshots, Storage,
+    Command, Engine, EngineError, Event, Permissions, Project, Registry, Role, Snapshots, Storage,
     permission::{Action, Rule},
     provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent},
 };
@@ -142,13 +142,15 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
 
     // ---- the turn -------------------------------------------------------
 
-    engine
-        .send(Command::SendPrompt {
+    settled(
+        &engine,
+        Command::SendPrompt {
             text: UNDONE.to_owned(),
             mentions: Vec::new(),
-        })
-        .await
-        .expect("an idle engine accepts a prompt");
+        },
+    )
+    .await
+    .expect("an idle engine accepts a prompt");
     finish(&mut events).await;
 
     assert_eq!(read(&tracked), AFTER, "the scripted turn edits the file");
@@ -156,8 +158,7 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
 
     // ---- undo -----------------------------------------------------------
 
-    engine
-        .send(Command::Undo)
+    settled(&engine, Command::Undo)
         .await
         .expect("there is a turn to undo");
     let reverted = next(&mut events).await;
@@ -192,8 +193,7 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
 
     // ---- redo -----------------------------------------------------------
 
-    engine
-        .send(Command::Redo)
+    settled(&engine, Command::Redo)
         .await
         .expect("there is an undo to redo");
     let restored = next(&mut events).await;
@@ -210,8 +210,7 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
 
     // ---- undo again, then keep it ---------------------------------------
 
-    engine
-        .send(Command::Undo)
+    settled(&engine, Command::Undo)
         .await
         .expect("a redone turn can be undone again");
     let _ = next(&mut events).await;
@@ -220,13 +219,15 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
         .lock()
         .expect("the request log is never poisoned")
         .len();
-    engine
-        .send(Command::SendPrompt {
+    settled(
+        &engine,
+        Command::SendPrompt {
             text: KEPT.to_owned(),
             mentions: Vec::new(),
-        })
-        .await
-        .expect("an idle engine accepts a prompt");
+        },
+    )
+    .await
+    .expect("an idle engine accepts a prompt");
     finish(&mut events).await;
 
     // The worktree comparison above cannot see this: an undo that restored
@@ -258,8 +259,8 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
     // been deleted, so there is nothing left to step forward into.
     assert!(
         matches!(
-            engine.send(Command::Redo).await,
-            Err(ganja_core::EngineError::NothingToRedo)
+            settled(&engine, Command::Redo).await,
+            Err(EngineError::NothingToRedo)
         ),
         "a prompt after an undo makes the undo permanent"
     );
@@ -347,6 +348,34 @@ fn sorted(files: &[String]) -> Vec<String> {
     sorted.sort();
 
     sorted
+}
+
+/// The engine's answer to `command`, once it is done being busy.
+///
+/// [`Event::MessageFinished`] is queued **before** the turn slot is released
+/// (`session.rs::run_turn`), and that order is deliberate: releasing the slot
+/// first opens a window where the next turn's opening events overtake the
+/// finish, which is the P3 finding
+/// `persistence.rs::a_finish_is_never_overtaken_by_the_next_turns_events`
+/// exists to pin. The cost the engine documents at that seam is that `Busy`
+/// stays observable for the moment the send takes, so a client acting the
+/// instant it sees a finish waits it out — which is what `persistence.rs`
+/// does at the same boundary, for the same reason.
+///
+/// Bounded by the drill's patience, so an engine that never goes idle fails
+/// this test loudly instead of spinning in it. Retrying is safe because every
+/// command here answers `Busy` before it has done anything.
+async fn settled(engine: &Engine, command: Command) -> Result<(), EngineError> {
+    let deadline = Instant::now() + PATIENCE;
+
+    loop {
+        match engine.send(command.clone()).await {
+            Err(EngineError::Busy) if Instant::now() < deadline => {
+                tokio::task::yield_now().await;
+            }
+            answer => return answer,
+        }
+    }
 }
 
 /// The next event, or a failure that says the drill stalled rather than
