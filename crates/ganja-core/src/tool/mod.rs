@@ -81,7 +81,11 @@ pub enum ToolError {
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Name the model calls, and the permission engine gates.
-    fn id(&self) -> &'static str;
+    ///
+    /// Borrowed from `&self` rather than `'static`, because a tool an MCP
+    /// server contributed is named `mcp__<server>__<tool>` out of two strings
+    /// nothing knew at compile time. Every builtin still returns a literal.
+    fn id(&self) -> &str;
 
     /// What the model is told about the tool.
     fn description(&self) -> &str;
@@ -166,6 +170,23 @@ impl Registry {
         tools.push(tool);
 
         Self { tools }
+    }
+
+    /// The same set with every tool in `tools` on the end, in the order given,
+    /// each replacing any tool already registered under its id.
+    ///
+    /// What the engine builds when a background connect finishes and the model
+    /// has a server's tools to be offered: the whole set is rebuilt from the
+    /// base rather than mutated, so a turn already holding a snapshot keeps
+    /// the tools it started with.
+    #[must_use]
+    pub fn with_all(&self, tools: impl IntoIterator<Item = Arc<dyn Tool>>) -> Self {
+        tools.into_iter().fold(
+            Self {
+                tools: self.tools.clone(),
+            },
+            |set, tool| set.with(tool),
+        )
     }
 
     /// The same set without the tool named `id`.

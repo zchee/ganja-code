@@ -234,7 +234,7 @@ fn denies_task(rules: &[Rule], subagent: &str) -> bool {
 
 #[async_trait]
 impl Tool for TaskTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         ID
     }
 

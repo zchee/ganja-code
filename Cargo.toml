@@ -67,12 +67,11 @@ reqwest = { version = "0.13.4", default-features = false, features = [
     "system-proxy",
 ] }
 # The official MCP SDK: config-named servers over stdio and streamable HTTP.
-# Client-side only — the default `server` feature stays off here, and the
-# test fixture that needs it opts in as a dev-dependency.
+# Client-side only — the default `server` feature stays off, because nothing
+# in this workspace serves MCP: the test fixture is a bun server on the
+# reference SDK, which is the point of it.
 rmcp = { version = "3.1.0", default-features = false, features = [
     "client",
-    # Derive macros for the dev-only fixture server's tool router.
-    "macros",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",
     # The remote transport, over the same reqwest/rustls stack the providers

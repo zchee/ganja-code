@@ -2483,7 +2483,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Tool for Effectful {
-        fn id(&self) -> &'static str {
+        fn id(&self) -> &str {
             "effectful"
         }
 

@@ -22,7 +22,7 @@
 //! compaction — which is what keeps golden, scripted and PTY runs
 //! deterministic.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use futures::{StreamExt as _, stream::BoxStream};
 use tokio::sync::{Mutex, mpsc};
@@ -33,6 +33,7 @@ use crate::{
     agent::{self, Agent},
     command,
     config::AgentMode,
+    mcp,
     permission::Permissions,
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
@@ -170,9 +171,24 @@ pub struct Engine {
     /// prompt with no agent rules, which is what an engine built for a golden
     /// run wants.
     agents: Option<Arc<agent::Registry>>,
-    /// Tools as the caller handed them over, without the task tool. What a
-    /// subagent is offered, and what every rebuild below starts from.
+    /// Tools as the caller handed them over, without the task tool and
+    /// without anything an MCP server lent. What every rebuild below starts
+    /// from.
     base_tools: Arc<Registry>,
+    /// [`Engine::base_tools`] plus whatever the connected MCP servers are
+    /// currently lending. What a subagent is offered — the same set the parent
+    /// has, minus the task tool it never gets.
+    ///
+    /// Behind its own lock because a connect finishing has to change it
+    /// without disturbing a turn that is already holding a snapshot.
+    lent_tools: std::sync::Mutex<Arc<Registry>>,
+    /// MCP servers this session was configured with, once somebody installed
+    /// them. [`None`] is every engine that was never given any, which is every
+    /// scripted and golden run.
+    mcp: Option<Arc<mcp::Servers>>,
+    /// Which [`mcp::Servers::generation`] the registries above were built
+    /// from, so a rebuild happens exactly when the tool surface moved.
+    mcp_installed: std::sync::Mutex<u64>,
     /// Tools the model is offered, and the agent loop executes.
     ///
     /// Behind a lock because the task tool's *description* is the roster of
@@ -281,6 +297,9 @@ impl Engine {
             // engine knows which agents it may spawn, which is
             // `with_agents`'s business.
             base_tools: Arc::clone(&tools),
+            lent_tools: std::sync::Mutex::new(Arc::clone(&tools)),
+            mcp: None,
+            mcp_installed: std::sync::Mutex::new(0),
             tools: std::sync::Mutex::new(tools),
             commands: Arc::new(command::Registry::builtin(&root)),
             permissions: Arc::new(std::sync::Mutex::new(permissions)),
@@ -351,6 +370,64 @@ impl Engine {
         }
 
         self
+    }
+
+    /// Sets the MCP servers this session may use.
+    ///
+    /// Installing them connects nothing: [`Engine::connect_mcp`] is what
+    /// starts that, and it is a separate call because a caller may want the
+    /// engine assembled before anything reaches the network.
+    #[must_use]
+    pub fn with_mcp(mut self, servers: Arc<mcp::Servers>) -> Self {
+        self.mcp = Some(servers);
+
+        self
+    }
+
+    /// Connects every enabled MCP server, in the background.
+    ///
+    /// Returns immediately. A server that connects lends its tools to the
+    /// registry the *next* turn is built with; a server that fails says so
+    /// through [`Engine::mcp_status`] and costs nothing else. Nothing here can
+    /// fail the engine, and nothing here can end a turn.
+    pub fn connect_mcp(&self) {
+        let Some(servers) = self.mcp.clone() else {
+            return;
+        };
+        if servers.is_empty() {
+            return;
+        }
+
+        tokio::spawn(async move { servers.connect_all().await });
+    }
+
+    /// Where every configured MCP server stands.
+    ///
+    /// Empty on an engine with no servers, and on one whose servers are all
+    /// still being dialled — a server with no status yet is one nothing has
+    /// finished trying.
+    ///
+    /// A connection that has gone away is noticed here as well as at the turn
+    /// seam, so that a frontend polling this is never shown a `connected` that
+    /// stopped being true. Its tools still leave the registry at the next turn
+    /// and not at this call: what a turn is offered is decided once, before it
+    /// starts.
+    #[must_use]
+    pub fn mcp_status(&self) -> BTreeMap<String, mcp::Status> {
+        let Some(servers) = &self.mcp else {
+            return BTreeMap::new();
+        };
+        servers.reap();
+
+        servers.status()
+    }
+
+    /// Closes every MCP connection and ends every local server's process
+    /// group.
+    pub async fn shutdown_mcp(&self) {
+        if let Some(servers) = &self.mcp {
+            servers.shutdown().await;
+        }
     }
 
     /// Sets the slash commands this session can run.
@@ -579,10 +656,23 @@ impl Engine {
             .and_then(|agent| agent.prompt.as_deref())
             .or(self.base_prompt.as_deref());
 
-        match (head, self.prompt_suffix.as_deref()) {
+        // What the connected servers said about themselves, after the
+        // instruction files and before nothing — upstream's own position for
+        // it (`session/prompt.ts:1261-1269`). Absent when no server said
+        // anything, which is every session with no MCP configured, so nothing
+        // that has no servers sees a change here.
+        let mcp = self.mcp.as_ref().and_then(|servers| servers.instructions());
+
+        let composed = match (head, self.prompt_suffix.as_deref()) {
             (None, None) => None,
             (Some(only), None) | (None, Some(only)) => Some(only.to_owned()),
             (Some(head), Some(suffix)) => Some(format!("{head}\n{suffix}")),
+        };
+
+        match (composed, mcp) {
+            (composed, None) => composed,
+            (None, Some(mcp)) => Some(mcp),
+            (Some(composed), Some(mcp)) => Some(format!("{composed}\n{mcp}")),
         }
     }
 
@@ -770,12 +860,76 @@ impl Engine {
             return;
         };
         let rebuilt = self
-            .base_tools
+            .lent()
             .with(Arc::new(task::TaskTool::new(agents, agent)));
         *self
             .tools
             .lock()
             .expect("the tool registry is never poisoned") = Arc::new(rebuilt);
+    }
+
+    /// The base set plus whatever the MCP servers are currently lending.
+    fn lent(&self) -> Arc<Registry> {
+        Arc::clone(
+            &self
+                .lent_tools
+                .lock()
+                .expect("the tool registry is never poisoned"),
+        )
+    }
+
+    /// Rebuilds the tool sets if the MCP servers' tool surface has moved since
+    /// the last one.
+    ///
+    /// Called at the start of a turn and nowhere else: a turn already holding
+    /// a snapshot keeps the tools it started with, so a server that connected
+    /// halfway through is offered to the model at the *next* turn rather than
+    /// changing the set under a request that has already been sent.
+    fn refresh_mcp(&self) {
+        let Some(servers) = &self.mcp else {
+            return;
+        };
+        // A connection that went away is one whose tools stop being offered;
+        // this is where that is noticed, because there is no reconnect to
+        // notice it anywhere else.
+        servers.reap();
+
+        let generation = servers.generation();
+        let mut installed = self
+            .mcp_installed
+            .lock()
+            .expect("the MCP generation is never poisoned");
+        if *installed == generation {
+            return;
+        }
+        *installed = generation;
+        drop(installed);
+
+        let lent = Arc::new(self.base_tools.with_all(servers.tools()));
+        *self
+            .lent_tools
+            .lock()
+            .expect("the tool registry is never poisoned") = Arc::clone(&lent);
+
+        // The task tool's roster is per agent, so the offered set is rebuilt
+        // through `install`, which is the one place that knows how.
+        let name = self.active().agent.clone();
+        let agent = self
+            .agents
+            .as_ref()
+            .zip(name.as_deref())
+            .and_then(|(registry, name)| registry.get(name));
+        match agent {
+            Some(agent) => self.install(agent),
+            // No agents means no task tool, so the offered set *is* the lent
+            // set.
+            None => {
+                *self
+                    .tools
+                    .lock()
+                    .expect("the tool registry is never poisoned") = lent;
+            }
+        }
     }
 
     /// The tools the next turn offers the model.
@@ -797,7 +951,10 @@ impl Engine {
             agents: Arc::clone(self.agents.as_ref()?),
             // A subagent is offered this build's tools minus the one that
             // spawns subagents, which is the whole of the depth limit (D9).
-            tools: Arc::clone(&self.base_tools),
+            // MCP tools are in that set: a subagent works on the same project
+            // with the same servers. Their asks refuse unattended, because
+            // nobody is watching a subagent's turn.
+            tools: self.lent(),
             permissions: Arc::clone(&self.permissions),
             base_prompt: self.base_prompt.clone(),
             prompt_suffix: self.prompt_suffix.clone(),
@@ -927,6 +1084,11 @@ impl Engine {
         if turn.is_some() {
             return Err(EngineError::Busy);
         }
+
+        // Between turns and never during one: a server that connected while
+        // the last turn was streaming is offered to the model here, and a
+        // connection that died is withdrawn here.
+        self.refresh_mcp();
 
         // Read once, and recorded as the previous turn's agent in the same
         // breath, so that the plan-to-build reminder fires for exactly one

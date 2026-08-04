@@ -66,7 +66,7 @@ pub struct ReadTool;
 
 #[async_trait]
 impl Tool for ReadTool {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "read"
     }
 

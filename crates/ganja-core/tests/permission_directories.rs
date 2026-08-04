@@ -71,7 +71,7 @@ struct Shell;
 
 #[async_trait]
 impl Tool for Shell {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "bash"
     }
 

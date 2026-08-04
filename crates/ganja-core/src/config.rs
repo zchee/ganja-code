@@ -36,6 +36,7 @@
 use std::{
     collections::BTreeMap,
     env, fmt, fs, io,
+    num::NonZeroU64,
     path::{Path, PathBuf},
 };
 
@@ -44,6 +45,7 @@ use serde::{
     Deserialize,
     de::{self, MapAccess, Visitor},
 };
+use url::{Host, Url};
 
 use crate::{
     permission::{Action, Rule},
@@ -192,6 +194,114 @@ impl AgentConfig {
         overlay(&mut self.disable, other.disable);
         self.permission.merge(&other.permission);
     }
+}
+
+/// How long a request to an MCP server may take when the entry says nothing:
+/// a tool call, in milliseconds.
+///
+/// Upstream leaves this to the SDK's own default rather than naming it
+/// (`mcp/index.ts:661-664` resolves to `undefined`), and the SDK's is 60
+/// seconds. Named here because a timeout that only exists inside somebody
+/// else's library is a timeout nobody can read.
+pub const MCP_CALL_TIMEOUT: u64 = 60_000;
+
+/// The same budget for the `tools/list` a connect makes (`mcp/catalog.ts:39`).
+pub const MCP_LIST_TIMEOUT: u64 = 30_000;
+
+/// How long a connect may take, in milliseconds — **fixed**, never the entry's
+/// `timeout`.
+///
+/// Upstream's schema documents `timeout` as "Defaults to 5000" and its code
+/// then uses a hard 30 000 for the connect and never consults the config value
+/// there (`mcp/index.ts:38`, used at `:286` and `:359`). This is that code, and
+/// the doc comment describes what it does.
+pub const MCP_CONNECT_TIMEOUT: u64 = 30_000;
+
+/// One MCP server a session may connect to.
+///
+/// Tagged by `type`, and an entry that carries no `type` is a parse error —
+/// upstream skips such an entry with a log line (`mcp/index.ts:510`), which
+/// leaves a server silently absent. A config that names a server means to have
+/// one.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum McpServer {
+    /// A child process spoken to over its stdio.
+    Local(McpLocal),
+    /// An HTTP endpoint spoken to over streamable HTTP.
+    Remote(McpRemote),
+}
+
+impl McpServer {
+    /// Whether this session should connect to it.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        match self {
+            Self::Local(local) => local.enabled,
+            Self::Remote(remote) => remote.enabled,
+        }
+    }
+
+    /// Milliseconds one request to this server may take, which the entry may
+    /// set and which governs **requests only** — never the connect.
+    ///
+    /// `fallback` is the default for the kind of request being made:
+    /// [`MCP_CALL_TIMEOUT`] for a tool call, [`MCP_LIST_TIMEOUT`] for a
+    /// listing.
+    #[must_use]
+    pub fn timeout(&self, fallback: u64) -> u64 {
+        let asked = match self {
+            Self::Local(local) => local.timeout,
+            Self::Remote(remote) => remote.timeout,
+        };
+
+        asked.map_or(fallback, NonZeroU64::get)
+    }
+}
+
+/// A local MCP server: a command this session runs and talks to over pipes.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct McpLocal {
+    /// The program and its arguments, `[cmd, args...]`. Required, and refused
+    /// empty: upstream destructures it as `[cmd, ...args]`, and an entry with
+    /// nothing to run is not a server.
+    pub command: Vec<String>,
+    /// Directory the child runs in. A relative path resolves against the
+    /// project root.
+    pub cwd: Option<String>,
+    /// Variables layered over the ones this process already has.
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+    /// A disabled server is configured and not connected.
+    #[serde(default = "connect_by_default")]
+    pub enabled: bool,
+    /// Request budget in milliseconds; see [`McpServer::timeout`].
+    pub timeout: Option<NonZeroU64>,
+}
+
+/// A remote MCP server: an endpoint this session posts to.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct McpRemote {
+    /// Where it lives. Refused unless it is `https`, or `http` to loopback —
+    /// the rule [`crate::provider`] applies to a base URL, for the same reason:
+    /// the `headers` below are where somebody puts a token.
+    pub url: String,
+    /// Headers sent with every request.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// A disabled server is configured and not connected.
+    #[serde(default = "connect_by_default")]
+    pub enabled: bool,
+    /// Request budget in milliseconds; see [`McpServer::timeout`].
+    pub timeout: Option<NonZeroU64>,
+}
+
+/// What `enabled` means when an entry does not say: upstream connects unless
+/// told not to (`mcp/index.ts:514-517`).
+fn connect_by_default() -> bool {
+    true
 }
 
 /// One custom command, as a config file describes it.
@@ -438,6 +548,11 @@ pub struct Config {
     /// Custom commands, by name.
     #[serde(default)]
     pub command: BTreeMap<String, CommandConfig>,
+    /// MCP servers this session may connect to, by name. The name is half of
+    /// every tool those servers contribute, so it is what a permission rule is
+    /// written against.
+    #[serde(default)]
+    pub mcp: BTreeMap<String, McpServer>,
     /// What the caller decided before any of this was read. Not a config key —
     /// `deny_unknown_fields` would reject one — and above every tier here.
     #[serde(skip)]
@@ -511,6 +626,11 @@ impl Config {
             }
         }
         self.keybinds.extend(other.keybinds);
+        // An entry replaces wholesale rather than merging field by field, as
+        // `agent` and `command` do: the two shapes carry different keys, so a
+        // closer tier turning a `local` server into a `remote` one would
+        // otherwise leave the command it no longer has behind.
+        self.mcp.extend(other.mcp);
         self.permission.merge(&other.permission);
 
         for instruction in other.instructions {
@@ -654,12 +774,73 @@ fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
 
     // Through `Option` so that an empty file, or one holding nothing but
     // comments, is an empty config rather than a type error about `null`.
-    jsonc_parser::parse_to_serde_value::<Option<Config>>(&text, &parse_options())
-        .map(|config| Some(config.unwrap_or_default()))
+    let config = jsonc_parser::parse_to_serde_value::<Option<Config>>(&text, &parse_options())
+        .map(Option::unwrap_or_default)
         .map_err(|error| ConfigError::Parse {
             path: path.to_owned(),
             message: error.to_string(),
-        })
+        })?;
+
+    // Checked per file rather than after the merge, so the complaint names the
+    // file that said it. Merging only ever replaces a whole entry, so every
+    // entry that survives has been through here.
+    check_mcp(&config.mcp).map_err(|message| ConfigError::Parse {
+        path: path.to_owned(),
+        message,
+    })?;
+
+    Ok(Some(config))
+}
+
+/// Refuses an MCP entry that describes a server nothing could connect to.
+///
+/// Two things are decided here rather than at connect time. A `command` with
+/// nothing in it is a server with no program, and finding that out one turn
+/// later hides it behind a status line. A remote URL that is neither `https`
+/// nor loopback is the same refusal [`crate::provider`] makes about a base URL
+/// and for the same reason — `headers` is where a token goes, and plain HTTP
+/// to somewhere else puts it on the wire in the clear.
+///
+/// Neither message quotes the URL. A remote entry is configuration, and
+/// configuration is allowed to carry a credential in its userinfo, so echoing
+/// one back is how it reaches a log.
+fn check_mcp(servers: &BTreeMap<String, McpServer>) -> Result<(), String> {
+    for (name, server) in servers {
+        match server {
+            McpServer::Local(local) if local.command.is_empty() => {
+                return Err(format!("mcp server \"{name}\" has an empty command"));
+            }
+            McpServer::Local(_) => {}
+            McpServer::Remote(remote) => {
+                let parsed = Url::parse(&remote.url)
+                    .map_err(|error| format!("mcp server \"{name}\" has no valid url: {error}"))?;
+                if !reachable_in_the_clear(&parsed) {
+                    return Err(format!(
+                        "mcp server \"{name}\" must be reached over https, or over http to \
+                         loopback; anything else puts its headers on the wire in the clear"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether `url` may be spoken to given that its headers may carry a secret.
+///
+/// The host is compared as a parsed host and never as text, for the reasons
+/// spelled out at `provider::check_base_url`: every cheap spelling of this
+/// check is beaten by a hostname somebody else registered.
+fn reachable_in_the_clear(url: &Url) -> bool {
+    let loopback = match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(name)) => name == "localhost",
+        None => false,
+    };
+
+    url.scheme() == "https" || (url.scheme() == "http" && loopback)
 }
 
 #[cfg(test)]
@@ -669,8 +850,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ANY, AgentMode, Config, ConfigError, Overrides, ThemeMode, existing, merge_files,
-        project_files, read, split_model,
+        ANY, AgentMode, Config, ConfigError, McpServer, NonZeroU64, Overrides, ThemeMode, existing,
+        merge_files, project_files, read, split_model,
     };
     use crate::permission::Action;
 
@@ -751,6 +932,135 @@ mod tests {
             panic!("expected a parse failure, got {error:?}");
         };
         assert!(message.contains("modle"), "{message}");
+    }
+
+    #[test]
+    fn an_mcp_entry_carries_everything_the_two_shapes_hold() {
+        let config = parse(
+            r#"{"mcp": {
+                "fs": {
+                    "type": "local",
+                    "command": ["bun", "x", "server"],
+                    "cwd": "tools",
+                    "environment": {"TOKEN": "x"},
+                    "timeout": 1234
+                },
+                "hub": {
+                    "type": "remote",
+                    "url": "https://mcp.example/mcp",
+                    "headers": {"Authorization": "Bearer x"},
+                    "enabled": false
+                }
+            }}"#,
+        )
+        .expect("both shapes parse");
+
+        let McpServer::Local(local) = &config.mcp["fs"] else {
+            panic!("the first entry is local");
+        };
+        assert_eq!(local.command, ["bun", "x", "server"]);
+        assert_eq!(local.cwd.as_deref(), Some("tools"));
+        assert_eq!(local.environment["TOKEN"], "x");
+        assert!(local.enabled, "an entry that says nothing connects");
+        assert_eq!(local.timeout.map(NonZeroU64::get), Some(1234));
+
+        let McpServer::Remote(remote) = &config.mcp["hub"] else {
+            panic!("the second entry is remote");
+        };
+        assert_eq!(remote.url, "https://mcp.example/mcp");
+        assert_eq!(remote.headers["Authorization"], "Bearer x");
+        assert!(!remote.enabled);
+        assert_eq!(remote.timeout, None);
+    }
+
+    /// Every one of these is a config that would otherwise have described a
+    /// server nothing could reach, silently.
+    #[test]
+    fn an_mcp_entry_that_describes_no_reachable_server_is_refused_by_name() {
+        let cases = [
+            // Upstream skips a type-less entry with a log line; a config that
+            // names a server means to have one.
+            (r#"{"mcp": {"x": {"command": ["a"]}}}"#, "type"),
+            // MCP OAuth is not ported, so the key that asks for it fails loud
+            // rather than being ignored.
+            (
+                r#"{"mcp": {"x": {"type": "remote", "url": "https://a.test", "oauth": {}}}}"#,
+                "oauth",
+            ),
+            (r#"{"mcp": {"x": {"type": "local", "command": []}}}"#, "x"),
+            (
+                r#"{"mcp": {"x": {"type": "remote", "url": "http://mcp.example/mcp"}}}"#,
+                "loopback",
+            ),
+            (
+                r#"{"mcp": {"x": {"type": "remote", "url": "not a url"}}}"#,
+                "url",
+            ),
+            // A zero-millisecond budget is not a budget.
+            (
+                r#"{"mcp": {"x": {"type": "local", "command": ["a"], "timeout": 0}}}"#,
+                "0",
+            ),
+        ];
+
+        for (text, named) in cases {
+            let error = parse(text).expect_err(&format!("{text} describes no server"));
+            let ConfigError::Parse { message, .. } = &error else {
+                panic!("expected a parse failure for {text}, got {error:?}");
+            };
+            assert!(message.contains(named), "{text}: {message}");
+        }
+    }
+
+    /// The same rule the provider endpoints obey, and the same reason: a
+    /// remote entry's `headers` is where somebody puts a token.
+    #[test]
+    fn a_remote_server_may_be_plain_http_only_to_loopback() {
+        let allowed = [
+            "https://mcp.example/mcp",
+            "http://127.0.0.1:8000/mcp",
+            "http://localhost:8000/mcp",
+            "http://[::1]:8000/mcp",
+        ];
+        for url in allowed {
+            let text = format!(r#"{{"mcp": {{"x": {{"type": "remote", "url": "{url}"}}}}}}"#);
+            parse(&text).unwrap_or_else(|error| panic!("{url} is reachable: {error}"));
+        }
+
+        let refused = [
+            // A host that merely contains the address, and a host that merely
+            // starts with the name: both belong to whoever registered them.
+            "http://127.0.0.1.evil.test/mcp",
+            "http://localhost.evil.test/mcp",
+            "http://127.0.0.1@evil.test/mcp",
+        ];
+        for url in refused {
+            let text = format!(r#"{{"mcp": {{"x": {{"type": "remote", "url": "{url}"}}}}}}"#);
+            parse(&text).expect_err(url);
+        }
+    }
+
+    /// An entry replaces rather than merging, because the two shapes carry
+    /// different keys.
+    #[test]
+    fn a_closer_tier_replaces_a_whole_mcp_entry() {
+        let directory = temporary();
+        let outer = directory.path().join("outer.json");
+        let inner = directory.path().join("inner.json");
+        plant(
+            &outer,
+            r#"{"mcp": {"x": {"type": "local", "command": ["old"], "cwd": "here"}}}"#,
+        );
+        plant(
+            &inner,
+            r#"{"mcp": {"x": {"type": "remote", "url": "https://new.test/mcp"}}}"#,
+        );
+
+        let config = merge_files(&[outer, inner]).expect("both tiers parse");
+        let McpServer::Remote(remote) = &config.mcp["x"] else {
+            panic!("the closer tier decides what the entry is");
+        };
+        assert_eq!(remote.url, "https://new.test/mcp");
     }
 
     /// Nested maps stay open on purpose: an agent definition written for a
@@ -946,7 +1256,8 @@ mod tests {
               "theme_mode": "dark",
               "keybinds": {"agent_cycle": "tab"},
               "shell": "/bin/zsh",
-              "command": {"ship": {"template": "release $ARGUMENTS", "agent": "build"}}
+              "command": {"ship": {"template": "release $ARGUMENTS", "agent": "build"}},
+              "mcp": {"fs": {"type": "local", "command": ["bun", "x", "mcp-fs"]}}
             }"#,
         )
         .expect("every curated key is a key");
@@ -960,6 +1271,7 @@ mod tests {
         assert_eq!(config.command["ship"].template, "release $ARGUMENTS");
         assert_eq!(config.command["ship"].agent.as_deref(), Some("build"));
         assert!(config.command["ship"].description.is_none());
+        assert!(matches!(config.mcp["fs"], McpServer::Local(_)));
     }
 
     #[test]
