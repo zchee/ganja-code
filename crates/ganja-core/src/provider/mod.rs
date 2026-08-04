@@ -592,6 +592,23 @@ fn require_credential(provider_id: &str, variable: &str) -> Result<ApiKey, Provi
 /// any model it is asked for is taken at its word; refusing every switch there
 /// would make the command untestable in exactly the runs that are cheapest to
 /// run.
+/// The model a config spelling names, when `provider_id` serves it.
+///
+/// Config spells a model `"provider/model"` — that is what `model`,
+/// `small_model` and an agent's own `model` all carry, and what
+/// `import-opencode` writes — while a catalog id is the bare half after the
+/// slash and the provider is fixed at construction. Handing the whole spelling
+/// to [`serves`] therefore asks whether `anthropic` serves a model called
+/// `anthropic/claude-…`, which it does not: the answer is no wherever the
+/// catalog knows the provider, and an unexamined yes wherever it does not,
+/// which would put the prefix on the wire. Splitting first is what makes the
+/// documented spelling work in both places.
+pub(crate) fn adopt(provider_id: &str, spelled: &str) -> Option<String> {
+    let model = spelled.split_once('/').map_or(spelled, |(_, rest)| rest);
+
+    serves(provider_id, model).then(|| model.to_owned())
+}
+
 pub(crate) fn serves(provider_id: &str, model: &str) -> bool {
     let mut known = crate::catalog::models()
         .filter(|known| known.provider_id == provider_id)
