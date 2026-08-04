@@ -1,0 +1,17 @@
+[target.aarch64-apple-darwin]
+rustflags = [
+  "-C",
+  "target-cpu=native",
+  "-C",
+  "force-frame-pointers=on",
+  "-Z",
+  "mir-opt-level=4",
+  "-Z",
+  "inline-mir=yes",
+  "-C",
+  "llvm-args=-unroll-threshold=500",
+  "-C",
+  "llvm-args=-enable-dfa-jump-thread",
+  "-C",
+  "link-arg=-Wl,-dead_strip",
+]
