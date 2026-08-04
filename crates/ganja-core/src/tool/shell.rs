@@ -883,29 +883,34 @@ mod tests {
         );
     }
 
+    /// The two streams alternate, with enough of a pause between writes that
+    /// the arrival order is not in question. Reading one pipe to exhaustion
+    /// and then the other would answer `one three two four` — a transcript
+    /// that reads as though the command did something it never did.
     #[tokio::test]
     async fn both_streams_are_captured_in_the_order_they_arrived() {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let tool = ShellTool::new();
+        let command = "printf 'one\\n'; sleep 0.1; printf 'two\\n' >&2; \
+                       sleep 0.1; printf 'three\\n'; sleep 0.1; printf 'four\\n' >&2";
 
         let out = tool
             .run(
-                serde_json::json!({
-                    "command": "printf 'to stdout\\n'; printf 'to stderr\\n' >&2",
-                }),
+                serde_json::json!({ "command": command }),
                 &ctx(dir.path().to_owned()),
             )
             .await
             .expect("a command that runs has output");
 
-        assert!(
-            out.output.contains("to stdout") && out.output.contains("to stderr"),
-            "both streams belong in one transcript, got {:?}",
+        assert_eq!(
+            out.output.lines().collect::<Vec<_>>(),
+            vec!["one", "two", "three", "four"],
+            "got {:?}",
             out.output
         );
         assert_eq!(out.metadata["exit"], 0);
         assert_eq!(
-            out.title, "printf 'to stdout\\n'; printf 'to stderr\\n' >&2",
+            out.title, command,
             "the title is the command, as upstream reports it"
         );
     }

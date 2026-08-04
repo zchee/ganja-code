@@ -102,21 +102,21 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
         &config,
         project.root(),
     ));
-    // The frontend keeps its own copy of the model so that it can price a turn
-    // without reaching into the engine for the model it was built with.
-    //
     // The registry carries every builtin tool the agent loop can execute;
     // permission rules load for the project the terminal was opened in.
     let engine = Engine::persistent(
         selection.provider,
-        selection.model.clone(),
+        selection.model,
         Arc::new(ganja_core::Registry::with_builtins()),
         ganja_core::Permissions::load(&cwd),
         storage,
     )
     .with_agents(agents)
     .with_commands(commands);
-    let (base, suffix) = system_parts(&config, &cwd, &selection.model);
+    // Composed from the engine and not from the selection, and only once the
+    // agents are on it: the default agent may have named a model of another
+    // family, and the prompt has to be that model's.
+    let (base, suffix) = system_parts(&engine, &config, &cwd);
     let engine = engine.with_system_parts(base, suffix);
 
     let seed = match resume {
@@ -145,18 +145,16 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_mouse() {
         Ok(()) => {
-            let mut app = App::new(
-                engine,
-                selection.model,
-                notice(selection.notice, theme_notice),
-                themes,
-            )
-            .with_provider(provider_id)
-            .with_keybinds(keys)
-            // The `@` file menu walks from here, so a mention resolves against
-            // the directory the user opened rather than the project root: what
-            // they typed is relative to where they are standing.
-            .with_cwd(cwd);
+            // The model is the engine's to answer for, not the selection's:
+            // the default agent may have named one of its own, and a resumed
+            // session restores the one it was left on.
+            let mut app = App::new(engine, notice(selection.notice, theme_notice), themes)
+                .with_provider(provider_id)
+                .with_keybinds(keys)
+                // The `@` file menu walks from here, so a mention resolves against
+                // the directory the user opened rather than the project root: what
+                // they typed is relative to where they are standing.
+                .with_cwd(cwd);
             app.seed(seed);
             app.run(&mut terminal).await
         }
@@ -170,7 +168,16 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     outcome.and(restored)
 }
 
-/// The two halves of the system prompt a session runs under.
+/// The two halves of the system prompt `engine` runs under.
+///
+/// The model is asked of the engine rather than taken from the provider
+/// selection, and that is the whole reason this takes an [`Engine`] instead of
+/// a name. Both halves are written against a model id — the base half picks a
+/// prompt by family (`claude` / `gpt` / neither), and the suffix's environment
+/// block names the model twice — so composing them against the launch model
+/// while the engine had already adopted the default agent's own would tell a
+/// `gpt` session it was Claude, in a block that also states its model as fact.
+/// This must therefore run **after** `with_agents`.
 ///
 /// The base half is handed over **explicitly** rather than left to [`None`].
 /// `Engine::system_for` resolves an agent's own prompt *or* the base one, and
@@ -180,11 +187,15 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
 /// their turns carrying the environment block and nothing else.
 ///
 /// The suffix is the half no agent replaces, so a switch swaps the first and
-/// keeps this one.
-fn system_parts(config: &Config, cwd: &Path, model: &str) -> (Option<String>, Option<String>) {
+/// keeps this one. What it does not track is a *later* `SwitchModel`: the
+/// prompt is composed once (**D22**), so this is about starting truthfully
+/// rather than about staying current.
+fn system_parts(engine: &Engine, config: &Config, cwd: &Path) -> (Option<String>, Option<String>) {
+    let model = engine.model();
+
     (
-        Some(instruction::base_prompt(model).to_owned()),
-        instruction::suffix(config, cwd, model),
+        Some(instruction::base_prompt(&model).to_owned()),
+        instruction::suffix(config, cwd, &model),
     )
 }
 
@@ -288,9 +299,15 @@ mod tests {
 
     /// A persistent engine over an empty store in `directory`.
     fn engine(directory: &TempDir) -> Engine {
+        engine_asking(directory, fake::MODEL)
+    }
+
+    /// The same, launched on a model of the caller's choosing — which is what
+    /// the system-prompt tests need, since a prompt is picked by model family.
+    fn engine_asking(directory: &TempDir, model: &str) -> Engine {
         Engine::persistent(
             Arc::new(FakeProvider::default()),
-            fake::MODEL,
+            model,
             Arc::new(ganja_core::Registry::new(Vec::new())),
             ganja_core::Permissions::default(),
             Storage::open(directory.path().join("storage")),
@@ -521,7 +538,8 @@ mod tests {
         let directory = temporary();
 
         for model in ["claude-sonnet-5", "gpt-5.6", "something-else"] {
-            let (base, suffix) = system_parts(&Config::default(), directory.path(), model);
+            let engine = engine_asking(&directory, model);
+            let (base, suffix) = system_parts(&engine, &Config::default(), directory.path());
 
             assert_eq!(
                 base.as_deref(),
@@ -537,6 +555,56 @@ mod tests {
                 "{model}: the environment block always says something"
             );
         }
+    }
+
+    /// **Non-vacuity target for composing the prompt after the agents.** The
+    /// launch model is Claude's and the default agent names one of OpenAI's,
+    /// so the two families disagree and only one of them is the model that
+    /// will actually be asked. Composing against the launch model — what the
+    /// startup path did before — hands a GPT session Anthropic's prompt, and
+    /// an environment block that states the wrong model as fact twice over.
+    #[test]
+    fn the_system_prompt_is_composed_for_the_model_the_agents_left_the_engine_on() {
+        const LAUNCH: &str = "claude-sonnet-5";
+        const ADOPTED: &str = "gpt-5.6";
+
+        let directory = temporary();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "default_agent": "review",
+            "agent": { "review": { "mode": "primary", "model": format!("openai/{ADOPTED}") } }
+        }))
+        .expect("the fixture is a config");
+        let engine = engine_asking(&directory, LAUNCH).with_agents(Arc::new(
+            ganja_core::AgentRegistry::build(&config).expect("the fixture resolves an agent"),
+        ));
+        assert_eq!(
+            engine.model(),
+            ADOPTED,
+            "the fixture only proves anything while the agent moves the engine off the launch model"
+        );
+
+        let (base, suffix) = system_parts(&engine, &config, directory.path());
+
+        assert_eq!(
+            base.as_deref(),
+            Some(ganja_core::instruction::base_prompt(ADOPTED)),
+            "the base half is the adopted model's family"
+        );
+        assert_ne!(
+            ganja_core::instruction::base_prompt(ADOPTED),
+            ganja_core::instruction::base_prompt(LAUNCH),
+            "the two families must really differ, or the assertion above proves nothing"
+        );
+
+        let suffix = suffix.expect("the environment block always says something");
+        assert!(
+            suffix.contains(ADOPTED),
+            "the environment block names the model that will be asked: {suffix}"
+        );
+        assert!(
+            !suffix.contains(LAUNCH),
+            "and never the one it was launched with: {suffix}"
+        );
     }
 
     #[test]

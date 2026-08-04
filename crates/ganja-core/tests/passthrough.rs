@@ -7,6 +7,7 @@
 //! a person running their own command rather than a model asking to (**D13**).
 
 use std::{
+    path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -17,7 +18,8 @@ use futures::{
     stream::{self, BoxStream},
 };
 use ganja_core::{
-    Command, Engine, Event, FinishReason, PartBody, Permissions, Registry, Role, ToolState,
+    Command, Engine, Event, FinishReason, PartBody, Permissions, Project, Registry, Role,
+    ToolState,
     permission::{Action, Rule},
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
 };
@@ -217,6 +219,46 @@ async fn a_passthrough_writes_the_command_and_its_output_into_the_transcript() {
             ))),
         "and it reads the command and what it printed: {:?}",
         asked.messages
+    );
+}
+
+/// `!pwd` answers with the project, not with wherever the process happens to
+/// have been started (**R10**) — which is what a person typing `!git status`
+/// means by "here".
+///
+/// The test binary runs with its working directory at the crate, and the
+/// project root is the repository above it, so the two are provably different
+/// and the assertion cannot pass by coincidence.
+#[tokio::test]
+async fn a_passthrough_runs_at_the_project_root_and_not_at_the_process_directory() {
+    let cwd = std::env::current_dir().expect("the test process has a directory");
+    let root = Project::resolve(&cwd).root().to_owned();
+    assert_ne!(
+        root, cwd,
+        "this test only proves anything while the crate directory is below the project root"
+    );
+
+    let (provider, _) = Recorder::new();
+    let engine = engine(provider);
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::RunShell {
+            // `-P` so the answer is the directory the process was really given
+            // rather than an inherited `PWD` spelling of it.
+            command: "pwd -P".to_owned(),
+        })
+        .await
+        .expect("an idle engine accepts a command");
+    let seen = drain(&mut events).await;
+
+    let ToolState::Completed { output, .. } = shell_part(&seen) else {
+        panic!("the command completed");
+    };
+    assert_eq!(
+        Path::new(output.trim()),
+        root,
+        "the passthrough ran somewhere else"
     );
 }
 
