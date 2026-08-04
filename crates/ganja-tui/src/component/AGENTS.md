@@ -21,7 +21,7 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 | `list.rs` | `ListDialog`: one centered modal for choosing a model or an agent — the same dialog over two lists, because what differs between them is the rows and the command Enter sends, and neither of those is drawing. Marks the row the session is already on; previews nothing. |
 | `palette.rs` | The command palette, grouped by category with a filter line and a block of suggested commands pinned while nothing is typed. Spec: upstream `packages/tui/src/component/command-palette.tsx`. |
 | `dropdown.rs` | The inline command menu, anchored above the editor. Opens only when `/` is the first character of the buffer and the cursor has not left the first whitespace-free span; matches descriptions as well as names, which the palette does not. Spec: upstream `packages/tui/src/component/prompt/autocomplete.tsx`. |
-| `files.rs` | The inline file menu, raised by an `@`. The same box `dropdown.rs` draws, over paths the core `glob` tool walked — and **not re-ranked**, because upstream says twice in comments to trust the backend's order. |
+| `files.rs` | The inline file menu, raised by an `@`. The same box `dropdown.rs` draws, over paths `ganja-tool`'s `glob` walked in-process — and **not re-ranked**, because upstream says twice in comments to trust the backend's order. |
 | `help.rs` | The reference card: every command with its key, then the bindings no command row shows, named as a config file rebinds them. Sizes itself to its content and **scrolls** when the window cannot hold it — upstream's card is one sentence and never needed to (deviation: `help-card-scrolls`); the footer counts which rows are showing, so a clip is never silent. |
 
 ## For AI Agents
@@ -47,7 +47,7 @@ Each component owns its own state struct and exposes methods the app calls (`scr
 
 ### Internal
 
-`crate::theme`, `crate::event::AppEvent`, and the `ganja_core` protocol types each pane renders (`PartBody`, `ToolState`, `Usage`, `PermissionReply`, `Role`).
+`crate::theme`, `crate::event::AppEvent`, and the `ganja_protocol` types each pane renders (`PartBody`, `ToolState`, `Usage`, `PermissionReply`, `Role`).
 
 ### External
 

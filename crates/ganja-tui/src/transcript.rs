@@ -15,7 +15,7 @@
 //! - `assistantMetadata` would print `## Assistant (Agent · model · duration)`
 //!   (deviation: transcript-assistant-metadata-omitted). The transcript this
 //!   renders from holds a role and its parts, and the agent a message ran as
-//!   is not on [`Message`](ganja_core::Message) at all — filling the line from
+//!   is not on [`Message`](ganja_protocol::Message) at all — filling the line from
 //!   the session's *current* agent and model would misattribute every earlier
 //!   message, which is worse than the heading upstream prints when the toggle
 //!   is off.
@@ -23,7 +23,8 @@
 //! Times render as UTC rather than `toLocaleString`'s machine-local spelling,
 //! following **D24**, which made the same call for the prompt's date block.
 
-use ganja_core::{Part, PartBody, Role, SessionInfo, ToolState};
+use ganja_core::SessionInfo;
+use ganja_protocol::{Part, PartBody, Role, ToolState};
 
 /// What a session with no title of its own is headed with. Upstream's title
 /// is always a string; ganja's is absent until a title call has named the
@@ -32,7 +33,7 @@ const UNTITLED: &str = "Untitled session";
 
 /// One message, as both formatters read it.
 ///
-/// A pair rather than a [`Message`](ganja_core::Message) because the
+/// A pair rather than a [`Message`](ganja_protocol::Message) because the
 /// transcript on screen is what gets copied, and the chat holds each entry as
 /// its role and the parts that arrived — which is exactly, and only, what
 /// these two functions need.
@@ -224,7 +225,8 @@ fn leap(year: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ganja_core::{Part, PartBody, Role, SessionId, SessionInfo, ToolState, Usage};
+    use ganja_core::{SessionId, SessionInfo};
+    use ganja_protocol::{Part, PartBody, Role, ToolState, Usage};
 
     use super::{Missing, civil_date, format, last_reply, stamp};
 
@@ -250,7 +252,7 @@ mod tests {
 
     fn completed(tool: &str, input: serde_json::Value, output: &str) -> Part {
         Part {
-            id: ganja_core::PartId::ascending(),
+            id: ganja_protocol::PartId::ascending(),
             body: PartBody::Tool {
                 call_id: "call_1".to_owned(),
                 tool: tool.to_owned(),
@@ -330,7 +332,7 @@ mod tests {
     #[test]
     fn a_failed_call_carries_what_went_wrong() {
         let parts = [Part {
-            id: ganja_core::PartId::ascending(),
+            id: ganja_protocol::PartId::ascending(),
             body: PartBody::Tool {
                 call_id: "call_1".to_owned(),
                 tool: "edit".to_owned(),
@@ -359,7 +361,7 @@ mod tests {
         let parts = [
             Part::file("src/lib.rs", "text/plain"),
             Part {
-                id: ganja_core::PartId::ascending(),
+                id: ganja_protocol::PartId::ascending(),
                 body: PartBody::StepStart,
             },
         ];

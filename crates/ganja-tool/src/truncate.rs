@@ -17,8 +17,8 @@
 //! - **Where the file lives.** Upstream's `TRUNCATION_DIR` is
 //!   `path.join(Global.Path.data, "tool-output")`, and this port has no
 //!   `Global.Path` equivalent. The location is resolved the way
-//!   [`crate::auth`] and [`crate::project`] already resolve their own
-//!   state — same crate, same `ganja` directory under the XDG data
+//!   `ganja-core`'s `auth` and [`ganja_permission::project`] already resolve
+//!   their own state — the same `ganja` directory under the XDG data
 //!   home — landing on `<XDG data home>/ganja/tool-output/`.
 //! - **The file name.** Upstream names the file with a `ToolID` (a sortable
 //!   identifier tied to session bookkeeping this crate does not have yet).
@@ -63,8 +63,8 @@ pub const MAX_CHARS: usize = 50 * 1024;
 pub const MAX_LINES: usize = 2_000;
 
 /// Directory ganja keeps its state in, under the XDG data home. Matches
-/// [`crate::auth`] and [`crate::project`], which resolve their own state the
-/// same way.
+/// `ganja-core`'s `auth` and [`ganja_permission::project`], which resolve their
+/// own state the same way.
 const DIRECTORY: &str = "ganja";
 
 /// Where a truncating clamp spills its full text, under [`DIRECTORY`].
@@ -425,7 +425,8 @@ pub(crate) fn sweep_in(dir: &Path) -> usize {
 
 /// Sweeps once, then once an hour, until `cancel` fires.
 ///
-/// Shaped after [`crate::catalog::spawn_refresh_loop`], with one difference:
+/// Shaped after `ganja-core`'s `catalog::spawn_refresh_loop`, with one
+/// difference:
 /// the first round runs inside the spawned task rather than on the calling
 /// thread. The catalog's first step installs the table a frontend's first
 /// frame prices against; nothing at all waits on a sweep, so nothing is gained

@@ -6,6 +6,8 @@
 
 Upstream prompt texts, compiled in with `include_str!`. Nothing here is code.
 
+What is *not* here: a tool's own description. Those live beside the tool in `ganja-tool`, which is where upstream keeps them too (`packages/opencode/src/tool/*.txt`).
+
 ## Key Files
 
 | File | Description |
@@ -16,7 +18,6 @@ Upstream prompt texts, compiled in with `include_str!`. Nothing here is code.
 | `plan.txt` | The reminder injected into every request made under the `plan` agent. |
 | `build-switch.txt` | The one-time reminder injected when a `plan` turn is followed by a `build` turn. |
 | `explore.txt` | The `explore` subagent's own system prompt (replaces the base prompt). |
-| `task.txt` | What the model is told the `task` tool is for; the per-caller agent roster is appended to it at registration. |
 | `initialize.txt` | What `/init` sends. `${path}` is filled with the worktree; `$ARGUMENTS` with whatever the user typed after the name. |
 
 ## For AI Agents

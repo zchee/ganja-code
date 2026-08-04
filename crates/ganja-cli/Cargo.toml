@@ -23,6 +23,11 @@ clap.workspace = true
 # `project.rs` already each resolve it this way; this is the third.
 etcetera.workspace = true
 ganja-core.workspace = true
+# `sessions` prints a stored session's cost and the importer decides where a
+# project's config lives, so the binary names a worktree and a usage total
+# without needing the engine's re-export to hand them over.
+ganja-permission.workspace = true
+ganja-protocol.workspace = true
 ganja-tui.workspace = true
 # The importer reads someone else's config, which is JSONC whatever its
 # extension says, and it has to see the keys in document order — permission

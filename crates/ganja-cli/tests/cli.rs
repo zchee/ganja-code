@@ -13,7 +13,9 @@ use std::{
 };
 
 use assert_cmd::Command;
-use ganja_core::{Project, SessionId, SessionInfo, Storage, Usage, storage::VERSION};
+use ganja_core::{SessionId, SessionInfo, Storage, storage::VERSION};
+use ganja_permission::Project;
+use ganja_protocol::Usage;
 use predicates::prelude::*;
 use tempfile::TempDir;
 

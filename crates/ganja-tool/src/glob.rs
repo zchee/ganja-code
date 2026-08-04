@@ -24,7 +24,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput};
 
 /// Most paths a call returns. Upstream's `limit` in `tool/glob.ts`.
 const LIMIT: usize = 100;
@@ -218,7 +218,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::GlobTool;
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{FileTimes, Tool, ToolCtx, ToolError};
 
     /// A context rooted at `cwd`, with a cancel nobody has pulled.
     fn ctx(cwd: PathBuf) -> ToolCtx {

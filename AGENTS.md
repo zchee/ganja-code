@@ -4,7 +4,7 @@
 
 ## Purpose
 
-`ganja` is a terminal-first AI coding agent: a **behavioral port of [opencode](https://github.com/anomalyco/opencode) v1.18.11 to Rust**, with a ratatui TUI. Upstream's TypeScript is the *specification*, not source to translate — the port writes idiomatic Rust and matches observable behavior. The workspace is three crates: an engine that carries no terminal dependency, a ratatui frontend, and the `ganja` binary that wires them together.
+`ganja` is a terminal-first AI coding agent: a **behavioral port of [opencode](https://github.com/anomalyco/opencode) v1.18.11 to Rust**, with a ratatui TUI. Upstream's TypeScript is the *specification*, not source to translate — the port writes idiomatic Rust and matches observable behavior. The workspace is six crates: the protocol, the permission engine and the tools beneath an engine that carries no terminal dependency, then a ratatui frontend and the `ganja` binary that wires them together.
 
 ## Key Files
 
@@ -25,7 +25,7 @@
 
 | Directory | Purpose |
 |-----------|---------|
-| `crates/` | The three workspace members (see `crates/AGENTS.md`) |
+| `crates/` | The workspace members (see `crates/AGENTS.md`) |
 | `.github/` | CI configuration (see `.github/AGENTS.md`) |
 | `.omc/` | **Gitignored operational state**, not documented by this tree: `plans/` (the authoritative port plan), `handoffs/` (frozen per-phase contracts), `reference/opencode-v1.18.11/` (the upstream checkout the golden test drives). |
 | `target/` | Cargo build output. Never read. |
@@ -48,9 +48,10 @@ cargo clippy --all-targets -- -D warnings
 cargo nextest run --workspace       # the suite; each test in its own process
 cargo test --workspace --doc        # nextest skips doctests, so run them beside it
 ! cargo tree -p ganja-core -e normal | grep -q ratatui   # core stays terminal-free
+! cargo tree -p ganja-tool -e normal | grep -q ganja-core # tools never reach back
 ```
 
-The last gate is inverted deliberately: a plain `grep -c` exits non-zero on zero matches and would fail exactly when the core is pure.
+The last two gates are inverted deliberately: a plain `grep -c` exits non-zero on zero matches and would fail exactly when the boundary holds. They assert the two directions that matter — the engine reaches no terminal, and nothing beneath the engine reaches the engine.
 
 Single tests (nextest filters by name substring; `cargo test` still works and is what runs doctests):
 
@@ -58,7 +59,8 @@ Single tests (nextest filters by name substring; `cargo test` still works and is
 cargo nextest run -E 'binary(golden)'                # one integration binary
 cargo nextest run -E 'binary(mcp)'                   # shares golden's bun + upstream-checkout prerequisites
 cargo nextest run -E 'binary(lsp)'                   # needs rust-analyzer on PATH (rustup component); hard-fails without it
-cargo nextest run -p ganja-core permission           # tests whose name matches "permission"
+cargo nextest run -p ganja-permission                # the permission engine's own tests
+cargo nextest run --workspace permission             # every test whose name matches "permission"
 cargo nextest run -p ganja-tui snapshot_tool_error   # one snapshot test
 cargo insta review                                   # TUI snapshots: crates/ganja-tui/src/snapshots/
 ```
@@ -86,22 +88,26 @@ Two suites need setup, and both are documented in `crates/ganja-core/tests/AGENT
 
 ## Architecture
 
-Three crates, and the boundary between the first two is load-bearing.
+Six crates. Two boundaries are load-bearing, and both are asserted rather than trusted: nothing in the engine may reach a terminal, and nothing beneath the engine may reach the engine. The dependency direction runs `ganja-cli` → `ganja-tui` → `ganja-core` → `ganja-tool` → `ganja-permission` → `ganja-protocol`.
 
-**`ganja-core`** — the engine. No terminal dependency (CI-enforced), so it is testable headless and can later be served over a socket. Every `Command`, `Event` and message type is serde-derived from day one; that serialization constraint — not a trait — is what preserves the path to `ganja serve` (P7).
+**`ganja-protocol`** — the types every side of the app speaks: `Command`, `Event`, `Message`/`Part`, `ToolState`, `Usage`, and the ids that sort in creation order. Serde-derived from day one; that serialization constraint — not a trait — is what preserves the path to serving the engine over a socket and to transcripts that replay from disk. Its dependency list is `serde` and the value type a tool call's arguments arrive as, which is the whole reason it is a crate: a frontend that renders a transcript builds nothing else.
+
+**`ganja-permission`** — a call becomes one or more patterns; the **last matching rule wins**, and **every** pattern must be allowed for the call to run unasked. Rules layer builtin defaults < the agent's < the config's < the answers a person stored. Shell "always" answers remember the *kind* of command via upstream's arity table. A subagent inherits the refusals and never the allows: nobody is watching its turn. `project.rs` rides along — which worktree this is decides where the answers are stored and what counts as outside it — and the crate's own docs own that the name is a small lie about that.
+
+**`ganja-tool`** — `Tool` trait + `Registry::with_builtins()` (read, edit, write, glob, grep, `bash`, todowrite, webfetch), plus `task`, which the engine registers once it knows which agents this session may spawn. Schemas generated from the argument structs; `FileTimes` enforces read-before-write; glob/grep run in-process on the ripgrep crates. `write` and `edit` reach the disk through a directory descriptor (`anchor.rs`), never twice through a path, so a link swapped in after the permission dialog has nothing to redirect. `watch.rs` is here too, beside the log it reports into. It depends on `ganja-permission` and on nothing else of ours — the engine is deliberately outside its graph, so a tool that seems to need the loop is a tool that needs another value in its `ToolCtx`.
+
+**`ganja-core`** — the engine. No terminal dependency (CI-enforced), so it is testable headless and can later be served over a socket. It re-exports the three crates above under the module names they always had — `ganja_core::protocol`, `::permission`, `::project`, `::tool`, `::watch` — so the split cost no caller a rewrite; new code that wants one of them alone should depend on it directly.
 
 - `engine.rs` — commands in, an ordered event stream out. Delivery is **lossless**: a bounded `mpsc`, so backpressure lands on the turn task and never on the render loop. **One subscriber**, **one turn at a time**. The event stream is complete — a frontend that applies every event holds exactly what the next `ChatRequest` will carry.
 - `session.rs` — the agent loop. Mark a step, ask the model, execute the tools it called, repeat until a request ends without tool calls. **Tool results are information, never control flow**: a refusal, an unknown tool, unparseable arguments or a failed tool all become error text the model reads next, and the loop continues. Only a cancel or a dead provider ends a turn early; there is no step cap.
 - `provider/` — `Provider` trait, Anthropic Messages and OpenAI chat completions over a hand-rolled SSE splitter, plus the fake provider. Two failure channels, never a completed turn. Retry only before the first byte. Credential-travel bounds (no redirects, https-or-loopback) live in `provider/mod.rs`.
-- `tool/` — `Tool` trait + `Registry::with_builtins()` (read, edit, write, glob, grep, `bash`, todowrite, webfetch), plus `task`, which the engine registers once it knows which agents this session may spawn. Schemas generated from the argument structs; `FileTimes` enforces read-before-write; glob/grep run in-process on the ripgrep crates. `write` and `edit` reach the disk through a directory descriptor (`anchor.rs`), never twice through a path, so a link swapped in after the permission dialog has nothing to redirect.
-- `permission.rs` — a call becomes one or more patterns; the **last matching rule wins**, and **every** pattern must be allowed for the call to run unasked. Rules layer builtin defaults < the agent's < the config's < the answers a person stored. Shell "always" answers remember the *kind* of command via upstream's arity table. A subagent inherits the refusals and never the allows: nobody is watching its turn.
 - `mcp.rs` — config-named MCP servers, dialled concurrently in the background at startup and never reconnected. Their tools join the registry as `mcp__<server>__<tool>`, every one of them asking by default.
 - `lsp/` — language servers, opt-in by config and spawned lazily by the first touch of a file they claim. Diagnostics — errors only, pushed and pulled, merged and deduped — are appended to `edit`/`write` results at one seam in `session.rs`; no LSP failure may fail a tool call or a turn.
 - `agent.rs` / `instruction.rs` / `command.rs` — who a turn runs as (build, plan, general, explore, plus whatever the config adds), the system prompt it runs under (a base prompt per model family, the `<env>` block, the `AGENTS.md` family), and the slash commands it can run.
 - `config.rs` — `ganja.jsonc`/`ganja.json` across three tiers, under the environment and the flags. Unknown top-level keys are refused by name.
-- `auth.rs` / `project.rs` / `catalog.rs` / `storage.rs` — credentials (env beats file, `SecretString` throughout), project resolution by walking up to `.git`, model sizing and pricing (fetched, cached under the XDG cache home, falling back to a compiled-in snapshot that never fails), and versioned session storage.
+- `auth.rs` / `catalog.rs` / `storage.rs` / `snapshot.rs` — credentials (env beats file, `SecretString` throughout), model sizing and pricing (fetched, cached under the XDG cache home, falling back to a compiled-in snapshot that never fails), and versioned session storage.
 
-**`ganja-tui`** — every pixel, no engine logic. One `tokio::select!` owns all mutable UI state; `App::handle` is the only mutator, which is what makes components testable without a terminal. Frames coalesce to 16ms for streaming bursts; a keystroke redraws immediately. Themes are loadable data (four ported from upstream, plus whatever `~/.config/ganja/themes/` holds), the palette and the `/` menu are two views of the same command set, `@` raises a file menu, and a leading `!` hands the line to a shell. `/copy` and `/copy-message` put the conversation or the last reply on the clipboard, pasted text arrives whole through bracketed paste, and a configured MCP server that cannot be reached is named in the status bar.
+**`ganja-tui`** — every pixel, no engine logic. It links `ganja-protocol` for the types it renders and `ganja-tool` for the one thing it runs in-process, the `@` menu's glob walk. One `tokio::select!` owns all mutable UI state; `App::handle` is the only mutator, which is what makes components testable without a terminal. Frames coalesce to 16ms for streaming bursts; a keystroke redraws immediately. Themes are loadable data (four ported from upstream, plus whatever `~/.config/ganja/themes/` holds), the palette and the `/` menu are two views of the same command set, `@` raises a file menu, and a leading `!` hands the line to a shell. `/copy` and `/copy-message` put the conversation or the last reply on the clipboard, pasted text arrives whole through bracketed paste, and a configured MCP server that cannot be reached is named in the status bar.
 
 **`ganja-cli`** — clap; no subcommand starts the TUI.
 
@@ -131,6 +137,6 @@ The four gates above, all green, before a phase is called done. Unit tests live 
 
 ### External
 
-Load-bearing choices, all pinned in the workspace manifest: `tokio` (runtime), `ratatui` 0.30 + `ratatui-textarea` (TUI), `reqwest` with rustls (provider HTTP; no OpenSSL), `secrecy` (key material wiped on drop), `schemars` (tool argument schemas generated from the argument structs), `ignore`/`grep-searcher`/`grep-regex` (ripgrep internals, so glob and grep run in-process instead of shelling out to `rg`), `similar` (unified diffs from `edit`), `etcetera` (XDG paths), `jsonc-parser` (config files in the dialect upstream's are written in, decoded in document order so permission rules keep theirs), `nucleo-matcher` (fuzzy ranking behind the palette), `libc` (the unix calls the shell tool and the anchored file I/O are built on), `insta` + `expectrl` + `assert_cmd` (snapshot, pty and CLI tests).
+Load-bearing choices, all pinned in the workspace manifest — which is also where each member crate is declared as a path dependency, with the reason it exists: `tokio` (runtime), `ratatui` 0.30 + `ratatui-textarea` (TUI), `reqwest` with rustls (provider HTTP; no OpenSSL), `secrecy` (key material wiped on drop), `schemars` (tool argument schemas generated from the argument structs), `ignore`/`grep-searcher`/`grep-regex` (ripgrep internals, so glob and grep run in-process instead of shelling out to `rg`), `similar` (unified diffs from `edit`), `etcetera` (XDG paths), `jsonc-parser` (config files in the dialect upstream's are written in, decoded in document order so permission rules keep theirs), `nucleo-matcher` (fuzzy ranking behind the palette), `libc` (the unix calls the shell tool and the anchored file I/O are built on), `insta` + `expectrl` + `assert_cmd` (snapshot, pty and CLI tests).
 
 <!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->

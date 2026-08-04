@@ -44,7 +44,7 @@ Widget state lives in the component struct, never in a global; components expose
 
 ### Internal
 
-`ganja-core` — for `Engine`, `Command`, `Event`, `catalog` pricing, and the permission types the dialog renders.
+`ganja-core` — for `Engine`, `catalog` pricing, and the permission types the dialog renders. `ganja-protocol` — for `Command`, `Event` and the `Message`/`Part` model a transcript is built from, named directly rather than through the engine's re-export, because rendering takes the protocol and nothing else. `ganja-tool` — for the one thing this crate runs in-process: the `@` file menu's glob walk, which builds its own `ToolCtx` and a `FileTimes` of its own so nothing it touches enters the session's read log.
 
 ### External
 

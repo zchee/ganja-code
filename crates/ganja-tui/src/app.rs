@@ -17,10 +17,12 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
-use ganja_core::{
-    Command, Engine, Event as CoreEvent, FinishReason, Message, PartBody, PermissionReply, Role,
-    ToolCtx, ToolState, Usage, catalog, tool::FileTimes,
+use ganja_core::{Engine, catalog};
+use ganja_protocol::{
+    Command, Event as CoreEvent, FinishReason, Message, PartBody, PermissionReply, Role, ToolState,
+    Usage,
 };
+use ganja_tool::{FileTimes, ToolCtx};
 use ratatui::{
     DefaultTerminal, Terminal,
     backend::Backend,
@@ -254,7 +256,7 @@ pub struct App {
     /// The tools the `@` menu drives. The registry rather than the glob tool
     /// alone, so the menu asks for its walker by the name the engine knows it
     /// by instead of holding a second copy of the decision.
-    tools: ganja_core::Registry,
+    tools: ganja_tool::Registry,
     /// Every theme this run can switch to, and which one is active.
     themes: Themes,
     theme: Theme,
@@ -328,7 +330,7 @@ impl App {
             mcp_servers: 0,
             mcp_notice: None,
             mcp_resolved: 0,
-            tools: ganja_core::Registry::with_builtins(),
+            tools: ganja_tool::Registry::with_builtins(),
             themes,
             theme,
             totals: Totals::default(),
@@ -1888,10 +1890,13 @@ mod tests {
 
     use futures::{FutureExt as _, StreamExt as _, stream::BoxStream};
     use ganja_core::{
-        Engine, Event as CoreEvent, FinishReason, Message, Part, PartBody, PartId, PermissionId,
-        PermissionReply, SessionId, SessionInfo, Storage, ToolState, Usage,
+        Engine, SessionId, SessionInfo, Storage,
         provider::{FakeProvider, fake},
         storage::VERSION,
+    };
+    use ganja_protocol::{
+        Event as CoreEvent, FinishReason, Message, Part, PartBody, PartId, PermissionId,
+        PermissionReply, ToolState, Usage,
     };
     use ratatui::{
         Terminal,
@@ -1925,7 +1930,7 @@ mod tests {
         Engine::new(
             Arc::new(FakeProvider::default()),
             model,
-            Arc::new(ganja_core::Registry::new(Vec::new())),
+            Arc::new(ganja_tool::Registry::new(Vec::new())),
             ganja_core::Permissions::default(),
         )
     }
@@ -1946,7 +1951,7 @@ mod tests {
             Engine::persistent(
                 Arc::new(FakeProvider::default()),
                 fake::MODEL,
-                Arc::new(ganja_core::Registry::new(Vec::new())),
+                Arc::new(ganja_tool::Registry::new(Vec::new())),
                 ganja_core::Permissions::default(),
                 Storage::open(directory.path().join("storage")),
             ),
@@ -3305,7 +3310,7 @@ mod tests {
         let engine = Engine::new(
             Arc::new(FakeProvider::new("one two three", Duration::from_millis(2))),
             fake::MODEL,
-            Arc::new(ganja_core::Registry::new(Vec::new())),
+            Arc::new(ganja_tool::Registry::new(Vec::new())),
             ganja_core::Permissions::default(),
         );
         let mut events = engine.subscribe().await.expect("the test subscribes first");
@@ -3818,7 +3823,7 @@ mod tests {
         let engine = Engine::new(
             Arc::new(FakeProvider::default()),
             fake::MODEL,
-            Arc::new(ganja_core::Registry::new(Vec::new())),
+            Arc::new(ganja_tool::Registry::new(Vec::new())),
             ganja_core::Permissions::default(),
         )
         .with_agents(registry);
@@ -4750,7 +4755,7 @@ mod tests {
         let text: String = message
             .parts
             .iter()
-            .filter_map(ganja_core::Part::as_text)
+            .filter_map(ganja_protocol::Part::as_text)
             .collect();
         assert_eq!(
             text, "compare @src/lib.rs with @README.md",
@@ -4882,7 +4887,7 @@ mod tests {
         let text: String = message
             .parts
             .iter()
-            .filter_map(ganja_core::Part::as_text)
+            .filter_map(ganja_protocol::Part::as_text)
             .collect();
         assert_eq!(text, "The following tool was executed by the user");
 
@@ -4990,7 +4995,7 @@ mod tests {
         let text: String = message
             .parts
             .iter()
-            .filter_map(ganja_core::Part::as_text)
+            .filter_map(ganja_protocol::Part::as_text)
             .collect();
 
         assert!(
@@ -5030,7 +5035,7 @@ mod tests {
         let text: String = message
             .parts
             .iter()
-            .filter_map(ganja_core::Part::as_text)
+            .filter_map(ganja_protocol::Part::as_text)
             .collect();
 
         assert_eq!(text, "/nonesuch please ");
@@ -5704,10 +5709,10 @@ mod tests {
     /// An assistant message carrying `texts`, as the transcript holds one.
     fn replied(texts: &[&str]) -> Message {
         Message {
-            id: ganja_core::MessageId::ascending(),
-            role: ganja_core::Role::Assistant,
+            id: ganja_protocol::MessageId::ascending(),
+            role: ganja_protocol::Role::Assistant,
             parts: texts.iter().map(|text| Part::text(*text)).collect(),
-            time: ganja_core::MessageTime {
+            time: ganja_protocol::MessageTime {
                 created: 1,
                 completed: Some(2),
             },
@@ -5955,7 +5960,7 @@ mod tests {
 
     /// A conversation of two exchanges, and the id of the prompt an undo of
     /// the last one anchors on.
-    fn two_exchanges(app: &mut App) -> ganja_core::MessageId {
+    fn two_exchanges(app: &mut App) -> ganja_protocol::MessageId {
         app.chat
             .start_message(Message::user("the question that stands"));
         let mut first = Message::assistant("canned");
@@ -5975,9 +5980,9 @@ mod tests {
     }
 
     /// The event the engine sends after an undo.
-    fn reverted(anchor: &ganja_core::MessageId, prompt: Option<&str>) -> AppEvent {
+    fn reverted(anchor: &ganja_protocol::MessageId, prompt: Option<&str>) -> AppEvent {
         AppEvent::core(CoreEvent::RevertChanged {
-            revert: Some(ganja_core::RevertInfo {
+            revert: Some(ganja_protocol::RevertInfo {
                 message_id: anchor.clone(),
                 files: vec!["src/lib.rs".to_owned()],
             }),

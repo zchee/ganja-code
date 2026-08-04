@@ -35,7 +35,7 @@ use std::{
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 
 /// Directory ganja keeps its state in, under the XDG data home. Matches
-/// [`crate::auth`], which resolves the credential store the same way.
+/// `ganja-core`'s `auth`, which resolves the credential store the same way.
 const DIRECTORY: &str = "ganja";
 
 /// Directory per-project state is grouped under, mirroring upstream's
@@ -213,10 +213,11 @@ fn readable(root: &Path) -> String {
 /// encoding can express would collide, which costs them a shared directory and
 /// nothing else.
 ///
-/// Shared with [`crate::snapshot`], which names a worktree the same way and for
-/// the same reason: the value ends up in a directory name that has to keep
-/// meaning the same thing across upgrades.
-pub(crate) fn digest(root: &Path) -> String {
+/// Shared with `ganja-core`'s `snapshot`, which names a worktree the same way
+/// and for the same reason: the value ends up in a directory name that has to
+/// keep meaning the same thing across upgrades. That sharing is what makes it
+/// public rather than crate-private.
+pub fn digest(root: &Path) -> String {
     let mut hash = FNV_BASIS;
     for byte in root.to_string_lossy().as_bytes() {
         hash ^= u64::from(*byte);

@@ -4,6 +4,13 @@
 //! `registry.ts` for the set. Each tool lives in its own module beside this
 //! one, and descriptions are ported from upstream's `*.txt` prompt files
 //! (MIT, attributed in `THIRD_PARTY_NOTICES.md`).
+//!
+//! Its own crate, and one that must never depend on the engine. A tool answers
+//! to the rules and to the filesystem, never to the loop that called it, and
+//! with the engine outside this crate's dependency graph that is the compiler's
+//! rule rather than a convention a reviewer has to keep holding. Everything a
+//! call needs from the outside arrives in [`ToolCtx`], which is why that type is
+//! a bag of values rather than a handle back to a session.
 
 /// Anchored file I/O, shared by the two tools that write. Not public: it is
 /// how `write` and `edit` reach the disk, not something a frontend or a
@@ -17,6 +24,12 @@ pub mod shell;
 pub mod task;
 pub mod todo;
 pub mod truncate;
+/// The stale-read watcher, here because [`FileTimes`] is here: it is built on
+/// the announce channel a read registers itself through, and what it reports is
+/// a state on that same log. The engine still owns *when* a watcher exists — it
+/// constructs one through this module — but nothing about deciding a file went
+/// stale belongs on the far side of the boundary from the log that records it.
+pub mod watch;
 pub mod webfetch;
 pub mod write;
 
@@ -45,8 +58,9 @@ pub struct ToolCtx {
     /// refuse the file — see [`ToolCtx::is_credential_store`].
     ///
     /// Handed over rather than resolved here: which file holds this machine's
-    /// keys is [`crate::auth`]'s answer, and a tool that went and asked for it
-    /// would be a tool that has to know where credentials live. [`None`] is a
+    /// keys is `ganja-core`'s `auth`'s answer, and a tool that went and asked
+    /// for it would be a tool that has to know where credentials live.
+    /// [`None`] is a
     /// caller that named none, and behaves exactly like a store that is not on
     /// this disk — there is then nothing here to protect.
     pub credentials: Option<PathBuf>,
@@ -618,7 +632,7 @@ mod tests {
         std::fs::write(&path, "one").expect("the fixture writes");
 
         let held = std::fs::File::open(&path).expect("the file opens");
-        times.record_stat(&path, crate::tool::anchor::stamp(&held));
+        times.record_stat(&path, crate::anchor::stamp(&held));
 
         // The name is repointed at a different file with a stamp of its own.
         // Renaming rather than rewriting is the point: the descriptor above
@@ -631,7 +645,7 @@ mod tests {
         std::fs::rename(&replacement, &path).expect("the fixture can repoint the name");
 
         times
-            .check_fresh_stat(&path, crate::tool::anchor::stamp(&held))
+            .check_fresh_stat(&path, crate::anchor::stamp(&held))
             .expect("the file this call holds open has not changed");
 
         let refused = times

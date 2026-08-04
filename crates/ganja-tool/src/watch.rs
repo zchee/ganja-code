@@ -50,7 +50,7 @@ use notify::{RecursiveMode, Watcher as _};
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-use crate::tool::FileTimes;
+use crate::FileTimes;
 
 /// Watches the directories holding the files a session has read.
 ///
@@ -337,7 +337,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{Registrar, Roots, bridge, register_reads};
-    use crate::tool::{FileTimes, ToolError};
+    use crate::{FileTimes, ToolError};
 
     /// An event of the shape a backend reports for a saved file.
     fn changed(paths: Vec<PathBuf>) -> notify::Event {

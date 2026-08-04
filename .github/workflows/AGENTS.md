@@ -19,7 +19,7 @@ CI definitions. One workflow, three jobs, and it is the contract every phase is 
 
 Four things in `ci.yaml` are load-bearing and should not be "cleaned up" without understanding them:
 
-- **The core-purity gate is inverted**: `! cargo tree -p ganja-core -e normal | grep -q ratatui`. A plain `grep -c` exits non-zero on *zero* matches, which would fail the build exactly when the core is pure.
+- **The core-purity gate is inverted**: `! cargo tree -p ganja-core -e normal | grep -q ratatui`. A plain `grep -c` exits non-zero on *zero* matches, which would fail the build exactly when the core is pure. Its sibling `! cargo tree -p ganja-tool -e normal | grep -q ganja-core` is inverted for the same reason and asserts the other load-bearing direction: nothing beneath the engine may reach the engine.
 - **Clippy runs at the default lint level** with `-D warnings`, not `pedantic`. That was a deliberate P0 decision.
 - **The toolchain is nightly**, matching `rust-toolchain.toml`.
 - **The upstream spec checkout lands in `upstream/`, not `.omc/`.** `.omc/` is local tooling state that is never committed, so the workflow cannot assume it exists and must not create it. The checkout is `anomalyco/opencode` at `v1.18.11` with `persist-credentials: false`, its `node_modules` are cached and installed with `bun install --frozen-lockfile`, and the path is handed to the tests as `GANJA_OPENCODE_DIR`. The golden suite hard-fails when that is missing, so removing any of those steps turns a real comparison into a green run that compared against nothing.

@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::tool::{
+use crate::{
     Tool, ToolCtx, ToolError, ToolOutput,
     anchor::{self, Anchor},
 };
@@ -153,7 +153,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::WriteTool;
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{FileTimes, Tool, ToolCtx, ToolError};
 
     /// A context rooted at `cwd`, with a fresh, empty read log.
     fn ctx(cwd: PathBuf) -> ToolCtx {
@@ -339,7 +339,7 @@ mod tests {
         let planted = project.path().join("notes.txt");
         std::os::unix::fs::symlink(&target, &planted).expect("the link is creatable");
 
-        crate::tool::anchor::refuse_link_escape(project.path(), &planted).expect(
+        crate::anchor::refuse_link_escape(project.path(), &planted).expect(
             "a link that stays inside the project is no escape — if this starts \
              failing, the refusal below stops proving anything about the open",
         );

@@ -1,0 +1,33 @@
+[package]
+name = "ganja-permission"
+description = "Which calls ganja runs unasked, and which worktree it runs them in."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io. Also load-bearing for deny.toml: with every
+# member unpublished, `allow-wildcard-paths` exempts the workspace's own path
+# dependencies from `wildcards = "deny"`.
+publish = false
+
+[dependencies]
+# Resolves the data directory a stored answer lands under on every platform,
+# macOS included, which is where upstream keeps its own there.
+etcetera.workspace = true
+# Rules are read out of a config file, so the shapes they decode from are
+# declared rather than walked as raw values.
+serde.workspace = true
+# A gated call is described by the arguments the model sent, and those arrive as
+# a value: deciding a pattern means reading one field out of it, not knowing
+# every tool's argument struct.
+serde_json.workspace = true
+thiserror.workspace = true
+# A stored answer that cannot be read is not fatal — the session simply asks
+# again — which is only defensible if the run says which file it dropped.
+tracing.workspace = true
+
+[dev-dependencies]
+# The stored-answer tests write real files under a real directory tree that
+# goes away afterwards, rather than mocking the store.
+tempfile.workspace = true

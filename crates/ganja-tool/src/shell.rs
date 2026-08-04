@@ -30,7 +30,7 @@ use tokio::{
     sync::mpsc,
 };
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
 
 /// How long a command runs before it is killed, when the call names no
 /// timeout. Upstream's `2 * 60 * 1000`.
@@ -198,7 +198,7 @@ impl Tool for ShellTool {
 /// whose reader fell behind would block the pump, which would block the command
 /// on its own pipe, which is the deadlock the drain exists to prevent. What
 /// bounds memory is the reader, not the channel.
-pub(crate) type Progress = mpsc::UnboundedSender<Vec<u8>>;
+pub type Progress = mpsc::UnboundedSender<Vec<u8>>;
 
 impl ShellTool {
     /// Runs the command, reporting each chunk of output to `progress` as it
@@ -208,7 +208,7 @@ impl ShellTool {
     /// the caller that has something: it renders the output into a transcript
     /// row while the command is still running, which is what upstream's
     /// `shellImpl` republishes on the part it faked.
-    pub(crate) async fn run_reporting(
+    pub async fn run_reporting(
         &self,
         args: serde_json::Value,
         ctx: &ToolCtx,
@@ -846,7 +846,7 @@ mod tests {
         Collector, DEFAULT_TIMEOUT, KEEP, SPILL_THRESHOLD, ShellTool, Spill, Spilled, assemble,
         tail,
     };
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError, truncate};
+    use crate::{FileTimes, Tool, ToolCtx, ToolError, truncate};
 
     /// A context rooted at `cwd`, with a cancel nobody has pulled.
     fn ctx(cwd: PathBuf) -> ToolCtx {
@@ -875,7 +875,7 @@ mod tests {
             "the prompt should name the timeout it enforces: {description}"
         );
         assert!(
-            description.contains(&crate::tool::truncate::MAX_LINES.to_string()),
+            description.contains(&crate::truncate::MAX_LINES.to_string()),
             "the prompt should name the output budget it enforces: {description}"
         );
         assert!(
