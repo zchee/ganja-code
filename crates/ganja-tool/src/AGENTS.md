@@ -1,17 +1,17 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-04 | Updated: 2026-08-04 -->
+<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
 
-# tool
+# ganja-tool/src
 
 ## Purpose
 
-What the model can do besides talk. Each tool lives in its own module and implements one trait: an id the model calls and the permission engine gates, a description the model reads, a JSON schema, a one-line `describe` for dialogs and transcripts, and `run`. `Registry::with_builtins()` is the set this build ships.
+What the model can do besides talk. Each tool lives in its own module and implements one trait: an id the model calls and the permission engine gates, a description the model reads, a JSON schema, a one-line `describe` for dialogs and transcripts, and `run`. `Registry::with_builtins()` is the set this build ships. The stale-read watcher sits alongside them, because the read log it reports into is `lib.rs`'s.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `mod.rs` | `Tool` trait, `ToolCtx`, `ToolOutput`, `ToolError`, `ToolDefinition`, `Registry`, `FileTimes` (the read-before-write log, including the `Stale` state `../watch.rs` sets, the queue of files still to be named to the model, and the announcer a watcher subscribes to so it can watch the directory each read lands in), and `ToolCtx::is_credential_store` (the guard `read` and `grep` consult, answering from the store path the call was handed). |
+| `lib.rs` | Crate root: the `Tool` trait, `ToolCtx`, `ToolOutput`, `ToolError`, `ToolDefinition`, `Registry`, `FileTimes` (the read-before-write log, including the `Stale` state `watch.rs` sets, the queue of files still to be named to the model, and the announcer a watcher subscribes to so it can watch the directory each read lands in), and `ToolCtx::is_credential_store` (the guard `read` and `grep` consult, answering from the store path the call was handed). |
 | `read.rs` | `read` — line-numbered file reads. Defaults: 2,000 lines, lines clipped at 2,000 chars, 50 KB budget; binary files are detected by extension and by sampling the first 4 KB. |
 | `edit.rs` | `edit` — replace a string in a file, forgiving about what "the same string" means. The largest module in the crate; see below. |
 | `write.rs` | `write` — create or overwrite a file. |
@@ -20,20 +20,23 @@ What the model can do besides talk. Each tool lives in its own module and implem
 | `shell.rs` | `bash` — runs a command in a shell. 2 min default timeout, own process group, `killpg` on cancel with a 200ms grace and a 100ms output drain. |
 | `todo.rs` | `todowrite` — the task list a turn keeps for itself. Upstream registers exactly one todo tool. |
 | `webfetch.rs` | `webfetch` — reads a page and hands the model its text. `markdown` is a real HTML→markdown conversion (`htmd`, where upstream uses turndown), `text` is the tag stripper, `html` is the body untouched; both renderings drop `script`/`style` and friends whole, and a conversion that fails falls back to the stripper. |
-| `task.rs` | `task` — hands work to a subagent and returns its last words. Holds the tool's own half (schema, the roster the model is offered, argument parsing, upstream's result XML) and the `Subagents` seam it delegates through — `Delegation` in, `Delegated` or `Unanswered` out, all of it strings. Running the child loop is `../subagent.rs`'s. Registered only once the engine knows which agents it may spawn, so a child's registry (this one minus `task`) is the depth limit. |
+| `task.rs` | `task` — hands work to a subagent and returns its last words. Holds the tool's own half (schema, the roster the model is offered, argument parsing, upstream's result XML) and the `Subagents` seam it delegates through — `Delegation` in, `Delegated` or `Unanswered` out, all of it strings. Running the child loop is the engine's. Registered only once the engine knows which agents it may spawn, so a child's registry (this one minus `task`) is the depth limit. |
 | `truncate.rs` | Shared output truncation so one tool call cannot flood the context window: 2,000 lines / 50 KB, with the overflow spilled to a file the notice names. Also the hourly sweep that deletes week-old `tool_*` spills from both candidate directories. |
 | `anchor.rs` | Private. Anchored file I/O for the two tools that write: the parent directory opened `O_DIRECTORY\|O_NOFOLLOW` and walked a component at a time, `openat`/`mkdirat` beneath it, and the project-escape guard both tools share. |
+| `watch.rs` | The stale-read watcher: a **non-recursive** `notify` watch on the directory holding each file as the read log records it — never a recursive watch on the project root, which on Linux is a synchronous walk of the whole tree and blocked startup. Events are narrowed to paths already in the read log and each is stat'd against the stamp that read recorded. A file that moved is marked `Stale` in `FileTimes`, so `write`/`edit` refuse it, and queued for the engine to name to the model. A deliberate extension: upstream watches nothing by default and surfaces nothing to the model. Nothing here can fail a turn; a backend that will not start, or a directory that will not register, is one warning. |
+| `*.txt` | The tool descriptions, byte-verbatim from upstream — attributed in the root notices. `task.txt` sits here rather than under the engine's `prompt/` for the same reason upstream keeps it at `packages/opencode/src/tool/task.txt`: it is this tool's own text. |
 
 ## For AI Agents
 
 ### Working In This Directory
 
+- **This directory may not name the engine.** `ganja-core` is not a dependency of this crate and must not become one; what a call needs from its caller arrives in `ToolCtx`. A doc comment that has to talk about the far side of that line says so in prose rather than as an intra-doc link.
 - **Descriptions are ported verbatim from upstream's `*.txt` prompt files** (MIT, attributed in `THIRD_PARTY_NOTICES.md`). They are prompt engineering, not documentation — do not "improve" the wording, and record any new port in the notices file.
 - **The tool id is what upstream registers, not what the module is called.** `shell.rs` registers as `bash` because upstream pins `ShellID.ToolID` to `bash` for compatibility with saved permissions; `todo.rs` registers as `todowrite`. Renaming an id silently invalidates every stored permission rule.
 - **Schemas are generated by `schemars` from the argument structs**, so what the model is told cannot drift from what the tool parses. Never hand-write a schema.
 - **`write` and `edit` reach the disk through a directory descriptor, never twice through a path.** `anchor.rs` opens the canonical parent with `O_NOFOLLOW`, walking it one component at a time so a directory swapped mid-call is caught, and everything after that — the containment check, the freshness stamp (`fstat` on the descriptor being written, not a fresh path stat), the write itself, and any parent directory that has to be created — happens relative to that one handle. A tool that asks permission before it acts hands an attacker the pause as a window; this is what closes it. The consequence to know: **a symbolic link at the file's own name is refused**, wherever it points, so editing a checkout's symlinked file means naming the file it points at.
 - **Read-before-write is enforced across the whole session.** `FileTimes` refuses to let `write` or `edit` touch an existing file the model has not read, or one that changed on disk after the read; the error text names the remedy ("read it first" / "read it again") because that text is what the model sees next. Where the filesystem offers no modification stamp, recording and checking compare equal — it fails open rather than refusing every edit.
-- **A change is noticed two ways, and the second one is a state.** The stamp comparison above answers when a tool asks; `../watch.rs` answers as the filesystem moves — over the directory of each read file, subscribed through `announce_reads` — and what it records is `Seen::Stale` rather than a new stamp. That state is terminal until the file is read again — which is what makes the refusal survive a file changed and changed back, and what makes the model told about it once per episode instead of once per event. **Both writing tools record the written descriptor's own stamp inside the call that wrote it** (`write.rs`, `edit.rs`, comments at both sites): that ordering is the whole reason a session does not condemn its own edits when they arrive back as events.
+- **A change is noticed two ways, and the second one is a state.** The stamp comparison above answers when a tool asks; `watch.rs` answers as the filesystem moves — over the directory of each read file, subscribed through `announce_reads` — and what it records is `Seen::Stale` rather than a new stamp. That state is terminal until the file is read again — which is what makes the refusal survive a file changed and changed back, and what makes the model told about it once per episode instead of once per event. **Both writing tools record the written descriptor's own stamp inside the call that wrote it** (`write.rs`, `edit.rs`, comments at both sites): that ordering is the whole reason a session does not condemn its own edits when they arrive back as events.
 - **`read` and `grep` refuse ganja's own credential store.** Both run ungated and both take a path the model chose, so a model acting on instructions it read in a file or a fetched page could otherwise put this machine's provider API keys into the transcript that is sent to a provider. `ToolCtx::is_credential_store` is the one guard; the store path is **handed to the call** (the engine resolves it once through `auth::store_path()` at construction) rather than looked up here, so this layer knows nothing about where credentials live, and it compares file *identity* — canonicalizing both sides, so a symlink planted at an innocent name or a `..` route that climbs back down onto the store is caught, while any other file called `auth.json` still reads and searches normally. It is deliberately **not** a secret-file blocklist: whether `.env`, `~/.ssh` or `~/.aws` are off limits is the user's call and belongs to the config layer, and a built-in half-list would advertise a protection it does not actually give. `glob` and directory listings still show the name, because the path is a documented constant and hiding it would buy secrecy the other listing paths immediately contradict. `write` and `edit` are unguarded on purpose — they are permission-gated, so the user sees them, and overwriting a credential file exfiltrates nothing.
 - **Error messages are model-facing.** `ToolError::Failed` text is the next thing the model reads, so it says what went wrong in terms the model can act on.
 - **Cancellation must be honored.** Long work watches `ToolCtx::cancel`; `bash` puts each command in its own process group so cancelling takes the whole group with it rather than orphaning children.
@@ -45,19 +48,19 @@ Each tool has unit tests in its own module. `edit.rs` additionally carries upstr
 
 `simple` → `line-trimmed` → `block-anchor` → `whitespace-normalized` → `indentation-flexible` → `escape-normalized` → `trimmed-boundary` → `context-aware` → `multi-occurrence`
 
-The golden differential (`../../tests/golden.rs`) compares the *arguments* tools ran with against upstream, so an argument name or shape is part of the contract, not an implementation detail. Upstream's camelCase spellings (`filePath`, `oldString`, `newString`) are what the model sends.
+The golden differential (`../../ganja-core/tests/golden.rs`) compares the *arguments* tools ran with against upstream, so an argument name or shape is part of the contract, not an implementation detail. Upstream's camelCase spellings (`filePath`, `oldString`, `newString`) are what the model sends.
 
 ### Common Patterns
 
 - A tool returns `ToolOutput { title, output, metadata }`: one line for a transcript, the result the model reads, and structured extras a frontend may render richer than text (`edit` reports its change as a unified diff so the UI renders a patch rather than two whole files).
 - Paths resolve against `ToolCtx::cwd`, captured once per session so every call agrees on where it is.
-- Adding a tool means registering it in `Registry::with_builtins()` and deciding its default in `permission::ASK_BY_DEFAULT` — anything that writes files, runs commands or reaches the network asks first.
+- Adding a tool means registering it in `Registry::with_builtins()` and deciding its default in `ganja-permission`'s `ASK_BY_DEFAULT` — anything that writes files, runs commands or reaches the network asks first.
 
 ## Dependencies
 
 ### Internal
 
-`crate::permission` (which calls are gated), `crate::project` (where spilled output lands), `crate::protocol` (`ToolState` as a call is reported).
+`ganja-permission` alone: `permission` for which calls are gated, `project` for the worktree a write is checked against. This crate names no protocol type — a `ToolOutput`'s metadata is a `serde_json::Value`, and turning one into a `ToolState` is the engine's step.
 
 ### External
 

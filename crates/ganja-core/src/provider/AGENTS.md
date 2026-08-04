@@ -47,7 +47,7 @@ Live vendor checks are opt-in (`GANJA_LIVE_TEST=1`, `-- --ignored`) and prove on
 
 ### Internal
 
-`crate::protocol` (`Message`, `Usage`, `FinishReason`), `crate::auth` (credential lookup), `crate::catalog` (default models), `crate::tool::ToolDefinition` (what the model is offered).
+`crate::protocol` (`Message`, `Usage`, `FinishReason`) and `crate::tool::ToolDefinition` (what the model is offered) — both re-exports, of `ganja-protocol` and `ganja-tool`; `crate::auth` (credential lookup) and `crate::catalog` (default models), which are this crate's own.
 
 ### External
 

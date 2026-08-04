@@ -2,7 +2,7 @@
 //! about one pending tool call.
 //!
 //! Spec: upstream `packages/tui/src/routes/session/permission.tsx`, trimmed to
-//! the one-shot shape [`ganja_core::PermissionReply`] offers today — no
+//! the one-shot shape [`ganja_protocol::PermissionReply`] offers today — no
 //! "always" confirmation stage and no "reject with a message" stage, both of
 //! which upstream's richer protocol supports and ganja's does not yet.
 //!
@@ -10,7 +10,7 @@
 //! below about measuring rows exists for that case: `y` and `a` are consent,
 //! and consent to a command whose tail was cut without a word is not consent.
 
-use ganja_core::PermissionId;
+use ganja_protocol::PermissionId;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Rect},
@@ -237,7 +237,7 @@ fn wrap_all(lines: &[(String, Style)], width: usize) -> Vec<(String, Style)> {
 
 #[cfg(test)]
 mod tests {
-    use ganja_core::PermissionId;
+    use ganja_protocol::PermissionId;
     use ratatui::{buffer::Buffer, layout::Rect};
     use unicode_width::UnicodeWidthStr as _;
 

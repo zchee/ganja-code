@@ -79,7 +79,7 @@
 //! Two layers, and the boundary between them is who wrote them. The
 //! **baseline** is what a build decided — the ruleset of the agent the session
 //! runs as, which already carries the config's own `permission` block
-//! ([`crate::agent`]) — and it is replaced wholesale whenever the agent
+//! (`ganja-core`'s `agent`) — and it is replaced wholesale whenever the agent
 //! changes. The **stored** rules are the answers a person gave, and they sit
 //! on top, so an "always allow" is never undone by switching agents.
 //! Evaluation walks the concatenation backwards, which is the same
@@ -455,7 +455,7 @@ pub struct Rule {
 
 /// What one tool's key in a `permission` object said.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RuleSet {
+pub enum RuleSet {
     /// `"bash": "ask"` — one action for every call to the tool.
     All(Action),
     /// `"bash": { "git *": "allow", "*": "ask" }` — an action per pattern, in
@@ -525,9 +525,9 @@ impl<'de> Deserialize<'de> for RuleSet {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PermissionConfig {
     /// One entry per tool key, in the order the document spelled them.
-    /// Read outside this module only by the config layer's own tests, which
+    /// Read outside this crate only by the config layer's own tests, which
     /// assert on the order a document was written in before it is flattened.
-    pub(crate) entries: Vec<(String, RuleSet)>,
+    pub entries: Vec<(String, RuleSet)>,
     /// Set when the whole value was a bare action rather than an object.
     /// Upstream's merge only recurses when both sides are objects, so a bare
     /// action replaces everything underneath it instead of merging into it.
@@ -569,7 +569,7 @@ impl PermissionConfig {
     /// appended, and a bare action on either side replaces rather than merges.
     ///
     /// Reached from the config layer, which is where two files become one.
-    pub(crate) fn merge(&mut self, other: &Self) {
+    pub fn merge(&mut self, other: &Self) {
         if other.scalar {
             *self = other.clone();
             return;
@@ -744,7 +744,7 @@ impl Permissions {
     /// dialogs is watching the turn it is used for. Anything unattended wants
     /// [`Permissions::derive_subagent`] instead.
     #[must_use]
-    pub(crate) fn derive(&self, baseline: Vec<Rule>) -> Self {
+    pub fn derive(&self, baseline: Vec<Rule>) -> Self {
         Self {
             baseline,
             rules: self.rules.clone(),
@@ -769,7 +769,7 @@ impl Permissions {
     /// answered "always" and outlive the process the same way — what is
     /// dropped is the parent's answers, not the ability to give one.
     #[must_use]
-    pub(crate) fn derive_subagent(&self, baseline: Vec<Rule>) -> Self {
+    pub fn derive_subagent(&self, baseline: Vec<Rule>) -> Self {
         Self {
             baseline,
             rules: Vec::new(),
@@ -794,7 +794,7 @@ impl Permissions {
     /// baseline, and a config that took `webfetch` away from the session has to
     /// take it away from what the session delegates.
     #[must_use]
-    pub(crate) fn inherited_by_subagent(&self) -> Vec<Rule> {
+    pub fn inherited_by_subagent(&self) -> Vec<Rule> {
         self.ordered()
             .filter(|rule| rule.action == Action::Deny || rule.permission == EXTERNAL_DIRECTORY)
             .cloned()
@@ -805,7 +805,7 @@ impl Permissions {
     /// decides whether a subagent's ruleset gets the `task`/`todowrite` denials
     /// appended (upstream's "unless the set mentions it").
     #[must_use]
-    pub(crate) fn baseline_mentions(rules: &[Rule], permission: &str) -> bool {
+    pub fn baseline_mentions(rules: &[Rule], permission: &str) -> bool {
         rules.iter().any(|rule| rule.permission == permission)
     }
 
@@ -1796,7 +1796,7 @@ fn holding(path: PathBuf) -> PathBuf {
 ///   covering `lst`;
 /// - separators are normalised, so a rule written with either kind of slash
 ///   covers a path written with the other.
-pub(crate) fn matches(text: &str, pattern: &str) -> bool {
+pub fn matches(text: &str, pattern: &str) -> bool {
     let text = normalize(text);
     let pattern = normalize(pattern);
 

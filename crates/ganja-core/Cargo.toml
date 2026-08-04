@@ -15,22 +15,27 @@ publish = false
 # Only where dyn-safety demands it: `Provider` and `Tool` live behind
 # `Arc<dyn _>`.
 async-trait.workspace = true
-# Tool argument schemas, generated from the argument structs themselves so the
-# schema a model sees cannot drift from what the tool parses.
+# The two schemas the engine builds rather than derives: an MCP tool's, handed
+# over by the server, and the no-argument one the title request advertises.
+# Generating a builtin tool's schema is `ganja-tool`'s business.
 schemars.workspace = true
 # Resolves `auth.json` under the XDG data directory on every platform, macOS
 # included, which is where upstream keeps its own credentials there.
 etcetera.workspace = true
 futures.workspace = true
-# `webfetch`'s markdown format is a real conversion of the page's markup, the
-# way upstream's turndown call is, rather than the tag-stripped text that stood
-# in for one until the crate landed.
-htmd.workspace = true
-# `glob` and `grep` walk the filesystem in-process rather than shelling to
-# `rg`, sharing the same crates ripgrep itself is built on for byte-identical
-# glob and ignore-file semantics.
-grep-regex.workspace = true
-grep-searcher.workspace = true
+# Which calls are gated, and which worktree a session is in. Re-exported as
+# `ganja_core::permission` and `ganja_core::project`, the module names every
+# caller already writes.
+ganja-permission.workspace = true
+# The types a frontend speaks, re-exported as `ganja_core::protocol`.
+ganja-protocol.workspace = true
+# The builtin tools and the read log, re-exported as `ganja_core::tool` and
+# `ganja_core::watch`. The dependency runs one way only: nothing in there may
+# name this crate.
+ganja-tool.workspace = true
+# The `AGENTS.md` family is discovered by walking the worktree under the same
+# ignore rules the tools search it with, so a file `glob` would skip is a file
+# the instruction layer skips too.
 ignore.workspace = true
 # Config files are JSONC, the way upstream's are. Only the `serde` feature is
 # on: it makes the parser itself a `serde::Deserializer` over the token stream,
@@ -42,11 +47,6 @@ jsonc-parser = { workspace = true, features = ["serde"] }
 # sync kinds — decoded straight off the wire rather than re-declared here
 # and drifting from the protocol at the next revision of it.
 lsp-types.workspace = true
-# The stale-read watcher subscribes to the platform's own filesystem
-# notifications — FSEvents, inotify, ReadDirectoryChangesW — instead of polling
-# the files a session has read, which on a large checkout would be a stat storm
-# for an answer that is almost always "nothing moved".
-notify.workspace = true
 # The HTTP providers speak SSE, so only `stream` and `json` are load-bearing;
 # the workspace declaration pins rustls so no build here reaches for OpenSSL.
 reqwest.workspace = true
@@ -57,9 +57,6 @@ rmcp.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# `edit` reports what it changed as a unified patch, which a frontend renders
-# instead of the two whole files.
-similar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -71,8 +68,9 @@ url.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 
 [target.'cfg(unix)'.dependencies]
-# The shell tool runs commands in their own process group and `killpg` is the
-# call that ends one; Windows support arrives with its own mechanism later.
+# The LSP and MCP servers this crate spawns are ended by signalling their
+# process group, and `killpg` is that call; Windows support arrives with its own
+# mechanism later.
 libc.workspace = true
 
 [dev-dependencies]

@@ -103,7 +103,7 @@ const REPLACEMENT: &str = "edited-replacement";
 const SCRIPT: &str = "script.json";
 
 /// Where permission answers are stored, relative to the project's data
-/// directory. Pinned to `ganja_core::permission::FILE`.
+/// directory. Pinned to `ganja_permission::permission::FILE`.
 const PERMISSIONS: &str = "permissions.json";
 
 /// A `ganja` process in a pty, reaped however the test that owns it ends.

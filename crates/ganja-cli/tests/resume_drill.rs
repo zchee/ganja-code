@@ -132,7 +132,7 @@ const INTERRUPTED: &str = "[interrupted] the session ended before this reply fin
 const SCRIPT: &str = "script.json";
 
 /// The state a call that is executing is stored in. Pinned to
-/// `ganja_core::protocol::ToolState`, which tags its variants `status`.
+/// `ganja_protocol::ToolState`, which tags its variants `status`.
 const RUNNING: &str = "running";
 
 /// Where a project's sessions live, under its data directory. Pinned to the

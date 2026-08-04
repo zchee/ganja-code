@@ -1,0 +1,23 @@
+[package]
+name = "ganja-protocol"
+description = "The serde-serializable command/event protocol ganja's frontends speak."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io. Also load-bearing for deny.toml: with every
+# member unpublished, `allow-wildcard-paths` exempts the workspace's own path
+# dependencies from `wildcards = "deny"`.
+publish = false
+
+# Two entries, and that is the point of the crate: a frontend that names an
+# `Event`, or a test that asserts on a `Part`, links this and builds nothing
+# else. Anything that would widen this list belongs on the other side of the
+# boundary.
+[dependencies]
+serde.workspace = true
+# A tool call's arguments and its metadata are whatever the model and the tool
+# put there, so the protocol carries them as values rather than re-declaring
+# every tool's shape here.
+serde_json.workspace = true

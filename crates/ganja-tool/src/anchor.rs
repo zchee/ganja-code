@@ -47,13 +47,15 @@ use std::{
     time::SystemTime,
 };
 
-use crate::{project::Project, tool::ToolError};
+use ganja_permission::project::Project;
+
+use crate::ToolError;
 
 /// The modification stamp of a file that is already open, read from the
 /// descriptor rather than from the path it was opened by.
 ///
-/// What [`crate::tool::FileTimes::record_stat`] and
-/// [`crate::tool::FileTimes::check_fresh_stat`] are documented to want: a
+/// What [`crate::FileTimes::record_stat`] and
+/// [`crate::FileTimes::check_fresh_stat`] are documented to want: a
 /// second resolution of the name would be a second chance for somebody to
 /// point it somewhere else. [`None`] where the filesystem offers no stamp, on
 /// which the read log deliberately fails open.
@@ -153,7 +155,7 @@ impl Anchor {
 ///
 /// The permission gate resolves the same path and asks about it
 /// (`permission.rs`, `outside`), but it answers *before* the call runs, and a
-/// [`crate::permission::Permissions::default`] set has no project to compare
+/// [`ganja_permission::Permissions::default`] set has no project to compare
 /// anything against at all. This is the check the writing tools make for
 /// themselves, before they open anything.
 ///

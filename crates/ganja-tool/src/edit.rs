@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 
-use crate::tool::{
+use crate::{
     Tool, ToolCtx, ToolError, ToolOutput,
     anchor::{self, Anchor},
 };
@@ -1196,7 +1196,7 @@ mod tests {
         SEPARATOR, block, chars_from, is_disproportionate_match, levenshtein, line_spans,
         normalize_whitespace, remove_indentation, replace, trim_diff, unescape,
     };
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError, ToolOutput};
+    use crate::{FileTimes, Tool, ToolCtx, ToolError, ToolOutput};
 
     /// A context over `cwd` whose file log starts empty.
     fn ctx(cwd: &Path) -> ToolCtx {
@@ -1441,7 +1441,7 @@ mod tests {
         let planted = project.path().join("notes.txt");
         std::os::unix::fs::symlink(&target, &planted).expect("the link is creatable");
 
-        crate::tool::anchor::refuse_link_escape(project.path(), &planted).expect(
+        crate::anchor::refuse_link_escape(project.path(), &planted).expect(
             "a link that stays inside the project is no escape — if this starts \
              failing, the refusal below stops proving anything about the open",
         );

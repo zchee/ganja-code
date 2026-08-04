@@ -1,5 +1,11 @@
 //! The wire protocol frontends speak, version 1.
 //!
+//! Its own crate because it is the one thing every side of the app needs and
+//! the only thing some of them need: rendering a transcript, asserting on an
+//! event, or later driving a session from the far end of a socket takes none of
+//! the engine. The dependency list is that boundary made visible, and it is
+//! `serde` and the value type a tool call's arguments arrive as.
+//!
 //! Every type here is serde-serializable so that the same values can later
 //! cross a socket unchanged, and so that P4 can persist a session by writing
 //! them out verbatim. The model follows upstream's `session/message-v2.ts`:
@@ -27,7 +33,10 @@ const PERMISSION_PREFIX: &str = "perm";
 
 /// Milliseconds since the Unix epoch, saturating rather than failing when the
 /// clock is set before 1970.
-pub(crate) fn now() -> u64 {
+///
+/// Public so that the engine stamps a message it minted itself with the same
+/// clock reading the types here carry, rather than a second one of its own.
+pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
@@ -42,7 +51,10 @@ pub(crate) fn now() -> u64 {
 /// lexicographically by creation time and cannot collide inside one process.
 /// Ordering across processes is only as good as the clock, which is the same
 /// guarantee upstream makes.
-pub(crate) fn ascending(prefix: &str) -> String {
+///
+/// Public so that a stored session's ids are minted by this counter too: two
+/// implementations of "sorts after everything before it" is one too many.
+pub fn ascending(prefix: &str) -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     let millis = now();
@@ -220,8 +232,8 @@ pub enum PartBody {
     /// now rather than as it was. That is upstream's shape — its file part
     /// carries a `file://` URL the server resolves at send time — and it is
     /// also why a mention is not a read: nothing here records the file in
-    /// [`FileTimes`](crate::tool::FileTimes), so `edit` still refuses a file
-    /// the model itself has not opened.
+    /// `ganja-tool`'s `FileTimes`, so `edit` still refuses a file the model
+    /// itself has not opened.
     File {
         /// Where the file is, relative to the project root.
         path: String,

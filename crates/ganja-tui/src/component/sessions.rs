@@ -259,7 +259,8 @@ fn clip(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ganja_core::{SessionId, SessionInfo, Usage, storage::VERSION};
+    use ganja_core::{SessionId, SessionInfo, storage::VERSION};
+    use ganja_protocol::Usage;
     use ratatui::{buffer::Buffer, layout::Rect};
 
     use super::{DAY, HOUR, MINUTE, Sessions, age};

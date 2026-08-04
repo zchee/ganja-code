@@ -1,0 +1,71 @@
+[package]
+name = "ganja-tool"
+description = "What the model can do besides talk: ganja's builtin tools and the read log behind them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io. Also load-bearing for deny.toml: with every
+# member unpublished, `allow-wildcard-paths` exempts the workspace's own path
+# dependencies from `wildcards = "deny"`.
+publish = false
+
+[dependencies]
+# Only where dyn-safety demands it: `Tool` lives behind `Arc<dyn _>`.
+async-trait.workspace = true
+# Where truncated output spills to, resolved the same way every other store in
+# this workspace resolves its directory.
+etcetera.workspace = true
+futures.workspace = true
+# Which calls are gated, and the project root a write is checked for
+# containment against. The engine is not in this list and must never be: a tool
+# answers to the rules, not to the loop that called it.
+ganja-permission.workspace = true
+# `glob` and `grep` walk the filesystem in-process rather than shelling to
+# `rg`, sharing the same crates ripgrep itself is built on for byte-identical
+# glob and ignore-file semantics.
+grep-regex.workspace = true
+grep-searcher.workspace = true
+ignore.workspace = true
+# `webfetch`'s markdown format is a real conversion of the page's markup, the
+# way upstream's turndown call is, rather than the tag-stripped text that stood
+# in for one until the crate landed.
+htmd.workspace = true
+# The stale-read watcher subscribes to the platform's own filesystem
+# notifications — FSEvents, inotify, ReadDirectoryChangesW — instead of polling
+# the files a session has read, which on a large checkout would be a stat storm
+# for an answer that is almost always "nothing moved".
+notify.workspace = true
+# `webfetch` is the one tool that reaches the network; the workspace
+# declaration pins rustls so no build here reaches for OpenSSL.
+reqwest.workspace = true
+# Tool argument schemas, generated from the argument structs themselves so the
+# schema a model sees cannot drift from what the tool parses.
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `edit` reports what it changed as a unified patch, which a frontend renders
+# instead of the two whole files.
+similar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# `CancellationToken` lives behind `rt`; the workspace declaration carries no
+# features so crates opt into exactly the modules they use.
+tokio-util = { workspace = true, features = ["rt"] }
+
+[target.'cfg(unix)'.dependencies]
+# The shell tool runs commands in their own process group and `killpg` is the
+# call that ends one; the anchored file I/O is built on `openat` and friends
+# from the same crate. Windows support arrives with its own mechanism later.
+libc.workspace = true
+
+[dev-dependencies]
+# Every tool that touches the disk is tested against a real directory tree that
+# goes away afterwards, rather than against a mocked filesystem.
+tempfile.workspace = true
+# `net` is for `webfetch` only: its tests serve canned HTTP over a loopback
+# socket rather than mocking the client, so the request really is built, sent
+# and streamed. The library itself needs no listener.
+tokio = { workspace = true, features = ["net"] }

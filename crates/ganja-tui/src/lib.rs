@@ -1,8 +1,8 @@
 //! ratatui frontend for ganja.
 //!
 //! The crate owns every pixel and no engine logic: it turns terminal events
-//! into [`Command`](ganja_core::Command)s and
-//! [`Event`](ganja_core::Event)s into frames.
+//! into [`Command`](ganja_protocol::Command)s and
+//! [`Event`](ganja_protocol::Event)s into frames.
 
 pub mod app;
 pub mod clipboard;
@@ -24,10 +24,11 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use ganja_core::{
-    AgentRegistry, Engine, Message, Project, SessionId, Storage, catalog,
+    AgentRegistry, Engine, Project, SessionId, Storage, catalog,
     config::{Config, Overrides, ThemeMode},
     instruction, provider,
 };
+use ganja_protocol::Message;
 use ratatui::crossterm::{
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
@@ -131,7 +132,7 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     let mut engine = Engine::persistent(
         selection.provider,
         selection.model,
-        Arc::new(ganja_core::Registry::with_builtins()),
+        Arc::new(ganja_tool::Registry::with_builtins()),
         ganja_core::Permissions::load(&cwd),
         storage,
     )
@@ -180,7 +181,7 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
 
     // Spilled tool output older than a week is nobody's context any more, and
     // nothing else on this machine ever deletes it.
-    ganja_core::tool::truncate::spawn_sweep_loop(background.clone());
+    ganja_tool::truncate::spawn_sweep_loop(background.clone());
 
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_input() {
@@ -354,10 +355,11 @@ mod tests {
     use std::sync::Arc;
 
     use ganja_core::{
-        Engine, Message, Storage,
+        Engine, Storage,
         config::{Config, ThemeMode},
         provider::{FakeProvider, fake},
     };
+    use ganja_protocol::Message;
     use tempfile::TempDir;
 
     use super::{Resume, configure_themes, notice, stored_transcript, system_parts};
@@ -374,7 +376,7 @@ mod tests {
         Engine::persistent(
             Arc::new(FakeProvider::default()),
             model,
-            Arc::new(ganja_core::Registry::new(Vec::new())),
+            Arc::new(ganja_tool::Registry::new(Vec::new())),
             ganja_core::Permissions::default(),
             Storage::open(directory.path().join("storage")),
         )
@@ -393,7 +395,7 @@ mod tests {
             title: None,
             created: 1,
             updated: 1,
-            usage: ganja_core::Usage::default(),
+            usage: ganja_protocol::Usage::default(),
             context_tokens: 0,
             summary: None,
             agent: None,
@@ -474,7 +476,7 @@ mod tests {
             transcript
                 .iter()
                 .flat_map(|message| message.parts.iter())
-                .filter_map(ganja_core::Part::as_text)
+                .filter_map(ganja_protocol::Part::as_text)
                 .collect::<String>(),
             "the newer conversation"
         );
@@ -501,7 +503,7 @@ mod tests {
             transcript
                 .iter()
                 .flat_map(|message| message.parts.iter())
-                .filter_map(ganja_core::Part::as_text)
+                .filter_map(ganja_protocol::Part::as_text)
                 .collect::<String>(),
             "the older conversation"
         );

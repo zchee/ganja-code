@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
 
 /// How many lines a call reads when it names no `limit`. Upstream's
 /// `DEFAULT_READ_LIMIT`.
@@ -537,7 +537,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::ReadTool;
-    use crate::tool::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{FileTimes, Tool, ToolCtx, ToolError};
 
     /// A context rooted at `cwd`, with a fresh, empty read log and no
     /// credential store to refuse.

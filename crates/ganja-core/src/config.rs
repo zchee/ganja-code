@@ -45,7 +45,7 @@ use serde::{
     Deserialize,
     de::{self, MapAccess, Visitor},
 };
-use url::{Host, Url};
+use url::Url;
 
 use crate::{
     // The `permission` block parses straight into the types the permission
@@ -788,7 +788,9 @@ fn check_lsp(config: Option<&LspConfig>) -> Result<(), String> {
 /// later hides it behind a status line. A remote URL that is neither `https`
 /// nor loopback is the same refusal [`crate::provider`] makes about a base URL
 /// and for the same reason — `headers` is where a token goes, and plain HTTP
-/// to somewhere else puts it on the wire in the clear.
+/// to somewhere else puts it on the wire in the clear. Literally the same:
+/// the predicate is [`crate::provider::reachable_in_the_clear`], and only the
+/// message below is this module's.
 ///
 /// Neither message quotes the URL. A remote entry is configuration, and
 /// configuration is allowed to carry a credential in its userinfo, so echoing
@@ -803,7 +805,7 @@ fn check_mcp(servers: &BTreeMap<String, McpServer>) -> Result<(), String> {
             McpServer::Remote(remote) => {
                 let parsed = Url::parse(&remote.url)
                     .map_err(|error| format!("mcp server \"{name}\" has no valid url: {error}"))?;
-                if !reachable_in_the_clear(&parsed) {
+                if !crate::provider::reachable_in_the_clear(&parsed) {
                     return Err(format!(
                         "mcp server \"{name}\" must be reached over https, or over http to \
                          loopback; anything else puts its headers on the wire in the clear"
@@ -814,22 +816,6 @@ fn check_mcp(servers: &BTreeMap<String, McpServer>) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-/// Whether `url` may be spoken to given that its headers may carry a secret.
-///
-/// The host is compared as a parsed host and never as text, for the reasons
-/// spelled out at `provider::check_base_url`: every cheap spelling of this
-/// check is beaten by a hostname somebody else registered.
-fn reachable_in_the_clear(url: &Url) -> bool {
-    let loopback = match url.host() {
-        Some(Host::Ipv4(address)) => address.is_loopback(),
-        Some(Host::Ipv6(address)) => address.is_loopback(),
-        Some(Host::Domain(name)) => name == "localhost",
-        None => false,
-    };
-
-    url.scheme() == "https" || (url.scheme() == "http" && loopback)
 }
 
 #[cfg(test)]

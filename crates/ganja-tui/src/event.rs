@@ -1,6 +1,6 @@
 //! What the event loop reacts to.
 
-use ganja_core::Event as CoreEvent;
+use ganja_protocol::Event as CoreEvent;
 use ratatui::crossterm::event::Event as TermEvent;
 
 /// One thing that woke the loop up.
