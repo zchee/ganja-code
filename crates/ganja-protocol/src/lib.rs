@@ -7,13 +7,14 @@
 //! `serde` and the value type a tool call's arguments arrive as.
 //!
 //! Every type here is serde-serializable so that the same values can later
-//! cross a socket unchanged, and so that P4 can persist a session by writing
-//! them out verbatim. The model follows upstream's `session/message-v2.ts`:
+//! cross a socket unchanged, and so that a stored session is these values
+//! written out verbatim. The model follows upstream's `session/message-v2.ts`:
 //! messages carry ordered parts, parts carry a type tag beside their id, and
 //! ids sort in creation order.
 //!
-//! P2 ships text parts. P3 adds tool and step parts as new [`PartBody`]
-//! variants, which changes nothing already on the wire.
+//! Text parts came first; tool and step parts arrived later as new
+//! [`PartBody`] variants, changing nothing already on the wire — which is the
+//! pattern every further variant is expected to follow.
 
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -156,7 +157,8 @@ pub enum Role {
 /// What a turn spent, as the provider reported it.
 ///
 /// Cost stays out until there is a model table to price tokens against; the
-/// counts are what every provider reports and what P4 accumulates per session.
+/// counts are what every provider reports and what the engine accumulates per
+/// session.
 ///
 /// # The three input counters are disjoint
 ///
@@ -201,7 +203,7 @@ pub struct Usage {
 /// The kinds of content a [`Part`] can carry.
 ///
 /// The tag travels as a `type` field beside the part's id, which is the shape
-/// upstream's parts have, so P4's stored transcripts can add variants without
+/// upstream's parts have, so a stored transcript can gain variants without
 /// moving anything already on the wire.
 ///
 /// `Eq` stops at [`PartBody::Tool`]: tool arguments are arbitrary JSON, and
@@ -628,8 +630,9 @@ pub enum PermissionReply {
 /// order and without loss.
 ///
 /// The stream is the whole truth: a frontend that applies every event in order
-/// holds the same transcript the engine does, which is what lets P4 rebuild a
-/// session and P7 serve one over a socket. Names follow upstream's bus —
+/// holds the same transcript the engine does, which is what lets a session be
+/// rebuilt from disk and later served over a socket. Names follow upstream's
+/// bus —
 /// [`Event::PartDelta`] is `message.part.delta`, [`Event::PartStarted`] and
 /// [`Event::PartUpdated`] are `message.part.updated`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -967,9 +970,9 @@ mod tests {
     }
 
     /// Pins the bytes of every variant. A change here is a protocol change: it
-    /// invalidates stored sessions (P4) and anything speaking the protocol over
-    /// a socket (P7), so it has to be a deliberate edit rather than a side
-    /// effect of renaming a field.
+    /// invalidates stored sessions and anything speaking the protocol over a
+    /// socket, so it has to be a deliberate edit rather than a side effect of
+    /// renaming a field.
     #[test]
     fn the_wire_format_is_stable() {
         let cases = [
