@@ -460,6 +460,96 @@ async fn switching_agents_swaps_the_prompt_and_keeps_the_environment() {
     );
 }
 
+/// A `!` passthrough between the switch and the first build prompt does not
+/// spend the notice that planning is over.
+///
+/// The reminder is defined as a comparison against the previous turn
+/// (**D37**), and only a turn that asks the model anything can carry it: a
+/// passthrough puts a command and its output in the transcript without a
+/// request. Counting one as "the previous turn" retired a notice that was
+/// never delivered.
+#[tokio::test]
+async fn a_shell_passthrough_does_not_consume_the_notice_that_planning_is_over() {
+    let directory = temporary();
+    let storage = Storage::open(directory.path().join("storage"));
+    let session = seeded(&storage);
+
+    let (provider, seen) = Recorder::new(vec![says("one"), says("two")]);
+    let engine = Engine::persistent(
+        provider,
+        "recorder-model",
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        Storage::open(directory.path().join("storage")),
+    )
+    .with_agents(agents(&Config::default()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine.resume(&session).await.expect("the session loads");
+
+    engine
+        .send(Command::SwitchAgent {
+            name: "plan".to_owned(),
+        })
+        .await
+        .expect("plan is a builtin primary agent");
+    engine
+        .send(Command::SendPrompt {
+            text: "how would you do it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    engine
+        .send(Command::SwitchAgent {
+            name: "build".to_owned(),
+        })
+        .await
+        .expect("build is a builtin primary agent");
+    engine
+        .send(Command::RunShell {
+            command: "printf 'on branch main'".to_owned(),
+        })
+        .await
+        .expect("an idle engine accepts a command");
+    drain(&mut events).await;
+
+    engine
+        .send(Command::SendPrompt {
+            text: "go ahead".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let requests = seen.lock().expect("the request log is never poisoned");
+    assert_eq!(
+        requests.len(),
+        2,
+        "a passthrough asks the model nothing, so only the two prompts are here"
+    );
+    let carried: Vec<&str> = requests[1]
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)
+        .map(|message| {
+            message
+                .parts
+                .iter()
+                .filter_map(|part| part.as_text())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        carried,
+        vec!["go ahead", BUILD_SWITCH_REMINDER],
+        "the first turn that asks the model after the switch is the one that is told"
+    );
+}
+
 /// The planning notice rides on the request and never on the transcript, and
 /// the one that says planning is over is said once.
 #[tokio::test]

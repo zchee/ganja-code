@@ -930,11 +930,20 @@ impl Engine {
 
         // Read once, and recorded as the previous turn's agent in the same
         // breath, so that the plan-to-build reminder fires for exactly one
-        // turn however many follow it.
+        // turn however many follow it. Only a prompt is that kind of turn: a
+        // `!` passthrough and a compaction never put the reminder in front of
+        // the model, so letting one stand in as "the previous turn" would
+        // spend a notice that was never delivered (deviation:
+        // build-switch-counts-only-turns-that-ask).
+        let asks_the_model = matches!(kind, TurnKind::Prompt { .. });
         let (mut model, name, previous) = {
             let mut active = self.active();
             let name = active.agent.clone();
-            let previous = std::mem::replace(&mut active.previous_agent, name.clone());
+            let previous = if asks_the_model {
+                std::mem::replace(&mut active.previous_agent, name.clone())
+            } else {
+                active.previous_agent.clone()
+            };
 
             (active.model.clone(), name, previous)
         };

@@ -176,22 +176,26 @@ pub struct App {
 }
 
 impl App {
-    /// Builds an app driven by `engine`, which is asking `model`, showing
-    /// `notice` in the status bar, drawn in whichever of `themes` is active.
+    /// Builds an app driven by `engine`, showing `notice` in the status bar,
+    /// drawn in whichever of `themes` is active.
+    ///
+    /// The model is **asked of the engine** rather than passed in beside it.
+    /// The two can already differ by the time a session starts — the default
+    /// agent may name a model of its own, and a resumed session restores the
+    /// one it was left on — and a frontend that priced against the model the
+    /// process was launched with would be pricing tokens nobody spent. Every
+    /// later change re-reads it from the same place, so this is the one that
+    /// used to be able to disagree.
     ///
     /// The registry is handed in rather than loaded here so that the disk —
     /// the user's theme directory and their stored pick — is read on the one
     /// startup path that should read it, and so that the lane wiring
     /// configuration in has somewhere to put a configured theme.
     #[must_use]
-    pub fn new(
-        engine: Engine,
-        model: impl Into<String>,
-        notice: Option<String>,
-        mut themes: Themes,
-    ) -> Self {
+    pub fn new(engine: Engine, notice: Option<String>, mut themes: Themes) -> Self {
         let theme = themes.theme();
         let agent = engine.agent();
+        let model = engine.model();
         let engine_commands = command::EngineCommand::roster(engine.commands());
         let mut status = Status::new(notice);
         status.set_agent(agent.clone());
@@ -199,7 +203,7 @@ impl App {
         Self {
             engine,
             provider: String::new(),
-            model: model.into(),
+            model,
             agent,
             chat: Chat::default(),
             editor: Editor::new(&theme),
@@ -1544,9 +1548,16 @@ mod tests {
     };
 
     fn engine() -> Engine {
+        engine_asking(fake::MODEL)
+    }
+
+    /// The same, asking for a model of the caller's choosing — which is what
+    /// the pricing tests need, since prices come from a catalog the fake
+    /// model is not in.
+    fn engine_asking(model: &str) -> Engine {
         Engine::new(
             Arc::new(FakeProvider::default()),
-            fake::MODEL,
+            model,
             Arc::new(ganja_core::Registry::new(Vec::new())),
             ganja_core::Permissions::default(),
         )
@@ -1555,7 +1566,7 @@ mod tests {
     /// An app over the builtin themes: no disk is read, so a test never
     /// sees the machine's own theme directory or stored pick.
     fn app() -> App {
-        App::new(engine(), fake::MODEL, None, Themes::builtin())
+        App::new(engine(), None, Themes::builtin())
     }
 
     /// An app whose engine writes into, and lists from, a store in `directory`.
@@ -1572,7 +1583,6 @@ mod tests {
                 ganja_core::Permissions::default(),
                 Storage::open(directory.path().join("storage")),
             ),
-            fake::MODEL,
             None,
             Themes::builtin(),
         )
@@ -1682,10 +1692,7 @@ mod tests {
         let engine = engine();
         let events = engine.subscribe().await.expect("the test subscribes first");
 
-        (
-            App::new(engine, fake::MODEL, None, Themes::builtin()),
-            events,
-        )
+        (App::new(engine, None, Themes::builtin()), events)
     }
 
     /// Feeds the app the next `count` engine events.
@@ -1772,7 +1779,7 @@ mod tests {
             .select(name)
             .unwrap_or_else(|| panic!("{name} should be a builtin theme"));
 
-        App::new(engine(), fake::MODEL, None, themes)
+        App::new(engine(), None, themes)
     }
 
     /// The transcript the per-theme snapshots are taken over: a prompt, a
@@ -2100,7 +2107,7 @@ mod tests {
     async fn usage_accumulates_across_turns_and_reaches_the_status_bar() {
         const MODEL: &str = "claude-sonnet-5";
 
-        let mut app = App::new(engine(), MODEL, None, Themes::builtin());
+        let mut app = App::new(engine_asking(MODEL), None, Themes::builtin());
         let usage = Usage {
             input_tokens: 6_000,
             output_tokens: 400,
@@ -2130,6 +2137,47 @@ mod tests {
         // Two turns of $0.01795: input 6k at $2, 6k cached at $0.20, 300
         // written at $2.50, output 400 at $10, all per million tokens.
         assert!(screen.contains("$0.0359"), "got:\n{screen}");
+    }
+
+    /// **Non-vacuity target for asking the engine which model it is asking.**
+    /// The default agent names a model of its own, so the engine has already
+    /// left the one the process was launched with by the time the screen is
+    /// built. Handing the launch model to the app instead — what the startup
+    /// path used to do — prices this turn against a model nothing asked for,
+    /// and the fake one has no price at all, so the dollars vanish.
+    #[tokio::test]
+    async fn a_default_agents_own_model_is_what_the_first_turn_is_priced_against() {
+        const MODEL: &str = "claude-sonnet-5";
+
+        let config: ganja_core::config::Config = serde_json::from_value(serde_json::json!({
+            "default_agent": "review",
+            "agent": { "review": { "mode": "primary", "model": format!("anthropic/{MODEL}") } }
+        }))
+        .expect("the fixture is a config");
+        let engine = engine().with_agents(Arc::new(
+            ganja_core::AgentRegistry::build(&config).expect("the fixture resolves an agent"),
+        ));
+        assert_ne!(
+            engine.model(),
+            fake::MODEL,
+            "the fixture only proves anything while the agent moves the engine off the launch model"
+        );
+
+        let mut app = App::new(engine, None, Themes::builtin());
+        app.handle(finished(
+            MODEL,
+            Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 0,
+                ..Usage::default()
+            },
+        ))
+        .await
+        .expect("a turn end is handled");
+
+        assert_eq!(app.model, MODEL);
+        // A million input tokens at $2 per million.
+        assert_eq!(app.totals.cost_usd, Some(2.0));
     }
 
     /// The fake provider reports usage against a model with no price, which is
@@ -2168,7 +2216,7 @@ mod tests {
     async fn a_failed_turn_still_bills_for_what_it_spent() {
         const MODEL: &str = "claude-sonnet-5";
 
-        let mut app = App::new(engine(), MODEL, None, Themes::builtin());
+        let mut app = App::new(engine_asking(MODEL), None, Themes::builtin());
 
         app.handle(AppEvent::core(CoreEvent::MessageFinished {
             message_id: Message::assistant(MODEL).id,
@@ -2207,7 +2255,7 @@ mod tests {
     async fn a_turn_without_usage_does_not_disturb_the_totals() {
         const MODEL: &str = "claude-sonnet-5";
 
-        let mut app = App::new(engine(), MODEL, None, Themes::builtin());
+        let mut app = App::new(engine_asking(MODEL), None, Themes::builtin());
         app.handle(finished(
             MODEL,
             Usage {
@@ -2766,7 +2814,7 @@ mod tests {
             ganja_core::Permissions::default(),
         );
         let mut events = engine.subscribe().await.expect("the test subscribes first");
-        let mut app = App::new(engine, fake::MODEL, None, Themes::builtin());
+        let mut app = App::new(engine, None, Themes::builtin());
 
         for event in typing("hello") {
             app.handle(event).await.expect("typing is handled");
@@ -3097,7 +3145,7 @@ mod tests {
 
         let mut themes = Themes::builtin();
         themes.adopt_store(store.clone());
-        let mut app = App::new(engine(), fake::MODEL, None, themes);
+        let mut app = App::new(engine(), None, themes);
 
         app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
             .await
@@ -3112,7 +3160,7 @@ mod tests {
 
         let mut reopened = Themes::builtin();
         reopened.adopt_store(store);
-        let next_run = App::new(engine(), fake::MODEL, None, reopened);
+        let next_run = App::new(engine(), None, reopened);
 
         assert_eq!(next_run.theme.name(), kept);
         assert_ne!(kept, DEFAULT_THEME, "the fixture must have changed it");
@@ -3126,7 +3174,7 @@ mod tests {
 
         let mut themes = Themes::builtin();
         themes.adopt_store(store.clone());
-        let mut app = App::new(engine(), fake::MODEL, None, themes);
+        let mut app = App::new(engine(), None, themes);
 
         app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
             .await
@@ -3280,7 +3328,7 @@ mod tests {
         )
         .with_agents(registry);
 
-        App::new(engine, fake::MODEL, None, Themes::builtin())
+        App::new(engine, None, Themes::builtin())
     }
 
     /// The whole point of `ctrl+p`: it reaches the list of everything else.
@@ -4165,7 +4213,7 @@ mod tests {
     async fn a_submitted_prompt_carries_its_mentions_and_keeps_their_text() {
         let engine = engine();
         let mut events = engine.subscribe().await.expect("the test subscribes first");
-        let mut app = App::new(engine, fake::MODEL, None, Themes::builtin());
+        let mut app = App::new(engine, None, Themes::builtin());
 
         typed(&mut app, "compare @src/lib.rs with @README.md").await;
         // The menu is still up over the mention the cursor is in, and it owns
@@ -4425,7 +4473,7 @@ mod tests {
     async fn submitting_an_engine_command_runs_it_with_what_was_typed_after_it() {
         let engine = engine();
         let mut events = engine.subscribe().await.expect("the test subscribes first");
-        let mut app = App::new(engine, fake::MODEL, None, Themes::builtin());
+        let mut app = App::new(engine, None, Themes::builtin());
 
         typed(&mut app, "/init focus on the test suite").await;
         app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
@@ -4464,7 +4512,7 @@ mod tests {
     async fn an_unknown_slash_command_is_sent_as_the_text_it_is() {
         let engine = engine();
         let mut events = engine.subscribe().await.expect("the test subscribes first");
-        let mut app = App::new(engine, fake::MODEL, None, Themes::builtin());
+        let mut app = App::new(engine, None, Themes::builtin());
 
         // Trailing space, so the menu is closed and Enter reaches the submit.
         typed(&mut app, "/nonesuch please ").await;

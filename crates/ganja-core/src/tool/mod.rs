@@ -419,6 +419,53 @@ mod tests {
         times.check_fresh(&path).expect("re-reading repairs it");
     }
 
+    /// **D78.** The stamp forms answer for the *descriptor* they were given a
+    /// stamp of, never for whatever the name resolves to when they are asked.
+    ///
+    /// The fixture is the race in slow motion: the name is repointed at a
+    /// different file while the first one stays open, which is exactly what an
+    /// attacker gets to do between a permission dialog and the write that
+    /// follows it. The held file has not changed, so the write may proceed; a
+    /// second look at the name would have said otherwise, and the path form is
+    /// asserted alongside to show it really does say otherwise.
+    ///
+    /// What this cannot reach is the call sites: whether `write.rs` and
+    /// `edit.rs` hand over `anchor::stamp(&file)` or a fresh path stat is
+    /// visible only in the source, because outside the race window the two
+    /// agree and the window is not one a test can step into.
+    #[test]
+    fn a_held_files_own_stamp_is_what_freshness_is_judged_on() {
+        let times = FileTimes::default();
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        let held = std::fs::File::open(&path).expect("the file opens");
+        times.record_stat(&path, crate::tool::anchor::stamp(&held));
+
+        // The name is repointed at a different file with a stamp of its own.
+        // Renaming rather than rewriting is the point: the descriptor above
+        // still refers to the original, which is now reachable no other way.
+        let replacement = dir.path().join("b.txt");
+        std::fs::write(&replacement, "something else entirely").expect("the fixture writes");
+        std::fs::File::open(&replacement)
+            .and_then(|file| file.set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .expect("the fixture can move the stamp");
+        std::fs::rename(&replacement, &path).expect("the fixture can repoint the name");
+
+        times
+            .check_fresh_stat(&path, crate::tool::anchor::stamp(&held))
+            .expect("the file this call holds open has not changed");
+
+        let refused = times
+            .check_fresh(&path)
+            .expect_err("the name now leads somewhere else");
+        assert!(
+            matches!(&refused, ToolError::Failed(message) if message.contains("read it again")),
+            "the path form must really disagree, or the assertion above proves nothing: {refused:?}"
+        );
+    }
+
     #[test]
     fn the_file_log_is_shared_by_clone_not_copied() {
         let times = Arc::new(FileTimes::default());

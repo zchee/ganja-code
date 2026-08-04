@@ -212,8 +212,37 @@ impl Default for Keybinds {
 ///
 /// Code and modifiers only: the kind (press, repeat) is the caller's gate, and
 /// the state carries things like caps-lock that no binding is about.
+///
+/// Both sides are folded into one spelling first, because shift has more than
+/// one. A config file writes `shift+a`, and the terminal reports the capital
+/// `A` that shift already produced — sometimes with the modifier still set and
+/// sometimes without. Comparing those literally is how a `shift+…` binding
+/// parses, loads, renders in a hint, and then never fires.
 fn same(bound: KeyEvent, pressed: KeyEvent) -> bool {
-    bound.code == pressed.code && bound.modifiers == pressed.modifiers
+    canonical(bound) == canonical(pressed)
+}
+
+/// One key event in the single spelling a comparison can be made in.
+///
+/// Shift is not a modifier of a key the way ctrl is: the terminal applies it
+/// and hands over the result, so it is folded into the key itself and dropped
+/// from the modifiers. Every other modifier is left exactly as it came, and an
+/// unshifted `a` therefore still does not answer to `A`.
+fn canonical(key: KeyEvent) -> (KeyCode, KeyModifiers) {
+    let shifted = key.modifiers.contains(KeyModifiers::SHIFT);
+    let code = match key.code {
+        KeyCode::Char(character) if shifted => {
+            // `to_uppercase` can yield more than one character for a few
+            // letters; a key is one, and the first is the one a keyboard sends.
+            KeyCode::Char(character.to_uppercase().next().unwrap_or(character))
+        }
+        // Shift-tab has its own key code, so `shift+tab` and `backtab` are two
+        // ways of writing the key every terminal reports as the second.
+        KeyCode::Tab if shifted => KeyCode::BackTab,
+        other => other,
+    };
+
+    (code, key.modifiers - KeyModifiers::SHIFT)
 }
 
 /// Every alternative in a comma-separated binding.
@@ -230,6 +259,10 @@ fn parse(value: &str) -> Result<Vec<KeyEvent>, String> {
 }
 
 /// One `ctrl+shift+x` style binding.
+///
+/// Case-insensitive throughout, which is why case cannot be what carries
+/// shift: a shifted letter is written `shift+a`, never `A`. [`same`] is where
+/// that meets what the terminal reports.
 fn key(text: &str) -> Option<KeyEvent> {
     let lowered = text.to_ascii_lowercase();
     let mut parts = lowered.split('+').peekable();
@@ -504,6 +537,67 @@ mod tests {
             refusal.to_string().contains("hypermeta+z"),
             "the message should name it: {refusal}"
         );
+    }
+
+    /// A `shift+…` binding has to survive the round trip through the terminal,
+    /// which reports the letter shift already produced rather than the letter
+    /// the config file wrote — with the modifier still set on some terminals
+    /// and folded away on others. Both have to reach the action, and the
+    /// unshifted key must still not.
+    #[test]
+    fn a_shifted_binding_answers_to_the_key_the_terminal_actually_reports() {
+        let binds = Keybinds::from_config(&configured(&[("agent_cycle", "shift+a")]))
+            .expect("a legible binding loads");
+
+        let cases = [
+            (KeyCode::Char('A'), KeyModifiers::SHIFT, true),
+            (KeyCode::Char('A'), KeyModifiers::NONE, true),
+            (KeyCode::Char('a'), KeyModifiers::SHIFT, true),
+            (KeyCode::Char('a'), KeyModifiers::NONE, false),
+        ];
+
+        for (code, modifiers, reaches) in cases {
+            assert_eq!(
+                binds.binds(Action::AgentCycle, pressed(code, modifiers)),
+                reaches,
+                "{code:?}+{modifiers:?}"
+            );
+            assert_eq!(
+                binds.action(pressed(code, modifiers)) == Some(Action::AgentCycle),
+                reaches,
+                "{code:?}+{modifiers:?} through the lookup that has no action in hand"
+            );
+        }
+    }
+
+    /// Shift-tab is the one key with two names, and every terminal reports it
+    /// under the second. Both spellings must reach it, and neither may reach
+    /// plain tab.
+    #[test]
+    fn shift_tab_and_backtab_are_one_key_however_they_were_written() {
+        for spelling in ["shift+tab", "backtab"] {
+            let binds = Keybinds::from_config(&configured(&[("themes_open", spelling)]))
+                .expect("a legible binding loads");
+
+            for modifiers in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+                assert!(
+                    binds.binds(Action::ThemesOpen, pressed(KeyCode::BackTab, modifiers)),
+                    "{spelling} should answer to backtab+{modifiers:?}"
+                );
+            }
+            assert!(
+                !binds.binds(
+                    Action::ThemesOpen,
+                    pressed(KeyCode::Tab, KeyModifiers::NONE)
+                ),
+                "{spelling} is not plain tab"
+            );
+            assert_eq!(
+                Keybinds::defaults().action(pressed(KeyCode::BackTab, KeyModifiers::SHIFT)),
+                None,
+                "and cycling agents on tab is not reached by shift-tab"
+            );
+        }
     }
 
     #[test]
