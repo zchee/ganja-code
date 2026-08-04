@@ -578,8 +578,18 @@ fn global_dir() -> Option<PathBuf> {
 }
 
 /// The global tier's files, in merge order.
+///
+/// Reversed out of [`FILES`] order for the same reason the project walk
+/// reverses: merging applies later over earlier, so the name that has to win —
+/// `ganja.jsonc` where both sit in one directory — must be merged last.
 fn global_files() -> Vec<PathBuf> {
-    global_dir().map(|dir| existing(&dir)).unwrap_or_default()
+    global_dir()
+        .map(|dir| {
+            let mut files = existing(&dir);
+            files.reverse();
+            files
+        })
+        .unwrap_or_default()
 }
 
 /// The one file a flag or [`CONFIG_ENV`] named, if either did. The flag wins:

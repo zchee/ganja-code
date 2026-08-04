@@ -232,6 +232,21 @@ impl FileTimes {
             .insert(path.to_owned(), stamp);
     }
 
+    /// Forgets every read, so that what the model may write is judged against
+    /// the conversation it is actually in.
+    ///
+    /// The rule is per conversation, not per process: a subagent starts with an
+    /// empty log for exactly this reason. A session the engine puts down —
+    /// cleared or swapped for a stored one — has to leave its reads behind
+    /// with it, or the first thing the next conversation does could be to
+    /// overwrite a file it never opened.
+    pub fn clear(&self) {
+        self.read
+            .lock()
+            .expect("the read log is never poisoned")
+            .clear();
+    }
+
     /// Checks that `path` was read this session and has not changed on disk
     /// since.
     ///

@@ -27,7 +27,7 @@ use futures::{
 };
 use ganja_core::{
     AgentRegistry, Command, Config, Engine, Event, FinishReason, PartBody, PermissionReply,
-    Permissions, Registry, Tool, ToolCtx, ToolError, ToolOutput, ToolState,
+    Permissions, Registry, Storage, Tool, ToolCtx, ToolError, ToolOutput, ToolState,
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
 };
 use serde_json::json;
@@ -52,6 +52,15 @@ impl Recorder {
             }),
             seen,
         )
+    }
+
+    /// Adds a step to the end of the script, for a test whose next answer
+    /// depends on what the first turn produced.
+    fn push(&self, script: Vec<ProviderEvent>) {
+        self.scripts
+            .lock()
+            .expect("the scripts are never poisoned")
+            .push_back(script);
     }
 }
 
@@ -781,4 +790,87 @@ async fn a_primary_agent_may_not_be_run_as_a_subagent() {
         panic!("a primary agent is refused");
     };
     assert_eq!(error, "Unknown agent type: build is not a valid agent type");
+}
+
+/// A `task_id` names a session an earlier call left behind. A **root** id is
+/// not one — least of all the live conversation's own — and running a child
+/// into it would interleave two transcripts in one record. An id that answers
+/// to nothing usable starts a fresh child, which is what an unanswerable one
+/// already did.
+#[tokio::test]
+async fn a_task_id_naming_a_root_session_starts_a_fresh_child_instead() {
+    let directory = tempfile::TempDir::new().expect("a temporary directory is creatable");
+    let storage = Storage::open(directory.path().join("storage"));
+    let (recorder, _) = Recorder::new(vec![says("noted")]);
+    let provider: Arc<dyn Provider> = Arc::clone(&recorder) as Arc<dyn Provider>;
+    let engine = Engine::persistent(
+        provider,
+        "recorder-model",
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        Storage::open(directory.path().join("storage")),
+    )
+    .with_agents(agents(&Config::default()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "remember this".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain_answering(&engine, &mut events, PermissionReply::Once).await;
+
+    let parent = engine
+        .current_session()
+        .expect("the first prompt minted a session")
+        .id;
+
+    // The model hands back the id of the conversation it is having.
+    recorder.push(calls(
+        "task",
+        json!({
+            "description": "find the thing",
+            "prompt": "go and find the thing",
+            "subagent_type": "general",
+            "task_id": parent.as_str(),
+        }),
+    ));
+    recorder.push(says("the child spoke here"));
+    recorder.push(says("and the parent finished"));
+
+    engine
+        .send(Command::SendPrompt {
+            text: "delegate it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("a finished turn leaves the engine idle");
+    drain_answering(&engine, &mut events, PermissionReply::Once).await;
+
+    let said: Vec<String> = storage
+        .load_transcript(&parent)
+        .expect("the parent record reads back")
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .filter_map(|part| match &part.body {
+            PartBody::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !said.iter().any(|text| text == "the child spoke here"),
+        "the child wrote into the conversation it was told to continue: {said:?}"
+    );
+
+    let sessions = storage
+        .list_sessions()
+        .expect("the store lists what it holds");
+    assert!(
+        sessions
+            .iter()
+            .any(|info| info.parent.as_ref() == Some(&parent)),
+        "the child got a session of its own, naming the turn that spawned it: {sessions:?}"
+    );
 }

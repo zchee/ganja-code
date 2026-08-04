@@ -15,8 +15,8 @@ use futures::{
     stream::{self, BoxStream},
 };
 use ganja_core::{
-    Command, Config, Engine, EngineError, Event, FinishReason, PermissionReply, Permissions,
-    Registry, Role, SessionId, SessionInfo, Storage, Usage, command,
+    Command, Config, Engine, EngineError, Event, FinishReason, PartBody, PermissionReply,
+    Permissions, Registry, Role, SessionId, SessionInfo, Storage, ToolState, Usage, command,
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
     storage,
 };
@@ -534,5 +534,86 @@ async fn starting_a_new_session_leaves_the_old_one_on_disk_and_the_next_prompt_f
     assert!(
         stored.contains(&first) && stored.contains(&second),
         "and the old one is still there to resume: {stored:?}"
+    );
+}
+
+/// Read-before-write is a rule about one conversation. Starting a new one has
+/// to leave the old one's reads behind, or the first thing a fresh session
+/// could do is overwrite a file it never opened.
+#[tokio::test]
+async fn a_new_session_does_not_inherit_what_the_last_one_had_read() {
+    let directory = temporary();
+    let target = directory.path().join("notes.md");
+    std::fs::write(&target, "what was there before\n").expect("the fixture file is writable");
+    let path = target.display().to_string();
+
+    let (provider, _) = Recorder::new(vec![
+        calls("read", json!({ "filePath": path })),
+        says("read it"),
+        calls(
+            "write",
+            json!({ "filePath": path, "content": "something else\n" }),
+        ),
+        says("tried to write it"),
+    ]);
+    // No store, so no title request: this is about the read log, and an engine
+    // that titles its sessions would spend a scripted answer on doing so.
+    let engine = Engine::new(
+        provider,
+        "recorder-model",
+        Arc::new(Registry::new(vec![
+            Arc::new(ganja_core::tool::read::ReadTool),
+            Arc::new(ganja_core::tool::write::WriteTool),
+        ])),
+        Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "read it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain_allowing(&engine, &mut events).await;
+
+    engine
+        .send(Command::NewSession)
+        .await
+        .expect("an idle engine accepts a reset");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "now write it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    let seen = drain_allowing(&engine, &mut events).await;
+
+    let refused: Vec<String> = seen
+        .iter()
+        .filter_map(|event| match event {
+            Event::PartUpdated { part, .. } => match &part.body {
+                PartBody::Tool {
+                    state: ToolState::Error { error, .. },
+                    ..
+                } => Some(error.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert!(
+        refused
+            .iter()
+            .any(|error| error.contains("has not been read this session")),
+        "the write had to be refused as unread, got {refused:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("the file is still readable"),
+        "what was there before\n",
+        "and the file it would have overwritten is untouched"
     );
 }
