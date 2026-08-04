@@ -238,8 +238,19 @@ fn reference_sdk() -> PathBuf {
 
 /// The fixture server as a config entry.
 fn reference_server(name: &str) -> Config {
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp/reference-server.mjs");
+    fixture_server(name, "reference-server.mjs")
+}
+
+/// The fixture that ignores stdin EOF, as a config entry.
+fn stubborn_server(name: &str) -> Config {
+    fixture_server(name, "stubborn-server.mjs")
+}
+
+/// One of the fixture servers under `tests/fixtures/mcp/` as a config entry.
+fn fixture_server(name: &str, file: &str) -> Config {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mcp")
+        .join(file);
     assert!(script.is_file(), "{} is missing", script.display());
 
     let sdk = reference_sdk();
@@ -807,4 +818,67 @@ fn no_golden_fixture_asks_for_an_mcp_server() {
         "no golden fixtures were found in {}",
         directory.display()
     );
+}
+
+/// Whether `pid` names a process that is still running.
+///
+/// A zombie counts as gone: it has exited and is waiting to be reaped, which is
+/// the opposite of the orphan this is looking for.
+#[cfg(unix)]
+fn running(pid: u32) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+        .expect("ps runs");
+    let state = String::from_utf8_lossy(&output.stdout);
+    let state = state.trim();
+
+    !state.is_empty() && !state.starts_with('Z')
+}
+
+/// A session that ends without shutting down still takes its servers with it.
+///
+/// `shutdown` is the orderly path and it ends the whole process *group*. This
+/// pins the invariant underneath it: a session that goes away without calling it
+/// must not leave stray `bun` processes behind.
+///
+/// It runs against `stubborn-server.mjs` rather than the reference one, because
+/// a normal stdio server exits when its stdin closes and would make this pass
+/// for a reason that has nothing to do with the invariant. The stubborn fixture
+/// holds its event loop open forever, so only a kill can end it.
+///
+/// **What this does and does not discriminate.** Two mechanisms can satisfy it:
+/// `rmcp`'s `ChildWithCleanup::drop`, and the `kill_on_drop` set beside the
+/// spawn. Dropping the servers here happens on a healthy runtime, which is the
+/// case rmcp's own `tokio::spawn`ed kill already handles — so this test passes
+/// with `kill_on_drop` removed, and does *not* prove that line is carrying
+/// anything. What `kill_on_drop` adds is the case this cannot reach from inside
+/// a `#[tokio::test]`: a runtime being torn down, where a spawned task may never
+/// be polled. Reaching that needs a second process built to die mid-flight.
+/// The test is kept as a regression guard on the invariant itself — if a future
+/// `rmcp` drops its cleanup *and* the `kill_on_drop` goes with it, this is what
+/// notices.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_that_ends_without_shutting_down_leaves_no_server_running() {
+    let config = stubborn_server("fixture");
+    let servers = McpServers::new(config.mcp.clone(), Path::new("."));
+    servers.connect_all().await;
+
+    let groups = servers.process_groups();
+    assert_eq!(groups.len(), 1, "the fixture server connected");
+    let pid = groups[0];
+    assert!(running(pid), "and is running before anything is dropped");
+
+    // The abnormal exit: everything goes away, and `shutdown` is never called.
+    drop(servers);
+
+    for _ in 0..100 {
+        if !running(pid) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    panic!("the MCP server outlived the session that started it (pid {pid})");
 }

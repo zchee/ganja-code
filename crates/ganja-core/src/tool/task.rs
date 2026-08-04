@@ -123,6 +123,10 @@ pub struct Host {
     pub(crate) cwd: PathBuf,
     /// Where the project starts, for the same two uses the parent has.
     pub(crate) root: PathBuf,
+    /// The session's language servers, shared rather than started again: a
+    /// client is identified by `(root, server)`, so a child working in the
+    /// same project reuses the server the parent already has warm.
+    pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
     /// The store, when the engine persists. A child session is an ordinary
     /// stored session that names its parent.
     pub(crate) persistence: Option<Arc<SessionState>>,
@@ -441,6 +445,7 @@ impl Child {
             // A fresh read log: what the parent read is not what the child may
             // write over, and the read-before-write rule is per conversation.
             files: Arc::new(FileTimes::default()),
+            lsp: host.lsp.clone(),
             prompt: args.prompt.clone(),
             cancel,
             pending: Arc::clone(&spawn.pending),

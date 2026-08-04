@@ -34,6 +34,10 @@ ignore.workspace = true
 # order. Going through a `serde_json::Value` instead would sort them, and the
 # order permission rules were written in is what decides which one wins.
 jsonc-parser = { workspace = true, features = ["serde"] }
+# The LSP client's payloads are LSP's own types — diagnostics, positions,
+# sync kinds — decoded straight off the wire rather than re-declared here
+# and drifting from the protocol at the next revision of it.
+lsp-types.workspace = true
 # The HTTP providers speak SSE, so only `stream` and `json` are load-bearing;
 # the workspace declaration pins rustls so no build here reaches for OpenSSL.
 reqwest.workspace = true
@@ -68,8 +72,12 @@ libc.workspace = true
 tempfile.workspace = true
 # `net` is for the provider tests only: they serve canned HTTP over a loopback
 # socket rather than mocking the client, so the request really is built, sent,
-# retried and streamed. The library itself needs no listener.
-tokio = { workspace = true, features = ["net"] }
+# retried and streamed. The library itself needs no listener. `test-util` is
+# for the LSP wait contract: its whole behavior is a freshness window and a
+# 150ms debounce that restarts, and a test that drives the runtime's clock
+# proves those in microseconds where one that slept would spend seconds and
+# still be a race.
+tokio = { workspace = true, features = ["net", "test-util"] }
 # Only to prove that a failed request logs nothing resembling an API key: the
 # secret-hygiene test needs a subscriber it can read back.
 tracing-subscriber.workspace = true

@@ -535,6 +535,10 @@ pub(crate) struct Turn {
     pub(crate) root: PathBuf,
     /// Which files this session has read, shared by every call in it.
     pub(crate) files: Arc<FileTimes>,
+    /// Language servers this session may run. [`None`] is a session whose
+    /// config asked for none, and every tool call then completes exactly as it
+    /// did before this existed.
+    pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
     pub(crate) prompt: String,
     pub(crate) cancel: CancellationToken,
     /// Where an open permission request waits for its reply; the same cell the
@@ -2103,7 +2107,20 @@ async fn resolve(
     };
 
     match result {
-        Ok(output) => {
+        Ok(mut output) => {
+            // The single seam where a language server's opinion reaches the
+            // model. It is here rather than inside `edit`, `write` and `read`
+            // because the observable output is identical either way, and one
+            // place that knows which tools care beats three tools each
+            // remembering to ask. Everything inside swallows its own failures,
+            // so a language server can cost this call some advice and can
+            // never cost it its result.
+            if let Some(lsp) = &turn.lsp {
+                output
+                    .output
+                    .push_str(&lsp.annotate(&call.name, &args, &turn.cwd).await);
+            }
+
             if let Some(part) = set_tool_state(
                 assistant,
                 &call.part_id,
@@ -2531,6 +2548,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             root: std::env::temp_dir(),
             files: Arc::new(FileTimes::default()),
+            lsp: None,
             prompt: "run it".to_owned(),
             cancel,
             pending: Arc::new(std::sync::Mutex::new(None)),
