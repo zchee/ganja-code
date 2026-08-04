@@ -39,7 +39,7 @@ use std::{path::PathBuf, sync::Arc};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -48,9 +48,9 @@ use crate::{
     permission::{Action, Permissions, Rule, TASK},
     protocol::{Event, FinishReason, MessageId, Part, PartBody, PartId, Role, ToolState, Usage},
     provider::Provider,
-    session::{PendingReply, Persist, SessionState, Turn, TurnKind, run_turn},
+    session::{ChildParts, PendingReply, Persist, SessionState, Turn, TurnKind, run_turn},
     storage::{self, SessionId, SessionInfo},
-    tool::{FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput},
+    tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
 };
 
 /// The tool id, which is also the permission key. Both are a permanent
@@ -425,44 +425,26 @@ impl Child {
             },
         ));
 
-        run_turn(Turn {
-            provider: Arc::clone(&host.provider),
-            model: self.model.clone(),
-            system: crate::instruction::joined(
-                agent.prompt.as_deref().or(host.base_prompt.as_deref()),
-                host.prompt_suffix.as_deref(),
-            ),
-            // Upstream's plan/build reminders are about the agent a *person*
-            // switched to; a subagent runs the prompt it was built with.
-            reminders: Vec::new(),
-            kind: TurnKind::Prompt {
-                mentions: Vec::new(),
+        let turn = Turn::child(
+            spawn,
+            ChildParts {
+                model: self.model.clone(),
+                system: crate::instruction::joined(
+                    agent.prompt.as_deref().or(host.base_prompt.as_deref()),
+                    host.prompt_suffix.as_deref(),
+                ),
+                kind: TurnKind::Prompt {
+                    mentions: Vec::new(),
+                },
+                prompt: args.prompt.clone(),
+                permissions,
+                events,
+                history: self.history.clone(),
+                cancel,
+                persist,
             },
-            tools: Arc::clone(&host.tools),
-            permissions: Arc::new(std::sync::Mutex::new(permissions)),
-            cwd: host.cwd.clone(),
-            root: host.root.clone(),
-            // A fresh read log: what the parent read is not what the child may
-            // write over, and the read-before-write rule is per conversation.
-            files: Arc::new(FileTimes::default()),
-            lsp: host.lsp.clone(),
-            // No snapshots of its own: a patch is a diff of the working tree
-            // rather than a record of who wrote to it, so the step of the
-            // *parent* that made this call already covers everything the child
-            // changed — and covers it in the session an `/undo` can reach.
-            snapshots: None,
-            prompt: args.prompt.clone(),
-            cancel,
-            pending: Arc::clone(&spawn.pending),
-            events,
-            slot: Arc::new(Mutex::new(None)),
-            history: Arc::new(Mutex::new(self.history.clone())),
-            // The child's task tool is absent from its registry, so nothing
-            // below it can spawn anything.
-            spawn: None,
-            persist,
-        })
-        .await;
+        );
+        run_turn(turn).await;
 
         let outcome = watcher.await.unwrap_or_else(|_| Outcome {
             stop: ChildStop::Failed("the subagent task did not finish".to_owned()),

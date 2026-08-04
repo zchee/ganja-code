@@ -563,7 +563,146 @@ pub(crate) struct Turn {
     pub(crate) persist: Option<Persist>,
 }
 
+/// What the engine varies from one root turn to the next.
+///
+/// Every field is [`Turn`]'s own, and what each carries is documented there
+/// rather than said twice here. It travels as a struct because a positional
+/// list of twenty would name none of them: `cwd` and `root` are both paths,
+/// and `model`, `system` and `prompt` are all text, so a swapped pair would
+/// compile.
+pub(crate) struct RootParts {
+    pub(crate) provider: Arc<dyn Provider>,
+    pub(crate) model: String,
+    pub(crate) system: Option<String>,
+    pub(crate) reminders: Vec<String>,
+    pub(crate) kind: TurnKind,
+    pub(crate) tools: Arc<Registry>,
+    pub(crate) permissions: Arc<std::sync::Mutex<Permissions>>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) root: PathBuf,
+    pub(crate) files: Arc<FileTimes>,
+    pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
+    pub(crate) snapshots: Option<Arc<crate::snapshot::Snapshots>>,
+    pub(crate) prompt: String,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
+    pub(crate) events: mpsc::Sender<Event>,
+    pub(crate) slot: Arc<Mutex<Option<TurnHandle>>>,
+    pub(crate) history: Arc<Mutex<Vec<Message>>>,
+    pub(crate) spawn: Option<Arc<crate::tool::task::Host>>,
+    pub(crate) persist: Option<Persist>,
+}
+
+/// What a subagent's turn varies, which is everything [`Turn::child`] does not
+/// fix.
+pub(crate) struct ChildParts {
+    /// The subagent's own model when it named one, and the parent's otherwise.
+    pub(crate) model: String,
+    pub(crate) system: Option<String>,
+    pub(crate) kind: TurnKind,
+    pub(crate) prompt: String,
+    /// The ruleset the caller derived, which becomes the child's own: a
+    /// subagent inherits the refusals and never the allows.
+    pub(crate) permissions: Permissions,
+    /// The child's **private** channel, not the sender the parent's turn
+    /// reports on. Every event on the frontend's stream is understood to
+    /// belong to the engine's one current session, so a child that published
+    /// there would be a second conversation on the same wire.
+    pub(crate) events: mpsc::Sender<Event>,
+    /// The transcript a resumed child continues from; empty for a fresh one.
+    pub(crate) history: Vec<Message>,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) persist: Option<Persist>,
+}
+
 impl Turn {
+    /// The engine's own turn: what a person's prompt, `!` command or
+    /// compaction starts.
+    ///
+    /// A root turn is the session's turn. It holds the busy slot a frontend
+    /// reads as idle, carries the read log and the snapshots the whole session
+    /// shares, and is the only kind that may spawn a subagent at all. All of
+    /// that is the engine's to vary, which is why nothing is fixed here — the
+    /// fixed points are [`Turn::child`]'s.
+    pub(crate) fn root(parts: RootParts) -> Self {
+        Self {
+            provider: parts.provider,
+            model: parts.model,
+            system: parts.system,
+            reminders: parts.reminders,
+            kind: parts.kind,
+            tools: parts.tools,
+            permissions: parts.permissions,
+            cwd: parts.cwd,
+            root: parts.root,
+            files: parts.files,
+            lsp: parts.lsp,
+            snapshots: parts.snapshots,
+            prompt: parts.prompt,
+            cancel: parts.cancel,
+            pending: parts.pending,
+            events: parts.events,
+            slot: parts.slot,
+            history: parts.history,
+            spawn: parts.spawn,
+            persist: parts.persist,
+        }
+    }
+
+    /// The turn a subagent runs, spawned by a `task` call rather than by
+    /// anything a person did.
+    ///
+    /// What a child turn is *not* free to vary is the point of this
+    /// constructor: the caller cannot supply the fields below, so the reasons
+    /// they hold are stated once, here, instead of at each place a child is
+    /// started. Two of them are shared with the parent on purpose — the
+    /// pending-reply cell, because the parent is blocked inside this call and
+    /// its slot is the only route a dialog's answer can travel (see
+    /// [`Spawn::pending`]), and the language servers, because a client is
+    /// identified by `(root, server)` and a child in the same project should
+    /// reuse what the parent already has warm (see [`Host::lsp`]).
+    ///
+    /// [`Spawn::pending`]: crate::tool::task::Spawn::pending
+    /// [`Host::lsp`]: crate::tool::task::Host::lsp
+    pub(crate) fn child(spawn: &crate::tool::task::Spawn, parts: ChildParts) -> Self {
+        let host = &spawn.host;
+
+        Self {
+            provider: Arc::clone(&host.provider),
+            model: parts.model,
+            system: parts.system,
+            // Upstream's plan/build reminders are about the agent a *person*
+            // switched to; a subagent runs the prompt it was built with.
+            reminders: Vec::new(),
+            kind: parts.kind,
+            tools: Arc::clone(&host.tools),
+            permissions: Arc::new(std::sync::Mutex::new(parts.permissions)),
+            cwd: host.cwd.clone(),
+            root: host.root.clone(),
+            // A fresh read log: what the parent read is not what the child may
+            // write over, and the read-before-write rule is per conversation.
+            files: Arc::new(FileTimes::default()),
+            lsp: host.lsp.clone(),
+            // No snapshots of its own: a patch is a diff of the working tree
+            // rather than a record of who wrote to it, so the step of the
+            // *parent* that made this call already covers everything the child
+            // changed — and covers it in the session an `/undo` can reach.
+            snapshots: None,
+            prompt: parts.prompt,
+            cancel: parts.cancel,
+            pending: Arc::clone(&spawn.pending),
+            events: parts.events,
+            // The child's turn handle is nobody else's: the busy slot a
+            // frontend reads belongs to the parent, which is busy running this.
+            slot: Arc::new(Mutex::new(None)),
+            history: Arc::new(Mutex::new(parts.history)),
+            // The child's task tool is absent from its registry, so nothing
+            // below it can spawn anything.
+            spawn: None,
+            persist: parts.persist,
+        }
+    }
+
     /// Writes `part` through immediately, when the engine persists.
     fn persist_part(&self, owner: &Message, part: &Part) {
         if let Some(persist) = &self.persist {
@@ -2563,13 +2702,17 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        BufferedCall, Turn, TurnKind, add_usage, attached, parse_args, resolve, resolve_mentions,
+        BufferedCall, ChildParts, RootParts, Turn, TurnKind, add_usage, attached, parse_args,
+        resolve, resolve_mentions,
     };
     use crate::{
         FinishReason, Message, Part, PartBody, Permissions, Registry, ToolState,
         protocol::Usage,
         provider::{FakeProvider, fake},
-        tool::{FileTimes, Tool, ToolCtx, ToolError, ToolOutput},
+        tool::{
+            FileTimes, Tool, ToolCtx, ToolError, ToolOutput,
+            task::{Host, Spawn},
+        },
     };
 
     /// A tool that marks the filesystem the moment its body runs.
@@ -2621,7 +2764,7 @@ mod tests {
         tool: Arc<dyn Tool>,
     ) -> (Turn, mpsc::Receiver<crate::Event>) {
         let (events, received) = mpsc::channel(64);
-        let turn = Turn {
+        let turn = Turn::root(RootParts {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
             model: fake::MODEL.to_owned(),
             system: None,
@@ -2644,7 +2787,7 @@ mod tests {
             history: Arc::new(Mutex::new(Vec::new())),
             spawn: None,
             persist: None,
-        };
+        });
 
         (turn, received)
     }
@@ -2876,6 +3019,181 @@ mod tests {
         assert!(
             times.check_fresh(&path).is_err(),
             "and nothing recorded the file as read"
+        );
+    }
+
+    /// A [`Spawn`] as a `task` call hands one over. The parent is blocked
+    /// inside that call, which is what makes its pending-reply cell free for
+    /// the child to use and its language servers worth reusing.
+    ///
+    /// The receiver comes back with it because dropping it would close the
+    /// parent's event channel, and a dead sender is not what a blocked parent
+    /// is holding.
+    fn parent_spawn(lsp: Option<Arc<crate::lsp::Lsp>>) -> (Spawn, mpsc::Receiver<crate::Event>) {
+        let (events, received) = mpsc::channel(64);
+        let host = Host {
+            provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
+            model: fake::MODEL.to_owned(),
+            agents: Arc::new(
+                crate::agent::Registry::build(&crate::config::Config::default())
+                    .expect("the default config resolves agents"),
+            ),
+            tools: Arc::new(Registry::new(Vec::new())),
+            permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
+            base_prompt: None,
+            prompt_suffix: None,
+            cwd: std::env::temp_dir(),
+            root: std::env::temp_dir(),
+            lsp,
+            persistence: None,
+        };
+
+        let spawn = Spawn {
+            host: Arc::new(host),
+            events,
+            pending: Arc::new(std::sync::Mutex::new(None)),
+            message_id: crate::protocol::MessageId::ascending(),
+            part_id: crate::protocol::PartId::ascending(),
+        };
+
+        (spawn, received)
+    }
+
+    /// The turn a `task` call builds for its subagent, with the child's own
+    /// event channel held open beside it for the same reason.
+    fn child_of(spawn: &Spawn) -> (Turn, mpsc::Receiver<crate::Event>) {
+        let (events, received) = mpsc::channel(64);
+        let turn = Turn::child(
+            spawn,
+            ChildParts {
+                model: fake::MODEL.to_owned(),
+                system: None,
+                kind: TurnKind::Prompt {
+                    mentions: Vec::new(),
+                },
+                prompt: "do the thing".to_owned(),
+                permissions: Permissions::default(),
+                events,
+                history: Vec::new(),
+                cancel: CancellationToken::new(),
+                persist: None,
+            },
+        );
+
+        (turn, received)
+    }
+
+    /// Upstream's plan/build reminders are about the agent a *person* switched
+    /// to. Nobody switched to a subagent, so it is told nothing of the kind.
+    #[test]
+    fn a_child_turn_carries_no_reminders() {
+        let (spawn, _parent) = parent_spawn(None);
+        let (turn, _events) = child_of(&spawn);
+
+        assert!(
+            turn.reminders.is_empty(),
+            "a subagent runs the prompt it was built with: {:?}",
+            turn.reminders
+        );
+    }
+
+    /// Read-before-write is per conversation, so a child begins having read
+    /// nothing — whatever the parent read is not what the child may write over.
+    #[test]
+    fn a_child_turn_starts_a_fresh_read_log() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        let (spawn, _parent) = parent_spawn(None);
+        let (turn, _events) = child_of(&spawn);
+
+        assert!(
+            turn.files.check_fresh(&path).is_err(),
+            "the child has read nothing yet, so it may write nothing yet"
+        );
+        assert_eq!(
+            Arc::strong_count(&turn.files),
+            1,
+            "and the log is its own, not a view of somebody else's"
+        );
+    }
+
+    /// A patch is a diff of the working tree rather than a record of who wrote
+    /// to it, so the parent's own step already covers what the child changed.
+    #[test]
+    fn a_child_turn_takes_no_snapshots_of_its_own() {
+        let (spawn, _parent) = parent_spawn(None);
+        let (turn, _events) = child_of(&spawn);
+
+        assert!(
+            turn.snapshots.is_none(),
+            "the step that made the call is where an `/undo` reaches the change"
+        );
+    }
+
+    /// The busy slot a frontend reads belongs to the parent, which is busy
+    /// running this call. The child's own cell is nobody else's.
+    #[tokio::test]
+    async fn a_child_turn_gets_a_turn_handle_cell_of_its_own() {
+        let (spawn, _parent) = parent_spawn(None);
+        let (turn, _events) = child_of(&spawn);
+
+        assert!(
+            turn.slot.lock().await.is_none(),
+            "nothing is holding the child's cell when it starts"
+        );
+        assert_eq!(
+            Arc::strong_count(&turn.slot),
+            1,
+            "and nobody outside the child's turn can reach it"
+        );
+    }
+
+    /// The depth limit, as the loop sees it: a child has nothing to spawn
+    /// with, so nothing below it can spawn anything.
+    #[test]
+    fn a_child_turn_cannot_spawn_anything() {
+        let (spawn, _parent) = parent_spawn(None);
+        let (turn, _events) = child_of(&spawn);
+
+        assert!(
+            turn.spawn.is_none(),
+            "one level, fixed — and fixed here rather than asked about later"
+        );
+    }
+
+    /// A subagent's permission dialog is answered through the parent's cell:
+    /// the engine's handle routes a reply into that one, and the parent is
+    /// blocked here rather than using it.
+    #[test]
+    fn a_child_turn_shares_the_parents_pending_permission_cell() {
+        let (spawn, _parent) = parent_spawn(None);
+        let (turn, _events) = child_of(&spawn);
+
+        assert!(
+            Arc::ptr_eq(&turn.pending, &spawn.pending),
+            "a child asking through a cell of its own would be a child that hangs"
+        );
+    }
+
+    /// A client is identified by `(root, server)`, so a child working in the
+    /// same project reuses what the parent already has warm.
+    #[test]
+    fn a_child_turn_shares_the_parents_language_servers() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let lsp = crate::lsp::Lsp::new(Some(&crate::config::LspConfig::Enabled(true)), dir.path())
+            .expect("the builtins resolve to at least one server");
+
+        let (spawn, _parent) = parent_spawn(Some(Arc::clone(&lsp)));
+        let (turn, _events) = child_of(&spawn);
+
+        let shared = turn
+            .lsp
+            .expect("a child of a session that has servers is given them");
+        assert!(
+            Arc::ptr_eq(&shared, &lsp),
+            "the same service, not a second one started behind the parent's back"
         );
     }
 }
