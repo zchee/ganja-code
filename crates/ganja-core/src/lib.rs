@@ -22,6 +22,12 @@ pub mod provider;
 pub mod session;
 pub mod snapshot;
 pub mod storage;
+/// Runs the second agent loop a `task` call delegates to.
+///
+/// Crate-private: what a frontend may know about a subagent is the answer that
+/// comes back, and the trait that answer arrives through
+/// ([`tool::task::Subagents`]) is the only part of this that is public.
+pub(crate) mod subagent;
 pub mod tool;
 pub mod watch;
 
@@ -30,13 +36,13 @@ pub use auth::{AuthError, Credential};
 pub use catalog::{Cost, ModelInfo};
 pub use config::{
     AgentConfig, AgentMode, CommandConfig, Config, ConfigError, LspConfig, LspEntry, McpLocal,
-    McpRemote, McpServer, Overrides, PermissionConfig, ThemeMode,
+    McpRemote, McpServer, Overrides, ThemeMode,
 };
 pub use engine::{Engine, EngineError};
 pub use instruction::system_prompt;
 pub use lsp::Lsp;
 pub use mcp::{Servers as McpServers, Status as McpStatus};
-pub use permission::{CallDecision, Decision, Permissions};
+pub use permission::{CallDecision, Decision, PermissionConfig, Permissions};
 pub use project::{Project, ProjectError};
 pub use protocol::{
     Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody, PartId,

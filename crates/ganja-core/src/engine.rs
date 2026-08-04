@@ -46,6 +46,7 @@ use crate::{
     },
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
+    subagent,
     tool::{FileTimes, Registry, task},
     watch,
 };
@@ -243,6 +244,16 @@ pub struct Engine {
     root: PathBuf,
     /// Which files this session has read, shared by every tool call in it.
     files: Arc<FileTimes>,
+    /// Where this build keeps its credentials, handed to every tool call so
+    /// that `read` and `grep` can refuse the file.
+    ///
+    /// Resolved once per engine, at construction: the store cannot move while
+    /// ganja runs, a guard that could be pointed somewhere harmless by setting
+    /// an environment variable mid-run would not be worth much, and `grep`
+    /// would otherwise re-derive the path for every file it walks past.
+    /// [`None`] is a machine with no home directory to resolve a store
+    /// against, where there is nothing here to protect.
+    credentials: Option<PathBuf>,
     /// What reports changes to those files, once somebody started one.
     /// [`None`] is an engine nobody asked to watch — every scripted, golden
     /// and PTY run — where a file changed outside the session is noticed by
@@ -351,6 +362,7 @@ impl Engine {
             cwd,
             root,
             files: Arc::new(FileTimes::default()),
+            credentials: crate::auth::store_path().ok(),
             watcher: std::sync::Mutex::new(None),
             events,
             unclaimed: Mutex::new(Some(receiver)),
@@ -1243,7 +1255,9 @@ impl Engine {
         };
         let rebuilt = self
             .lent()
-            .with(Arc::new(task::TaskTool::new(agents, agent)));
+            .with(Arc::new(task::TaskTool::new(&subagent::roster(
+                agents, agent,
+            ))));
         *self
             .tools
             .lock()
@@ -1326,8 +1340,8 @@ impl Engine {
 
     /// What a `task` call needs to run a child loop, or [`None`] when this
     /// engine has no agents to spawn.
-    fn spawn_host(&self, model: String) -> Option<Arc<task::Host>> {
-        Some(Arc::new(task::Host {
+    fn spawn_host(&self, model: String) -> Option<Arc<subagent::Host>> {
+        Some(Arc::new(subagent::Host {
             provider: Arc::clone(&self.provider),
             model,
             agents: Arc::clone(self.agents.as_ref()?),
@@ -1342,6 +1356,7 @@ impl Engine {
             prompt_suffix: self.prompt_suffix.clone(),
             cwd: self.cwd.clone(),
             root: self.root.clone(),
+            credentials: self.credentials.clone(),
             lsp: self.lsp.clone(),
             persistence: self.persistence.clone(),
         }))
@@ -1596,6 +1611,7 @@ impl Engine {
             cwd: self.cwd.clone(),
             root: self.root.clone(),
             files: Arc::clone(&self.files),
+            credentials: self.credentials.clone(),
             lsp: self.lsp.clone(),
             snapshots: self.snapshots.clone(),
             prompt,

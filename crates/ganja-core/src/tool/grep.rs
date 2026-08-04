@@ -28,7 +28,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, credential_store, is_same_file};
+use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, is_same_file};
 
 /// Most matches a call returns. Upstream's `limit` in `tool/grep.ts`.
 const LIMIT: usize = 100;
@@ -122,11 +122,18 @@ impl Tool for GrepTool {
         let include = args.include;
         let cancel = ctx.cancel.clone();
         let searched = base_dir.clone();
-        // Resolved before the walk rather than inside it: the store cannot move
-        // while ganja runs, and the walk visits every file in the tree.
-        let store = credential_store();
+        // Owned before the walk rather than borrowed into it: the search runs
+        // on a blocking thread that outlives this call's context, and the walk
+        // compares every file in the tree against it.
+        let store = ctx.credentials.clone();
         let matches = tokio::task::spawn_blocking(move || {
-            search(&searched, &pattern, include.as_deref(), store, &cancel)
+            search(
+                &searched,
+                &pattern,
+                include.as_deref(),
+                store.as_deref(),
+                &cancel,
+            )
         })
         .await
         .map_err(|error| ToolError::Failed(format!("the grep search did not finish: {error}")))??;
@@ -338,13 +345,17 @@ mod tests {
     use super::{GrepTool, search};
     use crate::tool::{FileTimes, Tool, ToolCtx, ToolError, read::ReadTool};
 
-    /// A context rooted at `cwd`, with a cancel nobody has pulled.
+    /// A context rooted at `cwd`, with a cancel nobody has pulled and the
+    /// credential store the engine would have named sitting under it.
     fn ctx(cwd: PathBuf) -> ToolCtx {
+        let credentials = cwd.join("ganja").join("auth.json");
+
         ToolCtx {
             cwd,
             cancel: CancellationToken::new(),
             call_id: "call-1".to_owned(),
             files: Arc::new(FileTimes::default()),
+            credentials: Some(credentials),
             spawn: None,
         }
     }
