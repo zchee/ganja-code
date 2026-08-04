@@ -18,6 +18,7 @@ Dev-only scaffolding for `ganja-core`'s integration suites (`crates/ganja-core/t
 | `src/drain.rs` | [`drain`] (collect a turn's events to its finish), [`drain_answering`] (the same, answering every permission dialog with a given reply), [`drain_allowing`] (the same, always `Once`). |
 | `src/session.rs` | [`seeded_session_info`] (a pre-titled `SessionInfo` for seeding storage directly), [`seed_session`] (write one and return its id), [`seed_message`] (write a `Message`'s envelope and parts the way the engine does). |
 | `src/fs.rs` | [`temp_dir`] and [`redirect_xdg_data_home`] (`unsafe`, mutates process environment — see its doc comment for the invariant a caller must uphold). |
+| `src/subagent.rs` | [`ScriptedSubagents`] — the `Subagents` seam a `task` call delegates through, answering each delegation from a queued script and recording what it was asked. The second implementation of that trait, which is what makes it a seam: no provider, no agents, no turn. |
 | `src/agent.rs` | [`agent_registry`], building an `AgentRegistry` from a fixture `Config` for suites that need one to construct an engine but are not testing config resolution itself. |
 
 ## For AI Agents

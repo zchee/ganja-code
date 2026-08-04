@@ -1287,6 +1287,9 @@ impl App {
             cancel: CancellationToken::new(),
             call_id: MENTION_CALL.to_owned(),
             files: Arc::new(FileTimes::default()),
+            // The menu is a file walk, not a conversation: it has no
+            // credentials to guard and nothing to delegate to.
+            credentials: None,
             spawn: None,
         };
 

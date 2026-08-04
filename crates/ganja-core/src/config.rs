@@ -48,7 +48,10 @@ use serde::{
 use url::{Host, Url};
 
 use crate::{
-    permission::{Action, Rule},
+    // The `permission` block parses straight into the types the permission
+    // layer evaluates: a config file describes rules, and what a rule *is* is
+    // not this module's to say.
+    permission::PermissionConfig,
     project::Project,
 };
 
@@ -67,11 +70,6 @@ const DIRECTORY: &str = "ganja";
 /// upstream's `toReversed()`, whose second effect is that the outermost
 /// ancestor merges first so the closest directory wins.
 const FILES: [&str; 2] = ["ganja.jsonc", "ganja.json"];
-
-/// The pattern that covers every call to a tool, mirroring the private `ANY` in
-/// [`crate::permission`]: a rule written as `"bash": "ask"` is a rule about all
-/// of `bash`, and that is how it has to be spelled once flattened.
-const ANY: &str = "*";
 
 /// How a config file is parsed.
 ///
@@ -399,167 +397,6 @@ impl CommandConfig {
         overlay(&mut self.description, other.description);
         overlay(&mut self.agent, other.agent);
         overlay(&mut self.model, other.model);
-    }
-}
-
-/// What one tool's key in a `permission` object said.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RuleSet {
-    /// `"bash": "ask"` — one action for every call to the tool.
-    All(Action),
-    /// `"bash": { "git *": "allow", "*": "ask" }` — an action per pattern, in
-    /// the order they were written.
-    Patterns(Vec<(String, Action)>),
-}
-
-impl RuleSet {
-    /// Overlays `other`, replicating upstream's `mergeDeep`: two objects merge
-    /// key by key, with a re-specified pattern keeping its original position
-    /// and taking the new action, and anything else replacing wholesale.
-    fn merge(&mut self, other: &Self) {
-        match (self, other) {
-            (Self::Patterns(mine), Self::Patterns(theirs)) => {
-                for (pattern, action) in theirs {
-                    match mine.iter_mut().find(|(name, _)| name == pattern) {
-                        Some(slot) => slot.1 = action.clone(),
-                        None => mine.push((pattern.clone(), action.clone())),
-                    }
-                }
-            }
-            (slot, replacement) => *slot = replacement.clone(),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for RuleSet {
-    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        /// Accepts either spelling a tool's key may take.
-        struct Shape;
-
-        impl<'de> Visitor<'de> for Shape {
-            type Value = RuleSet;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an action, or an object mapping patterns to actions")
-            }
-
-            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Action::deserialize(de::value::StrDeserializer::new(value)).map(RuleSet::All)
-            }
-
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
-                let mut patterns = Vec::with_capacity(map.size_hint().unwrap_or_default());
-                while let Some((pattern, action)) = map.next_entry::<String, Action>()? {
-                    patterns.push((pattern, action));
-                }
-
-                Ok(RuleSet::Patterns(patterns))
-            }
-        }
-
-        deserializer.deserialize_any(Shape)
-    }
-}
-
-/// The `permission` object of a config file, with its key order intact.
-///
-/// Order is semantic. Evaluation is last-match-wins ([`crate::permission`]), so
-/// which of two rules covering the same call was written second is the whole
-/// answer — which is why this is a list rather than a map, and why nothing here
-/// ever sorts.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PermissionConfig {
-    /// One entry per tool key, in the order the document spelled them.
-    entries: Vec<(String, RuleSet)>,
-    /// Set when the whole value was a bare action rather than an object.
-    /// Upstream's merge only recurses when both sides are objects, so a bare
-    /// action replaces everything underneath it instead of merging into it.
-    scalar: bool,
-}
-
-impl PermissionConfig {
-    /// The rules this config asks for, flattened and in order.
-    #[must_use]
-    pub fn rules(&self) -> Vec<Rule> {
-        self.entries
-            .iter()
-            .flat_map(|(tool, set)| match set {
-                RuleSet::All(action) => vec![Rule {
-                    permission: tool.clone(),
-                    pattern: ANY.to_owned(),
-                    action: action.clone(),
-                }],
-                RuleSet::Patterns(patterns) => patterns
-                    .iter()
-                    .map(|(pattern, action)| Rule {
-                        permission: tool.clone(),
-                        pattern: pattern.clone(),
-                        action: action.clone(),
-                    })
-                    .collect(),
-            })
-            .collect()
-    }
-
-    /// Whether the config asked for no rules at all.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Overlays `other`, replicating upstream's `mergeDeep` at both levels: a
-    /// re-specified tool keeps its position and merges, a tool that is new is
-    /// appended, and a bare action on either side replaces rather than merges.
-    fn merge(&mut self, other: &Self) {
-        if other.scalar {
-            *self = other.clone();
-            return;
-        }
-
-        for (tool, incoming) in &other.entries {
-            match self.entries.iter_mut().find(|(name, _)| name == tool) {
-                Some(slot) => slot.1.merge(incoming),
-                None => self.entries.push((tool.clone(), incoming.clone())),
-            }
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PermissionConfig {
-    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        /// Accepts either spelling the `permission` key may take.
-        struct Shape;
-
-        impl<'de> Visitor<'de> for Shape {
-            type Value = PermissionConfig;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an action, or an object mapping tools to actions")
-            }
-
-            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                let action = Action::deserialize(de::value::StrDeserializer::new(value))?;
-
-                Ok(PermissionConfig {
-                    entries: vec![(ANY.to_owned(), RuleSet::All(action))],
-                    scalar: true,
-                })
-            }
-
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
-                let mut entries = Vec::with_capacity(map.size_hint().unwrap_or_default());
-                while let Some((tool, set)) = map.next_entry::<String, RuleSet>()? {
-                    entries.push((tool, set));
-                }
-
-                Ok(PermissionConfig {
-                    entries,
-                    scalar: false,
-                })
-            }
-        }
-
-        deserializer.deserialize_any(Shape)
     }
 }
 
@@ -1002,10 +839,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ANY, AgentMode, Config, ConfigError, LspConfig, McpServer, NonZeroU64, Overrides,
-        ThemeMode, existing, merge_files, project_files, read, split_model,
+        AgentMode, Config, ConfigError, LspConfig, McpServer, NonZeroU64, Overrides, ThemeMode,
+        existing, merge_files, project_files, read, split_model,
     };
-    use crate::permission::Action;
+    use crate::permission::{Action, RuleSet};
 
     fn temporary() -> TempDir {
         TempDir::new().expect("a temporary directory is creatable")
@@ -1027,8 +864,8 @@ mod tests {
             .entries
             .iter()
             .flat_map(|(tool, set)| match set {
-                super::RuleSet::All(action) => vec![(tool.as_str(), ANY, action.clone())],
-                super::RuleSet::Patterns(patterns) => patterns
+                RuleSet::All(action) => vec![(tool.as_str(), "*", action.clone())],
+                RuleSet::Patterns(patterns) => patterns
                     .iter()
                     .map(|(pattern, action)| (tool.as_str(), pattern.as_str(), action.clone()))
                     .collect(),

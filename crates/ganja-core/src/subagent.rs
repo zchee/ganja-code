@@ -1,0 +1,744 @@
+//! Runs a subagent: the second agent loop a `task` call delegates to.
+//!
+//! Spec: upstream `packages/opencode/src/tool/task.ts` and
+//! `packages/opencode/src/agent/subagent-permissions.ts`. The tool
+//! ([`crate::tool::task`]) knows what the model asked for and what it will read
+//! back; everything between those two — which agent may run, what rules it runs
+//! under, whose provider answers it, and where its events go — is here, because
+//! all of it is the engine's vocabulary rather than a tool's.
+//!
+//! [`Spawn`] is the implementation of [`Subagents`] the engine hands to a call.
+//!
+//! # Why it does not go through the engine
+//!
+//! [`Engine::send`](crate::engine::Engine::send) runs one turn at a time, and
+//! the parent's turn is still holding that slot while the call runs — a child
+//! asking the engine for a turn would wait for a turn that is waiting for it.
+//! So the child drives [`run_turn`] directly, with a [`Turn`] of its own.
+//!
+//! # What the parent sees
+//!
+//! The child's events go to a **private channel**, not the one the frontend is
+//! subscribed to: every event on that stream is understood to belong to the
+//! engine's one current session, and there is no session id on the wire to say
+//! otherwise. What crosses over is exactly two things:
+//!
+//! - the child's permission requests and their replies, forwarded verbatim,
+//!   because a subagent that asks a question nobody can see is a subagent that
+//!   hangs — and the reply routes back through the *parent's* pending slot,
+//!   which is free precisely because the parent is blocked in the call;
+//! - progress on the parent's own tool part: `{current_tool, toolcalls}` in
+//!   [`ToolState::Running::metadata`], which is what lets a frontend render
+//!   upstream's single inline row without a single new event variant.
+//!
+//! # Depth
+//!
+//! One level, fixed (**D9**). A child's registry is this registry without the
+//! task tool, so a subagent is not refused the call — it is never offered it.
+
+use std::{path::PathBuf, sync::Arc};
+
+use async_trait::async_trait;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    agent::{self, Agent},
+    engine::EVENT_CAPACITY,
+    permission::{Action, Permissions, Rule, TASK},
+    protocol::{Event, FinishReason, MessageId, Part, PartBody, PartId, Role, ToolState, Usage},
+    provider::Provider,
+    session::{ChildParts, PendingReply, Persist, SessionState, Turn, TurnKind, run_turn},
+    storage::{self, SessionId, SessionInfo},
+    tool::{
+        Registry,
+        task::{Delegated, Delegation, Offered, Subagents, Unanswered},
+    },
+};
+
+/// The permission a subagent's ruleset gets denied unless it says otherwise, so
+/// that a subagent cannot delegate its way past the depth limit even if the
+/// registry it was handed did offer the tool.
+const TODOWRITE: &str = "todowrite";
+
+/// The pattern that covers every call to a permission.
+const ANY: &str = "*";
+
+/// Everything a child agent loop needs that does not change between calls.
+///
+/// Held by the turn and cloned into each [`Spawn`]. Its own [`std::fmt::Debug`]
+/// because [`Provider`] has none, and because a derived one would be a wall of
+/// prompt text in every tool-call log line.
+pub(crate) struct Host {
+    /// Who answers the child's requests. The same provider the parent uses:
+    /// the instance is fixed when the engine is built.
+    pub(crate) provider: Arc<dyn Provider>,
+    /// What the parent is asking, which a subagent naming no model of its own
+    /// inherits.
+    pub(crate) model: String,
+    /// Agents the parent may spawn.
+    pub(crate) agents: Arc<agent::Registry>,
+    /// Tools the **child** is offered: this build's registry without the task
+    /// tool, which is the whole of the depth guard.
+    pub(crate) tools: Arc<Registry>,
+    /// The parent's rules, which the child derives its own from.
+    pub(crate) permissions: Arc<std::sync::Mutex<Permissions>>,
+    /// The half of the system prompt an agent replaces, for a subagent that
+    /// brings no prompt of its own.
+    pub(crate) base_prompt: Option<String>,
+    /// The half no agent replaces.
+    pub(crate) prompt_suffix: Option<String>,
+    /// Where the child's tool calls resolve relative paths.
+    pub(crate) cwd: PathBuf,
+    /// Where the project starts, for the same two uses the parent has.
+    pub(crate) root: PathBuf,
+    /// The credential store the child's `read` and `grep` refuse, which is the
+    /// parent's: a subagent runs unattended, so it is the last conversation
+    /// that should be able to read a key out of the disk.
+    pub(crate) credentials: Option<PathBuf>,
+    /// The session's language servers, shared rather than started again: a
+    /// client is identified by `(root, server)`, so a child working in the
+    /// same project reuses the server the parent already has warm.
+    pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
+    /// The store, when the engine persists. A child session is an ordinary
+    /// stored session that names its parent.
+    pub(crate) persistence: Option<Arc<SessionState>>,
+}
+
+impl std::fmt::Debug for Host {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Host")
+            .field("provider", &self.provider.id())
+            .field("model", &self.model)
+            .field("cwd", &self.cwd)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What one task call delegates through: the session-wide [`Host`], plus where
+/// in the parent's transcript this call is so its progress can be reported.
+#[derive(Clone)]
+pub(crate) struct Spawn {
+    pub(crate) host: Arc<Host>,
+    /// The parent turn's event sender — used for the parent's own tool part and
+    /// for forwarding the child's permission dialogs, and for nothing else.
+    pub(crate) events: mpsc::Sender<Event>,
+    /// Where an open permission request waits, shared with the parent turn: the
+    /// parent is blocked inside this call, so the slot is the child's to use and
+    /// a reply routed to the parent reaches the child.
+    pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
+    /// The parent message holding this call's part.
+    pub(crate) message_id: MessageId,
+    /// The part this call's progress is reported on.
+    pub(crate) part_id: PartId,
+}
+
+impl std::fmt::Debug for Spawn {
+    /// Hand-written because the pending-reply slot is a channel end with no
+    /// [`Debug`] of its own, and because what is worth reading here is where
+    /// the call sits, not the machinery behind it.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Spawn")
+            .field("host", &self.host)
+            .field("message_id", &self.message_id)
+            .field("part_id", &self.part_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl Subagents for Spawn {
+    async fn delegate(
+        &self,
+        request: Delegation,
+        cancel: CancellationToken,
+    ) -> Result<Delegated, Unanswered> {
+        // Upstream does not check the mode here — only the permission dialog
+        // stands between the model and `subagent_type: "build"`. This build
+        // refuses it: an agent the roster never offered is one the model has no
+        // business naming, and running a *primary* agent unattended is the one
+        // thing subagent mode exists to prevent
+        // (deviation: task-spawns-subagents-only).
+        let Some(agent) = self
+            .host
+            .agents
+            .get(&request.subagent_type)
+            .filter(|agent| agent.spawnable())
+        else {
+            return Err(Unanswered::Unknown);
+        };
+
+        let child = Child::open(self, agent, request.task_id.as_deref());
+        let outcome = child.run(self, agent, &request, cancel).await;
+        let task_id = child.session.as_str().to_owned();
+
+        match outcome.stop {
+            ChildStop::Cancelled => Err(Unanswered::Cancelled),
+            ChildStop::Failed(message) => Err(Unanswered::Failed { task_id, message }),
+            ChildStop::Completed => Ok(Delegated {
+                task_id,
+                agent: agent.name.clone(),
+                model: child.model,
+                text: outcome.text,
+                toolcalls: outcome.toolcalls,
+            }),
+        }
+    }
+}
+
+/// The agents `caller` may delegate to, as the task tool lists them.
+///
+/// The filter is upstream's `describeTask` (`tool/registry.ts`) — `mode !==
+/// "primary"`, then the caller's own rules consulted for `task`/`<name>` and
+/// dropped when they say deny. `hidden` deliberately does not filter here: it
+/// hides an agent from the pickers a *person* uses, not from the model.
+pub(crate) fn roster(agents: &agent::Registry, caller: &Agent) -> Vec<Offered> {
+    agents
+        .agents()
+        .iter()
+        .filter(|agent| agent.spawnable() && !denies_task(&caller.rules, &agent.name))
+        .map(|agent| Offered {
+            name: agent.name.clone(),
+            description: agent.description.clone(),
+        })
+        .collect()
+}
+
+/// Whether `rules` refuse a task call naming `subagent`, by the same
+/// last-match-wins walk the gate does.
+fn denies_task(rules: &[Rule], subagent: &str) -> bool {
+    rules
+        .iter()
+        .rev()
+        .find(|rule| {
+            crate::permission::matches(TASK, &rule.permission)
+                && crate::permission::matches(subagent, &rule.pattern)
+        })
+        .is_some_and(|rule| rule.action == Action::Deny)
+}
+
+/// One child session, resolved: where it writes and what it runs as.
+struct Child {
+    session: SessionId,
+    model: String,
+    /// The transcript a resumed child continues from; empty for a fresh one.
+    history: Vec<crate::protocol::Message>,
+    /// Whether the session record still has to be created.
+    fresh: bool,
+}
+
+impl Child {
+    /// Resolves the session a call runs in: the one `task_id` names when the
+    /// store still holds it, and a new one otherwise.
+    fn open(spawn: &Spawn, agent: &Agent, task_id: Option<&str>) -> Self {
+        let model = agent
+            .model
+            .as_deref()
+            .and_then(|model| crate::provider::adopt(spawn.host.provider.id(), model))
+            .unwrap_or_else(|| spawn.host.model.clone());
+
+        let resumed = task_id.zip(spawn.host.persistence.as_ref()).and_then(
+            |(id, state)| -> Option<(SessionId, Vec<crate::protocol::Message>)> {
+                let id = SessionId::from(id.to_owned());
+                // Only a session some earlier call left behind. A root id —
+                // the live conversation's own, most of all — names a
+                // transcript somebody is having, and appending a child's turns
+                // into it would interleave two conversations in one record;
+                // the unanswerable id starts a fresh child instead.
+                state
+                    .storage
+                    .load_info(&id)
+                    .ok()
+                    .flatten()
+                    .filter(|info| info.parent.is_some())?;
+                let transcript = state.storage.load_transcript(&id).unwrap_or_default();
+
+                Some((id, transcript))
+            },
+        );
+
+        match resumed {
+            Some((session, history)) => Self {
+                session,
+                model,
+                history,
+                fresh: false,
+            },
+            // A `task_id` the store cannot answer for starts a fresh session
+            // rather than failing the call: the model asked for work to happen,
+            // and the id was a hint about where to continue it
+            // (deviation: task-id-miss-starts-fresh).
+            None => Self {
+                session: SessionId::ascending(),
+                model,
+                history: Vec::new(),
+                fresh: true,
+            },
+        }
+    }
+
+    /// Runs the child loop to its finish and reports what it said.
+    async fn run(
+        &self,
+        spawn: &Spawn,
+        agent: &Agent,
+        request: &Delegation,
+        cancel: CancellationToken,
+    ) -> Outcome {
+        let host = &spawn.host;
+        let persist = host.persistence.as_ref().map(|state| {
+            if self.fresh {
+                create(
+                    state,
+                    &self.session,
+                    agent,
+                    &request.description,
+                    &self.model,
+                );
+            }
+            Persist::new(Arc::clone(state), self.session.clone())
+        });
+
+        let permissions = {
+            let parent = host
+                .permissions
+                .lock()
+                .expect("the permission rules are never poisoned");
+            parent.derive_subagent(subagent_rules(agent, &parent))
+        };
+
+        // The child's own channel. Its events never reach the frontend — see
+        // the module docs — so the watcher below is the only reader, and it is
+        // what turns them back into the two things the parent is entitled to.
+        let (events, receiver) = mpsc::channel(EVENT_CAPACITY);
+        let watcher = tokio::spawn(watch(
+            receiver,
+            Watched {
+                events: spawn.events.clone(),
+                tools: Arc::clone(&host.tools),
+                message_id: spawn.message_id.clone(),
+                part_id: spawn.part_id.clone(),
+                command: request.description.clone(),
+            },
+        ));
+
+        let turn = Turn::child(
+            spawn,
+            ChildParts {
+                model: self.model.clone(),
+                system: crate::instruction::joined(
+                    agent.prompt.as_deref().or(host.base_prompt.as_deref()),
+                    host.prompt_suffix.as_deref(),
+                ),
+                kind: TurnKind::Prompt {
+                    mentions: Vec::new(),
+                },
+                prompt: request.prompt.clone(),
+                permissions,
+                events,
+                history: self.history.clone(),
+                cancel,
+                persist,
+            },
+        );
+        run_turn(turn).await;
+
+        let outcome = watcher.await.unwrap_or_else(|_| Outcome {
+            stop: ChildStop::Failed("the subagent task did not finish".to_owned()),
+            ..Outcome::default()
+        });
+
+        if let Some(state) = &host.persistence {
+            settle(state, &self.session, outcome.usage);
+        }
+
+        outcome
+    }
+}
+
+/// The rules a subagent runs under: its own, then what the parent session
+/// insists on, then the two denials that keep it from delegating further.
+///
+/// Upstream's `deriveSubagentSessionPermission` (`agent/subagent-permissions.ts`)
+/// appends `task`/`todowrite` denials unless the subagent's own set already
+/// mentions them, which is how `general`'s explicit `todowrite: deny` and an
+/// agent that deliberately re-enables it both survive.
+///
+/// This is the child's whole ruleset. It reaches the child through
+/// [`Permissions::derive_subagent`], which leaves the parent's stored answers
+/// behind — a set assembled this carefully would mean nothing under a tier
+/// that outranks all of it.
+fn subagent_rules(agent: &Agent, parent: &Permissions) -> Vec<Rule> {
+    let mut rules = agent.rules.clone();
+    rules.extend(parent.inherited_by_subagent());
+
+    for permission in [TASK, TODOWRITE] {
+        if !Permissions::baseline_mentions(&agent.rules, permission) {
+            rules.push(Rule {
+                permission: permission.to_owned(),
+                pattern: ANY.to_owned(),
+                action: Action::Deny,
+            });
+        }
+    }
+
+    rules
+}
+
+/// Writes the child's session record before its first byte streams, naming the
+/// parent so a listing can tell a delegated conversation from a real one.
+fn create(state: &SessionState, session: &SessionId, agent: &Agent, what: &str, model: &str) {
+    let created = crate::protocol::now();
+    let parent = state
+        .live
+        .lock()
+        .expect("the live session is never poisoned")
+        .info
+        .as_ref()
+        .map(|info| info.id.clone());
+
+    let info = SessionInfo {
+        id: session.clone(),
+        version: storage::VERSION,
+        // Upstream's default child title, so a stored child says what it was
+        // for without spending a title request on finding out.
+        title: Some(format!("{what} (@{} subagent)", agent.name)),
+        created,
+        updated: created,
+        usage: Usage::default(),
+        context_tokens: 0,
+        summary: None,
+        agent: Some(agent.name.clone()),
+        model: Some(model.to_owned()),
+        parent,
+        revert: None,
+    };
+
+    if let Err(error) = state.storage.save_info(&info) {
+        tracing::warn!(
+            session = session.as_str(),
+            %error,
+            "could not create the subagent's session on disk; it runs in memory"
+        );
+    }
+}
+
+/// Adds what the child spent to its own record.
+///
+/// The turn's own closing write cannot: [`Persist::finish`] only touches the
+/// record of the session the engine is *live* on, which is the parent's — that
+/// guard is what keeps a child from overwriting its parent's bookkeeping.
+fn settle(state: &SessionState, session: &SessionId, usage: Usage) {
+    let Ok(Some(mut info)) = state.storage.load_info(session) else {
+        return;
+    };
+    info.usage = usage;
+    info.updated = crate::protocol::now();
+
+    if let Err(error) = state.storage.save_info(&info) {
+        tracing::warn!(
+            session = session.as_str(),
+            %error,
+            "could not record what the subagent spent"
+        );
+    }
+}
+
+/// What a finished child loop reports back.
+#[derive(Default)]
+struct Outcome {
+    /// The last text part the child produced, which is upstream's
+    /// `parts.findLast(p => p.type === "text")`.
+    text: String,
+    /// How the loop ended.
+    stop: ChildStop,
+    /// How many tools it called, which the parent's inline row shows.
+    toolcalls: usize,
+    /// What it spent.
+    usage: Usage,
+}
+
+/// Why a child loop stopped.
+#[derive(Default)]
+enum ChildStop {
+    /// It ran out of things to say, which is the only success.
+    #[default]
+    Completed,
+    /// The parent's cancel reached it.
+    Cancelled,
+    /// The provider could not answer. The message is what the parent model
+    /// reads.
+    Failed(String),
+}
+
+/// What the watcher needs to translate a child's events.
+struct Watched {
+    events: mpsc::Sender<Event>,
+    /// The child's registry, so a running call can be named the way a dialog
+    /// would name it — `read src/main.rs`, not `read`.
+    tools: Arc<Registry>,
+    message_id: MessageId,
+    part_id: PartId,
+    /// What the model called the task, which is the input the parent's part
+    /// keeps showing while the child works.
+    command: String,
+}
+
+/// Reads the child's event stream and does the two things the parent is owed:
+/// forwards permission dialogs, and keeps `{current_tool, toolcalls}` on the
+/// parent's tool part current.
+///
+/// Everything else is dropped on purpose. A frontend applying this engine's
+/// stream believes every event belongs to the session it is showing, and there
+/// is no session id on the wire to tell it otherwise — so a child's messages
+/// would arrive as the parent's own. Upstream publishes them and lets its
+/// frontend filter by session id; this one cannot, so it does not publish
+/// (deviation: subagent-events-stay-off-the-stream).
+async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome {
+    let mut outcome = Outcome::default();
+    let mut current: Option<String> = None;
+    // The text part being streamed right now. The last one to be opened is the
+    // last one there is, which is what upstream's `findLast` selects.
+    let mut open: Option<PartId> = None;
+
+    while let Some(event) = receiver.recv().await {
+        match event {
+            // A subagent's question is the user's to answer, and the reply
+            // routes back through the parent's pending slot.
+            Event::PermissionRequested { .. } | Event::PermissionReplied { .. } => {
+                let _ = watched.events.send(event).await;
+            }
+            Event::PartStarted { part, .. } => match &part.body {
+                PartBody::Text { .. } => {
+                    open = Some(part.id.clone());
+                    outcome.text.clear();
+                }
+                PartBody::Tool { .. } => {
+                    outcome.toolcalls += 1;
+                    report(&watched, current.as_deref(), outcome.toolcalls).await;
+                }
+                PartBody::File { .. }
+                | PartBody::StepStart
+                | PartBody::StepFinish { .. }
+                | PartBody::Patch { .. } => {}
+            },
+            Event::PartDelta { part_id, delta, .. } => {
+                if open.as_ref() == Some(&part_id) {
+                    outcome.text.push_str(&delta);
+                }
+            }
+            Event::PartUpdated { part, .. } => {
+                if let PartBody::Tool { tool, state, .. } = &part.body
+                    && let ToolState::Running { input, .. } = state
+                {
+                    current = Some(name_of(&watched, tool, input));
+                    report(&watched, current.as_deref(), outcome.toolcalls).await;
+                }
+            }
+            Event::MessageStarted { message } => {
+                // A compaction summary arrives as a complete assistant message
+                // rather than a streamed one; it is not the child's answer.
+                if message.role == Role::User {
+                    outcome.text.clear();
+                    open = None;
+                }
+            }
+            Event::MessageFinished {
+                reason,
+                usage,
+                error,
+                ..
+            } => {
+                if let Some(usage) = usage {
+                    outcome.usage = usage;
+                }
+                outcome.stop = match reason {
+                    FinishReason::Completed => ChildStop::Completed,
+                    FinishReason::Cancelled => ChildStop::Cancelled,
+                    FinishReason::Failed => ChildStop::Failed(
+                        error.unwrap_or_else(|| "the subagent could not answer".to_owned()),
+                    ),
+                };
+            }
+            // A child takes no snapshots of its own, so nothing here ever
+            // reverts; the arm exists because the parent's watcher reads the
+            // whole event stream and must not be surprised by one of them.
+            Event::RevertChanged { .. } => {}
+        }
+    }
+
+    outcome
+}
+
+/// How a running child call is named on the parent's row.
+///
+/// Upstream shows the tool's own `state.title`, which its running parts carry
+/// and ganja's do not. What stands in is the line a permission dialog would
+/// have used for the same call — `read src/main.rs`, not `read` — which is the
+/// same sentence by a different route
+/// (deviation: task-progress-names-the-call).
+fn name_of(watched: &Watched, tool: &str, input: &serde_json::Value) -> String {
+    watched
+        .tools
+        .get(tool)
+        .map_or_else(|| tool.to_owned(), |found| found.describe(input))
+}
+
+/// Rewrites the parent's tool part with what the child is doing now.
+///
+/// The part travels whole, as every [`Event::PartUpdated`] does. The parent's
+/// own copy is deliberately not touched: this is progress, not transcript, and
+/// what reaches the disk is the completed call.
+async fn report(watched: &Watched, current: Option<&str>, toolcalls: usize) {
+    let mut metadata = serde_json::json!({ "toolcalls": toolcalls });
+    if let Some(current) = current {
+        metadata["current_tool"] = serde_json::json!(current);
+    }
+
+    let _ = watched
+        .events
+        .send(Event::PartUpdated {
+            message_id: watched.message_id.clone(),
+            part: Part {
+                id: watched.part_id.clone(),
+                body: PartBody::Tool {
+                    call_id: watched.part_id.as_str().to_owned(),
+                    tool: crate::tool::task::ID.to_owned(),
+                    state: ToolState::Running {
+                        input: serde_json::json!({ "description": watched.command }),
+                        metadata,
+                        started: 0,
+                    },
+                },
+            },
+        })
+        .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{denies_task, roster, subagent_rules};
+    use crate::{
+        agent::{self, Registry},
+        config::Config,
+        permission::{Action, Permissions, Rule},
+        tool::{
+            Tool as _,
+            task::{DESCRIPTION, ROSTER_HEADER, TaskTool},
+        },
+    };
+
+    fn registry() -> Registry {
+        Registry::build(&Config::default()).expect("the default config resolves agents")
+    }
+
+    #[test]
+    fn the_description_is_upstreams_text_followed_by_the_callers_roster() {
+        let agents = registry();
+        let build = agents.get(agent::BUILD).expect("build is builtin");
+        let tool = TaskTool::new(&roster(&agents, build));
+        let described = tool.description();
+
+        assert!(
+            described.starts_with(DESCRIPTION),
+            "upstream's text comes first, unedited"
+        );
+        // Only the tail past the header is the roster: upstream's own text
+        // carries `- ` bullets of its own.
+        let (_, listed) = described
+            .split_once(ROSTER_HEADER)
+            .expect("the roster header is appended");
+        let roster: Vec<&str> = listed
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect();
+        assert_eq!(roster.len(), 2, "two subagents ship: {roster:?}");
+        assert!(roster[0].starts_with("- explore: "), "sorted by name");
+        assert!(roster[1].starts_with("- general: "));
+    }
+
+    /// The planning agent denies `task: general`, so what it may delegate to
+    /// is what is left.
+    #[test]
+    fn an_agent_that_denies_a_subagent_is_not_offered_it() {
+        let agents = registry();
+        let plan = agents.get(agent::PLAN).expect("plan is builtin");
+        let tool = TaskTool::new(&roster(&agents, plan));
+        let described = tool.description();
+
+        assert!(described.contains("- explore: "));
+        assert!(
+            !described.contains("- general: "),
+            "plan denies task:general: {described}"
+        );
+    }
+
+    #[test]
+    fn a_subagent_may_not_delegate_and_may_not_keep_a_todo_list() {
+        let agents = registry();
+        let explore = agents.get(agent::EXPLORE).expect("explore is builtin");
+        let rules = subagent_rules(explore, &Permissions::default());
+
+        assert!(denies_task(&rules, "general"));
+        assert_eq!(
+            rules
+                .iter()
+                .rev()
+                .find(|rule| rule.permission == "todowrite")
+                .map(|rule| rule.action.clone()),
+            Some(Action::Deny)
+        );
+    }
+
+    /// `general` already says something about `todowrite`, so upstream leaves
+    /// that decision alone rather than appending a second one.
+    #[test]
+    fn a_subagent_that_already_rules_on_todowrite_keeps_its_own_rule() {
+        let agents = registry();
+        let general = agents.get(agent::GENERAL).expect("general is builtin");
+        let rules = subagent_rules(general, &Permissions::default());
+
+        assert_eq!(
+            rules
+                .iter()
+                .filter(|rule| rule.permission == "todowrite")
+                .count(),
+            1,
+            "the appended denial would be a second one: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn a_parents_denial_reaches_the_child_and_a_parents_allowance_does_not() {
+        let mut parent = Permissions::default();
+        parent.set_baseline(vec![
+            Rule {
+                permission: "webfetch".to_owned(),
+                pattern: "*".to_owned(),
+                action: Action::Deny,
+            },
+            Rule {
+                permission: "bash".to_owned(),
+                pattern: "cargo *".to_owned(),
+                action: Action::Allow,
+            },
+        ]);
+
+        let agents = registry();
+        let general = agents.get(agent::GENERAL).expect("general is builtin");
+        let rules = subagent_rules(general, &parent);
+
+        assert!(
+            rules
+                .iter()
+                .any(|rule| rule.permission == "webfetch" && rule.action == Action::Deny),
+            "a denial travels down: {rules:?}"
+        );
+        assert!(
+            !rules.iter().any(|rule| rule.pattern == "cargo *"),
+            "an allowance does not: {rules:?}"
+        );
+    }
+}

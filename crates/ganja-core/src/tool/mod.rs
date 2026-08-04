@@ -23,7 +23,7 @@ pub mod write;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::SystemTime,
 };
 
@@ -41,14 +41,45 @@ pub struct ToolCtx {
     pub call_id: String,
     /// Which files this session has read, shared by every call in it.
     pub files: Arc<FileTimes>,
-    /// What a call needs to run a whole second agent loop, which only
+    /// Where this build keeps its credentials, so that `read` and `grep` can
+    /// refuse the file — see [`ToolCtx::is_credential_store`].
+    ///
+    /// Handed over rather than resolved here: which file holds this machine's
+    /// keys is [`crate::auth`]'s answer, and a tool that went and asked for it
+    /// would be a tool that has to know where credentials live. [`None`] is a
+    /// caller that named none, and behaves exactly like a store that is not on
+    /// this disk — there is then nothing here to protect.
+    pub credentials: Option<PathBuf>,
+    /// What a call runs a whole second agent loop through, which only
     /// [`task::TaskTool`] does.
     ///
     /// [`None`] on every turn that has no agents to spawn — and on every
-    /// *child* turn, which is the entire depth guard stated a second way. Its
-    /// fields are private and it has no public constructor, so a frontend
-    /// building a [`ToolCtx`] of its own can only ever pass [`None`].
-    pub spawn: Option<task::Spawn>,
+    /// *child* turn, which is the entire depth guard stated a second way.
+    pub spawn: Option<Arc<dyn task::Subagents>>,
+}
+
+impl ToolCtx {
+    /// Whether `path` is the credential store this call was handed.
+    ///
+    /// `read` and `grep` run without asking — that is what makes them usable —
+    /// and both take a path the model chose, so without this a model acting on
+    /// instructions it read in a file or a fetched page could put this
+    /// machine's provider API keys straight into the transcript that is sent to
+    /// a provider.
+    ///
+    /// Only ganja's own store is guarded. Which *other* files hold secrets is a
+    /// question only the user can answer, and a built-in half-answer would read
+    /// as a promise this cannot keep.
+    ///
+    /// Public because [`ToolCtx::credentials`] is: a third-party tool that
+    /// reads files is handed the same path, and should refuse it by the same
+    /// identity comparison rather than by comparing the two as text.
+    #[must_use]
+    pub fn is_credential_store(&self, path: &Path) -> bool {
+        self.credentials
+            .as_deref()
+            .is_some_and(|store| is_same_file(path, store))
+    }
 }
 
 /// What a finished tool call hands back to the model.
@@ -187,22 +218,6 @@ impl Registry {
             },
             |set, tool| set.with(tool),
         )
-    }
-
-    /// The same set without the tool named `id`.
-    ///
-    /// A subagent's registry is this build's minus `task`, which is how the
-    /// depth limit is enforced: the tool is not refused, it is not offered.
-    #[must_use]
-    pub fn without(&self, id: &str) -> Self {
-        Self {
-            tools: self
-                .tools
-                .iter()
-                .filter(|tool| tool.id() != id)
-                .map(Arc::clone)
-                .collect(),
-        }
     }
 
     /// What a provider advertises to the model, in registration order.
@@ -485,36 +500,6 @@ fn modification_stamp(path: &Path) -> Option<SystemTime> {
         .ok()
 }
 
-/// Where ganja keeps its own credentials, or [`None`] when this machine has no
-/// home directory to resolve a store against — in which case there is nothing
-/// here to protect.
-///
-/// Resolved once per process: the store cannot move while ganja runs, a guard
-/// that could be pointed somewhere harmless by setting an environment variable
-/// mid-run would not be worth much, and `grep` would otherwise re-derive the
-/// path for every file it walks past.
-fn credential_store() -> Option<&'static Path> {
-    static STORE: OnceLock<Option<PathBuf>> = OnceLock::new();
-
-    STORE
-        .get_or_init(|| crate::auth::store_path().ok())
-        .as_deref()
-}
-
-/// Whether `path` is ganja's credential store.
-///
-/// `read` and `grep` run without asking — that is what makes them usable — and
-/// both take a path the model chose, so without this a model acting on
-/// instructions it read in a file or a fetched page could put this machine's
-/// provider API keys straight into the transcript that is sent to a provider.
-///
-/// Only ganja's own store is guarded. Which *other* files hold secrets is a
-/// question only the user can answer, and a built-in half-answer would read as
-/// a promise this cannot keep.
-pub(crate) fn is_credential_store(path: &Path) -> bool {
-    credential_store().is_some_and(|store| is_same_file(path, store))
-}
-
 /// Whether `left` and `right` name the same file.
 ///
 /// Both sides are canonicalized, so a link planted at an innocent name and a
@@ -536,11 +521,24 @@ fn is_same_file(left: &Path, right: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{path::PathBuf, sync::Arc};
 
-    use super::{
-        FileTimes, Registry, ToolError, credential_store, is_credential_store, is_same_file,
-    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::{FileTimes, Registry, ToolCtx, ToolError, is_same_file};
+
+    /// A call whose credential store is `store`, which is the only thing the
+    /// guard tests below vary.
+    fn ctx(store: Option<PathBuf>) -> ToolCtx {
+        ToolCtx {
+            cwd: std::env::temp_dir(),
+            cancel: CancellationToken::new(),
+            call_id: "call_1".to_owned(),
+            files: Arc::new(FileTimes::default()),
+            credentials: store,
+            spawn: None,
+        }
+    }
 
     #[test]
     fn the_registry_finds_a_tool_by_id_and_misses_unknown_names() {
@@ -805,21 +803,37 @@ mod tests {
 
     #[test]
     fn the_credential_store_guard_answers_for_the_store_and_not_for_a_namesake() {
-        let store = credential_store().expect("this machine has a home directory");
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let store = dir.path().join("ganja").join("auth.json");
+        std::fs::create_dir_all(store.parent().expect("the store sits in a directory"))
+            .expect("the fixture nests");
+        std::fs::write(&store, "{}").expect("the fixture writes");
+        let ctx = ctx(Some(store.clone()));
 
         assert!(
-            is_credential_store(store),
+            ctx.is_credential_store(&store),
             "the guard has to recognize the store it exists to protect"
         );
 
-        let dir = tempfile::tempdir().expect("a scratch directory");
         let namesake = dir.path().join("auth.json");
         std::fs::write(&namesake, "{}").expect("the fixture writes");
 
         assert!(
-            !is_credential_store(&namesake),
+            !ctx.is_credential_store(&namesake),
             "the guard is about which file this is, not what it is called"
         );
+    }
+
+    /// A call nobody named a store to — a frontend's own context, or a test's —
+    /// reads exactly like one whose store is not on this disk. There is then
+    /// nothing here to protect, and no file is special.
+    #[test]
+    fn a_call_that_was_handed_no_store_has_nothing_to_refuse() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let looks_the_part = dir.path().join("auth.json");
+        std::fs::write(&looks_the_part, "{}").expect("the fixture writes");
+
+        assert!(!ctx(None).is_credential_store(&looks_the_part));
     }
 
     #[cfg(unix)]

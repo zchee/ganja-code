@@ -155,6 +155,7 @@ async fn a_files_own_write_does_not_condemn_it() {
         cancel: CancellationToken::new(),
         call_id: "call-1".to_owned(),
         files: Arc::clone(&files),
+        credentials: None,
         spawn: None,
     };
     for content in ["what the agent wrote", "and then wrote again"] {
