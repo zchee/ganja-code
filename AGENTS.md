@@ -35,7 +35,12 @@
 ```sh
 cargo build --workspace
 cargo run                       # TUI; no GANJA_PROVIDER set means the built-in fake provider
-cargo run -- auth login         # also: auth list, auth logout, models
+cargo run -- --model anthropic/claude-sonnet-4-5 --agent plan   # also --config <file>
+cargo run -- --continue         # or --session <id>; the two are mutually exclusive
+cargo run -- auth login         # also: auth list, auth logout
+cargo run -- sessions           # this project's stored conversations, roots only
+cargo run -- models anthropic --refresh        # the catalog, narrowed to a provider and re-fetched first
+cargo run -- config import-opencode --dry-run  # translate an opencode config, naming what it skipped
 
 # The gates CI runs, in order
 cargo fmt --all --check
@@ -70,6 +75,7 @@ Two suites need setup, and both are documented in `crates/ganja-core/tests/AGENT
 | `GANJA_FAKE_SCRIPT` | Path to a JSON script the fake provider plays (text + tool calls per turn). How PTY tests and demos drive a deterministic agent. Read only on the `from_env` route, never by `FakeProvider::default()`. |
 | `GANJA_CONFIG` | An extra config file merged between the global tier and the project files. Naming a file that does not exist is an error, where an absent discovered file is nothing to merge. |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Credential; outranks the stored `auth.json` key. |
+| `EDITOR` | What `/editor` hands the prompt buffer to. Unset or empty falls back to `vi`. |
 | `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` | Endpoint override; must be `https` or loopback or the provider refuses. |
 | `GANJA_MODELS_URL` | Base URL the live model catalog is fetched from (`/api.json` appended); default `https://models.opencode.ai`. |
 | `GANJA_MODELS_PATH` | Read-only override of the catalog cache path; writes keep going to the canonical cache file. |
@@ -85,11 +91,13 @@ Three crates, and the boundary between the first two is load-bearing.
 - `engine.rs` — commands in, an ordered event stream out. Delivery is **lossless**: a bounded `mpsc`, so backpressure lands on the turn task and never on the render loop. **One subscriber**, **one turn at a time**. The event stream is complete — a frontend that applies every event holds exactly what the next `ChatRequest` will carry.
 - `session.rs` — the agent loop. Mark a step, ask the model, execute the tools it called, repeat until a request ends without tool calls. **Tool results are information, never control flow**: a refusal, an unknown tool, unparseable arguments or a failed tool all become error text the model reads next, and the loop continues. Only a cancel or a dead provider ends a turn early; there is no step cap.
 - `provider/` — `Provider` trait, Anthropic Messages and OpenAI chat completions over a hand-rolled SSE splitter, plus the fake provider. Two failure channels, never a completed turn. Retry only before the first byte. Credential-travel bounds (no redirects, https-or-loopback) live in `provider/mod.rs`.
-- `tool/` — `Tool` trait + `Registry::with_builtins()` (read, edit, write, glob, grep, `bash`, todowrite, webfetch). Schemas generated from the argument structs; `FileTimes` enforces read-before-write; glob/grep run in-process on the ripgrep crates.
-- `permission.rs` — a call becomes one or more patterns; the **last matching rule wins**, and **every** pattern must be allowed for the call to run unasked. Shell "always" answers remember the *kind* of command via upstream's arity table.
-- `auth.rs` / `project.rs` / `catalog.rs` — credentials (env beats file, `SecretString` throughout), project resolution by walking up to `.git`, and a compiled-in models.dev pricing snapshot.
+- `tool/` — `Tool` trait + `Registry::with_builtins()` (read, edit, write, glob, grep, `bash`, todowrite, webfetch), plus `task`, which the engine registers once it knows which agents this session may spawn. Schemas generated from the argument structs; `FileTimes` enforces read-before-write; glob/grep run in-process on the ripgrep crates. `write` and `edit` reach the disk through a directory descriptor (`anchor.rs`), never twice through a path, so a link swapped in after the permission dialog has nothing to redirect.
+- `permission.rs` — a call becomes one or more patterns; the **last matching rule wins**, and **every** pattern must be allowed for the call to run unasked. Rules layer builtin defaults < the agent's < the config's < the answers a person stored. Shell "always" answers remember the *kind* of command via upstream's arity table. A subagent inherits the refusals and never the allows: nobody is watching its turn.
+- `agent.rs` / `instruction.rs` / `command.rs` — who a turn runs as (build, plan, general, explore, plus whatever the config adds), the system prompt it runs under (a base prompt per model family, the `<env>` block, the `AGENTS.md` family), and the slash commands it can run.
+- `config.rs` — `ganja.jsonc`/`ganja.json` across three tiers, under the environment and the flags. Unknown top-level keys are refused by name.
+- `auth.rs` / `project.rs` / `catalog.rs` / `storage.rs` — credentials (env beats file, `SecretString` throughout), project resolution by walking up to `.git`, model sizing and pricing (fetched, cached under the XDG cache home, falling back to a compiled-in snapshot that never fails), and versioned session storage.
 
-**`ganja-tui`** — every pixel, no engine logic. One `tokio::select!` owns all mutable UI state; `App::handle` is the only mutator, which is what makes components testable without a terminal. Frames coalesce to 16ms for streaming bursts; a keystroke redraws immediately.
+**`ganja-tui`** — every pixel, no engine logic. One `tokio::select!` owns all mutable UI state; `App::handle` is the only mutator, which is what makes components testable without a terminal. Frames coalesce to 16ms for streaming bursts; a keystroke redraws immediately. Themes are loadable data (four ported from upstream, plus whatever `~/.config/ganja/themes/` holds), the palette and the `/` menu are two views of the same command set, `@` raises a file menu, and a leading `!` hands the line to a shell.
 
 **`ganja-cli`** — clap; no subcommand starts the TUI.
 
@@ -97,7 +105,7 @@ Three crates, and the boundary between the first two is load-bearing.
 
 ### Working In This Directory
 
-- **Respect phase discipline.** P0–P3 have landed (workspace, TUI shell, providers, agent loop + tools + permissions). P4 (sessions & compaction) is **in progress**; `crates/ganja-core/src/storage.rs` is being written against the contract frozen in `.omc/handoffs/team-exec-p4.md`. Scope, acceptance criteria and the ADR live in `.omc/plans/2026-08-03-opencode-rust-port.md`. Do not build ahead of the current phase.
+- **Respect phase discipline.** P0–P5 have landed: the workspace, the TUI shell, providers, the agent loop with tools and permissions, sessions and compaction, and now config, agents, commands, themes, the model catalog, the task tool, `@file` mentions and `!` passthrough. Scope, acceptance criteria and the ADR live in `.omc/plans/2026-08-03-opencode-rust-port.md`, and each phase's frozen contract in `.omc/handoffs/`. Do not build ahead of the current phase — P6 (markdown rendering, MCP, LSP, undo, the `/share` family) is not started.
 - **Check `git status` before editing.** Phase execution assigns **one owner per file**. A dirty file belongs to another lane — do not finish somebody else's work in flight.
 - **Port behavior, not code.** Module docs cite the upstream file they port (`//! Spec: upstream packages/opencode/src/tool/edit.ts`). Deliberate divergences are documented at the point they occur, with the reason.
 - **Comments explain why, not what** — including in `Cargo.toml`. Match the surrounding density.
@@ -119,6 +127,6 @@ The four gates above, all green, before a phase is called done. Unit tests live 
 
 ### External
 
-Load-bearing choices, all pinned in the workspace manifest: `tokio` (runtime), `ratatui` 0.30 + `ratatui-textarea` (TUI), `reqwest` with rustls (provider HTTP; no OpenSSL), `secrecy` (key material wiped on drop), `schemars` (tool argument schemas generated from the argument structs), `ignore`/`grep-searcher`/`grep-regex` (ripgrep internals, so glob and grep run in-process instead of shelling out to `rg`), `similar` (unified diffs from `edit`), `etcetera` (XDG paths), `insta` + `expectrl` + `assert_cmd` (snapshot, pty and CLI tests).
+Load-bearing choices, all pinned in the workspace manifest: `tokio` (runtime), `ratatui` 0.30 + `ratatui-textarea` (TUI), `reqwest` with rustls (provider HTTP; no OpenSSL), `secrecy` (key material wiped on drop), `schemars` (tool argument schemas generated from the argument structs), `ignore`/`grep-searcher`/`grep-regex` (ripgrep internals, so glob and grep run in-process instead of shelling out to `rg`), `similar` (unified diffs from `edit`), `etcetera` (XDG paths), `jsonc-parser` (config files in the dialect upstream's are written in, decoded in document order so permission rules keep theirs), `nucleo-matcher` (fuzzy ranking behind the palette), `libc` (the unix calls the shell tool and the anchored file I/O are built on), `insta` + `expectrl` + `assert_cmd` (snapshot, pty and CLI tests).
 
 <!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->
