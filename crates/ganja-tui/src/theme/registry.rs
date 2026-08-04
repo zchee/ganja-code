@@ -480,6 +480,66 @@ mod tests {
         );
     }
 
+    /// R11 sorts the dialog case-insensitively, and every builtin is
+    /// lowercase — so only a custom theme written with a capital can tell that
+    /// apart from a plain byte sort, under which every capital would be herded
+    /// to the top away from the name it belongs beside.
+    #[test]
+    fn the_listing_sorts_by_name_and_not_by_the_case_it_was_written_in() {
+        let directory = temporary();
+        custom(&directory, "Zenburn", &minimal("#3f3f3f"));
+        custom(&directory, "Ayu", &minimal("#0a0e14"));
+
+        let mut themes = Themes::builtin();
+        themes.add_custom_dir(directory.path());
+
+        assert_eq!(
+            themes.names(),
+            vec![
+                "aura",
+                "Ayu",
+                "gruvbox",
+                "opencode",
+                "terminal",
+                "tokyonight",
+                "Zenburn"
+            ],
+            "a byte sort would have listed Ayu and Zenburn before aura"
+        );
+    }
+
+    /// D21 from the registry's side: resolving in one mode is not enough to be
+    /// listed. A theme that only answers in dark would leave the screen with
+    /// no colors the moment the mode changed under it, so it never registers
+    /// at all — and the ones beside it in the same directory still do.
+    #[test]
+    fn a_theme_that_only_answers_in_one_mode_never_reaches_the_listing() {
+        let directory = temporary();
+        custom(
+            &directory,
+            "darkonly",
+            "{\"theme\": {\"text\": {\"dark\": \"#101020\"}}}",
+        );
+        custom(&directory, "bothmodes", &minimal("#123456"));
+
+        let mut themes = Themes::builtin();
+        themes.add_custom_dir(directory.path());
+
+        assert!(
+            !themes.names().contains(&"darkonly".to_owned()),
+            "got: {:?}",
+            themes.names()
+        );
+        assert!(
+            themes.select("darkonly").is_none(),
+            "and there is nothing to select either"
+        );
+        assert!(
+            themes.names().contains(&"bothmodes".to_owned()),
+            "the theme beside it still loaded"
+        );
+    }
+
     /// R11: a name collision is the user's file winning. That is the whole
     /// point of being able to write one.
     #[test]

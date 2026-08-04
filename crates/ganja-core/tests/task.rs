@@ -27,8 +27,10 @@ use futures::{
 };
 use ganja_core::{
     AgentRegistry, Command, Config, Engine, Event, FinishReason, PartBody, PermissionReply,
-    Permissions, Registry, Storage, Tool, ToolCtx, ToolError, ToolOutput, ToolState,
+    Permissions, Registry, SessionId, SessionInfo, Storage, Tool, ToolCtx, ToolError, ToolOutput,
+    ToolState, Usage,
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
+    storage,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -790,6 +792,102 @@ async fn a_primary_agent_may_not_be_run_as_a_subagent() {
         panic!("a primary agent is refused");
     };
     assert_eq!(error, "Unknown agent type: build is not a valid agent type");
+}
+
+/// A delegated conversation is a session of its own, and the record it leaves
+/// says whose errand it was (**R7**).
+///
+/// Read back off the disk rather than from the engine, because the field is
+/// there for the next process: a picker listing roots, and a person asking
+/// later what a stored transcript was for, both have only the file to go on.
+///
+/// The parent session is seeded already titled, so the title machinery cannot
+/// spend a scripted answer and shift the turn boundaries this depends on.
+#[tokio::test]
+async fn a_delegated_child_is_stored_as_a_session_of_its_own_naming_its_parent() {
+    let directory = tempfile::TempDir::new().expect("a temporary directory is creatable");
+    let storage = Storage::open(directory.path().join("storage"));
+    // Fixed rather than read from the clock: nothing here compares timestamps.
+    let created = 1;
+    let parent = SessionId::ascending();
+    storage
+        .save_info(&SessionInfo {
+            id: parent.clone(),
+            version: storage::VERSION,
+            title: Some("seeded".to_owned()),
+            created,
+            updated: created,
+            usage: Usage::default(),
+            context_tokens: 0,
+            summary: None,
+            agent: None,
+            model: None,
+            parent: None,
+        })
+        .expect("the seeded record writes");
+
+    let (provider, _) = Recorder::new(vec![
+        delegates("general"),
+        says("the child's own answer"),
+        says("and the parent signs off"),
+    ]);
+    let engine = Engine::persistent(
+        provider,
+        "recorder-model",
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        Storage::open(directory.path().join("storage")),
+    )
+    .with_agents(agents(&Config::default()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine.resume(&parent).await.expect("the session loads");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "delegate it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain_answering(&engine, &mut events, PermissionReply::Once).await;
+
+    let child = storage
+        .list_sessions()
+        .expect("the store lists what it holds")
+        .into_iter()
+        .find(|info| info.id != parent)
+        .expect("the child got a record of its own")
+        .id;
+
+    let stored = storage
+        .load_info(&child)
+        .expect("the child's record reads back")
+        .expect("and it is there");
+    assert_eq!(
+        stored.parent,
+        Some(parent.clone()),
+        "the stored child names the conversation that delegated to it"
+    );
+    assert_eq!(
+        stored.agent.as_deref(),
+        Some("general"),
+        "and the subagent it ran as"
+    );
+
+    let said: Vec<String> = storage
+        .load_transcript(&child)
+        .expect("the child's transcript reads back")
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .filter_map(|part| match &part.body {
+            PartBody::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        said.iter().any(|text| text == "the child's own answer"),
+        "the record is the child's own conversation, not an empty stub: {said:?}"
+    );
 }
 
 /// A `task_id` names a session an earlier call left behind. A **root** id is

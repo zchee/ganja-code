@@ -1419,6 +1419,10 @@ mod tests {
                 // Nothing but a token, so carrying it would name a model that
                 // does not exist.
                 ("small_model", "token"),
+                // Ganja has both keys; neither holds what opencode puts in
+                // them, so they are refused by name rather than half-mapped.
+                ("keybinds", "incompatible"),
+                ("tui", "incompatible"),
                 ("instructions[1]", "token"),
                 ("instructions[3]", "unsupported"),
                 ("tools.write", "overridden"),

@@ -484,14 +484,21 @@ mod tests {
     fn plant(dir: &Path, name: &str, age: Duration) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, "spilled").expect("the fixture writes");
-        let when = SystemTime::now()
-            .checked_sub(age)
-            .expect("a representable stamp");
-        std::fs::File::open(&path)
-            .and_then(|file| file.set_modified(when))
-            .expect("the fixture can move the stamp");
+        stamp(
+            &path,
+            SystemTime::now()
+                .checked_sub(age)
+                .expect("a representable stamp"),
+        );
 
         path
+    }
+
+    /// Moves `path`'s modification stamp to `when`, directory or file alike.
+    fn stamp(path: &Path, when: SystemTime) {
+        std::fs::File::open(path)
+            .and_then(|handle| handle.set_modified(when))
+            .expect("the fixture can move the stamp");
     }
 
     /// What a sweep may and may not delete, in one table: the `tool_` prefix
@@ -527,6 +534,58 @@ mod tests {
         }
     }
 
+    /// **D81.** A stamp in the future is not an age. Clock skew across a
+    /// shared filesystem is the ordinary way one arrives, and a sweep that
+    /// cannot say how old a file is has no business deleting it — least of
+    /// all silently, since what it would be deleting is a spill some live
+    /// tool call may still be pointing the model at.
+    #[test]
+    fn a_spill_stamped_in_the_future_is_kept() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let ahead = dir.path().join("tool_fromtomorrow");
+        std::fs::write(&ahead, "spilled").expect("the fixture writes");
+        stamp(
+            &ahead,
+            SystemTime::now()
+                .checked_add(Duration::from_secs(400 * DAY))
+                .expect("a representable stamp"),
+        );
+
+        assert_eq!(
+            super::sweep_in(dir.path()),
+            0,
+            "a stamp a sweep cannot subtract from is not an age"
+        );
+        assert!(ahead.exists());
+    }
+
+    /// **D80, the directory half.** Nothing here creates a directory under
+    /// this prefix, so an aged one is somebody else's — and the sweep neither
+    /// removes it nor treats its contents as spills to age out. Backdating
+    /// needs a descriptor on the directory itself, which is a unix affordance.
+    #[cfg(unix)]
+    #[test]
+    fn an_aged_directory_under_the_prefix_is_neither_entered_nor_removed() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let planted = dir.path().join("tool_notaspill");
+        std::fs::create_dir(&planted).expect("the fixture directory is creatable");
+        // A file inside it that WOULD be swept if the sweep descended.
+        let inside = plant(&planted, "tool_inside", Duration::from_secs(400 * DAY));
+        stamp(
+            &planted,
+            SystemTime::now()
+                .checked_sub(Duration::from_secs(400 * DAY))
+                .expect("a representable stamp"),
+        );
+
+        assert_eq!(super::sweep_in(dir.path()), 0);
+        assert!(planted.is_dir(), "the directory itself stays");
+        assert!(
+            inside.exists(),
+            "and the sweep never went in: this file is older than anything it deletes"
+        );
+    }
+
     /// Age is the entry's own, never its target's — which is what keeps a
     /// sweep from reaching through a name somebody planted at it.
     #[cfg(unix)]
@@ -547,6 +606,69 @@ mod tests {
             "the link itself is still there"
         );
         assert!(ancient.exists(), "and so is what it pointed at");
+    }
+
+    /// The other side of the same rule: a link old enough on its own account
+    /// really is removed — and what goes is the **name**. A sweep that
+    /// followed the link would delete a file nobody asked it to touch, which
+    /// is the whole point of planting one at a name this code creates.
+    #[cfg(unix)]
+    #[test]
+    fn an_aged_link_is_unlinked_and_what_it_pointed_at_is_not() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let target = plant(dir.path(), "precious.txt", Duration::ZERO);
+        let planted = dir.path().join("tool_aged");
+        std::os::unix::fs::symlink(&target, &planted).expect("the link is creatable");
+        age_link(&planted, Duration::from_secs(8 * DAY));
+
+        assert_eq!(super::sweep_in(dir.path()), 1);
+        assert!(
+            std::fs::symlink_metadata(&planted).is_err(),
+            "the link is gone"
+        );
+        assert!(
+            target.exists(),
+            "and the file it pointed at, which is fresh and not even a spill, is untouched"
+        );
+    }
+
+    /// Backdates a symbolic link's **own** stamp.
+    ///
+    /// Not [`stamp`]: opening a link opens what it points at, so the ordinary
+    /// route would age the target and leave the link exactly as new as it was.
+    #[cfg(unix)]
+    fn age_link(path: &Path, ago: Duration) {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let seconds = SystemTime::now()
+            .checked_sub(ago)
+            .and_then(|when| when.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .expect("a representable stamp")
+            .as_secs();
+        let when = libc::timespec {
+            tv_sec: seconds as libc::time_t,
+            tv_nsec: 0,
+        };
+        let times = [when, when];
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path with no NUL");
+
+        // SAFETY: both pointers are to locals that outlive the call, `times`
+        // is the two-element array utimensat is specified to take, and
+        // AT_SYMLINK_NOFOLLOW is what makes the stamp the link's own.
+        let result = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                name.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "the fixture can age a link: {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     #[test]

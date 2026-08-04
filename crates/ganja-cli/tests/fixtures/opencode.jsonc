@@ -10,6 +10,12 @@
   "default_agent": "plan",
   "shell": "/bin/zsh",
   "theme": "tokyonight",
+  // Both keys exist in ganja too, and neither means what it means here:
+  // ganja binds a curated handful of actions of its own, and its status bar
+  // is not opencode's. Carried across, they would name actions and options
+  // that do not exist.
+  "keybinds": { "session_share": "<leader>s", "app_exit": "ctrl+x" },
+  "tui": { "scroll_speed": 3 },
   "instructions": [
     "AGENTS.md",
     "{file:./docs/house.md}",
