@@ -23,7 +23,7 @@
 //! broken one costs is an undo with less to restore.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     ffi::OsStr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -608,12 +608,13 @@ impl Snapshots {
         }
 
         let untracked: Vec<String> = split_nul(&untracked.text);
+        let mut seen: HashSet<String> = HashSet::new();
         let mut candidates: Vec<String> = Vec::new();
         for file in split_nul(&tracked.text)
             .into_iter()
             .chain(untracked.clone())
         {
-            if !candidates.contains(&file) {
+            if seen.insert(file.clone()) {
                 candidates.push(file);
             }
         }
@@ -641,18 +642,20 @@ impl Snapshots {
 
         // A large *untracked* file is a build artefact an ignore rule missed;
         // a large tracked one is somebody's data and is staged regardless.
+        let untracked_set: HashSet<&String> = untracked.iter().collect();
         let blocked: Vec<String> = allowed
             .iter()
-            .filter(|file| untracked.contains(file) && self.oversized(file))
+            .filter(|file| untracked_set.contains(file) && self.oversized(file))
             .cloned()
             .collect();
         if !blocked.is_empty() {
             self.exclude(&blocked).await;
         }
 
+        let blocked_set: HashSet<&String> = blocked.iter().collect();
         let staged: Vec<String> = allowed
             .into_iter()
-            .filter(|file| !blocked.contains(file))
+            .filter(|file| !blocked_set.contains(file))
             .collect();
         if staged.is_empty() {
             return;
@@ -1086,20 +1089,32 @@ async fn run(
         Ok(child) => child,
         Err(error) => return failed(&error),
     };
-    if let Some(bytes) = stdin {
-        // Taken and dropped, so the child sees end of input; a git waiting on
-        // stdin that never closes would hang the turn that asked for the
-        // snapshot.
-        if let Some(mut pipe) = child.stdin.take() {
+    // The stdin write and the stdout/stderr drain must run concurrently:
+    // `check-ignore --stdin -z` starts echoing answers while it is still
+    // reading paths, so once the reply outgrows the OS pipe buffer (~64KB)
+    // a git that is blocked writing output meets a caller still blocked
+    // writing input — a permanent deadlock, taken under the snapshot
+    // mutation lock, that no cancellation can reach. Taking stdin out of
+    // the child (rather than leaving it for `wait_with_output`) is what
+    // lets the write run beside the drain instead of before it; dropping
+    // the pipe when the write finishes is still what tells the child it
+    // has seen end of input.
+    let pipe = stdin.is_some().then(|| child.stdin.take()).flatten();
+    let write = async move {
+        if let (Some(bytes), Some(mut pipe)) = (stdin, pipe) {
             let written = pipe.write_all(&bytes).await;
             drop(pipe);
-            if let Err(error) = written {
-                return failed(&error);
-            }
+            written
+        } else {
+            Ok(())
         }
-    }
+    };
 
-    match child.wait_with_output().await {
+    let (written, output) = tokio::join!(write, child.wait_with_output());
+    if let Err(error) = written {
+        return failed(&error);
+    }
+    match output {
         Ok(output) => Output {
             code: output.status.code().unwrap_or(1),
             text: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -1111,7 +1126,7 @@ async fn run(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, time::Duration};
 
     use tempfile::TempDir;
 
@@ -1333,5 +1348,64 @@ mod tests {
             snapshots.gitdir.display()
         );
         assert_ne!(snapshots.gitdir, Path::new(".git"));
+    }
+
+    /// A real, empty repository whose `.gitignore` matches everything — so
+    /// `check-ignore`'s reply to a stdin request is exactly as large as the
+    /// request, which is what this drill needs from it.
+    fn ignore_everything(root: &Path) {
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(root)
+            .status()
+            .expect("git is a test prerequisite");
+        assert!(status.success(), "git init failed");
+        std::fs::write(root.join(".gitignore"), "*\n").expect("the ignore file is writable");
+    }
+
+    /// **Regression, pipe deadlock.** `run` used to write the whole stdin
+    /// payload to completion before it read a single byte back — correct
+    /// for a reply that fits in the OS pipe buffer, and a permanent hang for
+    /// one that does not. `check-ignore --stdin -z` answers while it is
+    /// still reading, so a large enough request makes it fill its own
+    /// stdout pipe before this call has finished writing stdin: git blocks
+    /// writing a reply nobody is draining, this call blocks writing a
+    /// request nobody is reading, and neither is ever going to move again.
+    ///
+    /// Several hundred KB of candidates, every one matched by the blanket
+    /// `.gitignore`, is comfortably past the ~64KB a pipe buffer usually
+    /// holds — enough that the old, sequential `run` deadlocked on this
+    /// exact call every time it was tried. **Non-vacuity, checked by hand
+    /// while landing the fix:** reverting `run` to write-then-drain made
+    /// this test hang and fail on the timeout below instead of passing.
+    #[tokio::test]
+    async fn a_huge_check_ignore_reply_does_not_deadlock_the_stdin_write_that_asked_for_it() {
+        let directory = temporary();
+        ignore_everything(directory.path());
+        let snapshots = Snapshots::new(&Project::resolve(directory.path()), true);
+        assert!(snapshots.enabled(), "git is a test prerequisite");
+
+        let candidates: Vec<String> = (0..4000)
+            .map(|i| {
+                format!(
+                    "some/moderately/deeply/nested/directory/tree/padding/out/the/path/\
+                     length/file-{i:06}.txt"
+                )
+            })
+            .collect();
+
+        let ignored = tokio::time::timeout(Duration::from_secs(30), snapshots.ignored(&candidates))
+            .await
+            .expect(
+                "check-ignore answers well within this drill's patience; a hang here is the \
+                 deadlock this test exists to catch",
+            );
+
+        assert_eq!(
+            ignored.len(),
+            candidates.len(),
+            "every candidate matches the blanket .gitignore"
+        );
     }
 }
