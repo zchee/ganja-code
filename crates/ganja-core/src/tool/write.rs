@@ -104,6 +104,14 @@ impl Tool for WriteTool {
         // A write is also a read, as far as freshness goes: the model now
         // knows exactly what is on disk, so an immediate follow-up edit
         // should not be refused as stale.
+        //
+        // The ordering is load-bearing for `crate::watch`, not only for the
+        // next call: this write is about to arrive back as a filesystem event,
+        // and the watcher decides staleness by comparing the file's stamp
+        // against the recorded one. Recorded here — before that event can be
+        // processed, because it happens inside the call that caused it — the
+        // agent's own write compares clean. Recorded any later and the session
+        // would condemn its own edits.
         ctx.files.record_stat(&filepath, anchor::stamp(&file));
 
         Ok(ToolOutput {

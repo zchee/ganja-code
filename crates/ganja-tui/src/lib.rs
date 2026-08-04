@@ -153,6 +153,11 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     // that never answers costs its tools and a line of the status bar rather
     // than the startup this call returns straight out of (**R3**).
     engine.connect_mcp();
+    // Filesystem events for the files this session reads, so a file edited in
+    // another window is refused before the model acts on what it read and is
+    // named to it at the top of the next turn. A watcher that will not start
+    // is one warning and nothing else.
+    engine.watch_files();
 
     let seed = match resume {
         Some(resume) => stored_transcript(&engine, resume).await?,

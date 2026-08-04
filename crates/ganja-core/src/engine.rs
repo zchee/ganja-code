@@ -22,7 +22,11 @@
 //! compaction — which is what keeps golden, scripted and PTY runs
 //! deterministic.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use futures::{StreamExt as _, stream::BoxStream};
 use tokio::sync::{Mutex, mpsc};
@@ -41,6 +45,7 @@ use crate::{
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
     tool::{FileTimes, Registry, task},
+    watch,
 };
 
 /// Events the engine queues before a producer has to wait for the subscriber.
@@ -236,6 +241,13 @@ pub struct Engine {
     root: PathBuf,
     /// Which files this session has read, shared by every tool call in it.
     files: Arc<FileTimes>,
+    /// What reports changes to those files, once somebody started one.
+    /// [`None`] is an engine nobody asked to watch — every scripted, golden
+    /// and PTY run — where a file changed outside the session is noticed by
+    /// the next write that touches it and not before.
+    ///
+    /// Held only so that it is not dropped: dropping it ends the watch.
+    watcher: std::sync::Mutex<Option<watch::Watcher>>,
     events: mpsc::Sender<Event>,
     unclaimed: Mutex<Option<mpsc::Receiver<Event>>>,
     /// Holds the handle of the turn in flight, and doubles as the idle/busy
@@ -337,6 +349,7 @@ impl Engine {
             cwd,
             root,
             files: Arc::new(FileTimes::default()),
+            watcher: std::sync::Mutex::new(None),
             events,
             unclaimed: Mutex::new(Some(receiver)),
             turn: Arc::default(),
@@ -482,6 +495,36 @@ impl Engine {
     pub fn shutdown_lsp(&self) {
         if let Some(lsp) = &self.lsp {
             lsp.shutdown();
+        }
+    }
+
+    /// Starts reporting changes other people make to the files this session
+    /// has read.
+    ///
+    /// Returns immediately, and is a separate call rather than part of
+    /// assembly for [`Engine::connect_mcp`]'s reason: the engine is built
+    /// before anything of its own starts running. Must be called from inside a
+    /// tokio runtime.
+    ///
+    /// A watcher that will not start is one warning and nothing else — the
+    /// session then behaves exactly as it did before watching existed, which
+    /// is a read-before-write gate that notices a change when a write asks
+    /// about it. Calling this twice replaces the watch rather than adding a
+    /// second one.
+    pub fn watch_files(&self) {
+        match watch::Watcher::new(&self.root, Arc::clone(&self.files)) {
+            Ok(watcher) => {
+                *self
+                    .watcher
+                    .lock()
+                    .expect("the watcher slot is never poisoned") = Some(watcher);
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                root = %self.root.display(),
+                "no filesystem watcher; a file changed outside the session will be noticed \
+                 when something writes to it"
+            ),
         }
     }
 
@@ -1493,7 +1536,16 @@ impl Engine {
         // A command that runs as another agent is not the session switching to
         // it, so the plan-to-build notice — which is about what the *user*
         // switched to — is left to the session's own agent.
-        let reminders = reminders(name.as_deref(), previous.as_deref());
+        let mut reminders = reminders(name.as_deref(), previous.as_deref());
+        // Files that went stale while nobody was asking are named here, at the
+        // top of the first turn that could act on what it read of them. Only a
+        // turn that asks the model can deliver one — a `!` passthrough asks
+        // nothing and a compaction asks a question of its own — so the queue is
+        // drained by those turns alone and the notice waits for the prompt that
+        // follows (deviation: stale-notice-only-on-turns-that-ask).
+        if asks_the_model && let Some(notice) = stale_notice(&self.files.take_stale(), &self.root) {
+            reminders.push(notice);
+        }
 
         // The first prompt on a persistent engine mints the session, and its
         // record reaches the disk before the first byte streams: a crash
@@ -1625,6 +1677,41 @@ fn reminders(agent: Option<&str>, previous: Option<&str>) -> Vec<String> {
     found
 }
 
+/// What the model is told about files that changed underneath it, before the
+/// list of them.
+const STALE_FILES: &str = "The following files changed on disk after they were read in this \
+                           session; re-read them before relying on their contents:";
+
+/// The one synthetic user part naming `stale`, or [`None`] when nothing went
+/// stale.
+///
+/// A reminder like the two above and carried the same way: it belongs to the
+/// request and not to the transcript, because it is about the state the
+/// filesystem is in right now and a stored copy would be telling some later
+/// turn about a file that has long since been re-read.
+///
+/// Paths are project-relative, as every other path the model is shown is: what
+/// it does with the answer is call `read` with it.
+fn stale_notice(stale: &[PathBuf], root: &Path) -> Option<String> {
+    if stale.is_empty() {
+        return None;
+    }
+
+    let mut notice = String::from(STALE_FILES);
+    for path in stale {
+        notice.push_str("\n- ");
+        notice.push_str(
+            &path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string(),
+        );
+    }
+
+    Some(notice)
+}
+
 /// A brand-new session record, already on disk by the time it is adopted,
 /// carrying whatever the engine is set to run as.
 fn fresh_session(storage: &Storage, agent: Option<String>, model: String) -> SessionInfo {
@@ -1703,7 +1790,10 @@ fn close_interrupted(storage: &Storage, session: &SessionId, transcript: &mut [M
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
 
     use async_trait::async_trait;
     use futures::{
@@ -1712,7 +1802,7 @@ mod tests {
     };
     use tokio_util::sync::CancellationToken;
 
-    use super::{Engine, EngineError};
+    use super::{Engine, EngineError, STALE_FILES, stale_notice};
     use crate::{
         permission::Permissions,
         protocol::{Command, Event, FinishReason, Message, Role, Usage},
@@ -1720,7 +1810,7 @@ mod tests {
             ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake::MODEL,
         },
         storage::{self, SessionId, SessionInfo, Storage},
-        tool::Registry,
+        tool::{FileTimes, Registry},
     };
 
     /// An engine over `provider` with no tools and default rules, which is
@@ -2265,5 +2355,155 @@ mod tests {
             .send(Command::CancelTurn)
             .await
             .expect("an idle cancel is a no-op");
+    }
+
+    #[test]
+    fn the_stale_notice_names_its_files_the_way_the_model_would_ask_for_them() {
+        let root = std::path::Path::new("/project");
+
+        assert_eq!(stale_notice(&[], root), None, "nothing stale, nothing said");
+        assert_eq!(
+            stale_notice(
+                &[
+                    PathBuf::from("/project/src/main.rs"),
+                    PathBuf::from("/project/README.md"),
+                    // A file the session read outside the project has no
+                    // relative form; naming it absolutely is what `read`
+                    // would take back.
+                    PathBuf::from("/etc/hosts"),
+                ],
+                root,
+            )
+            .as_deref(),
+            Some(
+                "The following files changed on disk after they were read in this session; \
+                 re-read them before relying on their contents:\n\
+                 - src/main.rs\n\
+                 - README.md\n\
+                 - /etc/hosts"
+            )
+        );
+    }
+
+    /// Marks `path` stale in `files` the way the watcher would: read, moved by
+    /// somebody else, noticed.
+    fn condemn(files: &FileTimes, path: &std::path::Path) {
+        files.record(path);
+        std::fs::File::open(path)
+            .and_then(|file| file.set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .expect("the fixture can move the stamp");
+        files.note_change(path);
+    }
+
+    /// The text parts of the last user message in `request` — where a
+    /// reminder lands.
+    fn last_user_text(request: &ChatRequest) -> Vec<&str> {
+        request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User)
+            .expect("a request carries the user's message")
+            .parts
+            .iter()
+            .filter_map(crate::protocol::Part::as_text)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn files_that_went_stale_are_named_to_the_model_once() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("notes.md");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            ProviderEvent::TextDelta("sure".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ]));
+        let seen = Arc::clone(&provider.seen);
+        let engine = bare(provider, "scripted-model");
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+        condemn(&engine.files, &path);
+
+        for prompt in ["first", "second"] {
+            engine
+                .send(Command::SendPrompt {
+                    text: prompt.to_owned(),
+                    mentions: Vec::new(),
+                })
+                .await
+                .expect("an idle engine accepts a prompt");
+            drain(&mut events).await;
+        }
+
+        let requests = seen.lock().expect("the request log is never poisoned");
+        let first = last_user_text(requests.first().expect("the first turn asked"));
+        assert_eq!(
+            first.first(),
+            Some(&"first"),
+            "the user's own text comes first: {first:?}"
+        );
+        let notice = first
+            .get(1)
+            .expect("the turn after the change carries the notice");
+        assert!(
+            notice.starts_with(STALE_FILES) && notice.contains("notes.md"),
+            "got {notice:?}"
+        );
+
+        assert_eq!(
+            last_user_text(requests.get(1).expect("the second turn asked too")),
+            vec!["second"],
+            "one episode is told once; a later turn is not reminded again"
+        );
+    }
+
+    /// A `!` passthrough asks the model nothing, so it is not a turn that can
+    /// carry a notice — and must not consume one on the way past.
+    #[tokio::test]
+    async fn a_passthrough_between_the_change_and_the_prompt_does_not_spend_the_notice() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("notes.md");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            ProviderEvent::TextDelta("sure".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ]));
+        let seen = Arc::clone(&provider.seen);
+        let engine = bare(provider, "scripted-model");
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+        condemn(&engine.files, &path);
+
+        engine
+            .send(Command::RunShell {
+                command: "true".to_owned(),
+            })
+            .await
+            .expect("an idle engine accepts a passthrough");
+        drain(&mut events).await;
+
+        engine
+            .send(Command::SendPrompt {
+                text: "now what".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("a finished passthrough leaves the engine idle");
+        drain(&mut events).await;
+
+        let requests = seen.lock().expect("the request log is never poisoned");
+        assert_eq!(
+            requests.len(),
+            1,
+            "a passthrough asks the provider nothing, got {requests:?}"
+        );
+        let carried = last_user_text(&requests[0]);
+        assert!(
+            carried
+                .iter()
+                .any(|text| text.starts_with(STALE_FILES) && text.contains("notes.md")),
+            "the notice waited for the turn that could deliver it: {carried:?}"
+        );
     }
 }

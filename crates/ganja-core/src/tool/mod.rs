@@ -220,14 +220,48 @@ impl Registry {
     }
 }
 
+/// What the read log knows about one file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    /// Read this session, with the modification stamp it had at the time.
+    Read(Option<SystemTime>),
+    /// Changed on disk after it was read, and not read again since.
+    ///
+    /// A state rather than a stamp comparison, because what noticed is
+    /// [`crate::watch`], at a moment nothing was asking. Re-deriving the
+    /// answer when a `write` finally does ask would be a second look at a name
+    /// the first look already condemned — and would answer "fresh" for a file
+    /// that has been changed and changed back, which is precisely the case the
+    /// model needs told.
+    Stale,
+}
+
 /// Which files were read this session, and the modification stamp each had.
 ///
 /// `write` and `edit` refuse to touch an existing file the model has not
 /// read, or one that changed on disk after the read — upstream's
 /// read-before-write rule — and this is where the reads are recorded.
+///
+/// The rule has two ways of noticing a change. A tool asking whether it may
+/// write compares stamps, which is the whole of it upstream; and
+/// [`crate::watch`] reports changes as the filesystem makes them, so a file
+/// somebody edited in another window is condemned before the model acts on
+/// what it read, and named to it at the top of the next turn.
 #[derive(Debug, Default)]
 pub struct FileTimes {
-    read: Mutex<HashMap<PathBuf, Option<SystemTime>>>,
+    log: Mutex<Log>,
+}
+
+/// The read log's contents, under one lock: what is known about each file, and
+/// which files the model still has to be told about.
+#[derive(Debug, Default)]
+struct Log {
+    /// What was read, and what became of it.
+    read: HashMap<PathBuf, Seen>,
+    /// Files that went stale and have not been named to the model yet, in the
+    /// order they went. Drained by [`FileTimes::take_stale`] at the top of the
+    /// next turn that asks the model anything.
+    unannounced: Vec<PathBuf>,
 }
 
 impl FileTimes {
@@ -247,10 +281,13 @@ impl FileTimes {
     /// exists to close. Recording the stamp of a file other than the one that
     /// was written is how a stale read passes for a fresh one.
     pub fn record_stat(&self, path: &Path, stamp: Option<SystemTime>) {
-        self.read
-            .lock()
-            .expect("the read log is never poisoned")
-            .insert(path.to_owned(), stamp);
+        let mut log = self.log.lock().expect("the read log is never poisoned");
+
+        log.read.insert(path.to_owned(), Seen::Read(stamp));
+        // A file read again before the notice went out has nothing left to
+        // say: the model is about to be handed the current contents, and
+        // "re-read it" is advice it has already taken.
+        log.unannounced.retain(|held| held != path);
     }
 
     /// Forgets every read, so that what the model may write is judged against
@@ -262,10 +299,83 @@ impl FileTimes {
     /// with it, or the first thing the next conversation does could be to
     /// overwrite a file it never opened.
     pub fn clear(&self) {
-        self.read
+        let mut log = self.log.lock().expect("the read log is never poisoned");
+
+        log.read.clear();
+        // The queued notice belongs to the conversation that read the files.
+        // Telling the next one that files it never opened have moved would be
+        // a reminder about somebody else's session.
+        log.unannounced.clear();
+    }
+
+    /// Records that something outside this session may have touched `path`,
+    /// and marks it stale if something did.
+    ///
+    /// What [`crate::watch`] calls for every filesystem event whose path this
+    /// session has read; a path it has not read is not this rule's business
+    /// and returns without touching the disk. Stale means the file's
+    /// modification stamp differs from the one recorded when it was read, or
+    /// the file is gone — an agent's own write records its new stamp as part
+    /// of writing, so the event that write causes compares clean.
+    pub fn note_change(&self, path: &Path) {
+        // The stat happens between the two locks rather than under one: this
+        // runs on every event for every watched file, and holding the log
+        // across a filesystem call would put a tool call behind whatever the
+        // disk is doing.
+        let recorded = match self
+            .log
             .lock()
             .expect("the read log is never poisoned")
-            .clear();
+            .read
+            .get(path)
+        {
+            Some(Seen::Read(stamp)) => *stamp,
+            // Not read this session, or already condemned: either way there is
+            // nothing here to decide.
+            Some(Seen::Stale) | None => return,
+        };
+
+        let changed = match std::fs::metadata(path) {
+            Ok(metadata) => metadata.modified().ok() != recorded,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            // Anything else is the filesystem declining to answer rather than
+            // an answer. `modification_stamp` fails open for the same reason:
+            // a session that started refusing edits because one lookup was
+            // momentarily refused would be worse than one that lets the
+            // write's own check decide.
+            Err(_) => false,
+        };
+        if !changed {
+            return;
+        }
+
+        let mut log = self.log.lock().expect("the read log is never poisoned");
+        // Re-checked against the same stamp, because a read may have landed
+        // while the stat above was running: that read saw the change, so
+        // condemning what it recorded would refuse a file the model just
+        // looked at.
+        if log.read.get(path) != Some(&Seen::Read(recorded)) {
+            return;
+        }
+        log.read.insert(path.to_owned(), Seen::Stale);
+        log.unannounced.push(path.to_owned());
+    }
+
+    /// The files that went stale since this was last asked, and clears them.
+    ///
+    /// Draining is what makes the notice fire once per staleness episode
+    /// rather than once per turn: the file stays [`Seen::Stale`] — so `write`
+    /// and `edit` keep refusing it until it is read again — while the *telling*
+    /// happens once. A file that is re-read and then changed again is a new
+    /// episode, and is named again.
+    pub fn take_stale(&self) -> Vec<PathBuf> {
+        std::mem::take(
+            &mut self
+                .log
+                .lock()
+                .expect("the read log is never poisoned")
+                .unannounced,
+        )
     }
 
     /// Checks that `path` was read this session and has not changed on disk
@@ -294,24 +404,37 @@ impl FileTimes {
         stamp: Option<SystemTime>,
     ) -> Result<(), ToolError> {
         let recorded = self
-            .read
+            .log
             .lock()
             .expect("the read log is never poisoned")
+            .read
             .get(path)
             .copied();
 
-        let Some(recorded) = recorded else {
-            return Err(ToolError::Failed(format!(
-                "{} has not been read this session; read it first",
+        let stale = || {
+            ToolError::Failed(format!(
+                "{} changed on disk after it was read; read it again",
                 path.display()
-            )));
+            ))
+        };
+
+        let recorded = match recorded {
+            // Already condemned by the watcher, so this answers from the state
+            // rather than from a fresh look: the stamp it was condemned on is
+            // gone, and a file changed and changed back would otherwise pass
+            // for one that never moved.
+            Some(Seen::Stale) => return Err(stale()),
+            Some(Seen::Read(recorded)) => recorded,
+            None => {
+                return Err(ToolError::Failed(format!(
+                    "{} has not been read this session; read it first",
+                    path.display()
+                )));
+            }
         };
 
         if stamp != recorded {
-            return Err(ToolError::Failed(format!(
-                "{} changed on disk after it was read; read it again",
-                path.display()
-            )));
+            return Err(stale());
         }
 
         Ok(())
@@ -485,6 +608,151 @@ mod tests {
             matches!(&refused, ToolError::Failed(message) if message.contains("read it again")),
             "the path form must really disagree, or the assertion above proves nothing: {refused:?}"
         );
+    }
+
+    /// The stamp comparison the watcher makes, and what it costs the file that
+    /// loses it: the refusal is the one `write` and `edit` already print, and
+    /// it comes from the recorded state rather than from a fresh look.
+    #[test]
+    fn a_file_the_watcher_condemned_is_refused_until_it_is_read_again() {
+        let times = FileTimes::default();
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        times.record(&path);
+        let as_read = super::modification_stamp(&path);
+        times.note_change(&path);
+        times
+            .check_fresh(&path)
+            .expect("nothing moved, so nothing is stale");
+
+        std::fs::write(&path, "somebody else's edit").expect("the fixture writes");
+        age(&path, 0);
+        times.note_change(&path);
+
+        let refused = times
+            .check_fresh(&path)
+            .expect_err("the file moved under the session");
+        assert!(
+            matches!(&refused, ToolError::Failed(message) if message.contains("read it again")),
+            "got {refused:?}"
+        );
+
+        // Put the stamp back where the read found it. A stamp comparison would
+        // now say the file never moved, which is exactly why the condemnation
+        // is a state and not a comparison: the contents are somebody else's
+        // and the model has not seen them.
+        std::fs::File::open(&path)
+            .and_then(|file| file.set_modified(as_read.expect("the fixture's filesystem stamps")))
+            .expect("the fixture can move the stamp");
+        assert!(
+            times.check_fresh(&path).is_err(),
+            "a file changed and changed back is still not the one that was read"
+        );
+
+        times.record(&path);
+        times
+            .check_fresh(&path)
+            .expect("reading it again is what repairs it");
+    }
+
+    #[test]
+    fn a_file_names_itself_to_the_model_once_per_time_it_goes_stale() {
+        let times = FileTimes::default();
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        times.record(&path);
+        age(&path, 0);
+        times.note_change(&path);
+        times.note_change(&path);
+
+        assert_eq!(
+            times.take_stale(),
+            vec![path.clone()],
+            "one episode is one mention, however many events reported it"
+        );
+        assert!(
+            times.take_stale().is_empty(),
+            "the queue is drained by being read; a later turn is not told again"
+        );
+
+        // Read again, changed again: a second episode, told a second time.
+        times.record(&path);
+        age(&path, 60);
+        times.note_change(&path);
+        assert_eq!(times.take_stale(), vec![path]);
+    }
+
+    #[test]
+    fn a_file_read_again_before_the_notice_goes_out_is_not_mentioned() {
+        let times = FileTimes::default();
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        times.record(&path);
+        age(&path, 0);
+        times.note_change(&path);
+        // The model asked for the file itself before the turn that would have
+        // told it to. There is nothing left to advise.
+        times.record(&path);
+
+        assert!(times.take_stale().is_empty());
+        times
+            .check_fresh(&path)
+            .expect("the read that beat the notice also cleared the staleness");
+    }
+
+    #[test]
+    fn a_file_nobody_read_is_not_the_watchers_business() {
+        let times = FileTimes::default();
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        times.note_change(&path);
+
+        assert!(times.take_stale().is_empty());
+        let refused = times
+            .check_fresh(&path)
+            .expect_err("an unread file is unread, not stale");
+        assert!(
+            matches!(&refused, ToolError::Failed(message) if message.contains("read it first")),
+            "got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_new_conversation_inherits_neither_the_reads_nor_what_became_of_them() {
+        let times = FileTimes::default();
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "one").expect("the fixture writes");
+
+        times.record(&path);
+        age(&path, 0);
+        times.note_change(&path);
+
+        times.clear();
+
+        assert!(
+            times.take_stale().is_empty(),
+            "a queued notice belongs to the session that read the file"
+        );
+    }
+
+    /// Puts `path`'s modification stamp at a named second, so that no
+    /// assertion below rides on a filesystem's stamp resolution — and so that
+    /// two changes in a row are provably two, which "set it to the epoch"
+    /// twice would not be.
+    fn age(path: &std::path::Path, second: u64) {
+        let stamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(second);
+        std::fs::File::open(path)
+            .and_then(|file| file.set_modified(stamp))
+            .expect("the fixture can move the stamp");
     }
 
     #[test]
