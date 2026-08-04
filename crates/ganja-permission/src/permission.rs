@@ -525,9 +525,12 @@ impl<'de> Deserialize<'de> for RuleSet {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PermissionConfig {
     /// One entry per tool key, in the order the document spelled them.
-    /// Read outside this crate only by the config layer's own tests, which
-    /// assert on the order a document was written in before it is flattened.
-    pub entries: Vec<(String, RuleSet)>,
+    /// Private even though the config layer's tests read it — order is
+    /// semantic here (the last matching rule wins), and a field an outside
+    /// writer could push onto would let the entries and the scalar flag
+    /// disagree about what the object means. [`PermissionConfig::entries`]
+    /// lends it out instead.
+    entries: Vec<(String, RuleSet)>,
     /// Set when the whole value was a bare action rather than an object.
     /// Upstream's merge only recurses when both sides are objects, so a bare
     /// action replaces everything underneath it instead of merging into it.
@@ -562,6 +565,13 @@ impl PermissionConfig {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// The parsed entries in document order, for whoever needs to see what
+    /// was written without being able to rewrite it.
+    #[must_use]
+    pub fn entries(&self) -> &[(String, RuleSet)] {
+        &self.entries
     }
 
     /// Overlays `other`, replicating upstream's `mergeDeep` at both levels: a
