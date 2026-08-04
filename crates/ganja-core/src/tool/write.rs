@@ -2,6 +2,12 @@
 //!
 //! Spec: upstream `packages/opencode/src/tool/write.ts` and `write.txt`.
 //!
+//! The file is opened through the directory holding it rather than by name
+//! (`tool/anchor.rs`), which upstream does not do: a link planted at the path
+//! between the permission dialog's answer and the write has nothing left to
+//! redirect, and a link *at* the file's own name is refused rather than
+//! followed.
+//!
 //! Upstream's diff-for-permission-prompt, BOM preservation, format-on-write
 //! and LSP diagnostics reporting all lean on services this port does not
 //! have at the tool layer (`ctx.ask`, `Format.Service`, `LSP.Service`) —
@@ -9,15 +15,18 @@
 //! back to without those services, `"Wrote file successfully."`, is exactly
 //! what this port always returns.
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    io::Write as _,
+    path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{
-    project::Project,
-    tool::{Tool, ToolCtx, ToolError, ToolOutput},
+use crate::tool::{
+    Tool, ToolCtx, ToolError, ToolOutput,
+    anchor::{self, Anchor},
 };
 
 /// What the model passes to `write`.
@@ -63,35 +72,39 @@ impl Tool for WriteTool {
         let title = display(&ctx.cwd, &filepath);
         // Before anything touches the disk, including the parent directories
         // created below — materialising a path is itself a way through a link.
-        refuse_link_escape(&ctx.cwd, &filepath)?;
+        anchor::refuse_link_escape(&ctx.cwd, &filepath)?;
+
+        // From here the file is addressed through a directory this call holds
+        // open (`tool/anchor.rs`): the second containment check, the freshness
+        // stamp and the write all speak to that one descriptor, so a link
+        // planted at the name after the permission dialog was answered has
+        // nothing left to redirect. Missing parents are made under the same
+        // anchor rather than by `create_dir_all`, whose own walk would resolve
+        // those names afresh.
+        let anchor = Anchor::open(&filepath, true)?;
+        anchor::refuse_anchor_escape(&ctx.cwd, &filepath, &anchor)?;
+        let (mut file, existed) = anchor.write()?;
 
         // Upstream's "you MUST use the Read tool first" rule, enforced only
         // for a file that already exists — a brand-new file has nothing on
-        // disk a stale read could have missed.
-        let existed = filepath.exists();
+        // disk a stale read could have missed. Nothing has been truncated
+        // yet: a refusal here leaves the file exactly as it was.
         if existed {
-            ctx.files.check_fresh(&filepath)?;
-        }
-
-        if let Some(parent) = filepath.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                ToolError::Failed(format!(
-                    "could not create directory {}: {error}",
-                    parent.display()
-                ))
+            ctx.files
+                .check_fresh_stat(&filepath, anchor::stamp(&file))?;
+            file.set_len(0).map_err(|error| {
+                ToolError::Failed(format!("could not write {}: {error}", filepath.display()))
             })?;
         }
 
-        std::fs::write(&filepath, &args.content).map_err(|error| {
+        file.write_all(args.content.as_bytes()).map_err(|error| {
             ToolError::Failed(format!("could not write {}: {error}", filepath.display()))
         })?;
 
         // A write is also a read, as far as freshness goes: the model now
         // knows exactly what is on disk, so an immediate follow-up edit
         // should not be refused as stale.
-        ctx.files.record(&filepath);
+        ctx.files.record_stat(&filepath, anchor::stamp(&file));
 
         Ok(ToolOutput {
             title,
@@ -114,124 +127,6 @@ fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
     } else {
         cwd.join(path)
     }
-}
-
-/// Refuses a path that is inside the project by its text but lands outside it
-/// once the filesystem has its say — that is, one a symbolic link redirects.
-///
-/// The permission gate resolves the same path and asks about it
-/// (`permission.rs`, `outside`), but it answers *before* the call runs: a link
-/// planted between the answer and the write redirects it afterwards, and a
-/// [`crate::permission::Permissions::default`] set has no project to compare
-/// anything against at all. `fs::write` follows links, so this is the check
-/// the write itself makes, immediately before opening the file.
-///
-/// Only a link that *escapes* is refused. A call that openly names somewhere
-/// outside the project is the gate's business and not this function's — the
-/// user was asked about that directory and may well have allowed it — so the
-/// rule is precisely the one this tool's contract states: do not follow a link
-/// out of the project. Text inside plus reality outside is that link and
-/// nothing else.
-///
-/// Resolution mirrors `permission::resolve` deliberately, so the gate and the
-/// tool cannot disagree about where a path goes: canonicalise what exists, so
-/// every link along it and every `..` is already applied, then apply what does
-/// not exist yet by text — a `..` there cannot cross a link, because nothing
-/// it names is on the disk to be one.
-///
-/// The window between this check and the open is narrowed, not closed. Only
-/// opening the canonical parent with `O_NOFOLLOW` would close it, which this
-/// port does not do yet; what is refused here is the escape that exists when
-/// the call is made, which is the shape a planted link takes.
-///
-/// The twin of this lives in `tool/edit.rs`. The two are deliberately
-/// duplicated rather than shared: exactly two tools write, and the alternative
-/// is a module whose only job is to hold one function.
-fn refuse_link_escape(cwd: &Path, path: &Path) -> Result<(), ToolError> {
-    let root = Project::resolve(cwd).root().to_owned();
-    let real = real_path(path);
-    if real.starts_with(&root) {
-        return Ok(());
-    }
-    if !claimed(cwd, path).starts_with(&root) {
-        return Ok(());
-    }
-
-    Err(ToolError::Failed(format!(
-        "{} is inside the project but resolves to {}, which is not: a symbolic \
-         link on that path leads out of {}. Refusing to write through it — name \
-         the real path if that is what you meant.",
-        path.display(),
-        real.display(),
-        root.display()
-    )))
-}
-
-/// Where `path` really lands: canonical for as much of it as exists, lexical
-/// for whatever does not exist yet.
-fn real_path(path: &Path) -> PathBuf {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical;
-    }
-
-    let mut ancestors: Vec<Component> = path.components().collect();
-    let mut rest: Vec<Component> = Vec::new();
-    while let Some(component) = ancestors.pop() {
-        rest.push(component);
-        let existing: PathBuf = ancestors.iter().collect();
-        if existing.as_os_str().is_empty() {
-            continue;
-        }
-        if let Ok(canonical) = std::fs::canonicalize(&existing) {
-            return apply(canonical, rest.iter().rev().copied());
-        }
-    }
-
-    lexical(path)
-}
-
-/// What the call claimed the path was, before any link was followed: the
-/// session directory in canonical form, with everything the call added applied
-/// by text.
-///
-/// Only the anchor is canonicalised, and that asymmetry is the whole point —
-/// the anchor is the one part of the path the model did not choose. Comparing
-/// raw text against a canonical root would be wrong in the other direction on
-/// any machine where the session directory is reached through a link, which on
-/// macOS is every temporary directory there is (`/var` -> `/private/var`):
-/// every path under it would read as "outside the project" and every write
-/// would be refused.
-fn claimed(cwd: &Path, path: &Path) -> PathBuf {
-    let anchor = std::fs::canonicalize(cwd).unwrap_or_else(|_| lexical(cwd));
-
-    match path.strip_prefix(cwd) {
-        Ok(rest) => apply(anchor, rest.components()),
-        Err(_) => lexical(path),
-    }
-}
-
-/// `path` made absolute with its `.` and `..` applied by text alone, which is
-/// what it claims to be before the filesystem is consulted.
-fn lexical(path: &Path) -> PathBuf {
-    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
-
-    apply(PathBuf::new(), absolute.components())
-}
-
-/// `base` with `rest` applied by text: `.` ignored, `..` popped, anything else
-/// pushed.
-fn apply<'a>(mut base: PathBuf, rest: impl Iterator<Item = Component<'a>>) -> PathBuf {
-    for component in rest {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                base.pop();
-            }
-            other => base.push(other.as_os_str()),
-        }
-    }
-
-    base
 }
 
 /// `path` relative to `cwd` when it is under it, absolute otherwise — for a
@@ -415,6 +310,56 @@ mod tests {
             std::fs::read_to_string(&secret).expect("the file outside still exists"),
             "before",
             "the write followed the link and landed outside the project"
+        );
+    }
+
+    /// The window the guard above could only narrow, now closed.
+    ///
+    /// This link stays *inside* the project, so the lexical guard has nothing
+    /// to say about it — that is asserted here rather than assumed, because it
+    /// is what makes the rest of the test about the open and not about the
+    /// guard. The old code wrote straight through a link like this one. What
+    /// refuses it now is `openat` with `O_NOFOLLOW`: the name is never
+    /// resolved, whoever planted it and wherever it leads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_planted_at_the_name_is_refused_by_the_open_not_by_the_guard() {
+        let (project, _elsewhere) = project_and_elsewhere();
+        let target = project.path().join("real.txt");
+        std::fs::write(&target, "before").expect("the fixture writes");
+        let planted = project.path().join("notes.txt");
+        std::os::unix::fs::symlink(&target, &planted).expect("the link is creatable");
+
+        crate::tool::anchor::refuse_link_escape(project.path(), &planted).expect(
+            "a link that stays inside the project is no escape — if this starts \
+             failing, the refusal below stops proving anything about the open",
+        );
+
+        let context = ctx(project.path().to_owned());
+        context.files.record(&planted);
+        let refused = WriteTool
+            .run(
+                serde_json::json!({ "filePath": "notes.txt", "content": "after" }),
+                &context,
+            )
+            .await
+            .expect_err("a link at the final component is not followed");
+
+        assert!(
+            matches!(&refused, ToolError::Failed(message) if message.contains("symbolic link")),
+            "got {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("the target still exists"),
+            "before",
+            "the write followed a link planted at the name"
+        );
+        assert!(
+            std::fs::symlink_metadata(&planted)
+                .expect("the link is still there")
+                .file_type()
+                .is_symlink(),
+            "the link is refused, not replaced: what it points at is not this tool's to decide"
         );
     }
 

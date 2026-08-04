@@ -5,6 +5,10 @@
 //! one, and descriptions are ported from upstream's `*.txt` prompt files
 //! (MIT, attributed in `THIRD_PARTY_NOTICES.md`).
 
+/// Anchored file I/O, shared by the two tools that write. Not public: it is
+/// how `write` and `edit` reach the disk, not something a frontend or a
+/// third-party tool has any business addressing files through.
+mod anchor;
 pub mod edit;
 pub mod glob;
 pub mod grep;
@@ -209,11 +213,23 @@ impl FileTimes {
     /// Records that `path` was read just now, with the modification stamp it
     /// currently has.
     pub fn record(&self, path: &Path) {
-        let modified = modification_stamp(path);
+        self.record_stat(path, modification_stamp(path));
+    }
+
+    /// Records that `path` was read or written just now, with a stamp the
+    /// caller already has.
+    ///
+    /// That stamp must come from an `fstat` on the descriptor the call is
+    /// reading or writing — `File::metadata`, not `fs::metadata` — because a
+    /// fresh look at the path is a second resolution of a name somebody else
+    /// may have redefined in between, which is the race `tool/anchor.rs`
+    /// exists to close. Recording the stamp of a file other than the one that
+    /// was written is how a stale read passes for a fresh one.
+    pub fn record_stat(&self, path: &Path, stamp: Option<SystemTime>) {
         self.read
             .lock()
             .expect("the read log is never poisoned")
-            .insert(path.to_owned(), modified);
+            .insert(path.to_owned(), stamp);
     }
 
     /// Checks that `path` was read this session and has not changed on disk
@@ -224,6 +240,23 @@ impl FileTimes {
     /// Returns [`ToolError::Failed`] naming the remedy — read the file first,
     /// or read it again — because the message is what the model sees next.
     pub fn check_fresh(&self, path: &Path) -> Result<(), ToolError> {
+        self.check_fresh_stat(path, modification_stamp(path))
+    }
+
+    /// The same check against a stamp the caller already has, under the same
+    /// rule as [`FileTimes::record_stat`]: it must be an `fstat` on the
+    /// descriptor about to be written, so what is judged fresh is the file
+    /// that is about to be overwritten and not whatever the name resolves to
+    /// a moment later.
+    ///
+    /// # Errors
+    ///
+    /// As [`FileTimes::check_fresh`].
+    pub fn check_fresh_stat(
+        &self,
+        path: &Path,
+        stamp: Option<SystemTime>,
+    ) -> Result<(), ToolError> {
         let recorded = self
             .read
             .lock()
@@ -238,7 +271,7 @@ impl FileTimes {
             )));
         };
 
-        if modification_stamp(path) != recorded {
+        if stamp != recorded {
             return Err(ToolError::Failed(format!(
                 "{} changed on disk after it was read; read it again",
                 path.display()

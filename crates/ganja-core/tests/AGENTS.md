@@ -34,6 +34,7 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 | `catalog_fetch.rs` | The catalog against a real socket: the startup loop fetches, the payload parses through fields this build has never heard of, the table is replaced wholesale, the body is cached verbatim under a name derived from the source, and the five-minute debounce keeps a second refresh off the wire. Mutates environment variables — one test, one binary. |
 | `catalog_offline.rs` | Fetching disabled and nothing cached: the compiled-in snapshot answers every question, and a loopback listener that would have counted a request counts none. Mutates environment variables — one test, one binary. |
 | `catalog_retry.rs` | A refused catalog request is retried twice and then reported as the status it gave up on, and a refresh that failed leaves the table it started with. Mutates environment variables — one test, one binary. |
+| `spill_sweep.rs` | The spill sweep over the directories it really resolves: both candidates a clamp would have written to, week-old `tool_*` gone, fresh and foreign kept. Mutates `XDG_DATA_HOME` and `TMPDIR` — one test, one binary. |
 
 ## Subdirectories
 
