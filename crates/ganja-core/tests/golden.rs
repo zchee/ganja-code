@@ -445,6 +445,7 @@ async fn ganja(task: &Task) -> Vec<Executed> {
     engine
         .send(Command::SendPrompt {
             text: task.prompt.clone(),
+            mentions: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

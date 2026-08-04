@@ -215,6 +215,7 @@ fn seeded(storage: &Storage) -> SessionId {
         summary: None,
         agent: None,
         model: None,
+        parent: None,
     };
     storage.save_info(&info).expect("the seeded record writes");
 
@@ -249,6 +250,7 @@ async fn the_planning_agent_refuses_an_edit_without_asking_anyone() {
     engine
         .send(Command::SendPrompt {
             text: "how would you do it".to_owned(),
+            mentions: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -313,6 +315,7 @@ async fn the_building_agent_runs_what_the_planning_one_refused() {
     engine
         .send(Command::SendPrompt {
             text: "do it".to_owned(),
+            mentions: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -405,6 +408,7 @@ async fn switching_agents_swaps_the_prompt_and_keeps_the_environment() {
         engine
             .send(Command::SendPrompt {
                 text: text.to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -466,6 +470,7 @@ async fn the_plan_reminders_reach_the_request_and_not_the_stored_history() {
         engine
             .send(Command::SendPrompt {
                 text: text.to_owned(),
+                mentions: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -562,6 +567,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
     engine
         .send(Command::SendPrompt {
             text: "first".to_owned(),
+            mentions: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -592,6 +598,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
     engine
         .send(Command::SendPrompt {
             text: "second".to_owned(),
+            mentions: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -650,6 +657,7 @@ async fn a_switch_sent_mid_turn_is_refused() {
     engine
         .send(Command::SendPrompt {
             text: "hello".to_owned(),
+            mentions: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

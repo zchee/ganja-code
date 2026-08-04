@@ -223,6 +223,7 @@ fn shape(event: &Event) -> String {
         },
         Event::PartStarted { part, .. } => match &part.body {
             PartBody::Text { .. } => "part:text".to_owned(),
+            PartBody::File { path, .. } => format!("part:file:{path}"),
             PartBody::StepStart => "part:step_start".to_owned(),
             PartBody::StepFinish { usage } => format!(
                 "part:step_finish:{}/{}",
@@ -318,6 +319,7 @@ fn tool_states(request: &ChatRequest) -> Vec<(&str, &ToolState)> {
 fn prompt() -> Command {
     Command::SendPrompt {
         text: "go".to_owned(),
+        mentions: Vec::new(),
     }
 }
 

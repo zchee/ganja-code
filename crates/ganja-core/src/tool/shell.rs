@@ -27,6 +27,7 @@ use serde::Deserialize;
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _},
     process::{Child, Command},
+    sync::mpsc,
 };
 
 use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
@@ -112,6 +113,12 @@ pub struct ShellTool {
 }
 
 impl ShellTool {
+    /// The registry id, which is also the permission key. `bash`, not `shell`:
+    /// upstream pins it for compatibility with saved permissions, and so does
+    /// this. Spelled as a constant because the `!` passthrough builds a part
+    /// carrying it without going through the registry.
+    pub const ID: &'static str = "bash";
+
     /// Builds the tool around the shell this machine offers.
     #[must_use]
     pub fn new() -> Self {
@@ -159,7 +166,7 @@ impl Default for ShellTool {
 #[async_trait]
 impl Tool for ShellTool {
     fn id(&self) -> &'static str {
-        "bash"
+        Self::ID
     }
 
     fn description(&self) -> &str {
@@ -180,6 +187,33 @@ impl Tool for ShellTool {
     }
 
     async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
+        self.run_reporting(args, ctx, None).await
+    }
+}
+
+/// Where a running command's output is reported as it arrives, chunk by chunk
+/// and undecoded.
+///
+/// Unbounded on purpose: this sits on the drain path, and a bounded channel
+/// whose reader fell behind would block the pump, which would block the command
+/// on its own pipe, which is the deadlock the drain exists to prevent. What
+/// bounds memory is the reader, not the channel.
+pub(crate) type Progress = mpsc::UnboundedSender<Vec<u8>>;
+
+impl ShellTool {
+    /// Runs the command, reporting each chunk of output to `progress` as it
+    /// arrives.
+    ///
+    /// [`Tool::run`] is this with nothing to report to. The `!` passthrough is
+    /// the caller that has something: it renders the output into a transcript
+    /// row while the command is still running, which is what upstream's
+    /// `shellImpl` republishes on the part it faked.
+    pub(crate) async fn run_reporting(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolCtx,
+        progress: Option<Progress>,
+    ) -> Result<ToolOutput, ToolError> {
         let args: Args = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArgs(error.to_string()))?;
         let timeout = match args.timeout {
@@ -211,8 +245,9 @@ impl Tool for ShellTool {
         let mut pumps = tokio::spawn({
             let out = Arc::clone(&collected);
             let err = Arc::clone(&collected);
+            let out_progress = progress.clone();
             async move {
-                tokio::join!(pump(stdout, out), pump(stderr, err));
+                tokio::join!(pump(stdout, out, out_progress), pump(stderr, err, progress));
             }
         });
 
@@ -682,16 +717,28 @@ async fn kill_tree(child: &mut Child) {
 /// Both pipes share one collector, so stdout and stderr interleave in the
 /// order they arrived — which is what a terminal would have shown, and what
 /// upstream's merged stream carries.
-async fn pump<R: AsyncRead + Unpin>(mut reader: R, sink: Arc<Mutex<Collector>>) {
+async fn pump<R: AsyncRead + Unpin>(
+    mut reader: R,
+    sink: Arc<Mutex<Collector>>,
+    progress: Option<Progress>,
+) {
     let mut chunk = [0_u8; 8192];
 
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
-            Ok(read) => sink
-                .lock()
-                .expect("the output buffer is never poisoned")
-                .push(&chunk[..read]),
+            Ok(read) => {
+                sink.lock()
+                    .expect("the output buffer is never poisoned")
+                    .push(&chunk[..read]);
+                // Outside the lock, and unbounded, because this arrives on the
+                // path that must never stall a producer: a command blocked on
+                // its own output is a command that never reaches its exit.
+                // A watcher that has gone away simply stops being told.
+                if let Some(progress) = &progress {
+                    let _ = progress.send(chunk[..read].to_vec());
+                }
+            }
         }
     }
 }
@@ -808,6 +855,7 @@ mod tests {
             cancel: CancellationToken::new(),
             call_id: "call-1".to_owned(),
             files: Arc::new(FileTimes::default()),
+            spawn: None,
         }
     }
 

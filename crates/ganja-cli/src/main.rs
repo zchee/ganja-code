@@ -772,6 +772,7 @@ mod tests {
             summary: None,
             agent: None,
             model: None,
+            parent: None,
         }
     }
 

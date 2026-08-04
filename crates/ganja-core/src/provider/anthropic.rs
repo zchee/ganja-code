@@ -426,9 +426,15 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
                     is_error,
                 });
             }
+            // A mentioned file is a *reference*, and the reference is resolved
+            // into a text block before a request is built
+            // (`session::resolve_mentions`). One arriving here would be a
+            // request built past that resolution, and sending a path the model
+            // cannot follow would read as content it could.
+            //
             // `StepFinish` carries a step's bill rather than content, and
             // `StepStart` was consumed as the boundary this step was cut at.
-            PartBody::StepStart | PartBody::StepFinish { .. } => {}
+            PartBody::File { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => {}
         }
     }
 
@@ -1346,6 +1352,7 @@ mod tests {
             ToolState::Pending,
             ToolState::Running {
                 input: json!({"filePath": "src/main.rs"}),
+                metadata: serde_json::Value::Null,
                 started: 1,
             },
         ] {

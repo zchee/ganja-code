@@ -27,6 +27,10 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 | `config.rs` | The five-tier precedence table: global file < explicit file < project file < environment < flags, each tier proven to outrank the one below. Mutates environment variables — one test, one binary. |
 | `agents.rs` | Agents at the engine level: the planning agent's refusals, config rules deciding unasked, prompt swap on switch, plan reminders reaching requests and not history, switch persistence across a resume, mid-turn refusal. |
 | `permission_directories.rs` | A shell call naming a directory outside the project surfaces that directory in the permission event. Mutates `XDG_DATA_HOME` — one test, one binary. |
+| `task.rs` | The task tool end to end: one ordered script drives the parent *and* the child, the child's transcript stays off the frontend's stream, its progress arrives as metadata on the parent's tool part, its registry has no task tool, and a parent's denial reaches it. |
+| `passthrough.rs` | `!` passthrough: the exact synthetic user text, the `bash` part completing with the output and no exit code, ungated even where a rule refuses the model, and a cancel that stops the command. |
+| `commands.rs` | Slash commands, compaction on demand, and starting over: `/init` writing `AGENTS.md` through the ordinary loop, argument expansion reaching the prompt, a configured command, and `NewSession` leaving the old session on disk. |
+| `mentions.rs` | `@file`: the reference on the message, the content in the request, read at **send** time (a file rewritten between two turns reaches the model rewritten), and never recorded as a read. |
 
 ## Subdirectories
 

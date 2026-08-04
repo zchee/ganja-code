@@ -212,6 +212,23 @@ pub enum PartBody {
         /// Where the call currently stands.
         state: ToolState,
     },
+    /// A file the user attached to their message with an `@` mention.
+    ///
+    /// The part carries a **reference and nothing else**: the content is read
+    /// when a request is built, never when the mention is made, so a file the
+    /// user edits between attaching it and sending reaches the model as it is
+    /// now rather than as it was. That is upstream's shape — its file part
+    /// carries a `file://` URL the server resolves at send time — and it is
+    /// also why a mention is not a read: nothing here records the file in
+    /// [`FileTimes`](crate::tool::FileTimes), so `edit` still refuses a file
+    /// the model itself has not opened.
+    File {
+        /// Where the file is, relative to the project root.
+        path: String,
+        /// What kind of file it is, upstream's `mime`. `text/plain` for
+        /// everything this build attaches.
+        mime: String,
+    },
     /// The turn began another model request. Tool results make a turn span
     /// several requests, and each one opens with this marker.
     StepStart,
@@ -236,6 +253,16 @@ pub enum ToolState {
     Running {
         /// The parsed arguments it runs with.
         input: serde_json::Value,
+        /// What the call has produced so far, for a frontend to render while
+        /// it runs: a shell command's output as it arrives, a subagent's
+        /// progress as it works. Upstream republishes the same field on a
+        /// running part (`session/prompt.ts`, `shellImpl`).
+        ///
+        /// Null — and absent from the wire — for a call that reports nothing
+        /// until it finishes, which is every builtin tool the model calls, so
+        /// the bytes of an ordinary running part are what they always were.
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        metadata: serde_json::Value,
         /// When execution began.
         started: u64,
     },
@@ -303,12 +330,27 @@ impl Part {
         }
     }
 
+    /// Builds a file part with a fresh id, for a file the user mentioned.
+    #[must_use]
+    pub fn file(path: impl Into<String>, mime: impl Into<String>) -> Self {
+        Self {
+            id: PartId::ascending(),
+            body: PartBody::File {
+                path: path.into(),
+                mime: mime.into(),
+            },
+        }
+    }
+
     /// The text this part carries, or [`None`] when it carries something else.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match &self.body {
             PartBody::Text { text } => Some(text),
-            PartBody::Tool { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => None,
+            PartBody::Tool { .. }
+            | PartBody::File { .. }
+            | PartBody::StepStart
+            | PartBody::StepFinish { .. } => None,
         }
     }
 
@@ -316,7 +358,10 @@ impl Part {
     pub fn as_text_mut(&mut self) -> Option<&mut String> {
         match &mut self.body {
             PartBody::Text { text } => Some(text),
-            PartBody::Tool { .. } | PartBody::StepStart | PartBody::StepFinish { .. } => None,
+            PartBody::Tool { .. }
+            | PartBody::File { .. }
+            | PartBody::StepStart
+            | PartBody::StepFinish { .. } => None,
         }
     }
 }
@@ -401,10 +446,20 @@ impl Message {
     pub fn has_content(&self) -> bool {
         self.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !text.is_empty(),
-            PartBody::Tool { .. } => true,
+            PartBody::Tool { .. } | PartBody::File { .. } => true,
             PartBody::StepStart | PartBody::StepFinish { .. } => false,
         })
     }
+}
+
+/// One file the user attached to a prompt, by `@`-mentioning it.
+///
+/// A path and nothing more: what the file *says* is read when the request is
+/// built, not when the mention is made. See [`PartBody::File`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mention {
+    /// Where the file is, relative to the project root.
+    pub path: String,
 }
 
 /// A request from a frontend to the engine.
@@ -415,6 +470,11 @@ pub enum Command {
     SendPrompt {
         /// What the user typed.
         text: String,
+        /// Files the user attached to it. Absent from the wire when there are
+        /// none, so a frontend that knows nothing about mentions sends — and a
+        /// stored command replays — exactly the bytes it always did.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<Mention>,
     },
     /// Stops the turn that is streaming; a no-op when the engine is idle.
     /// When the turn is waiting on a permission, cancelling also refuses it.
@@ -443,6 +503,34 @@ pub enum Command {
         /// The model's id, as the provider spells it.
         model: String,
     },
+    /// Runs `command` in the shell on the user's behalf and puts both the
+    /// command and its output in the transcript, where the next model request
+    /// will read them. Upstream's `!` passthrough.
+    ///
+    /// **Not gated by permissions.** This is the person at the terminal typing
+    /// a command, not the model asking to run one, and upstream runs it without
+    /// a dialog for exactly that reason.
+    RunShell {
+        /// What to run, verbatim.
+        command: String,
+    },
+    /// Expands the named command's template and starts a turn with the result,
+    /// which is an ordinary prompt by the time the model sees it.
+    RunCommand {
+        /// The command's name, without the leading slash.
+        name: String,
+        /// Everything the user typed after the name, unparsed: the template
+        /// decides what `$1` and `$ARGUMENTS` make of it.
+        args: String,
+    },
+    /// Summarizes the conversation so far and continues from the summary. The
+    /// manual half of the compaction that otherwise happens on its own when a
+    /// session fills its model's context window.
+    Compact,
+    /// Forgets the session the engine is on, so the next prompt starts a fresh
+    /// one. Nothing stored is touched: the old session is still there to
+    /// resume.
+    NewSession,
 }
 
 /// What the user decided about one permission request.
@@ -567,8 +655,8 @@ pub enum FinishReason {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, Event, FinishReason, Message, MessageId, MessageTime, Part, PartBody, PartId,
-        PermissionId, PermissionReply, Role, ToolState, Usage,
+        Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody,
+        PartId, PermissionId, PermissionReply, Role, ToolState, Usage,
     };
 
     /// Builds a completed tool part with pinned ids and times, the richest
@@ -669,6 +757,13 @@ mod tests {
         let cases = [
             Command::SendPrompt {
                 text: "hello".to_owned(),
+                mentions: Vec::new(),
+            },
+            Command::SendPrompt {
+                text: "what does this do".to_owned(),
+                mentions: vec![Mention {
+                    path: "src/main.rs".to_owned(),
+                }],
             },
             Command::CancelTurn,
             Command::ReplyPermission {
@@ -681,6 +776,15 @@ mod tests {
             Command::SwitchModel {
                 model: "claude-haiku-4.5".to_owned(),
             },
+            Command::RunShell {
+                command: "git status".to_owned(),
+            },
+            Command::RunCommand {
+                name: "init".to_owned(),
+                args: "focus on the tests".to_owned(),
+            },
+            Command::Compact,
+            Command::NewSession,
         ];
 
         for command in cases {
@@ -751,15 +855,63 @@ mod tests {
     #[test]
     fn the_wire_format_is_stable() {
         let cases = [
+            // A prompt with nothing attached, whose bytes are exactly what
+            // they were before mentions existed.
             (
                 serde_json::to_string(&Command::SendPrompt {
                     text: "hi".to_owned(),
+                    mentions: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi"}"#,
             ),
             (
+                serde_json::to_string(&Command::SendPrompt {
+                    text: "hi".to_owned(),
+                    mentions: vec![
+                        Mention {
+                            path: "src/main.rs".to_owned(),
+                        },
+                        Mention {
+                            path: "README.md".to_owned(),
+                        },
+                    ],
+                }),
+                r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs"},{"path":"README.md"}]}"#,
+            ),
+            (
                 serde_json::to_string(&Command::CancelTurn),
                 r#"{"type":"cancel_turn"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::RunShell {
+                    command: "git status".to_owned(),
+                }),
+                r#"{"type":"run_shell","command":"git status"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::RunCommand {
+                    name: "init".to_owned(),
+                    args: String::new(),
+                }),
+                r#"{"type":"run_command","name":"init","args":""}"#,
+            ),
+            (
+                serde_json::to_string(&Command::Compact),
+                r#"{"type":"compact"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::NewSession),
+                r#"{"type":"new_session"}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::File {
+                        path: "src/main.rs".to_owned(),
+                        mime: "text/plain".to_owned(),
+                    },
+                }),
+                r#"{"id":"prt_1","type":"file","path":"src/main.rs","mime":"text/plain"}"#,
             ),
             (
                 serde_json::to_string(&Part {
@@ -898,12 +1050,30 @@ mod tests {
                             tool: "shell".to_owned(),
                             state: ToolState::Running {
                                 input: serde_json::json!({"command": "ls"}),
+                                metadata: serde_json::Value::Null,
                                 started: 7,
                             },
                         },
                     },
                 }),
                 r#"{"type":"part_updated","message_id":"msg_1","part":{"id":"prt_1","type":"tool","call_id":"call_1","tool":"shell","state":{"status":"running","input":{"command":"ls"},"started":7}}}"#,
+            ),
+            // A call that reports progress while it runs — the `!` passthrough
+            // streaming its output, or a task tool watching a subagent.
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::Tool {
+                        call_id: "call_1".to_owned(),
+                        tool: "bash".to_owned(),
+                        state: ToolState::Running {
+                            input: serde_json::json!({"command": "ls"}),
+                            metadata: serde_json::json!({"output": "a.rs\n"}),
+                            started: 7,
+                        },
+                    },
+                }),
+                r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"bash","state":{"status":"running","input":{"command":"ls"},"metadata":{"output":"a.rs\n"},"started":7}}"#,
             ),
             // A call that stays inside the checkout, whose bytes are exactly
             // what they were before `directories` existed.
@@ -953,6 +1123,56 @@ mod tests {
         for (encoded, expected) in cases {
             assert_eq!(encoded.expect("the value serializes"), expected);
         }
+    }
+
+    /// The shape every frontend written before mentions existed sends. It has
+    /// to keep parsing, and it has to keep meaning "no files attached" rather
+    /// than failing on a field that is not there.
+    #[test]
+    fn a_prompt_written_before_mentions_existed_still_parses() {
+        let decoded: Command = serde_json::from_str(r#"{"type":"send_prompt","text":"hi"}"#)
+            .expect("the original shape parses");
+
+        assert_eq!(
+            decoded,
+            Command::SendPrompt {
+                text: "hi".to_owned(),
+                mentions: Vec::new(),
+            }
+        );
+
+        let decoded: Command = serde_json::from_str(
+            r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"a.rs"}]}"#,
+        )
+        .expect("the new shape parses");
+        assert_eq!(
+            decoded,
+            Command::SendPrompt {
+                text: "hi".to_owned(),
+                mentions: vec![Mention {
+                    path: "a.rs".to_owned()
+                }],
+            }
+        );
+    }
+
+    /// A running part written before it could report progress still parses,
+    /// and reads back as one that reports nothing.
+    #[test]
+    fn a_running_part_without_metadata_still_parses() {
+        let decoded: Part = serde_json::from_str(
+            r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"bash","state":{"status":"running","input":{},"started":7}}"#,
+        )
+        .expect("the original shape parses");
+
+        let PartBody::Tool {
+            state: ToolState::Running { metadata, .. },
+            ..
+        } = decoded.body
+        else {
+            panic!("the fixture is a running tool part");
+        };
+        assert!(metadata.is_null());
     }
 
     /// A stored assistant message keeps its model and usage; a stored user
