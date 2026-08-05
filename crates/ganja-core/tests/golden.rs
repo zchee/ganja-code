@@ -861,6 +861,40 @@ fn keys(calls: &[Executed]) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// No fixture asks for a tool this build does not have.
+///
+/// `websearch` is upstream's and is not ported. A fixture that scripted one
+/// would have upstream execute a real search and this crate refuse an unknown
+/// tool, and the differential would compare a call nobody wrote against a
+/// refusal nobody meant — a red run whose cause is the fixture. Written before
+/// the tool exists so that the day it lands, the fixture that assumes it has to
+/// be a deliberate act rather than a silent one.
+#[test]
+fn no_golden_fixture_asks_for_websearch() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/golden");
+    let mut checked = 0;
+
+    for entry in std::fs::read_dir(&directory).expect("the golden fixtures are readable") {
+        let path = entry.expect("the directory lists").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("a fixture is readable");
+        assert!(
+            !text.contains("websearch"),
+            "{} mentions websearch; the differential no longer compares what it was written to",
+            path.display()
+        );
+        checked += 1;
+    }
+
+    assert!(
+        checked > 0,
+        "no golden fixtures were found in {}",
+        directory.display()
+    );
+}
+
 /// Loads the task in `tests/fixtures/golden/{name}.json`.
 fn task(name: &str) -> Task {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))

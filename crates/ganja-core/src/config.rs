@@ -466,6 +466,9 @@ pub struct Config {
     /// Language servers this session may run. **Absent is none of them**; see
     /// [`LspConfig`].
     pub lsp: Option<LspConfig>,
+    /// What the `webfetch` tool may reach; see [`WebfetchConfig`].
+    #[serde(default)]
+    pub webfetch: WebfetchConfig,
     /// Whether this session snapshots the working tree, which is what `/undo`
     /// restores from.
     ///
@@ -481,12 +484,39 @@ pub struct Config {
     pub overrides: Overrides,
 }
 
+/// What the `webfetch` tool may reach.
+///
+/// Its own object rather than a flat key, because what it configures is one
+/// tool's reach and the next question of that kind belongs beside this one.
+/// Not a key upstream has: it configures a refusal upstream does not make.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WebfetchConfig {
+    /// Whether `webfetch` may fetch a URL resolving onto this machine or a
+    /// private network.
+    ///
+    /// **Absent is no.** The tool refuses those by default — the URL is one a
+    /// model chose, and a model chooses it after reading files and pages other
+    /// people wrote — and this is how somebody with an intranet wiki or a
+    /// service on their own machine says so. An [`Option`] rather than a
+    /// `bool` for the reason [`Config::snapshot`] is one: a tier that says
+    /// nothing has to leave the tier below it alone.
+    pub allow_private: Option<bool>,
+}
+
 impl Config {
     /// Whether this session snapshots the working tree; see
     /// [`Config::snapshot`].
     #[must_use]
     pub fn snapshots_enabled(&self) -> bool {
         self.snapshot != Some(false)
+    }
+
+    /// Whether `webfetch` may reach a private address; see
+    /// [`WebfetchConfig::allow_private`].
+    #[must_use]
+    pub fn webfetch_allows_private(&self) -> bool {
+        self.webfetch.allow_private == Some(true)
     }
 
     /// Loads the config for a session working in `cwd`.
@@ -543,6 +573,10 @@ impl Config {
         overlay(&mut self.theme_mode, other.theme_mode);
         overlay(&mut self.shell, other.shell);
         overlay(&mut self.snapshot, other.snapshot);
+        overlay(
+            &mut self.webfetch.allow_private,
+            other.webfetch.allow_private,
+        );
 
         for (name, incoming) in other.agent {
             self.agent.entry(name).or_default().merge(incoming);

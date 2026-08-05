@@ -129,10 +129,20 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     let snapshot_notice = snapshots.notice().map(str::to_owned);
     // The registry carries every builtin tool the agent loop can execute;
     // permission rules load for the project the terminal was opened in.
+    let mut tools = ganja_tool::Registry::with_builtins();
+    // `webfetch` refuses a private address unless this session said otherwise,
+    // and the config is the only place that can say so — which address on a
+    // private network is a legitimate one to fetch is a question only the
+    // person running the session can answer.
+    if config.webfetch_allows_private() {
+        tools = tools.with(Arc::new(
+            ganja_tool::webfetch::WebfetchTool::allowing_private(),
+        ));
+    }
     let mut engine = Engine::persistent(
         selection.provider,
         selection.model,
-        Arc::new(ganja_tool::Registry::with_builtins()),
+        Arc::new(tools),
         ganja_core::Permissions::load(&cwd),
         storage,
     )
@@ -147,7 +157,14 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     // agents are on it: the default agent may have named a model of another
     // family, and the prompt has to be that model's.
     let (base, suffix) = system_parts(&engine, &config, &cwd);
-    let engine = engine.with_system_parts(base, suffix);
+    let engine = engine.with_system_parts(base, suffix).with_environment({
+        // Owned copies, because this outlives the startup that composed the
+        // first one: the environment block names the model, and the model
+        // moves when somebody picks another one mid-session.
+        let config = config.clone();
+        let cwd = cwd.clone();
+        move |model| instruction::suffix(&config, &cwd, model)
+    });
 
     // Dialled from here on, in the background: the first turn is offered
     // whichever servers have answered by the time it starts, and a server
@@ -239,10 +256,11 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
 /// turn, not a system prompt. Passing [`None`] here would leave every one of
 /// their turns carrying the environment block and nothing else.
 ///
-/// The suffix is the half no agent replaces, so a switch swaps the first and
-/// keeps this one. What it does not track is a *later* `SwitchModel`: the
-/// prompt is composed once (**D22**), so this is about starting truthfully
-/// rather than about staying current.
+/// The suffix is the half no agent replaces, so an agent switch swaps the
+/// first and keeps this one. This composes the pair the session starts on;
+/// keeping the suffix current across a later model switch is
+/// `Engine::with_environment`'s business, and the caller installs one beside
+/// this.
 fn system_parts(engine: &Engine, config: &Config, cwd: &Path) -> (Option<String>, Option<String>) {
     let model = engine.model();
 
