@@ -203,7 +203,11 @@ pub enum CatalogError {
 /// Deliberately not read from the fetched catalog: `api.json` publishes no
 /// per-provider default, so this pin is ganja's own and a refresh has nothing
 /// to say about it.
-const DEFAULTS: &[(&str, &str)] = &[("anthropic", "claude-sonnet-5"), ("openai", "gpt-5.6")];
+const DEFAULTS: &[(&str, &str)] = &[
+    ("anthropic", "claude-sonnet-5"),
+    ("openai", "gpt-5.6"),
+    ("grok", "grok-4.3"),
+];
 
 /// One row of the compiled-in snapshot.
 ///
@@ -354,6 +358,31 @@ const SNAPSHOT: &[Row] = &[
             input: 1.75,
             output: 14.0,
             cache_read: 0.175,
+            cache_write: None,
+        },
+    },
+    // `provider_id` is `grok` and not `xai`: the file a credential is stored in
+    // uses upstream's name for this provider and everything else uses ganja's,
+    // and this table is read by `provider::serves` and by the session layer's
+    // pricing lookup, both of which hold a `Provider::id`.
+    //
+    // **The price under-reports a very long context.** xAI charges in tiers —
+    // above 200k tokens the rate roughly doubles (input 2.5, output 5,
+    // cache_read 0.4) — and `Pricing` has no tier concept. The row carries the
+    // base rate, which is the same approximation every other tiered provider in
+    // this table already gets; modelling tiers is a schema change, and a schema
+    // change is not something a new row should smuggle in.
+    Row {
+        id: "grok-4.3",
+        provider_id: "grok",
+        name: "Grok 4.3",
+        context_window: 1_000_000,
+        max_output: 30_000,
+        pricing: Pricing {
+            input: 1.25,
+            output: 2.5,
+            cache_read: 0.2,
+            // xAI publishes no cache-write price.
             cache_write: None,
         },
     },
@@ -735,25 +764,35 @@ fn fresh(path: &Path) -> bool {
 /// will generate. Both numbers are load-bearing — one decides when a session
 /// compacts, the other caps the reply a request may ask for — and a zero in
 /// either is worse than an absent row, which every caller already handles.
+///
+/// The payload's provider keys are upstream's vocabulary, the same vocabulary
+/// `auth.json` is written in, so each one is read through
+/// [`auth::provider_id_for_storage_key`] on the way in. That is the identity
+/// for every provider the two projects name the same way and turns `xai` into
+/// `grok`, which matters because every consumer of this table holds a
+/// [`Provider::id`](crate::provider::Provider::id): a fetched catalog filing
+/// grok's models under `xai` would leave a refreshed install unable to price a
+/// grok turn or to confirm the model it is about to ask for.
 fn parse(body: &str) -> Result<Catalog, CatalogError> {
     let root: BTreeMap<String, serde_json::Value> =
         serde_json::from_str(body).map_err(|error| CatalogError::Parse(error.to_string()))?;
 
     let mut models = Vec::new();
-    for (provider_id, provider) in root {
+    for (published_under, provider) in root {
         let Some(published) = provider
             .get("models")
             .and_then(serde_json::Value::as_object)
         else {
             continue;
         };
+        let provider_id = crate::auth::provider_id_for_storage_key(&published_under);
 
         for (model_id, published) in published {
             let Ok(wire) = serde_json::from_value::<Wire>(published.clone()) else {
                 tracing::debug!(provider_id, model_id, "a catalog row was not readable");
                 continue;
             };
-            if let Some(info) = wire.into_info(&provider_id, model_id) {
+            if let Some(info) = wire.into_info(provider_id, model_id) {
                 models.push(Arc::new(info));
             }
         }
@@ -1111,6 +1150,40 @@ mod tests {
         }
 
         assert!(default_model("nonexistent").is_none());
+    }
+
+    /// A fetched catalog names providers the way upstream does, because it is
+    /// upstream's file; a table nothing can look a provider up in is a table
+    /// that silently stops pricing that provider the first time somebody runs
+    /// `ganja models --refresh`.
+    #[test]
+    fn a_fetched_row_is_filed_under_the_name_the_provider_reports() {
+        let fetched = parse(
+            r#"{"xai":{"models":{"grok-4.3":{"name":"Grok 4.3","limit":{"context":1000000,
+                "output":30000},"cost":{"input":1.25,"output":2.5}}}},
+                "openai":{"models":{"gpt-5.6":{"name":"GPT-5.6","limit":{"context":1050000,
+                "output":128000},"cost":{"input":5,"output":30}}}}}"#,
+        )
+        .expect("the payload decodes");
+
+        let grok = fetched
+            .models
+            .iter()
+            .find(|model| model.id == "grok-4.3")
+            .expect("the row survived decoding");
+
+        assert_eq!(
+            grok.provider_id, "grok",
+            "`xai` is the name on disk; every table lookup holds a `Provider::id`"
+        );
+        // Only the aliased one is translated. Everything else is already
+        // spelled the way both projects spell it.
+        assert!(
+            fetched
+                .models
+                .iter()
+                .any(|model| model.id == "gpt-5.6" && model.provider_id == "openai")
+        );
     }
 
     #[test]

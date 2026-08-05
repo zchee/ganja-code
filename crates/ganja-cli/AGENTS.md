@@ -5,13 +5,13 @@
 
 ## Purpose
 
-The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login`/`list`/`logout`, `config import-opencode`), to answer questions about it (`models`, `sessions`, `mcp`) without taking the screen over, and — with `run` — to take one turn with no screen at all.
+The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login` — a key, or a browser or device login where the provider has one — plus `auth list`/`logout` and `config import-opencode`), to answer questions about it (`models`, `sessions`, `mcp`) without taking the screen over, and — with `run` — to take one turn with no screen at all.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `Cargo.toml` | Member manifest. Declares `[[bin]] name = "ganja"`. Depends on `ratatui` for exactly one thing — the raw-mode read that keeps a typed API key off the screen — on `secrecy` so a key is wrapped the moment it is whole, on `futures` because `run` consumes the engine's event stream and the `Stream` trait behind a `BoxStream` has to be named to be reached, and on `serde_json` because `run --format json` writes one serde-derived object per event. |
+| `Cargo.toml` | Member manifest. Declares `[[bin]] name = "ganja"`. Depends on `tokio-util` for exactly one thing — the `CancellationToken` a login flow's wait takes, which only the binary can fire because only the binary catches the keystroke — on `ratatui` for exactly one other — the raw-mode read that keeps a typed API key off the screen — on `secrecy` so a key is wrapped the moment it is whole, on `futures` because `run` consumes the engine's event stream and the `Stream` trait behind a `BoxStream` has to be named to be reached, and on `serde_json` because `run --format json` writes one serde-derived object per event. |
 
 ## Subdirectories
 
@@ -31,6 +31,7 @@ This crate is where a secret is most likely to escape, because it is the only pl
 ```sh
 cargo test -p ganja-cli                    # includes pty tests on unix
 cargo test -p ganja-cli --test cli         # CLI surface only, fast
+cargo test -p ganja-cli --test auth_login  # the login flows, against an issuer the suite owns
 cargo test -p ganja-cli --test run         # the headless turn, fast
 ```
 
@@ -48,6 +49,6 @@ Subcommands print to stdout and diagnostics to stderr, so a caller capturing std
 
 ### External
 
-`clap` (derive), `tokio`, `anyhow`, `secrecy`, `futures` (the engine's event stream), `serde_json` (`run --format json`), `ratatui` (raw mode only); dev: `assert_cmd`, `predicates`, `tempfile`, and `expectrl` on unix.
+`clap` (derive), `tokio`, `tokio-util` (the login flows' cancellation), `anyhow`, `secrecy`, `futures` (the engine's event stream), `serde_json` (`run --format json`), `ratatui` (raw mode only); dev: `assert_cmd`, `predicates`, `tempfile`, and `expectrl` on unix.
 
 <!-- MANUAL: -->

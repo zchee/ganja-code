@@ -12,6 +12,7 @@ The binary's whole surface: clap parsing, the credential subcommands, the config
 | File | Description |
 |------|-------------|
 | `main.rs` | `Cli`/`Command`/`Auth`/`Config` clap types, `login`/`list`/`logout`, `models`, `mcp`, and the raw-mode key prompt. No subcommand delegates straight to `ganja_tui::run()`. |
+| `login.rs` | Which login a provider gets and running the ones that are not a key: `--method` selection, the Copilot deployment prompts, the device and browser flows, and the interrupt that ends a wait. Spec: upstream `packages/opencode/src/cli/cmd/providers.ts:39-205`. Stores nothing — `main.rs` does. |
 | `import.rs` | `ganja config import-opencode`: discovery of opencode's config tiers, the key mapping, the mapped/skipped table, and the JSON writer that produces a `ganja.json`. |
 | `run.rs` | `ganja run`: assembles the same `Engine` the TUI drives, takes one turn, writes an account of it, and exits. Spec: upstream `packages/opencode/src/cli/cmd/run.ts`, its non-interactive branch. |
 
@@ -30,6 +31,16 @@ Every rule here exists because a secret passed through this code, and each is pi
 - A key given via `--key` was already in shell history and the process table before this ran; the flag's help says so, and wrapping it is all that is left to do.
 
 Prompts and diagnostics go to stderr so stdout stays a clean channel for whatever a caller is capturing. A piped key is read whole so `pass show … | ganja auth login` works.
+
+`login.rs` adds the logins that are not a key, and every rule it has is about what a person can see or get out of:
+
+- **A device grant is two calls with a print between them.** `start` returns the code and the address, `poll` blocks until somebody has typed the one into the other; a build that printed afterwards would leave a person watching a terminal that had told them nothing. `tests/auth_login.rs` holds the token exchange open until it has read the code, so that ordering is asserted rather than assumed.
+- **The wait ends on the interrupt keystroke**, which is wired to the `CancellationToken` the flows take. A cancelled login says so *and* says nothing was stored — which is structural, not reassurance: storing is the step after the flow returns and an error never reaches it.
+- **Which login runs is decided in one place, in this order**: `--key`, then `--method`, then "standard input that is not a terminal is a key" (`pass show … | ganja auth login` predates every flow here), then a provider's only login, then a menu. Only ChatGPT reaches the menu; the other three have one login worth offering, which is why grok and Copilot never ask.
+- **A method a provider does not have is refused with the ones it does have named.** The flow dispatch refuses an impossible pairing a second time as the shape of its match, so the "it has …" clause is the only part of the message that distinguishes the front-door check from the fallback — and the test asserts on it for that reason.
+- **A login says what it is about to replace.** A ChatGPT login and an OpenAI API key are stored under the same provider key, so each silently overwrites the other; `ganja-core` is handed a credential and cannot know somebody is watching, so this is the only place that can warn. Nothing is refused — replacing is what `login` is for, and the point is that it not be silent.
+- **`GANJA_AUTH_ISSUER` redirects every login endpoint, and only to loopback.** It exists so a test can complete a login against endpoints it owns. The value decides where a device code and then a pair of tokens are sent, so it is checked by *shape* — the whole value has to be `http://<loopback host>:<port>`, which leaves nowhere for userinfo, a path or a query to hide. A prefix match alone would accept `http://127.0.0.1:80@elsewhere.example`. A value that is set and not loopback is refused rather than ignored: quietly using the real issuer instead is the one outcome whoever set it cannot have wanted.
+- **Storing a credential is all a login does.** Whether a model then runs on it is a separate question per provider, and nothing printed here may imply an answer to it.
 
 The importer inherits the same posture, for the same reason — it reads a file that may hold a credential:
 
@@ -74,16 +85,16 @@ Adding a subcommand means adding its assertion there; adding anything that handl
 
 ### Common Patterns
 
-`ProviderId` is a clap `ValueEnum` that maps to the string ids `ganja-core` knows (`anthropic`, `openai`), so the CLI's spelling and the engine's cannot drift. Prices render with trailing zeros trimmed rather than padded, so a fraction of a cent shows as itself instead of rounding to a different number.
+`ProviderId` is a clap `ValueEnum` that maps to the string ids `ganja-core` knows (`anthropic`, `openai`, `grok`, `github-copilot`), so the CLI's spelling and the engine's cannot drift — through each login module's own `PROVIDER_ID` constant rather than a literal, because a login that wrote under one spelling while a request read another would read as a storage bug rather than the naming one it is. `grok` is deliberately not `xai`: `xai` is what the credential is filed as so a shared `auth.json` keeps working, and `auth::storage_key` is the single place that translation happens. Prices render with trailing zeros trimmed rather than padded, so a fraction of a cent shows as itself instead of rounding to a different number.
 
 ## Dependencies
 
 ### Internal
 
-`ganja_core::auth` (store, list, remove, redaction), `ganja_core::catalog` (the `models` table), `ganja_core::config::Config` (what the importer's output has to decode as, and what `run` assembles an engine from), `ganja_core::lsp::server::BUILTIN_IDS` (which language servers this build ships, so the CLI's answer and the engine's cannot drift), `ganja_core::Project` (the import's project walk and destination, and where `run`'s session store lives), `ganja_core::Engine` + `provider::select` + `instruction` + `permission` + `tool::Registry` (everything `run` needs to take a turn), `ganja_tui::run`.
+`ganja_core::auth` (store, list, remove, redaction, and the `grok`/`copilot`/`openai` login flows with `device`'s two-call shape), `ganja_core::catalog` (the `models` table), `ganja_core::config::Config` (what the importer's output has to decode as, and what `run` assembles an engine from), `ganja_core::lsp::server::BUILTIN_IDS` (which language servers this build ships, so the CLI's answer and the engine's cannot drift), `ganja_core::Project` (the import's project walk and destination, and where `run`'s session store lives), `ganja_core::Engine` + `provider::select` + `instruction` + `permission` + `tool::Registry` (everything `run` needs to take a turn), `ganja_tui::run`.
 
 ### External
 
-`clap`, `anyhow`, `tokio`, `futures` (`run` consumes the engine's `BoxStream`), `serde_json` (`run --format json`), `secrecy` (+ `zeroize`), `ratatui`'s crossterm re-export for raw mode, `jsonc-parser` (the importer reads someone else's config, in document order).
+`clap`, `anyhow`, `tokio` (+ `tokio-util`'s `CancellationToken`, which is what ends a login's wait), `futures` (`run` consumes the engine's `BoxStream`), `serde_json` (`run --format json`), `secrecy` (+ `zeroize`), `ratatui`'s crossterm re-export for raw mode, `jsonc-parser` (the importer reads someone else's config, in document order).
 
 <!-- MANUAL: -->
