@@ -626,8 +626,10 @@ pub enum PermissionReply {
     Reject,
 }
 
-/// Something the engine observed, delivered to the subscribed frontend in
-/// order and without loss.
+/// Something the engine observed, delivered to every subscriber in the order
+/// it happened, under the policy each subscriber chose: a lossless subscriber
+/// is waited for and misses nothing, and a droppable one is evicted whole —
+/// its stream ends with an error value — rather than shown a silent gap.
 ///
 /// The stream is the whole truth: a frontend that applies every event in order
 /// holds the same transcript the engine does, which is what lets a session be
