@@ -145,6 +145,10 @@ const SCRIPT: &str = "script.json";
 /// `ganja_protocol::ToolState`, which tags its variants `status`.
 const RUNNING: &str = "running";
 
+/// The state a resume leaves that call in: closed as an error, because the
+/// process it belonged to died. Pinned the same way [`RUNNING`] is.
+const CLOSED: &str = "error";
+
 /// Where a project's sessions live, under its data directory. Pinned to the
 /// same constant in `ganja-cli` and `ganja-tui`.
 const STORAGE: &str = "storage";
@@ -531,4 +535,18 @@ fn a_reply_killed_mid_call_comes_back_under_continue_marked_interrupted() {
         .expect("the resumed reply was not shown as one that never finished");
 
     resumed.quit_and_assert_clean_exit();
+
+    // The marker on screen derives from the envelope alone — a reply with no
+    // ending — so the call the crash left `running` needs its own read: the
+    // resume must have closed it on disk, or the next request this session
+    // takes would carry a call still claiming to execute.
+    let closed = store(&data)
+        .as_ref()
+        .and_then(stored_reply)
+        .expect("the resumed run's session should still be on disk");
+    assert_eq!(
+        closed.call_states(),
+        vec![CLOSED.to_owned()],
+        "resuming must close the call the crash left open"
+    );
 }
