@@ -706,6 +706,106 @@ fn a_pasted_key_says_what_the_stored_login_it_replaces_was() {
     assert_eq!(stored(&data)["openai"]["type"], "api");
 }
 
+/// grok's browser login is reachable from the command line, and the socket it
+/// would bind is deliberately not this suite's to own.
+///
+/// The callback port is fixed by xAI's client registration (`xai.ts:33-38`), so
+/// a test that bound it would contend with every other test process on the
+/// machine and with whatever else is logged in to xAI. What the binary owes
+/// here is the wiring: that `--method browser` reaches grok's *browser* flow
+/// rather than being refused, and that a provider without one still says so.
+/// The socket is driven end to end where the flow lives, in `ganja-core`'s own
+/// suite — the same split the ChatGPT browser flow already has.
+///
+/// A redirected issuer that is not loopback is what makes the first half
+/// observable without a port: that check runs inside the browser flow's own
+/// constructor, so reaching its message means the method was accepted, the
+/// browser arm ran, and nothing had been bound yet when it stopped.
+#[test]
+fn grok_takes_a_browser_login_where_a_provider_without_one_refuses_it() {
+    let data = data();
+
+    let reached = ganja(&data, "https://auth.x.ai")
+        .args(["auth", "login", "--provider", "grok", "--method", "browser"])
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&reached.stderr).into_owned();
+
+    assert!(!reached.status.success(), "a redirected login was refused");
+    assert!(
+        said.contains("GANJA_AUTH_ISSUER") && said.contains("loopback origin"),
+        "the browser flow got as far as reading where it was redirected: {said:?}"
+    );
+    assert!(
+        !said.contains("has no `browser` login"),
+        "grok has one now, and the front door has to know: {said:?}"
+    );
+
+    let refused = ganja(&data, "https://auth.x.ai")
+        .args([
+            "auth",
+            "login",
+            "--provider",
+            "anthropic",
+            "--method",
+            "browser",
+        ])
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+
+    assert!(!refused.status.success());
+    assert!(
+        said.contains("anthropic has no `browser` login") && said.contains("`api`"),
+        "a method a provider lacks is refused with the ones it has named: {said:?}"
+    );
+
+    assert!(
+        !stored_at(&data).exists(),
+        "neither invocation may leave a credential behind"
+    );
+}
+
+/// The rule a menu could have swallowed: standard input that is not a terminal
+/// is a key, and it is consulted before a provider's own logins are.
+///
+/// `pass show … | ganja auth login --provider grok` predates every OAuth flow
+/// here, and grok gaining a second one is exactly the change that would break
+/// it — the provider now reaches the menu instead of running its only login.
+#[test]
+fn a_piped_key_still_reaches_grok_now_that_it_has_more_than_one_login() {
+    let gate = Gate::closed();
+    let issuer = serve(&gate);
+    let data = data();
+
+    let mut child = ganja(&data, &issuer)
+        .args(["auth", "login", "--provider", "grok"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(b"xai-piped-key-5150\n")
+        .expect("the key is writable");
+    let finished = child.wait_with_output().expect("the child is waitable");
+
+    assert!(
+        finished.status.success(),
+        "a piped key is a login: {:?}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    let store = stored(&data);
+    assert_eq!(store["xai"]["type"], "api");
+    assert_eq!(store["xai"]["key"], "xai-piped-key-5150");
+    assert!(
+        !String::from_utf8_lossy(&finished.stderr).contains("Login method"),
+        "nothing was there to answer a menu: {:?}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+}
+
 /// The wait is what a person has to be able to get out of, and getting out of
 /// it must leave nothing behind.
 ///

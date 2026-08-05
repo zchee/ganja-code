@@ -48,6 +48,7 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 | `catalog_offline.rs` | Fetching disabled and nothing cached: the compiled-in snapshot answers every question, and a loopback listener that would have counted a request counts none. Mutates environment variables — one test, one binary. |
 | `catalog_retry.rs` | A refused catalog request is retried twice and then reported as the status it gave up on, and a refresh that failed leaves the table it started with. Mutates environment variables — one test, one binary. |
 | `spill_sweep.rs` | The spill sweep over the directories it really resolves: both candidates a clamp would have written to, week-old `tool_*` gone, fresh and foreign kept. Mutates `XDG_DATA_HOME` and `TMPDIR` — one test, one binary. |
+| `responses_wire.rs` | A ChatGPT subscription becoming a turn, against a real socket: a whole streamed Responses turn through the ordinary engine (all five headers, the input items, the flat tool shape, the bill with the cached half taken back out), the stored credential rotated mid-suite so the *second* token is what the second request carries, the chat-completions request an API key produces compared byte for byte, and the credential-kind dispatch all three ways (key wins, stored login serves, neither is the startup error). Mutates `XDG_DATA_HOME`, `OPENAI_API_KEY`, `OPENAI_BASE_URL` and `GANJA_PROVIDER` — one test, one binary, told in phases. |
 
 ## Subdirectories
 
