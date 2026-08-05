@@ -62,6 +62,17 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     credential: Credential,
     base_url: String,
+    /// What every request carries besides the bearer token.
+    ///
+    /// Empty for OpenAI itself and for every gateway that copied its schema —
+    /// the credential is the whole of what those endpoints ask for. What fills
+    /// it is a provider that *is* this wire under another name and whose
+    /// endpoint decides what to serve by more than the token: see
+    /// [`super::copilot`], which `api.githubcopilot.com` refuses without four
+    /// of them. Held rather than passed per request because they describe the
+    /// endpoint, which is fixed when the provider is built, and never the
+    /// credential, which is not.
+    headers: reqwest::header::HeaderMap,
 }
 
 impl fmt::Debug for OpenAiProvider {
@@ -128,6 +139,7 @@ impl OpenAiProvider {
             client: client()?,
             credential,
             base_url: base_url.into(),
+            headers: reqwest::header::HeaderMap::new(),
         })
     }
 
@@ -136,6 +148,19 @@ impl OpenAiProvider {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Puts `headers` on every request this provider sends.
+    ///
+    /// The third and last thing a wrapper provider declares about itself, beside
+    /// [`with_credential`](Self::with_credential) and the base URL — see
+    /// [`headers`](Self::headers) for what fills it and why nothing else does.
+    /// Crate-internal for [`with_credential`](Self::with_credential)'s reason:
+    /// what a caller outside this module picks between is providers.
+    #[must_use]
+    pub(super) fn with_headers(mut self, headers: reqwest::header::HeaderMap) -> Self {
+        self.headers = headers;
         self
     }
 }
@@ -169,6 +194,10 @@ impl Provider for OpenAiProvider {
                 self.base_url.trim_end_matches('/')
             ))
             .bearer_auth(presented.expose())
+            // After the bearer, and never carrying one: these describe the
+            // endpoint, and a credential put here would travel outside the
+            // redaction `presented` is the single source of.
+            .headers(self.headers.clone())
             .json(&body)
             .build()
             .map_err(|error| {

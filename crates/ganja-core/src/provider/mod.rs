@@ -1,13 +1,18 @@
 //! Sources of assistant text.
 //!
 //! A provider turns a [`ChatRequest`] into a stream of [`ProviderEvent`]s; the
-//! engine is what maps those onto the protocol frontends see. Four ship:
+//! engine is what maps those onto the protocol frontends see. Four wires ship:
 //! [`FakeProvider`] for demos and tests, [`AnthropicProvider`] for the Messages
 //! API, [`OpenAiProvider`] for anything speaking OpenAI chat completions, and
 //! [`ResponsesProvider`] for the Responses API a ChatGPT subscription answers
 //! on. The last two are the same vendor and answer to the same
 //! [`Provider::id`]; which of them a session gets is decided by the credential
 //! it has, in [`select`].
+//!
+//! Two more providers are chat completions under another name, and are
+//! deliberately not second wires: [`GrokProvider`] is xAI's endpoint and
+//! [`CopilotProvider`] is GitHub's, each a base URL, a credential source and —
+//! for Copilot — a header set over [`OpenAiProvider`].
 //!
 //! Every HTTP provider shares the same shape — build a request, retry it while
 //! it has not started answering, split the `text/event-stream` body into
@@ -67,6 +72,7 @@ use crate::{
 };
 
 pub mod anthropic;
+pub mod copilot;
 pub mod fake;
 pub mod grok;
 pub mod openai;
@@ -75,6 +81,7 @@ pub mod retry;
 pub mod sse;
 
 pub use anthropic::AnthropicProvider;
+pub use copilot::CopilotProvider;
 pub use fake::FakeProvider;
 pub use grok::GrokProvider;
 pub use openai::OpenAiProvider;
@@ -87,7 +94,7 @@ pub const PROVIDER_ENV: &str = "GANJA_PROVIDER";
 pub const MODEL_ENV: &str = "GANJA_MODEL";
 
 /// Every value [`PROVIDER_ENV`] accepts.
-pub const PROVIDERS: [&str; 4] = [anthropic::ID, openai::ID, grok::ID, fake::ID];
+pub const PROVIDERS: [&str; 5] = [anthropic::ID, openai::ID, grok::ID, copilot::ID, fake::ID];
 
 /// One request to a model.
 #[derive(Clone, Debug, PartialEq)]
@@ -936,6 +943,12 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         anthropic::ID => Arc::new(AnthropicProvider::from_env()?),
         openai::ID => openai_provider()?,
         grok::ID => Arc::new(GrokProvider::from_stored()?),
+        // Grok's construction shape, and grok's posture with it: neither reads
+        // a token here, so a session with no stored login is built and fails at
+        // its first request, with the message that names the login. What
+        // Copilot does read is which deployment its login was against, because
+        // that decides the endpoint rather than the credential.
+        copilot::ID => Arc::new(CopilotProvider::from_stored()?),
         _ => return Err(SelectionError::Unknown { requested }),
     };
 

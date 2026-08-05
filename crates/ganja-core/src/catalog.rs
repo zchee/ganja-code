@@ -207,6 +207,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("anthropic", "claude-sonnet-5"),
     ("openai", "gpt-5.6"),
     ("grok", "grok-4.3"),
+    ("github-copilot", "claude-sonnet-4.6"),
 ];
 
 /// One row of the compiled-in snapshot.
@@ -383,6 +384,52 @@ const SNAPSHOT: &[Row] = &[
             output: 2.5,
             cache_read: 0.2,
             // xAI publishes no cache-write price.
+            cache_write: None,
+        },
+    },
+    // **One row, deliberately.** `api.githubcopilot.com/models` answers with
+    // dozens across the Claude, GPT and Gemini families, and this build has
+    // measured exactly one of them end to end; a row is a promise that a turn
+    // asking for that model works, and the rest are unkept until somebody
+    // checks. That is D274's precedent — grok ships one row for the same
+    // reason — and asking `api.githubcopilot.com/models` at runtime, which
+    // would settle the question wholesale, is deliberately out of this build.
+    // So this tier answers `provider::serves` for Copilot on its own; the
+    // published catalog, when it has been fetched, replaces it with a much
+    // longer list.
+    //
+    // **The limits are GitHub's, not the model's**, and the difference is a
+    // factor of five: the published catalog sizes this row at a 200k window
+    // with 32k of output, where the same model served by Anthropic directly
+    // takes a million. A proxy is free to cap what it resells and this one
+    // does. Sizing the row at the model's own limits would have been the
+    // plausible guess and the wrong one — a session sized to a window the
+    // endpoint will not accept stops compacting and starts being refused —
+    // which is why these are copied from the catalog rather than inferred from
+    // the model's name.
+    //
+    // **The prices are zero, and that is the honest figure rather than a hole
+    // somebody forgot to fill.** A Copilot seat is billed by the month: there
+    // is no per-token rate to report, and inventing the underlying vendor's
+    // would tell a person they had spent money they had not. `cost` therefore
+    // returns zero for every Copilot turn priced from *this* tier and the
+    // status bar shows none, while the token counters — which are real, and
+    // are what a seat's quota is actually spent against — still show.
+    //
+    // The published catalog disagrees, and a build that has fetched it will
+    // price these turns at the underlying vendor's rates: this tier is the
+    // floor, not the last word. Reconciling the two is a decision about what a
+    // subscription turn should report, not a number to change here.
+    Row {
+        id: "claude-sonnet-4.6",
+        provider_id: "github-copilot",
+        name: "Claude Sonnet 4.6 (Copilot)",
+        context_window: 200_000,
+        max_output: 32_000,
+        pricing: Pricing {
+            input: 0.0,
+            output: 0.0,
+            cache_read: 0.0,
             cache_write: None,
         },
     },
@@ -1074,6 +1121,21 @@ mod tests {
         .to_owned()
     }
 
+    /// Providers whose turns are paid for by the month rather than by the
+    /// token.
+    ///
+    /// A row under one of these carries no price at all, and that is the
+    /// honest figure rather than a hole — see the Copilot row for the whole
+    /// reasoning. Named as a provider, deliberately: a `price == 0.0` escape
+    /// would excuse every row anybody forgot to fill in, whereas this excuses
+    /// exactly the provider that has nothing to fill in and holds it to being
+    /// free in *every* counter.
+    const SEAT_BILLED: &[&str] = &["github-copilot"];
+
+    /// Every row carries the price it ought to — which for almost all of them
+    /// means a real one obeying the three relationships below, and for a
+    /// seat-billed provider means none at all — and every row is sized, with
+    /// no exceptions: sizing is what a session compacts against.
     #[test]
     fn every_row_is_priced_and_sized() {
         let snapshot = snapshot();
@@ -1087,6 +1149,23 @@ mod tests {
                 model.max_output > 0 && model.max_output <= model.context_window,
                 "a reply cannot exceed the window: {model:?}"
             );
+
+            if SEAT_BILLED.contains(&model.provider_id.as_str()) {
+                assert_eq!(
+                    (
+                        model.pricing.input,
+                        model.pricing.output,
+                        model.pricing.cache_read,
+                        model.pricing.cache_write,
+                    ),
+                    (0.0, 0.0, 0.0, None),
+                    "a seat has no per-token rate, so this row reports none — a \
+                     partly filled one would bill somebody for tokens their \
+                     subscription already covers: {model:?}"
+                );
+                continue;
+            }
+
             assert!(model.pricing.input > 0.0, "{model:?}");
             assert!(
                 model.pricing.output >= model.pricing.input,
