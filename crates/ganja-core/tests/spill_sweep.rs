@@ -73,7 +73,12 @@ fn plant(path: &std::path::Path, age: Duration) {
     let when = SystemTime::now()
         .checked_sub(age)
         .expect("a representable stamp");
-    std::fs::File::open(path)
+    // Opened for writing because a stamp is metadata a handle must be allowed
+    // to write: unix grants that with the file's own permissions, Windows only
+    // through a handle that asked for write access.
+    std::fs::File::options()
+        .write(true)
+        .open(path)
         .and_then(|file| file.set_modified(when))
         .expect("the fixture can move the stamp");
 }

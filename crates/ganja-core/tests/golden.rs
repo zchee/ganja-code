@@ -804,11 +804,41 @@ fn normalize_text(text: &str, roots: &[String]) -> String {
 
 /// The forms `directory` can appear in inside a tool argument, longest first so
 /// that rewriting one cannot leave a fragment of another behind.
+///
+/// Three axes, because each leg reports a path in whatever spelling its own
+/// runtime produced and a directory that survives the rewrite on one leg and
+/// not the other is a difference the comparison would report as drift:
+///
+/// - as given and canonical, because macOS hands out temporary directories
+///   under a symlink and a tool that resolves its arguments reports the target;
+/// - with the Windows verbatim prefix stripped, because that is the form
+///   `canonicalize` answers in there and no tool on either leg ever prints one
+///   — bun reports the ordinary `C:\…` and this port rewrites the prefix away
+///   before a path reaches anybody;
+/// - with forward slashes, because a POSIX-shaped runtime writes `C:/…` where
+///   the native spelling is `C:\…` and the two name one directory.
+///
+/// Widening the *needles* rather than rewriting the compared text is deliberate.
+/// A blanket separator rewrite over tool output would forgive the next tool
+/// that drifts, which is the one thing this comparison exists to catch.
 fn roots(directory: &Path) -> Vec<String> {
-    let mut roots = vec![directory.display().to_string()];
+    let mut spellings = vec![directory.display().to_string()];
     if let Ok(canonical) = directory.canonicalize() {
-        roots.push(canonical.display().to_string());
+        spellings.push(canonical.display().to_string());
     }
+
+    let mut roots: Vec<String> = Vec::new();
+    for spelling in spellings {
+        if let Some(share) = spelling.strip_prefix(r"\\?\UNC\") {
+            roots.push(format!(r"\\{share}"));
+        } else if let Some(plain) = spelling.strip_prefix(r"\\?\") {
+            roots.push(plain.to_owned());
+        }
+        roots.push(spelling);
+    }
+    let slashed: Vec<String> = roots.iter().map(|root| root.replace('\\', "/")).collect();
+    roots.extend(slashed);
+
     roots.sort_by_key(|root| std::cmp::Reverse(root.len()));
     roots.dedup();
 

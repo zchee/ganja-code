@@ -1349,9 +1349,20 @@ fn covering(directory: &Path) -> String {
 /// Resolving before comparing is what makes the walk in the other direction —
 /// `..` back out of the project, or a link planted inside it — land outside
 /// where it belongs.
-fn resolve(path: &Path) -> PathBuf {
+///
+/// Every canonical answer goes through [`plain`] first, because on Windows
+/// `canonicalize` answers in the verbatim spelling and this function's output
+/// is what rules are written from and compared against.
+///
+/// Public because it is the only correct way to say where the gate thinks a
+/// path is: `fs::canonicalize` is not that answer on Windows, and anything that
+/// compares its own spelling of a directory against a disclosed one — a test
+/// asserting on what a dialog named, most of all — is otherwise comparing two
+/// spellings of the same place and calling them different.
+#[must_use]
+pub fn resolve(path: &Path) -> PathBuf {
     if let Ok(canonical) = fs::canonicalize(path) {
-        return canonical;
+        return plain(canonical);
     }
 
     let mut ancestor: Vec<Component> = path.components().collect();
@@ -1363,7 +1374,8 @@ fn resolve(path: &Path) -> PathBuf {
         if existing.as_os_str().is_empty() {
             continue;
         }
-        if let Ok(mut resolved) = fs::canonicalize(&existing) {
+        if let Ok(resolved) = fs::canonicalize(&existing) {
+            let mut resolved = plain(resolved);
             resolved.extend(rest.iter().rev().map(|component| component.as_os_str()));
             return lexical(&resolved);
         }
@@ -1373,6 +1385,73 @@ fn resolve(path: &Path) -> PathBuf {
     // one the process cannot look at. Lexical is all that is left, and it is
     // still a definite answer to compare.
     lexical(&std::path::absolute(path).unwrap_or_else(|_| path.to_owned()))
+}
+
+/// `path` in the spelling a person writes, rather than the one
+/// [`fs::canonicalize`] answers in.
+///
+/// Windows canonicalises to a **verbatim** path — `\\?\C:\work\api`, or
+/// `\\?\UNC\server\share\…` for a network location — which is the form that
+/// skips the Win32 path parser entirely. Two things break when that spelling
+/// reaches the rules.
+///
+/// The first is that the prefix carries a literal `?`, and `?` is a [`glob`]
+/// metacharacter. [`means_itself`] would therefore judge *every* canonicalised
+/// directory on Windows to be wildcard-named, and no `external_directory` rule
+/// would ever be stored: an "always" answer would be taken from the person,
+/// disclosed back to them, and then quietly forgotten, so the same dialog would
+/// return every turn. That is the whole of the defect this rewrite exists for.
+///
+/// The second is that a rule written down as `\\?\C:\work\api\*` is in a
+/// spelling nobody types into a config file, and these rules are a file people
+/// read and edit.
+///
+/// Only the two verbatim forms with an ordinary equivalent are rewritten. A
+/// bare `\\?\` over a device path — a pipe, a volume GUID — has no
+/// non-verbatim spelling to be rewritten *to*, so it is left exactly as it
+/// came rather than mangled into something that names nothing.
+///
+/// Nothing to do anywhere else: every other platform's `canonicalize` answers
+/// in the only spelling it has.
+fn plain(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    let path = unverbatim(path);
+
+    path
+}
+
+/// The rewrite [`plain`] documents, which only Windows has a use for.
+#[cfg(windows)]
+fn unverbatim(path: PathBuf) -> PathBuf {
+    use std::{ffi::OsString, path::Prefix};
+
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return path;
+    };
+    let root = match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => {
+            let mut root = OsString::from(char::from(letter).to_string());
+            root.push(r":\");
+            root
+        }
+        Prefix::VerbatimUNC(server, share) => {
+            let mut root = OsString::from(r"\\");
+            root.push(server);
+            root.push(r"\");
+            root.push(share);
+            root
+        }
+        _ => return path,
+    };
+
+    let mut rewritten = PathBuf::from(root);
+    rewritten.extend(
+        path.components()
+            .skip_while(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+            .map(Component::as_os_str),
+    );
+
+    rewritten
 }
 
 /// `path` with its `.` and `..` components applied by text rather than by
@@ -1775,6 +1854,14 @@ fn dynamic(text: &str) -> bool {
 /// Every path this module judges goes through here, because a gate that resolves
 /// a path differently from the code that will use it is gating a different path.
 fn against(base: &Path, named: &str) -> PathBuf {
+    // A POSIX-shell spelling of a Windows drive is translated before anything
+    // else looks at it, so the gate and the tools judge one spelling. See
+    // [`from_posix_drive`] for what would go wrong otherwise.
+    #[cfg(windows)]
+    if let Some(native) = from_posix_drive(named) {
+        return resolve(&native);
+    }
+
     let path = Path::new(named);
 
     if path.is_absolute() {
@@ -1782,6 +1869,52 @@ fn against(base: &Path, named: &str) -> PathBuf {
     } else {
         resolve(&base.join(path))
     }
+}
+
+/// `text` read as one of the POSIX spellings a Windows drive is reached by
+/// under a POSIX shell, or [`None`] when it is not one.
+///
+/// `/c/work`, `/c:/work`, `/cygdrive/c/work` and `/mnt/c/work` are the four in
+/// circulation — MSYS2 and Git Bash write the first two, Cygwin the third, WSL
+/// the fourth — and every one of them names `C:\work`. A command running under
+/// Git Bash produces them constantly, because that is what its own tools print:
+/// `git rev-parse --show-toplevel` answers `/c/work/api`, and a model that
+/// pastes that answer into the next call has named a path no rule stored as
+/// `C:/work/api/*` would ever match. The gate would then ask about a directory
+/// the person has already answered for, every turn, forever.
+///
+/// A single letter is the whole test. `/mnt/data` and `/usr/bin` keep their own
+/// meaning, because `data` and `usr` are not drives — which is also why the
+/// `cygdrive` and `mnt` prefixes are stripped before the letter is read rather
+/// than treated as evidence on their own.
+///
+/// Windows-only at the call site: on a unix machine `/c/work` is an ordinary
+/// path and rewriting it would invent a drive that does not exist. The function
+/// itself is left compiled everywhere so its rules can be asserted on from any
+/// machine.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn from_posix_drive(text: &str) -> Option<PathBuf> {
+    let rest = text.strip_prefix('/')?;
+    let rest = rest
+        .strip_prefix("cygdrive/")
+        .or_else(|| rest.strip_prefix("mnt/"))
+        .unwrap_or(rest);
+
+    let (head, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    // `/c` and `/c:` name the drive itself; the colon is Git Bash's own second
+    // spelling of the same thing.
+    let head = head.strip_suffix(':').unwrap_or(head);
+    let mut characters = head.chars();
+    let letter = characters.next().filter(char::is_ascii_alphabetic)?;
+    if characters.next().is_some() {
+        return None;
+    }
+
+    let mut native = String::from(letter.to_ascii_uppercase());
+    native.push_str(":\\");
+    native.push_str(&tail.replace('/', "\\"));
+
+    Some(PathBuf::from(native))
 }
 
 /// The directory an answer about `path` would cover: `path` itself when it is
@@ -2116,6 +2249,12 @@ mod tests {
     /// carries a wildcard cannot be written down as a rule — `/tmp/build*/*`
     /// would cover every sibling — but the call still goes there, and a dialog
     /// that hid it would be asking about somewhere else.
+    ///
+    /// Unix-only because the fixture is: NTFS refuses `*` in a file name at
+    /// `mkdir`, so this exact arrangement cannot be built on Windows. The rule
+    /// under test is not unix-only, and the sibling below is the one that says
+    /// so on every platform.
+    #[cfg(unix)]
     #[test]
     fn a_wildcard_directory_is_disclosed_even_though_it_is_never_remembered() {
         let store = temporary();
@@ -2136,6 +2275,144 @@ mod tests {
             "{:?}",
             decision.learned
         );
+    }
+
+    /// The same rule, asked of a directory nothing ever created — which is how
+    /// it can be asked on a filesystem that would refuse to create it.
+    ///
+    /// [`resolve`] canonicalises the deepest ancestor that exists and appends
+    /// the rest by text, so a wildcard in the part that is not there survives
+    /// into the answer exactly as written. A call may perfectly well name a
+    /// directory it is about to make, which is the case this covers on every
+    /// platform and the reason the fixture above is not the only pin.
+    ///
+    /// Both metacharacters, because [`glob`] has two and forgetting the second
+    /// is not a hypothetical: `?` is what a Windows verbatim prefix carries,
+    /// and a [`means_itself`] that let it through would remember a rule
+    /// covering every sibling whose name differs by one character.
+    #[test]
+    fn a_wildcard_directory_that_was_never_created_is_disclosed_and_still_not_remembered() {
+        for name in ["build*", "build?"] {
+            let store = temporary();
+            let project = temporary();
+            let elsewhere = temporary();
+            let wildcard = elsewhere.path().join(name);
+
+            let permissions = scoped(&store, &project);
+            let decision = permissions.gate("bash", &shell_in("cargo test", &wildcard));
+
+            assert_eq!(decision.directories, vec![resolve(&wildcard)], "{name}");
+            assert!(
+                !decision
+                    .learned
+                    .iter()
+                    .any(|rule| rule.permission == EXTERNAL_DIRECTORY),
+                "{name}: {:?}",
+                decision.learned
+            );
+        }
+    }
+
+    /// The precondition every stored `external_directory` rule rests on: what
+    /// [`resolve`] answers can be written down as a pattern that still means
+    /// the directory it came from.
+    ///
+    /// Trivially true where `canonicalize` answers in the ordinary spelling.
+    /// On Windows it answers `\\?\C:\…`, whose `?` is a [`glob`]
+    /// metacharacter — so without [`plain`] this fails for every directory on
+    /// the machine, and an "always" answer about any of them is disclosed,
+    /// accepted, and then dropped on the floor.
+    #[test]
+    fn a_resolved_directory_can_still_be_written_down_as_a_rule() {
+        let directory = temporary();
+
+        let resolved = resolve(directory.path());
+        let text = resolved.to_string_lossy();
+
+        assert!(
+            !text.contains('?'),
+            "a resolved path may carry no glob metacharacter: {text}"
+        );
+        assert!(
+            super::means_itself(&text),
+            "a resolved directory has to survive being made into a rule: {text}"
+        );
+        assert!(
+            matches(
+                &resolved.join("notes.txt").to_string_lossy(),
+                &covering(&resolved)
+            ),
+            "and the rule it becomes has to cover what is under it: {text}"
+        );
+    }
+
+    /// The two verbatim spellings `canonicalize` answers in on Windows, and
+    /// what each is written back to. Everything downstream — the patterns, the
+    /// comparisons, the text a person reads in the dialog — depends on this
+    /// being the only spelling that escapes [`resolve`].
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_windows_path_is_rewritten_to_the_spelling_a_person_writes() {
+        for (verbatim, plain) in [
+            (r"\\?\C:\work\api", r"C:\work\api"),
+            (r"\\?\C:\", r"C:\"),
+            (r"\\?\UNC\server\share\dir", r"\\server\share\dir"),
+            // No ordinary spelling exists for a device path, so it is left
+            // alone rather than turned into something that names nothing.
+            (r"\\?\Volume{deadbeef}\x", r"\\?\Volume{deadbeef}\x"),
+            (r"C:\already\plain", r"C:\already\plain"),
+        ] {
+            assert_eq!(
+                super::plain(PathBuf::from(verbatim)),
+                PathBuf::from(plain),
+                "{verbatim}"
+            );
+        }
+    }
+
+    /// The four POSIX spellings of a Windows drive that a shell running under
+    /// Git Bash, Cygwin or WSL hands back, and the one native path they all
+    /// mean. A rule stored for `C:/work` has to cover a call that arrived
+    /// naming `/c/work`, or the person answers the same dialog every turn.
+    ///
+    /// Asserted everywhere though it is only applied on Windows: this is a
+    /// judgement about text, and one that only runs where nobody can watch it
+    /// is one that rots.
+    #[test]
+    fn a_posix_shell_spelling_of_a_windows_drive_is_read_as_that_drive() {
+        for (posix, native) in [
+            ("/c/work/api", r"C:\work\api"),
+            ("/c:/work/api", r"C:\work\api"),
+            ("/cygdrive/c/work/api", r"C:\work\api"),
+            ("/mnt/c/work/api", r"C:\work\api"),
+            ("/d/other", r"D:\other"),
+            ("/c", r"C:\"),
+            ("/c:", r"C:\"),
+        ] {
+            assert_eq!(
+                super::from_posix_drive(posix),
+                Some(PathBuf::from(native)),
+                "{posix}"
+            );
+        }
+
+        for untouched in [
+            // Not a drive: a directory that happens to sit at the root.
+            "/usr/bin",
+            "/mnt/data/archive",
+            "/cygdrive/data",
+            // Not absolute, so not a drive spelling at all.
+            "c/work",
+            "relative/path",
+            r"C:\work\api",
+            "",
+        ] {
+            assert_eq!(
+                super::from_posix_drive(untouched),
+                None,
+                "{untouched} names no drive"
+            );
+        }
     }
 
     /// An answer arrives long after the call was judged — a person had to read

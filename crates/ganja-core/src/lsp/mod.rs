@@ -635,28 +635,44 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("a temp dir");
         let root = temp.path().canonicalize().expect("the fixture resolves");
         let attempts = root.join("attempts");
-        let script = root.join("pretend-server");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\necho attempt >> {}\nexit 1\n",
-                attempts.display()
-            ),
-        )
-        .expect("the script is written");
+        // The two platforms need different fixtures for one behaviour. A
+        // `#!/bin/sh` file is not a program on Windows — nothing would spawn,
+        // and the test would be counting a failure it never provoked — so
+        // there the server is `cmd.exe` appending a line and exiting, which is
+        // the same shape: a process that starts, says nothing an LSP client can
+        // read, and goes. The echo carries no space, so nothing on the way to
+        // `cmd` has to guess where its quoting ends.
         #[cfg(unix)]
-        {
+        let command = {
             use std::os::unix::fs::PermissionsExt as _;
+
+            let script = root.join("pretend-server");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\necho attempt >> {}\nexit 1\n",
+                    attempts.display()
+                ),
+            )
+            .expect("the script is written");
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
                 .expect("the script is made runnable");
-        }
+
+            vec![script.to_string_lossy().into_owned()]
+        };
+        #[cfg(not(unix))]
+        let command = vec![
+            "cmd.exe".to_owned(),
+            "/c".to_owned(),
+            format!("echo.attempt>>{}", attempts.display()),
+        ];
         std::fs::write(root.join("main.rs"), "fn main() {}\n").expect("a file to touch");
 
         let lsp = Arc::new(Lsp {
             servers: vec![super::server::Spec {
                 id: "pretend".to_owned(),
                 extensions: vec![".rs".to_owned()],
-                command: Some(vec![script.to_string_lossy().into_owned()]),
+                command: Some(command),
                 root: super::server::Root::Directory,
                 env: BTreeMap::new(),
                 initialization: None,

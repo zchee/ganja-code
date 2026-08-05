@@ -622,9 +622,15 @@ mod tests {
         std::fs::write(&path, "one").expect("the fixture writes");
 
         times.record(&path);
-        // Filesystem stamps can be coarse; force one that differs.
+        // Filesystem stamps can be coarse; force one that differs. Opened for
+        // writing throughout this module because a stamp is metadata a handle
+        // must be allowed to write: unix grants that with the file's own
+        // permissions, Windows only through a handle that asked for write
+        // access.
         let stale = std::time::SystemTime::UNIX_EPOCH;
-        std::fs::File::open(&path)
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
             .and_then(|file| file.set_modified(stale))
             .expect("the fixture can move the stamp");
 
@@ -669,7 +675,9 @@ mod tests {
         // still refers to the original, which is now reachable no other way.
         let replacement = dir.path().join("b.txt");
         std::fs::write(&replacement, "something else entirely").expect("the fixture writes");
-        std::fs::File::open(&replacement)
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
             .and_then(|file| file.set_modified(std::time::SystemTime::UNIX_EPOCH))
             .expect("the fixture can move the stamp");
         std::fs::rename(&replacement, &path).expect("the fixture can repoint the name");
@@ -720,7 +728,9 @@ mod tests {
         // now say the file never moved, which is exactly why the condemnation
         // is a state and not a comparison: the contents are somebody else's
         // and the model has not seen them.
-        std::fs::File::open(&path)
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
             .and_then(|file| file.set_modified(as_read.expect("the fixture's filesystem stamps")))
             .expect("the fixture can move the stamp");
         assert!(
@@ -827,7 +837,9 @@ mod tests {
     /// twice would not be.
     fn age(path: &std::path::Path, second: u64) {
         let stamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(second);
-        std::fs::File::open(path)
+        std::fs::File::options()
+            .write(true)
+            .open(path)
             .and_then(|file| file.set_modified(stamp))
             .expect("the fixture can move the stamp");
     }
