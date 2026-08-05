@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-04 | Updated: 2026-08-04 -->
+<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
 
 # fixtures
 
@@ -25,7 +25,7 @@ Recorded inputs the test suites replay. Two kinds: `.sse` files are captured `te
 | Directory | Purpose |
 |-----------|---------|
 | `golden/` | Canned tasks for the upstream differential (see `golden/AGENTS.md`) |
-| `mcp/` | `reference-server.mjs`: an MCP server on the upstream checkout's `@modelcontextprotocol/sdk`, spawned by `tests/mcp.rs` so the client is certified against somebody else's implementation rather than against rmcp talking to itself. |
+| `mcp/` | MCP servers on the upstream checkout's `@modelcontextprotocol/sdk`, spawned by `tests/mcp.rs` so the client is certified against somebody else's implementation rather than against rmcp talking to itself. `reference-server.mjs` answers, fails, and dies on request; `stubborn-server.mjs` ignores stdin EOF, so only a kill ends it; `changing-server.mjs` swaps one tool for another and sends `tools/list_changed`, which is the only fixture that makes a server *tell* the client something. |
 
 ## For AI Agents
 

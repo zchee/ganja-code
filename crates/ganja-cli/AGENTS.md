@@ -1,11 +1,11 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-04 | Updated: 2026-08-04 -->
+<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
 
 # ganja-cli
 
 ## Purpose
 
-The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login`/`list`/`logout`, `config import-opencode`) and to answer questions about it (`models`, `sessions`) without taking the screen over.
+The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login`/`list`/`logout`, `config import-opencode`) and to answer questions about it (`models`, `sessions`, `mcp`) without taking the screen over.
 
 ## Key Files
 

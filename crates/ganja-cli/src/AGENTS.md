@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-04 | Updated: 2026-08-04 -->
+<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
 
 # ganja-cli/src
 
@@ -11,7 +11,7 @@ The binary's whole surface: clap parsing, the credential subcommands, the config
 
 | File | Description |
 |------|-------------|
-| `main.rs` | `Cli`/`Command`/`Auth`/`Config` clap types, `login`/`list`/`logout`, `models`, and the raw-mode key prompt. No subcommand delegates straight to `ganja_tui::run()`. |
+| `main.rs` | `Cli`/`Command`/`Auth`/`Config` clap types, `login`/`list`/`logout`, `models`, `mcp`, and the raw-mode key prompt. No subcommand delegates straight to `ganja_tui::run()`. |
 | `import.rs` | `ganja config import-opencode`: discovery of opencode's config tiers, the key mapping, the mapped/skipped table, and the JSON writer that produces a `ganja.json`. |
 
 ## For AI Agents
@@ -46,6 +46,7 @@ The importer inherits the same posture, for the same reason — it reads a file 
 The two listings each have one rule that is not obvious from their code:
 
 - **`models` calls `catalog::load_cached()` before it reads the table.** The disk tier is a layer somebody installs, not one a lookup reaches for, so a listing that skipped installing it would answer from the compiled-in snapshot however recently a session had fetched something newer. `--refresh` fetches on top of that and is never fatal — fetching switched off and an endpoint that refuses the connection both leave the table standing and say so on stderr. Only a named provider the table does not carry is a failure, because a header over no rows is indistinguishable from the typo it usually is.
+- **`mcp` dials.** A standing nothing has tried is not a standing, so the listing connects every enabled server and reports what came of it — and reads the statuses and the tools it lends *before* it shuts them down again, because closing a connection takes its tools with it. The rows are driven by the config rather than by the statuses, which deliberately omit a server nothing has finished trying: a row that could silently vanish is worse than one reporting it has no standing. Nothing here wants a credential, so no engine is built, for the reason `sessions` reads the store directly.
 - **`sessions` lists roots.** A session carrying a `parent` belongs to the `task` call that spawned it; the picker in `ganja-tui` filters the same way, and filtering before the count is what makes a project whose every session is delegated read as one with none.
 
 ### Testing Requirements
