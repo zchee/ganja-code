@@ -28,7 +28,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Tool, ToolCtx, ToolError, ToolOutput, is_same_file};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, is_same_file, native_path};
 
 /// Most matches a call returns. Upstream's `limit` in `tool/grep.ts`.
 const LIMIT: usize = 100;
@@ -199,11 +199,16 @@ fn resolve(cwd: &Path, path: Option<&str>) -> PathBuf {
         return cwd.to_owned();
     };
     let path = Path::new(path);
-    if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path.to_owned()
     } else {
         cwd.join(path)
-    }
+    };
+
+    // Spelled the way this platform spells a path: every result below is built
+    // by joining onto this one, and all of them are printed. See
+    // [`native_path`].
+    native_path(joined)
 }
 
 /// Searches every file under `base_dir` for `pattern`, honoring `include`

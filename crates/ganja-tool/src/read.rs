@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, native_path, truncate};
 
 /// How many lines a call reads when it names no `limit`. Upstream's
 /// `DEFAULT_READ_LIMIT`.
@@ -125,11 +125,15 @@ impl Tool for ReadTool {
 /// own working directory happens to be.
 fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
     let path = Path::new(file_path);
-    if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path.to_owned()
     } else {
         cwd.join(path)
-    }
+    };
+
+    // Spelled the way this platform spells a path, because this one is echoed
+    // back to the model. See [`native_path`].
+    native_path(joined)
 }
 
 /// `path` relative to `cwd` when it is under it, absolute otherwise — for a
@@ -538,6 +542,37 @@ mod tests {
 
     use super::ReadTool;
     use crate::{FileTimes, Tool, ToolCtx, ToolError};
+
+    /// A model writes `docs/guide.md` on every platform, and the path this
+    /// tool echoes back is built by joining that onto the session's directory.
+    /// On Windows a plain join keeps the argument's own `/` and prints
+    /// `C:\project\docs/guide.md` — a spelling that opens fine and that no
+    /// Windows program would ever produce, which is a gratuitous divergence
+    /// from upstream in a string the golden differential compares.
+    ///
+    /// Trivially true on unix, where there is one separator; it bites on
+    /// Windows, where there are two.
+    #[test]
+    fn a_resolved_path_never_mixes_the_two_separators() {
+        let cwd = std::path::Path::new(if cfg!(windows) {
+            r"C:\project"
+        } else {
+            "/project"
+        });
+
+        for argument in ["docs/guide.md", "docs/deep/nested.md", "guide.md"] {
+            let resolved = super::resolve(cwd, argument).display().to_string();
+
+            assert!(
+                !(resolved.contains('/') && resolved.contains('\\')),
+                "{argument} resolved to a path spelled two ways at once: {resolved}"
+            );
+            assert!(
+                resolved.ends_with("guide.md") || resolved.ends_with("nested.md"),
+                "{argument} resolved to {resolved}"
+            );
+        }
+    }
 
     /// A context rooted at `cwd`, with a fresh, empty read log and no
     /// credential store to refuse.

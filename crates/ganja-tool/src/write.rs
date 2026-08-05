@@ -27,6 +27,7 @@ use serde::Deserialize;
 use crate::{
     Tool, ToolCtx, ToolError, ToolOutput,
     anchor::{self, Anchor},
+    native_path,
 };
 
 /// What the model passes to `write`.
@@ -130,11 +131,15 @@ impl Tool for WriteTool {
 /// own working directory happens to be.
 fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
     let path = Path::new(file_path);
-    if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path.to_owned()
     } else {
         cwd.join(path)
-    }
+    };
+
+    // Spelled the way this platform spells a path, because this one is echoed
+    // back to the model. See [`native_path`].
+    native_path(joined)
 }
 
 /// `path` relative to `cwd` when it is under it, absolute otherwise — for a

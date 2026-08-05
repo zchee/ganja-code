@@ -34,6 +34,7 @@ use similar::{ChangeTag, TextDiff};
 use crate::{
     Tool, ToolCtx, ToolError, ToolOutput,
     anchor::{self, Anchor},
+    native_path,
 };
 
 /// What the model is told about the tool: upstream's prompt file, verbatim.
@@ -407,11 +408,15 @@ async fn prepare(
 /// when the model passed a relative one.
 fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
     let path = Path::new(file_path);
-    if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path.to_owned()
     } else {
         cwd.join(path)
-    }
+    };
+
+    // Spelled the way this platform spells a path, because this one is echoed
+    // back to the model. See [`native_path`].
+    native_path(joined)
 }
 
 /// `path` as the transcript should show it: relative to the session's

@@ -7,7 +7,7 @@
 //! a person running their own command rather than a model asking to (**D13**).
 
 use std::{
-    path::Path,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -26,6 +26,42 @@ use ganja_core::{
     tool::Registry,
 };
 use tokio_util::sync::CancellationToken;
+
+/// `text`, which a shell printed, as this platform spells a path.
+///
+/// A POSIX shell on Windows answers `pwd` with `/d/a/project` where the native
+/// spelling is `D:\a\project`; Cygwin writes `/cygdrive/d/...` and WSL
+/// `/mnt/d/...` for the same place. All of them name one directory and only one
+/// of them is a path anything else here can open.
+///
+/// Gated to Windows rather than merely documented as Windows-only: on unix
+/// `/d/a/project` *is* the path, and rewriting it would invent a drive that
+/// does not exist. A single letter is the whole test, so `/usr/bin` keeps its
+/// meaning.
+#[cfg(windows)]
+fn native(text: &str) -> PathBuf {
+    let rest = text.strip_prefix('/').unwrap_or(text);
+    let rest = rest
+        .strip_prefix("cygdrive/")
+        .or_else(|| rest.strip_prefix("mnt/"))
+        .unwrap_or(rest);
+    let (head, tail) = rest.split_once('/').unwrap_or((rest, ""));
+
+    match head.strip_suffix(':').unwrap_or(head).as_bytes() {
+        [drive] if drive.is_ascii_alphabetic() => PathBuf::from(format!(
+            "{}:\\{}",
+            drive.to_ascii_uppercase() as char,
+            tail.replace('/', "\\")
+        )),
+        _ => PathBuf::from(text),
+    }
+}
+
+/// Nothing to translate where a shell and the filesystem already agree.
+#[cfg(not(windows))]
+fn native(text: &str) -> PathBuf {
+    PathBuf::from(text)
+}
 
 /// The whole of the synthetic user message, pinned to upstream
 /// `packages/opencode/src/session/prompt.ts` (`shellImpl`).
@@ -261,8 +297,12 @@ async fn a_passthrough_runs_at_the_project_root_and_not_at_the_process_directory
     let ToolState::Completed { output, .. } = shell_part(&seen) else {
         panic!("the command completed");
     };
+    // Canonicalised, not compared as text: `root` is canonical already, and on
+    // Windows that is the verbatim spelling — so the shell's answer has to be
+    // put through the same resolution before the two can be one string.
     assert_eq!(
-        Path::new(output.trim()),
+        std::fs::canonicalize(native(output.trim()))
+            .expect("the directory the passthrough reported exists"),
         root,
         "the passthrough ran somewhere else"
     );

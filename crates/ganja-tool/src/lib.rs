@@ -535,6 +535,28 @@ impl FileTimes {
     }
 }
 
+/// `path` spelled the way this platform spells one.
+///
+/// A tool's `filePath` is text a model wrote, and a model writes
+/// `docs/guide.md` on every platform there is. Joining that onto a Windows
+/// working directory gives `C:\project\docs/guide.md` — a path that *opens*,
+/// because Windows accepts both separators, but that no Windows program would
+/// ever print. These paths are printed: `read` echoes one back in its `<path>`
+/// element, `edit` and `write` put one in the title a person reads, and the
+/// golden differential compares every one of them against upstream, whose Node
+/// `path.resolve` hands back a native spelling. A mixed one is a divergence
+/// with no upside — nobody chose it, it just falls out of `join`.
+///
+/// Rebuilding from [`Path::components`] is the whole of it: the components come
+/// back out joined with this platform's own separator. Windows treats `/` and
+/// `\` alike when it parses, so both are read and one is written.
+///
+/// A no-op on unix, where `/` is the only separator there has ever been and a
+/// `\` inside a name is part of the name.
+fn native_path(path: PathBuf) -> PathBuf {
+    path.components().collect()
+}
+
 /// The filesystem's modification stamp for `path`, or [`None`] where the
 /// filesystem does not offer one — in which case recording and checking
 /// compare as equal, failing open rather than refusing every edit.

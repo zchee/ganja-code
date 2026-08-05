@@ -179,10 +179,15 @@ fn fixture() -> TempDir {
 }
 
 /// Whether a binary named `binary` is on `PATH`.
+///
+/// Asked through the product's own resolver rather than by joining the bare
+/// name. A precondition check is a claim that *the engine* will find the
+/// server, so anything that answers it differently can refuse to run a suite
+/// the engine would have been perfectly able to drive — which is exactly what a
+/// bare join does on Windows, where the binary rustup installs is
+/// `rust-analyzer.exe`.
 fn on_path(binary: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|directory| directory.join(binary).is_file())
-    })
+    ganja_core::lsp::server::which(binary).is_some()
 }
 
 /// Every error message the servers currently hold about `path`.
