@@ -19,12 +19,15 @@
 //!
 //! # Divergences
 //!
-//! - **D22** — the prompt is composed once, at startup, where upstream rebuilds
-//!   it for every request. The two things that can go stale in a long session
-//!   are the date and the working directory; neither moves during a session
-//!   ganja can have, since the working directory is captured once at engine
-//!   construction, and a session that outlives midnight tells the model
-//!   yesterday's date.
+//! - **D22** — the prompt is composed when the model moves, where upstream
+//!   rebuilds it for every request. Both halves are recomposed by the engine
+//!   after anything that changes the active model — `Engine::with_base_for_model`
+//!   for the base, `Engine::with_environment` for this one — because both are
+//!   written against a model: the base is its family's, and the environment
+//!   block states its name as fact. What is left composed-once is what does not
+//!   depend on the model: the working directory, captured at engine
+//!   construction, and the date, so a session that outlives midnight tells the
+//!   model yesterday's.
 //! - **D23** — the environment block's model line names the model the way the
 //!   provider is asked for it. Upstream additionally spells the `provider/model`
 //!   pair, which is not available where this is composed.
@@ -94,6 +97,12 @@ const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
 /// Upstream selects by substring on the model's own identifier, first match
 /// wins, and this ports the three arms whose providers ganja has. The
 /// comparison is case-sensitive, as upstream's is.
+///
+/// This is the half an agent replaces, and it is not composed once for the
+/// session: which arm answers depends on the model's family, so
+/// `Engine::with_base_for_model` calls this again whenever the active model
+/// moves, and a session that switches across families stops running the new
+/// model under the old one's instructions.
 #[must_use]
 pub fn base_prompt(model_id: &str) -> &'static str {
     if model_id.contains("gpt") {

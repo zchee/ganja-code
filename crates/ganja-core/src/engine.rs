@@ -190,7 +190,16 @@ pub struct Engine {
     /// the model's family, composed by [`crate::instruction::system_prompt`].
     /// [`None`] is an engine nobody configured, which every scripted and
     /// golden run relies on.
-    base_prompt: Option<String>,
+    ///
+    /// Behind a lock for the reason the suffix is: which prompt this is depends
+    /// on the model's family, and the model can change under a session that is
+    /// already assembled; see [`Engine::with_base_for_model`].
+    base_prompt: std::sync::Mutex<Option<String>>,
+    /// Whether that half is recomposed for the family of whatever model is
+    /// active. `false` leaves whatever [`Engine::with_system_parts`] was given
+    /// standing for the session, which is what every scripted and golden run
+    /// wants.
+    base_follows_model: bool,
     /// The half no agent replaces — the environment block and the instruction
     /// files — which is why it is held apart from the base prompt rather than
     /// concatenated into it: switching agents swaps one and keeps the other.
@@ -360,7 +369,8 @@ impl Engine {
                 agent: None,
                 previous_agent: None,
             }),
-            base_prompt: None,
+            base_prompt: std::sync::Mutex::new(None),
+            base_follows_model: false,
             prompt_suffix: std::sync::Mutex::new(None),
             environment: None,
             agents: None,
@@ -423,10 +433,67 @@ impl Engine {
     /// them, and [`None`] only when neither half says anything.
     #[must_use]
     pub fn with_system_parts(mut self, base: Option<String>, suffix: Option<String>) -> Self {
-        self.base_prompt = base;
+        self.base_prompt = std::sync::Mutex::new(base);
         self.prompt_suffix = std::sync::Mutex::new(suffix);
 
         self
+    }
+
+    /// Keeps the base half composed for the family of whichever model the
+    /// session is asking, rather than for the one it launched on.
+    ///
+    /// The base prompt is chosen by family — Anthropic's, OpenAI's, or the one
+    /// for everything else — so a session that switches across families and
+    /// keeps the prompt it launched with runs the new model under another
+    /// family's instructions, inside a prompt whose environment block has
+    /// already moved on and names the new one. Installing this composes that
+    /// half now, and again after anything that moves the active model.
+    ///
+    /// Takes no way to compose one, where [`Engine::with_environment`] does:
+    /// the environment half is composed from a config and a working directory
+    /// the engine does not hold, while the base half is composed from the
+    /// model's name alone and [`crate::instruction::base_prompt`] is already in
+    /// this crate. A closure here would be indirection that bought nothing —
+    /// and would let a caller install a base that disagrees with the family
+    /// table.
+    ///
+    /// Supersedes whatever base [`Engine::with_system_parts`] was given, so the
+    /// two cannot disagree; a caller with a base of its own — a scripted run, a
+    /// golden run — simply does not ask for this.
+    #[must_use]
+    pub fn with_base_for_model(mut self) -> Self {
+        self.base_follows_model = true;
+        self.recompose_base();
+
+        self
+    }
+
+    /// The base half as it currently stands.
+    fn base_half(&self) -> Option<String> {
+        self.base_prompt
+            .lock()
+            .expect("the system prompt is never poisoned")
+            .clone()
+    }
+
+    /// Composes the base half again for the family of the model that is active
+    /// now.
+    ///
+    /// Does nothing unless [`Engine::with_base_for_model`] asked for it, which
+    /// is what leaves a scripted engine's own base alone. Called beside
+    /// [`Engine::recompose_environment`] at every site that moves the active
+    /// model: the two halves are written against the same model and a site that
+    /// moved one without the other would leave the prompt describing two.
+    fn recompose_base(&self) {
+        if !self.base_follows_model {
+            return;
+        }
+        let composed = crate::instruction::base_prompt(&self.model()).to_owned();
+
+        *self
+            .base_prompt
+            .lock()
+            .expect("the system prompt is never poisoned") = Some(composed);
     }
 
     /// Keeps the suffix half composed for whichever model the session is
@@ -496,9 +563,12 @@ impl Engine {
                     active.model = model;
                 }
             }
-            // The default agent may prefer a model of another family, and the
-            // environment block names whichever one the session ends up on.
+            // The default agent may prefer a model of another family, and both
+            // halves are written against whichever one the session ends up on:
+            // the base prompt is that family's, and the environment block names
+            // the model.
             self.recompose_environment();
+            self.recompose_base();
         }
 
         self
@@ -864,19 +934,21 @@ impl Engine {
         // so a resumed session has no previous turn to compare against and
         // does not replay the plan-to-build reminder.
         self.active().previous_agent = None;
-        // A session reopened on the model it was last asking gets an
-        // environment block naming that model, not the one this process
-        // happened to start on.
+        // A session reopened on the model it was last asking gets that model's
+        // prompt — its family's base and an environment block naming it — and
+        // not the one this process happened to start on.
         self.recompose_environment();
+        self.recompose_base();
     }
 
     /// The system prompt one turn carries: the agent's own prompt where it has
     /// one, the model family's base prompt where it does not, and the
     /// environment half after either.
     fn system_for(&self, agent: Option<&Agent>) -> Option<String> {
+        let base = self.base_half();
         let head = agent
             .and_then(|agent| agent.prompt.as_deref())
-            .or(self.base_prompt.as_deref());
+            .or(base.as_deref());
         let suffix = self.environment_half();
 
         // What the connected servers said about themselves, after the
@@ -1431,7 +1503,7 @@ impl Engine {
             // nobody is watching a subagent's turn.
             tools: self.lent(),
             permissions: Arc::clone(&self.permissions),
-            base_prompt: self.base_prompt.clone(),
+            base_prompt: self.base_half(),
             prompt_suffix: self.environment_half(),
             cwd: self.cwd.clone(),
             root: self.root.clone(),
@@ -1490,6 +1562,7 @@ impl Engine {
             }
         }
         self.recompose_environment();
+        self.recompose_base();
         self.remember_selection();
         drop(turn);
 
@@ -1512,6 +1585,7 @@ impl Engine {
 
         self.active().model = model;
         self.recompose_environment();
+        self.recompose_base();
         self.remember_selection();
         drop(turn);
 
