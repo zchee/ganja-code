@@ -1084,12 +1084,14 @@ name = "ganja-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.0",
  "etcetera",
  "futures",
  "ganja-permission",
  "ganja-protocol",
  "ganja-testkit",
  "ganja-tool",
+ "getrandom 0.4.3",
  "ignore",
  "jsonc-parser",
  "libc",
@@ -1101,6 +1103,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

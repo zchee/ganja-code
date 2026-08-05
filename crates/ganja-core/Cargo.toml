@@ -15,6 +15,9 @@ publish = false
 # Only where dyn-safety demands it: `Provider` and `Tool` live behind
 # `Arc<dyn _>`.
 async-trait.workspace = true
+# The two encodings an OAuth login meets: a PKCE challenge on the way out, and
+# the payload of the id_token a ChatGPT login answers with on the way back.
+base64.workspace = true
 # The two schemas the engine builds rather than derives: an MCP tool's, handed
 # over by the server, and the no-argument one the title request advertises.
 # Generating a builtin tool's schema is `ganja-tool`'s business.
@@ -23,6 +26,10 @@ schemars.workspace = true
 # included, which is where upstream keeps its own credentials there.
 etcetera.workspace = true
 futures.workspace = true
+# A login's unguessable halves: the PKCE verifier, and the `state` and `nonce`
+# that make a loopback callback answerable only by the request that opened it.
+# Thirty-two bytes from the operating system, rendered as base64url.
+getrandom.workspace = true
 # Which calls are gated, and which worktree a session is in. Re-exported as
 # `ganja_core::permission` and `ganja_core::project`, the module names every
 # caller already writes.
@@ -61,6 +68,9 @@ rusqlite.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# PKCE's S256 challenge is SHA-256 of the verifier; the provider recomputes it
+# and refuses the exchange if the two disagree.
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
