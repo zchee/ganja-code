@@ -54,6 +54,10 @@ reqwest.workspace = true
 # a second hand-rolled JSON-RPC client: the workspace declaration carries the
 # stdio and streamable-HTTP transports this module connects over.
 rmcp.workspace = true
+# The session store. WAL keeps readers from ever blocking the writer;
+# `bundled` (declared at the workspace) keeps the pragma defaults the storage
+# layer relies on compiled in rather than inherited from the platform.
+rusqlite.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

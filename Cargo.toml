@@ -102,6 +102,13 @@ rmcp = { version = "3.1.0", default-features = false, features = [
     # already use.
     "transport-streamable-http-client-reqwest",
 ] }
+# Session storage is SQLite, the way upstream's is. `bundled` compiles the
+# exact SQLite this workspace was validated against instead of linking
+# whatever the platform ships: the pragma *defaults* the storage layer relies
+# on (`foreign_keys`, WAL synchronous level) are build-time properties that
+# differ between system libraries, so pinning the library is what pins the
+# semantics.
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 schemars = "1.2.2"
 # Key material is held in `SecretString` so that it is wiped on drop and cannot
 # reach a `Debug` rendering; `serde` is what lets `auth.json` decode into one.
