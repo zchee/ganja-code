@@ -10,11 +10,28 @@
 //! the parent chain the kernel keeps.
 //!
 //! The witness is a file rather than a signal. Windows offers no way to ask
-//! "is this group still alive" without reaching for an API this workspace has
-//! no crate for, so the grandchild announces itself, waits, and then tries to
+//! "is this tree still alive" without reaching for an API this workspace has no
+//! crate for, so the grandchild announces itself, waits, and then tries to
 //! announce that it survived. A second announcement means the kill did not
 //! reach it. Its own binary, like its unix twin, because it runs a real shell
 //! and a real tree.
+//!
+//! # Every wait here has a deadline, and the stream is never left unread
+//!
+//! Two rules this file follows deliberately, because breaking either one hangs
+//! CI rather than failing it — and a test that hangs is worse than a test that
+//! is missing, since it burns the runner's whole slow-timeout before saying
+//! anything at all.
+//!
+//! The first: **`Engine::subscribe` is lossless**, so its queue applies
+//! backpressure to the turn that fills it. A test that stops draining while it
+//! polls the filesystem stops the very turn it is about to wait for, and then
+//! waits for it forever. So the stream is drained by a task of its own for the
+//! whole test and the assertions read what that task forwarded.
+//!
+//! The second: every await on that forwarded channel is wrapped in a timeout,
+//! so a turn that never finishes fails this test in seconds with a message
+//! naming what it was waiting for.
 
 #![cfg(windows)]
 
@@ -32,31 +49,35 @@ use ganja_core::{
     provider::{FakeProvider, fake},
     tool::Registry,
 };
+use tokio::sync::mpsc;
 
 /// How long the command is given to fork the witness and say so. Generous,
 /// because it covers a whole turn's worth of scripted streaming before the
-/// shell is even spawned — and because starting a process on Windows is not
-/// the cheap thing it is on unix.
-const START_DEADLINE: Duration = Duration::from_secs(20);
+/// shell is even spawned — and because starting a process on Windows is not the
+/// cheap thing it is on unix.
+const START_DEADLINE: Duration = Duration::from_secs(30);
 
 /// How long the grandchild waits before claiming to have survived.
 ///
-/// It has to outlast the kill sequence comfortably — otherwise a slow kill
-/// would look like a failed one — and still be short enough that the check
-/// below is not the slowest thing in the suite.
-const SURVIVAL_DELAY: Duration = Duration::from_secs(3);
+/// Long enough that the cancel comfortably lands first on a loaded runner — if
+/// it did not, the witness would announce survival before anything tried to
+/// kill it and the test would be measuring nothing.
+const SURVIVAL_DELAY: Duration = Duration::from_secs(5);
 
 /// How long the survival file is watched for after the cancel. Longer than
-/// [`SURVIVAL_DELAY`], so a grandchild that lived would have had time to say
-/// so and its silence means it was killed.
-const SILENCE_WINDOW: Duration = Duration::from_secs(8);
+/// [`SURVIVAL_DELAY`], so a grandchild that lived would have had time to say so
+/// and its silence means it was killed.
+const SILENCE_WINDOW: Duration = Duration::from_secs(9);
 
-/// How long the turn may take to report the cancel. Far short of the command
-/// it was running, so a turn that waits the command out fails here rather than
+/// How long the turn may take to report the cancel. Far short of the command it
+/// was running, so a turn that waits the command out fails here rather than
 /// hanging the suite.
-const FINISH_BUDGET: Duration = Duration::from_secs(10);
+const FINISH_BUDGET: Duration = Duration::from_secs(20);
 
-/// Between polls of the two marker files.
+/// How long the permission dialog may take to arrive.
+const ASK_BUDGET: Duration = Duration::from_secs(30);
+
+/// Between polls of the marker files.
 const TICK: Duration = Duration::from_millis(50);
 
 /// `path` as a POSIX shell will read it.
@@ -66,6 +87,23 @@ const TICK: Duration = Duration::from_millis(50);
 /// Git Bash accepts a forward-slash spelling of a drive path throughout.
 fn posix(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")
+}
+
+/// The next event, or a failure naming what it was that never arrived.
+///
+/// Every read of the stream goes through here. A bare `.next().await` is what
+/// turned this suite's first draft into a four-minute CI hang instead of a
+/// failure somebody could read.
+async fn next_event(
+    events: &mut mpsc::UnboundedReceiver<Event>,
+    within: Duration,
+    awaited: &str,
+) -> Event {
+    match tokio::time::timeout(within, events.recv()).await {
+        Ok(Some(event)) => event,
+        Ok(None) => panic!("the event stream ended before {awaited}"),
+        Err(_) => panic!("{awaited} did not happen within {within:?}"),
+    }
 }
 
 /// Waits for `marker` to appear, or says what never happened.
@@ -92,8 +130,8 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
     // process, so killing the shell alone — all that dropping the tool's future
     // achieves — leaves it running. It writes `started` the moment it exists,
     // which is what proves the test built its own attack, then waits and writes
-    // `survived`. Only a kill that reached the whole tree stops the second
-    // file from appearing.
+    // `survived`. Only a kill that reached the whole tree stops the second file
+    // from appearing.
     let command = format!(
         "( echo yes > {started}; sleep {delay}; echo yes > {survived} ) & sleep 300",
         started = posix(&started),
@@ -118,7 +156,19 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
         Arc::new(Registry::with_builtins()),
         Permissions::default(),
     );
-    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    let mut stream = engine.subscribe().await.expect("the first subscriber wins");
+
+    // See the module docs: the subscriber is lossless, so it is drained for the
+    // whole test by a task that does nothing else. Everything below reads the
+    // channel it forwards to, which no assertion can stall.
+    let (sender, mut events) = mpsc::unbounded_channel();
+    let drain = tokio::spawn(async move {
+        while let Some(event) = stream.next().await {
+            if sender.send(event).is_err() {
+                return;
+            }
+        }
+    });
 
     engine
         .send(Command::SendPrompt {
@@ -130,19 +180,17 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
 
     // `bash` asks by default, and nothing runs until the answer arrives.
     loop {
-        match events.next().await {
-            Some(Event::PermissionRequested { id, .. }) => {
-                engine
-                    .send(Command::ReplyPermission {
-                        id,
-                        reply: PermissionReply::Once,
-                    })
-                    .await
-                    .expect("a reply is always accepted");
-                break;
-            }
-            Some(_) => {}
-            None => panic!("the engine stopped before it asked to run the command"),
+        if let Event::PermissionRequested { id, .. } =
+            next_event(&mut events, ASK_BUDGET, "the tool asked to run the command").await
+        {
+            engine
+                .send(Command::ReplyPermission {
+                    id,
+                    reply: PermissionReply::Once,
+                })
+                .await
+                .expect("a reply is always accepted");
+            break;
         }
     }
 
@@ -150,7 +198,7 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
     assert!(
         !survived.exists(),
         "the witness announced survival before anything cancelled it; \
-         {SURVIVAL_DELAY:?} is too short to be a wait"
+         {SURVIVAL_DELAY:?} is too short a wait to prove a kill"
     );
 
     let issued = Instant::now();
@@ -159,22 +207,21 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
         .await
         .expect("a running engine accepts a cancel");
 
-    let deadline = issued + SILENCE_WINDOW;
-    while Instant::now() < deadline {
-        assert!(
-            !survived.exists(),
-            "the grandchild outlived the cancel; the kill reached the shell and not the tree"
-        );
-        tokio::time::sleep(TICK).await;
-    }
-
-    // What the cancel looks like from outside is unchanged: the call's part
-    // closes as an error carrying the cancel, and the turn finishes cancelled.
+    // The turn is drained to its finish *first*. What the cancel looks like
+    // from outside is unchanged: the call's part closes as an error carrying
+    // the cancel, and the turn finishes cancelled.
     let mut call_error = None;
     let reason = loop {
-        match events.next().await {
-            Some(Event::MessageFinished { reason, .. }) => break reason,
-            Some(Event::PartUpdated { part, .. }) => {
+        match next_event(
+            &mut events,
+            FINISH_BUDGET,
+            "the cancelled turn finished (if this is where it stops, the kill \
+             did not reach the command and the tool is still waiting on it)",
+        )
+        .await
+        {
+            Event::MessageFinished { reason, .. } => break reason,
+            Event::PartUpdated { part, .. } => {
                 if let PartBody::Tool {
                     tool,
                     state: ToolState::Error { error, .. },
@@ -185,8 +232,7 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
                     call_error = Some(error);
                 }
             }
-            Some(_) => {}
-            None => panic!("the turn never finished"),
+            _ => {}
         }
     };
 
@@ -196,9 +242,19 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
         Some("the call was cancelled"),
         "a cancelled call still closes as the cancel it was"
     );
+
+    // Only now is there nothing left to keep reading, so the wait for the
+    // witness's silence can be a plain sleep. It runs past the moment the
+    // grandchild would have spoken.
+    let waited = issued.elapsed();
+    if let Some(remaining) = SILENCE_WINDOW.checked_sub(waited) {
+        tokio::time::sleep(remaining).await;
+    }
     assert!(
-        issued.elapsed() < SILENCE_WINDOW + FINISH_BUDGET,
-        "the turn took {:?} to report the cancel",
-        issued.elapsed()
+        !survived.exists(),
+        "the grandchild outlived the cancel by {SILENCE_WINDOW:?}; \
+         the kill reached the shell and not the tree"
     );
+
+    drain.abort();
 }

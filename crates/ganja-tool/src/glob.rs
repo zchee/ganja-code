@@ -24,7 +24,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Tool, ToolCtx, ToolError, ToolOutput};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, native_path};
 
 /// Most paths a call returns. Upstream's `limit` in `tool/glob.ts`.
 const LIMIT: usize = 100;
@@ -130,11 +130,16 @@ fn resolve(cwd: &Path, path: Option<&str>) -> PathBuf {
         return cwd.to_owned();
     };
     let path = Path::new(path);
-    if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path.to_owned()
     } else {
         cwd.join(path)
-    }
+    };
+
+    // Spelled the way this platform spells a path: every result below is built
+    // by joining onto this one, and all of them are printed. See
+    // [`native_path`].
+    native_path(joined)
 }
 
 /// `path` relative to `cwd` when it is under it, absolute otherwise.

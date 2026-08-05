@@ -277,7 +277,15 @@ fn rust_root(file: &Path, directory: &Path, worktree: &Path) -> Option<PathBuf> 
 /// A hand-rolled `which` rather than a crate: the whole of it is "split PATH,
 /// join, ask whether it is a file somebody may execute", and a dependency for
 /// that is a dependency to audit.
-fn which(binary: &str) -> Option<PathBuf> {
+///
+/// Public beside [`resolve`] and [`root`], which answer the module's other two
+/// "where does this server live" questions. It was private only because nothing
+/// outside had needed to ask yet, and a caller that asks it a *different* way —
+/// a suite checking its own preconditions, say — is a caller that can disagree
+/// with the product about whether a server is installed, and then fail for a
+/// reason that is not true.
+#[must_use]
+pub fn which(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
 
     std::env::split_paths(&path)

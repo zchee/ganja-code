@@ -2071,6 +2071,21 @@ mod tests {
         json!({ "command": command, "workdir": workdir.as_ref().to_string_lossy() })
     }
 
+    /// `path` as it has to be written *inside a command string*.
+    ///
+    /// A command is POSIX shell text by contract — [`tokens`] applies `\` as an
+    /// escape — so a native Windows path interpolated into one is eaten by its
+    /// own separators and the remainder resolves to somewhere nobody named. A
+    /// person driving ganja from Git Bash writes forward slashes here for the
+    /// same reason, and Windows accepts them everywhere a path is opened.
+    ///
+    /// A no-op on unix, where there is nothing to translate. Only command
+    /// *text* needs this: a `workdir` or a `filePath` travels as its own JSON
+    /// field, is never tokenized, and is meant to be native.
+    fn posix(path: &Path) -> String {
+        path.display().to_string().replace('\\', "/")
+    }
+
     /// The whole `mcp__` namespace asks, without anything having listed the
     /// names: an MCP tool is somebody else's code and the build cannot know
     /// what it does.
@@ -3160,7 +3175,7 @@ mod tests {
         );
 
         for escape in [
-            format!("cd {} && cat passwd", elsewhere.path().display()),
+            format!("cd {} && cat passwd", posix(elsewhere.path())),
             // The same climb spelled relatively, which `moves_only` accepts as
             // an ordinary path and so drops from the patterns entirely.
             "cd ../.. && cat etc/passwd".to_owned(),
@@ -3183,7 +3198,7 @@ mod tests {
         let outside = temporary();
 
         let mut permissions = scoped(&store, &project);
-        let call = shell(&format!("cp {}/shadow ./stolen", outside.path().display()));
+        let call = shell(&format!("cp {}/shadow ./stolen", posix(outside.path())));
 
         assert_eq!(permissions.gate("shell", &call).action, Decision::Ask);
         let decision = permissions.gate("shell", &call);
@@ -3366,7 +3381,7 @@ mod tests {
 
         let mut permissions = scoped(&store, &project);
         let call = shell_in(
-            &format!("rm {}/x", clean.path().display()),
+            &format!("rm {}/x", posix(clean.path())),
             globbed.path().join("a*"),
         );
 

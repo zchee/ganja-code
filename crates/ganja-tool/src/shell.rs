@@ -1106,6 +1106,53 @@ mod tests {
     };
     use crate::{FileTimes, Tool, ToolCtx, ToolError, truncate};
 
+    /// `text`, which a shell printed, as this platform spells a path.
+    ///
+    /// A POSIX shell on Windows answers `pwd` with `/c/Users/...` where the
+    /// native spelling is `C:\Users\...`; Cygwin writes `/cygdrive/c/...` and
+    /// WSL `/mnt/c/...` for the same place. All of them name one directory and
+    /// only one of them is a path anything else here can open.
+    ///
+    /// Gated to Windows rather than merely documented as Windows-only: on unix
+    /// `/c/Users` *is* the path, and rewriting it would invent a drive that
+    /// does not exist. A single letter is the whole test, so `/usr/bin` keeps
+    /// its meaning.
+    #[cfg(windows)]
+    fn native(text: &str) -> PathBuf {
+        let rest = text.strip_prefix('/').unwrap_or(text);
+        let rest = rest
+            .strip_prefix("cygdrive/")
+            .or_else(|| rest.strip_prefix("mnt/"))
+            .unwrap_or(rest);
+        let (head, tail) = rest.split_once('/').unwrap_or((rest, ""));
+
+        match head.strip_suffix(':').unwrap_or(head).as_bytes() {
+            [drive] if drive.is_ascii_alphabetic() => PathBuf::from(format!(
+                "{}:\\{}",
+                drive.to_ascii_uppercase() as char,
+                tail.replace('/', "\\")
+            )),
+            _ => PathBuf::from(text),
+        }
+    }
+
+    /// Nothing to translate where a shell and the filesystem already agree.
+    #[cfg(not(windows))]
+    fn native(text: &str) -> PathBuf {
+        PathBuf::from(text)
+    }
+
+    /// `path` as it has to be written *inside a command string*.
+    ///
+    /// The other direction, and the reason both exist: a command is POSIX shell
+    /// text, so a native Windows path interpolated into one loses its
+    /// separators to the shell's own escaping and names somewhere nobody meant.
+    /// Windows opens a forward-slash path perfectly well, so this is what a
+    /// fixture writes. A no-op on unix.
+    fn posix(path: &Path) -> String {
+        path.display().to_string().replace('\\', "/")
+    }
+
     /// A context rooted at `cwd`, with a cancel nobody has pulled.
     fn ctx(cwd: PathBuf) -> ToolCtx {
         ToolCtx {
@@ -1328,9 +1375,13 @@ mod tests {
             .expect("pwd runs");
 
         // The temporary directory is reached through a symlink on macOS, so
-        // both sides are resolved before they are compared.
+        // both sides are resolved before they are compared — and the shell's
+        // answer is put into this platform's alphabet first, because a POSIX
+        // shell on Windows prints `/c/Users/...` for a place spelled
+        // `C:\Users\...` and `canonicalize` knows only the second one.
         let canonical = |text: &str| {
-            std::fs::canonicalize(text.trim()).expect("the directory the shell reported exists")
+            std::fs::canonicalize(native(text.trim()))
+                .expect("the directory the shell reported exists")
         };
         assert_eq!(
             canonical(&rooted.output),
@@ -1345,16 +1396,33 @@ mod tests {
     #[tokio::test]
     async fn a_timeout_kills_the_command_and_everything_it_forked() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        let marker = dir.path().join("grandchild-was-here");
+        let forked = dir.path().join("grandchild-was-forked");
+        let survived = dir.path().join("grandchild-was-here");
         // The backgrounded sleep is a grandchild of the tool: the shell forks
-        // it and would leave it running if only the shell were killed. It
-        // announces itself a second in, which is long after the timeout below.
-        let command = format!("(sleep 1; touch {}) & sleep 30", marker.display());
+        // it and would leave it running if only the shell were killed.
+        //
+        // It writes twice, and the first write is why. The claim under test is
+        // that a file does NOT appear, and an assertion of that shape passes
+        // for every reason a file might fail to be written — a path the shell
+        // could not parse, a shell that never ran at all — not only the one it
+        // means. So the grandchild announces itself the moment it exists, and
+        // that announcement is asserted *present*: without it this test would
+        // have gone on passing on a platform where the command was never
+        // running in the first place.
+        //
+        // The paths are interpolated POSIX-spelled, because a command string is
+        // POSIX shell text by contract and a native Windows path written into
+        // one is eaten by its own backslashes.
+        let command = format!(
+            "( echo yes > {forked}; sleep 3; echo yes > {survived} ) & sleep 30",
+            forked = posix(&forked),
+            survived = posix(&survived),
+        );
 
         let started = Instant::now();
         let out = ShellTool::new()
             .run(
-                serde_json::json!({ "command": command, "timeout": 200 }),
+                serde_json::json!({ "command": command, "timeout": 1_000 }),
                 &ctx(dir.path().to_owned()),
             )
             .await
@@ -1362,21 +1430,25 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert!(
-            elapsed < Duration::from_secs(3),
+            elapsed < Duration::from_secs(5),
             "the timeout should end the command promptly, took {elapsed:?}"
         );
         assert!(
             out.output.contains("<shell_metadata>")
-                && out.output.contains("exceeding timeout 200 ms"),
+                && out.output.contains("exceeding timeout 1000 ms"),
             "the model has to be told why the output stops: {:?}",
             out.output
         );
 
-        // Long enough that the grandchild would have written the marker had it
-        // survived the group kill.
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        // Long enough that the grandchild would have written its second marker
+        // had it survived the kill.
+        tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(
-            !marker.exists(),
+            forked.exists(),
+            "the grandchild never ran, so nothing below proves anything about killing it"
+        );
+        assert!(
+            !survived.exists(),
             "a backgrounded grandchild outlived the timeout that killed its parent"
         );
     }
