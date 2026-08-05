@@ -1146,6 +1146,7 @@ dependencies = [
  "ganja-core",
  "ganja-permission",
  "ganja-protocol",
+ "ganja-serve",
  "ganja-tui",
  "jsonc-parser",
  "predicates",
@@ -1220,13 +1221,21 @@ name = "ganja-serve"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.23.0",
+ "futures",
  "ganja-core",
  "ganja-protocol",
+ "ganja-testkit",
+ "reqwest",
+ "secrecy",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-stream",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,0 +1,138 @@
+//! What a route answers when it cannot answer: a status and a tagged JSON
+//! body, upstream's envelope in this protocol's casing.
+//!
+//! Spec: upstream `packages/opencode/src/server/routes/instance/httpapi/errors.ts`,
+//! whose tagged classes (`InvalidRequestError`, `ConflictError`,
+//! `UnknownError`, the not-found family) serialize a tag beside a message.
+//! Here the tag is spelled `type` in snake_case, because that is the one
+//! casing rule this protocol has (see `ganja-protocol`'s
+//! session-id-is-snake-case deviation).
+//!
+//! The mapping is a table, not a judgment call per route:
+//! [`EngineError::SessionNotFound`] is `404`, [`EngineError::Busy`] is `409`,
+//! a payload that does not parse is `400`, and everything else the engine can
+//! refuse with is `500` — the engine's own message as the body, because the
+//! engine already says what went wrong better than a translation would.
+
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use ganja_core::EngineError;
+
+/// A refusal on its way to the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ApiError {
+    /// `404` — the named thing does not exist here.
+    NotFound(String),
+    /// `409` — the engine runs one turn at a time, and one is running.
+    Conflict(String),
+    /// `400` — the request itself is wrong: an unparseable payload, or a
+    /// directory this server does not serve.
+    Invalid(String),
+    /// `500` — everything else, in the engine's own words.
+    Internal(String),
+}
+
+impl ApiError {
+    pub(crate) fn status(&self) -> StatusCode {
+        match self {
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Invalid(_) => StatusCode::BAD_REQUEST,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// The envelope's tag, upstream's class name in this wire's casing.
+    fn tag(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "not_found",
+            Self::Conflict(_) => "conflict",
+            Self::Invalid(_) => "invalid_request",
+            Self::Internal(_) => "unknown",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::NotFound(message)
+            | Self::Conflict(message)
+            | Self::Invalid(message)
+            | Self::Internal(message) => message,
+        }
+    }
+}
+
+impl From<EngineError> for ApiError {
+    fn from(error: EngineError) -> Self {
+        match error {
+            EngineError::SessionNotFound { .. } => Self::NotFound(error.to_string()),
+            EngineError::Busy => Self::Conflict(error.to_string()),
+            _ => Self::Internal(error.to_string()),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let body = serde_json::json!({
+            "type": self.tag(),
+            "message": self.message(),
+        });
+
+        (self.status(), Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use ganja_core::EngineError;
+    use ganja_protocol::SessionId;
+
+    use super::ApiError;
+
+    /// The table the routes hang on: a client switches on these statuses, so
+    /// each engine refusal must land on exactly its own.
+    #[test]
+    fn the_engine_refusals_map_to_their_statuses_and_nothing_else_moves() {
+        let not_found = ApiError::from(EngineError::SessionNotFound {
+            id: SessionId::from("ses_missing".to_owned()),
+        });
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+
+        let busy = ApiError::from(EngineError::Busy);
+        assert_eq!(busy.status(), StatusCode::CONFLICT);
+
+        for other in [
+            EngineError::Ephemeral,
+            EngineError::NoAgents,
+            EngineError::NothingToUndo,
+            EngineError::NothingToRedo,
+            EngineError::NoSnapshots,
+            EngineError::UnknownAgent {
+                name: "nobody".to_owned(),
+            },
+        ] {
+            let mapped = ApiError::from(other);
+            assert_eq!(
+                mapped.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "everything the table does not name is a 500: {mapped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_is_tagged_json_naming_what_went_wrong() {
+        let error = ApiError::Conflict("a turn is already streaming".to_owned());
+        assert_eq!(error.tag(), "conflict");
+        assert_eq!(error.message(), "a turn is already streaming");
+
+        assert_eq!(ApiError::NotFound(String::new()).tag(), "not_found");
+        assert_eq!(ApiError::Invalid(String::new()).tag(), "invalid_request");
+        assert_eq!(ApiError::Internal(String::new()).tag(), "unknown");
+    }
+}

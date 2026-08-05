@@ -22,6 +22,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 mod import;
 mod login;
 mod run;
+mod serve;
 
 // A plain comment, and above the doc comment rather than below it: clap
 // renders a doc comment as the help a person reads — every line of it — and
@@ -141,6 +142,12 @@ enum Command {
     /// dialog, so a call that would have opened one is refused instead. Use
     /// `--auto` to allow them, and mean it: nobody is watching.
     Run(run::RunArgs),
+    /// Serve the engine over HTTP until SIGINT or SIGTERM.
+    ///
+    /// The same engine the UI drives, behind REST routes and an SSE event
+    /// stream instead of a screen. Loopback by default; binding anything
+    /// else requires GANJA_SERVER_PASSWORD, and every route then asks for it.
+    Serve(serve::ServeArgs),
     /// List the stored sessions of the project this was run in.
     Sessions,
 }
@@ -313,6 +320,7 @@ async fn main() -> Result<()> {
         Some(Command::Mcp) => mcp_command().await,
         Some(Command::Models { provider, refresh }) => models_command(provider, refresh).await,
         Some(Command::Run(args)) => run::run(args).await,
+        Some(Command::Serve(args)) => serve::serve(args).await,
         Some(Command::Sessions) => sessions_command(),
     }
 }

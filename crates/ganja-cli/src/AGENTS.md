@@ -15,6 +15,7 @@ The binary's whole surface: clap parsing, the credential subcommands, the config
 | `login.rs` | Which login a provider gets and running the ones that are not a key: `--method` selection, the Copilot deployment prompts, the device and browser flows, and the interrupt that ends a wait. Spec: upstream `packages/opencode/src/cli/cmd/providers.ts:39-205`. Stores nothing — `main.rs` does. |
 | `import.rs` | `ganja config import-opencode`: discovery of opencode's config tiers, the key mapping, the mapped/skipped table, and the JSON writer that produces a `ganja.json`. |
 | `run.rs` | `ganja run`: assembles the same `Engine` the TUI drives, takes one turn, writes an account of it, and exits. Spec: upstream `packages/opencode/src/cli/cmd/run.ts`, its non-interactive branch. |
+| `serve.rs` | `ganja serve`: the same assembly as `run`, handed to `ganja-serve` and served until SIGINT/SIGTERM. Spec: upstream `packages/opencode/src/cli/cmd/serve.ts` + `cli/network.ts`. The address line is stdout's one payload; the unsecured warning and every other diagnostic go to stderr. |
 
 ## For AI Agents
 
@@ -71,6 +72,8 @@ The two listings each have one rule that is not obvious from their code:
 - **`--format json` carries exactly six `type` names** — `tool_use`, `step_start`, `step_finish`, `text`, `reasoning`, `error` — and this build has five sources for them: ganja's protocol has no reasoning part, so `reasoning` is a name a consumer must still handle and nothing here emits (deviation: `run-emits-no-reasoning`). Text has no completion event of its own; the step's `step_finish` marker is what closes it, so text is accumulated and written when the step ends.
 - **A flag ganja cannot honor is absent, not stubbed.** `--attach`, `--port`, `--mini`, `--share`, `--file`, `--title`, `--variant`, `--thinking` and the rest name features this build has no surface for. `--fork` is the exception, and deliberately so: upstream's *validation* of it is worth keeping whole, so the flag parses, `--fork` without `--continue`/`--session` is refused exactly as upstream refuses it, and a `--fork` that survives that is refused loudly because nothing in `ganja-core` copies a session.
 - **Payload on stdout, diagnostics on stderr.** Upstream mixes its warnings into stdout; here a warning inside `--format json`'s stream would corrupt it, so the account of the turn is the only thing on stdout. A failure is emitted as an `error` object *and* returned, and the caller prints it once on its way to exit 1 — never the same sentence twice.
+
+`serve` reuses `run`'s assembly shape whole — duplicated deliberately rather than shared through core, because the seam between the binary and the engine is frozen — with the two differences a server earns: the file watcher runs (later turns must distrust files that moved between them), and `run`'s auto-refuse permission rules are **not** installed, because a serve client is a person at a distance — dialogs travel out on `/event` and answers come back on `POST /permission/{id}/reply`. The bind posture, the auth, and the port policy all live in `ganja-serve`; this file only assembles, prints, and waits for the signal.
 
 ### Testing Requirements
 

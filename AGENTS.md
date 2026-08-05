@@ -4,7 +4,7 @@
 
 ## Purpose
 
-`ganja` is a terminal-first AI coding agent: a **behavioral port of [opencode](https://github.com/anomalyco/opencode) v1.18.13 to Rust**, with a ratatui TUI. Upstream's TypeScript is the *specification*, not source to translate — the port writes idiomatic Rust and matches observable behavior. The workspace is six crates: the protocol, the permission engine and the tools beneath an engine that carries no terminal dependency, then a ratatui frontend and the `ganja` binary that wires them together.
+`ganja` is a terminal-first AI coding agent: a **behavioral port of [opencode](https://github.com/anomalyco/opencode) v1.18.13 to Rust**, with a ratatui TUI. Upstream's TypeScript is the *specification*, not source to translate — the port writes idiomatic Rust and matches observable behavior. The workspace is seven crates: the protocol, the permission engine and the tools beneath an engine that carries no terminal dependency, then a ratatui frontend, an HTTP frontend, and the `ganja` binary that wires them together.
 
 ## Key Files
 
@@ -45,6 +45,7 @@ cargo run -- mcp                # the configured MCP servers, dialled, with the 
 cargo run -- run "what does this crate do"        # one headless turn; --format json for a script
 cargo run -- run --continue --auto "now fix it"   # --auto allows what a headless run otherwise refuses
 cargo run -- config import-opencode --dry-run  # translate an opencode config, naming what it skipped
+cargo run -- serve --port 4096  # the engine over HTTP + SSE; loopback unless GANJA_SERVER_PASSWORD is set
 
 # The gates CI runs, in order
 cargo fmt --all --check
@@ -52,6 +53,7 @@ cargo clippy --all-targets -- -D warnings
 cargo nextest run --workspace       # the suite; each test in its own process
 cargo test --workspace --doc        # nextest skips doctests, so run them beside it
 ! cargo tree -p ganja-core -e normal | grep -q ratatui   # core stays terminal-free
+! cargo tree -p ganja-core -e normal | grep -q axum      # the engine never grows an HTTP server
 ! cargo tree -p ganja-tool -e normal | grep -q ganja-core # tools never reach back
 ! cargo tree -p ganja-permission -e normal | tail -n +2 | grep -q ganja-  # the rules need nothing of ours
 ! cargo tree -p ganja-protocol -e normal | tail -n +2 | grep -q ganja-    # the wire types even less
@@ -91,11 +93,13 @@ Two suites need setup, and both are documented in `crates/ganja-core/tests/AGENT
 | `GANJA_MODELS_PATH` | Read-only override of the catalog cache path; writes keep going to the canonical cache file. |
 | `GANJA_DISABLE_MODELS_FETCH` | Truthy (`1`/`true`) disables all catalog fetching — the disk cache and the compiled-in snapshot still serve. |
 | `GANJA_AUTH_ISSUER` | Origin every login endpoint is reached at, so a test can complete a login against endpoints it owns. **Loopback only**, matched as a whole origin — a value that is set and is not loopback is refused rather than ignored, because silently using the real issuer is the one outcome whoever set it cannot have wanted. |
+| `GANJA_SERVER_PASSWORD` | When set, every `ganja serve` route requires HTTP Basic auth with it; when unset, only loopback binds are allowed. |
+| `GANJA_SERVER_USERNAME` | The Basic username `serve` expects; default `ganja`. |
 | `GANJA_LIVE_TEST`, `GANJA_OPENCODE_DIR` | Test opt-ins, above. |
 
 ## Architecture
 
-Six crates. The load-bearing boundaries are asserted rather than trusted: nothing in the engine may reach a terminal, nothing beneath the engine may reach the engine, and the two bottom crates name nothing else of ours. The graph is a DAG, not a chain — frontends sit on `ganja-core`, core on `ganja-tool`, tool on `ganja-permission`, while `ganja-protocol` is a leaf that core and both frontends consume directly and that tool and permission never touch.
+Seven crates. The load-bearing boundaries are asserted rather than trusted: nothing in the engine may reach a terminal or an HTTP server, nothing beneath the engine may reach the engine, and the two bottom crates name nothing else of ours. The graph is a DAG, not a chain — frontends sit on `ganja-core`, core on `ganja-tool`, tool on `ganja-permission`, while `ganja-protocol` is a leaf that core and the frontends consume directly and that tool and permission never touch.
 
 **`ganja-protocol`** — the types every side of the app speaks: `Command`, `Event`, `Message`/`Part`, `ToolState`, `Usage`, and the ids that sort in creation order. Serde-derived from day one; that serialization constraint — not a trait — is what preserves the path to serving the engine over a socket and to transcripts that replay from disk. Its dependency list is `serde` and the value type a tool call's arguments arrive as, which is the whole reason it is a crate: a frontend that renders a transcript builds nothing else.
 
@@ -116,7 +120,9 @@ Six crates. The load-bearing boundaries are asserted rather than trusted: nothin
 
 **`ganja-tui`** — every pixel, no engine logic. It links `ganja-protocol` for the types it renders, `ganja-permission` for the stored rules it loads and hands to the engine, and `ganja-tool` for the one thing it runs in-process, the `@` menu's glob walk. One `tokio::select!` owns all mutable UI state; `App::handle` is the only mutator, which is what makes components testable without a terminal. Frames coalesce to 16ms for streaming bursts; a keystroke redraws immediately. Themes are loadable data (four ported from upstream, plus whatever `~/.config/ganja/themes/` holds), the palette and the `/` menu are two views of the same command set, `@` raises a file menu, and a leading `!` hands the line to a shell. `/copy` and `/copy-message` put the conversation or the last reply on the clipboard, pasted text arrives whole through bracketed paste, and a configured MCP server that cannot be reached is named in the status bar.
 
-**`ganja-cli`** — clap; no subcommand starts the TUI, and one of them — `run` — takes a whole turn without it, driving the same engine headless and writing either readable lines or one JSON object per event.
+**`ganja-serve`** — the engine over a socket: the legacy `/session/…` REST surface and a `GET /event` SSE stream, driving the same `Engine` the TUI does and inventing no state of its own — `GET /permission` is the one derived view, kept by a lossless subscriber that only moves map entries. Three postures are pinned by its tests: a non-loopback bind with no password is refused at startup (a deliberate divergence from upstream's warn-and-serve), the launch directory is the only directory served (anything else is `400`, never a silent answer about the wrong worktree), and no query string ever reaches a log line, because `?auth_token=` is a credential in a URL. The SSE stream opens with a `connected` frame, heartbeats every ten seconds, and ends an evicted subscriber with an observable `evicted` frame rather than a silent close; `EngineError` maps `SessionNotFound`→404 and `Busy`→409, with unparseable payloads at 400.
+
+**`ganja-cli`** — clap; no subcommand starts the TUI, one of them — `run` — takes a whole turn without it, driving the same engine headless and writing either readable lines or one JSON object per event, and another — `serve` — puts the same engine behind HTTP and SSE until a signal ends it.
 
 ## For AI Agents
 
