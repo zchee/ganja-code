@@ -42,7 +42,7 @@ pub use auth::{AuthError, Credential};
 pub use catalog::{Cost, ModelInfo};
 pub use config::{
     AgentConfig, AgentMode, CommandConfig, Config, ConfigError, LspConfig, LspEntry, McpLocal,
-    McpRemote, McpServer, Overrides, ThemeMode,
+    McpRemote, McpServer, Overrides, ThemeMode, WebfetchConfig,
 };
 pub use engine::{Engine, EngineError};
 pub use ganja_permission::{permission, project};

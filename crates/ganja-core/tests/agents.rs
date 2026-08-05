@@ -284,6 +284,179 @@ async fn switching_agents_swaps_the_prompt_and_keeps_the_environment() {
     );
 }
 
+/// The environment block states the model as fact — "you are powered by the
+/// model named X", twice over — so a session that switches model and keeps the
+/// block it launched with spends the rest of the conversation telling the new
+/// model it is the old one.
+///
+/// Composed here through the real `instruction::suffix`, not a stand-in, so
+/// what is asserted is the sentence a model would actually read.
+#[tokio::test]
+async fn switching_models_recomposes_the_environment_block_for_the_new_model() {
+    const BASE: &str = "you are a coding agent";
+    const LAUNCH: &str = "launch-model";
+    const PICKED: &str = "picked-model";
+
+    let directory = ganja_testkit::temp_dir();
+    let cwd = directory.path().to_owned();
+
+    let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two")]);
+    let engine = Engine::new(
+        provider,
+        LAUNCH,
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+    )
+    .with_system_parts(Some(BASE.to_owned()), None)
+    .with_environment(move |model| {
+        ganja_core::instruction::suffix(&Config::default(), &cwd, model)
+    });
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "first".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    engine
+        .send(Command::SwitchModel {
+            model: PICKED.to_owned(),
+        })
+        .await
+        .expect("a provider the catalog does not cover takes the model at its word");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "second".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let requests = seen.lock().expect("the request log is never poisoned");
+    let systems: Vec<&str> = requests
+        .iter()
+        .map(|request| {
+            request
+                .system
+                .as_deref()
+                .expect("every request carries the prompt it was built with")
+        })
+        .collect();
+    assert_eq!(systems.len(), 2, "one request per prompt");
+
+    for (index, model) in [(0, LAUNCH), (1, PICKED)] {
+        let system = systems[index];
+        assert!(
+            system.starts_with(&format!("{BASE}\n")),
+            "the base half is not what a model switch touches: {system}"
+        );
+        assert!(
+            system.contains(&format!("You are powered by the model named {model}")),
+            "request {index} should name {model}: {system}"
+        );
+    }
+    assert!(
+        !systems[1].contains(LAUNCH),
+        "and the model it switched away from is gone: {}",
+        systems[1]
+    );
+}
+
+/// The same block, moved by the other route: an agent that prefers a model
+/// switches the model with it, so it has to move the environment block too.
+#[tokio::test]
+async fn switching_to_an_agent_that_prefers_a_model_recomposes_the_environment_block() {
+    const LAUNCH: &str = "launch-model";
+    const PREFERRED: &str = "preferred-model";
+
+    let directory = ganja_testkit::temp_dir();
+    let cwd = directory.path().to_owned();
+
+    let mut agent = std::collections::BTreeMap::new();
+    agent.insert(
+        "scribe".to_owned(),
+        AgentConfig {
+            model: Some(format!("recorder/{PREFERRED}")),
+            ..AgentConfig::default()
+        },
+    );
+    let config = Config {
+        agent,
+        ..Config::default()
+    };
+
+    let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two")]);
+    let engine = Engine::new(
+        provider,
+        LAUNCH,
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+    )
+    .with_agents(ganja_testkit::agent_registry(&config))
+    .with_environment(move |model| {
+        ganja_core::instruction::suffix(&Config::default(), &cwd, model)
+    });
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "first".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    engine
+        .send(Command::SwitchAgent {
+            name: "scribe".to_owned(),
+        })
+        .await
+        .expect("a config agent is selectable");
+    assert_eq!(
+        engine.model(),
+        PREFERRED,
+        "the fixture only proves anything while the agent really moves the model"
+    );
+
+    engine
+        .send(Command::SendPrompt {
+            text: "second".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let requests = seen.lock().expect("the request log is never poisoned");
+    let systems: Vec<&str> = requests
+        .iter()
+        .map(|request| {
+            request
+                .system
+                .as_deref()
+                .expect("every request carries the prompt it was built with")
+        })
+        .collect();
+    assert_eq!(systems.len(), 2, "one request per prompt");
+    assert!(
+        systems[0].contains(&format!("You are powered by the model named {LAUNCH}")),
+        "the first turn names the model it launched on: {}",
+        systems[0]
+    );
+    assert!(
+        systems[1].contains(&format!("You are powered by the model named {PREFERRED}")),
+        "and the second names the one the agent brought with it: {}",
+        systems[1]
+    );
+}
+
 /// A `!` passthrough between the switch and the first build prompt does not
 /// spend the notice that planning is over.
 ///

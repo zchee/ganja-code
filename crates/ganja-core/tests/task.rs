@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use futures::StreamExt as _;
 use ganja_core::{
     AgentRegistry, Command, Config, Engine, Event, FinishReason, PartBody, PermissionReply,
-    Permissions, Registry, SessionId, SessionInfo, Storage, Tool, ToolCtx, ToolError, ToolOutput,
-    ToolState, Usage,
+    Permissions, Registry, Role, SessionId, SessionInfo, Storage, Tool, ToolCtx, ToolError,
+    ToolOutput, ToolState, Usage,
     provider::{ChatRequest, Provider},
     storage,
 };
@@ -118,6 +118,33 @@ fn task_part(seen: &[Event]) -> ToolState {
         .expect("the turn made a task call")
 }
 
+/// Everything of an event a frontend would render, minus the parent's own
+/// `task` part.
+///
+/// That one part is the whole of what a child is allowed to reach the stream
+/// through: it carries `{current_tool, toolcalls}` while the child works and
+/// the delegated answer once it stops. Every other rendering is the parent's
+/// own transcript, and a child's words appearing in one is the leak.
+fn published(event: &Event) -> Vec<String> {
+    fn render(part: &ganja_core::Part) -> Option<String> {
+        let delegated = matches!(&part.body, PartBody::Tool { tool, .. } if tool == "task");
+
+        (!delegated).then(|| format!("{:?}", part.body))
+    }
+
+    match event {
+        Event::MessageStarted { message } => message.parts.iter().filter_map(render).collect(),
+        Event::PartStarted { part, .. } | Event::PartUpdated { part, .. } => {
+            render(part).into_iter().collect()
+        }
+        // A delta names a part id and not a part, so none of them is exempt.
+        // The parent's task part never takes one — deltas carry streamed text —
+        // so a delta bearing the child's words is a leak by construction.
+        Event::PartDelta { delta, .. } => vec![delta.clone()],
+        _ => Vec::new(),
+    }
+}
+
 /// The parent runs, delegates, the child runs its own loop, and what comes back
 /// is the child's last words — wrapped so the parent model can tell a delegated
 /// answer from its own.
@@ -190,6 +217,93 @@ async fn a_task_call_runs_a_child_loop_and_hands_back_its_last_words() {
                 .any(|part| part.as_text() == Some("the thing is in src/main.rs"))
         )),
         "the child's own transcript never reaches the frontend: {seen:?}"
+    );
+}
+
+/// A child's turn is a turn nobody subscribed to.
+///
+/// Nothing on this wire carries a session id, so a frontend applying this
+/// stream files every message it sees under the session it is showing — a
+/// child's messages would arrive as the parent's own. Upstream publishes them
+/// and lets its frontend filter by session id; this one has nothing to filter
+/// on, so it does not publish (deviation:
+/// `subagent-events-stay-off-the-stream`).
+///
+/// What may cross is named exactly: the child's permission dialogs, and the
+/// parent's own `task` part carrying `{current_tool, toolcalls}` and, at the
+/// end, the answer it delegated for. The sentinel below is a phrase only the
+/// child ever utters, so any other rendering carrying it is a leak — and the
+/// property is what a served engine would stand on, where a subscriber is on
+/// another process and cannot be asked to sort the two transcripts out.
+#[tokio::test]
+async fn a_childs_own_messages_never_reach_the_subscribed_stream() {
+    /// Said by the child and by nothing else in this script.
+    const CHILD_ONLY: &str = "the child alone utters this sentence";
+
+    let (provider, requests) = ScriptedProvider::new(vec![
+        delegates("general"),
+        // The child's own turn: one tool call, then its answer.
+        tool_call("webfetch", json!({ "url": "https://example.test" })),
+        says(CHILD_ONLY),
+        says("the parent speaks for itself"),
+    ]);
+    let (webfetch, fetches) = Canned::new("webfetch");
+    let engine = engine(provider, vec![webfetch], &Config::default());
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "delegate it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    let seen = drain_answering(&engine, &mut events, PermissionReply::Once).await;
+
+    assert_eq!(
+        requests
+            .lock()
+            .expect("the request log is never poisoned")
+            .len(),
+        4,
+        "the child has to have really run, or there is nothing to leak"
+    );
+    assert_eq!(
+        *fetches.lock().expect("the call log"),
+        1,
+        "and to have executed a tool call of its own"
+    );
+
+    // The one rendering the sentinel is *supposed* to reach, which is also what
+    // stops the sweep below from passing because the child never said it.
+    let ToolState::Completed { output, .. } = task_part(&seen) else {
+        panic!("the delegated call completed");
+    };
+    assert!(
+        output.contains(CHILD_ONLY),
+        "the parent's own task part carries the delegated answer: {output}"
+    );
+
+    for event in &seen {
+        for rendering in published(event) {
+            assert!(
+                !rendering.contains(CHILD_ONLY),
+                "the child's own words reached the stream: {rendering}"
+            );
+        }
+    }
+
+    let roles: Vec<Role> = seen
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageStarted { message } => Some(message.role),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        roles,
+        vec![Role::User, Role::Assistant],
+        "one prompt and one assistant turn — the child's own pair is not on the stream: {seen:?}"
     );
 }
 

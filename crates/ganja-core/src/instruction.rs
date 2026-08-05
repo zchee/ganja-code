@@ -120,10 +120,12 @@ pub fn system_prompt(config: &Config, cwd: &Path, model_id: &str) -> Option<Stri
 /// The half of the system prompt no agent replaces: the environment block and
 /// the instruction files, true of every agent working in `cwd`.
 ///
-/// This is what `Engine::with_system_parts` takes as `suffix` — a switch swaps
-/// the base-or-agent half and keeps this one. Composed once like the rest of
-/// the prompt (D22), so after a mid-session model switch the environment block
-/// keeps naming the launch model.
+/// This is what `Engine::with_system_parts` takes as `suffix` — an agent
+/// switch swaps the base-or-agent half and keeps this one. It is not composed
+/// once for the session: the environment block states the model as fact, so
+/// `Engine::with_environment` calls this again whenever the active model
+/// moves, and a session that switches model mid-conversation stops telling the
+/// new model it is the old one.
 ///
 /// Never [`None`] in practice — the environment block always says something —
 /// but typed to match its consumer.

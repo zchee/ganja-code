@@ -173,6 +173,14 @@ struct Active {
     previous_agent: Option<String>,
 }
 
+/// Composes the environment half of the system prompt for a model.
+///
+/// Taken as a function rather than as the config and directory it is composed
+/// from, so that the engine's dependency here is exactly what it uses — a
+/// model's name in, a prompt half out — and not a whole config a later reader
+/// would start reading other answers out of.
+type Environment = dyn Fn(&str) -> Option<String> + Send + Sync;
+
 /// Owns the turn lifecycle and publishes what happens during it.
 pub struct Engine {
     provider: Arc<dyn Provider>,
@@ -186,7 +194,16 @@ pub struct Engine {
     /// The half no agent replaces — the environment block and the instruction
     /// files — which is why it is held apart from the base prompt rather than
     /// concatenated into it: switching agents swaps one and keeps the other.
-    prompt_suffix: Option<String>,
+    ///
+    /// Behind a lock because the environment block states the model as fact,
+    /// and the model can change under a session that is already assembled; see
+    /// [`Engine::with_environment`].
+    prompt_suffix: std::sync::Mutex<Option<String>>,
+    /// How that half is composed for a given model, when the caller handed a
+    /// way to compose it. [`None`] leaves whatever
+    /// [`Engine::with_system_parts`] was given standing for the session, which
+    /// is what every scripted and golden run wants.
+    environment: Option<Arc<Environment>>,
     /// Agents this session may run as. [`None`] leaves every turn on the base
     /// prompt with no agent rules, which is what an engine built for a golden
     /// run wants.
@@ -344,7 +361,8 @@ impl Engine {
                 previous_agent: None,
             }),
             base_prompt: None,
-            prompt_suffix: None,
+            prompt_suffix: std::sync::Mutex::new(None),
+            environment: None,
             agents: None,
             // The task tool is never one of these: it exists only once the
             // engine knows which agents it may spawn, which is
@@ -406,9 +424,56 @@ impl Engine {
     #[must_use]
     pub fn with_system_parts(mut self, base: Option<String>, suffix: Option<String>) -> Self {
         self.base_prompt = base;
-        self.prompt_suffix = suffix;
+        self.prompt_suffix = std::sync::Mutex::new(suffix);
 
         self
+    }
+
+    /// Keeps the suffix half composed for whichever model the session is
+    /// asking, rather than for the one it launched on.
+    ///
+    /// The environment block states the model as fact — twice, in the sentence
+    /// above `<env>` — so a session that switches model mid-conversation and
+    /// keeps the block it started with tells the new model it is the old one.
+    /// Installing this recomposes that half now, and again after anything that
+    /// moves the active model.
+    ///
+    /// Supersedes whatever suffix [`Engine::with_system_parts`] was given, so
+    /// the two cannot disagree; a caller with a fixed suffix simply does not
+    /// install one of these.
+    #[must_use]
+    pub fn with_environment(
+        mut self,
+        compose: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.environment = Some(Arc::new(compose));
+        self.recompose_environment();
+
+        self
+    }
+
+    /// The environment half as it currently stands.
+    fn environment_half(&self) -> Option<String> {
+        self.prompt_suffix
+            .lock()
+            .expect("the system prompt is never poisoned")
+            .clone()
+    }
+
+    /// Composes the suffix half again for the model that is active now.
+    ///
+    /// Does nothing when no way to compose one was installed, which is what
+    /// leaves a scripted engine's literal suffix alone.
+    fn recompose_environment(&self) {
+        let Some(compose) = self.environment.as_ref() else {
+            return;
+        };
+        let composed = compose(&self.model());
+
+        *self
+            .prompt_suffix
+            .lock()
+            .expect("the system prompt is never poisoned") = composed;
     }
 
     /// Sets the agents this session may run as, and starts it on the
@@ -424,11 +489,16 @@ impl Engine {
         let start = agents.default_agent().to_owned();
         if let Some(agent) = agents.get(&start) {
             self.install(agent);
-            let mut active = self.active();
-            active.agent = Some(start);
-            if let Some(model) = agent.model.as_deref().and_then(|model| self.adopt(model)) {
-                active.model = model;
+            {
+                let mut active = self.active();
+                active.agent = Some(start);
+                if let Some(model) = agent.model.as_deref().and_then(|model| self.adopt(model)) {
+                    active.model = model;
+                }
             }
+            // The default agent may prefer a model of another family, and the
+            // environment block names whichever one the session ends up on.
+            self.recompose_environment();
         }
 
         self
@@ -794,15 +864,20 @@ impl Engine {
         // so a resumed session has no previous turn to compare against and
         // does not replay the plan-to-build reminder.
         self.active().previous_agent = None;
+        // A session reopened on the model it was last asking gets an
+        // environment block naming that model, not the one this process
+        // happened to start on.
+        self.recompose_environment();
     }
 
     /// The system prompt one turn carries: the agent's own prompt where it has
     /// one, the model family's base prompt where it does not, and the
-    /// unchanging suffix after either.
+    /// environment half after either.
     fn system_for(&self, agent: Option<&Agent>) -> Option<String> {
         let head = agent
             .and_then(|agent| agent.prompt.as_deref())
             .or(self.base_prompt.as_deref());
+        let suffix = self.environment_half();
 
         // What the connected servers said about themselves, after the
         // instruction files and before nothing — upstream's own position for
@@ -811,7 +886,7 @@ impl Engine {
         // that has no servers sees a change here.
         let mcp = self.mcp.as_ref().and_then(|servers| servers.instructions());
 
-        let composed = match (head, self.prompt_suffix.as_deref()) {
+        let composed = match (head, suffix.as_deref()) {
             (None, None) => None,
             (Some(only), None) | (None, Some(only)) => Some(only.to_owned()),
             (Some(head), Some(suffix)) => Some(format!("{head}\n{suffix}")),
@@ -1357,7 +1432,7 @@ impl Engine {
             tools: self.lent(),
             permissions: Arc::clone(&self.permissions),
             base_prompt: self.base_prompt.clone(),
-            prompt_suffix: self.prompt_suffix.clone(),
+            prompt_suffix: self.environment_half(),
             cwd: self.cwd.clone(),
             root: self.root.clone(),
             credentials: self.credentials.clone(),
@@ -1414,6 +1489,7 @@ impl Engine {
                 active.model = model;
             }
         }
+        self.recompose_environment();
         self.remember_selection();
         drop(turn);
 
@@ -1435,6 +1511,7 @@ impl Engine {
         }
 
         self.active().model = model;
+        self.recompose_environment();
         self.remember_selection();
         drop(turn);
 
