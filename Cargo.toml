@@ -49,12 +49,23 @@ arboard = { version = "3.6.1", default-features = false, features = [
     "wayland-data-control",
 ] }
 async-trait = "0.1.91"
+# base64url, unpadded, in both directions: a PKCE challenge is the encoding of
+# a SHA-256, and the account id a ChatGPT login stores comes out of an
+# id_token's payload. Padding is a setting on the engine rather than a second
+# encoder, which is why one crate covers both.
+base64 = "0.23.0"
 clap = { version = "4.6.5", features = ["derive"] }
 # `ratatui` re-exports this exact crate; depending on it here is what turns on
 # `event-stream`, which the re-export alone cannot request.
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 etcetera = "0.11.0"
 futures = "0.3.33"
+# An OAuth login's unguessable values — the PKCE verifier, and the `state` and
+# `nonce` that make a callback answerable only by the request that opened it.
+# Each is raw bytes rendered as base64url, so the operating system's entropy is
+# the whole requirement: a userspace generator would be state to seed, reseed
+# and reason about for thirty-two bytes drawn once per login.
+getrandom = "0.4.3"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 # webfetch's markdown format is a real HTML→markdown conversion (upstream
@@ -115,6 +126,11 @@ schemars = "1.2.2"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# PKCE's S256 method is literally SHA-256 of the verifier, and the provider
+# checks it — a login is refused if the digest disagrees. The digest rustls
+# already carries reaches this workspace only transitively, and depending on
+# what a TLS stack happens to re-export is not a dependency decision.
+sha2 = "0.10.9"
 similar = "3.1.1"
 # Fenced-code highlighting for the markdown renderer. The regex backend is
 # the pure-Rust `fancy-regex` — `default-onig` would put a C library in
