@@ -1178,7 +1178,59 @@ fn file_path(uri: &str) -> Option<PathBuf> {
         return None;
     }
 
-    parsed.to_file_path().ok()
+    parsed.to_file_path().ok().map(keyed)
+}
+
+/// `path` in the single spelling this module files diagnostics under.
+///
+/// Diagnostics arrive keyed by whatever URI the server chose, and are looked up
+/// again by a path this process built from the filesystem. On Windows those two
+/// need not agree about the drive letter's case: rust-analyzer answers
+/// `file:///c%3A/work/api/src/main.rs` where this port would have written
+/// `file:///C:/work/api/src/main.rs`, and the percent-encoding decodes back to a
+/// lower-case `c`. Two [`PathBuf`]s differing only there are two different map
+/// keys, so an edit's diagnostics would be filed under a file nothing ever asks
+/// about — the errors would simply never appear.
+///
+/// Only the drive letter is touched. The rest of a Windows path is compared
+/// case-insensitively by the filesystem but is not this module's to rewrite: a
+/// server that echoes back the spelling it was given keeps it.
+///
+/// Nothing to do on any other platform, where a path has no prefix to disagree
+/// about.
+fn keyed(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    let path = uppercase_drive(path);
+
+    path
+}
+
+/// The rewrite [`keyed`] documents.
+#[cfg(windows)]
+fn uppercase_drive(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    if !path.is_absolute() {
+        return path;
+    }
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return path;
+    };
+    let Prefix::Disk(letter) = prefix.kind() else {
+        return path;
+    };
+    if letter.is_ascii_uppercase() {
+        return path;
+    }
+
+    let mut rewritten = PathBuf::from(format!("{}:\\", char::from(letter.to_ascii_uppercase())));
+    rewritten.extend(
+        path.components()
+            .skip_while(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+            .map(Component::as_os_str),
+    );
+
+    rewritten
 }
 
 /// The position one past the last character of `text`.
@@ -1215,10 +1267,7 @@ fn split_lines(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        path::{Path, PathBuf},
-        time::Duration,
-    };
+    use std::{path::PathBuf, time::Duration};
 
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
     use serde_json::json;
@@ -1248,8 +1297,20 @@ mod tests {
         }
     }
 
+    /// The fixture project, spelled the way this platform spells an absolute
+    /// path.
+    ///
+    /// A `file://` URI can only be built from one — [`url`] refuses a relative
+    /// path outright — and `/p/src` is not absolute on Windows, where a path
+    /// begins at a drive. A fixture that ignored that would key its
+    /// diagnostics under [`None`] and assert nothing at all.
+    #[cfg(unix)]
+    const ROOT: &str = "/p/src";
+    #[cfg(windows)]
+    const ROOT: &str = r"C:\p\src";
+
     fn path() -> PathBuf {
-        PathBuf::from("/p/src/main.rs")
+        PathBuf::from(ROOT).join("main.rs")
     }
 
     #[tokio::test(start_paused = true)]
@@ -1488,7 +1549,7 @@ mod tests {
     #[test]
     fn a_related_document_carries_another_files_errors() {
         let store = Store::default();
-        let other = PathBuf::from("/p/src/other.rs");
+        let other = PathBuf::from(ROOT).join("other.rs");
         let report = json!({
             "kind": "full",
             "items": [],
@@ -1611,11 +1672,31 @@ mod tests {
 
     #[test]
     fn a_path_survives_the_round_trip_through_a_uri() {
-        let original = Path::new("/tmp/a project/src/main.rs");
+        let original = PathBuf::from(ROOT).join("a project").join("main.rs");
 
-        let round_tripped = file_path(&uri(original));
+        let round_tripped = file_path(&uri(&original));
 
-        assert_eq!(round_tripped.as_deref(), Some(original), "spaces and all");
+        assert_eq!(round_tripped, Some(original), "spaces and all");
+    }
+
+    /// A server spells a drive letter however it likes — rust-analyzer sends
+    /// back a percent-encoded lower-case one — and this port builds its own
+    /// paths from the filesystem, which gives an upper-case drive. Two
+    /// [`PathBuf`]s differing only there are two map keys, so a file's errors
+    /// would be filed where nothing looks for them.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_letter_keys_one_file_however_the_server_spelled_it() {
+        let expected = Some(PathBuf::from(r"C:\p\src\main.rs"));
+
+        for spelling in [
+            "file:///C:/p/src/main.rs",
+            "file:///c:/p/src/main.rs",
+            "file:///c%3A/p/src/main.rs",
+            "file:///C%3A/p/src/main.rs",
+        ] {
+            assert_eq!(file_path(spelling), expected, "{spelling}");
+        }
     }
 
     #[test]

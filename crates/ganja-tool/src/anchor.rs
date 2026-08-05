@@ -34,10 +34,22 @@
 //!   `create_dir_all`'s own walk — which resolves names, and therefore links —
 //!   is not a second way in.
 //!
-//! The hardening is `cfg(unix)`. Windows has no `openat`, and its ACL story is
-//! a P7 problem the same way the credential store's is (`tool/truncate.rs`);
-//! there the fallback below behaves exactly as this port did before, and the
-//! lexical guard still runs.
+//! Windows keeps the first of those two and not the second. It has no `openat`
+//! to anchor to, but it does have `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a
+//! link rather than following it — so the handle a write gets back is the
+//! planted link's own, the refusal is made on that handle, and nothing is ever
+//! written through it. What is given up there, and only there, is:
+//!
+//! - **the mid-path directory swap**. The parent is resolved by path instead of
+//!   being walked a component at a time, so a directory replaced *above* the
+//!   final name between the check and the open goes unnoticed. The final
+//!   component — the one somebody actually answered a question about — does
+//!   not.
+//! - **`mkdirat`-style parent creation**. Missing parents are made with
+//!   `create_dir_all`, which resolves those names itself.
+//!
+//! What ACLs a created file lands with is a separate question and still an open
+//! one, the same way the credential store's is (`tool/truncate.rs`).
 
 use std::{
     ffi::OsString,
@@ -50,6 +62,22 @@ use std::{
 use ganja_permission::project::Project;
 
 use crate::ToolError;
+
+/// Refuses `file` when the name it was opened by turned out to be a directory.
+///
+/// Asked of the open descriptor rather than of the path, for the reason the
+/// whole module exists: a second look at the name is a second chance for
+/// somebody to change what it means.
+fn refuse_directory(file: &File, at: &Path) -> Result<(), AnchorError> {
+    // A descriptor whose metadata cannot be read is not a directory anybody can
+    // prove, and failing the call on that would refuse ordinary files on any
+    // filesystem with a thin `stat`. The read that follows will say so instead.
+    if file.metadata().is_ok_and(|meta| meta.is_dir()) {
+        return Err(AnchorError::Directory(at.to_owned()));
+    }
+
+    Ok(())
+}
 
 /// The modification stamp of a file that is already open, read from the
 /// descriptor rather than from the path it was opened by.
@@ -83,11 +111,16 @@ pub(crate) struct Anchor {
 pub(crate) enum AnchorError {
     /// Something on the path is a symbolic link and the open refused to follow
     /// it. The path named is the component that refused.
-    ///
-    /// Only the anchored implementation produces this; the fallback has no
-    /// `O_NOFOLLOW` to refuse with, which is what the allowance below says.
-    #[cfg_attr(not(unix), allow(dead_code))]
     Link(PathBuf),
+    /// The name is a directory, and no tool here writes or reads one as a file.
+    ///
+    /// Refused explicitly rather than left to the open, because the two
+    /// platforms fail this differently and only one of them says anything
+    /// useful: unix opens a directory happily and fails at the first read with
+    /// `EISDIR`, while Windows refuses the open outright with "Access is
+    /// denied" — a message that sends the model looking for a permission
+    /// problem it does not have.
+    Directory(PathBuf),
     /// The path names no file — a bare root, or one ending in `..`.
     Nameless(PathBuf),
     /// Whatever the filesystem said, and about which path it said it.
@@ -122,6 +155,12 @@ impl std::fmt::Display for AnchorError {
                  thing on a path that can change between the moment a call is \
                  allowed and the moment it runs. Name the file it points at if \
                  that is what you meant.",
+                path.display()
+            ),
+            Self::Directory(path) => write!(
+                formatter,
+                "{} is a directory, not a file. Name a file inside it if that \
+                 is what you meant.",
                 path.display()
             ),
             Self::Nameless(path) => write!(formatter, "{} does not name a file", path.display()),
@@ -386,10 +425,16 @@ mod unix {
 
         /// Opens the anchored file for reading, refusing to follow a link
         /// planted at its name.
+        ///
+        /// A directory opens perfectly well here and fails at the first read,
+        /// so the refusal is made on the descriptor already in hand — no name
+        /// is resolved a second time to ask the question.
         pub(crate) fn read(&self) -> Result<File, AnchorError> {
             let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+            let file = openat(&self.dir, &self.name, flags, 0, &self.path()).map(File::from)?;
+            super::refuse_directory(&file, &self.path())?;
 
-            openat(&self.dir, &self.name, flags, 0, &self.path()).map(File::from)
+            Ok(file)
         }
 
         /// Opens the anchored file for writing, saying whether it was already
@@ -562,16 +607,38 @@ mod unix {
     }
 }
 
-/// The unhardened path, for a platform with no `openat` to anchor to.
+/// Windows, which has no `openat` to anchor to but can still refuse a link at
+/// the name it was asked about.
 ///
-/// Behaviour is exactly what this port did before the module existed: resolve
-/// the path, create the parents, open by name. The lexical guard still runs, so
-/// what is missing is the closed race and nothing else.
-#[cfg(not(unix))]
-mod fallback {
-    use std::{fs::File, path::Path};
+/// The parent is resolved by path and the missing part of it created with
+/// `create_dir_all`, which is where the two divergences in the module docs come
+/// from. What is *not* given up is the refusal that matters most: every open
+/// below asks for the reparse point itself rather than what it points at, and
+/// then refuses it. A link planted at the answered name between the dialog and
+/// the write is therefore caught here exactly as it is on unix — the handle
+/// that comes back is the link's own, and nothing is ever written through it.
+#[cfg(windows)]
+mod windows {
+    use std::{
+        fs::{File, OpenOptions},
+        io,
+        os::windows::fs::OpenOptionsExt as _,
+        path::Path,
+    };
 
     use super::{Anchor, AnchorError, split_path};
+
+    /// `FILE_FLAG_OPEN_REPARSE_POINT` from `winbase.h`. Opens a reparse point —
+    /// which is what a symbolic link, a junction and a mount point all are —
+    /// instead of following it, so the handle names the link and the check
+    /// below can see one.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    /// `FILE_FLAG_BACKUP_SEMANTICS` from `winbase.h`. Permits a handle to a
+    /// directory at all. Without it a directory refuses the open outright and
+    /// the refusal a caller gets is "Access is denied", which says nothing
+    /// about what was actually wrong.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
     impl Anchor {
         pub(crate) fn open(path: &Path, create_parents: bool) -> Result<Self, AnchorError> {
@@ -583,7 +650,7 @@ mod fallback {
             } else if !parent.is_dir() {
                 return Err(AnchorError::Io(
                     parent,
-                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                    io::Error::from(io::ErrorKind::NotFound),
                 ));
             }
 
@@ -592,22 +659,96 @@ mod fallback {
 
         pub(crate) fn read(&self) -> Result<File, AnchorError> {
             let path = self.path();
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&path)
+                .map_err(|error| AnchorError::Io(path.clone(), error))?;
+            judge(&file, &path)?;
 
-            File::open(&path).map_err(|error| AnchorError::Io(path, error))
+            Ok(file)
         }
 
+        /// Opens the anchored file for writing, saying whether it was already
+        /// there — and refusing a link at the name before a byte is written.
+        ///
+        /// The order is what makes that true. Nothing is truncated (the
+        /// caller has a freshness rule to apply first), the handle is the
+        /// reparse point's own rather than its target's, and the refusal is
+        /// made on that handle: a link planted at the name gets a handle
+        /// nobody writes to and an error naming it. A file that is not there
+        /// yet is created with `create_new`, which fails rather than follow a
+        /// link somebody planted in the meantime.
         pub(crate) fn write(&self) -> Result<(File, bool), AnchorError> {
             let path = self.path();
-            let existed = path.exists();
+            let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
 
-            std::fs::OpenOptions::new()
+            let opened = OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&path)
-                .map(|file| (file, existed))
-                .map_err(|error| AnchorError::Io(path, error))
+                .custom_flags(flags)
+                .open(&path);
+            let (file, existed) = match opened {
+                Ok(file) => (file, true),
+                Err(error) if missing(&error) => {
+                    match OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .custom_flags(flags)
+                        .open(&path)
+                    {
+                        Ok(file) => (file, false),
+                        // Somebody created the name in between. Whatever they
+                        // put there is opened by the rule above, which refuses
+                        // a link — so the race is answered, not retried blind.
+                        Err(raced) if raced.kind() == io::ErrorKind::AlreadyExists => {
+                            let file = OpenOptions::new()
+                                .write(true)
+                                .custom_flags(flags)
+                                .open(&path)
+                                .map_err(|error| AnchorError::Io(path.clone(), error))?;
+                            (file, true)
+                        }
+                        Err(error) => return Err(AnchorError::Io(path, error)),
+                    }
+                }
+                Err(error) => return Err(AnchorError::Io(path, error)),
+            };
+            judge(&file, &path)?;
+
+            Ok((file, existed))
         }
+    }
+
+    /// Refuses a handle that turned out to name a link or a directory rather
+    /// than a file.
+    ///
+    /// Both questions are asked of the open handle, never of the path again,
+    /// which is the one piece of the unix discipline this platform can still
+    /// keep: whatever the name meant when it was opened is what is judged.
+    fn judge(file: &File, at: &Path) -> Result<(), AnchorError> {
+        let Ok(meta) = file.metadata() else {
+            return Ok(());
+        };
+        if meta.file_type().is_symlink() {
+            return Err(AnchorError::Link(at.to_owned()));
+        }
+        if meta.is_dir() {
+            return Err(AnchorError::Directory(at.to_owned()));
+        }
+
+        Ok(())
+    }
+
+    /// Whether `error` is "there is nothing at that name".
+    ///
+    /// Two kinds, because a name whose parent is a file rather than a
+    /// directory reports the second and means the same thing to a caller that
+    /// is about to create it.
+    fn missing(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        )
     }
 }
 
@@ -677,6 +818,68 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&target).expect("the target still exists"),
             "before"
+        );
+    }
+
+    /// The same refusal, recovered on the platform that has no `O_NOFOLLOW`:
+    /// the open asks for the reparse point itself, so a link planted at the
+    /// answered name is judged on the handle rather than followed to wherever
+    /// it leads.
+    ///
+    /// Planting an NTFS symbolic link needs `SeCreateSymbolicLinkPrivilege`,
+    /// which an elevated session and a GitHub windows runner have and an
+    /// ordinary desktop session does not. The fixture says so outright rather
+    /// than skipping: a security test that quietly passes because it could not
+    /// build its own attack is worse than no test at all.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_at_the_name_is_refused_by_the_open_itself() {
+        let dir = project();
+        let target = dir.path().join("real.txt");
+        std::fs::write(&target, "before").expect("the fixture writes");
+        let planted = dir.path().join("notes.txt");
+        std::os::windows::fs::symlink_file(&target, &planted).expect(
+            "this test has to plant the link it is about to refuse, and that needs \
+             SeCreateSymbolicLinkPrivilege: run it elevated, or turn Developer Mode on",
+        );
+
+        let anchor = Anchor::open(&planted, false).expect("the parent is an ordinary directory");
+
+        assert!(
+            matches!(anchor.read(), Err(AnchorError::Link(_))),
+            "a read through a planted link must be refused by the open"
+        );
+        assert!(matches!(anchor.write(), Err(AnchorError::Link(_))));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("the target still exists"),
+            "before",
+            "and the link's target is untouched"
+        );
+    }
+
+    /// A directory refuses in words that say it was a directory.
+    ///
+    /// Left to the system the two platforms answer differently and only one of
+    /// them answers usefully: unix opens the directory and fails at the first
+    /// read with `EISDIR`, Windows refuses the open with "Access is denied" —
+    /// which reads as a permissions problem the caller does not have and cannot
+    /// fix.
+    #[test]
+    fn a_directory_at_the_name_is_refused_as_a_directory() {
+        let dir = project();
+        let path = dir.path().join("adir");
+        std::fs::create_dir(&path).expect("the fixture makes a directory");
+
+        let anchor = Anchor::open(&path, false).expect("the parent is an ordinary directory");
+        let refused = anchor.read().expect_err("a directory is not a file");
+
+        assert!(
+            matches!(refused, AnchorError::Directory(_)),
+            "got {refused:?}"
+        );
+        assert!(
+            refused.to_string().contains("directory"),
+            "the refusal has to name what was wrong: {refused}"
         );
     }
 

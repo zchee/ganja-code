@@ -351,8 +351,14 @@ mod tests {
     /// Moves `path`'s modification stamp somewhere it provably was not, so a
     /// test does not race a filesystem whose stamps have one-second
     /// resolution.
+    ///
+    /// Opened for writing because a stamp is metadata a handle must be allowed
+    /// to write: unix grants that with the file's own permissions, Windows only
+    /// through a handle that asked for write access.
     fn age(path: &Path) {
-        std::fs::File::open(path)
+        std::fs::File::options()
+            .write(true)
+            .open(path)
             .and_then(|file| file.set_modified(SystemTime::UNIX_EPOCH))
             .expect("the fixture can move the stamp");
     }

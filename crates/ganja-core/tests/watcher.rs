@@ -110,7 +110,12 @@ async fn a_file_edited_outside_the_session_is_refused_and_named_to_the_model() {
     // Put the stamp back where the read found it, so that what refuses the
     // write below can only be the watcher's verdict: a comparison would say
     // this file never moved.
-    std::fs::File::open(&watched)
+    // Opened for writing because a stamp is metadata a handle must be allowed
+    // to write: unix grants that with the file's own permissions, Windows only
+    // through a handle that asked for write access.
+    std::fs::File::options()
+        .write(true)
+        .open(&watched)
         .and_then(|file| file.set_modified(as_read))
         .expect("the fixture can move the stamp");
     let refused = files

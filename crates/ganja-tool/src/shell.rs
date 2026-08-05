@@ -99,8 +99,13 @@ enum Ended {
 pub struct ShellTool {
     /// Rendered once, because it names the shell and the limits in force.
     description: String,
-    /// The shell binary commands run under.
-    shell: PathBuf,
+    /// The shell binary commands run under, or why this machine offers none.
+    ///
+    /// Held as the refusal rather than resolved to one at the call, so that a
+    /// machine with no POSIX shell says so once, in the same words, to every
+    /// call — and says it as a tool result the model reads and can act on,
+    /// which is what every other failure in this crate does.
+    shell: Result<PathBuf, NoPosixShell>,
     /// Where an overflowing command's output is spilled, when it must not go
     /// where [`truncate::open_spill`] would put it.
     ///
@@ -123,11 +128,18 @@ impl ShellTool {
     #[must_use]
     pub fn new() -> Self {
         let shell = default_shell();
-        let name = shell
-            .file_name()
-            .unwrap_or(shell.as_os_str())
-            .to_string_lossy()
-            .into_owned();
+        let name = match &shell {
+            Ok(shell) => shell
+                .file_name()
+                .unwrap_or(shell.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+            // The prompt is rendered once, and where there is no shell there is
+            // nothing truthful to name: printing the refused one would tell the
+            // model its commands run under PowerShell, which is exactly what
+            // will not happen. Every call answers with the reason anyway.
+            Err(_) => "unavailable".to_owned(),
+        };
 
         Self {
             description: describe_tool(&name),
@@ -143,6 +155,20 @@ impl ShellTool {
         Self {
             spill_dir: Some(dir.to_owned()),
             ..Self::new()
+        }
+    }
+
+    /// The tool as it stands on a machine that offers no shell it may use.
+    ///
+    /// Built rather than discovered, so the refusal can be asserted on wherever
+    /// the tests run: the machines where the probe actually answers this way
+    /// are the ones nobody develops on.
+    #[cfg(test)]
+    fn refusing(why: NoPosixShell) -> Self {
+        Self {
+            description: String::new(),
+            shell: Err(why),
+            spill_dir: None,
         }
     }
 }
@@ -627,7 +653,14 @@ fn last_bytes(line: &str, budget: usize) -> &str {
 impl ShellTool {
     /// Starts `command` under the shell, in its own process group.
     fn spawn(&self, command: &str, cwd: &Path) -> Result<Child, ToolError> {
-        let mut spawner = Command::new(&self.shell);
+        // A machine with no shell this port may use refuses here rather than at
+        // construction, so the reason travels back as a tool result the model
+        // reads instead of taking down the session that built the registry.
+        let shell = self
+            .shell
+            .as_ref()
+            .map_err(|why| ToolError::Failed(why.to_string()))?;
+        let mut spawner = Command::new(shell);
         spawner
             .arg("-c")
             .arg(command)
@@ -648,7 +681,7 @@ impl ShellTool {
         spawner.spawn().map_err(|error| {
             ToolError::Failed(format!(
                 "{} could not run the command in {}: {error}",
-                self.shell.display(),
+                shell.display(),
                 cwd.display()
             ))
         })
@@ -705,10 +738,37 @@ fn signal_group(pid: u32, signal: libc::c_int) {
     }
 }
 
-/// Windows has no process group to signal, so the direct child is all this can
-/// reach until job objects are wired up.
+/// Ends the process tree on a platform with no process group to signal.
+///
+/// Upstream's own answer on Windows (`packages/core/src/shell.ts`, `killTree`):
+/// hand the pid to `taskkill /T`, which walks the parent chain the kernel keeps
+/// and ends every descendant. `Child::start_kill` reaches the shell and nothing
+/// else, so a cancelled `cargo build` would go on building with its pipes still
+/// open — the orphaning this module's process groups exist to prevent, left
+/// unprevented on the one platform that has no groups.
+///
+/// There is no `SIGTERM` half to this: `taskkill /F` is the only termination
+/// Windows offers a process that is not cooperating, so [`KILL_GRACE`] has
+/// nothing to grant here and is a unix constant.
+///
+/// The call is awaited rather than fired and forgotten, so a caller returning
+/// straight afterwards cannot outrun it. What it reports is not read — it fails
+/// for a tree that has already exited, which is the outcome being asked for —
+/// and the direct child is killed regardless, so a machine whose `taskkill` is
+/// missing or refused is no worse off than before.
 #[cfg(not(unix))]
 async fn kill_tree(child: &mut Child) {
+    if let Some(pid) = child.id() {
+        let _ = Command::new("taskkill")
+            .args(["/pid", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status()
+            .await;
+    }
+
     let _ = child.start_kill();
 }
 
@@ -743,12 +803,139 @@ async fn pump<R: AsyncRead + Unpin>(
     }
 }
 
+/// Why this machine offers no shell a command may be handed to.
+///
+/// Every command that reaches this tool is POSIX shell text: upstream writes it
+/// that way, and `ganja-permission` reads it back with a POSIX tokenizer to
+/// decide which files the call would touch. A shell that parses that text by
+/// other rules is therefore not a substitute for the one this port expects but
+/// a hazard — which is why the absence of a POSIX shell is an error the model
+/// is told about rather than a fallback taken quietly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoPosixShell {
+    /// The shell that was found parses another grammar entirely — PowerShell,
+    /// or `cmd`.
+    NotPosix(PathBuf),
+    /// Nothing POSIX-shaped is installed, or nothing this process can see.
+    Missing,
+}
+
+impl std::fmt::Display for NoPosixShell {
+    /// Read by a person and by the model alike — this is the text a refused
+    /// call answers with — so it names the remedy and not only the fault.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotPosix(shell) => write!(
+                formatter,
+                "{} is a PowerShell or cmd shell, and every command this tool \
+                 runs is POSIX shell text. Refusing to run it: PowerShell reads \
+                 quoting, `&&` and `$` by rules of its own, so what ran would \
+                 not be what the permission gate was asked about. Install Git \
+                 Bash, or run under WSL, and put its sh on PATH.",
+                shell.display()
+            ),
+            Self::Missing => write!(
+                formatter,
+                "no POSIX shell was found on this machine, and every command \
+                 this tool runs is POSIX shell text. Install Git Bash — which \
+                 provides sh.exe and bash.exe — or run under WSL, and make sure \
+                 the shell it installs is on PATH."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NoPosixShell {}
+
+/// The shell a POSIX command line may be handed to on this machine, or why
+/// there is none.
+///
+/// Public because `ganja-tui` hands `$EDITOR` to a shell the same way, and the
+/// probe below — and the refusal beside it — are worth having exactly once.
+///
+/// Unix answers with `sh`, which POSIX requires to be on PATH: resolving it
+/// further would change which shell a command line has been running under since
+/// this port had one, for no gain on the platform where nothing was broken.
+///
+/// # Errors
+///
+/// Returns [`NoPosixShell`] when this machine offers only a PowerShell-family
+/// shell, or no shell at all.
+pub fn posix_shell() -> Result<PathBuf, NoPosixShell> {
+    #[cfg(unix)]
+    let found = PathBuf::from("sh");
+    #[cfg(not(unix))]
+    let found = probe()?;
+
+    accept_shell(found)
+}
+
+/// `shell` if a POSIX command line means on it what it was written to mean, and
+/// a refusal otherwise.
+///
+/// Applied to every candidate whatever found it — the probe below today, a
+/// configured shell whenever this port grows one — because this is the one
+/// place the answer can be made to fail closed. Falling back to PowerShell
+/// would be the fail-open case: the command that ran would not be the text
+/// `ganja-permission` tokenized, and the location gate's whole claim is that
+/// those two are the same string.
+fn accept_shell(shell: PathBuf) -> Result<PathBuf, NoPosixShell> {
+    if speaks_posix(&shell) {
+        return Ok(shell);
+    }
+
+    Err(NoPosixShell::NotPosix(shell))
+}
+
+/// Whether `shell` reads a command line by POSIX rules.
+///
+/// Judged by the binary's own name, which is the only thing knowable without
+/// running it. The list is what would otherwise be reached for on Windows:
+/// `cmd` is what `%ComSpec%` names, `pwsh` what a current PowerShell install
+/// puts on PATH, `powershell` what every Windows already carries, and
+/// `command` its DOS-era ancestor. A name nobody here recognises is taken at
+/// its word — an unknown shell that cannot run the command fails at the spawn,
+/// with the error the system gives, which says more than a guess would.
+///
+/// The name is cut out by text, on both separators, rather than through
+/// [`Path::file_stem`]: a `\` is an ordinary character in a unix path, so
+/// `file_stem` would hand back a whole Windows path unshortened and every
+/// judgement about one would have to be made on Windows to mean anything. A
+/// unix file genuinely named for a Windows path is refused by this, and that is
+/// a trade worth making — nobody's shell is called that, and the direction of
+/// the mistake is refusal rather than a command run under the wrong grammar.
+fn speaks_posix(shell: &Path) -> bool {
+    let text = shell.to_string_lossy();
+    let name = text.rsplit(['/', '\\']).next().unwrap_or(&text);
+    let stem = name.split('.').next().unwrap_or(name);
+
+    !matches!(
+        stem.to_ascii_lowercase().as_str(),
+        "pwsh" | "powershell" | "cmd" | "command"
+    )
+}
+
 /// The shell commands run under.
 ///
 /// Upstream's `fallback()`: zsh on macOS, otherwise bash where it exists, and
 /// `/bin/sh` where it does not. The configured shell is not consulted yet
 /// because nothing in this port writes that config.
-fn default_shell() -> PathBuf {
+///
+/// Windows has no such convention to inherit, so it takes the shared probe in
+/// [`posix_shell`] and the same refusal with it.
+fn default_shell() -> Result<PathBuf, NoPosixShell> {
+    #[cfg(unix)]
+    let found = unix_default();
+    #[cfg(not(unix))]
+    let found = probe()?;
+
+    accept_shell(found)
+}
+
+/// Upstream's `fallback()`, which is a statement about which shell a person on
+/// this machine would have typed the command into themselves.
+#[cfg(unix)]
+fn unix_default() -> PathBuf {
     if cfg!(target_os = "macos") {
         return PathBuf::from("/bin/zsh");
     }
@@ -760,6 +947,77 @@ fn default_shell() -> PathBuf {
     }
 
     PathBuf::from("/bin/sh")
+}
+
+/// Where a POSIX shell lives on Windows.
+///
+/// Naming the bare `sh` and leaving it to the spawn is not enough here.
+/// `CreateProcess` searches for a bare name by rules of its own — the
+/// application directory first, `PATH` last — and Git Bash's `sh.exe` sits in a
+/// directory that is on `PATH` for a Git Bash session and absent from the
+/// environment a desktop shortcut hands over. So the binary is resolved to a
+/// full path before it is ever spawned, and the conventional Git for Windows
+/// layouts are searched after `PATH` for the case where ganja was not launched
+/// from a Git Bash session at all.
+///
+/// Finding is all this does. Whether what it found may be *used* is
+/// [`accept_shell`]'s question, asked once by each caller — so that a
+/// configured shell, which this will never have looked at, passes the same gate
+/// as a probed one.
+#[cfg(not(unix))]
+fn probe() -> Result<PathBuf, NoPosixShell> {
+    // Best first: `sh` is the shell this crate's command lines are written
+    // against, `bash` the one Git for Windows is certain to have installed.
+    const NAMES: [&str; 2] = ["sh.exe", "bash.exe"];
+
+    for name in NAMES {
+        if let Some(found) = on_path(name) {
+            return Ok(found);
+        }
+    }
+
+    for root in git_roots() {
+        // Git for Windows has kept the shell in both places across its
+        // versions, and which one an install wrote depends on its vintage.
+        for directory in ["bin", r"usr\bin"] {
+            for name in NAMES {
+                let candidate = root.join(directory).join(name);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    Err(NoPosixShell::Missing)
+}
+
+/// The first directory on `PATH` holding `name`.
+#[cfg(not(unix))]
+fn on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Where Git for Windows is conventionally installed, likeliest first.
+///
+/// Read from the environment rather than written out, because the program
+/// directory is not `C:\Program Files` on every machine — a localised Windows,
+/// a relocated install, or a 32-bit Git on a 64-bit box each move it — and the
+/// literal is kept only as the last thing to try.
+#[cfg(not(unix))]
+fn git_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(|directory| PathBuf::from(directory).join("Git"))
+        .collect();
+    roots.push(PathBuf::from(r"C:\Program Files\Git"));
+
+    roots
 }
 
 /// The prompt the model is given, with the machine's own details filled in.
@@ -843,8 +1101,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        Collector, DEFAULT_TIMEOUT, KEEP, SPILL_THRESHOLD, ShellTool, Spill, Spilled, assemble,
-        tail,
+        Collector, DEFAULT_TIMEOUT, KEEP, NoPosixShell, SPILL_THRESHOLD, ShellTool, Spill, Spilled,
+        accept_shell, assemble, posix_shell, tail,
     };
     use crate::{FileTimes, Tool, ToolCtx, ToolError, truncate};
 
@@ -882,6 +1140,102 @@ mod tests {
             description.contains("Be aware: OS:"),
             "the ported prompt should survive rendering intact: {description}"
         );
+    }
+
+    /// The refusal the Windows posture rests on. A POSIX command line handed to
+    /// PowerShell is not the command `ganja-permission` tokenized to decide
+    /// which files it would touch, so a shell that reads another grammar is
+    /// refused rather than used — the one place where falling back would open
+    /// the location gate rather than narrow it.
+    ///
+    /// Deliberately not gated to Windows: the judgement is text about a name,
+    /// it is what a configured shell will be put through when this port grows
+    /// one, and a rule that only runs where nobody can watch it is a rule that
+    /// rots.
+    #[test]
+    fn a_powershell_or_cmd_shell_is_refused_rather_than_handed_posix_text() {
+        for refused in [
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Windows\System32\cmd.exe",
+            "/usr/local/bin/PWSH.EXE",
+            "cmd",
+            "command.com",
+        ] {
+            let verdict = accept_shell(PathBuf::from(refused));
+
+            assert_eq!(
+                verdict,
+                Err(NoPosixShell::NotPosix(PathBuf::from(refused))),
+                "{refused} parses a command line by rules this port does not write"
+            );
+        }
+
+        for allowed in [
+            "sh",
+            "/bin/bash",
+            "/bin/zsh",
+            r"C:\Program Files\Git\bin\sh.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ] {
+            assert_eq!(
+                accept_shell(PathBuf::from(allowed)),
+                Ok(PathBuf::from(allowed)),
+                "{allowed} is a shell this port's command lines are written for"
+            );
+        }
+    }
+
+    /// What a machine with no usable shell answers: a tool result naming the
+    /// remedy, not a panic and not a silent success. The message is the model's
+    /// only way to learn that nothing it runs here will work.
+    #[tokio::test]
+    async fn a_call_with_no_posix_shell_to_run_it_is_refused_with_the_remedy() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+
+        for why in [
+            NoPosixShell::Missing,
+            NoPosixShell::NotPosix(PathBuf::from(r"C:\Windows\System32\cmd.exe")),
+        ] {
+            let tool = ShellTool::refusing(why.clone());
+
+            let refused = tool
+                .run(
+                    serde_json::json!({ "command": "echo hello" }),
+                    &ctx(dir.path().to_owned()),
+                )
+                .await
+                .expect_err("a machine with no shell runs nothing");
+
+            let ToolError::Failed(message) = refused else {
+                panic!("a missing shell is a failure the model reads, got {refused:?}");
+            };
+            assert_eq!(message, why.to_string());
+            assert!(
+                message.contains("Git Bash"),
+                "the refusal should name what to install: {message}"
+            );
+        }
+    }
+
+    /// The machine the suite is running on offers a shell this port may use —
+    /// which is what every other test in this module has been assuming since it
+    /// was written.
+    #[test]
+    fn this_machine_offers_a_shell_a_posix_command_line_may_be_handed_to() {
+        let shell = posix_shell().expect("a development machine has a POSIX shell");
+
+        // On Windows the probe's whole job is to answer with something
+        // spawnable, and a bare name is exactly what does not survive
+        // `CreateProcess` from a non-Git-Bash environment.
+        #[cfg(windows)]
+        assert!(
+            shell.is_file(),
+            "the probe must resolve to a binary that is there: {}",
+            shell.display()
+        );
+        #[cfg(unix)]
+        assert_eq!(shell, PathBuf::from("sh"));
     }
 
     /// The two streams alternate, with enough of a pause between writes that

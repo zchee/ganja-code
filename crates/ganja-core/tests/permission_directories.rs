@@ -79,9 +79,21 @@ async fn a_request_discloses_the_directories_an_always_answer_would_cover() {
     fs::create_dir(project.path().join(".git")).expect("the fixture repository is creatable");
     let outside = TempDir::new().expect("a temporary directory is creatable");
     fs::write(outside.path().join("notes.txt"), "elsewhere").expect("the fixture file writes");
-    let named = outside.path().join("notes.txt");
-    let elsewhere = fs::canonicalize(outside.path())
-        .expect("the fixture directory resolves")
+    // Written with forward slashes, because a command string is POSIX shell
+    // text by contract: the tokenizer applies `\` as an escape, so a Windows
+    // path spelled natively would be eaten by it and the argument would resolve
+    // somewhere else entirely. Somebody driving ganja from Git Bash writes it
+    // this way too. A no-op on unix, where there is nothing to translate.
+    let named = outside
+        .path()
+        .join("notes.txt")
+        .to_string_lossy()
+        .replace('\\', "/");
+    // Asked through the gate's own resolver rather than `fs::canonicalize`:
+    // Windows canonicalises to a verbatim path and the gate rewrites it, so a
+    // fixture that skipped the rewrite would compare two spellings of one
+    // directory and call them different.
+    let elsewhere = ganja_core::permission::resolve(outside.path())
         .to_string_lossy()
         .into_owned();
 
@@ -91,7 +103,7 @@ async fn a_request_discloses_the_directories_an_always_answer_would_cover() {
     let (provider, _requests) = ganja_testkit::ScriptedProvider::new(vec![
         runs("cargo test"),
         ganja_testkit::says("refused"),
-        runs(&format!("cat {}", named.display())),
+        runs(&format!("cat {named}")),
         ganja_testkit::says("refused"),
     ]);
     let engine = Engine::new(
