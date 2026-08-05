@@ -171,6 +171,7 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
         .expect("there is a turn to undo");
     let reverted = next(&mut events).await;
     let Event::RevertChanged {
+        session_id: _,
         revert: Some(revert),
         prompt,
     } = &reverted

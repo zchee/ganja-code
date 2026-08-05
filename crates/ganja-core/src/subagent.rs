@@ -18,15 +18,20 @@
 //!
 //! # What the parent sees
 //!
-//! The child's events go to a **private channel**, not the one the frontend is
-//! subscribed to: every event on that stream is understood to belong to the
-//! engine's one current session, and there is no session id on the wire to say
-//! otherwise. What crosses over is exactly two things:
+//! The child's events go to a **private channel**, not the stream frontends
+//! subscribe to. Every event now names its session, so the wire *could* say
+//! whose they are — but the child session is one no frontend can see: its
+//! transcript is never seeded, no picker lists it, and a stream that suddenly
+//! interleaved a second conversation's messages would have every consumer
+//! rendering them into the one it is showing. So the child stays off the
+//! stream, and what crosses over is exactly two things:
 //!
-//! - the child's permission requests and their replies, forwarded verbatim,
-//!   because a subagent that asks a question nobody can see is a subagent that
-//!   hangs — and the reply routes back through the *parent's* pending slot,
-//!   which is free precisely because the parent is blocked in the call;
+//! - the child's permission requests and their replies — re-addressed to the
+//!   **parent's** session as they cross, because a dialog naming an invisible
+//!   session is one a filtering client could not attribute — since a subagent
+//!   that asks a question nobody can see is a subagent that hangs, and the
+//!   reply routes back through the *parent's* pending slot, which is free
+//!   precisely because the parent is blocked in the call;
 //! - progress on the parent's own tool part: `{current_tool, toolcalls}` in
 //!   [`ToolState::Running::metadata`], which is what lets a frontend render
 //!   upstream's single inline row without a single new event variant.
@@ -125,6 +130,10 @@ pub(crate) struct Spawn {
     /// for forwarding the child's permission dialogs, and for nothing else.
     /// What crosses here reaches every subscriber the parent has.
     pub(crate) events: Arc<Fanout>,
+    /// The parent's session, which everything sent on that fanout names:
+    /// the progress part is the parent's own, and a crossing dialog is
+    /// re-addressed to the conversation whose turn is waiting on it.
+    pub(crate) session_id: SessionId,
     /// Where an open permission request waits, shared with the parent turn: the
     /// parent is blocked inside this call, so the slot is the child's to use and
     /// a reply routed to the parent reaches the child.
@@ -318,6 +327,7 @@ impl Child {
             receiver,
             Watched {
                 events: Arc::clone(&spawn.events),
+                session_id: spawn.session_id.clone(),
                 tools: Arc::clone(&host.tools),
                 message_id: spawn.message_id.clone(),
                 part_id: spawn.part_id.clone(),
@@ -328,6 +338,7 @@ impl Child {
         let turn = Turn::child(
             spawn,
             ChildParts {
+                session_id: self.session.clone(),
                 model: self.model.clone(),
                 system: crate::instruction::joined(
                     agent.prompt.as_deref().or(host.base_prompt.as_deref()),
@@ -477,6 +488,8 @@ enum ChildStop {
 /// What the watcher needs to translate a child's events.
 struct Watched {
     events: Arc<Fanout>,
+    /// The parent's session — what everything the watcher publishes names.
+    session_id: SessionId,
     /// The child's registry, so a running call can be named the way a dialog
     /// would name it — `read src/main.rs`, not `read`.
     tools: Arc<Registry>,
@@ -488,14 +501,16 @@ struct Watched {
 }
 
 /// Reads the child's event stream and does the two things the parent is owed:
-/// forwards permission dialogs, and keeps `{current_tool, toolcalls}` on the
-/// parent's tool part current.
+/// forwards permission dialogs, re-addressed to the parent's session, and
+/// keeps `{current_tool, toolcalls}` on the parent's tool part current.
 ///
-/// Everything else is dropped on purpose. A frontend applying this engine's
-/// stream believes every event belongs to the session it is showing, and there
-/// is no session id on the wire to tell it otherwise — so a child's messages
-/// would arrive as the parent's own. Upstream publishes them and lets its
-/// frontend filter by session id; this one cannot, so it does not publish
+/// Everything else is dropped on purpose. Events name their session now, so a
+/// frontend *could* tell a child's messages apart — but the child session is
+/// invisible to every frontend (never seeded, never listed), and today's
+/// consumers apply the whole stream into the conversation they are showing, so
+/// publishing a second session's messages would tear every one of them.
+/// Upstream publishes and lets its frontend filter by session id; this build
+/// keeps the child off the stream until a consumer exists that asked to filter
 /// (deviation: subagent-events-stay-off-the-stream).
 async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome {
     let mut outcome = Outcome::default();
@@ -507,9 +522,21 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
     while let Some(event) = receiver.recv().await {
         match event {
             // A subagent's question is the user's to answer, and the reply
-            // routes back through the parent's pending slot.
+            // routes back through the parent's pending slot. The dialog is
+            // re-addressed to the **parent's** session as it crosses: the
+            // child session is invisible to every frontend — its events never
+            // reach the stream and no picker lists it — so a dialog naming it
+            // would hand a session-filtering client a question it cannot
+            // attribute, about a conversation it cannot see. The parent's is
+            // the conversation whose turn is actually waiting on the answer.
             Event::PermissionRequested { .. } | Event::PermissionReplied { .. } => {
-                let _ = watched.events.send(event).await;
+                let mut crossing = event;
+                if let Event::PermissionRequested { session_id, .. }
+                | Event::PermissionReplied { session_id, .. } = &mut crossing
+                {
+                    *session_id = watched.session_id.clone();
+                }
+                let _ = watched.events.send(crossing).await;
             }
             Event::PartStarted { part, .. } => match &part.body {
                 PartBody::Text { .. } => {
@@ -538,7 +565,10 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                     report(&watched, current.as_deref(), outcome.toolcalls).await;
                 }
             }
-            Event::MessageStarted { message } => {
+            Event::MessageStarted {
+                session_id: _,
+                message,
+            } => {
                 // A compaction summary arrives as a complete assistant message
                 // rather than a streamed one; it is not the child's answer.
                 if message.role == Role::User {
@@ -601,6 +631,9 @@ async fn report(watched: &Watched, current: Option<&str>, toolcalls: usize) {
     let _ = watched
         .events
         .send(Event::PartUpdated {
+            // The part being rewritten is the parent's own, so the event is
+            // the parent session's however a child's work fills it.
+            session_id: watched.session_id.clone(),
             message_id: watched.message_id.clone(),
             part: Part {
                 id: watched.part_id.clone(),

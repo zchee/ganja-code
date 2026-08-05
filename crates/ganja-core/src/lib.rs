@@ -59,4 +59,13 @@ pub use instruction::system_prompt;
 pub use lsp::Lsp;
 pub use mcp::{Servers as McpServers, Status as McpStatus};
 pub use snapshot::{RevertState, Snapshots};
-pub use storage::{SessionId, SessionInfo, Storage, StorageError};
+/// `SessionId` is the one protocol type the root names, and the exception is
+/// deliberate rather than drift: the crate doc above says the root carries
+/// the engine's own types and nothing else, and this *was* one — it lived in
+/// `storage` until events began naming their session, at which point a wire
+/// type had to move to [`ganja_protocol`]. The root keeps naming it because
+/// callers outside that change's blast radius were already reading it here,
+/// and the curation rule is about not inviting new flattening, not about
+/// breaking the readers the old shape has.
+pub use storage::SessionId;
+pub use storage::{SessionInfo, Storage, StorageError};

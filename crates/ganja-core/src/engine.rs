@@ -457,6 +457,18 @@ pub struct Engine {
     ///
     /// Held only so that it is not dropped: dropping it ends the watch.
     watcher: std::sync::Mutex<Option<watch::Watcher>>,
+    /// The id of the session this engine is on — the one every event names.
+    ///
+    /// Minted at construction, so an ephemeral engine's session has a name
+    /// even though it has no row; adopted by the first prompt's lazy create
+    /// on a persistent engine, so turn-1's events and the stored session
+    /// agree; replaced by [`Engine::resume`] before the resumed revert is
+    /// announced; re-minted by [`Command::NewSession`], because the next
+    /// conversation is a different session and a stale id here would have
+    /// its lazy create upsert over the previous one's row. Agent and model
+    /// switches never touch it — they change what the session runs as, not
+    /// which session it is.
+    session: std::sync::Mutex<SessionId>,
     /// Every subscriber's queue; the one place events leave the engine.
     fanout: Arc<Fanout>,
     /// The receiver of the queue the engine was born with, waiting for the
@@ -571,6 +583,7 @@ impl Engine {
                 .ok()
                 .map_or(Credentials::Unguarded, Credentials::Guarded),
             watcher: std::sync::Mutex::new(None),
+            session: std::sync::Mutex::new(SessionId::ascending()),
             fanout: Arc::new(Fanout::new(events)),
             unclaimed: Mutex::new(Some(receiver)),
             turn: Arc::default(),
@@ -938,6 +951,21 @@ impl Engine {
         Ok(sessions)
     }
 
+    /// The id every event this engine emits carries: its current session's.
+    ///
+    /// Always answers, where [`Engine::current_session`] answers only once a
+    /// persistent engine holds a row — the id predates the row on purpose,
+    /// so a subscriber can attribute a session's events from its very first
+    /// one, and an ephemeral engine's session has a name even though nothing
+    /// stores it.
+    #[must_use]
+    pub fn session_id(&self) -> SessionId {
+        self.session
+            .lock()
+            .expect("the session id is never poisoned")
+            .clone()
+    }
+
     /// The session the engine is writing into, or [`None`] before the first
     /// prompt or resume — and always [`None`] on an in-memory engine.
     #[must_use]
@@ -1029,6 +1057,13 @@ impl Engine {
         // the session it replaced had open says nothing about these files.
         self.files.clear();
         self.restore_selection(&info);
+        // The slot moves before anything is announced: the resumed revert
+        // below must carry the resumed session's id, not the one this engine
+        // minted at birth or was on a moment ago.
+        *self
+            .session
+            .lock()
+            .expect("the session id is never poisoned") = info.id.clone();
         let revert = info.revert.clone();
         {
             let mut live = state
@@ -1053,6 +1088,7 @@ impl Engine {
             let _ = self
                 .fanout
                 .send(Event::RevertChanged {
+                    session_id: self.session_id(),
                     revert: Some(revert.info()),
                     prompt: None,
                 })
@@ -1335,6 +1371,14 @@ impl Engine {
         }
 
         self.history.lock().await.clear();
+        // The next conversation is a different session, so it gets a
+        // different name now, before anything can be said in it. Left stale,
+        // the next prompt's lazy create would adopt the old id and its
+        // `save_info` would upsert over the previous conversation's row.
+        *self
+            .session
+            .lock()
+            .expect("the session id is never poisoned") = SessionId::ascending();
         if let Some(state) = &self.persistence {
             let mut live = state
                 .live
@@ -1429,6 +1473,7 @@ impl Engine {
                 let _ = self
                     .fanout
                     .send(Event::RevertChanged {
+                        session_id: self.session_id(),
                         revert: None,
                         prompt: None,
                     })
@@ -1485,6 +1530,7 @@ impl Engine {
         let _ = self
             .fanout
             .send(Event::RevertChanged {
+                session_id: self.session_id(),
                 revert: Some(info),
                 prompt,
             })
@@ -1544,6 +1590,7 @@ impl Engine {
         let _ = self
             .fanout
             .send(Event::RevertChanged {
+                session_id: self.session_id(),
                 revert: None,
                 prompt: None,
             })
@@ -1933,10 +1980,15 @@ impl Engine {
             reminders.push(notice);
         }
 
-        // The first prompt on a persistent engine mints the session, and its
-        // record reaches the disk before the first byte streams: a crash
+        // The first prompt on a persistent engine creates the session record,
+        // and it reaches the disk before the first byte streams: a crash
         // mid-turn must still leave something to resume. A store that
         // refuses is a warning, not a dead prompt.
+        //
+        // The record adopts the id the engine minted at construction (or at
+        // the last `NewSession`) rather than minting one of its own: the id
+        // predates the row on purpose, so the events of this very turn and
+        // the stored session agree on which conversation they are.
         let persist = self.persistence.as_ref().map(|state| {
             let session = {
                 let mut live = state
@@ -1948,7 +2000,12 @@ impl Engine {
                 }
                 live.info
                     .get_or_insert_with(|| {
-                        fresh_session(&state.storage, name.clone(), model.clone())
+                        fresh_session(
+                            &state.storage,
+                            self.session_id(),
+                            name.clone(),
+                            model.clone(),
+                        )
                     })
                     .id
                     .clone()
@@ -1974,6 +2031,7 @@ impl Engine {
         let turn = Turn::root(RootParts {
             provider: Arc::clone(&self.provider),
             spawn: self.spawn_host(model.clone()),
+            session_id: self.session_id(),
             model,
             system,
             reminders,
@@ -2102,10 +2160,20 @@ fn stale_notice(stale: &[PathBuf], root: &Path) -> Option<String> {
 
 /// A brand-new session record, already on disk by the time it is adopted,
 /// carrying whatever the engine is set to run as.
-fn fresh_session(storage: &Storage, agent: Option<String>, model: String) -> SessionInfo {
+///
+/// The id arrives from the caller — the engine's current one — rather than
+/// being minted here: the engine named its session at construction so that
+/// even turn 1's events could carry the name, and the row created here has to
+/// be the same session those events already named.
+fn fresh_session(
+    storage: &Storage,
+    id: SessionId,
+    agent: Option<String>,
+    model: String,
+) -> SessionInfo {
     let created = now();
     let info = SessionInfo {
-        id: SessionId::ascending(),
+        id,
         version: storage::VERSION,
         title: None,
         created,
@@ -2298,13 +2366,21 @@ mod tests {
 
         for event in events {
             match event {
-                Event::MessageStarted { message } => messages.push(message.clone()),
-                Event::PartStarted { message_id, part } => {
+                Event::MessageStarted {
+                    session_id: _,
+                    message,
+                } => messages.push(message.clone()),
+                Event::PartStarted {
+                    session_id: _,
+                    message_id,
+                    part,
+                } => {
                     if let Some(message) = messages.iter_mut().find(|it| it.id == *message_id) {
                         message.parts.push(part.clone());
                     }
                 }
                 Event::PartDelta {
+                    session_id: _,
                     message_id,
                     part_id,
                     delta,
@@ -2348,7 +2424,11 @@ mod tests {
 
         let seen = drain(&mut events).await;
 
-        let Some(Event::MessageStarted { message: user }) = seen.first() else {
+        let Some(Event::MessageStarted {
+            session_id: _,
+            message: user,
+        }) = seen.first()
+        else {
             panic!("a turn should open with the user's message, got {seen:?}");
         };
         assert_eq!(user.role, Role::User);
@@ -2357,7 +2437,11 @@ mod tests {
             Some("hi")
         );
 
-        let Some(Event::MessageStarted { message: assistant }) = seen.get(1) else {
+        let Some(Event::MessageStarted {
+            session_id: _,
+            message: assistant,
+        }) = seen.get(1)
+        else {
             panic!("the reply's envelope should follow, got {seen:?}");
         };
         assert_eq!(assistant.role, Role::Assistant);
@@ -2377,6 +2461,7 @@ mod tests {
         assert_eq!(replay(&seen), "hione two");
 
         let Some(Event::MessageFinished {
+            session_id: _,
             message_id,
             reason,
             usage,
@@ -2655,6 +2740,117 @@ mod tests {
         assert_eq!(
             heard_first, heard_second,
             "two lossless subscribers of one turn hold the same transcript"
+        );
+    }
+
+    /// Every event is addressed: it names the engine's current session, which
+    /// has a name even on an engine that stores nothing.
+    #[tokio::test]
+    async fn every_event_of_a_turn_carries_the_engines_session_id() {
+        let engine = engine();
+        let mut events = engine
+            .subscribe()
+            .await
+            .expect("the first subscriber claims the birth queue");
+
+        let session = engine.session_id();
+        assert!(
+            session.as_str().starts_with("ses_"),
+            "an ephemeral engine's session still has a name: {session:?}"
+        );
+
+        engine
+            .send(Command::SendPrompt {
+                text: "hi".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        let seen = drain(&mut events).await;
+
+        assert!(!seen.is_empty(), "a turn reports something");
+        for event in &seen {
+            assert_eq!(
+                event.session_id(),
+                &session,
+                "every event of the turn names the engine's session: {event:?}"
+            );
+        }
+    }
+
+    /// `Command::NewSession` renames the engine before anything can be said
+    /// in the next conversation. Left stale, the second conversation's lazy
+    /// create would adopt the first one's id and `save_info` would upsert
+    /// over its row — so the pin is that two conversations on one persistent
+    /// engine store two distinct sessions, each addressed as itself.
+    #[tokio::test]
+    async fn two_conversations_on_one_engine_store_two_distinct_sessions() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let engine = Engine::persistent(
+            Arc::new(FakeProvider::new(
+                "one two",
+                std::time::Duration::from_millis(1),
+            )),
+            MODEL,
+            Arc::new(Registry::new(Vec::new())),
+            Permissions::default(),
+            Storage::open(directory.path().join("storage")),
+        );
+        let mut events = engine.subscribe().await.expect("the first subscriber");
+
+        engine
+            .send(Command::SendPrompt {
+                text: "first".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        let first_turn = drain(&mut events).await;
+        let first = engine
+            .current_session()
+            .expect("the first prompt created a session");
+        assert_eq!(
+            engine.session_id(),
+            first.id,
+            "the stored row adopted the id the engine was already using"
+        );
+        assert!(
+            first_turn
+                .iter()
+                .all(|event| event.session_id() == &first.id),
+            "the first conversation's events name its session: {first_turn:?}"
+        );
+
+        engine
+            .send(Command::NewSession)
+            .await
+            .expect("an idle engine forgets its session");
+        engine
+            .send(Command::SendPrompt {
+                text: "second".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("a fresh conversation accepts a prompt");
+        let second_turn = drain(&mut events).await;
+        let second = engine
+            .current_session()
+            .expect("the second prompt created a session");
+
+        assert_ne!(first.id, second.id, "a new conversation is a new session");
+        assert!(
+            second_turn
+                .iter()
+                .all(|event| event.session_id() == &second.id),
+            "the second conversation's events name its own session: {second_turn:?}"
+        );
+
+        let stored = engine.sessions().await.expect("the store lists");
+        let ids: Vec<&SessionId> = stored.iter().map(|info| &info.id).collect();
+        assert_eq!(stored.len(), 2, "two conversations, two rows: {ids:?}");
+        assert!(
+            ids.contains(&&first.id) && ids.contains(&&second.id),
+            "and they are exactly the two the engine was on: {ids:?}"
         );
     }
 

@@ -22,7 +22,7 @@ use ganja_core::{
     protocol::{Command, Event, FinishReason, Message, Part},
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
 };
-use ganja_testkit::{drain, seed_message, seeded_session_info};
+use ganja_testkit::{drain, seed_message, seed_session, seeded_session_info};
 use tokio_util::sync::CancellationToken;
 
 const EVENTS: usize = 10_000;
@@ -191,7 +191,11 @@ async fn prompt(engine: &Engine, text: &str) {
 /// The text of the user message that opens a drained turn, for telling one
 /// turn's frames from another's.
 fn opening_prompt(seen: &[Event]) -> Option<String> {
-    let Some(Event::MessageStarted { message }) = seen.first() else {
+    let Some(Event::MessageStarted {
+        session_id: _,
+        message,
+    }) = seen.first()
+    else {
         return None;
     };
 
@@ -417,12 +421,65 @@ async fn a_resumes_revert_notice_waits_in_the_birth_queue_for_the_first_subscrib
         .expect("the resumed revert should be waiting in the birth queue");
     match event {
         Event::RevertChanged {
+            session_id,
             revert: Some(revert),
             prompt: None,
-        } => assert_eq!(
-            revert.message_id, anchor.id,
-            "the notice names the message the revert anchored on"
-        ),
+        } => {
+            assert_eq!(
+                revert.message_id, anchor.id,
+                "the notice names the message the revert anchored on"
+            );
+            assert_eq!(
+                session_id, info.id,
+                "the resumed revert is addressed to the resumed session"
+            );
+        }
         other => panic!("the first inherited event should be the resumed revert: {other:?}"),
+    }
+}
+
+/// After a resume, a turn's events are addressed to the resumed session —
+/// the engine's one current-session slot was replaced, and everything reads
+/// it — not to the name the engine was born with.
+#[tokio::test]
+async fn after_a_resume_every_event_carries_the_resumed_sessions_id() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let storage = Storage::open(directory.path().join("storage"));
+    let seeded = seed_session(&storage, 0);
+    seed_message(&storage, &seeded, &Message::user("what came before"));
+
+    let engine = Engine::persistent(
+        Arc::new(FloodProvider {
+            count: 3,
+            produced: Arc::default(),
+        }),
+        "flood-model",
+        Arc::new(ganja_core::tool::Registry::new(Vec::new())),
+        ganja_core::permission::Permissions::default(),
+        storage,
+    );
+    let born_as = engine.session_id();
+    engine.resume(&seeded).await.expect("the session loads");
+    assert_ne!(
+        born_as, seeded,
+        "the pin is only a pin while the resumed id differs from the birth one"
+    );
+
+    let mut events = engine
+        .subscribe()
+        .await
+        .expect("the first subscriber claims the birth queue");
+    prompt(&engine, "next").await;
+    let seen = tokio::time::timeout(DRAIN_PATIENCE, drain(&mut events))
+        .await
+        .expect("the resumed turn drains");
+
+    assert!(!seen.is_empty(), "a turn reports something");
+    for event in &seen {
+        assert_eq!(
+            event.session_id(),
+            &seeded,
+            "an event of the resumed conversation named another session: {event:?}"
+        );
     }
 }

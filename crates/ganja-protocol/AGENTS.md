@@ -32,7 +32,7 @@ cargo tree -p ganja-protocol -e normal   # the boundary, visible: serde and serd
 
 ### Common Patterns
 
-Types are plain data with derived `serde` impls; behavior belongs to whoever holds them. The exceptions are small and are about identity rather than meaning: `MessageId`/`PartId`/`PermissionId` mint and compare themselves, and `Part` carries the `as_text`/`as_text_mut` accessors that spare every caller a `match` on the body.
+Types are plain data with derived `serde` impls; behavior belongs to whoever holds them. The exceptions are small and are about identity rather than meaning: `MessageId`/`PartId`/`PermissionId`/`SessionId` mint and compare themselves, `Part` carries the `as_text`/`as_text_mut` accessors that spare every caller a `match` on the body, and `Event::session_id` reads the one field every variant carries so a session-filtering consumer does not write the eight-arm match itself.
 
 ## Dependencies
 
