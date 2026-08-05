@@ -25,6 +25,12 @@ ganja-permission = { path = "crates/ganja-permission" }
 # that later arrives over a socket — from having to build an engine to name an
 # event.
 ganja-protocol = { path = "crates/ganja-protocol" }
+# The engine over a socket: HTTP routes and the SSE event stream. Its own
+# crate rather than a module in `ganja-core`, so that a build which only wants
+# the terminal never pulls an HTTP server — the same reasoning, one level up,
+# that keeps ratatui out of the engine, and CI asserts it the same inverted
+# way.
+ganja-serve = { path = "crates/ganja-serve" }
 # Dev-only: the scripted-provider/recorder-tool/storage-seeding scaffolding
 # `ganja-core`'s own `tests/*.rs` binaries pulled in as a path dev-dependency,
 # so the duplication across those files has one place to live instead of
@@ -49,6 +55,11 @@ arboard = { version = "3.6.1", default-features = false, features = [
     "wayland-data-control",
 ] }
 async-trait = "0.1.91"
+# The HTTP server the serve layer stands on. Chosen over a hand-rolled hyper
+# service because upstream's surface is a routed REST-plus-SSE app, and axum's
+# extractors are the idiomatic Rust for exactly that shape; it rides the tokio
+# and tower stacks already in the tree.
+axum = "0.8.9"
 # base64url, unpadded, in both directions: a PKCE challenge is the encoding of
 # a SHA-256, and the account id a ChatGPT login stores comes out of an
 # id_token's payload. Padding is a setting on the engine rather than a second
@@ -165,6 +176,13 @@ tokio = { version = "1.53.1", features = [
 ] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
+# The service trait axum is built on. Admitted alongside it so the serve layer
+# can write one middleware (auth, header posture) without a second admission
+# round.
+tower = "0.5.3"
+# Tower's HTTP-specific middleware, admitted with the pair above; a member
+# opts in only where a hand-written layer would otherwise duplicate it.
+tower-http = "0.7.0"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

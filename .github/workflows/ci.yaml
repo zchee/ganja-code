@@ -38,6 +38,9 @@ jobs:
       - name: ganja-core stays free of terminal dependencies
         run: '! cargo tree -p ganja-core -e normal | grep -q ratatui'
 
+      - name: ganja-core stays free of the http server
+        run: '! cargo tree -p ganja-core -e normal | grep -q axum'
+
       - name: ganja-tool never reaches back into the engine
         run: '! cargo tree -p ganja-tool -e normal | grep -q ganja-core'
 

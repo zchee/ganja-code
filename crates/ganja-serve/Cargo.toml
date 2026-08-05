@@ -1,0 +1,23 @@
+[package]
+name = "ganja-serve"
+description = "The ganja engine over a socket: HTTP routes and the SSE event stream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# The engine the routes drive; every handler is a translation onto its
+# command surface and off its event stream.
+ganja-core.workspace = true
+# The wire types the routes serialize — named directly, as everywhere.
+ganja-protocol.workspace = true
+
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
