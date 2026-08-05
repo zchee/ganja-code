@@ -281,8 +281,52 @@ fn which(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
 
     std::env::split_paths(&path)
-        .map(|directory| directory.join(binary))
+        .flat_map(|directory| spellings(&directory.join(binary)))
         .find(|candidate| executable(candidate))
+}
+
+/// Every name `path` might be on disk under.
+///
+/// Exactly one on unix, where a binary is its own name. On Windows an
+/// executable carries an extension and `PATHEXT` says which: rustup installs
+/// `rust-analyzer.exe`, an npm-shimmed server is a `.cmd`, and joining the bare
+/// name — which is all upstream's Node needs, because `child_process` does this
+/// search itself — finds neither. The bare name is still tried first, so a
+/// config that named the extension itself is not handed a second one.
+fn spellings(path: &Path) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    let found = vec![path.to_owned()];
+    #[cfg(not(unix))]
+    let found = {
+        let mut found = vec![path.to_owned()];
+        found.extend(extensions().into_iter().map(|extension| {
+            let mut spelling = path.to_owned().into_os_string();
+            spelling.push(extension);
+            PathBuf::from(spelling)
+        }));
+
+        found
+    };
+
+    found
+}
+
+/// The extensions this machine treats as executable, from `PATHEXT`.
+///
+/// The fallback is what every Windows since NT has shipped with, so a process
+/// started without the variable — a service, a stripped environment — still
+/// finds an ordinary `.exe`.
+#[cfg(not(unix))]
+fn extensions() -> Vec<String> {
+    const FALLBACK: &str = ".COM;.EXE;.BAT;.CMD";
+
+    std::env::var("PATHEXT")
+        .unwrap_or_else(|_| FALLBACK.to_owned())
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Whether `path` is a file this process could run.
@@ -303,12 +347,50 @@ fn executable(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::Path};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use tempfile::TempDir;
 
-    use super::{GOPLS, RUST, Root, Spec, nearest_root, resolve, root, rust_root};
+    use super::{GOPLS, RUST, Root, Spec, nearest_root, resolve, root, rust_root, spellings};
     use crate::config::LspEntry;
+
+    /// The bare name is what a config that already spelled the extension gave,
+    /// so it is what gets tried first — on every platform, because a search
+    /// that reordered itself per machine would find a different binary on each.
+    #[test]
+    fn the_name_a_server_was_configured_under_is_the_first_thing_looked_for() {
+        let named = Path::new("/opt/bin/rust-analyzer");
+
+        assert_eq!(
+            spellings(named).first().map(PathBuf::as_path),
+            Some(named),
+            "the name as given comes first"
+        );
+    }
+
+    /// Windows executables carry an extension and `PATHEXT` says which. Joining
+    /// the bare name finds nothing there, which is why the LSP never started on
+    /// a machine where rustup had installed `rust-analyzer.exe` and put it on
+    /// `PATH`.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_binary_is_looked_for_under_the_extensions_that_make_it_one() {
+        let found = spellings(Path::new(r"C:\opt\bin\rust-analyzer"));
+
+        assert!(
+            found.contains(&PathBuf::from(r"C:\opt\bin\rust-analyzer.EXE"))
+                || found.contains(&PathBuf::from(r"C:\opt\bin\rust-analyzer.exe")),
+            "an executable extension has to be among the spellings tried: {found:?}"
+        );
+        assert!(
+            found.len() > 1,
+            "the bare name alone is what fails on this platform: {found:?}"
+        );
+    }
 
     /// Writes `contents` at `root/relative`, creating the directories above it.
     fn write(root: &Path, relative: &str, contents: &str) {

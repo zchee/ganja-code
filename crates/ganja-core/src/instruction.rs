@@ -489,6 +489,19 @@ mod tests {
         TempDir::new().expect("a temporary directory is creatable")
     }
 
+    /// `path` named relative to `root`, always with `/`.
+    ///
+    /// The assertions below are about which files a walk found and in what
+    /// order — the separator this platform happens to write is not the
+    /// behaviour under test, and spelling every expectation twice to say so
+    /// would bury the thing that is.
+    fn under(root: &Path, path: &Path) -> String {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
     /// Writes `text` to `path`, creating whatever directories it needs.
     fn plant(path: &Path, text: &str) {
         if let Some(parent) = path.parent() {
@@ -618,15 +631,8 @@ mod tests {
         plant(&nested.join("docs").join("style.md"), "web style");
 
         let found = resolve_entry(&nested, &root, "docs/*.md");
-        let owners: Vec<String> = found
-            .iter()
-            .map(|path| {
-                path.strip_prefix(fs::canonicalize(&root).expect("the fixture exists"))
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
+        let canonical = fs::canonicalize(&root).expect("the fixture exists");
+        let owners: Vec<String> = found.iter().map(|path| under(&canonical, path)).collect();
 
         assert_eq!(
             owners,
@@ -650,15 +656,7 @@ mod tests {
         plant(&root.join("packages").join("web").join("README.md"), "no");
 
         let found = glob(&root, "packages/*/AGENTS.md");
-        let names: Vec<String> = found
-            .iter()
-            .map(|path| {
-                path.strip_prefix(&root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
+        let names: Vec<String> = found.iter().map(|path| under(&root, path)).collect();
 
         assert_eq!(
             names,

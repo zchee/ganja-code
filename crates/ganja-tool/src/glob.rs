@@ -412,8 +412,13 @@ mod tests {
     #[tokio::test]
     async fn a_relative_path_argument_resolves_against_the_call_cwd() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        std::fs::create_dir(dir.path().join("nested")).unwrap();
-        std::fs::write(dir.path().join("nested/x.rs"), "").unwrap();
+        // Joined a component at a time rather than as `nested/x.rs`: the tool
+        // answers with a path the platform built, so an expectation carrying a
+        // separator this platform does not write would be comparing two
+        // spellings of one file.
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("x.rs"), "").unwrap();
 
         let out = GlobTool
             .run(
@@ -423,10 +428,7 @@ mod tests {
             .await
             .expect("a relative path resolves against ctx.cwd, not the process cwd");
 
-        assert_eq!(
-            out.output,
-            dir.path().join("nested/x.rs").display().to_string()
-        );
+        assert_eq!(out.output, nested.join("x.rs").display().to_string());
     }
 
     #[tokio::test]

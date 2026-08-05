@@ -3010,7 +3010,12 @@ mod tests {
     /// somebody else, noticed.
     fn condemn(files: &FileTimes, path: &std::path::Path) {
         files.record(path);
-        std::fs::File::open(path)
+        // Opened for writing because a stamp is metadata a handle must be
+        // allowed to write: unix grants that with the file's own permissions,
+        // Windows only through a handle that asked for write access.
+        std::fs::File::options()
+            .write(true)
+            .open(path)
             .and_then(|file| file.set_modified(std::time::SystemTime::UNIX_EPOCH))
             .expect("the fixture can move the stamp");
         files.note_change(path);

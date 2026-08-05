@@ -496,8 +496,17 @@ mod tests {
     }
 
     /// Moves `path`'s modification stamp to `when`, directory or file alike.
+    ///
+    /// A file is opened for writing, because a stamp is metadata a handle must
+    /// be allowed to write and Windows grants that only to a handle that asked
+    /// for write access. A directory refuses a write handle on unix — and only
+    /// unix backdates one here — so the read-only open is kept as the fallback
+    /// rather than as the first choice.
     fn stamp(path: &Path, when: SystemTime) {
-        std::fs::File::open(path)
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .or_else(|_| std::fs::File::open(path))
             .and_then(|handle| handle.set_modified(when))
             .expect("the fixture can move the stamp");
     }

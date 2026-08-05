@@ -81,16 +81,22 @@ pub fn read_back(path: &Path) -> io::Result<String> {
     Ok(text.strip_suffix('\n').map_or(text.clone(), str::to_owned))
 }
 
-/// The child process that opens `path` in `program`.
+/// The child process that opens `path` in `program`, run under `shell`.
 ///
-/// Run through the shell rather than split here, because `$EDITOR` is a
-/// *command line* and carries flags often enough to matter — `code -w`,
+/// Run through a shell rather than split here, because `$EDITOR` is a *command
+/// line* and carries flags often enough to matter — `code -w`,
 /// `emacsclient -nw`. The path arrives as an argument rather than inside the
 /// string, so a directory with a space or a quote in its name cannot become
 /// part of the command.
+///
+/// The shell is passed in rather than named here so that this stays a pure
+/// function, and so that the one machine where naming it would be wrong — a
+/// Windows box, where a bare `sh` reaches nothing and PowerShell would read
+/// `"$@"` as something else entirely — gets the same answer the `bash` tool
+/// resolved. See [`ganja_tool::shell::posix_shell`].
 #[must_use]
-pub fn command(program: &str, path: &Path) -> Command {
-    let mut command = Command::new("sh");
+pub fn command(shell: &Path, program: &str, path: &Path) -> Command {
+    let mut command = Command::new(shell);
     command
         .arg("-c")
         .arg(format!("{program} \"$@\""))
@@ -115,8 +121,14 @@ pub fn edit(text: &str) -> Result<String> {
     let directory = tempfile::tempdir().context("failed to make room for the prompt")?;
     let path = seed(directory.path(), text).context("failed to write the prompt out")?;
 
+    // Resolved before the terminal is handed over, so a machine with no shell
+    // to run the editor under says so on an intact screen rather than after
+    // leaving and re-entering the alternate one for nothing.
+    let shell = ganja_tool::shell::posix_shell()
+        .context("failed to find a shell to run the editor under")?;
+
     let released = release();
-    let status = command(&configured_program(), &path)
+    let status = command(&shell, &configured_program(), &path)
         .status()
         .context("failed to run the editor");
     let taken = take();
@@ -217,16 +229,43 @@ mod tests {
 
     /// The path is an argument, not part of the command string, so a directory
     /// nobody would name by hand cannot become part of what runs.
+    ///
+    /// The program is asserted against the resolved shell rather than against
+    /// the literal `sh`. A literal passed on Windows, where nothing spawns a
+    /// bare `sh`: the old assertion held while `/editor` could not launch an
+    /// editor at all.
     #[test]
     fn the_path_reaches_the_editor_as_an_argument_rather_than_as_text() {
         let path = std::path::Path::new("/tmp/a dir; rm -rf ~/ganja-prompt.md");
-        let command = command("code -w", path);
+        let shell = ganja_tool::shell::posix_shell().expect("a machine with a POSIX shell");
+        let command = command(&shell, "code -w", path);
 
         let arguments: Vec<&std::ffi::OsStr> = command.get_args().collect();
 
-        assert_eq!(command.get_program(), "sh");
+        assert_eq!(command.get_program(), shell.as_os_str());
         assert_eq!(arguments[0], "-c");
         assert_eq!(arguments[1], "code -w \"$@\"");
         assert_eq!(arguments[3], path.as_os_str());
+
+        // On Windows a program name only means something if it resolves, and
+        // the whole point of the probe is that a bare name does not.
+        #[cfg(windows)]
+        assert!(
+            shell.is_file(),
+            "the editor's shell has to be a binary that is there: {}",
+            shell.display()
+        );
+
+        // And the shell that was resolved is the shell that runs, which on the
+        // one platform where the two could differ is the whole fix. Asserted
+        // with a shell the probe would never answer, because on unix its answer
+        // is `sh` and a hardcoded `sh` would pass without meaning anything.
+        let elsewhere = std::path::Path::new("/opt/somewhere/dash");
+
+        assert_eq!(
+            super::command(elsewhere, "code -w", path).get_program(),
+            elsewhere.as_os_str(),
+            "the editor runs under the shell it was handed"
+        );
     }
 }
