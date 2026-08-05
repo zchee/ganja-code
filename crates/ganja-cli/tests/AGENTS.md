@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-04 | Updated: 2026-08-04 -->
+<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
 
 # ganja-cli/tests
 
@@ -12,6 +12,7 @@ Assertions on the shipped binary rather than on library functions: the command-l
 | File | Description |
 |------|-------------|
 | `cli.rs` | The command-line surface — subcommands, credential storage, redaction, the model listing and the session listing. Every credential assertion is on the redacted tail: a test that printed a whole key would put it in CI output, which is the failure redaction exists to prevent. |
+| `mcp.rs` | `ganja mcp` through the built binary: one server of each outcome there is — a loopback endpoint that answers, a program no machine has, and one configured off — proving each standing is its own and that a connected server's tools are listed under the names the model would call them by. The peer is a socket rather than a process, so this crate gains neither `bun` nor the upstream checkout as a prerequisite; the transport's own correctness is pinned beside the engine, which already pays for both. |
 | `import_opencode.rs` | `ganja config import-opencode` through the built binary: which files discovery reads and in what order, where the result lands, and that a run which would overwrite or leak refuses to. What the *mapping* does with a key is settled beside the mapping, in `src/import.rs`. |
 | `import_round_trip.rs` | One env-mutating test in its own binary: import, then `Config::load` in-process, so what the importer wrote is proved to be what the next launch reads — permission order included. It is also the only place the `mcp` and `lsp` mappings are fully answered for: the importer's own `validate` decodes, where `Config::load` additionally refuses a server with no program, a custom language server that names no extensions, and an endpoint whose headers would travel in the clear. |
 | `fixtures/opencode.jsonc` | One opencode config holding every shape the mapping has a rule for. Shared with the table test in `src/import.rs`, so the two cannot drift apart. |

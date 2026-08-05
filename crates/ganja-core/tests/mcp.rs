@@ -40,7 +40,8 @@ use std::{
 use futures::stream::BoxStream;
 use ganja_core::{
     Command, Config, Engine, Event, FinishReason, McpServers, McpStatus, PartBody, PermissionReply,
-    Permissions, Registry, ToolState, provider::Provider,
+    Permissions, Registry, ToolState,
+    provider::{ChatRequest, Provider},
 };
 use ganja_testkit::{ScriptedProvider, drain_answering, says, tool_call};
 use serde_json::{Value, json};
@@ -71,6 +72,15 @@ fn tool_part(seen: &[Event], tool: &str) -> ToolState {
             _ => None,
         })
         .unwrap_or_else(|| panic!("the turn produced no part for {tool}"))
+}
+
+/// The tool names one recorded request offered the model.
+///
+/// This is what the whole tool surface is *for*: a tool the engine holds and
+/// never advertises is a tool the model cannot call, so every claim about what
+/// a turn was offered is a claim about this list.
+fn offered(request: &ChatRequest) -> Vec<String> {
+    request.tools.iter().map(|tool| tool.name.clone()).collect()
 }
 
 /// The output text of a completed call.
@@ -138,6 +148,11 @@ fn stubborn_server(name: &str) -> Config {
     fixture_server(name, "stubborn-server.mjs")
 }
 
+/// The fixture whose tool set moves when it is asked to, as a config entry.
+fn changing_server(name: &str) -> Config {
+    fixture_server(name, "changing-server.mjs")
+}
+
 /// One of the fixture servers under `tests/fixtures/mcp/` as a config entry.
 fn fixture_server(name: &str, file: &str) -> Config {
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -201,7 +216,20 @@ fn delayed_reference_server(name: &str, pidfile: &Path, delay: Duration) -> Conf
 /// The connect runs in the background exactly as it does in a real session;
 /// this waits for it, because a test that raced it would be testing the race.
 async fn engine_with(provider: Arc<dyn Provider>, config: &Config) -> Engine {
+    engine_and_servers(provider, config).await.0
+}
+
+/// The same, keeping a handle on the servers the engine was given.
+///
+/// Only one test needs it, and it needs it to *wait* rather than to assert: a
+/// notification arriving is not something the engine reports, so the tool
+/// surface underneath is the one observable that says the message landed.
+async fn engine_and_servers(
+    provider: Arc<dyn Provider>,
+    config: &Config,
+) -> (Engine, Arc<McpServers>) {
     let servers = McpServers::new(config.mcp.clone(), Path::new("."));
+    let held = Arc::clone(&servers);
     let mut permissions = Permissions::default();
     permissions.set_baseline(config.permission.rules());
 
@@ -220,7 +248,7 @@ async fn engine_with(provider: Arc<dyn Provider>, config: &Config) -> Engine {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    engine
+    (engine, held)
 }
 
 /// Sends `prompt` and drains the turn, answering permissions with `reply`.
@@ -278,15 +306,13 @@ async fn the_reference_server_round_trips_a_call_the_model_made() {
     );
 
     // The whole surface is offered under the namespace, sanitized name and all.
-    let offered: Vec<String> = requests
-        .lock()
-        .expect("the request log is never poisoned")
-        .first()
-        .expect("the turn asked the model something")
-        .tools
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect();
+    let offered = offered(
+        requests
+            .lock()
+            .expect("the request log is never poisoned")
+            .first()
+            .expect("the turn asked the model something"),
+    );
     for name in [
         "mcp__reference__echo",
         "mcp__reference__explode",
@@ -517,20 +543,108 @@ async fn a_server_that_dies_mid_session_fails_and_loses_its_tools() {
         engine.mcp_status()
     );
 
-    let offered: Vec<String> = requests
-        .lock()
-        .expect("the request log is never poisoned")
-        .last()
-        .expect("the second turn asked the model")
-        .tools
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect();
+    let offered = offered(
+        requests
+            .lock()
+            .expect("the request log is never poisoned")
+            .last()
+            .expect("the second turn asked the model"),
+    );
     assert!(
         !offered
             .iter()
             .any(|name| name.starts_with("mcp__reference__")),
         "a dead server's tools must not still be offered: {offered:?}"
+    );
+
+    engine.shutdown_mcp().await;
+}
+
+/// A server that announces a changed tool set has that set re-listed, and the
+/// **next turn is offered the new one**.
+///
+/// This is the only leg that fires `notifications/tools/list_changed` end to
+/// end. The handler's own safety — that it cannot stall the receive loop, and
+/// that a re-list finishing after the connection was replaced cannot install a
+/// dead server's tools — is settled by reading rmcp; what reading cannot settle
+/// is whether the message arrives and moves anything, which needs a server that
+/// really sends one.
+///
+/// The assertion is on the **recorded request**, not on the tool surface
+/// underneath it: `refresh_mcp` runs at the start of a turn, so what proves the
+/// notification mattered is that the model was offered a different set the
+/// second time round. The surface is polled only to know the message has landed
+/// — a test that started the second turn without waiting would be timing the
+/// notification rather than testing it.
+///
+/// The fixture changes its listing **both ways** in one call, and both halves
+/// are asserted: a client that merely accumulated whatever it was told about
+/// would pass on the tool that appeared and fail on the one that went away.
+#[tokio::test]
+async fn a_server_that_announces_a_changed_tool_set_moves_what_the_next_turn_is_offered() {
+    let (provider, requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__changing__change", json!({})),
+        says("it moved"),
+        says("and the next turn sees it"),
+    ]);
+    let config = changing_server("changing");
+    let (engine, servers) = engine_and_servers(provider, &config).await;
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    let seen = turn(&engine, &mut events, "change it", PermissionReply::Once).await;
+    assert_eq!(
+        completed(&tool_part(&seen, "mcp__changing__change")),
+        "the tool set moved"
+    );
+
+    // What the first turn was offered, which is the listing as it stood before
+    // anything changed. Without this the test would pass against a fixture that
+    // had always listed the tool the second turn is checked for.
+    let before = offered(
+        requests
+            .lock()
+            .expect("the request log is never poisoned")
+            .first()
+            .expect("the first turn asked the model something"),
+    );
+    assert!(
+        before.contains(&"mcp__changing__withdrawn".to_owned()),
+        "the tool that is about to be withdrawn has to be offered first: {before:?}"
+    );
+    assert!(
+        !before.contains(&"mcp__changing__added".to_owned()),
+        "the tool that is about to be added must not be offered yet: {before:?}"
+    );
+
+    // The notification travels on its own, so the surface is where it lands
+    // first. Waiting on that — rather than on a sleep — is what makes the turn
+    // below a question about the tool set and not about the clock.
+    let deadline = tokio::time::Instant::now() + READY;
+    while tokio::time::Instant::now() < deadline
+        && !servers
+            .tools()
+            .iter()
+            .any(|tool| tool.id() == "mcp__changing__added")
+    {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    turn(&engine, &mut events, "anything else", PermissionReply::Once).await;
+
+    let after = offered(
+        requests
+            .lock()
+            .expect("the request log is never poisoned")
+            .last()
+            .expect("the second turn asked the model something"),
+    );
+    assert!(
+        after.contains(&"mcp__changing__added".to_owned()),
+        "a tool the server announced was never offered to the model: {after:?}"
+    );
+    assert!(
+        !after.contains(&"mcp__changing__withdrawn".to_owned()),
+        "a tool the server stopped listing was still offered to the model: {after:?}"
     );
 
     engine.shutdown_mcp().await;
