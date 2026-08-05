@@ -59,18 +59,54 @@ pub const DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
 pub struct GrokProvider(OpenAiProvider);
 
 impl GrokProvider {
-    /// The provider against xAI's own endpoints.
+    /// The provider against xAI's own endpoints, for a session that has a login
+    /// to run as.
     ///
-    /// Nothing is read from the credential store here. The store is consulted
-    /// per request, which is what lets a login that happens *after* a session
-    /// started be picked up, and what makes a renewal mid-session visible to
-    /// the next request rather than to the next process.
+    /// The store is asked one question here — **is there a credential at all**
+    /// — and nothing else. No token is captured, no renewal is attempted, and
+    /// the answer is thrown away the moment it has been counted:
+    /// [`auth::list_providers`] hands back redacted tails rather than tokens, so
+    /// no key material crosses into `provider/` on this path even briefly. The
+    /// credential a request carries is still resolved per request, which is what
+    /// lets a login that happens *after* a session started be picked up, and
+    /// what makes a renewal mid-session visible to the next request rather than
+    /// to the next process.
+    ///
+    /// The probe is about the **starting** state, and only that. A session
+    /// begun with a credential that has since been logged out of keeps going
+    /// and fails at a request, exactly as before; a session begun *without* one
+    /// used to do the same, and that was the defect — every other provider
+    /// refuses at startup, where the message is readable and no terminal has
+    /// been put into raw mode, and grok having no environment variable to name
+    /// is not a reason for it to be the one that starts anyway.
+    ///
+    /// Any stored credential counts, not only an OAuth one. `ganja auth login
+    /// --provider grok` can store a plain key, and a key stored for a provider
+    /// that speaks OAuth is a different situation with a different message —
+    /// [`auth::AuthError::NotOauth`] already says which one, naming what is
+    /// stored — so answering it here would mean saying "log in" to somebody who
+    /// just did.
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderError::Transport`] when no HTTP client can be built,
-    /// which in practice means the TLS backend failed to initialize.
+    /// Returns [`ProviderError::Auth`] when nothing is stored for this provider,
+    /// or when the credential store exists and could not be read — those are
+    /// different situations needing different repairs, and only the first is
+    /// fixed by logging in. Returns [`ProviderError::Transport`] when no HTTP
+    /// client can be built, which in practice means the TLS backend failed to
+    /// initialize.
     pub fn from_stored() -> Result<Self, ProviderError> {
+        // `storage_key` rather than a second spelling: what the file calls this
+        // provider is `auth`'s to know, and asking is not writing it down.
+        let stored = auth::storage_key(ID);
+        let listed =
+            auth::list_providers().map_err(|error| ProviderError::Auth(error.to_string()))?;
+        if !listed.iter().any(|entry| entry.provider_id == stored) {
+            return Err(ProviderError::Auth(format!(
+                "no {ID} credential is stored; run `ganja auth login {ID}`"
+            )));
+        }
+
         let refresh = auth::grok::Refresh::new().map_err(|error| {
             // `Refresh::new` fails only where `client()` does, and for the same
             // reason, so it is classified the same way: nothing was refused.
@@ -179,7 +215,14 @@ mod tests {
     fn the_endpoint_is_xais_own_and_speaks_chat_completions() {
         assert_eq!(DEFAULT_BASE_URL, "https://api.x.ai/v1");
 
-        let provider = GrokProvider::from_stored().expect("a client builds");
+        // Built through `at` at the same constant `from_stored` passes, rather
+        // than through `from_stored` itself: that route now asks the credential
+        // store whether there is a login, and the store belongs to whoever is
+        // running the suite. What this test is about — the endpoint and the id
+        // — is the same either way, and `tests/grok_startup.rs` is where the
+        // probe is drilled, against an `XDG_DATA_HOME` it owns.
+        let provider =
+            GrokProvider::at(DEFAULT_BASE_URL, Arc::new(NeverRenews)).expect("a client builds");
         assert_eq!(provider.id(), ID, "not the wire it borrows");
 
         // A provider renders as which provider it is and where it points, and

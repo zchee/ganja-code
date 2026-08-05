@@ -82,7 +82,7 @@ Two suites need setup, and both are documented in `crates/ganja-core/tests/AGENT
 
 | Variable | Meaning |
 |---|---|
-| `GANJA_PROVIDER` | `anthropic` \| `openai` \| `grok` \| `fake`. Unset means `fake` with a notice in the status bar. `grok` is entered by `ganja auth login`, not by a key variable. |
+| `GANJA_PROVIDER` | `anthropic` \| `openai` \| `grok` \| `github-copilot` \| `fake`. Unset means `fake` with a notice in the status bar. `grok` and `github-copilot` are entered by `ganja auth login`, not by a key variable; `openai` speaks chat completions with an API key and the Responses API with a stored ChatGPT login. |
 | `GANJA_MODEL` | Overrides the catalog's default model for the selected provider. |
 | `GANJA_FAKE_SCRIPT` | Path to a JSON script the fake provider plays (text + tool calls per turn). How PTY tests and demos drive a deterministic agent. Read only on the `from_env` route, never by `FakeProvider::default()`. |
 | `GANJA_CONFIG` | An extra config file merged between the global tier and the project files. Naming a file that does not exist is an error, where an absent discovered file is nothing to merge. |

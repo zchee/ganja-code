@@ -55,6 +55,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::{
+    Engine as _, alphabet,
+    engine::{GeneralPurpose, general_purpose::NO_PAD_INDIFFERENT},
+};
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use secrecy::{ExposeSecret as _, SecretString, zeroize::Zeroize as _};
@@ -145,6 +149,107 @@ pub fn provider_id_for_storage_key(key: &str) -> &str {
         .map_or(key, |(ganja, _)| *ganja)
 }
 
+/// What a stored `expires` of zero means, which is not one answer.
+///
+/// Two providers write a zero into that field and mean opposite things by it.
+/// GitHub Copilot stores the OAuth token as its own credential with `expires:
+/// 0` (`copilot.ts:288-295`) and means **never expires** — there is no renewal
+/// endpoint for that credential at all, so one that ever reported itself due
+/// would be due forever. xAI's loader reads the same zero as **no deadline was
+/// recorded** and renews (`xai.ts:491`, `!currentAuth.expires ||`), because its
+/// token endpoint does not always answer with an `expires_in` to compute one
+/// from; ChatGPT's reads it the same way (`codex.ts:361`, where `0 <
+/// Date.now()` is true).
+///
+/// One field, two meanings, so the meaning belongs to the provider rather than
+/// to whoever is holding the number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZeroExpiry {
+    /// The credential has no deadline and never becomes due.
+    Never,
+    /// No deadline was recorded, so the access token's own `exp` is what says
+    /// — and a token carrying none says nothing either way.
+    Unrecorded,
+}
+
+/// Providers whose zero is a promise rather than a gap.
+///
+/// A list rather than a match arm so that adding a provider is adding a row
+/// beside this reason. Everything not named here reads a zero the way both of
+/// upstream's other OAuth providers do, which is also the safer default: a
+/// deadline nobody wrote down is not a deadline nobody has.
+const ZERO_EXPIRY_NEVER: &[&str] = &[copilot::PROVIDER_ID];
+
+/// What a zero in `provider_id`'s stored `expires` means.
+///
+/// Either spelling of a provider lands on the same rule — ganja's name and the
+/// file's must not disagree about the same credential, which is the one way
+/// [`STORAGE_ALIASES`] could turn into a bug here.
+#[must_use]
+pub fn zero_expiry(provider_id: &str) -> ZeroExpiry {
+    if ZERO_EXPIRY_NEVER.contains(&provider_id_for_storage_key(provider_id)) {
+        ZeroExpiry::Never
+    } else {
+        ZeroExpiry::Unrecorded
+    }
+}
+
+/// The engine a JWT payload is decoded with.
+///
+/// base64url, which JWS mandates (RFC 7515 §2), and **indifferent about
+/// padding** for the reason [`openai`]'s own copy of this constant is:
+/// producers mostly emit none, one that pads is not producing something this
+/// decode believes anyway, and refusing it would buy strictness with a renewal
+/// that silently never happens. The two are the same engine and have to stay
+/// so; this one is the parent module's, so the child's can be collapsed into it
+/// whenever that file is next open for another reason.
+const JWT_CLAIMS: GeneralPurpose = GeneralPurpose::new(&alphabet::URL_SAFE, NO_PAD_INDIFFERENT);
+
+/// When an access token itself says it stops being accepted, for one that says.
+///
+/// Spec: `plugin/xai.ts:95-116` (`accessTokenIsExpiring`), whose own comment is
+/// the entire warrant for decoding an unsigned token: "We only use this to
+/// decide whether to proactively refresh, never to make trust decisions, so
+/// unsigned decode is safe."
+///
+/// **The signature is not checked, and this is not validation** — the same
+/// posture [`openai`]'s `claimed_account` is written under, said again here
+/// because the value is read for a different purpose and the reasoning has to
+/// survive being read on its own. Nothing may be believed on this claim's word;
+/// the worst a forged `exp` can do is spend a refresh token early, which costs
+/// a round trip rather than an authorization.
+///
+/// A value that is not a JWS compact serialization contributes nothing, which
+/// is upstream's answer too: an opaque token has no deadline inside it, and the
+/// stored one is then all there is. Three segments exactly, where upstream
+/// takes two or more (`xai.ts:105`) — a two-segment string is not a token any
+/// issuer minted, and accepting one would let an arbitrary `a.<base64>` value
+/// decide when a credential gets renewed.
+fn token_deadline_ms(access: &SecretString) -> Option<u64> {
+    // The fourth `expose_secret` in this module, and the second that reads a
+    // token in order to say something *about* it rather than to use it: what
+    // leaves here is a number, and a token that will not decode leaves nothing.
+    let token = access.expose_secret();
+    let mut segments = token.split('.');
+    segments.next()?;
+    let payload = segments.next()?;
+    segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+
+    let claims: Value = serde_json::from_slice(&JWT_CLAIMS.decode(payload).ok()?).ok()?;
+
+    claims
+        .get("exp")
+        // RFC 7519 §2 allows a NumericDate to be non-integer and every issuer
+        // met so far emits whole seconds; one that did not would decode as a
+        // float here, contribute nothing, and leave the stored deadline in
+        // charge — which is the same place a token with no `exp` leaves it.
+        .and_then(Value::as_u64)
+        .map(|seconds| seconds.saturating_mul(1_000))
+}
+
 /// The last few characters of a secret, which is all any output may show.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RedactedTail(String);
@@ -208,10 +313,11 @@ fn is_blank(secret: &SecretString) -> bool {
 /// An API key, and the only thing a provider needs to authenticate.
 ///
 /// The key is held in a [`SecretString`], so reading it back takes an explicit
-/// `expose_secret` — this module has three: [`RedactedTail::of_secret`] and
-/// [`is_blank`], which exist to avoid using the key rather than to use it, and
-/// [`Store::set`], which has to hand the plaintext to the serializer that
-/// writes it to disk — and the material is wiped when the last handle drops
+/// `expose_secret` — this module has four: [`RedactedTail::of_secret`],
+/// [`is_blank`] and [`token_deadline_ms`], which read a secret in order to say
+/// something *about* it rather than to use it, and [`Store::set`], which has to
+/// hand the plaintext to the serializer that writes it to disk — and the
+/// material is wiped when the last handle drops
 /// along every path this module controls. There is deliberately no `PartialEq`:
 /// comparing secrets is not something this crate needs, and an implementation
 /// of it would be a timing oracle nobody asked for.
@@ -271,11 +377,15 @@ pub struct OauthCredential {
     /// When [`access`](Self::access) stops being accepted, in milliseconds
     /// since the Unix epoch.
     ///
-    /// **Zero means it never expires**, which is how Copilot's credential is
-    /// stored (`copilot.ts:294`) — not "expired in 1970". [`needs_refresh`] is
-    /// the only thing that should be reading this directly.
+    /// **Zero is never "expired in 1970", and it does not mean one thing.** It
+    /// is Copilot's *never expires* (`copilot.ts:294`) and xAI's *no deadline
+    /// was recorded* (`xai.ts:491`) written into the same field by two
+    /// providers, so which of them a zero means is [`zero_expiry`]'s to say and
+    /// not a reader's to assume. [`needs_refresh`] and [`needs_refresh_for`]
+    /// are the only things that should be reading this directly.
     ///
     /// [`needs_refresh`]: Self::needs_refresh
+    /// [`needs_refresh_for`]: Self::needs_refresh_for
     pub expires: u64,
     /// The account a request is billed to, where the provider has more than one.
     #[serde(rename = "accountId", default)]
@@ -335,15 +445,65 @@ impl OauthCredential {
         !is_blank(&self.access) || !is_blank(&self.refresh)
     }
 
-    /// Whether [`access`](Self::access) is spent, or close enough to it that a
+    /// Whether the *stored* deadline is spent, or close enough to it that a
     /// request started now might outlive it.
     ///
-    /// `expires == 0` is upstream's "never" and is never due. `skew_ms` is the
-    /// margin: upstream refreshes two minutes early so that a single long tool
-    /// call does not have to recover from a mid-flight 401 (`xai.ts:44`).
+    /// `expires == 0` reads as "never" here — Copilot's meaning, and the one
+    /// this predicate has always had. It answers the narrow question the field
+    /// alone can answer, which is why
+    /// [`usable_access`](Self::usable_access) asks it: whether a token may be
+    /// *sent* is the stored record's business and nothing else's.
+    ///
+    /// **The renewal decision is [`needs_refresh_for`](Self::needs_refresh_for)**,
+    /// which reads a zero the way the credential's own provider writes one and
+    /// falls back to the deadline inside the access token. A caller deciding
+    /// whether to spend a refresh token wants that one; this one cannot tell
+    /// Copilot's promise from xAI's silence, and telling them apart is the
+    /// whole reason there are two.
+    ///
+    /// `skew_ms` is the margin: upstream refreshes two minutes early so that a
+    /// single long tool call does not have to recover from a mid-flight 401
+    /// (`xai.ts:44`).
     #[must_use]
     pub fn needs_refresh(&self, now_ms: u64, skew_ms: u64) -> bool {
         self.expires != 0 && self.expires <= now_ms.saturating_add(skew_ms)
+    }
+
+    /// Whether this credential is due for renewal, under `provider_id`'s own
+    /// reading of what it carries.
+    ///
+    /// This is the renewal decision, and [`Refresher`] is what asks it. Two
+    /// things separate it from [`needs_refresh`](Self::needs_refresh):
+    ///
+    /// - a zero in [`expires`](Self::expires) means whatever [`zero_expiry`]
+    ///   says it means for this provider, rather than Copilot's "never" for
+    ///   everybody;
+    /// - where the stored deadline says nothing, the deadline *inside the
+    ///   access token* does — upstream's own comment (`xai.ts:485-490`) calls
+    ///   that check "the load-bearing one for tokens that lack a fresh stored
+    ///   deadline", because xAI's token endpoint does not always send an
+    ///   `expires_in` to compute one from.
+    ///
+    /// The token's own claim is **only ever a reason to renew**. Nothing here
+    /// is a trust decision — see [`token_deadline_ms`], which checks no
+    /// signature — and [`usable_access`](Self::usable_access) deliberately does
+    /// not consult it: a forged `exp` must not be able to make a credential the
+    /// store calls live unusable.
+    #[must_use]
+    pub fn needs_refresh_for(&self, provider_id: &str, now_ms: u64, skew_ms: u64) -> bool {
+        let horizon = now_ms.saturating_add(skew_ms);
+
+        if self.expires == 0 && zero_expiry(provider_id) == ZeroExpiry::Never {
+            // A promise, and nothing may talk it out of one: this provider has
+            // no renewal endpoint at all, so a credential that ever reported
+            // itself due would report it forever.
+            return false;
+        }
+        if self.expires != 0 && self.expires <= horizon {
+            return true;
+        }
+
+        token_deadline_ms(&self.access).is_some_and(|deadline| deadline <= horizon)
     }
 
     /// The token a request should carry, or why it cannot have one.
@@ -974,6 +1134,44 @@ impl From<AuthError> for RefreshError {
 /// A refresh in progress, shared by everyone who asked for one.
 type Pending = Shared<BoxFuture<'static, Result<OauthCredential, RefreshError>>>;
 
+/// Runs the credential store's blocking file I/O off the async runtime.
+///
+/// [`Refresher`] sits on the per-request path of every OAuth provider, and
+/// every question it answers begins by reading `auth.json` — a `stat`, an open
+/// and a read against whatever filesystem the home directory happens to live
+/// on, which on a network mount is not a bounded wait. Doing that inline stalls
+/// the executor thread it is polled on, and on a single-threaded runtime that
+/// is the only thread there is: the frontend's render loop and every other
+/// request in the turn stop with it.
+///
+/// **This is not a cache, and the read must not become one.** Re-reading per
+/// request is load-bearing: it is what closes the window in which another ganja
+/// process — or another turn in this one — has already renewed the credential
+/// this caller is about to spend, and with a rotating refresh token spending a
+/// stale one logs somebody out mid-turn. Moving the read off the executor keeps
+/// that property exactly and costs a thread hop.
+///
+/// Key providers are untouched by this: [`credential_for`] is synchronous and
+/// is called once at startup, where blocking is what a startup does.
+async fn blocking<T, F>(work: F) -> Result<T, AuthError>
+where
+    F: FnOnce() -> Result<T, AuthError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        // The pool cancels a task only as the runtime shuts down, and a panic
+        // inside `work` is a bug in this module rather than a state the store
+        // is in. Either way the file was not read, which is a storage failure
+        // and is reported as one: "there is nothing stored" is the single
+        // answer that would be wrong, because it reads as "log in again".
+        Err(source) => Err(AuthError::Io {
+            context: "the credential store could not be read off the runtime".to_owned(),
+            source: io::Error::other(source),
+        }),
+    }
+}
+
 /// Renews expired OAuth credentials, once per provider however many callers ask.
 ///
 /// A turn can have several requests in the air at once, and an access token
@@ -1040,7 +1238,9 @@ impl Refresher {
         // Read once rather than through `Store::oauth`: saying what *is* stored
         // when there is no OAuth credential needs the same entry, and a second
         // read would be a second trip through the permission check as well.
-        let data = Store::open()?.read()?;
+        // Through `blocking`, because this is a file and this line is on the
+        // per-request path of every OAuth provider.
+        let data = blocking(|| Store::open().and_then(|store| store.read())).await?;
         let entry = data.get(&key);
         let Some(current) = entry.and_then(usable_oauth) else {
             return Err(AuthError::NotOauth {
@@ -1049,7 +1249,7 @@ impl Refresher {
             }
             .into());
         };
-        if !current.needs_refresh(now_ms(), REFRESH_SKEW_MS) {
+        if !current.needs_refresh_for(provider_id, now_ms(), REFRESH_SKEW_MS) {
             return Ok(current);
         }
 
@@ -1091,8 +1291,19 @@ impl Refresher {
                     // presenting a refresh token that has already been rotated
                     // away is how a live login gets refused. Reading again
                     // costs one small file and settles it.
-                    let current = match Store::open().and_then(|store| store.oauth(&key)) {
-                        Ok(Some(stored)) if !stored.needs_refresh(now_ms(), REFRESH_SKEW_MS) => {
+                    let reread = blocking({
+                        let key = key.clone();
+                        move || Store::open().and_then(|store| store.oauth(&key))
+                    })
+                    .await;
+                    let current = match reread {
+                        Ok(Some(stored))
+                            if !stored.needs_refresh_for(
+                                &provider_id,
+                                now_ms(),
+                                REFRESH_SKEW_MS,
+                            ) =>
+                        {
                             return Ok(stored);
                         }
                         Ok(Some(stored)) => stored,
@@ -1108,9 +1319,17 @@ impl Refresher {
                         .map_err(RefreshError::from)?
                         .inheriting(&current);
 
-                    if let Err(error) =
-                        Store::open().and_then(|store| store.set_oauth(&key, &renewed))
-                    {
+                    // Off the executor for the reason the reads are: this is a
+                    // create, a write, an fsync and a rename, and it happens
+                    // while every caller that joined this renewal is waiting
+                    // on it.
+                    let written = blocking({
+                        let key = key.clone();
+                        let renewed = renewed.clone();
+                        move || Store::open().and_then(|store| store.set_oauth(&key, &renewed))
+                    })
+                    .await;
+                    if let Err(error) = written {
                         tracing::warn!(
                             provider = %provider_id,
                             %error,
@@ -1385,8 +1604,9 @@ mod tests {
 
     use super::{
         AuthError, AuthErrorKind, Credential, CredentialKind, Entry, KEY_VARS, OauthCredential,
-        REFRESH_SKEW_MS, RedactedTail, Source, Store, credential_for, key_var, list_providers,
-        now_ms, provider_id_for_storage_key, set_credential, storage_key, store_path,
+        REFRESH_SKEW_MS, RedactedTail, Source, Store, ZeroExpiry, credential_for, key_var,
+        list_providers, now_ms, provider_id_for_storage_key, set_credential, storage_key,
+        store_path, zero_expiry,
     };
 
     /// A key that exists only to be hunted for in output. Nothing may print it
@@ -1438,6 +1658,46 @@ mod tests {
 
     fn temporary() -> TempDir {
         TempDir::new().expect("a temporary directory is creatable")
+    }
+
+    /// The instant the predicate tests read as "now", so that every deadline
+    /// below is a stated distance from one fixed point rather than from a
+    /// clock.
+    const NOW_MS: u64 = 1_785_000_000_000;
+
+    /// The same instant in whole seconds, which is the unit a JWT states its
+    /// claims in.
+    const NOW_S: u64 = NOW_MS / 1_000;
+
+    /// A JWS compact serialization issued at `issued_at` and expiring at
+    /// `expires_at`, both in seconds, signed by nobody.
+    ///
+    /// The signature is a placeholder because it is never looked at — that is
+    /// the posture these tests exist to pin, not an omission.
+    ///
+    /// `iat` and `nbf` are carried because they are the two other claims in a
+    /// real token that are *also* NumericDates, and because every caller below
+    /// gives them a value that makes reading one instead of `exp` a **wrong**
+    /// answer rather than no answer: a token still good for a day was issued
+    /// now, so a decode looking at `iat` calls it spent.
+    fn jwt(issued_at: u64, expires_at: u64) -> SecretString {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let payload = URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "iat": issued_at,
+                "nbf": issued_at,
+                "exp": expires_at,
+            })
+            .to_string(),
+        );
+
+        SecretString::from(format!("eyJhbGciOiJSUzI1NiJ9.{payload}.not-a-signature"))
+    }
+
+    /// A credential with `expires` stored and `access` as given.
+    fn credential(access: SecretString, expires: u64) -> OauthCredential {
+        OauthCredential::new(SecretString::from("rt-anything"), access, expires)
     }
 
     /// Everything an error would print, the way `anyhow` renders one: the
@@ -1709,6 +1969,12 @@ mod tests {
     /// Copilot's credential never expires (`copilot.ts:294` stores `expires:
     /// 0`), and reading that as "expired in 1970" would have every request
     /// renewing a token that has no renewal endpoint.
+    ///
+    /// This is the *stored deadline* alone, which is the narrow question
+    /// [`OauthCredential::needs_refresh`] answers. Whether a zero means what it
+    /// means here is `a_zero_expiry_is_copilots_promise_and_xais_silence`'s, and
+    /// the renewal decision that reads both is
+    /// `a_tokens_own_expiry_decides_a_renewal_the_stored_one_cannot`'s.
     #[test]
     fn a_credential_is_due_only_before_the_moment_it_expires() {
         let never = OauthCredential::new(SecretString::from("r"), SecretString::from("a"), 0);
@@ -1740,6 +2006,126 @@ mod tests {
                 now + 86_400_000
             )
             .needs_refresh(now, REFRESH_SKEW_MS)
+        );
+    }
+
+    /// Two providers write a zero into the same field and mean opposite things
+    /// by it, so the field alone cannot answer the question and the provider
+    /// has to.
+    ///
+    /// Collapsing the two readings back into one — whichever one — reddens this
+    /// test, which is the point of it: the bug it guards against is not a wrong
+    /// answer but a single answer.
+    #[test]
+    fn a_zero_expiry_is_copilots_promise_and_xais_silence() {
+        assert_eq!(zero_expiry("github-copilot"), ZeroExpiry::Never);
+        assert_eq!(zero_expiry("grok"), ZeroExpiry::Unrecorded);
+        assert_eq!(
+            zero_expiry("xai"),
+            ZeroExpiry::Unrecorded,
+            "the file's name for a provider and ganja's must not disagree about \
+             the same credential"
+        );
+        assert_eq!(
+            zero_expiry("some-provider-nobody-has-written-yet"),
+            ZeroExpiry::Unrecorded,
+            "a deadline nobody wrote down is not a deadline nobody has"
+        );
+
+        // One credential, byte for byte, read by two providers' rules: no
+        // stored deadline, and an access token whose own is exactly now.
+        let same_bytes = credential(jwt(NOW_S - 3_600, NOW_S), 0);
+
+        assert!(
+            !same_bytes.needs_refresh_for("github-copilot", NOW_MS, REFRESH_SKEW_MS),
+            "Copilot's zero is a promise that it never expires (`copilot.ts:294`), \
+             and there is no renewal endpoint to send a due credential to"
+        );
+        assert!(
+            same_bytes.needs_refresh_for("grok", NOW_MS, REFRESH_SKEW_MS),
+            "xAI's zero is a deadline nobody recorded (`xai.ts:491`), so the \
+             token's own is what decides"
+        );
+    }
+
+    /// Upstream decodes the access token's own `exp` and treats it as the
+    /// deadline for a credential whose stored one says nothing
+    /// (`xai.ts:95-116`, and `:485-490` for why: "the JWT check is the
+    /// load-bearing one for tokens that lack a fresh stored deadline").
+    #[test]
+    fn a_tokens_own_expiry_decides_a_renewal_the_stored_one_cannot() {
+        // Issued an hour ago, a minute of life left.
+        assert!(
+            credential(jwt(NOW_S - 3_540, NOW_S + 60), 0).needs_refresh_for(
+                "grok",
+                NOW_MS,
+                REFRESH_SKEW_MS
+            ),
+            "a minute left is inside the two-minute margin one long tool call needs"
+        );
+        // Issued this second, good for a day. Its `iat` and `nbf` are both
+        // already past, so a decode reading either instead of `exp` calls this
+        // spent and this assertion is what says so.
+        assert!(
+            !credential(jwt(NOW_S, NOW_S + 86_400), 0).needs_refresh_for(
+                "grok",
+                NOW_MS,
+                REFRESH_SKEW_MS
+            ),
+            "a token good for a day has said so, and spending a rotating refresh \
+             token on it costs a round trip for nothing"
+        );
+
+        // Everything that is not a JWT carrying an `exp` contributes nothing,
+        // which leaves the stored deadline — here, absent — in charge.
+        for opaque in [
+            "at-opaque-nothing-to-decode",
+            "two.segments",
+            "four.of.these.things",
+            "eyJhbGciOiJSUzI1NiJ9.!!!not-base64!!!.sig",
+        ] {
+            assert!(
+                !credential(SecretString::from(opaque), 0).needs_refresh_for(
+                    "grok",
+                    NOW_MS,
+                    REFRESH_SKEW_MS
+                ),
+                "{opaque} is not a token with a deadline in it"
+            );
+        }
+
+        let no_exp = {
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+            let payload = URL_SAFE_NO_PAD.encode(r#"{"sub":"someone"}"#);
+            SecretString::from(format!("eyJhbGciOiJSUzI1NiJ9.{payload}.sig"))
+        };
+        assert!(
+            !credential(no_exp, 0).needs_refresh_for("grok", NOW_MS, REFRESH_SKEW_MS),
+            "a JWT that names no `exp` names no deadline"
+        );
+    }
+
+    /// The `exp` inside an access token is a reason to renew and never a reason
+    /// to refuse. Nobody checked the signature, so a forged claim must not be
+    /// able to make a credential the store calls live unusable.
+    #[test]
+    fn a_tokens_own_expiry_never_decides_whether_it_may_be_sent() {
+        // A token that says it died yesterday, stored with a deadline a day out
+        // — which is exactly the disagreement a forged claim would manufacture.
+        let credential = credential(jwt(NOW_S - 90_000, NOW_S - 86_400), NOW_MS + 86_400_000);
+
+        assert!(
+            credential.needs_refresh_for("grok", NOW_MS, REFRESH_SKEW_MS),
+            "the token says it is spent, which is a reason to renew it early"
+        );
+        assert!(
+            credential.usable_access("grok", NOW_MS).is_ok(),
+            "and never a reason to refuse to send what the store calls live"
+        );
+        assert!(
+            !credential.needs_refresh(NOW_MS, REFRESH_SKEW_MS),
+            "the stored-deadline predicate is deliberately blind to the claim"
         );
     }
 
