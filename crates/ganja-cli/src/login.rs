@@ -84,10 +84,11 @@ impl ProviderId {
             // choose between.
             Self::Anthropic => &[Method::Api],
             Self::OpenAi => &[Method::Browser, Method::Device, Method::Api],
-            // Upstream's xAI plugin offers a loopback method too
-            // (`xai.ts:551-584`); this build ports only the device grant, which
-            // is the one that works over SSH and in a container.
-            Self::Grok => &[Method::Device, Method::Api],
+            // Upstream's own order for xAI too (`xai.ts:551`, `:594`, `:619`):
+            // the loopback method first, because somebody sitting in front of a
+            // browser is who a terminal login usually belongs to, then the
+            // device grant that needs no browser here at all.
+            Self::Grok => &[Method::Browser, Method::Device, Method::Api],
             // One method upstream too (`copilot.ts:182-185`). The API-key entry
             // is ganja's: `auth.json` is a key-value file that a shared
             // opencode install also reads, and refusing to write a line into it
@@ -99,15 +100,17 @@ impl ProviderId {
     /// What this provider does when nothing named a method and there is
     /// somebody at the terminal to ask.
     ///
-    /// [`None`] means ask. Only ChatGPT does: the other three have one login
-    /// each worth offering, and a menu with one item is a keystroke charged for
-    /// nothing (upstream skips the prompt at `providers.ts:47` for the same
-    /// reason).
+    /// [`None`] means ask. The two providers with an OAuth flow of each kind do:
+    /// a browser login and a device login are genuinely different situations —
+    /// whether there is a browser on *this* machine — and nothing here can tell
+    /// which one somebody is in. The other two have one login each worth
+    /// offering, and a menu with one item is a keystroke charged for nothing
+    /// (upstream skips the prompt at `providers.ts:47` for the same reason).
     fn only_login(self) -> Option<Method> {
         match self {
             Self::Anthropic => Some(Method::Api),
-            Self::Grok | Self::GithubCopilot => Some(Method::Device),
-            Self::OpenAi => None,
+            Self::GithubCopilot => Some(Method::Device),
+            Self::Grok | Self::OpenAi => None,
         }
     }
 }
@@ -160,8 +163,9 @@ pub(crate) fn chosen(
 /// `method`, when `provider` has it.
 ///
 /// The refusals are real rather than a policy: there is no Anthropic OAuth
-/// flow in the pin and no browser flow for the two device-grant providers, so
-/// an invocation naming one is asking for something that does not exist.
+/// flow in the pin and no browser flow for Copilot, whose only OAuth method
+/// upstream is the device grant — so an invocation naming one is asking for
+/// something that does not exist.
 fn accepted(provider: ProviderId, method: Method) -> Result<Method> {
     if provider.methods().contains(&method) {
         return Ok(method);
@@ -180,13 +184,15 @@ fn accepted(provider: ProviderId, method: Method) -> Result<Method> {
 
 /// What a menu calls one of a provider's logins.
 ///
-/// Upstream's own labels where it has one (`openai.ts:44`, `:101`), because
-/// the words on the screen are the part somebody recognises from having read
-/// its documentation.
+/// Upstream's own labels where it has one (`openai.ts:44`, `:101`; `xai.ts:552`,
+/// `:594`), because the words on the screen are the part somebody recognises
+/// from having read its documentation.
 fn label(provider: ProviderId, method: Method) -> String {
     match (provider, method) {
         (ProviderId::OpenAi, Method::Browser) => "ChatGPT Pro/Plus (browser)".to_owned(),
         (ProviderId::OpenAi, Method::Device) => "ChatGPT Pro/Plus (headless)".to_owned(),
+        (ProviderId::Grok, Method::Browser) => "xAI Grok OAuth (SuperGrok Subscription)".to_owned(),
+        (ProviderId::Grok, Method::Device) => "xAI Grok OAuth (Headless / Remote / VPS)".to_owned(),
         (_, Method::Api) => "Manually enter API Key".to_owned(),
         (_, method) => format!("{provider} ({method})"),
     }
@@ -210,6 +216,11 @@ pub(crate) async fn oauth(
     let _interrupt = Interrupt::watching(cancel.clone());
 
     match (provider, method) {
+        (ProviderId::Grok, Method::Browser) => {
+            let tokens = grok_browser(&cancel).await?;
+
+            Ok(grok::credential_from(&tokens))
+        }
         (ProviderId::Grok, Method::Device) => {
             let tokens = device(&grok_flow()?, &cancel).await?;
 
@@ -244,6 +255,22 @@ async fn device(flow: &DeviceFlow, cancel: &CancellationToken) -> Result<Tokens>
     announce(started.browser_url(), &started.user_code);
 
     flow.poll(&started, cancel).await.map_err(nothing_stored)
+}
+
+/// xAI through a browser on this machine (`xai.ts:551-584`).
+///
+/// The same two-step shape a device grant has, and for the same reason: the URL
+/// has to be on the screen before anything blocks on somebody having opened it.
+/// The socket is bound by `start` — before the URL exists — so a browser opened
+/// here can never finish the login into a port nothing is listening on.
+async fn grok_browser(cancel: &CancellationToken) -> Result<Tokens> {
+    let browser = grok_browser_flow()?.start().await.map_err(nothing_stored)?;
+    announce(browser.url(), "");
+
+    browser
+        .wait(grok::CALLBACK_DEADLINE, cancel)
+        .await
+        .map_err(nothing_stored)
 }
 
 /// ChatGPT through a browser on this machine (`openai.ts:39-94`).
@@ -336,6 +363,25 @@ fn grok_flow() -> Result<DeviceFlow> {
 
     grok::device_flow_at(
         format!("{origin}/oauth2/device/code"),
+        format!("{origin}/oauth2/token"),
+    )
+    .map_err(nothing_stored)
+}
+
+/// The grok browser login, against xAI or against whatever redirected it.
+///
+/// The paths are the ones xAI publishes (`xai.ts:11`, `:12`), so a redirected
+/// login exercises the same routing the real one does. **The callback port is
+/// not redirected with them**: it is part of somebody else's client
+/// registration rather than an address this build chose, so there is nothing
+/// here for an override to mean.
+fn grok_browser_flow() -> Result<grok::BrowserFlow> {
+    let Some(origin) = issuer()? else {
+        return grok::browser_flow().map_err(nothing_stored);
+    };
+
+    grok::browser_flow_at(
+        format!("{origin}/oauth2/authorize"),
         format!("{origin}/oauth2/token"),
     )
     .map_err(nothing_stored)
@@ -545,7 +591,7 @@ pub(crate) fn stored(
 
 #[cfg(test)]
 mod tests {
-    use super::{Method, loopback_origin};
+    use super::{Method, accepted, label, loopback_origin};
     use crate::ProviderId;
 
     /// Every pairing the CLI can be asked for, so a login that exists is never
@@ -557,7 +603,10 @@ mod tests {
             ProviderId::OpenAi.methods(),
             [Method::Browser, Method::Device, Method::Api]
         );
-        assert_eq!(ProviderId::Grok.methods(), [Method::Device, Method::Api]);
+        assert_eq!(
+            ProviderId::Grok.methods(),
+            [Method::Browser, Method::Device, Method::Api]
+        );
         assert_eq!(
             ProviderId::GithubCopilot.methods(),
             [Method::Device, Method::Api]
@@ -567,11 +616,56 @@ mod tests {
     /// A menu is only worth drawing when there is something to choose, and
     /// upstream skips it for the same reason (`providers.ts:47`).
     #[test]
-    fn only_the_provider_with_more_than_one_login_is_asked_which() {
+    fn only_the_providers_with_more_than_one_login_are_asked_which() {
         assert_eq!(ProviderId::Anthropic.only_login(), Some(Method::Api));
-        assert_eq!(ProviderId::Grok.only_login(), Some(Method::Device));
         assert_eq!(ProviderId::GithubCopilot.only_login(), Some(Method::Device));
         assert_eq!(ProviderId::OpenAi.only_login(), None);
+        assert_eq!(
+            ProviderId::Grok.only_login(),
+            None,
+            "a browser login and a device login answer different questions about \
+             this machine, and nothing here can tell which one somebody is in"
+        );
+    }
+
+    /// The menu is what somebody without `--method` actually reads, so the words
+    /// on it are worth pinning — they are upstream's, which is what makes them
+    /// recognisable to anybody who arrived from its documentation.
+    #[test]
+    fn groks_menu_offers_upstreams_two_oauth_logins_by_upstreams_names() {
+        let offered: Vec<String> = ProviderId::Grok
+            .methods()
+            .iter()
+            .map(|method| label(ProviderId::Grok, *method))
+            .collect();
+
+        assert_eq!(
+            offered,
+            [
+                "xAI Grok OAuth (SuperGrok Subscription)",
+                "xAI Grok OAuth (Headless / Remote / VPS)",
+                "Manually enter API Key",
+            ],
+            "xai.ts:552, :594, :620"
+        );
+    }
+
+    /// The refusal names what the provider does have, so gaining a login has to
+    /// change the sentence as well as the table.
+    #[test]
+    fn grok_accepts_a_browser_login_and_says_so_when_asked_for_one_it_lacks() {
+        assert_eq!(
+            accepted(ProviderId::Grok, Method::Browser).expect("grok has a browser login"),
+            Method::Browser
+        );
+
+        let refused = accepted(ProviderId::Anthropic, Method::Browser)
+            .expect_err("anthropic has no OAuth flow in the pin")
+            .to_string();
+        assert!(
+            refused.contains("`browser`") && refused.contains("`api`"),
+            "{refused}"
+        );
     }
 
     /// The variable decides where a device code and then a pair of tokens are
