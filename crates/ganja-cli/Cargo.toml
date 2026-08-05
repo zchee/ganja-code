@@ -28,6 +28,9 @@ clap.workspace = true
 # exposes its own paths but not the data home they hang under. `auth.rs` and
 # `project.rs` already each resolve it this way; this is the third.
 etcetera.workspace = true
+# `run` consumes the engine's event stream, which arrives as a `BoxStream`.
+# Naming the crate is the only way to reach the `Stream` trait behind it.
+futures.workspace = true
 ganja-core.workspace = true
 # `sessions` prints a stored session's cost and the importer decides where a
 # project's config lives, so the binary names a worktree and a usage total
@@ -48,6 +51,11 @@ ratatui.workspace = true
 # A typed or piped key is wrapped the moment it is whole, and the buffer it was
 # assembled in is wiped rather than left in the heap.
 secrecy.workspace = true
+# `run --format json` writes one object per event, and the parts it carries are
+# serde-derived: composing that by hand would be a JSON escaper nobody reviewed.
+# The pty and importer tests read documents with it too, which is why it sits
+# here rather than under the dev tier it used to.
+serde_json.workspace = true
 tokio.workspace = true
 # The binary is where the log sink is chosen, because it is the only crate that
 # knows whether a terminal is about to be taken over. The library crates trace;
@@ -62,9 +70,6 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
-# The pty tests write the fake provider's script and read the permission rules
-# a session stored, both of which are JSON documents rather than text.
-serde_json.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]

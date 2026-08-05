@@ -1062,6 +1062,7 @@ dependencies = [
  "clap",
  "etcetera",
  "expectrl",
+ "futures",
  "ganja-core",
  "ganja-permission",
  "ganja-protocol",

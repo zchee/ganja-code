@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The binary's whole surface: clap parsing, the credential subcommands, the config importer, the model listing, and the terminal prompt that reads an API key without echoing it.
+The binary's whole surface: clap parsing, the credential subcommands, the config importer, the model listing, the headless turn, and the terminal prompt that reads an API key without echoing it.
 
 ## Key Files
 
@@ -13,6 +13,7 @@ The binary's whole surface: clap parsing, the credential subcommands, the config
 |------|-------------|
 | `main.rs` | `Cli`/`Command`/`Auth`/`Config` clap types, `login`/`list`/`logout`, `models`, `mcp`, and the raw-mode key prompt. No subcommand delegates straight to `ganja_tui::run()`. |
 | `import.rs` | `ganja config import-opencode`: discovery of opencode's config tiers, the key mapping, the mapped/skipped table, and the JSON writer that produces a `ganja.json`. |
+| `run.rs` | `ganja run`: assembles the same `Engine` the TUI drives, takes one turn, writes an account of it, and exits. Spec: upstream `packages/opencode/src/cli/cmd/run.ts`, its non-interactive branch. |
 
 ## For AI Agents
 
@@ -49,12 +50,24 @@ The two listings each have one rule that is not obvious from their code:
 - **`mcp` dials.** A standing nothing has tried is not a standing, so the listing connects every enabled server and reports what came of it — and reads the statuses and the tools it lends *before* it shuts them down again, because closing a connection takes its tools with it. The rows are driven by the config rather than by the statuses, which deliberately omit a server nothing has finished trying: a row that could silently vanish is worse than one reporting it has no standing. Nothing here wants a credential, so no engine is built, for the reason `sessions` reads the store directly.
 - **`sessions` lists roots.** A session carrying a `parent` belongs to the `task` call that spawned it; the picker in `ganja-tui` filters the same way, and filtering before the count is what makes a project whose every session is delegated read as one with none.
 
+`run` is the one subcommand that takes a turn, and every rule it has exists because nobody is watching it:
+
+- **It drives the concrete `Engine`, not a transport.** Upstream reaches its own engine through a loopback HTTP client and therefore has an `--attach` that reaches somebody else's; ganja has neither a server nor a second transport, so `run` calls the engine the TUI calls, assembled in the same order and for the same reasons (deviation: `run-drives-the-engine-directly`).
+- **Subscribe before prompting.** Upstream's ordering, kept for a different reason: ganja's queue is created with the engine and is lossless, so a late subscriber does not lose the head of the turn — it *wedges* once the turn fills a queue nobody drains.
+- **The session id is a local**, captured before a single event is read, and stamped on every emitted object. Upstream additionally filters other sessions out per event; this build has nothing to filter, because a subagent's events never reach the subscribed stream at all (`ganja-core/tests/task.rs` pins that, and `../tests/run.rs` pins the corollary here) — a documented divergence, not an omission.
+- **Nothing waits on a person.** Two mechanisms, both ported: the session refuses `question`/`plan_enter`/`plan_exit` at every pattern — tools this build does not have yet, which is the point, since it makes a later `question` safe in `run` by construction — and a live request is answered the moment it arrives, `once` under `--auto`/`--yolo`/`--dangerously-skip-permissions` and otherwise a warning plus `reject`.
+- **Those refusal rules are installed after `with_agents`, never before.** `Engine::with_agents` installs the default agent's ruleset as the baseline *wholesale*, so rules written earlier are thrown away; they are appended to the agent's own, which is where last-match-wins needs them.
+- **`--format json` carries exactly six `type` names** — `tool_use`, `step_start`, `step_finish`, `text`, `reasoning`, `error` — and this build has five sources for them: ganja's protocol has no reasoning part, so `reasoning` is a name a consumer must still handle and nothing here emits (deviation: `run-emits-no-reasoning`). Text has no completion event of its own; the step's `step_finish` marker is what closes it, so text is accumulated and written when the step ends.
+- **A flag ganja cannot honor is absent, not stubbed.** `--attach`, `--port`, `--mini`, `--share`, `--file`, `--title`, `--variant`, `--thinking` and the rest name features this build has no surface for. `--fork` is the exception, and deliberately so: upstream's *validation* of it is worth keeping whole, so the flag parses, `--fork` without `--continue`/`--session` is refused exactly as upstream refuses it, and a `--fork` that survives that is refused loudly because nothing in `ganja-core` copies a session.
+- **Payload on stdout, diagnostics on stderr.** Upstream mixes its warnings into stdout; here a warning inside `--format json`'s stream would corrupt it, so the account of the turn is the only thing on stdout. A failure is emitted as an `error` object *and* returned, and the caller prints it once on its way to exit 1 — never the same sentence twice.
+
 ### Testing Requirements
 
 ```sh
 cargo test -p ganja-cli --test cli
 cargo test -p ganja-cli --bin ganja            # the mapping table lives beside the mapping
 cargo test -p ganja-cli --test import_opencode
+cargo test -p ganja-cli --test run             # the exit-code table and the nd-JSON shape
 ```
 
 Adding a subcommand means adding its assertion there; adding anything that handles key material means proving the key does not reach stdout, stderr, or a stored file in the clear.
@@ -67,10 +80,10 @@ Adding a subcommand means adding its assertion there; adding anything that handl
 
 ### Internal
 
-`ganja_core::auth` (store, list, remove, redaction), `ganja_core::catalog` (the `models` table), `ganja_core::config::Config` (what the importer's output has to decode as), `ganja_core::lsp::server::BUILTIN_IDS` (which language servers this build ships, so the CLI's answer and the engine's cannot drift), `ganja_core::Project` (the import's project walk and destination), `ganja_tui::run`.
+`ganja_core::auth` (store, list, remove, redaction), `ganja_core::catalog` (the `models` table), `ganja_core::config::Config` (what the importer's output has to decode as, and what `run` assembles an engine from), `ganja_core::lsp::server::BUILTIN_IDS` (which language servers this build ships, so the CLI's answer and the engine's cannot drift), `ganja_core::Project` (the import's project walk and destination, and where `run`'s session store lives), `ganja_core::Engine` + `provider::select` + `instruction` + `permission` + `tool::Registry` (everything `run` needs to take a turn), `ganja_tui::run`.
 
 ### External
 
-`clap`, `anyhow`, `tokio`, `secrecy` (+ `zeroize`), `ratatui`'s crossterm re-export for raw mode, `jsonc-parser` (the importer reads someone else's config, in document order).
+`clap`, `anyhow`, `tokio`, `futures` (`run` consumes the engine's `BoxStream`), `serde_json` (`run --format json`), `secrecy` (+ `zeroize`), `ratatui`'s crossterm re-export for raw mode, `jsonc-parser` (the importer reads someone else's config, in document order).
 
 <!-- MANUAL: -->

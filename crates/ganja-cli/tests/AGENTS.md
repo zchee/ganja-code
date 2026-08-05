@@ -15,6 +15,7 @@ Assertions on the shipped binary rather than on library functions: the command-l
 | `mcp.rs` | `ganja mcp` through the built binary: one server of each outcome there is — a loopback endpoint that answers, a program no machine has, and one configured off — proving each standing is its own and that a connected server's tools are listed under the names the model would call them by. The peer is a socket rather than a process, so this crate gains neither `bun` nor the upstream checkout as a prerequisite; the transport's own correctness is pinned beside the engine, which already pays for both. |
 | `import_opencode.rs` | `ganja config import-opencode` through the built binary: which files discovery reads and in what order, where the result lands, and that a run which would overwrite or leak refuses to. What the *mapping* does with a key is settled beside the mapping, in `src/import.rs`. |
 | `import_round_trip.rs` | One env-mutating test in its own binary: import, then `Config::load` in-process, so what the importer wrote is proved to be what the next launch reads — permission order included. It is also the only place the `mcp` and `lsp` mappings are fully answered for: the importer's own `validate` decodes, where `Config::load` additionally refuses a server with no program, a custom language server that names no extensions, and an endpoint whose headers would travel in the clear. |
+| `run.rs` | `ganja run` through the built binary: the exit-code table, the nd-JSON shape (six `type` names, and every object carrying the session `ganja sessions` reports for this project), the two permission mechanisms, and what the model was actually asked. Every invocation runs the fake provider against a written script, in its own project directory and against its own `XDG_DATA_HOME`, with stdin closed — `run` reads a pipe whole when standard input is not a terminal, so a test that inherited the harness's would be asking a different question each time. |
 | `fixtures/opencode.jsonc` | One opencode config holding every shape the mapping has a rule for. Shared with the table test in `src/import.rs`, so the two cannot drift apart. |
 | `pty_smoke.rs` | Unix-only (`#![cfg(unix)]`). Runs the binary under a pty: a fake turn streams into the transcript, a scripted turn runs a read, an edit and a shell command past the permission dialog, and the terminal is left restored however the process exits. |
 | `resume_drill.rs` | Unix-only. The crash drill: a scripted turn is SIGKILLed mid tool call, the store must hold an unfinished envelope with the streamed text, and `--continue` must show that text marked interrupted. The store is read through `ganja_core::Storage` — the same reader the binary uses — rather than by opening files, so the drill pins stored state rather than a layout. Kills wait for pty EOF before reaping — a session leader cannot finish dying while its terminal has unread output. |
@@ -34,6 +35,7 @@ Assertions on the shipped binary rather than on library functions: the command-l
 ```sh
 cargo test -p ganja-cli --test cli               # fast
 cargo test -p ganja-cli --test import_opencode   # fast
+cargo test -p ganja-cli --test run               # fast; drives real turns, no pty
 cargo test -p ganja-cli --test pty_smoke         # unix only, slower
 ```
 
@@ -45,6 +47,8 @@ Anything that reads or writes a *config* redirects `XDG_CONFIG_HOME` as well, so
 
 Timeouts are generous on purpose (`EXIT_DEADLINE` is 10s): a timeout here should mean "hung", not "slow machine". Assert on stored files wherever a filesystem assertion is available; reach for the screen only when nothing else can observe the behavior.
 
+`run.rs` needs no screen at all, which is what makes it the cheapest place to assert on a real turn: it drives the same engine the pty suite drives, but reads its answers off stdout, off stderr and off the filesystem. Two of its assertions lean on surfaces worth knowing about — `ganja sessions` is the independent witness for which session a run created, and the fallback title a completed turn earns is the first fifty characters of the first prompt, which is the one place a headless run records *what it was asked*.
+
 ## Dependencies
 
 ### Internal
@@ -53,6 +57,6 @@ The built `ganja` binary, located by `assert_cmd`.
 
 ### External
 
-`expectrl` (pty sessions, unix), `assert_cmd`, `predicates`, `tempfile`, `serde_json` (fake scripts and stored permission rules are JSON documents, not text).
+`expectrl` (pty sessions, unix), `assert_cmd`, `predicates`, `tempfile`, `serde_json` (fake scripts, stored permission rules and `run`'s nd-JSON are JSON documents, not text; it is a normal dependency of the crate rather than a dev one, because `run --format json` writes with it).
 
 <!-- MANUAL: -->

@@ -42,6 +42,8 @@ cargo run -- auth login         # also: auth list, auth logout
 cargo run -- sessions           # this project's stored conversations, roots only
 cargo run -- models anthropic --refresh        # the catalog, narrowed to a provider and re-fetched first
 cargo run -- mcp                # the configured MCP servers, dialled, with the tools they lend
+cargo run -- run "what does this crate do"        # one headless turn; --format json for a script
+cargo run -- run --continue --auto "now fix it"   # --auto allows what a headless run otherwise refuses
 cargo run -- config import-opencode --dry-run  # translate an opencode config, naming what it skipped
 
 # The gates CI runs, in order
@@ -113,13 +115,13 @@ Six crates. The load-bearing boundaries are asserted rather than trusted: nothin
 
 **`ganja-tui`** — every pixel, no engine logic. It links `ganja-protocol` for the types it renders and `ganja-tool` for the one thing it runs in-process, the `@` menu's glob walk. One `tokio::select!` owns all mutable UI state; `App::handle` is the only mutator, which is what makes components testable without a terminal. Frames coalesce to 16ms for streaming bursts; a keystroke redraws immediately. Themes are loadable data (four ported from upstream, plus whatever `~/.config/ganja/themes/` holds), the palette and the `/` menu are two views of the same command set, `@` raises a file menu, and a leading `!` hands the line to a shell. `/copy` and `/copy-message` put the conversation or the last reply on the clipboard, pasted text arrives whole through bracketed paste, and a configured MCP server that cannot be reached is named in the status bar.
 
-**`ganja-cli`** — clap; no subcommand starts the TUI.
+**`ganja-cli`** — clap; no subcommand starts the TUI, and one of them — `run` — takes a whole turn without it, driving the same engine headless and writing either readable lines or one JSON object per event.
 
 ## For AI Agents
 
 ### Working In This Directory
 
-- **Respect phase discipline.** P0–P6 have landed: the workspace, the TUI shell, providers, the agent loop with tools and permissions, sessions and compaction, config, agents, commands, themes, the model catalog, the task tool, `@file` mentions, `!` passthrough — and now MCP servers, LSP diagnostics, working-tree snapshots with `/undo`/`/redo`, markdown rendering, the stale-read watcher and the system clipboard. Scope, acceptance criteria and the ADR live in `.omc/plans/2026-08-03-opencode-rust-port.md`, and each phase's frozen contract in `.omc/handoffs/`. Do not build ahead of the current phase — P7 is underway: the `mcp` listing subcommand, SQLite session storage, the windows CI lane, the toolchain date-pin and local packaging have landed; `ganja serve`, `ganja run`, OAuth and the websearch/skills/question/plan tools have not started.
+- **Respect phase discipline.** P0–P6 have landed: the workspace, the TUI shell, providers, the agent loop with tools and permissions, sessions and compaction, config, agents, commands, themes, the model catalog, the task tool, `@file` mentions, `!` passthrough — and now MCP servers, LSP diagnostics, working-tree snapshots with `/undo`/`/redo`, markdown rendering, the stale-read watcher and the system clipboard. Scope, acceptance criteria and the ADR live in `.omc/plans/2026-08-03-opencode-rust-port.md`, and each phase's frozen contract in `.omc/handoffs/`. Do not build ahead of the current phase — P7 is underway: the `mcp` listing subcommand, SQLite session storage, the windows CI lane, the toolchain date-pin, local packaging and `ganja run` — a headless turn with an nd-JSON mode — have landed; `ganja serve`, OAuth and the websearch/skills/question/plan tools have not started.
 - **Check `git status` before editing.** Phase execution assigns **one owner per file**. A dirty file belongs to another lane — do not finish somebody else's work in flight.
 - **Port behavior, not code.** Module docs cite the upstream file they port (`//! Spec: upstream packages/opencode/src/tool/edit.ts`). Deliberate divergences are documented at the point they occur, with the reason.
 - **Comments explain why, not what** — including in `Cargo.toml`. Match the surrounding density.
