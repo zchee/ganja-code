@@ -61,6 +61,13 @@ use secrecy::{ExposeSecret as _, SecretString, zeroize::Zeroize as _};
 use serde::Deserialize;
 use serde_json::{Map, Value, error::Category};
 
+pub mod copilot;
+pub mod device;
+pub mod grok;
+pub mod loopback;
+pub mod openai;
+pub mod pkce;
+
 /// Directory ganja keeps its state in, under the XDG data home.
 const DIRECTORY: &str = "ganja";
 
