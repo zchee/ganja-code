@@ -74,7 +74,12 @@ serde_json.workspace = true
 # build architectures without a separate assembly crate.
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+# `net` for the one socket this crate binds itself: the loopback listener a
+# browser login's callback comes back to. It compiled without this, because
+# `reqwest` turns the feature on further down the graph and Cargo unifies them
+# — which would have made a future change to the HTTP client break a file that
+# has nothing to do with HTTP.
+tokio = { workspace = true, features = ["net"] }
 tokio-stream.workspace = true
 tracing.workspace = true
 # `Host`, for deciding whether an endpoint is loopback without matching strings.
