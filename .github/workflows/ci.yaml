@@ -20,8 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@nightly
+      # @master is the invocation form that takes an explicit toolchain; the
+      # date matches rust-toolchain.toml, which this action does not read.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-08-03
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
@@ -59,7 +62,11 @@ jobs:
       # read the dependency graph, so a `cargo` on PATH is required. Installed
       # explicitly, like every other job here, rather than assumed present on
       # the runner image.
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # The same date rust-toolchain.toml pins; this action does not read
+          # that file, so the date is repeated here on purpose.
+          toolchain: nightly-2026-08-03
 
       - name: dependency audit (advisories, licenses, bans, sources)
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -91,10 +98,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
-          # The LSP diagnostics drill spawns rust-analyzer from PATH; the
-          # component ships it with the pinned toolchain on both runners.
+          # The same date rust-toolchain.toml pins — this action does not read
+          # that file. The LSP diagnostics drill spawns rust-analyzer from
+          # PATH; the component ships it with the pinned toolchain on every
+          # runner.
+          toolchain: nightly-2026-08-03
           components: rust-analyzer
 
       - uses: Swatinem/rust-cache@v2

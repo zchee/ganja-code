@@ -1,4 +1,8 @@
 [toolchain]
-channel = "nightly"
+# Date-pinned so every machine — and CI, whose toolchain steps name the same
+# date — compiles with the same nightly instead of whatever today resolves
+# to. The date is the one this tree was validated on; moving it is a
+# deliberate act with a gate run, not a side effect of the calendar.
+channel = "nightly-2026-08-03"
 components = ["clippy", "rustfmt", "rust-analyzer"]
 profile = "default"

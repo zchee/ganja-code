@@ -15,6 +15,12 @@ publish = false
 name = "ganja"
 path = "src/main.rs"
 
+# `publish = false` above also hides the binary from `dist`, which reads it as
+# "nothing to distribute"; this says the local distribution archive still
+# carries `ganja` even though crates.io never will.
+[package.metadata.dist]
+dist = true
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
