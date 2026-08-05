@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ganja_core::{SessionInfo, Storage, auth, catalog};
+use ganja_core::{McpStatus, SessionInfo, Storage, auth, catalog};
 use ganja_permission::Project;
 use ganja_protocol::Usage;
 use secrecy::{SecretString, zeroize::Zeroize as _};
@@ -117,6 +117,12 @@ enum Command {
         #[command(subcommand)]
         action: Config,
     },
+    /// Show the configured MCP servers and the tools they lend.
+    ///
+    /// Every enabled server is connected, so the standing reported is one this
+    /// build actually reached rather than one the config merely asked for, and
+    /// every connection is closed again before this returns.
+    Mcp,
     /// List the models this build knows how to size and price.
     Models {
         /// List only the models this provider serves.
@@ -243,6 +249,9 @@ const STORAGE: &str = "storage";
 /// by a completed turn, and the fake provider never earns one.
 const UNTITLED: &str = "(untitled)";
 
+/// What a line hanging under a row of the MCP listing starts with.
+const INDENT: &str = "    ";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parsed before the log is installed so that `--version`, `--help` and a
@@ -256,6 +265,7 @@ async fn main() -> Result<()> {
         None => ganja_tui::run(cli.resume.wanted(), cli.select.overrides()).await,
         Some(Command::Auth { action }) => auth_command(action),
         Some(Command::Config { action }) => config_command(action),
+        Some(Command::Mcp) => mcp_command().await,
         Some(Command::Models { provider, refresh }) => models_command(provider, refresh).await,
         Some(Command::Sessions) => sessions_command(),
     }
@@ -355,6 +365,128 @@ fn log_directory() -> Result<PathBuf> {
     Ok(base.data_dir().join(DIRECTORY).join(LOGS))
 }
 
+/// Shows every configured MCP server, where connecting to it got, and the
+/// tools it lends the agent loop.
+///
+/// Spec: upstream `packages/opencode/src/cli/cmd/mcp.ts` — its `McpListCommand`
+/// is what this ports, one row per configured server carrying a standing and
+/// the command or URL it was reached at. Upstream spells the listing `opencode
+/// mcp list`, under a parent whose other children — `add`, `auth`, `logout`,
+/// `debug` — are all about OAuth or about writing config, and none of which
+/// this build has. A parent with one child would be a menu with one item, so
+/// the listing *is* the subcommand here, the way `sessions` and `models` are
+/// (deviation: mcp-listing-is-the-subcommand). Adding those siblings later
+/// nests this under `list`, which is a rename of one word.
+///
+/// Upstream's listing stops at the standing. The tools are ganja's addition and
+/// the reason to run this at all: what a server contributes is what the model
+/// is offered, under names the permission rules are written against, and there
+/// is otherwise nowhere to read them.
+///
+/// **Servers are dialled.** A status nothing has tried is not a status — the
+/// question is what this build makes of the config, and only a connect answers
+/// it. No credential is needed for any of it: an MCP server is a peer of the
+/// session and not of the model provider, so the config is read directly and no
+/// [`ganja_core::Engine`] is built, for the reason `sessions` reads the store
+/// directly.
+///
+/// **Everything is read before the shutdown, and the shutdown always runs.**
+/// Closing a connection takes its client and clears its definitions, so a
+/// listing that shut down first would report every server as lending nothing.
+async fn mcp_command() -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read the working directory")?;
+    let config = ganja_core::config::Config::load(&cwd).context("failed to read the config")?;
+
+    if config.mcp.is_empty() {
+        println!("no MCP servers configured; add one under `mcp` in this project's ganja.json");
+
+        return Ok(());
+    }
+
+    // The **project root**, not this process's working directory, because that
+    // is what a relative `cwd` in an entry resolves against — the same root
+    // `ganja-tui` dials from, so that what this reports is what a session
+    // would get.
+    let root = Project::resolve(&cwd);
+    let servers = ganja_core::McpServers::new(config.mcp.clone(), root.root());
+    servers.connect_all().await;
+
+    let standing = servers.status();
+    let lent: Vec<String> = servers
+        .tools()
+        .iter()
+        .map(|tool| tool.id().to_owned())
+        .collect();
+    servers.shutdown().await;
+
+    println!("{:<20}  {:<9}  ADDRESS", "SERVER", "STATUS");
+    // Driven by the config rather than by the statuses, which deliberately omit
+    // a server nothing has finished trying: after an awaited `connect_all` there
+    // is no such server, and a row that could silently vanish is worse than one
+    // that reports it has no standing.
+    for (name, entry) in &config.mcp {
+        let status = standing.get(name);
+        println!("{:<20}  {:<9}  {}", name, word(status), address(entry));
+
+        // A failed server's reason and a connected server's tools both hang
+        // under the row, and no server is ever both.
+        if let Some(McpStatus::Failed { error }) = status {
+            println!("{INDENT}{}", printable(error));
+        }
+        if status == Some(&McpStatus::Connected) {
+            report(&lent, name);
+        }
+    }
+
+    Ok(())
+}
+
+/// What hangs under a connected server's row: the tools it lends, or the fact
+/// that it lends none.
+///
+/// A connected server that contributed nothing is worth a line of its own —
+/// silence there is indistinguishable from a listing that forgot to look.
+fn report(lent: &[String], server: &str) {
+    // Matched on the prefix the engine builds these names with rather than by
+    // asking which server each came from, which is not on offer: a tool knows
+    // the name it is called, and that name is `mcp__<server>__<tool>`. Two
+    // configured names that sanitize to one prefix would group together — the
+    // engine already refuses the colliding tools and says so in the log, so
+    // what reaches here cannot be ambiguous about anything but which of two
+    // pathological names lent it.
+    let prefix = ganja_core::mcp::tool_name(server, "");
+    let mut lending = lent.iter().filter(|id| id.starts_with(&prefix)).peekable();
+
+    if lending.peek().is_none() {
+        println!("{INDENT}(no tools)");
+
+        return;
+    }
+    for id in lending {
+        println!("{INDENT}{id}");
+    }
+}
+
+/// What a server's standing is called in the listing.
+fn word(status: Option<&McpStatus>) -> &'static str {
+    match status {
+        Some(McpStatus::Connected) => "connected",
+        Some(McpStatus::Disabled) => "disabled",
+        Some(McpStatus::Failed { .. }) => "failed",
+        // Unreachable after an awaited connect, and rendered rather than
+        // skipped so that the listing never drops a configured server.
+        None => "unknown",
+    }
+}
+
+/// Where a server was reached, as the config spells it.
+fn address(server: &ganja_core::config::McpServer) -> String {
+    match server {
+        ganja_core::config::McpServer::Local(local) => printable(&local.command.join(" ")),
+        ganja_core::config::McpServer::Remote(remote) => printable(&remote.url),
+    }
+}
+
 /// Lists the stored sessions of the project this was run in, newest first.
 ///
 /// The store is read directly rather than through an [`ganja_core::Engine`],
@@ -422,8 +554,25 @@ fn title(session: &SessionInfo) -> String {
         return UNTITLED.to_owned();
     };
 
-    let printable: String = title
-        .chars()
+    let trimmed = printable(title);
+    let trimmed = trimmed.trim();
+
+    if trimmed.is_empty() {
+        UNTITLED.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// `text` with everything that would move the cursor replaced by a space.
+///
+/// Every caller is printing something somebody else wrote to a terminal that
+/// would *execute* an escape sequence in it: a title a model chose, a command
+/// out of a config file, or the words a remote MCP server failed with. A
+/// newline would break one row of a table into two and an escape would repaint
+/// the screen, so neither reaches `println!`.
+fn printable(text: &str) -> String {
+    text.chars()
         .map(|character| {
             if character.is_control() {
                 ' '
@@ -431,14 +580,7 @@ fn title(session: &SessionInfo) -> String {
                 character
             }
         })
-        .collect();
-    let trimmed = printable.trim();
-
-    if trimmed.is_empty() {
-        UNTITLED.to_owned()
-    } else {
-        trimmed.to_owned()
-    }
+        .collect()
 }
 
 /// Every token a session was billed for.

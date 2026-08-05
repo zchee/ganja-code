@@ -1,4 +1,4 @@
-<!-- Generated: 2026-08-04 | Updated: 2026-08-04 -->
+<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
 
 # ganja-code
 
@@ -40,6 +40,7 @@ cargo run -- --continue         # or --session <id>; the two are mutually exclus
 cargo run -- auth login         # also: auth list, auth logout
 cargo run -- sessions           # this project's stored conversations, roots only
 cargo run -- models anthropic --refresh        # the catalog, narrowed to a provider and re-fetched first
+cargo run -- mcp                # the configured MCP servers, dialled, with the tools they lend
 cargo run -- config import-opencode --dry-run  # translate an opencode config, naming what it skipped
 
 # The gates CI runs, in order
@@ -117,7 +118,7 @@ Six crates. The load-bearing boundaries are asserted rather than trusted: nothin
 
 ### Working In This Directory
 
-- **Respect phase discipline.** P0–P6 have landed: the workspace, the TUI shell, providers, the agent loop with tools and permissions, sessions and compaction, config, agents, commands, themes, the model catalog, the task tool, `@file` mentions, `!` passthrough — and now MCP servers, LSP diagnostics, working-tree snapshots with `/undo`/`/redo`, markdown rendering, the stale-read watcher and the system clipboard. Scope, acceptance criteria and the ADR live in `.omc/plans/2026-08-03-opencode-rust-port.md`, and each phase's frozen contract in `.omc/handoffs/`. Do not build ahead of the current phase — P7 (`ganja serve`, `ganja run`, OAuth, SQLite storage, the websearch/skills/question/plan tools, Windows, packaging) is not started.
+- **Respect phase discipline.** P0–P6 have landed: the workspace, the TUI shell, providers, the agent loop with tools and permissions, sessions and compaction, config, agents, commands, themes, the model catalog, the task tool, `@file` mentions, `!` passthrough — and now MCP servers, LSP diagnostics, working-tree snapshots with `/undo`/`/redo`, markdown rendering, the stale-read watcher and the system clipboard. Scope, acceptance criteria and the ADR live in `.omc/plans/2026-08-03-opencode-rust-port.md`, and each phase's frozen contract in `.omc/handoffs/`. Do not build ahead of the current phase — P7 is underway: the `mcp` listing subcommand has landed; `ganja serve`, `ganja run`, OAuth, SQLite storage, the websearch/skills/question/plan tools, Windows and packaging have not started.
 - **Check `git status` before editing.** Phase execution assigns **one owner per file**. A dirty file belongs to another lane — do not finish somebody else's work in flight.
 - **Port behavior, not code.** Module docs cite the upstream file they port (`//! Spec: upstream packages/opencode/src/tool/edit.ts`). Deliberate divergences are documented at the point they occur, with the reason.
 - **Comments explain why, not what** — including in `Cargo.toml`. Match the surrounding density.
