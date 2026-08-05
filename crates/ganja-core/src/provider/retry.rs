@@ -21,7 +21,7 @@ use reqwest::header::HeaderMap;
 use secrecy::zeroize::Zeroize as _;
 use tokio_util::sync::CancellationToken;
 
-use crate::provider::{ApiKey, ProviderError};
+use crate::provider::{Presented, ProviderError};
 
 /// Delay before the first retry. Upstream `RETRY_INITIAL_DELAY`.
 pub const INITIAL_DELAY: Duration = Duration::from_millis(2_000);
@@ -73,8 +73,8 @@ impl ProviderError {
 
 /// Sends `request`, retrying it while the failure looks transient.
 ///
-/// `key` is scrubbed from anything that ends up in the returned error, so a
-/// provider that echoes the credential it rejected cannot leak it into a log.
+/// `presented` is scrubbed from anything that ends up in the returned error, so
+/// a provider that echoes the credential it rejected cannot leak it into a log.
 ///
 /// # Errors
 ///
@@ -85,7 +85,7 @@ impl ProviderError {
 pub(super) async fn send(
     client: &reqwest::Client,
     request: reqwest::Request,
-    key: &ApiKey,
+    presented: &Presented,
     cancel: &CancellationToken,
 ) -> Result<reqwest::Response, ProviderError> {
     let mut attempt = 1;
@@ -96,7 +96,7 @@ pub(super) async fn send(
         let Some(replay) = request.try_clone() else {
             return match client.execute(request).await {
                 Ok(response) if response.status().is_success() => Ok(response),
-                Ok(response) => Err(refusal(response, key).await),
+                Ok(response) => Err(refusal(response, presented).await),
                 Err(error) => Err(transport(error)),
             };
         };
@@ -106,7 +106,7 @@ pub(super) async fn send(
             Ok(response) => {
                 let status = response.status().as_u16();
                 if attempt >= MAX_ATTEMPTS || !RETRYABLE_STATUS.contains(&status) {
-                    return Err(refusal(response, key).await);
+                    return Err(refusal(response, presented).await);
                 }
 
                 delay(attempt, retry_after(response.headers(), SystemTime::now()))
@@ -127,13 +127,13 @@ pub(super) async fn send(
 }
 
 /// Turns a final non-2xx response into the error the turn reports.
-async fn refusal(response: reqwest::Response, key: &ApiKey) -> ProviderError {
+async fn refusal(response: reqwest::Response, presented: &Presented) -> ProviderError {
     let status = response.status().as_u16();
     let mut body = response.text().await.unwrap_or_default();
     // A provider that quotes the credential it refused is a real shape, and
     // this is the one place that text becomes an error message and a log line,
     // so it is the one place the quote has to be masked.
-    let message = key.redact(&summarize(&body));
+    let message = presented.redact(&summarize(&body));
     // The unmasked body was one of those quotes; the masked copy is the only
     // one anything downstream should be able to find.
     body.zeroize();

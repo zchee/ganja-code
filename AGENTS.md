@@ -80,7 +80,7 @@ Two suites need setup, and both are documented in `crates/ganja-core/tests/AGENT
 
 | Variable | Meaning |
 |---|---|
-| `GANJA_PROVIDER` | `anthropic` \| `openai` \| `fake`. Unset means `fake` with a notice in the status bar. |
+| `GANJA_PROVIDER` | `anthropic` \| `openai` \| `grok` \| `fake`. Unset means `fake` with a notice in the status bar. `grok` is entered by `ganja auth login`, not by a key variable. |
 | `GANJA_MODEL` | Overrides the catalog's default model for the selected provider. |
 | `GANJA_FAKE_SCRIPT` | Path to a JSON script the fake provider plays (text + tool calls per turn). How PTY tests and demos drive a deterministic agent. Read only on the `from_env` route, never by `FakeProvider::default()`. |
 | `GANJA_CONFIG` | An extra config file merged between the global tier and the project files. Naming a file that does not exist is an error, where an absent discovered file is nothing to merge. |
@@ -90,6 +90,7 @@ Two suites need setup, and both are documented in `crates/ganja-core/tests/AGENT
 | `GANJA_MODELS_URL` | Base URL the live model catalog is fetched from (`/api.json` appended); default `https://models.opencode.ai`. |
 | `GANJA_MODELS_PATH` | Read-only override of the catalog cache path; writes keep going to the canonical cache file. |
 | `GANJA_DISABLE_MODELS_FETCH` | Truthy (`1`/`true`) disables all catalog fetching — the disk cache and the compiled-in snapshot still serve. |
+| `GANJA_AUTH_ISSUER` | Origin every login endpoint is reached at, so a test can complete a login against endpoints it owns. **Loopback only**, matched as a whole origin — a value that is set and is not loopback is refused rather than ignored, because silently using the real issuer is the one outcome whoever set it cannot have wanted. |
 | `GANJA_LIVE_TEST`, `GANJA_OPENCODE_DIR` | Test opt-ins, above. |
 
 ## Architecture

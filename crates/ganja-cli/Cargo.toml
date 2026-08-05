@@ -57,6 +57,10 @@ secrecy.workspace = true
 # here rather than under the dev tier it used to.
 serde_json.workspace = true
 tokio.workspace = true
+# A login flow's wait is ended by a `CancellationToken`, and the binary is the
+# only crate that can catch the keystroke which fires one. The token lives
+# behind `rt`, which is why the workspace declaration carries no features.
+tokio-util = { workspace = true, features = ["rt"] }
 # The binary is where the log sink is chosen, because it is the only crate that
 # knows whether a terminal is about to be taken over. The library crates trace;
 # none of them decides where it lands.

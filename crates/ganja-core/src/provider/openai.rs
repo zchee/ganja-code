@@ -20,8 +20,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
-        ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, check_base_url,
-        client, open, require_credential, setting, shown_base_url, sse::Frame, steps,
+        ChatRequest, Credential, Mapper, Presented, Provider, ProviderError, ProviderEvent,
+        check_base_url, client, open, require_key, setting, shown_base_url, sse::Frame, steps,
     },
 };
 
@@ -56,7 +56,7 @@ const NO_RESULT: &str = "[no result recorded]";
 /// Streams replies from an OpenAI-compatible chat completions endpoint.
 pub struct OpenAiProvider {
     client: reqwest::Client,
-    key: ApiKey,
+    credential: Credential,
     base_url: String,
 }
 
@@ -70,7 +70,7 @@ impl fmt::Debug for OpenAiProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpenAiProvider")
-            .field("key", &self.key)
+            .field("credential", &self.credential)
             .field("base_url", &shown_base_url(&self.base_url))
             .finish()
     }
@@ -84,14 +84,10 @@ impl OpenAiProvider {
     /// Returns [`ProviderError::Auth`] for a blank credential and
     /// [`ProviderError::Transport`] when no HTTP client can be built.
     pub fn new(key: impl Into<SecretString>) -> Result<Self, ProviderError> {
-        let key = ApiKey::new(key)
+        let key = Presented::new(key)
             .ok_or_else(|| ProviderError::Auth(format!("{API_KEY_ENV} is empty")))?;
 
-        Ok(Self {
-            client: client()?,
-            key,
-            base_url: DEFAULT_BASE_URL.to_owned(),
-        })
+        Self::with_credential(Credential::Key(key), DEFAULT_BASE_URL)
     }
 
     /// Builds a provider from [`API_KEY_ENV`] and [`BASE_URL_ENV`].
@@ -106,10 +102,28 @@ impl OpenAiProvider {
         let base_url = setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         check_base_url(&base_url)?;
 
+        Self::with_credential(Credential::Key(require_key(ID, API_KEY_ENV)?), base_url)
+    }
+
+    /// Builds a provider that authenticates however `credential` says.
+    ///
+    /// The seam a provider which is this wire under another name is built
+    /// through — see [`super::grok`], whose endpoint speaks this API and whose
+    /// credential is an OAuth access token rather than a key. Crate-internal
+    /// because [`Credential`] is: what a caller outside this module picks
+    /// between is providers, not credential sources.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Transport`] when no HTTP client can be built.
+    pub(super) fn with_credential(
+        credential: Credential,
+        base_url: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             client: client()?,
-            key: require_credential(ID, API_KEY_ENV)?,
-            base_url,
+            credential,
+            base_url: base_url.into(),
         })
     }
 
@@ -134,10 +148,15 @@ impl Provider for OpenAiProvider {
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
         // Checked here as well as at startup because `with_base_url` can point
-        // a provider anywhere, and this is the last moment before the key goes
-        // on the wire.
+        // a provider anywhere, and this is the last moment before the credential
+        // goes on the wire.
         check_base_url(&self.base_url)?;
 
+        // Resolved before the request is built rather than captured at
+        // construction: an access token expires under a long session, and one
+        // renewed a moment ago by another turn is the one this request should
+        // carry. A key resolves to itself, so the ordinary case pays nothing.
+        let presented = self.credential.presented().await?;
         let body = Body::new(&request);
         let built = self
             .client
@@ -145,14 +164,14 @@ impl Provider for OpenAiProvider {
                 "{}/chat/completions",
                 self.base_url.trim_end_matches('/')
             ))
-            .bearer_auth(self.key.expose())
+            .bearer_auth(presented.expose())
             .json(&body)
             .build()
             .map_err(|error| {
-                ProviderError::Transport(self.key.redact(&format!("malformed request: {error}")))
+                ProviderError::Transport(presented.redact(&format!("malformed request: {error}")))
             })?;
 
-        open(&self.client, built, &self.key, cancel, Mapping::default()).await
+        open(&self.client, built, &presented, cancel, Mapping::default()).await
     }
 }
 

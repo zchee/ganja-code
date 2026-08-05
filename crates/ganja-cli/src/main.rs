@@ -20,6 +20,7 @@ use secrecy::{SecretString, zeroize::Zeroize as _};
 use tracing_appender::non_blocking::WorkerGuard;
 
 mod import;
+mod login;
 mod run;
 
 // A plain comment, and above the doc comment rather than below it: clap
@@ -173,12 +174,16 @@ enum Config {
 
 #[derive(Debug, Subcommand)]
 enum Auth {
-    /// Store a provider's API key.
+    /// Store a provider's credential, by logging in or by giving a key.
     ///
-    /// The key is taken from `--key`, else from standard input when it is
-    /// piped in, else from a prompt the terminal does not echo.
+    /// A key is taken from `--key`, else from standard input when it is piped
+    /// in, else from a prompt the terminal does not echo. A provider with a
+    /// login of its own runs that instead — see `--method`.
+    ///
+    /// Storing a credential is all this does. Which models then run on it is a
+    /// separate question, and a login that succeeded is not an answer to it.
     Login {
-        /// Provider the key belongs to.
+        /// Provider the credential belongs to.
         #[arg(long, value_enum, default_value_t = ProviderId::Anthropic)]
         provider: ProviderId,
         /// The key itself.
@@ -187,10 +192,26 @@ enum Auth {
         /// prefer piping the key in or typing it at the prompt.
         #[arg(long, value_name = "KEY")]
         key: Option<String>,
+        /// How to log in, instead of being asked.
+        ///
+        /// `api` is a key; `browser` opens one on this machine; `device` shows
+        /// a code to type into a browser anywhere. Each provider has only some
+        /// of them, and naming one it has not is refused.
+        #[arg(long, short = 'm', value_enum, value_name = "METHOD")]
+        method: Option<login::Method>,
+        /// The GitHub Enterprise deployment a Copilot login is against.
+        ///
+        /// Answers both of the questions the login would otherwise ask, which
+        /// is what makes it runnable with nobody at the keyboard. A domain or a
+        /// URL: `company.ghe.com` and `https://company.ghe.com/` name the same
+        /// deployment.
+        #[arg(long, value_name = "URL")]
+        enterprise_url: Option<String>,
     },
-    /// Show which providers have a credential, and where it comes from.
+    /// Show which providers have a credential, of what kind, and where it comes
+    /// from.
     List,
-    /// Forget a provider's stored API key.
+    /// Forget a provider's stored credential.
     Logout {
         /// Provider to forget.
         #[arg(long, value_enum)]
@@ -200,18 +221,34 @@ enum Auth {
 
 /// The providers this build can authenticate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum ProviderId {
+pub(crate) enum ProviderId {
     Anthropic,
+    // Without this clap would derive `open-ai`, which is nobody's name for it.
+    // The two below derive the names their providers already have.
     #[value(name = "openai")]
     OpenAi,
+    Grok,
+    GithubCopilot,
 }
 
 impl ProviderId {
     /// The identifier `ganja-core` knows the provider by.
-    fn as_str(self) -> &'static str {
+    ///
+    /// The constants rather than literals wherever the module that owns the
+    /// name exports one: a command-line argument, a config key and a provider
+    /// id all mean the same provider, and a login that wrote under one spelling
+    /// while a request read another would read as a storage bug rather than as
+    /// the naming one it is.
+    ///
+    /// **`grok` and not `xai`**, deliberately: `xai` is what the credential is
+    /// stored under so that a shared `auth.json` keeps working, and
+    /// [`auth::storage_key`] is the single place that translation happens.
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
-            Self::OpenAi => "openai",
+            Self::OpenAi => auth::openai::PROVIDER_ID,
+            Self::Grok => auth::grok::PROVIDER_ID,
+            Self::GithubCopilot => auth::copilot::PROVIDER_ID,
         }
     }
 }
@@ -271,7 +308,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None => ganja_tui::run(cli.resume.wanted(), cli.select.overrides()).await,
-        Some(Command::Auth { action }) => auth_command(action),
+        Some(Command::Auth { action }) => auth_command(action).await,
         Some(Command::Config { action }) => config_command(action),
         Some(Command::Mcp) => mcp_command().await,
         Some(Command::Models { provider, refresh }) => models_command(provider, refresh).await,
@@ -639,15 +676,56 @@ fn age(then: u64, now: u64) -> String {
     format!("{}d ago", elapsed / DAY)
 }
 
-fn auth_command(action: Auth) -> Result<()> {
+async fn auth_command(action: Auth) -> Result<()> {
     match action {
-        Auth::Login { provider, key } => login(provider, key),
+        Auth::Login {
+            provider,
+            key,
+            method,
+            enterprise_url,
+        } => login(provider, key, method, enterprise_url).await,
         Auth::List => list(),
         Auth::Logout { provider } => logout(provider),
     }
 }
 
-fn login(provider: ProviderId, key: Option<String>) -> Result<()> {
+/// Stores a credential for `provider`, by whichever route this invocation asked
+/// for.
+///
+/// Spec: upstream `packages/opencode/src/cli/cmd/providers.ts:39-205`. What is
+/// chosen and how it is run lives in [`login`](mod@login); what is written down
+/// lives here, because storing is the step that must not happen when anything
+/// above it failed.
+async fn login(
+    provider: ProviderId,
+    key: Option<String>,
+    method: Option<login::Method>,
+    enterprise_url: Option<String>,
+) -> Result<()> {
+    match login::chosen(provider, key.is_some(), method)? {
+        login::Method::Api => store_key(provider, key),
+        oauth => {
+            let credential = login::oauth(provider, oauth, enterprise_url).await?;
+            let tail = credential.tail();
+
+            warn_before_replacing(provider)?;
+            auth::set_oauth(provider.as_str(), &credential)
+                .with_context(|| format!("failed to store the {provider} login"))?;
+
+            // "Login successful" is upstream's word for this
+            // (`providers.ts:128`); where it landed and what may be shown of it
+            // are ganja's, and match what the key path has always printed.
+            println!(
+                "login successful; stored the {provider} credential {tail} in {}",
+                auth::store_path()?.display()
+            );
+            warn_if_shadowed(provider)
+        }
+    }
+}
+
+/// Stores a key taken from wherever this invocation put it.
+fn store_key(provider: ProviderId, key: Option<String>) -> Result<()> {
     let key = match key {
         // A key given on the command line was already in the shell's history
         // and its process table entry before this ran; wrapping it is all that
@@ -660,6 +738,7 @@ fn login(provider: ProviderId, key: Option<String>) -> Result<()> {
     };
     let tail = auth::RedactedTail::of_secret(&key);
 
+    warn_before_replacing(provider)?;
     auth::set_credential(provider.as_str(), key)
         .with_context(|| format!("failed to store the {provider} key"))?;
 
@@ -668,6 +747,26 @@ fn login(provider: ProviderId, key: Option<String>) -> Result<()> {
         auth::store_path()?.display()
     );
     warn_if_shadowed(provider)
+}
+
+/// Says what a login is about to overwrite, while it still exists.
+///
+/// A ChatGPT login and an OpenAI API key are stored under the same key, so each
+/// replaces the other — upstream's behaviour at that key too, and `ganja-core`
+/// pins it in both directions. Core cannot warn about it: it is handed a
+/// credential and a provider, and has no way to know a person is watching. This
+/// is the only place that does.
+///
+/// Nothing is refused. A replacement is what `login` is for, and the point is
+/// that it not be silent.
+fn warn_before_replacing(provider: ProviderId) -> Result<()> {
+    let Some((kind, tail)) = login::stored(provider)? else {
+        return Ok(());
+    };
+
+    eprintln!("note: this replaces the {kind} credential {tail} already stored for {provider}");
+
+    Ok(())
 }
 
 /// Wraps a key and wipes the buffer it was assembled in.
@@ -702,11 +801,16 @@ fn list() -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<10}  {:<9}  SOURCE", "PROVIDER", "KEY");
+    // TYPE is not decoration: a login and a pasted key are stored under the
+    // same provider key for at least one provider, so without this column the
+    // listing shows the same row for two credentials that behave nothing alike
+    // — one expires and renews itself, the other never changes. The column is
+    // what makes "which of them is in there" a question the listing answers.
+    println!("{:<16}  {:<5}  {:<9}  SOURCE", "PROVIDER", "TYPE", "KEY");
     for entry in entries {
         println!(
-            "{:<10}  {:<9}  {}",
-            entry.provider_id, entry.tail, entry.source
+            "{:<16}  {:<5}  {:<9}  {}",
+            entry.provider_id, entry.kind, entry.tail, entry.source
         );
     }
 
@@ -714,13 +818,16 @@ fn list() -> Result<()> {
 }
 
 fn logout(provider: ProviderId) -> Result<()> {
+    // Not every stored credential is a key, and `remove_credential` takes the
+    // provider rather than the storage key — so forgetting `grok` really does
+    // remove the entry filed under `xai`.
     let forgotten = auth::remove_credential(provider.as_str())
-        .with_context(|| format!("failed to forget the {provider} key"))?;
+        .with_context(|| format!("failed to forget the {provider} credential"))?;
 
     if forgotten {
-        println!("forgot the stored {provider} key");
+        println!("forgot the stored {provider} credential");
     } else {
-        println!("there was no stored {provider} key to forget");
+        println!("there was no stored {provider} credential to forget");
     }
 
     warn_if_shadowed(provider)
@@ -728,11 +835,19 @@ fn logout(provider: ProviderId) -> Result<()> {
 
 /// Says so when an environment variable outranks whatever is stored, because
 /// otherwise a login that appears to have worked changes nothing.
+///
+/// A no-op for a provider with no key variable, which is every OAuth one:
+/// [`auth::list_providers`] only reports an environment entry for a provider in
+/// [`auth::KEY_VARS`], so there is nothing there to shadow with. The comparison
+/// is on the *storage* key because that is the name the listing reports, and a
+/// provider ganja and the file disagree about — `grok`, filed as `xai` — would
+/// otherwise silently never match.
 fn warn_if_shadowed(provider: ProviderId) -> Result<()> {
+    let stored_as = auth::storage_key(provider.as_str());
     let shadowing = auth::list_providers()
         .context("failed to read stored credentials")?
         .into_iter()
-        .find(|entry| entry.provider_id == provider.as_str())
+        .find(|entry| entry.provider_id == stored_as)
         .and_then(|entry| match entry.source {
             auth::Source::Environment(variable) => Some(variable),
             auth::Source::File => None,
