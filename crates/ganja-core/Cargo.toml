@@ -69,7 +69,9 @@ secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # PKCE's S256 challenge is SHA-256 of the verifier; the provider recomputes it
-# and refuses the exchange if the two disagree.
+# and refuses the exchange if the two disagree. The workspace declaration picks
+# the major whose backend reaches the CPU's SHA extensions on this crate's two
+# build architectures without a separate assembly crate.
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
