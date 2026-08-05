@@ -16,8 +16,11 @@ use std::{fs, sync::Arc};
 use async_trait::async_trait;
 use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
-    Command, Engine, Event, FinishReason, PermissionReply, Permissions, Registry, Tool, ToolCtx,
-    ToolError, ToolOutput, provider::ProviderEvent,
+    Engine,
+    permission::Permissions,
+    protocol::{Command, Event, FinishReason, PermissionReply},
+    provider::ProviderEvent,
+    tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
 };
 use serde_json::json;
 use tempfile::TempDir;

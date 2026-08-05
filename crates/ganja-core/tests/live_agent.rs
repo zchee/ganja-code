@@ -26,8 +26,11 @@ use std::{env, path::Path, sync::Arc};
 
 use futures::StreamExt as _;
 use ganja_core::{
-    Command, Engine, Event, FinishReason, PartBody, PermissionReply, Permissions, Registry,
-    ToolState, catalog, provider::AnthropicProvider,
+    Engine, catalog,
+    permission::Permissions,
+    protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState},
+    provider::AnthropicProvider,
+    tool::Registry,
 };
 
 /// Variable that has to be `1` before this talks to a vendor.

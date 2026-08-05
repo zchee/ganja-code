@@ -16,8 +16,8 @@ use std::env;
 
 use futures::StreamExt as _;
 use ganja_core::{
-    Message, catalog,
-    protocol::{FinishReason, Usage},
+    catalog,
+    protocol::{FinishReason, Message, Usage},
     provider::{
         AnthropicProvider, ChatRequest, OpenAiProvider, Provider, ProviderEvent,
         retry::MAX_ATTEMPTS,

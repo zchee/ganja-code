@@ -29,11 +29,14 @@ use futures::{
     stream::{self, BoxStream},
 };
 use ganja_core::{
-    Engine, EngineError, Message, Part, PartBody, PartId, Permissions, Registry, Role, SessionId,
-    SessionInfo, Storage, ToolState, Usage,
-    protocol::{Command, Event, FinishReason},
+    Engine, EngineError, SessionId, SessionInfo, Storage,
+    permission::Permissions,
+    protocol::{
+        Command, Event, FinishReason, Message, Part, PartBody, PartId, Role, ToolState, Usage,
+    },
     provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake},
     storage,
+    tool::Registry,
 };
 use tokio_util::sync::CancellationToken;
 

@@ -18,5 +18,11 @@
 pub mod permission;
 pub mod project;
 
-pub use permission::{CallDecision, Decision, PermissionConfig, Permissions};
+// The inner module's name is load-bearing for `ganja-core`'s facade —
+// `ganja_core::permission` must keep resolving — so the
+// `ganja_permission::permission` stutter exists by construction. These
+// crate-root re-exports are how a direct consumer avoids paying it, and
+// `Action` belongs here with its siblings because rules are the crate's
+// primary vocabulary.
+pub use permission::{Action, CallDecision, Decision, PermissionConfig, Permissions};
 pub use project::{Project, ProjectError};

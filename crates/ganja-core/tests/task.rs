@@ -22,11 +22,12 @@ use std::{
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use ganja_core::{
-    AgentRegistry, Command, Config, Engine, Event, FinishReason, PartBody, PermissionReply,
-    Permissions, Registry, Role, SessionId, SessionInfo, Storage, Tool, ToolCtx, ToolError,
-    ToolOutput, ToolState, Usage,
+    AgentRegistry, Config, Engine, SessionId, SessionInfo, Storage,
+    permission::Permissions,
+    protocol::{Command, Event, FinishReason, PartBody, PermissionReply, Role, ToolState, Usage},
     provider::{ChatRequest, Provider},
     storage,
+    tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
 };
 use ganja_testkit::{BlockingTool, ScriptedProvider, drain_answering, says, tool_call};
 use serde_json::json;
@@ -126,7 +127,7 @@ fn task_part(seen: &[Event]) -> ToolState {
 /// the delegated answer once it stops. Every other rendering is the parent's
 /// own transcript, and a child's words appearing in one is the leak.
 fn published(event: &Event) -> Vec<String> {
-    fn render(part: &ganja_core::Part) -> Option<String> {
+    fn render(part: &ganja_core::protocol::Part) -> Option<String> {
         let delegated = matches!(&part.body, PartBody::Tool { tool, .. } if tool == "task");
 
         (!delegated).then(|| format!("{:?}", part.body))

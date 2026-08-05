@@ -46,12 +46,15 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Args, ValueEnum};
 use futures::StreamExt as _;
 use ganja_core::{
-    AgentRegistry, Command as EngineCommand, Engine, EngineError, Event, FinishReason, Message,
-    Part, PartBody, PartId, PermissionReply, Role, SessionId, Storage, ToolState, catalog,
+    AgentRegistry, Engine, EngineError, SessionId, Storage, catalog,
     config::{Config, Overrides},
-    instruction, permission, provider,
+    instruction, provider,
 };
-use ganja_permission::Project;
+use ganja_permission::{Project, permission};
+use ganja_protocol::{
+    Command as EngineCommand, Event, FinishReason, Message, Part, PartBody, PartId,
+    PermissionReply, Role, ToolState,
+};
 use serde_json::Value;
 
 use crate::{STORAGE, millis_now, printable};
@@ -299,7 +302,7 @@ fn assemble(cwd: &Path, overrides: Overrides) -> Result<Assembled> {
         selection.provider,
         selection.model,
         Arc::new(tools),
-        ganja_core::Permissions::load(cwd),
+        ganja_permission::Permissions::load(cwd),
         storage,
     )
     .with_agents(agents)

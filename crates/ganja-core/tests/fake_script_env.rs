@@ -16,7 +16,7 @@ use std::{env, fs, time::Duration};
 
 use futures::StreamExt as _;
 use ganja_core::{
-    Message,
+    protocol::Message,
     provider::{self, ChatRequest, FakeProvider, Provider, ProviderEvent, fake},
 };
 use tokio_util::sync::CancellationToken;
@@ -98,7 +98,9 @@ async fn an_exported_script_is_what_the_fake_provider_plays() {
     );
     assert_eq!(
         events.last(),
-        Some(&ProviderEvent::Finish(ganja_core::FinishReason::Completed)),
+        Some(&ProviderEvent::Finish(
+            ganja_core::protocol::FinishReason::Completed,
+        )),
         "a scripted turn still ends like a turn, got {events:?}"
     );
 

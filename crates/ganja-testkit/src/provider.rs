@@ -18,10 +18,8 @@ use futures::{
     StreamExt as _,
     stream::{self, BoxStream},
 };
-use ganja_core::{
-    FinishReason,
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
-};
+use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use ganja_protocol::FinishReason;
 use tokio_util::sync::CancellationToken;
 
 /// What a [`ScriptedProvider`] does once its script queue runs dry.

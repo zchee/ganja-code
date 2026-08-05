@@ -184,7 +184,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         let request = ChatRequest {
             model: "test-model".to_owned(),
             system: None,
-            messages: vec![ganja_core::Message::user("hello")],
+            messages: vec![ganja_core::protocol::Message::user("hello")],
             tools: Vec::new(),
         };
 

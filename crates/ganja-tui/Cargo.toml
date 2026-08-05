@@ -26,6 +26,11 @@ crossterm.workspace = true
 etcetera.workspace = true
 futures.workspace = true
 ganja-core.workspace = true
+# The frontend loads the project's stored permission rules and hands them to
+# the engine. Named directly rather than through `ganja-core`'s root, which is
+# what keeps "the frontend needs the protocol and nothing else about the engine
+# to render" honest.
+ganja-permission.workspace = true
 # The types this crate turns into frames, named directly rather than through
 # `ganja-core`'s re-export: a frontend needs the protocol and nothing else about
 # the engine to render a transcript, and depending on it that way is what keeps

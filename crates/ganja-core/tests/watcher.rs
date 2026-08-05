@@ -22,8 +22,7 @@ use std::{
 };
 
 use ganja_core::{
-    ToolCtx, ToolError,
-    tool::{Credentials, FileTimes, Tool as _, write::WriteTool},
+    tool::{Credentials, FileTimes, Tool as _, ToolCtx, ToolError, write::WriteTool},
     watch::Watcher,
 };
 use tokio_util::sync::CancellationToken;
