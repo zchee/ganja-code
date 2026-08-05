@@ -184,8 +184,11 @@ impl RedactedTail {
 }
 
 impl fmt::Display for RedactedTail {
+    /// Through [`fmt::Formatter::pad`] for the same reason
+    /// [`CredentialKind`]'s is: this is printed in a column beside values of
+    /// other widths, and a `write_str` would drop the width it was given.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.pad(&self.0)
     }
 }
 
@@ -456,8 +459,12 @@ pub enum CredentialKind {
 }
 
 impl fmt::Display for CredentialKind {
+    /// Through [`fmt::Formatter::pad`], not `write_str`: the two words differ
+    /// in length and the only caller prints them in a column, so a `{:<n}`
+    /// that a `write_str` silently ignored would misalign every row against
+    /// its own header.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
+        formatter.pad(match self {
             Self::ApiKey => "api",
             Self::Oauth => "oauth",
         })
@@ -2027,6 +2034,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `ganja auth list` prints these in fixed-width columns. A `Display`
+    /// written with `write_str` accepts a width and then silently drops it,
+    /// which lines the header up with nothing and lines `api` rows up with
+    /// `oauth` rows only by accident — the two words are not the same length.
+    #[test]
+    fn a_listed_column_is_as_wide_as_it_was_asked_to_be() {
+        assert_eq!(format!("{:<5}|", CredentialKind::ApiKey), "api  |");
+        assert_eq!(format!("{:<5}|", CredentialKind::Oauth), "oauth|");
+        assert_eq!(
+            format!("{:<9}|", RedactedTail::of("sk-test-ABCD")),
+            "****ABCD |",
+        );
     }
 
     #[test]
