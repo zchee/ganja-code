@@ -19,8 +19,17 @@
 //! synchronization and for the one question only the frontend can answer: that
 //! a resumed transcript carries the marker. What the crash actually left
 //! behind is read back off the store, because a terminal is only sent the
-//! cells that changed and a filesystem assertion is the honest one wherever
-//! there is one to make.
+//! cells that changed and a store assertion is the honest one wherever there
+//! is one to make.
+//!
+//! The store is a SQLite database, so it is read through `ganja_core::Storage`
+//! rather than by opening files: the same reader the binary under test uses,
+//! which is what keeps this drill an assertion about stored state rather than
+//! about a layout it would have to be taught again on every schema change. A
+//! poll of a database a live process is writing into needs no tolerance for a
+//! half-written record — a reader under WAL sees committed rows and nothing
+//! else — which is a property this drill now depends on and used to have to
+//! work around.
 //!
 //! # Killing a process that owns a terminal
 //!
@@ -51,7 +60,6 @@
 use std::{
     fs,
     ops::{Deref, DerefMut},
-    path::{Path, PathBuf},
     process::Command,
     thread,
     time::{Duration, Instant},
@@ -62,7 +70,9 @@ use expectrl::{
     process::unix::{Signal, WaitStatus},
     session::OsSession,
 };
-use serde_json::{Value, json};
+use ganja_core::{Message, Part, Role, Storage};
+use ganja_protocol::PartBody;
+use serde_json::json;
 use tempfile::TempDir;
 
 /// How long the resumed run is given to draw and then to quit. Generous on
@@ -331,131 +341,93 @@ fn submit_prompt(session: &mut Ganja) {
         .expect("the engine's user message never reached the transcript");
 }
 
-/// The `storage/` directory the runs under `data` write into, once one of them
-/// has created it.
+/// The session store the runs under `data` write into, once one of them has
+/// created it.
 ///
 /// The project's directory is found rather than computed, because its name is
 /// `ganja-core`'s to decide; that there is at most one of them is itself worth
 /// asserting, since a run that stored under two projects stored under the
-/// wrong one.
-fn storage_root(data: &TempDir) -> Option<PathBuf> {
-    let roots: Vec<PathBuf> = fs::read_dir(data.path().join("ganja").join("project"))
+/// wrong one. Opening a store does no I/O, so the database file is asked for
+/// by name before anything opens it: a store this test created would answer
+/// every question with an empty transcript forever.
+fn store(data: &TempDir) -> Option<Storage> {
+    let stores: Vec<Storage> = fs::read_dir(data.path().join("ganja").join("project"))
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
-        .map(|entry| entry.path().join(STORAGE))
-        .filter(|root| root.is_dir())
+        .map(|entry| Storage::open(entry.path().join(STORAGE)))
+        .filter(|store| store.database().is_file())
         .collect();
 
     assert!(
-        roots.len() <= 1,
-        "one run stores under one project, got {roots:?}"
+        stores.len() <= 1,
+        "one run stores under one project, got {stores:?}"
     );
 
-    roots.into_iter().next()
+    stores.into_iter().next()
 }
 
-/// The stored JSON files directly under `directory`, in filename order — which
-/// is the order they were created in, because every stored id ascends.
-fn stored_files(directory: &Path) -> Vec<PathBuf> {
-    let mut found: Vec<PathBuf> = fs::read_dir(directory)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        })
-        .collect();
-    found.sort();
-
-    found
-}
-
-/// One stored document, or [`None`] while it is not there to be read.
-///
-/// A poll of a store a live process is writing into has to tolerate both an
-/// absent file and one that is being replaced, which is why neither a missing
-/// file nor an unreadable one is an error here.
-fn document(path: &Path) -> Option<Value> {
-    serde_json::from_slice(&fs::read(path).ok()?).ok()
-}
-
-/// What one session's assistant reply looks like on disk.
+/// What one session's assistant reply looks like in the store.
 struct StoredReply {
-    /// The message envelope, `{"version":…,"payload":…}` as written.
-    envelope: Value,
-    /// The part envelopes filed under it, oldest first.
-    parts: Vec<Value>,
+    /// The message as the store holds it, its parts attached in id order.
+    reply: Message,
 }
 
 impl StoredReply {
     /// Whether the store ever saw the reply finish.
     ///
-    /// A `time.completed` a turn has not reached is left out of the file
-    /// rather than written as null, and indexing answers a missing field with
-    /// null, so the two read the same here — which is the point, since both
-    /// mean the same thing: this reply has no ending.
+    /// A `time.completed` a turn has not reached is left absent rather than
+    /// written as a stamp, and that absence is the whole crash marker: this
+    /// reply has no ending.
     fn finished(&self) -> bool {
-        !self.envelope["payload"]["time"]["completed"].is_null()
+        self.reply.time.completed.is_some()
     }
 
     /// Everything the stored text parts carry, in the order they were written.
     fn text(&self) -> String {
-        self.parts
-            .iter()
-            .filter_map(|part| part["payload"]["text"].as_str())
-            .collect()
+        self.reply.parts.iter().filter_map(Part::as_text).collect()
     }
 
     /// The status of every stored tool call, in the order they were written.
+    ///
+    /// Read off the serialized state rather than matched on, because what the
+    /// assertion is about is the tag a stored call carries — `ToolState` is
+    /// what tags its variants `status`, and a rename there has to reach this
+    /// test rather than pass it.
     fn call_states(&self) -> Vec<String> {
-        self.parts
+        self.reply
+            .parts
             .iter()
-            .map(|part| &part["payload"])
-            .filter(|payload| payload["type"] == "tool")
-            .filter_map(|payload| payload["state"]["status"].as_str().map(str::to_owned))
+            .filter_map(|part| match &part.body {
+                PartBody::Tool { state, .. } => serde_json::to_value(state).ok(),
+                _ => None,
+            })
+            .filter_map(|state| state["status"].as_str().map(str::to_owned))
             .collect()
     }
 }
 
-/// The assistant reply the store under `root` holds, once it holds one.
+/// The assistant reply `store` holds, once it holds one.
 ///
-/// The layout is `ganja_core::storage`'s: one info file names the session, one
-/// envelope per message under it, and one file per part under that.
-fn stored_reply(root: &Path) -> Option<StoredReply> {
-    let session = stored_files(&root.join("session").join("info"))
+/// One session, because the drill runs one conversation; the reply is the
+/// assistant message in it, read back through the same transcript loader the
+/// frontend seeds itself from.
+fn stored_reply(store: &Storage) -> Option<StoredReply> {
+    let session = store.list_sessions().ok()?.into_iter().next()?;
+    let reply = store
+        .load_transcript(&session.id)
+        .ok()?
         .into_iter()
-        .next()?;
-    let session = session.file_stem()?.to_str()?.to_owned();
+        .find(|message| message.role == Role::Assistant)?;
 
-    let messages = root.join("session").join("message").join(&session);
-    let (path, envelope) = stored_files(&messages).into_iter().find_map(|path| {
-        let document = document(&path)?;
-        (document["payload"]["role"] == "assistant").then_some((path, document))
-    })?;
-
-    let message = path.file_stem()?.to_str()?.to_owned();
-    let parts = stored_files(
-        &root
-            .join("session")
-            .join("part")
-            .join(&session)
-            .join(&message),
-    )
-    .iter()
-    .filter_map(|path| document(path))
-    .collect();
-
-    Some(StoredReply { envelope, parts })
+    Some(StoredReply { reply })
 }
 
 /// Whether the store says the drill's window is open: the streamed text has
-/// reached its part file, and the call that holds the turn open is recorded as
+/// reached its part row, and the call that holds the turn open is recorded as
 /// executing.
-fn mid_flight(root: &Path) -> bool {
-    stored_reply(root).is_some_and(|reply| {
+fn mid_flight(store: &Storage) -> bool {
+    stored_reply(store).is_some_and(|reply| {
         reply.text().contains(PARTIAL) && reply.call_states().iter().any(|state| state == RUNNING)
     })
 }
@@ -466,10 +438,21 @@ fn mid_flight(root: &Path) -> bool {
 /// Polling rather than sleeping is what keeps the drill honest on a loaded
 /// machine: a fixed wait long enough to be reliable there would be long enough
 /// to hide a regression that let the window close early.
-fn wait_until(data: &TempDir, what: &str, ready: impl Fn(&Path) -> bool) {
+fn wait_until(data: &TempDir, what: &str, ready: impl Fn(&Storage) -> bool) {
     let deadline = Instant::now() + STORE_DEADLINE;
+    // Opened once and then kept: every query runs in its own read transaction,
+    // so one handle still sees what the live process commits after it — and
+    // reopening on every tick would run a fresh integrity check fifty times a
+    // second for nothing.
+    let mut opened: Option<Storage> = None;
 
-    while !storage_root(data).is_some_and(|root| ready(&root)) {
+    loop {
+        if opened.is_none() {
+            opened = store(data);
+        }
+        if opened.as_ref().is_some_and(&ready) {
+            return;
+        }
         assert!(
             Instant::now() < deadline,
             "the store never showed {what} within {STORE_DEADLINE:?}"
@@ -505,8 +488,8 @@ fn a_reply_killed_mid_call_comes_back_under_continue_marked_interrupted() {
     // past its own startup, and so that the kill below lands on a run whose
     // child is sleeping rather than on one whose child is still starting up.
     let held = project.path().join(HELD);
-    wait_until(&data, "a call whose command has started", |root| {
-        held.is_file() && mid_flight(root)
+    wait_until(&data, "a call whose command has started", |store| {
+        held.is_file() && mid_flight(store)
     });
 
     session.kill_outright();
@@ -514,15 +497,18 @@ fn a_reply_killed_mid_call_comes_back_under_continue_marked_interrupted() {
     // What survived the kill is the store, so that is what is asked. Read
     // after the kill rather than reused from the wait: the claim is about what
     // a dead process left behind, not about what a live one had written.
-    let survived = storage_root(&data)
-        .as_deref()
+    // A store opened after the kill rather than the one the wait held: what
+    // is being asked is what a dead process left in the database, and a
+    // connection that was open while it died has no business answering that.
+    let survived = store(&data)
+        .as_ref()
         .and_then(stored_reply)
         .expect("the killed run's session should still be on disk");
 
     assert!(
         !survived.finished(),
-        "a reply its process died in the middle of must not be stored as finished, got {}",
-        survived.envelope["payload"]["time"]
+        "a reply its process died in the middle of must not be stored as finished, got {:?}",
+        survived.reply.time
     );
     assert!(
         survived.text().contains(PARTIAL),
