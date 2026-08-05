@@ -157,14 +157,22 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     // agents are on it: the default agent may have named a model of another
     // family, and the prompt has to be that model's.
     let (base, suffix) = system_parts(&engine, &config, &cwd);
-    let engine = engine.with_system_parts(base, suffix).with_environment({
-        // Owned copies, because this outlives the startup that composed the
-        // first one: the environment block names the model, and the model
-        // moves when somebody picks another one mid-session.
-        let config = config.clone();
-        let cwd = cwd.clone();
-        move |model| instruction::suffix(&config, &cwd, model)
-    });
+    let engine = engine
+        .with_system_parts(base, suffix)
+        .with_environment({
+            // Owned copies, because this outlives the startup that composed the
+            // first one: the environment block names the model, and the model
+            // moves when somebody picks another one mid-session.
+            let config = config.clone();
+            let cwd = cwd.clone();
+            move |model| instruction::suffix(&config, &cwd, model)
+        })
+        // And the other half moves with it: the base prompt is chosen by the
+        // model's family, so a switch from a `claude` model to a `gpt` one has
+        // to change this too or the new model reads the old family's
+        // instructions. Nothing is handed over — the engine composes this half
+        // from the model's name alone.
+        .with_base_for_model();
 
     // Dialled from here on, in the background: the first turn is offered
     // whichever servers have answered by the time it starts, and a server
@@ -258,9 +266,10 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
 ///
 /// The suffix is the half no agent replaces, so an agent switch swaps the
 /// first and keeps this one. This composes the pair the session starts on;
-/// keeping the suffix current across a later model switch is
-/// `Engine::with_environment`'s business, and the caller installs one beside
-/// this.
+/// keeping each half current across a later model switch is the engine's
+/// business — `Engine::with_environment` for the suffix and
+/// `Engine::with_base_for_model` for the base — and the caller installs both
+/// beside this.
 fn system_parts(engine: &Engine, config: &Config, cwd: &Path) -> (Option<String>, Option<String>) {
     let model = engine.model();
 
