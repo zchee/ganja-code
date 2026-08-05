@@ -22,8 +22,8 @@ use crate::{
     catalog,
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
-        ApiKey, ChatRequest, Mapper, Provider, ProviderError, ProviderEvent, check_base_url,
-        client, open, require_credential, setting, shown_base_url, sse::Frame, steps,
+        ChatRequest, Mapper, Presented, Provider, ProviderError, ProviderEvent, check_base_url,
+        client, open, require_key, setting, shown_base_url, sse::Frame, steps,
     },
 };
 
@@ -81,7 +81,7 @@ static NO_INPUT: LazyLock<Value> = LazyLock::new(|| Value::Object(serde_json::Ma
 /// Streams replies from the Anthropic Messages API.
 pub struct AnthropicProvider {
     client: reqwest::Client,
-    key: ApiKey,
+    key: Presented,
     base_url: String,
     max_tokens: u32,
 }
@@ -111,7 +111,7 @@ impl AnthropicProvider {
     /// Returns [`ProviderError::Transport`] when no HTTP client can be built,
     /// which in practice means the TLS backend failed to initialize.
     pub fn new(key: impl Into<SecretString>) -> Result<Self, ProviderError> {
-        let key = ApiKey::new(key)
+        let key = Presented::new(key)
             .ok_or_else(|| ProviderError::Auth(format!("{API_KEY_ENV} is empty")))?;
 
         Ok(Self {
@@ -136,7 +136,7 @@ impl AnthropicProvider {
 
         Ok(Self {
             client: client()?,
-            key: require_credential(ID, API_KEY_ENV)?,
+            key: require_key(ID, API_KEY_ENV)?,
             base_url,
             max_tokens: DEFAULT_MAX_TOKENS,
         })

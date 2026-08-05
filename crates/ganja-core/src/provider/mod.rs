@@ -64,12 +64,14 @@ use crate::{
 
 pub mod anthropic;
 pub mod fake;
+pub mod grok;
 pub mod openai;
 pub mod retry;
 pub mod sse;
 
 pub use anthropic::AnthropicProvider;
 pub use fake::FakeProvider;
+pub use grok::GrokProvider;
 pub use openai::OpenAiProvider;
 
 /// Environment variable naming the provider a session talks to.
@@ -79,7 +81,7 @@ pub const PROVIDER_ENV: &str = "GANJA_PROVIDER";
 pub const MODEL_ENV: &str = "GANJA_MODEL";
 
 /// Every value [`PROVIDER_ENV`] accepts.
-pub const PROVIDERS: [&str; 3] = [anthropic::ID, openai::ID, fake::ID];
+pub const PROVIDERS: [&str; 4] = [anthropic::ID, openai::ID, grok::ID, fake::ID];
 
 /// One request to a model.
 #[derive(Clone, Debug, PartialEq)]
@@ -216,24 +218,30 @@ pub trait Provider: Send + Sync {
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError>;
 }
 
-/// An API key.
+/// The credential one request presents, whatever kind of credential it is.
 ///
-/// The only way to read one is [`ApiKey::expose`], which is the single place in
-/// this crate's provider code that calls `expose_secret`, so that a grep for
+/// An API key and an OAuth access token are the same thing by the time they
+/// reach here: a secret that goes into a header and that must be scrubbed out
+/// of anything the provider says back. The difference between them is *where
+/// they come from*, and that is [`Credential`]'s business rather than this
+/// type's.
+///
+/// The only way to read one is [`Presented::expose`], which is the single place
+/// in this crate's provider code that calls `expose_secret`, so that a grep for
 /// either finds every place a credential leaves the type. Everything else —
 /// [`fmt::Debug`], and therefore every `tracing` field that renders a provider
-/// — sees a placeholder, and the key material is wiped when the last handle to
-/// it drops.
+/// — sees a placeholder, and the material is wiped when the last handle to it
+/// drops.
 #[derive(Clone)]
-struct ApiKey(SecretString);
+struct Presented(SecretString);
 
-impl ApiKey {
+impl Presented {
     /// Wraps a credential, rejecting a blank one so that an exported-but-empty
     /// variable fails at startup rather than as a 401 mid-turn.
-    fn new(key: impl Into<SecretString>) -> Option<Self> {
-        let key = Self(key.into());
+    fn new(secret: impl Into<SecretString>) -> Option<Self> {
+        let presented = Self(secret.into());
 
-        (!key.expose().trim().is_empty()).then_some(key)
+        (!presented.expose().trim().is_empty()).then_some(presented)
     }
 
     /// The credential itself, for putting on the wire.
@@ -242,16 +250,140 @@ impl ApiKey {
     }
 
     /// Replaces the credential with a placeholder wherever it appears in
-    /// `text`, so that a provider echoing back the key it rejected cannot put
-    /// it in an error message or a log line.
+    /// `text`, so that a provider echoing back the credential it rejected
+    /// cannot put it in an error message or a log line.
     fn redact(&self, text: &str) -> String {
         text.replace(self.expose(), "[redacted]")
     }
 }
 
-impl fmt::Debug for ApiKey {
+impl fmt::Debug for Presented {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ApiKey([redacted])")
+        formatter.write_str("Presented([redacted])")
+    }
+}
+
+/// Where a provider's credential comes from, consulted once per request.
+///
+/// The two arms differ in exactly one way, and it is the reason this is an enum
+/// rather than a [`Presented`] field: a key does not expire, so it is captured
+/// at construction and every request presents the same one. An OAuth access
+/// token does expire — and may have been renewed by another turn, or by another
+/// ganja process, since this provider was built — so it is resolved afresh
+/// immediately before each request is built.
+///
+/// That is the position upstream's fetch wrapper occupies: `plugin/xai.ts:487`
+/// and `plugin/openai/codex.ts:341-395` both wrap the request rather than the
+/// client, and `codex.ts:353` re-reads the credential on every call for exactly
+/// this reason.
+enum Credential {
+    /// A key, held for the life of the provider.
+    Key(Presented),
+    /// An OAuth credential, read from the store and renewed when it is due.
+    Oauth {
+        /// The provider whose credential this is, in ganja's vocabulary —
+        /// [`auth::storage_key`] is what maps it to the name on disk, so this
+        /// is the id a message names and never the file's key.
+        provider_id: &'static str,
+        /// The endpoint half of a renewal. [`auth::Refresher`] owns the rest:
+        /// when to renew, holding concurrent callers to one exchange, and
+        /// storing what comes back.
+        refresh: Arc<dyn auth::RefreshOauth>,
+    },
+}
+
+impl Credential {
+    /// The credential this request should present.
+    ///
+    /// For an OAuth provider this goes through [`auth::Refresher`] rather than
+    /// reading the store directly, so that a step with a dozen tool calls in
+    /// the air meeting the same expiry spends the refresh token **once**. With
+    /// a rotating refresh token — xAI's rotates — a second concurrent exchange
+    /// presents a token the first has already spent, and the provider is right
+    /// to refuse it.
+    ///
+    /// A credential that is not due is returned without the token endpoint
+    /// being troubled at all, and `expires: 0` is upstream's "never expires"
+    /// rather than "expired in 1970" — both of those are
+    /// [`auth::OauthCredential::needs_refresh`]'s to decide, and neither is
+    /// re-decided here.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever [`unusable`] classified the failure as: a refusal is
+    /// [`ProviderError::Auth`] and an unreachable endpoint is
+    /// [`ProviderError::Transport`], which are two different things to do next.
+    async fn presented(&self) -> Result<Presented, ProviderError> {
+        match self {
+            Self::Key(key) => Ok(key.clone()),
+            Self::Oauth {
+                provider_id,
+                refresh,
+            } => {
+                let credential = auth::Refresher::shared()
+                    .usable(provider_id, Arc::clone(refresh))
+                    .await
+                    .map_err(|error| unusable(&error))?;
+
+                // Only the access token travels. The refresh token stays in the
+                // store and never reaches a request, so it cannot reach a
+                // redaction pass either — which is the point: what is not here
+                // cannot leak from here.
+                Presented::new(credential.access).ok_or_else(|| {
+                    ProviderError::Auth(format!(
+                        "the stored {provider_id} credential carries no access token; \
+                         run `ganja auth login {provider_id}`"
+                    ))
+                })
+            }
+        }
+    }
+}
+
+impl fmt::Debug for Credential {
+    /// Names the kind and the provider, never the material. [`Presented`] is
+    /// already opaque; this exists so that the OAuth arm does not grow a
+    /// derived rendering of whatever a future field holds.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Key(key) => formatter.debug_tuple("Key").field(key).finish(),
+            Self::Oauth { provider_id, .. } => formatter
+                .debug_struct("Oauth")
+                .field("provider_id", provider_id)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// How a credential that could not be produced is reported to the turn.
+///
+/// The classification is load-bearing rather than cosmetic, because
+/// [`ProviderError::is_retryable`] decides what the retry driver in
+/// [`retry::send`] does with it — and a refresh sits exactly where that driver
+/// applies, before the first byte of the response:
+///
+/// - A refusal — the refresh token is dead, or there is no OAuth credential
+///   stored at all — is [`ProviderError::Auth`], which is **not** retryable.
+///   Only a new login fixes it, and retrying it turns one expired grant into a
+///   storm against an identity provider.
+/// - A renewal that never got that far is [`ProviderError::Transport`], which
+///   **is** retryable, correctly: the stored credential is untouched and trying
+///   again is what fixes it.
+///
+/// A store that could not be read lands on the `Auth` side with the refusals.
+/// It is not a network failure and repeating it changes nothing; what it needs
+/// is the file repaired, which is what its message says.
+///
+/// Every [`auth::AuthError`] message names the provider and the command that
+/// repairs it while quoting nothing out of the store or off the wire, so the
+/// whole taxonomy is safe to put in front of a user verbatim.
+fn unusable(error: &auth::RefreshError) -> ProviderError {
+    match error.kind() {
+        auth::AuthErrorKind::RefreshUnavailable => ProviderError::Transport(error.to_string()),
+        auth::AuthErrorKind::NotOauth
+        | auth::AuthErrorKind::Expired
+        | auth::AuthErrorKind::ReauthRequired
+        | auth::AuthErrorKind::Storage => ProviderError::Auth(error.to_string()),
     }
 }
 
@@ -398,11 +530,11 @@ fn is_terminal(event: &ProviderEvent) -> bool {
 async fn open<M: Mapper>(
     client: &reqwest::Client,
     request: reqwest::Request,
-    key: &ApiKey,
+    presented: &Presented,
     cancel: CancellationToken,
     mapper: M,
 ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-    let response = match retry::send(client, request, key, &cancel).await {
+    let response = match retry::send(client, request, presented, &cancel).await {
         Ok(response) => response,
         Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
         Err(error) => return Err(error),
@@ -568,16 +700,19 @@ pub enum SelectionError {
 ///
 /// [`auth::credential_for`] reads the same environment variables this used to
 /// read directly, and layers the stored `auth.json` underneath them, so an
-/// exported key still overrides a stored one for a single run.
+/// exported key still overrides a stored one for a single run. It reads only
+/// keys; a provider whose credential is a pair of OAuth tokens is served by
+/// [`Credential::Oauth`] instead, which is a different lookup because it is a
+/// different thing to look up.
 ///
 /// A store that could not be read is [`Err`], not [`Ok(None)`]: "you have no
 /// credential" and "you have one and it was refused" need different things
 /// from the person reading the message, and only the second can say what to
 /// fix. Reporting it here rather than logging it is what gets the reason in
 /// front of someone who is looking at a terminal, not a log file.
-fn credential_for(provider_id: &str) -> Result<Option<ApiKey>, ProviderError> {
+fn key_for(provider_id: &str) -> Result<Option<Presented>, ProviderError> {
     match auth::credential_for(provider_id) {
-        Ok(credential) => Ok(credential.and_then(|credential| ApiKey::new(credential.api_key))),
+        Ok(credential) => Ok(credential.and_then(|credential| Presented::new(credential.api_key))),
         // Every `AuthError` names the file and the command that repairs it
         // while quoting nothing out of it — the parse failure deliberately
         // throws away serde's message because it would echo the value — so the
@@ -587,8 +722,8 @@ fn credential_for(provider_id: &str) -> Result<Option<ApiKey>, ProviderError> {
 }
 
 /// The key for `provider_id`, or the error a startup should die on.
-fn require_credential(provider_id: &str, variable: &str) -> Result<ApiKey, ProviderError> {
-    credential_for(provider_id)?.ok_or_else(|| {
+fn require_key(provider_id: &str, variable: &str) -> Result<Presented, ProviderError> {
+    key_for(provider_id)?.ok_or_else(|| {
         ProviderError::Auth(format!(
             "{variable} is unset; export it or run `ganja auth login`"
         ))
@@ -723,6 +858,7 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         fake::ID => Arc::new(FakeProvider::default()),
         anthropic::ID => Arc::new(AnthropicProvider::from_env()?),
         openai::ID => Arc::new(OpenAiProvider::from_env()?),
+        grok::ID => Arc::new(GrokProvider::from_stored()?),
         _ => return Err(SelectionError::Unknown { requested }),
     };
 
@@ -753,10 +889,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ApiKey, Mapper, ProviderError, ProviderEvent, check_base_url, events, shown_base_url,
-        sse::Frame,
+        Credential, Mapper, Presented, ProviderError, ProviderEvent, check_base_url, events,
+        shown_base_url, sse::Frame, unusable,
     };
-    use crate::protocol::FinishReason;
+    use crate::{auth, protocol::FinishReason};
 
     /// Emits whatever a frame's data spells, so that the plumbing can be
     /// tested without a provider's JSON in the way.
@@ -793,17 +929,91 @@ mod tests {
     }
 
     #[test]
-    fn a_key_never_renders_itself() {
-        let key = ApiKey::new("sk-test-canary-XYZ").expect("a non-blank key");
+    fn a_credential_never_renders_itself() {
+        let key = Presented::new("sk-test-canary-XYZ").expect("a non-blank key");
 
-        assert_eq!(format!("{key:?}"), "ApiKey([redacted])");
+        assert_eq!(format!("{key:?}"), "Presented([redacted])");
         assert_eq!(
             key.redact("rejected sk-test-canary-XYZ, sorry"),
             "rejected [redacted], sorry"
         );
         assert_eq!(key.expose(), "sk-test-canary-XYZ");
-        assert!(ApiKey::new("   ").is_none(), "a blank key is not a key");
-        assert!(ApiKey::new("").is_none());
+        assert!(Presented::new("   ").is_none(), "a blank key is not a key");
+        assert!(Presented::new("").is_none());
+
+        // The same has to hold of the source a request resolves one from, or a
+        // provider's own `Debug` — which is what every `tracing` field holding
+        // one becomes — would print what the type it wraps refuses to.
+        let held = Credential::Key(key);
+        assert_eq!(format!("{held:?}"), "Key(Presented([redacted]))");
+        assert!(!format!("{held:?}").contains("sk-test-canary-XYZ"));
+    }
+
+    /// A dead refresh token and a token endpoint that could not be reached are
+    /// two different situations, and the difference is not a wording choice:
+    /// [`ProviderError::is_retryable`] is what the retry driver reads, and a
+    /// refresh sits exactly where that driver applies. Classifying a refusal as
+    /// transport turns one expired grant into a retry storm against an identity
+    /// provider; classifying an unreachable endpoint as auth sends someone
+    /// whose network dropped through a browser login they did not need.
+    #[test]
+    fn only_a_refusal_is_worth_a_new_login_and_only_a_reachable_failure_is_worth_retrying() {
+        let refused = unusable(
+            &auth::AuthError::ReauthRequired {
+                provider_id: "grok".to_owned(),
+                reason: "HTTP 401, invalid_grant".to_owned(),
+            }
+            .into(),
+        );
+        let unreachable = unusable(
+            &auth::AuthError::RefreshUnavailable {
+                provider_id: "grok".to_owned(),
+                reason: "connection refused".to_owned(),
+            }
+            .into(),
+        );
+
+        assert!(
+            matches!(refused, ProviderError::Auth(_)),
+            "a dead refresh token is not a transport failure: {refused:?}"
+        );
+        assert!(
+            !refused.is_retryable(),
+            "retrying a refused grant is a storm against an identity provider"
+        );
+        assert!(
+            format!("{refused}").contains("ganja auth login grok"),
+            "the message is what a status bar shows, and only a login fixes this: {refused}"
+        );
+
+        assert!(
+            matches!(unreachable, ProviderError::Transport(_)),
+            "an endpoint that never answered has not refused anything: {unreachable:?}"
+        );
+        assert!(
+            unreachable.is_retryable(),
+            "trying again is exactly what fixes a refresh that could not be reached"
+        );
+
+        // The rest of the taxonomy is a credential that has to be replaced or a
+        // file that has to be repaired, and repeating the request fixes
+        // neither.
+        for error in [
+            auth::AuthError::NotOauth {
+                provider_id: "grok".to_owned(),
+                found: "an API key",
+            },
+            auth::AuthError::Expired {
+                provider_id: "grok".to_owned(),
+            },
+        ] {
+            let classified = unusable(&error.into());
+
+            assert!(
+                matches!(classified, ProviderError::Auth(_)) && !classified.is_retryable(),
+                "{classified:?} should be a non-retryable auth failure"
+            );
+        }
     }
 
     /// The key travels in a header on every request, so the transport is what

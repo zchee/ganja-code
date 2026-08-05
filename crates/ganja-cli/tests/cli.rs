@@ -32,6 +32,10 @@ fn ganja(data: &TempDir) -> Command {
     for variable in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
         command.env_remove(variable);
     }
+    // A developer who left a login redirected would otherwise decide what the
+    // key path in this file does; the flows are driven in `auth_login.rs`,
+    // which sets this itself.
+    command.env_remove("GANJA_AUTH_ISSUER");
 
     command
 }
@@ -206,6 +210,128 @@ fn an_environment_variable_outranks_the_stored_key_and_is_pointed_out() {
                 "used in preference to the stored key",
             )),
         );
+}
+
+/// The listing has to say which *kind* of credential a row is, because a login
+/// and a pasted key are stored under the same provider name for at least one
+/// provider and behave nothing alike.
+#[test]
+fn the_listing_says_what_kind_of_credential_each_row_is() {
+    let data = data();
+    ganja(&data)
+        .args(["auth", "login", "--provider", "anthropic", "--key", CANARY])
+        .assert()
+        .success();
+
+    ganja(&data)
+        .args(["auth", "list"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("TYPE")
+                .and(predicate::str::is_match(r"anthropic\s+api\s+\*{4}8842").expect("a pattern")),
+        );
+}
+
+/// A method a provider does not have is asking for something that does not
+/// exist, so it is refused by name rather than attempted — and the refusal says
+/// what there is instead, which is the half that makes it actionable.
+///
+/// Asserting on the "it has" clause is load-bearing rather than thorough: the
+/// flow dispatch refuses an impossible pairing a second time as the shape of
+/// its match, with a message that names only what was asked for. A test that
+/// stopped at the method name would pass against a build whose front-door check
+/// had been removed entirely.
+#[test]
+fn a_login_method_a_provider_does_not_have_is_refused_and_the_ones_it_has_are_named() {
+    let data = data();
+
+    for (provider, method, instead) in [
+        // There is no Anthropic OAuth flow in the pin at all.
+        ("anthropic", "device", "`api`"),
+        ("anthropic", "browser", "`api`"),
+        // The two device-grant providers have no loopback flow here.
+        ("grok", "browser", "`device` and `api`"),
+        ("github-copilot", "browser", "`device` and `api`"),
+    ] {
+        ganja(&data)
+            .args(["auth", "login", "--provider", provider, "--method", method])
+            .assert()
+            .failure()
+            .stderr(
+                predicate::str::contains(format!("{provider} has no `{method}` login"))
+                    .and(predicate::str::contains(format!("it has {instead}"))),
+            );
+    }
+
+    assert!(
+        !stored_at(&data).exists(),
+        "a refused login should write nothing"
+    );
+}
+
+/// ganja calls the provider `grok`; the credential file calls it `xai`, which
+/// is what an opencode install reading the same file expects. The key path has
+/// to land there too, not only the login.
+#[test]
+fn a_grok_key_is_stored_under_the_name_the_credential_file_uses() {
+    let data = data();
+
+    ganja(&data)
+        .args(["auth", "login", "--provider", "grok"])
+        .write_stdin(format!("{CANARY}\n"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("****8842").and(predicate::str::contains(CANARY).not()));
+
+    let written = fs::read_to_string(stored_at(&data)).expect("the key was stored");
+    let parsed: serde_json::Value = serde_json::from_str(&written).expect("the store is JSON");
+    assert_eq!(parsed["xai"]["type"], "api");
+    assert!(
+        parsed.get("grok").is_none(),
+        "the command-line name is not a line in the file: {parsed}"
+    );
+
+    // And forgetting it reaches the same entry.
+    ganja(&data)
+        .args(["auth", "logout", "--provider", "grok"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("forgot"));
+    ganja(&data)
+        .args(["auth", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no credentials"));
+}
+
+/// The variable that redirects a login decides where a device code and then a
+/// pair of tokens are sent, so anything that could name a host off this machine
+/// is refused — and refused rather than ignored, because quietly using the real
+/// issuer instead is the one outcome whoever set it cannot have wanted.
+#[test]
+fn a_redirected_login_that_could_leave_the_machine_is_refused() {
+    let data = data();
+
+    for origin in [
+        "https://auth.x.ai",
+        // Userinfo: everything before the `@` is discarded by a resolver, so
+        // this names `elsewhere.example`.
+        "http://127.0.0.1:80@elsewhere.example",
+        "http://localhost.elsewhere.example:8080",
+    ] {
+        ganja(&data)
+            .env("GANJA_AUTH_ISSUER", origin)
+            .args(["auth", "login", "--provider", "grok", "--method", "device"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("GANJA_AUTH_ISSUER"));
+    }
+
+    assert!(
+        !stored_at(&data).exists(),
+        "a refused login should write nothing"
+    );
 }
 
 /// A cache home of this test's own.
