@@ -148,7 +148,11 @@ async fn a_passthrough_writes_the_command_and_its_output_into_the_transcript() {
         .expect("an idle engine accepts a command");
     let seen = drain(&mut events).await;
 
-    let Some(Event::MessageStarted { message: user }) = seen.first() else {
+    let Some(Event::MessageStarted {
+        session_id: _,
+        message: user,
+    }) = seen.first()
+    else {
         panic!("a passthrough opens with the synthetic user message, got {seen:?}");
     };
     assert_eq!(user.role, Role::User);

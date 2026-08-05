@@ -101,7 +101,11 @@ async fn the_users_message_carries_the_mention_as_a_reference() {
         .expect("an idle engine accepts a prompt");
     let seen = drain_allowing(&engine, &mut events).await;
 
-    let Some(Event::MessageStarted { message: user }) = seen.first() else {
+    let Some(Event::MessageStarted {
+        session_id: _,
+        message: user,
+    }) = seen.first()
+    else {
         panic!("a turn opens with the user's message, got {seen:?}");
     };
     assert_eq!(user.role, Role::User);
@@ -119,7 +123,7 @@ async fn the_users_message_carries_the_mention_as_a_reference() {
     assert!(
         !seen.iter().any(|event| matches!(
             event,
-            Event::MessageStarted { message } if message.parts.iter().any(|part| part
+            Event::MessageStarted { session_id: _, message } if message.parts.iter().any(|part| part
                 .as_text()
                 .is_some_and(|text| text.contains("contents")))
         )),
