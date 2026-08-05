@@ -1,9 +1,12 @@
-# Lets the profile table below carry rustflags — the only mechanism that can
-# make a flag differ between a dev build and a release artifact. Nightly-only,
-# like the -Z flags beneath; the date-pinned toolchain is what keeps it stable.
-[unstable]
-profile-rustflags = true
-
+# Deliberately absent: `-C target-cpu=native`. A release artifact must run on
+# every machine of its architecture, and cargo offers no shape that scopes the
+# flag to non-release profiles on one target: profile rustflags land *before*
+# the target's (codegen flags are last-wins, so the target block always won),
+# and putting native on the dev profile applies to every platform — a GitHub
+# ubuntu runner SIGILLed its own freshly built build-scripts under exactly
+# that (CPUID inside those VMs misreports what the host executes). Interactive
+# builds on this machine are governed by the ambient RUSTFLAGS anyway, which
+# replaces this whole block when set; gates and CI run with it unset.
 [target.aarch64-apple-darwin]
 rustflags = [
   "-C",
@@ -19,12 +22,3 @@ rustflags = [
   "-C",
   "link-arg=-Wl,-dead_strip",
 ]
-
-# Native codegen is a dev-loop luxury: a release artifact must run on every
-# machine of its architecture, not just the one that built it, so the flag
-# lives on the dev profile (test and its other descendants inherit it) and
-# deliberately never on release. Unlike the block above this applies on every
-# platform, which is safe for the same reason it exists — a dev or test build
-# only ever runs on the machine that compiled it.
-[profile.dev]
-rustflags = ["-C", "target-cpu=native"]
