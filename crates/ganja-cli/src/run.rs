@@ -555,7 +555,13 @@ impl<'a> Reporter<'a> {
     /// Applies one event, answering whether the turn is over.
     fn apply(&mut self, event: &Event, agent: Option<&str>) -> bool {
         match event {
-            Event::MessageStarted { message } => self.announce(message, agent),
+            // The event's own session is deliberately unread: the id this run
+            // stamps on every emitted object is the local it captured before
+            // the first event, which is the contract the format hangs on.
+            Event::MessageStarted {
+                session_id: _,
+                message,
+            } => self.announce(message, agent),
             Event::PartStarted { part, .. } => match &part.body {
                 // Opened empty and grown by the deltas below.
                 PartBody::Text { text } => self.open.push((part.id.clone(), text.clone())),
@@ -783,7 +789,8 @@ fn piped_stdin() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use ganja_protocol::{
-        Event, FinishReason, Message, MessageId, Part, PartBody, PartId, Role, ToolState, Usage,
+        Event, FinishReason, Message, MessageId, Part, PartBody, PartId, Role, SessionId,
+        ToolState, Usage,
     };
     use serde_json::Value;
 
@@ -792,6 +799,14 @@ mod tests {
     /// The session every fixture runs in, distinct from anything a part
     /// carries so that a stamp read off the wrong place would show.
     const SESSION: &str = "ses_the_runs_own";
+
+    /// The session the fixture events themselves carry — deliberately not
+    /// [`SESSION`], for the same reason that one is distinct from anything a
+    /// part carries: the stamp is the run's own local, and a stamp read off
+    /// the event instead would show.
+    fn event_session() -> SessionId {
+        SessionId::from("ses_carried_on_events".to_owned())
+    }
 
     /// Drives `events` through a reporter and hands back both channels.
     fn report(format: Format, events: &[Event]) -> (String, String) {
@@ -874,33 +889,41 @@ mod tests {
 
         vec![
             Event::MessageStarted {
+                session_id: event_session(),
                 message: Message::user("what is in main"),
             },
             Event::MessageStarted {
+                session_id: event_session(),
                 message: assistant(),
             },
             Event::PartStarted {
+                session_id: event_session(),
                 message_id: message_id.clone(),
                 part: step,
             },
             Event::PartStarted {
+                session_id: event_session(),
                 message_id: message_id.clone(),
                 part: text,
             },
             Event::PartDelta {
+                session_id: event_session(),
                 message_id: message_id.clone(),
                 part_id: PartId::from("prt_text".to_owned()),
                 delta: "Reading it.".to_owned(),
             },
             Event::PartStarted {
+                session_id: event_session(),
                 message_id: message_id.clone(),
                 part: finish,
             },
             Event::PartUpdated {
+                session_id: event_session(),
                 message_id: message_id.clone(),
                 part: call,
             },
             Event::MessageFinished {
+                session_id: event_session(),
                 message_id,
                 reason: FinishReason::Completed,
                 usage: None,
@@ -1026,6 +1049,7 @@ mod tests {
         let mut events = turn();
         events.pop();
         events.push(Event::MessageFinished {
+            session_id: event_session(),
             message_id: MessageId::from("msg_1".to_owned()),
             reason: FinishReason::Failed,
             usage: None,
@@ -1076,6 +1100,7 @@ mod tests {
             },
         };
         let events = [Event::PartUpdated {
+            session_id: event_session(),
             message_id: MessageId::from("msg_1".to_owned()),
             part: call.clone(),
         }];
@@ -1116,6 +1141,7 @@ mod tests {
         let (out, _) = report(
             Format::Default,
             &[Event::PartUpdated {
+                session_id: event_session(),
                 message_id: MessageId::from("msg_1".to_owned()),
                 part: call,
             }],

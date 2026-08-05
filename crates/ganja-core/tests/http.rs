@@ -954,7 +954,10 @@ fn replay(events: &[Event]) -> String {
     events
         .iter()
         .filter_map(|event| match event {
-            Event::MessageStarted { message } => Some(
+            Event::MessageStarted {
+                session_id: _,
+                message,
+            } => Some(
                 message
                     .parts
                     .iter()

@@ -728,7 +728,11 @@ async fn an_over_budget_session_is_summarized_before_the_turn() {
     // The first thing the frontend hears is the summary, arriving complete:
     // the frozen protocol has no way to close a message that is not the
     // turn's, so it is never announced half-grown.
-    let Some(Event::MessageStarted { message: summary }) = seen.first() else {
+    let Some(Event::MessageStarted {
+        session_id: _,
+        message: summary,
+    }) = seen.first()
+    else {
         panic!("the summary should open the event stream, got {seen:#?}");
     };
     assert_eq!(summary.role, Role::Assistant);
@@ -1163,7 +1167,10 @@ async fn a_finish_is_never_overtaken_by_the_next_turns_events() {
             .expect("the stream keeps moving")
             .expect("the engine outlives the drain");
         match &event {
-            Event::MessageStarted { message } if message.role == Role::User => {
+            Event::MessageStarted {
+                session_id: _,
+                message,
+            } if message.role == Role::User => {
                 open_turns += 1;
                 assert!(
                     open_turns <= 1,

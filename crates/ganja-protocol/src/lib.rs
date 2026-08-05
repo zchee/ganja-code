@@ -32,6 +32,9 @@ const PART_PREFIX: &str = "prt";
 /// Prefix for permission request ids.
 const PERMISSION_PREFIX: &str = "perm";
 
+/// Prefix session ids carry, matching upstream's `ses_` ids.
+const SESSION_PREFIX: &str = "ses";
+
 /// Milliseconds since the Unix epoch, saturating rather than failing when the
 /// clock is set before 1970.
 ///
@@ -139,6 +142,38 @@ impl PermissionId {
 
 impl From<String> for PermissionId {
     /// Adopts a stored id; see [`MessageId::from`].
+    fn from(id: String) -> Self {
+        Self(id)
+    }
+}
+
+/// Identifies a session: the conversation an [`Event`] belongs to and a
+/// stored record belongs under.
+///
+/// It began life beside the store and moved here when events started naming
+/// their session — a wire type has to live with the wire. Behavior is the
+/// one it always had: minted ascending like every other id here, transparent
+/// on the wire, adopted verbatim from storage.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// Mints an id that sorts after every id minted before it.
+    #[must_use]
+    pub fn ascending() -> Self {
+        Self(ascending(SESSION_PREFIX))
+    }
+
+    /// The id as it travels the wire, and as it appears in rows and listings.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SessionId {
+    /// Adopts a stored id, whatever it was written with.
     fn from(id: String) -> Self {
         Self(id)
     }
@@ -637,12 +672,20 @@ pub enum PermissionReply {
 /// bus —
 /// [`Event::PartDelta`] is `message.part.delta`, [`Event::PartStarted`] and
 /// [`Event::PartUpdated`] are `message.part.updated`.
+///
+/// Every variant names the session it happened in, so a consumer fed more
+/// than one conversation can attribute each event instead of guessing. The
+/// field is spelled `session_id` where upstream writes `sessionID`: this
+/// protocol has one casing rule, and a camel-case island would be the only
+/// one on the wire (deviation: session-id-is-snake-case).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     /// A message entered the transcript. A user message arrives complete; an
     /// assistant message arrives empty and grows through the events below.
     MessageStarted {
+        /// Session this happened in.
+        session_id: SessionId,
         /// The message as it stands.
         message: Message,
     },
@@ -650,6 +693,8 @@ pub enum Event {
     /// before any delta addresses it, so a frontend always knows a part's id
     /// and kind before its content.
     PartStarted {
+        /// Session this happened in.
+        session_id: SessionId,
         /// Message the part belongs to.
         message_id: MessageId,
         /// The part, empty of content.
@@ -657,6 +702,8 @@ pub enum Event {
     },
     /// Content was appended to a part.
     PartDelta {
+        /// Session this happened in.
+        session_id: SessionId,
         /// Message the part belongs to.
         message_id: MessageId,
         /// Part to append to.
@@ -667,6 +714,8 @@ pub enum Event {
     /// A part changed as a whole — a tool call moved through its lifecycle —
     /// and this is its new value, replacing the part with the same id.
     PartUpdated {
+        /// Session this happened in.
+        session_id: SessionId,
         /// Message the part belongs to.
         message_id: MessageId,
         /// The part as it now stands.
@@ -676,6 +725,10 @@ pub enum Event {
     /// turn holds until [`Command::ReplyPermission`] names this id, or the
     /// turn is cancelled.
     PermissionRequested {
+        /// Session this happened in. A dialog that crossed from a subagent
+        /// carries the delegating session's id, because that is the
+        /// conversation whose turn is waiting on the answer.
+        session_id: SessionId,
         /// Names this request, for the reply.
         id: PermissionId,
         /// The tool call waiting on the decision.
@@ -699,6 +752,8 @@ pub enum Event {
     /// A permission request was answered — by the user, or by a cancel
     /// refusing it — so a frontend can retire the dialog.
     PermissionReplied {
+        /// Session this happened in, addressed as its request was.
+        session_id: SessionId,
         /// The request that was answered.
         id: PermissionId,
         /// What was decided.
@@ -720,6 +775,8 @@ pub enum Event {
     /// have just been deleted and the frontend drops them. The engine draws no
     /// distinction because the frontend's own command already did.
     RevertChanged {
+        /// Session this happened in.
+        session_id: SessionId,
         /// Where the revert stands, or [`None`] when there is none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revert: Option<RevertInfo>,
@@ -733,6 +790,8 @@ pub enum Event {
     /// The turn ended and the engine is idle again. Always the last event of a
     /// turn, whatever went wrong during it.
     MessageFinished {
+        /// Session this happened in.
+        session_id: SessionId,
         /// The assistant message that just closed.
         message_id: MessageId,
         /// Why it ended.
@@ -748,6 +807,28 @@ pub enum Event {
         /// [`MessageTime::completed`].
         completed: u64,
     },
+}
+
+impl Event {
+    /// The session this event belongs to, whatever its variant.
+    ///
+    /// The field lives on every variant rather than on a wrapper, so the wire
+    /// shape stays flat; this is the one place that knows all eight spellings
+    /// of that fact, so a consumer that filters or groups by session does not
+    /// have to write the eight-arm match itself.
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        match self {
+            Event::MessageStarted { session_id, .. }
+            | Event::PartStarted { session_id, .. }
+            | Event::PartDelta { session_id, .. }
+            | Event::PartUpdated { session_id, .. }
+            | Event::PermissionRequested { session_id, .. }
+            | Event::PermissionReplied { session_id, .. }
+            | Event::RevertChanged { session_id, .. }
+            | Event::MessageFinished { session_id, .. } => session_id,
+        }
+    }
 }
 
 /// Why a turn ended.
@@ -766,8 +847,13 @@ pub enum FinishReason {
 mod tests {
     use super::{
         Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody,
-        PartId, PermissionId, PermissionReply, RevertInfo, Role, ToolState, Usage,
+        PartId, PermissionId, PermissionReply, RevertInfo, Role, SessionId, ToolState, Usage,
     };
+
+    /// The session every pinned event happens in.
+    fn pinned_session() -> SessionId {
+        SessionId::from("ses_1".to_owned())
+    }
 
     /// Builds a completed tool part with pinned ids and times, the richest
     /// shape a part takes on the wire.
@@ -826,6 +912,10 @@ mod tests {
         let parts: Vec<PartId> = (0..64).map(|_| PartId::ascending()).collect();
         assert!(parts.iter().all(|id| id.as_str().starts_with("prt_")));
         assert!(parts.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let sessions: Vec<SessionId> = (0..64).map(|_| SessionId::ascending()).collect();
+        assert!(sessions.iter().all(|id| id.as_str().starts_with("ses_")));
+        assert!(sessions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
@@ -906,23 +996,29 @@ mod tests {
         }
     }
 
+    /// The cases cover every variant, so the loop's accessor assertion is
+    /// also the proof that [`Event::session_id`] reads all eight of them.
     #[test]
     fn events_round_trip_through_json() {
         let message = pinned_message();
         let cases = [
             Event::MessageStarted {
+                session_id: pinned_session(),
                 message: message.clone(),
             },
             Event::PartStarted {
+                session_id: pinned_session(),
                 message_id: message.id.clone(),
                 part: Part::text(""),
             },
             Event::PartDelta {
+                session_id: pinned_session(),
                 message_id: message.id.clone(),
                 part_id: PartId::from("prt_1".to_owned()),
                 delta: "hi".to_owned(),
             },
             Event::MessageFinished {
+                session_id: pinned_session(),
                 message_id: message.id.clone(),
                 reason: FinishReason::Failed,
                 usage: Some(Usage {
@@ -936,10 +1032,12 @@ mod tests {
                 completed: 9,
             },
             Event::PartUpdated {
+                session_id: pinned_session(),
                 message_id: message.id.clone(),
                 part: pinned_tool_part(),
             },
             Event::PermissionRequested {
+                session_id: pinned_session(),
                 id: PermissionId::from("perm_1".to_owned()),
                 call_id: "call_1".to_owned(),
                 tool: "shell".to_owned(),
@@ -948,10 +1046,12 @@ mod tests {
                 directories: vec!["/tmp/scratch".to_owned()],
             },
             Event::PermissionReplied {
+                session_id: pinned_session(),
                 id: PermissionId::from("perm_1".to_owned()),
                 reply: PermissionReply::Reject,
             },
             Event::RevertChanged {
+                session_id: pinned_session(),
                 revert: Some(RevertInfo {
                     message_id: message.id.clone(),
                     files: vec!["src/main.rs".to_owned()],
@@ -959,12 +1059,19 @@ mod tests {
                 prompt: Some("rename the thing".to_owned()),
             },
             Event::RevertChanged {
+                session_id: pinned_session(),
                 revert: None,
                 prompt: None,
             },
         ];
 
         for event in cases {
+            assert_eq!(
+                event.session_id(),
+                &pinned_session(),
+                "the accessor reads the session off {event:?}"
+            );
+
             let encoded = serde_json::to_string(&event).expect("an event serializes");
             let decoded: Event = serde_json::from_str(&encoded).expect("an event deserializes");
             assert_eq!(decoded, event, "round trip changed {encoded}");
@@ -1040,20 +1147,22 @@ mod tests {
             ),
             (
                 serde_json::to_string(&Event::RevertChanged {
+                    session_id: pinned_session(),
                     revert: Some(RevertInfo {
                         message_id: MessageId::from("msg_1".to_owned()),
                         files: vec!["src/main.rs".to_owned()],
                     }),
                     prompt: Some("rename it".to_owned()),
                 }),
-                r#"{"type":"revert_changed","revert":{"message_id":"msg_1","files":["src/main.rs"]},"prompt":"rename it"}"#,
+                r#"{"type":"revert_changed","session_id":"ses_1","revert":{"message_id":"msg_1","files":["src/main.rs"]},"prompt":"rename it"}"#,
             ),
             (
                 serde_json::to_string(&Event::RevertChanged {
+                    session_id: pinned_session(),
                     revert: None,
                     prompt: None,
                 }),
-                r#"{"type":"revert_changed"}"#,
+                r#"{"type":"revert_changed","session_id":"ses_1"}"#,
             ),
             (
                 serde_json::to_string(&Part {
@@ -1076,12 +1185,14 @@ mod tests {
             ),
             (
                 serde_json::to_string(&Event::MessageStarted {
+                    session_id: pinned_session(),
                     message: pinned_message(),
                 }),
-                r#"{"type":"message_started","message":{"id":"msg_1","role":"user","parts":[{"id":"prt_1","type":"text","text":"hi"}],"time":{"created":7,"completed":7}}}"#,
+                r#"{"type":"message_started","session_id":"ses_1","message":{"id":"msg_1","role":"user","parts":[{"id":"prt_1","type":"text","text":"hi"}],"time":{"created":7,"completed":7}}}"#,
             ),
             (
                 serde_json::to_string(&Event::PartStarted {
+                    session_id: pinned_session(),
                     message_id: MessageId::from("msg_1".to_owned()),
                     part: Part {
                         id: PartId::from("prt_1".to_owned()),
@@ -1090,18 +1201,20 @@ mod tests {
                         },
                     },
                 }),
-                r#"{"type":"part_started","message_id":"msg_1","part":{"id":"prt_1","type":"text","text":""}}"#,
+                r#"{"type":"part_started","session_id":"ses_1","message_id":"msg_1","part":{"id":"prt_1","type":"text","text":""}}"#,
             ),
             (
                 serde_json::to_string(&Event::PartDelta {
+                    session_id: pinned_session(),
                     message_id: MessageId::from("msg_1".to_owned()),
                     part_id: PartId::from("prt_1".to_owned()),
                     delta: "hi".to_owned(),
                 }),
-                r#"{"type":"part_delta","message_id":"msg_1","part_id":"prt_1","delta":"hi"}"#,
+                r#"{"type":"part_delta","session_id":"ses_1","message_id":"msg_1","part_id":"prt_1","delta":"hi"}"#,
             ),
             (
                 serde_json::to_string(&Event::MessageFinished {
+                    session_id: pinned_session(),
                     message_id: MessageId::from("msg_1".to_owned()),
                     reason: FinishReason::Completed,
                     usage: Some(Usage {
@@ -1112,27 +1225,29 @@ mod tests {
                     error: None,
                     completed: 9,
                 }),
-                r#"{"type":"message_finished","message_id":"msg_1","reason":"completed","usage":{"input_tokens":1,"output_tokens":2,"reasoning_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0},"completed":9}"#,
+                r#"{"type":"message_finished","session_id":"ses_1","message_id":"msg_1","reason":"completed","usage":{"input_tokens":1,"output_tokens":2,"reasoning_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0},"completed":9}"#,
             ),
             (
                 serde_json::to_string(&Event::MessageFinished {
+                    session_id: pinned_session(),
                     message_id: MessageId::from("msg_1".to_owned()),
                     reason: FinishReason::Cancelled,
                     usage: None,
                     error: None,
                     completed: 9,
                 }),
-                r#"{"type":"message_finished","message_id":"msg_1","reason":"cancelled","completed":9}"#,
+                r#"{"type":"message_finished","session_id":"ses_1","message_id":"msg_1","reason":"cancelled","completed":9}"#,
             ),
             (
                 serde_json::to_string(&Event::MessageFinished {
+                    session_id: pinned_session(),
                     message_id: MessageId::from("msg_1".to_owned()),
                     reason: FinishReason::Failed,
                     usage: None,
                     error: Some("no credentials".to_owned()),
                     completed: 9,
                 }),
-                r#"{"type":"message_finished","message_id":"msg_1","reason":"failed","error":"no credentials","completed":9}"#,
+                r#"{"type":"message_finished","session_id":"ses_1","message_id":"msg_1","reason":"failed","error":"no credentials","completed":9}"#,
             ),
             (
                 serde_json::to_string(&Command::ReplyPermission {
@@ -1194,6 +1309,7 @@ mod tests {
             ),
             (
                 serde_json::to_string(&Event::PartUpdated {
+                    session_id: pinned_session(),
                     message_id: MessageId::from("msg_1".to_owned()),
                     part: Part {
                         id: PartId::from("prt_1".to_owned()),
@@ -1208,7 +1324,7 @@ mod tests {
                         },
                     },
                 }),
-                r#"{"type":"part_updated","message_id":"msg_1","part":{"id":"prt_1","type":"tool","call_id":"call_1","tool":"shell","state":{"status":"running","input":{"command":"ls"},"started":7}}}"#,
+                r#"{"type":"part_updated","session_id":"ses_1","message_id":"msg_1","part":{"id":"prt_1","type":"tool","call_id":"call_1","tool":"shell","state":{"status":"running","input":{"command":"ls"},"started":7}}}"#,
             ),
             // A call that reports progress while it runs — the `!` passthrough
             // streaming its output, or a task tool watching a subagent.
@@ -1227,10 +1343,12 @@ mod tests {
                 }),
                 r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"bash","state":{"status":"running","input":{"command":"ls"},"metadata":{"output":"a.rs\n"},"started":7}}"#,
             ),
-            // A call that stays inside the checkout, whose bytes are exactly
-            // what they were before `directories` existed.
+            // A call that stays inside the checkout, whose `directories` are
+            // absent from the wire exactly as they were when the field
+            // arrived.
             (
                 serde_json::to_string(&Event::PermissionRequested {
+                    session_id: pinned_session(),
                     id: PermissionId::from("perm_1".to_owned()),
                     call_id: "call_1".to_owned(),
                     tool: "shell".to_owned(),
@@ -1238,10 +1356,11 @@ mod tests {
                     args: serde_json::json!({"command": "ls"}),
                     directories: Vec::new(),
                 }),
-                r#"{"type":"permission_requested","id":"perm_1","call_id":"call_1","tool":"shell","title":"ls","args":{"command":"ls"}}"#,
+                r#"{"type":"permission_requested","session_id":"ses_1","id":"perm_1","call_id":"call_1","tool":"shell","title":"ls","args":{"command":"ls"}}"#,
             ),
             (
                 serde_json::to_string(&Event::PermissionRequested {
+                    session_id: pinned_session(),
                     id: PermissionId::from("perm_1".to_owned()),
                     call_id: "call_1".to_owned(),
                     tool: "shell".to_owned(),
@@ -1249,14 +1368,15 @@ mod tests {
                     args: serde_json::json!({"command": "ls /etc"}),
                     directories: vec!["/etc".to_owned(), "/tmp/scratch".to_owned()],
                 }),
-                r#"{"type":"permission_requested","id":"perm_1","call_id":"call_1","tool":"shell","title":"ls /etc","args":{"command":"ls /etc"},"directories":["/etc","/tmp/scratch"]}"#,
+                r#"{"type":"permission_requested","session_id":"ses_1","id":"perm_1","call_id":"call_1","tool":"shell","title":"ls /etc","args":{"command":"ls /etc"},"directories":["/etc","/tmp/scratch"]}"#,
             ),
             (
                 serde_json::to_string(&Event::PermissionReplied {
+                    session_id: pinned_session(),
                     id: PermissionId::from("perm_1".to_owned()),
                     reply: PermissionReply::Reject,
                 }),
-                r#"{"type":"permission_replied","id":"perm_1","reply":"reject"}"#,
+                r#"{"type":"permission_replied","session_id":"ses_1","id":"perm_1","reply":"reject"}"#,
             ),
             (
                 serde_json::to_string(&Command::SwitchAgent {

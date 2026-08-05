@@ -67,13 +67,10 @@ use std::{
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::protocol::{Message, MessageId, Part, Usage, ascending, now};
+use crate::protocol::{Message, MessageId, Part, Usage, now};
 
 /// The record format this build writes.
 pub const VERSION: u32 = 1;
-
-/// Prefix session ids carry, matching upstream's `ses_` ids.
-const SESSION_PREFIX: &str = "ses";
 
 /// The database file, beside the `storage/` directory a store is anchored on.
 ///
@@ -261,31 +258,11 @@ const MIGRATIONS: &[Migration] = &[Migration {
     up: SCHEMA,
 }];
 
-/// Identifies a stored session.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SessionId(String);
-
-impl SessionId {
-    /// Mints an id that sorts after every id minted before it.
-    #[must_use]
-    pub fn ascending() -> Self {
-        Self(ascending(SESSION_PREFIX))
-    }
-
-    /// The id as it appears in rows and listings.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for SessionId {
-    /// Adopts a stored id, whatever it was written with.
-    fn from(id: String) -> Self {
-        Self(id)
-    }
-}
+/// The session id began life here, beside the rows it names, and moved to
+/// [`crate::protocol`] when events started carrying it — a wire type has to
+/// live with the wire. The re-export keeps `storage::SessionId` meaning what
+/// it always meant to every caller that reads it here.
+pub use crate::protocol::SessionId;
 
 /// Everything known about a session apart from its transcript.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

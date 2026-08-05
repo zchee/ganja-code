@@ -8,10 +8,11 @@
 //! consume a script entry.
 //!
 //! What is *not* observable from the parent's event stream is the point of half
-//! these tests. A child's messages never reach the frontend, because nothing on
-//! this wire carries a session id and a frontend applying the stream would file
-//! them under the parent's own transcript. What crosses over is the child's
-//! permission dialogs and the progress metadata on the parent's tool part —
+//! these tests. A child's messages never reach the frontend: events name their
+//! session now, but the child session is one no frontend can see, and today's
+//! consumers apply the whole stream into the conversation they are showing.
+//! What crosses over is the child's permission dialogs — re-addressed to the
+//! parent's session — and the progress metadata on the parent's tool part,
 //! both asserted below.
 
 use std::{
@@ -134,7 +135,10 @@ fn published(event: &Event) -> Vec<String> {
     }
 
     match event {
-        Event::MessageStarted { message } => message.parts.iter().filter_map(render).collect(),
+        Event::MessageStarted {
+            session_id: _,
+            message,
+        } => message.parts.iter().filter_map(render).collect(),
         Event::PartStarted { part, .. } | Event::PartUpdated { part, .. } => {
             render(part).into_iter().collect()
         }
@@ -212,7 +216,7 @@ async fn a_task_call_runs_a_child_loop_and_hands_back_its_last_words() {
     assert!(
         !seen.iter().any(|event| matches!(
             event,
-            Event::MessageStarted { message } if message
+            Event::MessageStarted { session_id: _, message } if message
                 .parts
                 .iter()
                 .any(|part| part.as_text() == Some("the thing is in src/main.rs"))
@@ -223,11 +227,12 @@ async fn a_task_call_runs_a_child_loop_and_hands_back_its_last_words() {
 
 /// A child's turn is a turn nobody subscribed to.
 ///
-/// Nothing on this wire carries a session id, so a frontend applying this
-/// stream files every message it sees under the session it is showing — a
-/// child's messages would arrive as the parent's own. Upstream publishes them
-/// and lets its frontend filter by session id; this one has nothing to filter
-/// on, so it does not publish (deviation:
+/// Events name their session now, so a frontend *could* tell a child's
+/// messages apart — but today's consumers file everything the stream carries
+/// under the conversation they are showing, and the child session is one no
+/// frontend can see. Upstream publishes and lets its frontend filter by
+/// session id; this build keeps the child off the stream until a consumer
+/// exists that asked to filter (deviation:
 /// `subagent-events-stay-off-the-stream`).
 ///
 /// What may cross is named exactly: the child's permission dialogs, and the
@@ -297,7 +302,10 @@ async fn a_childs_own_messages_never_reach_the_subscribed_stream() {
     let roles: Vec<Role> = seen
         .iter()
         .filter_map(|event| match event {
-            Event::MessageStarted { message } => Some(message.role),
+            Event::MessageStarted {
+                session_id: _,
+                message,
+            } => Some(message.role),
             _ => None,
         })
         .collect();
@@ -554,6 +562,68 @@ async fn an_always_the_parent_was_given_does_not_authorize_the_child() {
         asked.iter().any(|tool| tool == "webfetch"),
         "the child's call had to be asked about on its own: {asked:?}"
     );
+}
+
+/// A child's permission dialog crosses to the parent's stream **re-addressed**:
+/// it carries the parent's session id, not the child's. The child session is
+/// invisible to every frontend — never seeded, never listed — so a dialog
+/// naming it would hand a session-filtering client a question it could not
+/// attribute; the parent's is the conversation whose turn is waiting on the
+/// answer.
+#[tokio::test]
+async fn a_crossing_permission_dialog_carries_the_parents_session_id() {
+    let (provider, _) = ScriptedProvider::new(vec![
+        delegates("general"),
+        tool_call("webfetch", json!({ "url": "https://example.test" })),
+        says("the child is done"),
+        says("so is the parent"),
+    ]);
+    let (webfetch, _fetches) = Canned::new("webfetch");
+    let engine = engine(provider, vec![webfetch], &Config::default());
+    let parent = engine.session_id();
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "delegate it".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    let seen = drain_answering(&engine, &mut events, PermissionReply::Once).await;
+
+    let crossed: Vec<&Event> = seen
+        .iter()
+        .filter(
+            |event| matches!(event, Event::PermissionRequested { tool, .. } if tool == "webfetch"),
+        )
+        .collect();
+    assert_eq!(
+        crossed.len(),
+        1,
+        "the child's own call asked exactly once: {seen:?}"
+    );
+    assert_eq!(
+        crossed[0].session_id(),
+        &parent,
+        "the crossing dialog is addressed to the delegating session"
+    );
+
+    // And not just the request: every dialog event on this stream — the
+    // parent's own `task` ask, the crossing ask, and both replies — belongs
+    // to the parent's session, because the stream never shows another one.
+    for event in seen.iter().filter(|event| {
+        matches!(
+            event,
+            Event::PermissionRequested { .. } | Event::PermissionReplied { .. }
+        )
+    }) {
+        assert_eq!(
+            event.session_id(),
+            &parent,
+            "a dialog event named a session the stream cannot show: {event:?}"
+        );
+    }
 }
 
 /// A refusal the parent session is under has to reach what the parent

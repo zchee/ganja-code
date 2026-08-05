@@ -297,9 +297,10 @@ async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
     let summary = seen
         .iter()
         .find_map(|event| match event {
-            Event::MessageStarted { message } if message.role == Role::Assistant => {
-                Some(message.clone())
-            }
+            Event::MessageStarted {
+                session_id: _,
+                message,
+            } if message.role == Role::Assistant => Some(message.clone()),
             _ => None,
         })
         .expect("the summary enters the transcript");

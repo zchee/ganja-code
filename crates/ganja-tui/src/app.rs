@@ -1689,19 +1689,31 @@ impl App {
 
     fn handle_core(&mut self, event: CoreEvent) {
         match event {
-            CoreEvent::MessageStarted { message } => {
+            CoreEvent::MessageStarted {
+                session_id: _,
+                message,
+            } => {
                 if message.role == Role::Assistant {
                     self.status.set_activity(Activity::Streaming);
                 }
                 self.chat.start_message(message);
             }
-            CoreEvent::PartStarted { message_id, part } => self.chat.start_part(&message_id, part),
+            CoreEvent::PartStarted {
+                session_id: _,
+                message_id,
+                part,
+            } => self.chat.start_part(&message_id, part),
             CoreEvent::PartDelta {
+                session_id: _,
                 message_id,
                 part_id,
                 delta,
             } => self.chat.append_delta(&message_id, &part_id, &delta),
-            CoreEvent::PartUpdated { message_id, part } => {
+            CoreEvent::PartUpdated {
+                session_id: _,
+                message_id,
+                part,
+            } => {
                 if let PartBody::Tool { tool, state, .. } = &part.body {
                     self.status.set_activity(match state {
                         ToolState::Pending | ToolState::Running { .. } => {
@@ -1740,7 +1752,11 @@ impl App {
             // means "show those messages again" or "they are gone": this
             // frontend sent the command that decides it, and remembered which
             // (**R10**).
-            CoreEvent::RevertChanged { revert, prompt } => {
+            CoreEvent::RevertChanged {
+                session_id: _,
+                revert,
+                prompt,
+            } => {
                 match revert {
                     Some(info) => self.chat.revert(info.message_id, info.files),
                     None => match self.cleared {
@@ -1912,6 +1928,13 @@ mod tests {
     use super::{
         App, Chooser, Cleared, Dropdown, FRAME, Mode, Palette, Permission, permission_reply,
     };
+
+    /// The session every hand-built fixture event happens in. One pinned id,
+    /// used consistently, so a test that one day cares which session an event
+    /// named has something stable to assert on.
+    fn session() -> SessionId {
+        SessionId::from("ses_fixture".to_owned())
+    }
     use crate::{
         clipboard, command,
         component::sessions,
@@ -2395,11 +2418,13 @@ mod tests {
         let part = Part::text("");
 
         app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
             message: reply.clone(),
         }))
         .await
         .expect("a message start is handled");
         app.handle(AppEvent::core(CoreEvent::PartStarted {
+            session_id: session(),
             message_id: reply.id.clone(),
             part: part.clone(),
         }))
@@ -2407,6 +2432,7 @@ mod tests {
         .expect("a part start is handled");
         for fragment in ["stream", "ed ", "reply"] {
             app.handle(AppEvent::core(CoreEvent::PartDelta {
+                session_id: session(),
                 message_id: reply.id.clone(),
                 part_id: part.id.clone(),
                 delta: fragment.to_owned(),
@@ -2426,6 +2452,7 @@ mod tests {
         );
 
         app.handle(AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
             message_id: reply.id,
             reason: FinishReason::Cancelled,
             usage: None,
@@ -2444,6 +2471,7 @@ mod tests {
         let mut app = app();
 
         app.handle(AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
             message_id: Message::assistant("canned").id,
             reason: FinishReason::Failed,
             usage: None,
@@ -2467,6 +2495,7 @@ mod tests {
     /// Builds the finish event a provider that reported its usage produces.
     fn finished(model: &str, usage: Usage) -> AppEvent {
         AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
             message_id: Message::assistant(model).id,
             reason: FinishReason::Completed,
             usage: Some(usage),
@@ -2593,6 +2622,7 @@ mod tests {
         let mut app = App::new(engine_asking(MODEL), None, Themes::builtin());
 
         app.handle(AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
             message_id: Message::assistant(MODEL).id,
             reason: FinishReason::Failed,
             usage: Some(Usage {
@@ -2642,6 +2672,7 @@ mod tests {
         .expect("a turn end is handled");
 
         app.handle(AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
             message_id: Message::assistant(MODEL).id,
             reason: FinishReason::Cancelled,
             usage: None,
@@ -2724,11 +2755,13 @@ mod tests {
         let reply = Message::assistant("canned");
         let part = Part::text("");
         app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
             message: reply.clone(),
         }))
         .await
         .expect("a message start is handled");
         app.handle(AppEvent::core(CoreEvent::PartStarted {
+            session_id: session(),
             message_id: reply.id.clone(),
             part: part.clone(),
         }))
@@ -2739,6 +2772,7 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
 
         app.handle(AppEvent::core(CoreEvent::PartDelta {
+            session_id: session(),
             message_id: reply.id,
             part_id: part.id,
             delta: "burst".to_owned(),
@@ -3076,6 +3110,7 @@ mod tests {
 
     fn permission_event(id: &str) -> CoreEvent {
         CoreEvent::PermissionRequested {
+            session_id: session(),
             id: PermissionId::from(id.to_owned()),
             call_id: "call_1".to_owned(),
             tool: "shell".to_owned(),
@@ -3092,11 +3127,13 @@ mod tests {
         let part = Part::tool("call_1", "shell");
 
         app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
             message: reply.clone(),
         }))
         .await
         .expect("a message start is handled");
         app.handle(AppEvent::core(CoreEvent::PartStarted {
+            session_id: session(),
             message_id: reply.id.clone(),
             part: part.clone(),
         }))
@@ -3112,6 +3149,7 @@ mod tests {
         );
 
         app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            session_id: session(),
             message_id: reply.id.clone(),
             part: Part {
                 id: part.id.clone(),
@@ -3136,6 +3174,7 @@ mod tests {
         );
 
         app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            session_id: session(),
             message_id: reply.id.clone(),
             part: Part {
                 id: part.id.clone(),
@@ -3166,6 +3205,7 @@ mod tests {
         let mut app = app();
         let reply = Message::assistant("canned");
         app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
             message: reply.clone(),
         }))
         .await
@@ -3174,6 +3214,7 @@ mod tests {
         // No PartStarted for this id: a frontend that joined mid-stream still
         // has to converge on the same transcript.
         app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            session_id: session(),
             message_id: reply.id.clone(),
             part: Part {
                 id: PartId::from("prt_orphan".to_owned()),
@@ -3267,6 +3308,7 @@ mod tests {
         assert!(app.permission.is_some());
 
         app.handle(AppEvent::core(CoreEvent::PermissionReplied {
+            session_id: session(),
             id: PermissionId::from("perm_other".to_owned()),
             reply: PermissionReply::Reject,
         }))
@@ -3278,6 +3320,7 @@ mod tests {
         );
 
         app.handle(AppEvent::core(CoreEvent::PermissionReplied {
+            session_id: session(),
             id: PermissionId::from("perm_1".to_owned()),
             reply: PermissionReply::Once,
         }))
@@ -4732,8 +4775,10 @@ mod tests {
             .await
             .expect("enter is handled");
 
-        let CoreEvent::MessageStarted { message } =
-            events.next().await.expect("the engine reports the prompt")
+        let CoreEvent::MessageStarted {
+            session_id: _,
+            message,
+        } = events.next().await.expect("the engine reports the prompt")
         else {
             panic!("the first event of a turn is the user's message");
         };
@@ -4879,8 +4924,10 @@ mod tests {
         );
         assert!(app.editor.is_empty());
 
-        let CoreEvent::MessageStarted { message } =
-            events.next().await.expect("the engine reports the command")
+        let CoreEvent::MessageStarted {
+            session_id: _,
+            message,
+        } = events.next().await.expect("the engine reports the command")
         else {
             panic!("the first event of a passthrough is the synthetic user message");
         };
@@ -4987,8 +5034,10 @@ mod tests {
             .await
             .expect("enter is handled");
 
-        let CoreEvent::MessageStarted { message } =
-            events.next().await.expect("the engine reports the prompt")
+        let CoreEvent::MessageStarted {
+            session_id: _,
+            message,
+        } = events.next().await.expect("the engine reports the prompt")
         else {
             panic!("the first event of a turn is the user's message");
         };
@@ -5027,8 +5076,10 @@ mod tests {
             .await
             .expect("enter is handled");
 
-        let CoreEvent::MessageStarted { message } =
-            events.next().await.expect("the engine reports the prompt")
+        let CoreEvent::MessageStarted {
+            session_id: _,
+            message,
+        } = events.next().await.expect("the engine reports the prompt")
         else {
             panic!("the first event of a turn is the user's message");
         };
@@ -5196,11 +5247,13 @@ mod tests {
     async fn task_part(app: &mut App, state: ToolState) {
         let reply = Message::assistant("canned");
         app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
             message: reply.clone(),
         }))
         .await
         .expect("a message start is handled");
         app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            session_id: session(),
             message_id: reply.id,
             part: Part {
                 id: PartId::from("prt_1".to_owned()),
@@ -5282,11 +5335,13 @@ mod tests {
         let mut app = app();
         let reply = Message::assistant("canned");
         app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
             message: reply.clone(),
         }))
         .await
         .expect("a message start is handled");
         app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            session_id: session(),
             message_id: reply.id,
             part: Part {
                 id: PartId::from("prt_1".to_owned()),
@@ -5375,6 +5430,7 @@ mod tests {
     async fn snapshot_permission_dialog_with_directories() {
         let mut app = app();
         app.handle(AppEvent::core(CoreEvent::PermissionRequested {
+            session_id: session(),
             id: PermissionId::from("perm_1".to_owned()),
             call_id: "call_1".to_owned(),
             tool: "bash".to_owned(),
@@ -5487,8 +5543,10 @@ mod tests {
             .await
             .expect("enter is handled");
 
-        let CoreEvent::MessageStarted { message } =
-            events.next().await.expect("the engine reports the prompt")
+        let CoreEvent::MessageStarted {
+            session_id: _,
+            message,
+        } = events.next().await.expect("the engine reports the prompt")
         else {
             panic!("the first event of a turn is the user's message");
         };
@@ -5551,8 +5609,10 @@ mod tests {
             .await
             .expect("enter is handled");
 
-        let CoreEvent::MessageStarted { message } =
-            events.next().await.expect("the engine reports the prompt")
+        let CoreEvent::MessageStarted {
+            session_id: _,
+            message,
+        } = events.next().await.expect("the engine reports the prompt")
         else {
             panic!("the first event of a turn is the user's message");
         };
@@ -5982,6 +6042,7 @@ mod tests {
     /// The event the engine sends after an undo.
     fn reverted(anchor: &ganja_protocol::MessageId, prompt: Option<&str>) -> AppEvent {
         AppEvent::core(CoreEvent::RevertChanged {
+            session_id: session(),
             revert: Some(ganja_protocol::RevertInfo {
                 message_id: anchor.clone(),
                 files: vec!["src/lib.rs".to_owned()],
@@ -5993,6 +6054,7 @@ mod tests {
     /// The event the engine sends when a revert ends, whichever way it ended.
     fn unreverted() -> AppEvent {
         AppEvent::core(CoreEvent::RevertChanged {
+            session_id: session(),
             revert: None,
             prompt: None,
         })

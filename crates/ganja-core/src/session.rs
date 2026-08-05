@@ -515,6 +515,11 @@ pub(crate) enum TurnKind {
 /// Everything one turn needs, gathered so the spawned task takes one argument.
 pub(crate) struct Turn {
     pub(crate) provider: Arc<dyn Provider>,
+    /// The session every event this turn emits names: the engine's current
+    /// one for a root turn, and the child's own stored session for a
+    /// subagent's — whose private stream is addressed honestly even though
+    /// only the watcher ever reads it.
+    pub(crate) session_id: SessionId,
     pub(crate) model: String,
     /// What the model is told before it is told anything else. Carried by
     /// every request this turn makes except the title one, which asks a
@@ -580,6 +585,7 @@ pub(crate) struct Turn {
 /// compile.
 pub(crate) struct RootParts {
     pub(crate) provider: Arc<dyn Provider>,
+    pub(crate) session_id: SessionId,
     pub(crate) model: String,
     pub(crate) system: Option<String>,
     pub(crate) reminders: Vec<String>,
@@ -605,6 +611,8 @@ pub(crate) struct RootParts {
 /// What a subagent's turn varies, which is everything [`Turn::child`] does not
 /// fix.
 pub(crate) struct ChildParts {
+    /// The child's own stored session, which its private events name.
+    pub(crate) session_id: SessionId,
     /// The subagent's own model when it named one, and the parent's otherwise.
     pub(crate) model: String,
     pub(crate) system: Option<String>,
@@ -636,6 +644,7 @@ impl Turn {
     pub(crate) fn root(parts: RootParts) -> Self {
         Self {
             provider: parts.provider,
+            session_id: parts.session_id,
             model: parts.model,
             system: parts.system,
             reminders: parts.reminders,
@@ -679,6 +688,7 @@ impl Turn {
 
         Self {
             provider: Arc::clone(&host.provider),
+            session_id: parts.session_id,
             model: parts.model,
             system: parts.system,
             // Upstream's plan/build reminders are about the agent a *person*
@@ -837,6 +847,7 @@ pub(crate) async fn run_turn(turn: Turn) {
         let _ = turn
             .events
             .send(Event::MessageFinished {
+                session_id: turn.session_id.clone(),
                 message_id: assistant.id,
                 reason: outcome.reason,
                 usage: assistant.usage,
@@ -1126,7 +1137,10 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
 
     if turn
         .events
-        .send(Event::MessageStarted { message: user })
+        .send(Event::MessageStarted {
+            session_id: turn.session_id.clone(),
+            message: user,
+        })
         .await
         .is_err()
     {
@@ -1142,6 +1156,7 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
     if turn
         .events
         .send(Event::MessageStarted {
+            session_id: turn.session_id.clone(),
             message: assistant.clone(),
         })
         .await
@@ -1261,6 +1276,7 @@ async fn record_patch(turn: &Turn, assistant: &mut Message, before: Option<Strin
     let _ = turn
         .events
         .send(Event::PartStarted {
+            session_id: turn.session_id.clone(),
             message_id: assistant.id.clone(),
             part,
         })
@@ -1291,7 +1307,10 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
     turn.history.lock().await.push(user.clone());
     if turn
         .events
-        .send(Event::MessageStarted { message: user })
+        .send(Event::MessageStarted {
+            session_id: turn.session_id.clone(),
+            message: user,
+        })
         .await
         .is_err()
     {
@@ -1305,6 +1324,7 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
     if turn
         .events
         .send(Event::MessageStarted {
+            session_id: turn.session_id.clone(),
             message: assistant.clone(),
         })
         .await
@@ -1336,6 +1356,7 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
     if let ControlFlow::Break(stop) = deliver(
         turn,
         Event::PartStarted {
+            session_id: turn.session_id.clone(),
             message_id: assistant.id.clone(),
             part,
         },
@@ -1397,6 +1418,7 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
         ) && let ControlFlow::Break(stop) = deliver(
             turn,
             Event::PartUpdated {
+                session_id: turn.session_id.clone(),
                 message_id: assistant.id.clone(),
                 part,
             },
@@ -1453,6 +1475,7 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
         let _ = turn
             .events
             .send(Event::PartUpdated {
+                session_id: turn.session_id.clone(),
                 message_id: assistant.id.clone(),
                 part,
             })
@@ -1627,6 +1650,7 @@ async fn compact_if_needed(
     deliver(
         turn,
         Event::MessageStarted {
+            session_id: turn.session_id.clone(),
             message: summary.clone(),
         },
     )
@@ -1851,6 +1875,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     if let ControlFlow::Break(stop) = deliver(
         turn,
         Event::PartStarted {
+            session_id: turn.session_id.clone(),
             message_id: assistant.id.clone(),
             part: marker,
         },
@@ -1984,6 +2009,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                         if let ControlFlow::Break(stop) = deliver(
                             turn,
                             Event::PartStarted {
+                                session_id: turn.session_id.clone(),
                                 message_id: assistant.id.clone(),
                                 part,
                             },
@@ -2012,6 +2038,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 if let ControlFlow::Break(stop) = deliver(
                     turn,
                     Event::PartDelta {
+                        session_id: turn.session_id.clone(),
                         message_id: assistant.id.clone(),
                         part_id,
                         delta,
@@ -2041,6 +2068,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 if let ControlFlow::Break(stop) = deliver(
                     turn,
                     Event::PartStarted {
+                        session_id: turn.session_id.clone(),
                         message_id: assistant.id.clone(),
                         part,
                     },
@@ -2098,6 +2126,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     if let ControlFlow::Break(stop) = deliver(
         turn,
         Event::PartStarted {
+            session_id: turn.session_id.clone(),
             message_id: assistant.id.clone(),
             part: marker,
         },
@@ -2270,6 +2299,7 @@ async fn resolve(
         deliver(
             turn,
             Event::PartUpdated {
+                session_id: turn.session_id.clone(),
                 message_id: assistant.id.clone(),
                 part,
             },
@@ -2308,6 +2338,7 @@ async fn resolve(
                 Arc::new(crate::subagent::Spawn {
                     host: Arc::clone(host),
                     events: Arc::clone(&turn.events),
+                    session_id: turn.session_id.clone(),
                     // Shared with this turn: the parent is blocked inside the
                     // call for as long as the child runs, so the slot is the
                     // child's to ask through and a reply addressed to the
@@ -2384,6 +2415,7 @@ async fn resolve(
                 deliver(
                     turn,
                     Event::PartUpdated {
+                        session_id: turn.session_id.clone(),
                         message_id: assistant.id.clone(),
                         part,
                     },
@@ -2411,6 +2443,7 @@ async fn resolve(
                 let _ = turn
                     .events
                     .send(Event::PartUpdated {
+                        session_id: turn.session_id.clone(),
                         message_id: assistant.id.clone(),
                         part,
                     })
@@ -2437,6 +2470,7 @@ async fn resolve(
                 deliver(
                     turn,
                     Event::PartUpdated {
+                        session_id: turn.session_id.clone(),
                         message_id: assistant.id.clone(),
                         part,
                     },
@@ -2484,6 +2518,7 @@ async fn wait_permission(
     if let ControlFlow::Break(stop) = deliver(
         turn,
         Event::PermissionRequested {
+            session_id: turn.session_id.clone(),
             id: id.clone(),
             call_id: call.id.clone(),
             tool: call.name.clone(),
@@ -2512,6 +2547,7 @@ async fn wait_permission(
         let _ = turn
             .events
             .send(Event::PermissionReplied {
+                session_id: turn.session_id.clone(),
                 id,
                 reply: PermissionReply::Reject,
             })
@@ -2522,6 +2558,7 @@ async fn wait_permission(
     match deliver(
         turn,
         Event::PermissionReplied {
+            session_id: turn.session_id.clone(),
             id: id.clone(),
             reply,
         },
@@ -2537,6 +2574,7 @@ async fn wait_permission(
                 let _ = turn
                     .events
                     .send(Event::PermissionReplied {
+                        session_id: turn.session_id.clone(),
                         id,
                         reply: PermissionReply::Reject,
                     })
@@ -2583,6 +2621,7 @@ async fn fail_call(
     deliver(
         turn,
         Event::PartUpdated {
+            session_id: turn.session_id.clone(),
             message_id: assistant.id.clone(),
             part,
         },
@@ -2628,6 +2667,7 @@ async fn close_unresolved(turn: &Turn, assistant: &mut Message, call: &BufferedC
         let _ = turn
             .events
             .send(Event::PartUpdated {
+                session_id: turn.session_id.clone(),
                 message_id: assistant.id.clone(),
                 part,
             })
@@ -2731,7 +2771,7 @@ mod tests {
     use crate::{
         engine::Fanout,
         permission::Permissions,
-        protocol::{FinishReason, Message, Part, PartBody, ToolState, Usage},
+        protocol::{FinishReason, Message, Part, PartBody, SessionId, ToolState, Usage},
         provider::{FakeProvider, fake},
         subagent::{Host, Spawn},
         tool::{Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput},
@@ -2788,6 +2828,7 @@ mod tests {
         let (events, received) = mpsc::channel(64);
         let turn = Turn::root(RootParts {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
+            session_id: SessionId::from("ses_fixture".to_owned()),
             model: fake::MODEL.to_owned(),
             system: None,
             reminders: Vec::new(),
@@ -3082,6 +3123,7 @@ mod tests {
         let spawn = Spawn {
             host: Arc::new(host),
             events: Arc::new(Fanout::new(events)),
+            session_id: SessionId::from("ses_parent".to_owned()),
             pending: Arc::new(std::sync::Mutex::new(None)),
             message_id: crate::protocol::MessageId::ascending(),
             part_id: crate::protocol::PartId::ascending(),
@@ -3097,6 +3139,7 @@ mod tests {
         let turn = Turn::child(
             spawn,
             ChildParts {
+                session_id: SessionId::from("ses_child".to_owned()),
                 model: fake::MODEL.to_owned(),
                 system: None,
                 kind: TurnKind::Prompt {

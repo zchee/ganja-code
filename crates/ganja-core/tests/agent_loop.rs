@@ -91,7 +91,10 @@ fn shape(event: &Event) -> String {
     }
 
     match event {
-        Event::MessageStarted { message } => match message.role {
+        Event::MessageStarted {
+            session_id: _,
+            message,
+        } => match message.role {
             Role::User => "started:user".to_owned(),
             Role::Assistant => "started:assistant".to_owned(),
         },
@@ -284,7 +287,11 @@ async fn a_turn_spans_steps_until_a_request_ends_without_tool_calls() {
     // Tool parts belong to the assistant message, and the second request
     // carries them — results included — so the model reads what its calls
     // returned.
-    let Some(Event::MessageStarted { message: assistant }) = seen.get(1) else {
+    let Some(Event::MessageStarted {
+        session_id: _,
+        message: assistant,
+    }) = seen.get(1)
+    else {
         panic!("the assistant envelope should be second, got {seen:?}");
     };
     for event in &seen {
