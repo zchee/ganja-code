@@ -1,0 +1,14 @@
+# Local packaging only: `dist build` produces a self-contained archive on
+# this machine. No CI backend is configured on purpose — publishing (a
+# release workflow, a tap, signing) is deliberately out of scope, so `dist`
+# must never generate a workflow file; if a `dist init`-style command drops
+# one under .github/workflows/, that file is a mistake and must not land.
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.31.0"
+# The one machine releases are built on today; more targets arrive with the
+# deferred publishing work, not before.
+targets = ["aarch64-apple-darwin"]
+installers = []

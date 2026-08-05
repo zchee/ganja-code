@@ -12,10 +12,11 @@
 |------|-------------|
 | `Cargo.toml` | Workspace manifest. **Every** dependency version is declared here; member crates only opt in with `x.workspace = true`. Each entry carries a comment explaining why that crate (or that feature) is in the tree. |
 | `Cargo.lock` | Resolved dependency graph; committed. Large — read only when a specific version is in question. |
-| `rust-toolchain.toml` | Pins the **nightly** channel plus clippy, rustfmt, rust-analyzer. Edition 2024. |
+| `rust-toolchain.toml` | Pins a **date-pinned nightly** (`nightly-2026-08-03`) plus clippy, rustfmt, rust-analyzer; CI's toolchain steps repeat the same date because the action does not read this file. Edition 2024. |
 | `CLAUDE.md` | Symlink to this file, so tools that look for either name read the same document. |
 | `PRACTICE.md` | Phase-to-exercise mapping for the owner, a Go expert learning Rust. Explanations here lean on Go anchors. |
 | `THIRD_PARTY_NOTICES.md` | Upstream MIT attribution. Any text ported from opencode (tool prompts, themes) must be recorded here. |
+| `dist-workspace.toml` | Local packaging only: `dist build` produces a self-contained archive (`target/distrib/`). No CI backend on purpose — publishing is deferred, so nothing may generate a workflow file. |
 | `README.md` | Stub. |
 | `LICENSE` | Apache-2.0. |
 | `CODE_OF_CONDUCT.md` | Contributor covenant. |
