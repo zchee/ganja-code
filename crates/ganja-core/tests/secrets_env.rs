@@ -7,6 +7,14 @@
 //! is — in the environment — a turn is run against a socket that rejects it by
 //! quoting it back, and every byte of what came out is searched.
 //!
+//! An OAuth credential is two more secrets on the same paths, and one of them
+//! travels further than an API key ever does: a refresh token is *sent* to a
+//! token endpoint, and a token endpoint that refuses it routinely quotes it
+//! back in the body it refuses with. So the same drill runs a second time
+//! against an access token and a refresh token — planted in the store rather
+//! than the environment, because that is where OAuth credentials live — with
+//! the renewal refused by a socket that echoes the token at it.
+//!
 //! One test, one binary, on purpose: it mutates process-wide environment
 //! variables, and `cargo test` runs the tests inside a binary on parallel
 //! threads.
@@ -24,9 +32,13 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use ganja_core::provider::{
-    self, AnthropicProvider, ChatRequest, OpenAiProvider, Provider as _, ProviderEvent,
+use ganja_core::{
+    auth::{self, AuthErrorKind, OauthCredential, RefreshOauth as _, grok},
+    provider::{
+        self, AnthropicProvider, ChatRequest, OpenAiProvider, Provider as _, ProviderEvent,
+    },
 };
+use secrecy::SecretString;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
@@ -36,6 +48,13 @@ use tracing_subscriber::fmt::MakeWriter;
 
 /// The key planted in the environment. Nothing may render it.
 const CANARY: &str = "sk-test-canary-XYZ";
+
+/// The access token planted in the credential store. Nothing may render it.
+const ACCESS_CANARY: &str = "at-test-canary-UVW";
+
+/// The refresh token planted beside it. This one is also *sent*, which is one
+/// more way out than the other two have.
+const REFRESH_CANARY: &str = "rt-test-canary-RST";
 
 /// A `tracing` writer a test can read back.
 #[derive(Clone, Default)]
@@ -197,6 +216,50 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         format!("{anthropic:?} {openai:?} {refusal} {refusal:?}")
     };
 
+    // The same drill for an OAuth credential. The store is the environment for
+    // this kind, so the canaries are planted there, read back through the
+    // public path, and then spent against an endpoint that refuses the renewal
+    // by quoting the token it refused.
+    let oauth_rendered = {
+        let credential = OauthCredential::new(
+            SecretString::from(REFRESH_CANARY),
+            SecretString::from(ACCESS_CANARY),
+            auth::now_ms(),
+        );
+        auth::set_oauth(grok::PROVIDER_ID, &credential).expect("the credential stores");
+        let read_back = auth::oauth_for(grok::PROVIDER_ID)
+            .expect("the store reads")
+            .expect("the credential is there");
+
+        let (token_url, _token_server) = serve(vec![response(
+            "401 Unauthorized",
+            "application/json",
+            // The shape that makes this worth testing: the endpoint refuses
+            // the token by repeating it.
+            &format!(
+                r#"{{"error":"invalid_grant","error_description":"refresh token {REFRESH_CANARY} was already used; access token {ACCESS_CANARY} is revoked"}}"#
+            ),
+        )])
+        .await;
+        let refusal = grok::Refresh::at(format!("{token_url}/token"))
+            .expect("a client builds")
+            .refresh(grok::PROVIDER_ID, &read_back)
+            .await
+            .expect_err("a refused renewal is not a credential");
+
+        assert_eq!(
+            refusal.kind(),
+            AuthErrorKind::ReauthRequired,
+            "an endpoint that refused the token is asking for a new login"
+        );
+        let listed = auth::list_providers().expect("the store lists");
+
+        format!(
+            "{credential:?} {credential} {read_back:?} {read_back} {refusal} {refusal:?} \
+             {listed:?}"
+        )
+    };
+
     let logged = capture.logged();
 
     // Not just "something was captured": something the *library* traced, from
@@ -207,6 +270,9 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
     for line in [
         "skipping an unfamiliar Anthropic frame",
         "the model stopped",
+        // The refused renewal's own line, for the same reason: without it the
+        // OAuth half of this test would be searching an empty space.
+        "the token endpoint would not renew",
     ] {
         assert!(
             logged.contains(line),
@@ -214,10 +280,12 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
              in it would prove nothing:\n{logged}"
         );
     }
-    assert!(
-        !logged.contains(CANARY),
-        "a credential reached the log:\n{logged}"
-    );
+    for secret in [CANARY, ACCESS_CANARY, REFRESH_CANARY] {
+        assert!(
+            !logged.contains(secret),
+            "a credential reached the log:\n{logged}"
+        );
+    }
     assert!(
         !rendered.contains(CANARY),
         "a credential reached a rendering: {rendered}"
@@ -225,5 +293,31 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
     assert!(
         rendered.contains("[redacted]"),
         "the echoed key should be masked rather than dropped: {rendered}"
+    );
+    for secret in [ACCESS_CANARY, REFRESH_CANARY] {
+        assert!(
+            !oauth_rendered.contains(secret),
+            "an OAuth token reached a rendering: {oauth_rendered}"
+        );
+    }
+    assert!(
+        oauth_rendered.contains("****") && oauth_rendered.contains("invalid_grant"),
+        "the tokens should be masked and the error code kept - the code is what a \
+         person acts on: {oauth_rendered}"
+    );
+    assert!(
+        !oauth_rendered.contains("already used") && !oauth_rendered.contains("revoked"),
+        "the refused body must not travel into a message that will be logged: \
+         {oauth_rendered}"
+    );
+
+    // The store itself is the one place these do belong, and a test that
+    // proved nothing rendered them because nothing ever held them would prove
+    // nothing at all.
+    let file = std::fs::read_to_string(auth::store_path().expect("the store has a path"))
+        .expect("the store was written");
+    assert!(
+        file.contains(ACCESS_CANARY) && file.contains(REFRESH_CANARY),
+        "the credential store is where a credential is supposed to be"
     );
 }
