@@ -35,10 +35,12 @@ use futures::{
     stream::{self, BoxStream},
 };
 use ganja_core::{
-    Command, Engine, Event, FinishReason, LspConfig, PartBody, Permissions, Registry, ToolState,
+    Engine, LspConfig,
     lsp::{Lsp, lsp_types},
-    permission::{Action, Rule},
+    permission::{Action, Permissions, Rule},
+    protocol::{Command, Event, FinishReason, PartBody, ToolState},
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
+    tool::Registry,
 };
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;

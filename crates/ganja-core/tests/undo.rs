@@ -29,9 +29,12 @@ use std::{
 use async_trait::async_trait;
 use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
-    Command, Engine, EngineError, Event, Permissions, Project, Registry, Role, Snapshots, Storage,
-    permission::{Action, Rule},
+    Engine, EngineError, Snapshots, Storage,
+    permission::{Action, Permissions, Rule},
+    project::Project,
+    protocol::{Command, Event, Role},
     provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent},
+    tool::Registry,
 };
 use tokio_util::sync::CancellationToken;
 

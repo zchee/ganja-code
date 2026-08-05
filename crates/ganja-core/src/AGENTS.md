@@ -11,7 +11,7 @@ The engine's modules. The shape to hold in mind: `engine.rs` accepts commands an
 
 | File | Description |
 |------|-------------|
-| `lib.rs` | Module list, the facade that re-exports `ganja-protocol`, `ganja-permission` and `ganja-tool` under their old module names, and the public surface. States the no-terminal-dependency rule that CI enforces. |
+| `lib.rs` | Module list, the facade that re-exports `ganja-protocol`, `ganja-permission` and `ganja-tool` under their old module names, and the crate root's own flat re-exports — the engine's types only; the three crates beneath stay behind their module names. States the no-terminal-dependency rule that CI enforces. |
 | `engine.rs` | `Engine`: commands in, an ordered event stream out. Owns the turn lifecycle and the transcript. |
 | `session.rs` | The agent loop — one turn, as many model requests as its tool calls demand. Also `TurnHandle`/`PendingReply`, the plumbing a permission reply is routed through. |
 | `provider/` | Sources of assistant text (see `provider/AGENTS.md`). |

@@ -24,10 +24,11 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use ganja_core::{
-    AgentRegistry, Engine, Project, SessionId, Storage, catalog,
+    AgentRegistry, Engine, SessionId, Storage, catalog,
     config::{Config, Overrides, ThemeMode},
     instruction, provider,
 };
+use ganja_permission::Project;
 use ganja_protocol::Message;
 use ratatui::crossterm::{
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
@@ -143,7 +144,7 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
         selection.provider,
         selection.model,
         Arc::new(tools),
-        ganja_core::Permissions::load(&cwd),
+        ganja_permission::Permissions::load(&cwd),
         storage,
     )
     .with_agents(agents)
@@ -404,7 +405,7 @@ mod tests {
             Arc::new(FakeProvider::default()),
             model,
             Arc::new(ganja_tool::Registry::new(Vec::new())),
-            ganja_core::Permissions::default(),
+            ganja_permission::Permissions::default(),
             Storage::open(directory.path().join("storage")),
         )
     }

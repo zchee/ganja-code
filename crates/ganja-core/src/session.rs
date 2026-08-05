@@ -2720,11 +2720,11 @@ mod tests {
         resolve, resolve_mentions,
     };
     use crate::{
-        FinishReason, Message, Part, PartBody, Permissions, Registry, ToolState,
-        protocol::Usage,
+        permission::Permissions,
+        protocol::{FinishReason, Message, Part, PartBody, ToolState, Usage},
         provider::{FakeProvider, fake},
         subagent::{Host, Spawn},
-        tool::{Credentials, FileTimes, Tool, ToolCtx, ToolError, ToolOutput},
+        tool::{Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput},
     };
 
     /// A tool that marks the filesystem the moment its body runs.
@@ -2774,7 +2774,7 @@ mod tests {
     fn turn_with(
         cancel: CancellationToken,
         tool: Arc<dyn Tool>,
-    ) -> (Turn, mpsc::Receiver<crate::Event>) {
+    ) -> (Turn, mpsc::Receiver<crate::protocol::Event>) {
         let (events, received) = mpsc::channel(64);
         let turn = Turn::root(RootParts {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
@@ -3009,9 +3009,9 @@ mod tests {
 
         let mut messages = vec![Message {
             id: crate::protocol::MessageId::ascending(),
-            role: crate::Role::User,
+            role: crate::protocol::Role::User,
             parts: vec![Part::file("a.txt", "text/plain")],
-            time: crate::MessageTime {
+            time: crate::protocol::MessageTime {
                 created: 1,
                 completed: Some(1),
             },
@@ -3047,7 +3047,9 @@ mod tests {
     /// The receiver comes back with it because dropping it would close the
     /// parent's event channel, and a dead sender is not what a blocked parent
     /// is holding.
-    fn parent_spawn(lsp: Option<Arc<crate::lsp::Lsp>>) -> (Spawn, mpsc::Receiver<crate::Event>) {
+    fn parent_spawn(
+        lsp: Option<Arc<crate::lsp::Lsp>>,
+    ) -> (Spawn, mpsc::Receiver<crate::protocol::Event>) {
         let (events, received) = mpsc::channel(64);
         let host = Host {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
@@ -3080,7 +3082,7 @@ mod tests {
 
     /// The turn a `task` call builds for its subagent, with the child's own
     /// event channel held open beside it for the same reason.
-    fn child_of(spawn: &Spawn) -> (Turn, mpsc::Receiver<crate::Event>) {
+    fn child_of(spawn: &Spawn) -> (Turn, mpsc::Receiver<crate::protocol::Event>) {
         let (events, received) = mpsc::channel(64);
         let turn = Turn::child(
             spawn,

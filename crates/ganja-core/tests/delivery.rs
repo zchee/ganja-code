@@ -13,8 +13,8 @@ use futures::{
     stream::{self, BoxStream},
 };
 use ganja_core::{
-    Command, Event, FinishReason,
     engine::{EVENT_CAPACITY, Engine},
+    protocol::{Command, Event, FinishReason},
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
 };
 use tokio_util::sync::CancellationToken;
@@ -75,8 +75,8 @@ async fn a_slow_consumer_receives_every_event_in_order() {
             produced: Arc::clone(&produced),
         }),
         "flood-model",
-        Arc::new(ganja_core::Registry::new(Vec::new())),
-        ganja_core::Permissions::default(),
+        Arc::new(ganja_core::tool::Registry::new(Vec::new())),
+        ganja_core::permission::Permissions::default(),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 

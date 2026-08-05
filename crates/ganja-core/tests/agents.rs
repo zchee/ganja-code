@@ -11,10 +11,12 @@ use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt as _;
 use ganja_core::{
-    AgentConfig, Command, Config, Decision, Engine, EngineError, Event, FinishReason, PartBody,
-    Permissions, Registry, Role, Storage, ToolState,
+    AgentConfig, Config, Engine, EngineError, Storage,
     agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER},
+    permission::{Decision, Permissions},
+    protocol::{Command, Event, FinishReason, PartBody, Role, ToolState},
     provider::{ChatRequest, FakeProvider, ProviderEvent, fake},
+    tool::Registry,
 };
 use ganja_testkit::{RecorderTool, ScriptedProvider, drain, says};
 use serde_json::json;

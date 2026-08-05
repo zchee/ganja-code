@@ -39,9 +39,11 @@ use std::{
 
 use futures::stream::BoxStream;
 use ganja_core::{
-    Command, Config, Engine, Event, FinishReason, McpServers, McpStatus, PartBody, PermissionReply,
-    Permissions, Registry, ToolState,
+    Config, Engine, McpServers, McpStatus,
+    permission::Permissions,
+    protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState},
     provider::{ChatRequest, Provider},
+    tool::Registry,
 };
 use ganja_testkit::{ScriptedProvider, drain_answering, says, tool_call};
 use serde_json::{Value, json};

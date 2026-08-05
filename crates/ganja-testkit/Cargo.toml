@@ -18,6 +18,13 @@ publish = false
 async-trait.workspace = true
 futures.workspace = true
 ganja-core.workspace = true
+# The wire types the doubles speak — `Message`, `Event`, `Usage` — come from
+# their home crate, not through `ganja-core`'s root, which names only the
+# engine's own types.
+ganja-protocol.workspace = true
+# Same rule for the `Tool` trait and the task seam the doubles implement: the
+# tool crate is where they live, so it is the crate this one names.
+ganja-tool.workspace = true
 # `RecorderTool`/`BlockingTool` advertise a schema the same way a real tool
 # does — the loop never validates a call's arguments against it, but the
 # registry still has to have one to offer.

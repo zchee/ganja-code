@@ -27,7 +27,7 @@ The dependency direction is one-way, and every load-bearing edge of it is assert
 
 - **`ganja-core` may never depend on a terminal crate.** CI asserts `cargo tree -p ganja-core -e normal` never mentions `ratatui`. If core needs to describe something the UI will draw, it does so in serde-serializable protocol types, not in ratatui types.
 - **Nothing below the engine may name the engine.** `! cargo tree -p ganja-tool -e normal | grep -q ganja-core` is the assertion; `ganja-permission` and `ganja-protocol` name nothing of ours at all. What a tool needs from its caller arrives as a value in `ToolCtx`, which is why that type is a bag of values rather than a session handle.
-- **`ganja-tui` holds no engine logic.** It turns terminal events into `Command`s and engine `Event`s into frames. A transcript is built from engine events alone — the frontend never invents an entry — because that is what makes resumed sessions and remote clients replay identically. It links `ganja-protocol` for the types it renders, and `ganja-tool` for the one thing it genuinely runs in-process: the `@` file menu's glob walk.
+- **`ganja-tui` holds no engine logic.** It turns terminal events into `Command`s and engine `Event`s into frames. A transcript is built from engine events alone — the frontend never invents an entry — because that is what makes resumed sessions and remote clients replay identically. It links `ganja-protocol` for the types it renders, `ganja-permission` for the project's stored rules it loads and hands to the engine, and `ganja-tool` for the one thing it genuinely runs in-process: the `@` file menu's glob walk.
 
 `ganja-cli` depends on `ratatui` for exactly one reason: the raw-mode read that keeps a typed API key off the screen, through the same crossterm instance the UI drives so the two cannot disagree about terminal state.
 
@@ -45,6 +45,6 @@ Member manifests declare dependencies as `foo.workspace = true` and never carry 
 
 Every member is declared as a workspace dependency (a path dep) in the root manifest with the reason it exists, so members reference each other the same way they reference crates.io — `foo.workspace = true`, never a path or a version in a member manifest.
 
-`ganja-core` re-exports the three crates beneath it under the module names they had before the split (`ganja_core::protocol`, `::permission`, `::project`, `::tool`, `::watch`), which is what let the split land without rewriting every caller. New code that wants only one of them should depend on it directly rather than reach through the facade.
+`ganja-core` re-exports the three crates beneath it under the module names they had before the split (`ganja_core::protocol`, `::permission`, `::project`, `::tool`, `::watch`), which is what let the split land without rewriting every caller. The facade is those module names and nothing more: the crate root names only the engine's own types, so a caller that wants one of the three crates alone depends on it directly rather than reach through the facade.
 
 <!-- MANUAL: -->

@@ -47,7 +47,7 @@ cargo nextest run --workspace         # ganja-core's suites, rewired onto this c
 
 ### Internal
 
-`ganja-core` (path dependency) — every type here is built on its public `Provider`/`Engine`/`Storage` surface, and on the `Tool` trait it re-exports from `ganja-tool`.
+`ganja-core` — the `Provider`/`Engine`/`Storage` surface the doubles are built on. `ganja-protocol` — the wire types they speak (`Message`, `Event`, `Usage`), named from their home crate rather than through the engine's root. `ganja-tool` — the `Tool` trait and the `task` seam the doubles implement, named the same way.
 
 ### External
 

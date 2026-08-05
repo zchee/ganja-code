@@ -13,8 +13,11 @@
 use std::sync::Arc;
 
 use ganja_core::{
-    Command, Engine, Event, Mention, PartBody, Permissions, Registry, Role, ToolState,
+    Engine,
+    permission::Permissions,
+    protocol::{Command, Event, Mention, PartBody, Role, ToolState},
     provider::{ChatRequest, Provider},
+    tool::Registry,
 };
 use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
 use serde_json::json;
@@ -26,7 +29,7 @@ fn user_text(request: &ChatRequest) -> String {
         .iter()
         .filter(|message| message.role == Role::User)
         .flat_map(|message| message.parts.iter())
-        .filter_map(ganja_core::Part::as_text)
+        .filter_map(ganja_core::protocol::Part::as_text)
         .collect::<Vec<_>>()
         .join("\n")
 }

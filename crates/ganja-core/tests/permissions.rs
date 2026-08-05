@@ -12,8 +12,8 @@
 use std::{fs, sync::Arc, thread};
 
 use ganja_core::{
-    Decision, Permissions, Project,
-    permission::{Action, FILE, Rule, VERSION},
+    permission::{Action, Decision, FILE, Permissions, Rule, VERSION},
+    project::Project,
 };
 use serde_json::json;
 use tempfile::TempDir;

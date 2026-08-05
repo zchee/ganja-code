@@ -2,7 +2,8 @@
 //! permission dialogs along the way.
 
 use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{Command, Engine, Event, PermissionReply};
+use ganja_core::Engine;
+use ganja_protocol::{Command, Event, PermissionReply};
 
 /// Collects every event up to and including the turn's finish.
 ///

@@ -7,8 +7,11 @@
 use std::sync::Arc;
 
 use ganja_core::{
-    Command, Config, Engine, EngineError, Event, FinishReason, Message, PartBody, Permissions,
-    Registry, Role, SessionId, Storage, ToolState, command, provider::ChatRequest,
+    Config, Engine, EngineError, SessionId, Storage, command,
+    permission::Permissions,
+    protocol::{Command, Event, FinishReason, Message, PartBody, Role, ToolState},
+    provider::ChatRequest,
+    tool::Registry,
 };
 use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
 use serde_json::json;
@@ -20,7 +23,7 @@ fn prompt_of(request: &ChatRequest) -> String {
         .iter()
         .filter(|message| message.role == Role::User)
         .flat_map(|message| message.parts.iter())
-        .filter_map(ganja_core::Part::as_text)
+        .filter_map(ganja_core::protocol::Part::as_text)
         .collect()
 }
 
@@ -301,7 +304,10 @@ async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
         })
         .expect("the summary enters the transcript");
     assert_eq!(
-        summary.parts.first().and_then(ganja_core::Part::as_text),
+        summary
+            .parts
+            .first()
+            .and_then(ganja_core::protocol::Part::as_text),
         Some("## Objective\n- find the thing")
     );
 

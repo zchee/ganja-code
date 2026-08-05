@@ -1,7 +1,8 @@
 //! Storage fixtures for suites that seed a session directly on disk rather
 //! than build one up through a turn.
 
-use ganja_core::{Message, SessionId, SessionInfo, Storage, Usage, storage};
+use ganja_core::{SessionId, SessionInfo, Storage, storage};
+use ganja_protocol::{Message, Usage};
 
 /// A [`SessionInfo`] for seeding storage directly: already titled, so the
 /// title machinery stays out of a test that is not about it, with `created`
@@ -45,7 +46,8 @@ pub fn seed_session(storage: &Storage, context_tokens: u64) -> SessionId {
 /// Writes `message` the way the engine does: the envelope, then each part.
 ///
 /// ```
-/// use ganja_core::{Message, SessionId, Storage};
+/// use ganja_core::{SessionId, Storage};
+/// use ganja_protocol::Message;
 ///
 /// let dir = ganja_testkit::temp_dir();
 /// let storage = Storage::open(dir.path().join("storage"));
