@@ -1,7 +1,11 @@
+# Lets the profile table below carry rustflags — the only mechanism that can
+# make a flag differ between a dev build and a release artifact. Nightly-only,
+# like the -Z flags beneath; the date-pinned toolchain is what keeps it stable.
+[unstable]
+profile-rustflags = true
+
 [target.aarch64-apple-darwin]
 rustflags = [
-  "-C",
-  "target-cpu=native",
   "-C",
   "force-frame-pointers=on",
   "-Z",
@@ -15,3 +19,12 @@ rustflags = [
   "-C",
   "link-arg=-Wl,-dead_strip",
 ]
+
+# Native codegen is a dev-loop luxury: a release artifact must run on every
+# machine of its architecture, not just the one that built it, so the flag
+# lives on the dev profile (test and its other descendants inherit it) and
+# deliberately never on release. Unlike the block above this applies on every
+# platform, which is safe for the same reason it exists — a dev or test build
+# only ever runs on the machine that compiled it.
+[profile.dev]
+rustflags = ["-C", "target-cpu=native"]

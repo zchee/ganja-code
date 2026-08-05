@@ -160,3 +160,10 @@ codegen-units = 1
 panic = "abort"
 debug-assertions = false
 overflow-checks = false
+
+# What `dist build` compiles. Nothing differs from release on purpose: the
+# archive a dist build produces must be the binary a release build was
+# validated as, and any deliberate difference belongs here where it is
+# visible rather than inside a generated config.
+[profile.dist]
+inherits = "release"
