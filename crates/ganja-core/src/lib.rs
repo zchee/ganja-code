@@ -50,7 +50,7 @@ pub use config::{
     AgentConfig, AgentMode, CommandConfig, Config, ConfigError, LspConfig, LspEntry, McpLocal,
     McpRemote, McpServer, Overrides, ThemeMode, WebfetchConfig,
 };
-pub use engine::{Engine, EngineError};
+pub use engine::{Engine, EngineError, Evicted};
 pub use ganja_permission::{permission, project};
 pub use ganja_protocol as protocol;
 pub use ganja_tool as tool;

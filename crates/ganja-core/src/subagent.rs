@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     agent::{self, Agent},
-    engine::EVENT_CAPACITY,
+    engine::{EVENT_CAPACITY, Fanout},
     permission::{Action, Permissions, Rule, TASK},
     protocol::{Event, FinishReason, MessageId, Part, PartBody, PartId, Role, ToolState, Usage},
     provider::Provider,
@@ -121,9 +121,10 @@ impl std::fmt::Debug for Host {
 #[derive(Clone)]
 pub(crate) struct Spawn {
     pub(crate) host: Arc<Host>,
-    /// The parent turn's event sender — used for the parent's own tool part and
+    /// The parent turn's fanout — used for the parent's own tool part and
     /// for forwarding the child's permission dialogs, and for nothing else.
-    pub(crate) events: mpsc::Sender<Event>,
+    /// What crosses here reaches every subscriber the parent has.
+    pub(crate) events: Arc<Fanout>,
     /// Where an open permission request waits, shared with the parent turn: the
     /// parent is blocked inside this call, so the slot is the child's to use and
     /// a reply routed to the parent reaches the child.
@@ -316,7 +317,7 @@ impl Child {
         let watcher = tokio::spawn(watch(
             receiver,
             Watched {
-                events: spawn.events.clone(),
+                events: Arc::clone(&spawn.events),
                 tools: Arc::clone(&host.tools),
                 message_id: spawn.message_id.clone(),
                 part_id: spawn.part_id.clone(),
@@ -475,7 +476,7 @@ enum ChildStop {
 
 /// What the watcher needs to translate a child's events.
 struct Watched {
-    events: mpsc::Sender<Event>,
+    events: Arc<Fanout>,
     /// The child's registry, so a running call can be named the way a dialog
     /// would name it — `read src/main.rs`, not `read`.
     tools: Arc<Registry>,

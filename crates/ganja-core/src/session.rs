@@ -43,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     catalog,
+    engine::Fanout,
     permission::{Decision, Permissions},
     protocol::{
         Event, FinishReason, Message, Part, PartBody, PartId, PermissionId, PermissionReply, Role,
@@ -555,7 +556,10 @@ pub(crate) struct Turn {
     /// Where an open permission request waits for its reply; the same cell the
     /// engine's [`TurnHandle`] routes replies into.
     pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
-    pub(crate) events: mpsc::Sender<Event>,
+    /// Every subscriber's queue, which this turn publishes into. A root turn
+    /// shares the engine's; a child turn gets one seeded with its private
+    /// channel, so the send sites below never know the difference.
+    pub(crate) events: Arc<Fanout>,
     pub(crate) slot: Arc<Mutex<Option<TurnHandle>>>,
     pub(crate) history: Arc<Mutex<Vec<Message>>>,
     /// What a `task` call needs to run a whole second agent loop. [`None`] on a
@@ -591,7 +595,7 @@ pub(crate) struct RootParts {
     pub(crate) prompt: String,
     pub(crate) cancel: CancellationToken,
     pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
-    pub(crate) events: mpsc::Sender<Event>,
+    pub(crate) events: Arc<Fanout>,
     pub(crate) slot: Arc<Mutex<Option<TurnHandle>>>,
     pub(crate) history: Arc<Mutex<Vec<Message>>>,
     pub(crate) spawn: Option<Arc<crate::subagent::Host>>,
@@ -700,7 +704,9 @@ impl Turn {
             prompt: parts.prompt,
             cancel: parts.cancel,
             pending: Arc::clone(&spawn.pending),
-            events: parts.events,
+            // A fanout of one, so the loop publishes the same way whoever is
+            // listening; the watcher on the other end stays the only reader.
+            events: Arc::new(Fanout::new(parts.events)),
             // The child's turn handle is nobody else's: the busy slot a
             // frontend reads belongs to the parent, which is busy running this.
             slot: Arc::new(Mutex::new(None)),
@@ -1085,7 +1091,7 @@ fn store_title(state: &SessionState, session: &SessionId, title: String) {
 }
 
 /// Runs the step loop and hands back the assistant message it accumulated,
-/// together with why the turn ended — or [`None`] once the subscriber is
+/// together with why the turn ended — or [`None`] once every subscriber is
 /// gone and there is nobody left to tell.
 ///
 /// The assistant message is minted here, *after* the user's message, because
@@ -2301,7 +2307,7 @@ async fn resolve(
             spawn: turn.spawn.as_ref().map(|host| {
                 Arc::new(crate::subagent::Spawn {
                     host: Arc::clone(host),
-                    events: turn.events.clone(),
+                    events: Arc::clone(&turn.events),
                     // Shared with this turn: the parent is blocked inside the
                     // call for as long as the child runs, so the slot is the
                     // child's to ask through and a reply addressed to the
@@ -2692,11 +2698,14 @@ async fn flush_after(deadline: Option<Instant>) {
     }
 }
 
-/// Queues `event`, or breaks with the turn's report.
+/// Queues `event` for every subscriber, or breaks with the turn's report.
 ///
-/// [`mpsc::Sender::send`] is cancel-safe: losing the race drops the event
-/// without queueing it, which is what an abandoned turn wants. Waiting on a
-/// full queue must not outlive a cancel, hence the race.
+/// Waiting on a full lossless queue must not outlive a cancel, hence the
+/// race. A cancel that lands mid-delivery abandons it wherever it stood, so
+/// subscribers of a *cancelled* turn may differ by the one event that was in
+/// flight — and by nothing else, because the terminal events that follow
+/// travel plain sends that are never raced. A completed turn is delivered
+/// whole to everyone.
 async fn deliver(turn: &Turn, event: Event) -> ControlFlow<Option<Outcome>> {
     tokio::select! {
         biased;
@@ -2720,6 +2729,7 @@ mod tests {
         resolve, resolve_mentions,
     };
     use crate::{
+        engine::Fanout,
         permission::Permissions,
         protocol::{FinishReason, Message, Part, PartBody, ToolState, Usage},
         provider::{FakeProvider, fake},
@@ -2795,7 +2805,7 @@ mod tests {
             prompt: "run it".to_owned(),
             cancel,
             pending: Arc::new(std::sync::Mutex::new(None)),
-            events,
+            events: Arc::new(Fanout::new(events)),
             slot: Arc::new(Mutex::new(None)),
             history: Arc::new(Mutex::new(Vec::new())),
             spawn: None,
@@ -3071,7 +3081,7 @@ mod tests {
 
         let spawn = Spawn {
             host: Arc::new(host),
-            events,
+            events: Arc::new(Fanout::new(events)),
             pending: Arc::new(std::sync::Mutex::new(None)),
             message_id: crate::protocol::MessageId::ascending(),
             part_id: crate::protocol::PartId::ascending(),

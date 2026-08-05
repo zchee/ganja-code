@@ -1,9 +1,16 @@
 //! The engine frontends drive: commands in, an ordered event stream out.
 //!
-//! Delivery is lossless. Events travel a bounded channel, so a producer that
-//! outruns its consumer waits instead of dropping fragments; backpressure lands
-//! on the turn task and never on the render loop. A single subscriber is
-//! supported through P6, after which fanout gets per-subscriber queues.
+//! Every subscriber has a bounded queue of its own, and chose a policy when it
+//! registered. A **lossless** subscriber ([`Engine::subscribe`]) is never
+//! dropped: a full queue makes the publisher wait, so backpressure lands on
+//! the turn task and never on a render loop. A **droppable** subscriber
+//! ([`Engine::subscribe_droppable`]) is the reverse trade: the publisher never
+//! waits for it, and one that stops draining is evicted whole — its stream
+//! ends with [`Evicted`] rather than silently, so a consumer can tell a
+//! finished turn from a torn one. The first lossless subscriber inherits the
+//! queue the engine was born with, buffered since construction; every later
+//! one sees events from the moment it registered. One turn at a time,
+//! unchanged.
 //!
 //! The engine owns the transcript. A turn appends the user's message, runs the
 //! agent loop in [`crate::session`] — streaming the reply, executing the tool
@@ -28,8 +35,11 @@ use std::{
     sync::Arc,
 };
 
-use futures::{StreamExt as _, stream::BoxStream};
-use tokio::sync::{Mutex, mpsc};
+use futures::{
+    StreamExt as _,
+    stream::{self, BoxStream},
+};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
@@ -51,7 +61,9 @@ use crate::{
     watch,
 };
 
-/// Events the engine queues before a producer has to wait for the subscriber.
+/// Events each subscriber's queue holds before its policy decides what a full
+/// queue means: a lossless subscriber makes the publisher wait, a droppable
+/// one is evicted.
 pub const EVENT_CAPACITY: usize = 1024;
 
 /// A command the engine refused.
@@ -62,9 +74,6 @@ pub enum EngineError {
     /// turn in flight is writing into the session it started on.
     #[error("a turn is already streaming; cancel it before sending another prompt")]
     Busy,
-    /// [`Engine::subscribe`] was called more than once.
-    #[error("the engine already has a subscriber")]
-    AlreadySubscribed,
     /// A session operation reached an engine built with [`Engine::new`],
     /// which keeps no sessions: its transcript lives and dies with the
     /// process.
@@ -141,6 +150,167 @@ pub enum EngineError {
     /// [`Command::Redo`] reached a session that is not reverted.
     #[error("nothing to redo")]
     NothingToRedo,
+}
+
+/// How a droppable subscriber's stream ends when it fell behind.
+///
+/// Yielded as the stream's final item, after whatever its queue still held:
+/// everything before it is real and in order, and everything after it was
+/// never queued. It is an error value rather than a silent end because the
+/// two look identical otherwise, and a consumer that mistook an eviction for
+/// a finished turn would render a torn transcript as a whole one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "this subscriber fell behind and was evicted; the events after its last one were never queued"
+)]
+pub struct Evicted;
+
+/// Every destination is gone: the engine-birth queue's receiver was dropped
+/// and no registered subscriber survives. The turn has nobody left to tell,
+/// which is the one condition under which it stops reporting.
+#[derive(Debug)]
+pub(crate) struct NoSubscribers;
+
+/// Where events leave the engine: every subscriber's queue, behind one lock,
+/// each carrying the policy its subscriber chose.
+///
+/// Ordering rests on there being **one publisher at a time**: the turn task
+/// while a turn streams, or a command path holding the turn slot while the
+/// engine is idle. Each queue is FIFO, so under that invariant every
+/// subscriber sees the events of a turn in emission order — two lossless
+/// subscribers of one turn hold the same transcript frame for frame.
+pub(crate) struct Fanout {
+    outlets: std::sync::Mutex<Outlets>,
+}
+
+/// The registry half of [`Fanout`]: the queues, and the counter that names
+/// them so the cleanup after an unlocked delivery removes exactly the ones
+/// whose receivers turned out to be gone.
+struct Outlets {
+    entries: Vec<Outlet>,
+    minted: u64,
+}
+
+/// One subscriber's queue.
+struct Outlet {
+    id: u64,
+    lane: Lane,
+}
+
+/// The policy a subscriber chose when it registered.
+enum Lane {
+    /// A full queue makes the publisher wait: nothing is ever dropped, and
+    /// the backpressure lands on the turn task.
+    Lossless(mpsc::Sender<Event>),
+    /// The publisher never waits: a full queue evicts the subscriber, and
+    /// `loss` is how its stream is told it did not simply end.
+    Droppable {
+        queue: mpsc::Sender<Event>,
+        loss: oneshot::Sender<Evicted>,
+    },
+}
+
+impl Fanout {
+    /// A fanout of one: `first` is registered as a lossless outlet. The
+    /// engine seeds this with its birth queue's sender; a subagent's turn
+    /// seeds it with the private queue its watcher reads.
+    pub(crate) fn new(first: mpsc::Sender<Event>) -> Self {
+        Self {
+            outlets: std::sync::Mutex::new(Outlets {
+                entries: vec![Outlet {
+                    id: 0,
+                    lane: Lane::Lossless(first),
+                }],
+                minted: 1,
+            }),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Outlets> {
+        self.outlets
+            .lock()
+            .expect("the subscriber registry is never poisoned")
+    }
+
+    /// Adds a subscriber. Registration is the atomic point after which
+    /// nothing published is lost: it takes the same lock every delivery
+    /// snapshots under, so an event published after this returns reaches the
+    /// new queue.
+    fn register(&self, lane: Lane) {
+        let mut outlets = self.lock();
+        let id = outlets.minted;
+        outlets.minted += 1;
+        outlets.entries.push(Outlet { id, lane });
+    }
+
+    /// Delivers `event` to every subscriber, each under its own policy.
+    ///
+    /// The registry lock is never held across an await: droppable queues are
+    /// served inline under it — `try_send` cannot wait — and the lossless
+    /// senders are snapshotted, then awaited one by one outside it. A
+    /// droppable queue that is full costs its subscriber the subscription,
+    /// never the turn a moment of waiting; a receiver that was dropped is
+    /// removed on its first failed send.
+    ///
+    /// # Errors
+    ///
+    /// [`NoSubscribers`] when no outlet remains after this delivery, which is
+    /// the caller's cue that the turn has nobody left to tell.
+    pub(crate) async fn send(&self, event: Event) -> Result<(), NoSubscribers> {
+        let lossless: Vec<(u64, mpsc::Sender<Event>)> = {
+            let mut outlets = self.lock();
+            let mut index = 0;
+            while index < outlets.entries.len() {
+                let full = match &outlets.entries[index].lane {
+                    Lane::Lossless(_) => {
+                        index += 1;
+                        continue;
+                    }
+                    Lane::Droppable { queue, .. } => match queue.try_send(event.clone()) {
+                        Ok(()) => {
+                            index += 1;
+                            continue;
+                        }
+                        Err(mpsc::error::TrySendError::Full(_)) => true,
+                        Err(mpsc::error::TrySendError::Closed(_)) => false,
+                    },
+                };
+                let removed = outlets.entries.swap_remove(index);
+                // An eviction is announced — that is the whole contract — but
+                // a receiver that is simply gone gets nothing: there is nobody
+                // on the other end to mislead.
+                if full && let Lane::Droppable { loss, .. } = removed.lane {
+                    let _ = loss.send(Evicted);
+                }
+            }
+
+            outlets
+                .entries
+                .iter()
+                .filter_map(|outlet| match &outlet.lane {
+                    Lane::Lossless(sender) => Some((outlet.id, sender.clone())),
+                    Lane::Droppable { .. } => None,
+                })
+                .collect()
+        };
+
+        let mut dead = Vec::new();
+        for (id, sender) in &lossless {
+            if sender.send(event.clone()).await.is_err() {
+                dead.push(*id);
+            }
+        }
+
+        let mut outlets = self.lock();
+        if !dead.is_empty() {
+            outlets.entries.retain(|outlet| !dead.contains(&outlet.id));
+        }
+        if outlets.entries.is_empty() {
+            Err(NoSubscribers)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// What one turn runs as, when it is not what the session runs as.
@@ -287,7 +457,12 @@ pub struct Engine {
     ///
     /// Held only so that it is not dropped: dropping it ends the watch.
     watcher: std::sync::Mutex<Option<watch::Watcher>>,
-    events: mpsc::Sender<Event>,
+    /// Every subscriber's queue; the one place events leave the engine.
+    fanout: Arc<Fanout>,
+    /// The receiver of the queue the engine was born with, waiting for the
+    /// first subscriber to claim it. Everything published before that claim —
+    /// a resume's `RevertChanged` most of all — is buffered here rather than
+    /// lost, which is what lets a frontend resume first and subscribe second.
     unclaimed: Mutex<Option<mpsc::Receiver<Event>>>,
     /// Holds the handle of the turn in flight, and doubles as the idle/busy
     /// flag. The handle carries the turn's cancellation token and the
@@ -396,7 +571,7 @@ impl Engine {
                 .ok()
                 .map_or(Credentials::Unguarded, Credentials::Guarded),
             watcher: std::sync::Mutex::new(None),
-            events,
+            fanout: Arc::new(Fanout::new(events)),
             unclaimed: Mutex::new(Some(receiver)),
             turn: Arc::default(),
             history: Arc::default(),
@@ -876,7 +1051,7 @@ impl Engine {
             .expect("the revert state is never poisoned") = revert.clone();
         if let Some(revert) = &revert {
             let _ = self
-                .events
+                .fanout
                 .send(Event::RevertChanged {
                     revert: Some(revert.info()),
                     prompt: None,
@@ -971,22 +1146,64 @@ impl Engine {
         }
     }
 
-    /// Claims the event stream.
+    /// Claims a lossless event stream.
+    ///
+    /// The first call inherits the queue the engine was born with, so
+    /// everything published since construction — a resume's `RevertChanged`
+    /// most of all — is already waiting in it. Every later call registers a
+    /// fresh queue that sees events from the moment this returns:
+    /// registration is the atomic point after which nothing published is
+    /// lost. Two lossless subscribers of one turn therefore hold the same
+    /// transcript frame for frame, differing only in where each began.
+    ///
+    /// Every stream this returns is bounded and lossless: a full queue makes
+    /// the publisher wait, so backpressure lands on the turn task and never
+    /// on a render loop. A subscriber that may be abandoned instead of waited
+    /// for is [`Engine::subscribe_droppable`]'s business.
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::AlreadySubscribed`] on every call after the
-    /// first: splitting one lossless queue between two readers would hand each
-    /// of them an arbitrary half of the transcript.
+    /// None today. The `Result` stays because this is the seam a
+    /// transport-served engine will fail at, and every caller already treats
+    /// it as fallible.
     pub async fn subscribe(&self) -> Result<BoxStream<'static, Event>, EngineError> {
-        let receiver = self
-            .unclaimed
-            .lock()
-            .await
-            .take()
-            .ok_or(EngineError::AlreadySubscribed)?;
+        if let Some(receiver) = self.unclaimed.lock().await.take() {
+            return Ok(ReceiverStream::new(receiver).boxed());
+        }
+
+        let (sender, receiver) = mpsc::channel(EVENT_CAPACITY);
+        self.fanout.register(Lane::Lossless(sender));
 
         Ok(ReceiverStream::new(receiver).boxed())
+    }
+
+    /// Registers a subscriber the engine may drop rather than wait for.
+    ///
+    /// The shape an HTTP or SSE consumer needs: the agent loop never stalls
+    /// on it, because a full queue costs the subscriber its subscription
+    /// instead of costing the turn a wait. The stream then ends with
+    /// [`Evicted`] after whatever its queue still held — an observable error,
+    /// never a silent end, so the consumer knows its transcript is torn and
+    /// can resynchronize rather than trust it.
+    ///
+    /// Like every later subscriber it sees events from the moment this
+    /// returns; the birth queue belongs to the first lossless subscriber,
+    /// whose loss guarantee is the one worth spending it on.
+    pub fn subscribe_droppable(&self) -> BoxStream<'static, Result<Event, Evicted>> {
+        let (sender, receiver) = mpsc::channel(EVENT_CAPACITY);
+        let (loss, lost) = oneshot::channel();
+        self.fanout.register(Lane::Droppable {
+            queue: sender,
+            loss,
+        });
+
+        // The queue drains first, whole; only once it ends is the loss
+        // marker consulted. An engine that simply went away drops `loss`
+        // unfired, and the stream ends the way it always did.
+        ReceiverStream::new(receiver)
+            .map(Ok)
+            .chain(stream::once(lost).filter_map(|fired| async move { fired.ok().map(Err) }))
+            .boxed()
     }
 
     /// Applies `command`.
@@ -1210,7 +1427,7 @@ impl Engine {
                 }
                 self.remember_revert(None);
                 let _ = self
-                    .events
+                    .fanout
                     .send(Event::RevertChanged {
                         revert: None,
                         prompt: None,
@@ -1266,7 +1483,7 @@ impl Engine {
         let info = state.info();
         self.remember_revert(Some(state));
         let _ = self
-            .events
+            .fanout
             .send(Event::RevertChanged {
                 revert: Some(info),
                 prompt,
@@ -1325,7 +1542,7 @@ impl Engine {
 
         self.remember_revert(None);
         let _ = self
-            .events
+            .fanout
             .send(Event::RevertChanged {
                 revert: None,
                 prompt: None,
@@ -1772,7 +1989,7 @@ impl Engine {
             prompt,
             cancel,
             pending,
-            events: self.events.clone(),
+            events: Arc::clone(&self.fanout),
             slot: Arc::clone(&self.turn),
             history: Arc::clone(&self.history),
             persist,
@@ -1983,6 +2200,11 @@ mod tests {
         storage::{self, SessionId, SessionInfo, Storage},
         tool::{FileTimes, Registry},
     };
+
+    /// How long a drain that should complete promptly is given before the
+    /// test calls it wedged. Generous against a loaded machine, and reached
+    /// only when delivery is broken — a green run never waits on it.
+    const DRAIN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
     /// An engine over `provider` with no tools and default rules, which is
     /// all these tests need: they prove the turn lifecycle, not the loop.
@@ -2393,15 +2615,47 @@ mod tests {
         }
     }
 
+    /// The successor to `a_second_subscriber_is_refused`, asserting the
+    /// contract that replaced the refusal: every subscriber has a queue of
+    /// its own, so a second one registered before the turn holds the same
+    /// transcript the first does, frame for frame.
     #[tokio::test]
-    async fn a_second_subscriber_is_refused() {
+    async fn a_second_subscriber_sees_the_same_events_the_first_does() {
         let engine = engine();
-        let _first = engine.subscribe().await.expect("the first subscriber wins");
+        let mut first = engine
+            .subscribe()
+            .await
+            .expect("the first subscriber claims the birth queue");
+        let mut second = engine
+            .subscribe()
+            .await
+            .expect("a later subscriber registers a queue of its own");
 
-        assert!(matches!(
-            engine.subscribe().await,
-            Err(EngineError::AlreadySubscribed)
-        ));
+        engine
+            .send(Command::SendPrompt {
+                text: "hi".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+
+        // Bounded so a delivery that forgot one of the queues fails loudly
+        // instead of waiting forever on a stream nothing feeds.
+        let heard_first = tokio::time::timeout(DRAIN_PATIENCE, drain(&mut first))
+            .await
+            .expect("the first subscriber hears the whole turn");
+        let heard_second = tokio::time::timeout(DRAIN_PATIENCE, drain(&mut second))
+            .await
+            .expect("the second subscriber hears the whole turn");
+
+        assert!(
+            matches!(heard_first.last(), Some(Event::MessageFinished { .. })),
+            "a drained turn ends with its finish: {heard_first:?}"
+        );
+        assert_eq!(
+            heard_first, heard_second,
+            "two lossless subscribers of one turn hold the same transcript"
+        );
     }
 
     #[tokio::test]
