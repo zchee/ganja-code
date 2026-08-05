@@ -217,7 +217,7 @@ impl Registry {
             Arc::new(shell::ShellTool::new()),
             // Upstream registers one todo tool, which owns the list.
             Arc::new(todo::TodoWriteTool::new()),
-            Arc::new(webfetch::WebfetchTool),
+            Arc::new(webfetch::WebfetchTool::new()),
         ])
     }
 
