@@ -16,8 +16,35 @@ ganja-core.workspace = true
 ganja-protocol.workspace = true
 
 axum.workspace = true
+# An `auth_token` query value and a `Basic` header both carry base64 of
+# `user:password`; decoding them is the one thing this crate borrows the
+# encoder for.
+base64.workspace = true
+# `subscribe_droppable` hands back a `BoxStream`, and the SSE pump and the
+# permission tracker both drain one; the trait that `.next()` lives on is
+# here.
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The configured password is held wiped-on-drop and out of `Debug`, the same
+# way every credential in the tree is.
+secrecy.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+# `ReceiverStream` turns the SSE pump's channel into the body axum streams;
+# the alternative is hand-implementing `Stream` over an `mpsc::Receiver`.
+tokio-stream.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# The scripted provider, recorder tool, drain loop and storage seeding the
+# socket suites drive turns with — the same scaffolding ganja-core's own
+# integration binaries use.
+ganja-testkit.workspace = true
+# The HTTP client the socket suites speak to the bound listener with; its
+# `stream` feature is what lets the SSE test read frames as they arrive.
+reqwest.workspace = true
+tempfile.workspace = true
+# The no-secrets suite installs a capturing global subscriber and searches
+# every byte the serve layer traced.
+tracing-subscriber.workspace = true

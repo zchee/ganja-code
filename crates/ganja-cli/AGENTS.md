@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login` — a key, or a browser or device login where the provider has one — plus `auth list`/`logout` and `config import-opencode`), to answer questions about it (`models`, `sessions`, `mcp`) without taking the screen over, and — with `run` — to take one turn with no screen at all.
+The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login` — a key, or a browser or device login where the provider has one — plus `auth list`/`logout` and `config import-opencode`), to answer questions about it (`models`, `sessions`, `mcp`) without taking the screen over, — with `run` — to take one turn with no screen at all, and — with `serve` — to put the same engine behind a socket until a signal ends it.
 
 ## Key Files
 
@@ -17,8 +17,8 @@ The `ganja` binary. Running it with no subcommand starts the terminal UI — opt
 
 | Directory | Purpose |
 |-----------|---------|
-| `src/` | `main.rs`: clap surface and the credential prompt; `run.rs`: the headless turn (see `src/AGENTS.md`) |
-| `tests/` | CLI assertions, the headless-turn suite, and pty smoke tests (see `tests/AGENTS.md`) |
+| `src/` | `main.rs`: clap surface and the credential prompt; `run.rs`: the headless turn; `serve.rs`: the HTTP server (see `src/AGENTS.md`) |
+| `tests/` | CLI assertions, the headless-turn suite, the serve smoke, and pty smoke tests (see `tests/AGENTS.md`) |
 
 ## For AI Agents
 
@@ -33,6 +33,7 @@ cargo test -p ganja-cli                    # includes pty tests on unix
 cargo test -p ganja-cli --test cli         # CLI surface only, fast
 cargo test -p ganja-cli --test auth_login  # the login flows, against an issuer the suite owns
 cargo test -p ganja-cli --test run         # the headless turn, fast
+cargo test -p ganja-cli --test serve       # the server end to end, unix only
 ```
 
 The pty suite drives the real binary through a terminal and is unix-only (`#![cfg(unix)]`).
@@ -45,7 +46,7 @@ Subcommands print to stdout and diagnostics to stderr, so a caller capturing std
 
 ### Internal
 
-`ganja-core` (`auth`, `catalog`, and — for `run` — `Engine`, `config`, `provider`, `instruction`, `permission`, `tool`), `ganja-tui` (`run()`).
+`ganja-core` (`auth`, `catalog`, and — for `run` and `serve` — `Engine`, `config`, `provider`, `instruction`, `permission`, `tool`), `ganja-tui` (`run()`), `ganja-serve` (`serve()`, behind the `serve` subcommand).
 
 ### External
 
