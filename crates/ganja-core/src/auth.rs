@@ -9,18 +9,37 @@
 //! that the two can eventually read each other's storage:
 //!
 //! ```json
-//! { "anthropic": { "type": "api", "key": "sk-…" } }
+//! {
+//!   "anthropic": { "type": "api", "key": "sk-…" },
+//!   "openai": { "type": "oauth", "refresh": "…", "access": "…",
+//!               "expires": 1785000000000, "accountId": "…" }
+//! }
 //! ```
 //!
-//! Reading is deliberately tolerant. Entries this build cannot interpret —
-//! upstream's `oauth` and `wellknown` credentials, providers it has never heard
-//! of — are carried through a rewrite untouched instead of being dropped, so
-//! `ganja auth login` can never cost someone a credential it did not understand.
+//! Reading is deliberately tolerant, and writing is deliberately conservative.
+//! Entries this build cannot interpret — upstream's `wellknown` credentials,
+//! providers it has never heard of, a credential type invented after this was
+//! written — are carried through a rewrite untouched instead of being dropped,
+//! so `ganja auth login` can never cost someone a credential it did not
+//! understand. The same holds *inside* an OAuth entry: upstream persists one as
+//! `{type, access, refresh, expires, ...extra}` (`provider/auth.ts:211-220`),
+//! where `...extra` is whatever the login method returned, so the record is
+//! open-ended by construction. Fields this build does not model are kept in
+//! [`OauthCredential::extra`] and written back as they were found.
+//!
+//! This is stricter than upstream, which decodes the whole file through a
+//! filtering read (`auth/index.ts:65-66`) and then writes that already-filtered
+//! map back (`:79`) — an entry it cannot decode is lost on the next write. A
+//! shared `auth.json` is somebody else's territory too, so ganja does not.
 //!
 //! Secrets never reach a log. Key material is held in a [`SecretString`], whose
 //! own [`Debug`] is a placeholder and whose contents are wiped when the last
-//! handle drops; [`Credential`] renders as its last four characters through both
-//! [`Debug`] and [`Display`], and nothing in this module formats a whole key.
+//! handle drops; [`Credential`] and [`OauthCredential`] render as the last four
+//! characters of their tokens through both [`Debug`] and [`Display`], and
+//! nothing in this module formats a whole secret. [`OauthCredential`]'s `Debug`
+//! is hand-written for that reason: the unmodelled extras are exactly where a
+//! third party's token would land, so their *keys* are shown and their values
+//! never are.
 //!
 //! The file is replaced by writing a sibling and renaming it into place. That
 //! sibling is created exclusively, because its name is predictable and a
@@ -29,15 +48,18 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     env, fmt, fs, io,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
+use futures::future::{BoxFuture, FutureExt as _, Shared};
 use secrecy::{ExposeSecret as _, SecretString, zeroize::Zeroize as _};
 use serde::Deserialize;
-use serde_json::{Value, error::Category};
+use serde_json::{Map, Value, error::Category};
 
 /// Directory ganja keeps its state in, under the XDG data home.
 const DIRECTORY: &str = "ganja";
@@ -76,6 +98,44 @@ pub fn key_var(provider_id: &str) -> Option<&'static str> {
         .iter()
         .find(|(provider, _)| *provider == provider_id)
         .map(|(_, variable)| *variable)
+}
+
+/// Providers ganja names differently from the key their credential is stored
+/// under, as `(ganja's id, the key in `auth.json`)`.
+///
+/// `auth.json` is shared territory: an opencode install pointed at the same
+/// file has to find the credential where it put it, and `config
+/// import-opencode` translates a config that names providers upstream's way.
+/// So the storage key is upstream's, always — xAI's is `xai`
+/// (`plugin/xai.ts:509`, which stores under `{ id: "xai" }`) — and ganja's own
+/// name for that provider, `grok`, is a name for a module and a command-line
+/// argument rather than for a line in a credential file.
+const STORAGE_ALIASES: &[(&str, &str)] = &[("grok", "xai")];
+
+/// The key `provider_id`'s credential is stored under.
+///
+/// The identity for every provider whose name ganja and upstream agree on,
+/// which is all but the ones in [`STORAGE_ALIASES`].
+#[must_use]
+pub fn storage_key(provider_id: &str) -> &str {
+    STORAGE_ALIASES
+        .iter()
+        .find(|(ganja, _)| *ganja == provider_id)
+        .map_or(provider_id, |(_, stored)| *stored)
+}
+
+/// The provider id ganja knows a stored key by — [`storage_key`] backwards.
+///
+/// Reading a listing back into ganja's own vocabulary is the caller's choice,
+/// not this module's: [`list_providers`] reports the keys the file actually
+/// holds, because that is what a person comparing it against `opencode auth
+/// list` or against the file itself will see.
+#[must_use]
+pub fn provider_id_for_storage_key(key: &str) -> &str {
+    STORAGE_ALIASES
+        .iter()
+        .find(|(_, stored)| *stored == key)
+        .map_or(key, |(ganja, _)| *ganja)
 }
 
 /// The last few characters of a secret, which is all any output may show.
@@ -174,6 +234,229 @@ impl fmt::Display for Credential {
     }
 }
 
+/// An OAuth credential, in the shape upstream writes it.
+///
+/// Spec: `packages/opencode/src/auth/index.ts:14-21` for the schema —
+/// `{type:"oauth", refresh, access, expires, accountId?, enterpriseUrl?}` — and
+/// `packages/opencode/src/provider/auth.ts:211-220` for how it reaches disk:
+/// the four required fields plus `...extra`, whatever else the login method
+/// returned. The two optional fields upstream names are modelled here because
+/// two shipped providers need them by name — `accountId` is the ChatGPT account
+/// a Codex request is billed to (`plugin/openai/codex.ts:365`, `:404`) and
+/// `enterpriseUrl` is the GitHub deployment a Copilot request goes to
+/// (`plugin/github-copilot/copilot.ts:65`) — and everything else stays in
+/// [`extra`](Self::extra), unread and unharmed.
+///
+/// Both tokens are secrets. Copilot's are the same string: the GitHub OAuth
+/// token *is* the credential, so it is stored as both `refresh` and `access`
+/// with `expires: 0` (`copilot.ts:288-295`), and this build measured that
+/// against the live API before writing any of this down.
+#[derive(Clone, Deserialize)]
+pub struct OauthCredential {
+    /// The long-lived token a new access token is obtained with. For a
+    /// credential that never expires this is the credential itself.
+    pub refresh: SecretString,
+    /// The token a request carries, until [`expires`](Self::expires).
+    pub access: SecretString,
+    /// When [`access`](Self::access) stops being accepted, in milliseconds
+    /// since the Unix epoch.
+    ///
+    /// **Zero means it never expires**, which is how Copilot's credential is
+    /// stored (`copilot.ts:294`) — not "expired in 1970". [`needs_refresh`] is
+    /// the only thing that should be reading this directly.
+    ///
+    /// [`needs_refresh`]: Self::needs_refresh
+    pub expires: u64,
+    /// The account a request is billed to, where the provider has more than one.
+    #[serde(rename = "accountId", default)]
+    pub account_id: Option<String>,
+    /// The GitHub Enterprise deployment this credential belongs to.
+    #[serde(rename = "enterpriseUrl", default)]
+    pub enterprise_url: Option<String>,
+    /// Everything else the entry carried.
+    ///
+    /// Never interpreted, never dropped: an entry written by opencode, by a
+    /// third-party plugin, or by a later version of ganja keeps whatever it
+    /// put here across a rewrite. It cannot collide with a modelled field —
+    /// serde matches those first — so writing this back can only restore what
+    /// was already there.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl OauthCredential {
+    /// A credential holding just the pair of tokens and an expiry.
+    ///
+    /// The optional fields are set afterwards by the login flow that knows
+    /// whether its provider has them; a struct literal would have to name them
+    /// all, and `..Default::default()` on a type with two secrets in it is a
+    /// default credential nobody asked to exist.
+    #[must_use]
+    pub fn new(refresh: SecretString, access: SecretString, expires: u64) -> Self {
+        Self {
+            refresh,
+            access,
+            expires,
+            account_id: None,
+            enterprise_url: None,
+            extra: Map::new(),
+        }
+    }
+
+    /// What may be shown of the credential: the tail of the token a request
+    /// would carry, or of the refresh token when there is no access token to
+    /// show — Copilot's two are the same string, and a credential mid-refresh
+    /// may have only the one.
+    #[must_use]
+    pub fn tail(&self) -> RedactedTail {
+        if is_blank(&self.access) {
+            RedactedTail::of_secret(&self.refresh)
+        } else {
+            RedactedTail::of_secret(&self.access)
+        }
+    }
+
+    /// Whether there is any token here at all.
+    ///
+    /// An entry whose tokens are blank is not a credential, the same way an
+    /// `api` entry storing an empty key is not one: it would fail at the
+    /// provider with a message about the request rather than about the login.
+    fn is_usable(&self) -> bool {
+        !is_blank(&self.access) || !is_blank(&self.refresh)
+    }
+
+    /// Whether [`access`](Self::access) is spent, or close enough to it that a
+    /// request started now might outlive it.
+    ///
+    /// `expires == 0` is upstream's "never" and is never due. `skew_ms` is the
+    /// margin: upstream refreshes two minutes early so that a single long tool
+    /// call does not have to recover from a mid-flight 401 (`xai.ts:44`).
+    #[must_use]
+    pub fn needs_refresh(&self, now_ms: u64, skew_ms: u64) -> bool {
+        self.expires != 0 && self.expires <= now_ms.saturating_add(skew_ms)
+    }
+
+    /// The token a request should carry, or why it cannot have one.
+    ///
+    /// For a caller that holds a credential and has no way to refresh it —
+    /// which is every caller until a login flow supplies a [`RefreshOauth`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Expired`] when the access token is spent. That is
+    /// a recoverable state, not a dead credential: [`Refresher::usable`] is
+    /// what recovers it.
+    pub fn usable_access(
+        &self,
+        provider_id: &str,
+        now_ms: u64,
+    ) -> Result<&SecretString, AuthError> {
+        if self.needs_refresh(now_ms, 0) || is_blank(&self.access) {
+            return Err(AuthError::Expired {
+                provider_id: provider_id.to_owned(),
+            });
+        }
+
+        Ok(&self.access)
+    }
+
+    /// This credential, taking from `previous` whatever it does not carry
+    /// itself.
+    ///
+    /// A refresh returns tokens, not an identity: upstream keeps the account id
+    /// across one explicitly (`codex.ts:365`, `extractAccountId(tokens) ||
+    /// authWithAccount.accountId`), and the same reasoning covers the enterprise
+    /// deployment and every unmodelled field — a token endpoint that does not
+    /// echo them back has not revoked them.
+    #[must_use]
+    pub fn inheriting(mut self, previous: &Self) -> Self {
+        if self.account_id.is_none() {
+            self.account_id = previous.account_id.clone();
+        }
+        if self.enterprise_url.is_none() {
+            self.enterprise_url = previous.enterprise_url.clone();
+        }
+        for (field, value) in &previous.extra {
+            self.extra
+                .entry(field.clone())
+                .or_insert_with(|| value.clone());
+        }
+
+        self
+    }
+
+    /// The entry as it goes on disk, exposing both tokens exactly once.
+    ///
+    /// Unmodelled fields are laid down first so that a modelled one can only
+    /// ever overwrite a stale copy of itself, never the other way round.
+    fn to_value(&self) -> Value {
+        let mut entry = self.extra.clone();
+        entry.insert("type".to_owned(), Value::from("oauth"));
+        entry.insert(
+            "refresh".to_owned(),
+            Value::from(self.refresh.expose_secret()),
+        );
+        entry.insert(
+            "access".to_owned(),
+            Value::from(self.access.expose_secret()),
+        );
+        entry.insert("expires".to_owned(), Value::from(self.expires));
+        if let Some(account_id) = &self.account_id {
+            entry.insert("accountId".to_owned(), Value::from(account_id.clone()));
+        }
+        if let Some(enterprise_url) = &self.enterprise_url {
+            entry.insert(
+                "enterpriseUrl".to_owned(),
+                Value::from(enterprise_url.clone()),
+            );
+        }
+
+        Value::Object(entry)
+    }
+}
+
+impl fmt::Debug for OauthCredential {
+    /// Hand-written because [`extra`](OauthCredential::extra) holds values this
+    /// module has never seen. A third-party plugin's own token lands there, and
+    /// a derived `Debug` would print it: the field names are useful for working
+    /// out what is stored, the values are not worth the risk.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OauthCredential")
+            .field("refresh", &RedactedTail::of_secret(&self.refresh))
+            .field("access", &RedactedTail::of_secret(&self.access))
+            .field("expires", &self.expires)
+            .field("account_id", &self.account_id)
+            .field("enterprise_url", &self.enterprise_url)
+            .field("extra", &self.extra.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl fmt::Display for OauthCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.tail().fmt(formatter)
+    }
+}
+
+/// Which of the things a provider can be authenticated with an entry holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialKind {
+    /// A key sent as-is on every request.
+    ApiKey,
+    /// A pair of tokens, the sent one with a lifetime.
+    Oauth,
+}
+
+impl fmt::Display for CredentialKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ApiKey => "api",
+            Self::Oauth => "oauth",
+        })
+    }
+}
+
 /// Where a credential came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -195,12 +478,15 @@ impl fmt::Display for Source {
 /// One provider that can be authenticated, and how.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// Provider the credential belongs to.
+    /// Key the credential is stored under, which is upstream's name for the
+    /// provider — see [`storage_key`].
     pub provider_id: String,
     /// What may be shown of the key.
     pub tail: RedactedTail,
     /// Where [`credential_for`] would read it.
     pub source: Source,
+    /// What kind of credential it is, since not every one is a key.
+    pub kind: CredentialKind,
 }
 
 /// A credential could not be read or written.
@@ -249,6 +535,72 @@ pub enum AuthError {
         /// The mode it was found with.
         mode: u32,
     },
+    /// An OAuth credential was asked for and the provider has none.
+    #[error(
+        "{provider_id} has no OAuth credential stored ({found}); \
+         run `ganja auth login {provider_id}`"
+    )]
+    NotOauth {
+        /// The provider that was asked about.
+        provider_id: String,
+        /// What is stored instead, in words that quote nothing.
+        found: &'static str,
+    },
+    /// The stored access token is spent, and nothing refreshed it.
+    ///
+    /// Recoverable: the refresh token is still there, and
+    /// [`Refresher::usable`] is what spends it.
+    #[error(
+        "the stored {provider_id} access token has expired; it can be renewed \
+         from the refresh token that is stored beside it"
+    )]
+    Expired {
+        /// The provider whose token expired.
+        provider_id: String,
+    },
+    /// A refresh ran, and the provider refused it. Only a new login fixes this.
+    #[error(
+        "the stored {provider_id} credential was refused when it was renewed \
+         ({reason}); run `ganja auth login {provider_id}`"
+    )]
+    ReauthRequired {
+        /// The provider that refused.
+        provider_id: String,
+        /// Why, in the provider's terms. Never carries token material: a
+        /// caller building one of these passes a status and an error code, not
+        /// a response body.
+        reason: String,
+    },
+    /// A refresh could not be carried out, and the stored credential is fine.
+    ///
+    /// The difference from [`ReauthRequired`](Self::ReauthRequired) is the
+    /// whole reason this variant exists: telling someone whose network dropped
+    /// to log in again costs them a browser round trip they did not need.
+    #[error(
+        "the {provider_id} access token could not be renewed right now \
+         ({reason}); the stored credential is still good - try again"
+    )]
+    RefreshUnavailable {
+        /// The provider whose token could not be renewed.
+        provider_id: String,
+        /// What got in the way. Never carries token material.
+        reason: String,
+    },
+}
+
+/// What a caller can do about an [`AuthError`], without matching every variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthErrorKind {
+    /// The store could not be read or written. Repair the file.
+    Storage,
+    /// There is no OAuth credential here. Log in.
+    NotOauth,
+    /// The access token is spent and renewable. Renew it.
+    Expired,
+    /// The credential is dead. Log in again.
+    ReauthRequired,
+    /// The renewal did not happen. Retry.
+    RefreshUnavailable,
 }
 
 impl AuthError {
@@ -266,12 +618,27 @@ impl AuthError {
             column: error.column(),
         }
     }
+
+    /// What went wrong, in the four terms a caller acts on.
+    #[must_use]
+    pub fn kind(&self) -> AuthErrorKind {
+        match self {
+            Self::Io { .. } | Self::Malformed { .. } | Self::Permissions { .. } => {
+                AuthErrorKind::Storage
+            }
+            Self::NotOauth { .. } => AuthErrorKind::NotOauth,
+            Self::Expired { .. } => AuthErrorKind::Expired,
+            Self::ReauthRequired { .. } => AuthErrorKind::ReauthRequired,
+            Self::RefreshUnavailable { .. } => AuthErrorKind::RefreshUnavailable,
+        }
+    }
 }
 
 /// A stored credential, as far as this build understands it.
 ///
-/// Upstream also stores `oauth` and `wellknown` credentials, which P2 cannot
-/// use; they decode as [`Stored::Unusable`] so that a rewrite keeps them.
+/// Upstream also stores `wellknown` credentials, and nothing says a later
+/// version of either tool will not invent a fourth kind; both decode as
+/// [`Stored::Unusable`] so that a rewrite keeps them.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Stored {
@@ -280,9 +647,27 @@ enum Stored {
         /// The key.
         key: SecretString,
     },
+    /// A pair of OAuth tokens, plus whatever else the entry carried.
+    Oauth(OauthCredential),
     /// Something this build cannot authenticate with.
     #[serde(other)]
     Unusable,
+}
+
+impl Stored {
+    /// How to describe this entry to someone who asked for a different kind.
+    ///
+    /// Deliberately not the entry itself: every value in it is a secret.
+    fn describe(entry: Option<&Value>) -> &'static str {
+        match entry.map(|value| serde_json::from_value::<Self>(value.clone())) {
+            None => "nothing is stored",
+            Some(Ok(Self::Api { .. })) => "an API key is stored",
+            Some(Ok(Self::Oauth(_))) => "the stored OAuth credential has no tokens in it",
+            Some(Ok(Self::Unusable) | Err(_)) => {
+                "a credential this build does not understand is stored"
+            }
+        }
+    }
 }
 
 /// The credential file, wherever it turned out to be.
@@ -382,9 +767,34 @@ impl Store {
     fn get(&self, provider_id: &str) -> Result<Option<Credential>, AuthError> {
         Ok(self
             .read()?
-            .get(provider_id)
+            .get(storage_key(provider_id))
             .and_then(usable_key)
             .map(|api_key| Credential { api_key }))
+    }
+
+    /// The OAuth credential stored for `provider_id`, whole.
+    ///
+    /// The entry's unmodelled fields come back with it, which is what makes
+    /// [`Self::set_oauth`] able to put them back.
+    fn oauth(&self, provider_id: &str) -> Result<Option<OauthCredential>, AuthError> {
+        Ok(self
+            .read()?
+            .get(storage_key(provider_id))
+            .and_then(usable_oauth))
+    }
+
+    /// Stores `credential` as `provider_id`'s, replacing whatever it had.
+    ///
+    /// Replacement rather than a merge, the way upstream's `set` is
+    /// (`auth/index.ts:73-81`): what the caller holds is the whole credential,
+    /// including the extras it read out of the previous one. Merging here
+    /// instead would resurrect a field from an account that has since been
+    /// logged out of.
+    fn set_oauth(&self, provider_id: &str, credential: &OauthCredential) -> Result<(), AuthError> {
+        let mut data = self.read()?;
+        data.insert(storage_key(provider_id).to_owned(), credential.to_value());
+
+        self.write(&data)
     }
 
     /// Stores `api_key`, exposing it exactly once: the serializer that puts it
@@ -394,7 +804,7 @@ impl Store {
         let api_key = api_key.into();
         let mut data = self.read()?;
         data.insert(
-            provider_id.to_owned(),
+            storage_key(provider_id).to_owned(),
             serde_json::json!({ "type": "api", "key": api_key.expose_secret() }),
         );
 
@@ -403,7 +813,7 @@ impl Store {
 
     fn remove(&self, provider_id: &str) -> Result<bool, AuthError> {
         let mut data = self.read()?;
-        if data.remove(provider_id).is_none() {
+        if data.remove(storage_key(provider_id)).is_none() {
             return Ok(false);
         }
         self.write(&data)?;
@@ -411,13 +821,28 @@ impl Store {
         Ok(true)
     }
 
-    /// Every stored provider this build could authenticate with, sorted.
-    fn stored(&self) -> Result<Vec<(String, RedactedTail)>, AuthError> {
+    /// Every stored provider this build could authenticate with, sorted, and
+    /// what it would authenticate with.
+    fn stored(&self) -> Result<Vec<(String, RedactedTail, CredentialKind)>, AuthError> {
         Ok(self
             .read()?
             .iter()
             .filter_map(|(provider_id, value)| {
-                usable_key(value).map(|key| (provider_id.clone(), RedactedTail::of_secret(&key)))
+                if let Some(key) = usable_key(value) {
+                    return Some((
+                        provider_id.clone(),
+                        RedactedTail::of_secret(&key),
+                        CredentialKind::ApiKey,
+                    ));
+                }
+
+                usable_oauth(value).map(|credential| {
+                    (
+                        provider_id.clone(),
+                        credential.tail(),
+                        CredentialKind::Oauth,
+                    )
+                })
             })
             .collect())
     }
@@ -439,6 +864,272 @@ fn usable_key(value: &Value) -> Option<SecretString> {
         // filters the same way rather than failing the whole read.
         Ok(Stored::Api { key }) if !is_blank(&key) => Some(key),
         _ => None,
+    }
+}
+
+/// The OAuth credential an entry carries, when it carries one with a token in
+/// it.
+///
+/// Same tolerance as [`usable_key`], for the same reason: an `oauth` entry
+/// whose `expires` is a string, or whose `access` is a number, is a record
+/// somebody else's schema wrote and this build has no business failing over.
+fn usable_oauth(value: &Value) -> Option<OauthCredential> {
+    match serde_json::from_value::<Stored>(value.clone()) {
+        Ok(Stored::Oauth(credential)) if credential.is_usable() => Some(credential),
+        _ => None,
+    }
+}
+
+/// The clock `expires` is measured against: milliseconds since the Unix epoch.
+///
+/// Public because every login flow computes an expiry the same way — `now +
+/// expires_in * 1000`, which is what upstream writes (`codex.ts:371`,
+/// `xai.ts:571`) — and three of them agreeing by accident is one of them
+/// getting it wrong.
+///
+/// A clock set before 1970 reads as zero rather than failing: a stored expiry
+/// then looks like the future, which errs towards using a credential that may
+/// have expired instead of refusing one that has not.
+#[must_use]
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// How long before an access token actually expires it is renewed.
+///
+/// Two minutes, upstream's margin (`plugin/xai.ts:44`): a tool call that starts
+/// with a token about to expire would otherwise have to recover from a 401 in
+/// the middle of a turn.
+pub const REFRESH_SKEW_MS: u64 = 120_000;
+
+/// Trades a spent OAuth credential for a fresh one.
+///
+/// The implementation is a login flow's: this crate knows when a token needs
+/// renewing and where the result is stored, and nothing about which endpoint
+/// renews it. Errors should be [`AuthError::ReauthRequired`] when the provider
+/// refused the refresh token and [`AuthError::RefreshUnavailable`] when the
+/// attempt never got that far, because those are the two things a caller can
+/// do something different about.
+#[async_trait::async_trait]
+pub trait RefreshOauth: Send + Sync {
+    /// Renews `credential`, which belongs to `provider_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when the provider refused or could not be reached.
+    async fn refresh(
+        &self,
+        provider_id: &str,
+        credential: &OauthCredential,
+    ) -> Result<OauthCredential, AuthError>;
+}
+
+/// A refresh that failed, as every caller that was waiting on it sees it.
+///
+/// Cloneable because one refresh serves every caller that asked for it, and an
+/// [`AuthError`] carrying an [`io::Error`] is not. The error itself is reached
+/// through [`AsRef`], [`Self::kind`], or the `source` chain.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct RefreshError(Arc<AuthError>);
+
+impl RefreshError {
+    /// What went wrong, in the terms a caller acts on.
+    #[must_use]
+    pub fn kind(&self) -> AuthErrorKind {
+        self.0.kind()
+    }
+}
+
+impl AsRef<AuthError> for RefreshError {
+    fn as_ref(&self) -> &AuthError {
+        &self.0
+    }
+}
+
+impl From<AuthError> for RefreshError {
+    fn from(error: AuthError) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
+/// A refresh in progress, shared by everyone who asked for one.
+type Pending = Shared<BoxFuture<'static, Result<OauthCredential, RefreshError>>>;
+
+/// Renews expired OAuth credentials, once per provider however many callers ask.
+///
+/// A turn can have several requests in the air at once, and an access token
+/// that expires under them would otherwise have each of them mint a new one:
+/// with a rotating refresh token — xAI's rotates — the second exchange presents
+/// a token the first has already spent, and the provider is right to refuse it.
+/// Upstream guards this with a module-scoped promise per provider plugin
+/// (`plugin/xai.ts:494-521`, `plugin/openai/codex.ts:362-386`, cleared in a
+/// `finally`); this is the same thing, keyed by provider so two providers
+/// refreshing at once do not queue behind each other.
+///
+/// [`Self::shared`] is the process-wide one, which is the scope upstream's
+/// module-level promise has. A test wanting its own takes [`Self::new`].
+#[derive(Default)]
+pub struct Refresher {
+    in_flight: Mutex<HashMap<String, Pending>>,
+}
+
+impl Refresher {
+    /// A refresher with nothing in flight.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The one every provider in this process shares.
+    #[must_use]
+    pub fn shared() -> &'static Self {
+        static SHARED: OnceLock<Refresher> = OnceLock::new();
+
+        SHARED.get_or_init(Self::new)
+    }
+
+    /// `provider_id`'s stored credential, renewed first if it is due.
+    ///
+    /// A credential that is still good is returned without `refresh` being
+    /// consulted at all. One that is due is renewed exactly once no matter how
+    /// many callers arrive while that is happening; they all receive the same
+    /// result, and the renewed credential is stored before any of them get it.
+    /// The renewal reads the store again before it spends anything, so a
+    /// credential renewed since this caller read it — by a caller that was
+    /// descheduled past its own turn, or by another process — is used rather
+    /// than replaced.
+    ///
+    /// A store that cannot be written is logged and not returned as a failure.
+    /// The credential in hand is valid, the turn depending on it should not die
+    /// for a filesystem, and upstream makes the same call explicitly
+    /// (`plugin/xai.ts:501-506`: "an auth.set failure leaves the on-disk state
+    /// stale but the in-memory result is still valid for this turn"). What is
+    /// lost is durability, and the next process to read a stale credential
+    /// renews it again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::NotOauth`] when the provider has no OAuth
+    /// credential, a storage error when the file cannot be read, and whatever
+    /// `refresh` returned when the renewal failed.
+    pub async fn usable(
+        &self,
+        provider_id: &str,
+        refresh: Arc<dyn RefreshOauth>,
+    ) -> Result<OauthCredential, RefreshError> {
+        let key = storage_key(provider_id).to_owned();
+        // Read once rather than through `Store::oauth`: saying what *is* stored
+        // when there is no OAuth credential needs the same entry, and a second
+        // read would be a second trip through the permission check as well.
+        let data = Store::open()?.read()?;
+        let entry = data.get(&key);
+        let Some(current) = entry.and_then(usable_oauth) else {
+            return Err(AuthError::NotOauth {
+                provider_id: provider_id.to_owned(),
+                found: Stored::describe(entry),
+            }
+            .into());
+        };
+        if !current.needs_refresh(now_ms(), REFRESH_SKEW_MS) {
+            return Ok(current);
+        }
+
+        let pending = self.enqueue(key.clone(), provider_id.to_owned(), current, refresh);
+        let renewed = pending.clone().await;
+        self.retire(&key, &pending);
+
+        renewed
+    }
+
+    /// The refresh for `key`, joining one already running rather than starting
+    /// a second.
+    ///
+    /// The lock is held only across the map lookup — the future is built, not
+    /// awaited, so nothing can block here — and the future itself is not polled
+    /// until a caller awaits it.
+    fn enqueue(
+        &self,
+        key: String,
+        provider_id: String,
+        current: OauthCredential,
+        refresh: Arc<dyn RefreshOauth>,
+    ) -> Pending {
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|poisoned| {
+            // A panic while the map was held says nothing about the map: it
+            // holds futures, and the panic came from whatever was building one.
+            poisoned.into_inner()
+        });
+
+        in_flight
+            .entry(key.clone())
+            .or_insert_with(|| {
+                async move {
+                    // The credential this was built from was read before the
+                    // map was locked, and the two are not one step. A caller
+                    // descheduled in between — or another process entirely,
+                    // which is a case upstream names and lives with
+                    // (`xai.ts:501-506`) — can have renewed it since, and
+                    // presenting a refresh token that has already been rotated
+                    // away is how a live login gets refused. Reading again
+                    // costs one small file and settles it.
+                    let current = match Store::open().and_then(|store| store.oauth(&key)) {
+                        Ok(Some(stored)) if !stored.needs_refresh(now_ms(), REFRESH_SKEW_MS) => {
+                            return Ok(stored);
+                        }
+                        Ok(Some(stored)) => stored,
+                        // Nothing readable to correct it with; the credential
+                        // in hand is what there is, and refusing to renew
+                        // because a file moved would be the worse answer.
+                        Ok(None) | Err(_) => current,
+                    };
+
+                    let renewed = refresh
+                        .refresh(&provider_id, &current)
+                        .await
+                        .map_err(RefreshError::from)?
+                        .inheriting(&current);
+
+                    if let Err(error) =
+                        Store::open().and_then(|store| store.set_oauth(&key, &renewed))
+                    {
+                        tracing::warn!(
+                            provider = %provider_id,
+                            %error,
+                            "the renewed credential could not be stored; it is still \
+                             good for this process",
+                        );
+                    }
+
+                    Ok(renewed)
+                }
+                .boxed()
+                .shared()
+            })
+            .clone()
+    }
+
+    /// Drops a finished refresh, so the next caller starts a new one.
+    ///
+    /// Only if it is still the same one: a caller cancelled mid-flight leaves
+    /// its `Shared` in the map for whoever comes next to drive to completion,
+    /// and by the time this runs the entry may already have been replaced.
+    fn retire(&self, key: &str, pending: &Pending) {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if in_flight
+            .get(key)
+            .is_some_and(|current| Shared::ptr_eq(current, pending))
+        {
+            in_flight.remove(key);
+        }
     }
 }
 
@@ -581,6 +1272,36 @@ pub fn set_credential(
     Store::open()?.set(provider_id, api_key)
 }
 
+/// The OAuth credential stored for `provider_id`, if there is one.
+///
+/// There is no environment variable in front of this the way there is for an
+/// API key: a pair of OAuth tokens with an expiry is not something anyone types
+/// into a shell, and upstream has no variable for one either.
+///
+/// The credential comes back whole, unmodelled fields included, so that a
+/// caller which stores it again with [`set_oauth`] puts back what it found.
+///
+/// # Errors
+///
+/// Returns [`AuthError`] when the stored file cannot be read, understood, or is
+/// readable by other users. A provider with no OAuth credential is `Ok(None)`.
+pub fn oauth_for(provider_id: &str) -> Result<Option<OauthCredential>, AuthError> {
+    Store::open()?.oauth(provider_id)
+}
+
+/// Stores `credential` as `provider_id`'s, replacing any credential it had.
+///
+/// Credentials belonging to other providers are left as they were, including
+/// ones this build cannot interpret.
+///
+/// # Errors
+///
+/// Returns [`AuthError`] when the existing file cannot be read or the new one
+/// cannot be written.
+pub fn set_oauth(provider_id: &str, credential: &OauthCredential) -> Result<(), AuthError> {
+    Store::open()?.set_oauth(provider_id, credential)
+}
+
 /// Forgets `provider_id`'s stored credential, reporting whether there was one.
 ///
 /// An environment variable is not this function's to clear, so a provider
@@ -599,6 +1320,10 @@ pub fn remove_credential(provider_id: &str) -> Result<bool, AuthError> {
 /// A provider whose environment variable is set appears once, as
 /// [`Source::Environment`], because that is the credential that would be used.
 ///
+/// Providers are named by the key they are stored under, which is upstream's
+/// name for them — see [`storage_key`], and [`provider_id_for_storage_key`] for
+/// a caller that would rather show ganja's.
+///
 /// # Errors
 ///
 /// Returns [`AuthError`] when the stored file cannot be read.
@@ -610,11 +1335,12 @@ pub fn list_providers() -> Result<Vec<Entry>, AuthError> {
                 provider_id: (*provider_id).to_owned(),
                 tail: RedactedTail::of_secret(&key),
                 source: Source::Environment(variable),
+                kind: CredentialKind::ApiKey,
             })
         })
         .collect();
 
-    for (provider_id, tail) in Store::open()?.stored()? {
+    for (provider_id, tail, kind) in Store::open()?.stored()? {
         if entries.iter().any(|entry| entry.provider_id == provider_id) {
             continue;
         }
@@ -622,6 +1348,7 @@ pub fn list_providers() -> Result<Vec<Entry>, AuthError> {
             provider_id,
             tail,
             source: Source::File,
+            kind,
         });
     }
     entries.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
@@ -635,6 +1362,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::{
         env, fs,
+        path::PathBuf,
         sync::{Mutex, MutexGuard, PoisonError},
     };
 
@@ -642,8 +1370,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        AuthError, Credential, Entry, KEY_VARS, RedactedTail, Source, Store, credential_for,
-        key_var, list_providers, set_credential, store_path,
+        AuthError, AuthErrorKind, Credential, CredentialKind, Entry, KEY_VARS, OauthCredential,
+        REFRESH_SKEW_MS, RedactedTail, Source, Store, credential_for, key_var, list_providers,
+        now_ms, provider_id_for_storage_key, set_credential, storage_key, store_path,
     };
 
     /// A key that exists only to be hunted for in output. Nothing may print it
@@ -747,7 +1476,11 @@ mod tests {
         );
         assert_eq!(
             store.stored().expect("the listing reads"),
-            vec![("anthropic".to_owned(), RedactedTail::of(CANARY))]
+            vec![(
+                "anthropic".to_owned(),
+                RedactedTail::of(CANARY),
+                CredentialKind::ApiKey
+            )]
         );
 
         assert!(store.remove("anthropic").expect("the key is removable"));
@@ -772,21 +1505,22 @@ mod tests {
         assert_eq!(parsed["openai"]["key"], CANARY);
     }
 
-    /// Credentials this build cannot use — upstream's OAuth entries, providers
-    /// it has never heard of — survive a rewrite. Dropping them would silently
-    /// log someone out of a tool that is still using the same file.
+    /// Credentials this build cannot use — upstream's `wellknown` entries, a
+    /// credential type nobody has invented yet, providers it has never heard of
+    /// — survive a rewrite. Dropping them would silently log someone out of a
+    /// tool that is still using the same file.
+    ///
+    /// The `oauth` entry that used to carry this assertion moved to
+    /// [`an_oauth_entry_round_trips_with_everything_it_arrived_with`]: it is a
+    /// credential this build understands now, so it can no longer stand for one
+    /// it does not.
     #[test]
     fn foreign_entries_survive_a_rewrite() {
         let directory = temporary();
         let store = store(&directory);
         let original = serde_json::json!({
-            "anthropic": {
-                "type": "oauth",
-                "refresh": "refresh-token",
-                "access": "access-token",
-                "expires": 1,
-            },
-            "some-future-provider": { "type": "wellknown", "key": "k", "token": "t" },
+            "anthropic": { "type": "wellknown", "key": "k", "token": "t" },
+            "some-future-provider": { "type": "quantum-handshake", "secret": "s" },
             "openai": { "type": "api", "key": "sk-old-0001", "metadata": { "label": "work" } },
         });
         fs::write(
@@ -798,14 +1532,18 @@ mod tests {
         fs::set_permissions(&store.path, fs::Permissions::from_mode(0o600))
             .expect("the fixture is made private");
 
-        // The OAuth entry is not a usable API key, so it is not offered.
+        // Neither entry is a usable credential, so neither is offered.
         assert_eq!(
             key_of(store.get("anthropic").expect("the file reads")),
             None
         );
         assert_eq!(
             store.stored().expect("the listing reads"),
-            vec![("openai".to_owned(), RedactedTail::of("sk-old-0001"))]
+            vec![(
+                "openai".to_owned(),
+                RedactedTail::of("sk-old-0001"),
+                CredentialKind::ApiKey
+            )]
         );
 
         store
@@ -826,6 +1564,276 @@ mod tests {
             key_of(store.get("anthropic").expect("the new key reads back")),
             Some(CANARY.to_owned())
         );
+    }
+
+    /// The record upstream writes is `{type, access, refresh, expires,
+    /// ...extra}` (`provider/auth.ts:211-220`), and `...extra` is whatever the
+    /// login method returned — `accountId` from Codex, `enterpriseUrl` from
+    /// Copilot, and anything a plugin nobody has written yet decides to keep.
+    /// Reading one has to bring all of it back, and storing it again has to put
+    /// all of it down, or ganja is the tool that quietly deleted somebody's
+    /// account id.
+    #[test]
+    fn an_oauth_entry_round_trips_with_everything_it_arrived_with() {
+        let directory = temporary();
+        let store = store(&directory);
+        let original = serde_json::json!({
+            "type": "oauth",
+            "refresh": "gho_refresh_0001",
+            "access": "gho_access_0002",
+            "expires": 1_785_000_000_000_u64,
+            "accountId": "acct-42",
+            "enterpriseUrl": "https://company.ghe.com",
+            "someFuturePluginField": { "nested": [1, 2, 3] },
+        });
+        fs::write(
+            &store.path,
+            serde_json::to_vec_pretty(&serde_json::json!({ "github-copilot": original }))
+                .expect("the fixture serializes"),
+        )
+        .expect("the fixture writes");
+        #[cfg(unix)]
+        fs::set_permissions(&store.path, fs::Permissions::from_mode(0o600))
+            .expect("the fixture is made private");
+
+        let credential = store
+            .oauth("github-copilot")
+            .expect("the file reads")
+            .expect("the entry is an OAuth credential");
+
+        assert_eq!(credential.refresh.expose_secret(), "gho_refresh_0001");
+        assert_eq!(credential.access.expose_secret(), "gho_access_0002");
+        assert_eq!(credential.expires, 1_785_000_000_000);
+        assert_eq!(credential.account_id.as_deref(), Some("acct-42"));
+        assert_eq!(
+            credential.enterprise_url.as_deref(),
+            Some("https://company.ghe.com")
+        );
+        assert_eq!(
+            credential.extra.get("someFuturePluginField"),
+            Some(&original["someFuturePluginField"]),
+            "a field this build does not model has to survive the decode"
+        );
+
+        store
+            .set_oauth("github-copilot", &credential)
+            .expect("the credential stores again");
+
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).expect("the file exists"))
+                .expect("the file is still JSON");
+        assert_eq!(
+            rewritten["github-copilot"], original,
+            "storing what was read has to put back what was there"
+        );
+    }
+
+    /// An OAuth credential is a credential, so it is listed as one — and as an
+    /// OAuth one, because "the key is ****0002" is a lie about a token that
+    /// expires.
+    #[test]
+    fn an_oauth_credential_is_listed_as_the_kind_it_is() {
+        let directory = temporary();
+        let store = store(&directory);
+        store
+            .set_oauth(
+                "github-copilot",
+                &OauthCredential::new(
+                    SecretString::from("gho_refresh_0001"),
+                    SecretString::from("gho_access_0002"),
+                    0,
+                ),
+            )
+            .expect("the credential stores");
+        store.set("openai", CANARY).expect("the key stores");
+
+        assert_eq!(
+            store.stored().expect("the listing reads"),
+            vec![
+                (
+                    "github-copilot".to_owned(),
+                    RedactedTail::of("gho_access_0002"),
+                    CredentialKind::Oauth
+                ),
+                (
+                    "openai".to_owned(),
+                    RedactedTail::of(CANARY),
+                    CredentialKind::ApiKey
+                ),
+            ]
+        );
+        // An OAuth credential is not an API key, and offering it as one would
+        // send a bearer token out in an `x-api-key` header.
+        assert_eq!(
+            key_of(store.get("github-copilot").expect("the file reads")),
+            None
+        );
+    }
+
+    /// An entry with no token in it is not a credential, the same way an `api`
+    /// entry with an empty key is not one.
+    #[test]
+    fn an_oauth_entry_with_no_tokens_is_not_a_credential() {
+        let directory = temporary();
+        let store = store(&directory);
+        store
+            .set_oauth(
+                "github-copilot",
+                &OauthCredential::new(SecretString::from("  "), SecretString::from(""), 0),
+            )
+            .expect("the entry stores");
+
+        assert!(
+            store
+                .oauth("github-copilot")
+                .expect("the file reads")
+                .is_none()
+        );
+        assert!(store.stored().expect("the listing reads").is_empty());
+    }
+
+    /// Copilot's credential never expires (`copilot.ts:294` stores `expires:
+    /// 0`), and reading that as "expired in 1970" would have every request
+    /// renewing a token that has no renewal endpoint.
+    #[test]
+    fn a_credential_is_due_only_before_the_moment_it_expires() {
+        let never = OauthCredential::new(SecretString::from("r"), SecretString::from("a"), 0);
+        assert!(!never.needs_refresh(1_785_000_000_000, REFRESH_SKEW_MS));
+
+        let expires_at = 1_785_000_000_000;
+        let credential =
+            OauthCredential::new(SecretString::from("r"), SecretString::from("a"), expires_at);
+
+        assert!(!credential.needs_refresh(expires_at - REFRESH_SKEW_MS - 1, REFRESH_SKEW_MS));
+        assert!(
+            credential.needs_refresh(expires_at - REFRESH_SKEW_MS, REFRESH_SKEW_MS),
+            "the margin is the point: a request started here would outlive the token"
+        );
+        assert!(!credential.needs_refresh(expires_at - 1, 0));
+        assert!(credential.needs_refresh(expires_at, 0));
+
+        // The clock is real, so this only pins the direction: an expiry in the
+        // past is due and one a day out is not.
+        let now = now_ms();
+        assert!(
+            OauthCredential::new(SecretString::from("r"), SecretString::from("a"), 1)
+                .needs_refresh(now, 0)
+        );
+        assert!(
+            !OauthCredential::new(
+                SecretString::from("r"),
+                SecretString::from("a"),
+                now + 86_400_000
+            )
+            .needs_refresh(now, REFRESH_SKEW_MS)
+        );
+    }
+
+    /// A caller holding an expired credential and no way to renew it is told
+    /// which of the four situations it is in, and what fixes it.
+    #[test]
+    fn every_failure_says_which_of_them_it_is_and_what_to_do() {
+        let expires_at = 1_785_000_000_000;
+        let credential = OauthCredential::new(
+            SecretString::from("r"),
+            SecretString::from(CANARY),
+            expires_at,
+        );
+
+        assert_eq!(
+            credential
+                .usable_access("openai", expires_at - 1)
+                .expect("a live token is handed over")
+                .expose_secret(),
+            CANARY
+        );
+
+        let expired = credential
+            .usable_access("openai", expires_at)
+            .expect_err("a spent token is refused");
+        assert_eq!(expired.kind(), AuthErrorKind::Expired);
+        assert!(
+            expired.to_string().contains("refresh token"),
+            "an expired token is recoverable, and the message has to say so: {expired}"
+        );
+
+        let taxonomy = [
+            (
+                AuthError::NotOauth {
+                    provider_id: "openai".to_owned(),
+                    found: "an API key is stored",
+                },
+                AuthErrorKind::NotOauth,
+                "ganja auth login openai",
+            ),
+            (
+                AuthError::ReauthRequired {
+                    provider_id: "openai".to_owned(),
+                    reason: "HTTP 400 invalid_grant".to_owned(),
+                },
+                AuthErrorKind::ReauthRequired,
+                "ganja auth login openai",
+            ),
+            (
+                AuthError::RefreshUnavailable {
+                    provider_id: "openai".to_owned(),
+                    reason: "the endpoint could not be reached".to_owned(),
+                },
+                AuthErrorKind::RefreshUnavailable,
+                "try again",
+            ),
+            (
+                AuthError::Permissions {
+                    path: PathBuf::from("/tmp/auth.json"),
+                    mode: 0o644,
+                },
+                AuthErrorKind::Storage,
+                "chmod 600",
+            ),
+        ];
+
+        for (error, kind, remedy) in taxonomy {
+            assert_eq!(error.kind(), kind, "{error}");
+            assert!(
+                error.to_string().contains(remedy),
+                "an error has to say what the caller can do about it: {error}"
+            );
+        }
+    }
+
+    /// `auth.json` is shared territory, so the key is upstream's name for the
+    /// provider even where ganja's own is different.
+    #[test]
+    fn a_grok_credential_is_stored_where_upstream_keeps_its_xai_one() {
+        let directory = temporary();
+        let store = store(&directory);
+        store.set("grok", CANARY).expect("the key stores");
+
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).expect("the file exists"))
+                .expect("the file is JSON");
+        assert_eq!(written["xai"]["key"], CANARY);
+        assert!(
+            written.get("grok").is_none(),
+            "a second key for the same account is how a login gets lost: {written}"
+        );
+
+        // Either name reaches it, so a caller that has upstream's does not have
+        // to know about ganja's.
+        assert_eq!(
+            key_of(store.get("grok").expect("the file reads")),
+            Some(CANARY.to_owned())
+        );
+        assert_eq!(
+            key_of(store.get("xai").expect("the file reads")),
+            Some(CANARY.to_owned())
+        );
+        assert!(store.remove("grok").expect("the key is removable"));
+
+        assert_eq!(storage_key("grok"), "xai");
+        assert_eq!(storage_key("openai"), "openai");
+        assert_eq!(provider_id_for_storage_key("xai"), "grok");
+        assert_eq!(provider_id_for_storage_key("openai"), "openai");
     }
 
     #[test]
@@ -887,6 +1895,20 @@ mod tests {
         // A second write goes through the same rename dance and must not
         // loosen anything.
         store.set("openai", CANARY).expect("a second key stores");
+        assert_eq!(mode(&store.path), 0o600);
+
+        // An OAuth credential is two more secrets in the same file, written
+        // through the same `write`; it must not be the one that widens it.
+        store
+            .set_oauth(
+                "github-copilot",
+                &OauthCredential::new(
+                    SecretString::from("gho_refresh_0001"),
+                    SecretString::from("gho_access_0002"),
+                    0,
+                ),
+            )
+            .expect("the credential stores");
         assert_eq!(mode(&store.path), 0o600);
         assert!(
             fs::read_dir(directory.path())
@@ -1010,6 +2032,7 @@ mod tests {
             provider_id: "anthropic".to_owned(),
             tail: tail.clone(),
             source: Source::Environment("ANTHROPIC_API_KEY"),
+            kind: CredentialKind::ApiKey,
         };
 
         let renderings = [
@@ -1043,6 +2066,46 @@ mod tests {
         assert!(
             !field.contains(CANARY) && field.contains("REDACTED"),
             "the key material renders itself: {field}"
+        );
+    }
+
+    /// Same rule for an OAuth credential, and one place more to leak from: the
+    /// unmodelled extras are values this build has never seen, and a plugin
+    /// keeping its own token in one is exactly the case a derived `Debug` would
+    /// print.
+    #[test]
+    fn nothing_renders_a_whole_token_including_the_fields_this_build_cannot_read() {
+        let mut credential = OauthCredential::new(
+            SecretString::from(format!("refresh-{CANARY}")),
+            SecretString::from(CANARY),
+            0,
+        );
+        credential.account_id = Some("acct-42".to_owned());
+        credential.extra.insert(
+            "somePluginToken".to_owned(),
+            serde_json::Value::from(CANARY),
+        );
+
+        let renderings = [
+            format!("{credential:?}"),
+            format!("{credential}"),
+            format!("{:?}", super::Stored::Oauth(credential.clone())),
+            credential.tail().as_str().to_owned(),
+        ];
+
+        for rendering in &renderings {
+            assert!(
+                !rendering.contains(CANARY) && !rendering.contains("sk-canary"),
+                "a whole token reached output: {rendering}"
+            );
+            assert!(
+                rendering.contains("8842"),
+                "the tail is what identifies a token: {rendering}"
+            );
+        }
+        assert!(
+            format!("{credential:?}").contains("somePluginToken"),
+            "the names of the unread fields are worth showing; their values are not"
         );
     }
 
@@ -1085,6 +2148,7 @@ mod tests {
                 provider_id: "anthropic".to_owned(),
                 tail: RedactedTail::of("sk-stored-0001"),
                 source: Source::File,
+                kind: CredentialKind::ApiKey,
             }]
         );
 
