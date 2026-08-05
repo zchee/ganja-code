@@ -117,6 +117,72 @@ impl Provider for LaneProvider {
     }
 }
 
+/// A provider that says when it was asked and answers only when it is let go.
+///
+/// What it buys is a moment the test can *hold*: the turn is open, the request
+/// is in flight, and nothing has finished — which is the only place a
+/// write-through claim can honestly be checked. A claim checked after the turn
+/// ends cannot tell a store that writes as it goes from one that writes at the
+/// end.
+///
+/// It claims `"fake"` so the title path asks it nothing: a title request would
+/// be a second call, and the second call would block on the same latch.
+struct HeldProvider {
+    /// A permit per request the provider has received.
+    asked: tokio::sync::Semaphore,
+    /// A permit per request the test has allowed to answer.
+    released: tokio::sync::Semaphore,
+    /// What it answers with, once let go.
+    reply: Vec<ProviderEvent>,
+}
+
+impl HeldProvider {
+    fn new(reply: Vec<ProviderEvent>) -> Arc<Self> {
+        Arc::new(Self {
+            asked: tokio::sync::Semaphore::new(0),
+            released: tokio::sync::Semaphore::new(0),
+            reply,
+        })
+    }
+
+    /// Waits until the provider has been asked, or fails loudly instead of
+    /// hanging the suite.
+    async fn asked(&self) {
+        tokio::time::timeout(Duration::from_secs(30), self.asked.acquire())
+            .await
+            .expect("the provider should have been asked within the deadline")
+            .expect("the latch is never closed")
+            .forget();
+    }
+
+    /// Lets the pending request answer.
+    fn release(&self) {
+        self.released.add_permits(1);
+    }
+}
+
+#[async_trait]
+impl Provider for HeldProvider {
+    fn id(&self) -> &str {
+        "fake"
+    }
+
+    async fn stream(
+        &self,
+        _request: ChatRequest,
+        _cancel: CancellationToken,
+    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+        self.asked.add_permits(1);
+        self.released
+            .acquire()
+            .await
+            .expect("the latch is never closed")
+            .forget();
+
+        Ok(stream::iter(self.reply.clone()).boxed())
+    }
+}
+
 /// One completed reply: `text` in a single fragment, then usage claiming
 /// `input_tokens`, then a completed finish.
 fn reply(text: &str, input_tokens: u64) -> Vec<ProviderEvent> {
@@ -262,6 +328,59 @@ async fn a_turn_on_a_persistent_engine_reaches_the_disk_as_it_streamed() {
         "one two",
         "the streamed text and the stored text are the same text"
     );
+}
+
+#[tokio::test]
+async fn a_prompt_is_on_disk_before_the_provider_is_asked_rather_than_when_the_turn_ends() {
+    let (_dir, storage) = store();
+    let provider = HeldProvider::new(reply("understood", 3));
+    let engine = persistent(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        "canned",
+        storage.clone(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "hold the line".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+
+    // The one moment worth asserting in: the request is in flight and the turn
+    // has finished nothing. Everything read below is what a `kill -9` here
+    // would have left behind.
+    provider.asked().await;
+
+    let info = engine
+        .current_session()
+        .expect("the first prompt creates a session");
+    let mid_turn = storage
+        .load_transcript(&info.id)
+        .expect("the transcript loads");
+    assert_eq!(mid_turn[0].role, Role::User);
+    assert_eq!(
+        text_of(&mid_turn[0]),
+        "hold the line",
+        "the prompt's own part must be stored with it, not held until the turn ends"
+    );
+    assert!(
+        mid_turn
+            .iter()
+            .all(|message| message.role == Role::User || message.time.completed.is_none()),
+        "the turn is genuinely open here — nothing may be stored as finished: {mid_turn:#?}"
+    );
+
+    provider.release();
+    drain(&mut events).await;
+
+    let finished = storage
+        .load_transcript(&info.id)
+        .expect("the transcript loads");
+    assert_eq!(finished.len(), 2, "{finished:#?}");
+    assert_eq!(text_of(&finished[1]), "understood");
 }
 
 #[tokio::test]
