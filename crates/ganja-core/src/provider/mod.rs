@@ -1,11 +1,15 @@
 //! Sources of assistant text.
 //!
 //! A provider turns a [`ChatRequest`] into a stream of [`ProviderEvent`]s; the
-//! engine is what maps those onto the protocol frontends see. Three ship:
+//! engine is what maps those onto the protocol frontends see. Four ship:
 //! [`FakeProvider`] for demos and tests, [`AnthropicProvider`] for the Messages
-//! API, and [`OpenAiProvider`] for anything speaking OpenAI chat completions.
+//! API, [`OpenAiProvider`] for anything speaking OpenAI chat completions, and
+//! [`ResponsesProvider`] for the Responses API a ChatGPT subscription answers
+//! on. The last two are the same vendor and answer to the same
+//! [`Provider::id`]; which of them a session gets is decided by the credential
+//! it has, in [`select`].
 //!
-//! Both HTTP providers share the same shape — build a request, retry it while
+//! Every HTTP provider shares the same shape — build a request, retry it while
 //! it has not started answering, split the `text/event-stream` body into
 //! [`sse::Frame`]s, and map those onto events — so everything except the
 //! mapping lives here.
@@ -66,6 +70,7 @@ pub mod anthropic;
 pub mod fake;
 pub mod grok;
 pub mod openai;
+pub mod responses;
 pub mod retry;
 pub mod sse;
 
@@ -73,6 +78,7 @@ pub use anthropic::AnthropicProvider;
 pub use fake::FakeProvider;
 pub use grok::GrokProvider;
 pub use openai::OpenAiProvider;
+pub use responses::ResponsesProvider;
 
 /// Environment variable naming the provider a session talks to.
 pub const PROVIDER_ENV: &str = "GANJA_PROVIDER";
@@ -292,15 +298,32 @@ enum Credential {
     },
 }
 
+/// A credential as one request carries it.
+///
+/// The secret that goes in the header, and whatever else the stored record says
+/// about *who* is asking. The second half exists because one provider needs it:
+/// a ChatGPT credential names which of a person's accounts to bill, and
+/// upstream puts it on every request beside the token
+/// (`plugin/openai/codex.ts:406-408`). It is resolved in the same step as the
+/// token rather than read separately, because a renewal can replace both and
+/// two reads would be two answers.
+struct Resolved {
+    /// What authenticates the request.
+    presented: Presented,
+    /// The account it is billed to, where the credential names one. Always
+    /// [`None`] for a key, which identifies an account by being one.
+    account_id: Option<String>,
+}
+
 impl Credential {
     /// The credential this request should present.
     ///
     /// For an OAuth provider this goes through [`auth::Refresher`] rather than
     /// reading the store directly, so that a step with a dozen tool calls in
     /// the air meeting the same expiry spends the refresh token **once**. With
-    /// a rotating refresh token — xAI's rotates — a second concurrent exchange
-    /// presents a token the first has already spent, and the provider is right
-    /// to refuse it.
+    /// a rotating refresh token — xAI's and ChatGPT's both rotate — a second
+    /// concurrent exchange presents a token the first has already spent, and
+    /// the provider is right to refuse it.
     ///
     /// A credential that is not due is returned without the token endpoint
     /// being troubled at all, and `expires: 0` is upstream's "never expires"
@@ -313,9 +336,12 @@ impl Credential {
     /// Returns whatever [`unusable`] classified the failure as: a refusal is
     /// [`ProviderError::Auth`] and an unreachable endpoint is
     /// [`ProviderError::Transport`], which are two different things to do next.
-    async fn presented(&self) -> Result<Presented, ProviderError> {
+    async fn resolved(&self) -> Result<Resolved, ProviderError> {
         match self {
-            Self::Key(key) => Ok(key.clone()),
+            Self::Key(key) => Ok(Resolved {
+                presented: key.clone(),
+                account_id: None,
+            }),
             Self::Oauth {
                 provider_id,
                 refresh,
@@ -324,19 +350,34 @@ impl Credential {
                     .usable(provider_id, Arc::clone(refresh))
                     .await
                     .map_err(|error| unusable(&error))?;
+                let account_id = credential.account_id.clone();
 
                 // Only the access token travels. The refresh token stays in the
                 // store and never reaches a request, so it cannot reach a
                 // redaction pass either — which is the point: what is not here
                 // cannot leak from here.
-                Presented::new(credential.access).ok_or_else(|| {
+                let presented = Presented::new(credential.access).ok_or_else(|| {
                     ProviderError::Auth(format!(
                         "the stored {provider_id} credential carries no access token; \
                          run `ganja auth login {provider_id}`"
                     ))
+                })?;
+
+                Ok(Resolved {
+                    presented,
+                    account_id,
                 })
             }
         }
+    }
+
+    /// Just the secret, for a provider with no use for the rest.
+    ///
+    /// # Errors
+    ///
+    /// As [`resolved`](Self::resolved).
+    async fn presented(&self) -> Result<Presented, ProviderError> {
+        Ok(self.resolved().await?.presented)
     }
 }
 
@@ -730,6 +771,42 @@ fn require_key(provider_id: &str, variable: &str) -> Result<Presented, ProviderE
     })
 }
 
+/// Which OpenAI wire a session speaks, decided by the credential it has.
+///
+/// One vendor, two request/response shapes, and the credential is what picks
+/// between them — which is upstream's arrangement too: the ChatGPT plugin's
+/// loader looks at `ctx.auth?.type` and only rewrites the request when it finds
+/// an OAuth one (`plugin/openai/codex.ts:331`, `:356`).
+///
+/// - **A key** — exported, or stored, in exactly the order [`key_for`] has
+///   always read them — keeps the session on chat completions against
+///   `api.openai.com`. Nothing about that path changes, including which error
+///   a bad base URL produces, because it is still [`OpenAiProvider::from_env`]
+///   that builds it.
+/// - **No key but a stored ChatGPT login** speaks Responses against the backend
+///   that credential was minted for. Only its *presence* is read here; the
+///   token itself is resolved per request, so this costs one small file and
+///   captures nothing.
+/// - **Neither** is the startup failure it has always been, naming the variable
+///   and the login — [`require_key`]'s message, reached by the same call.
+///
+/// A store that cannot be read is reported rather than treated as "no
+/// credential": those are different situations needing different repairs, and
+/// only the second can say what to fix.
+fn openai_provider() -> Result<Arc<dyn Provider>, ProviderError> {
+    if key_for(openai::ID)?.is_some() {
+        return Ok(Arc::new(OpenAiProvider::from_env()?));
+    }
+
+    let stored =
+        auth::oauth_for(openai::ID).map_err(|error| ProviderError::Auth(error.to_string()))?;
+    if stored.is_some() {
+        return Ok(Arc::new(ResponsesProvider::from_stored()?));
+    }
+
+    Ok(Arc::new(OpenAiProvider::from_env()?))
+}
+
 /// Whether the provider `provider_id` serves a model called `model`.
 ///
 /// The catalog is the only thing that knows, and it does not know every
@@ -857,7 +934,7 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
     let provider: Arc<dyn Provider> = match requested.as_str() {
         fake::ID => Arc::new(FakeProvider::default()),
         anthropic::ID => Arc::new(AnthropicProvider::from_env()?),
-        openai::ID => Arc::new(OpenAiProvider::from_env()?),
+        openai::ID => openai_provider()?,
         grok::ID => Arc::new(GrokProvider::from_stored()?),
         _ => return Err(SelectionError::Unknown { requested }),
     };

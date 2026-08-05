@@ -51,7 +51,11 @@ const DONE: &str = "[DONE]";
 /// answered by a `tool` message before the next assistant turn. So the pair is
 /// emitted with this in place of the output. Upstream resolves the same
 /// dangling call with the wording "[Tool execution was interrupted]".
-const NO_RESULT: &str = "[no result recorded]";
+///
+/// Shared with [`super::responses`], which pairs a call with its output by id
+/// rather than by position but has the same hole to fill: one spelling, or two
+/// wires tell the model two different stories about the same dead turn.
+pub(super) const NO_RESULT: &str = "[no result recorded]";
 
 /// Streams replies from an OpenAI-compatible chat completions endpoint.
 pub struct OpenAiProvider {
@@ -409,7 +413,10 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
 ///
 /// A call the model never finished streaming has none; an empty object is the
 /// honest spelling of "the model was still saying", and the field is required.
-fn arguments(state: &ToolState) -> String {
+///
+/// Shared with [`super::responses`]: both wires carry arguments as a string,
+/// because both receive them as one.
+pub(super) fn arguments(state: &ToolState) -> String {
     let input = match state {
         ToolState::Pending => return "{}".to_owned(),
         ToolState::Running { input, .. }
@@ -423,8 +430,9 @@ fn arguments(state: &ToolState) -> String {
 /// What a call produced, or why it produced nothing.
 ///
 /// This API has no error flag on a result, so a failure travels as the text the
-/// model reads — which is what [`ToolState::Error`] holds anyway.
-fn result(state: &ToolState) -> &str {
+/// model reads — which is what [`ToolState::Error`] holds anyway. Shared with
+/// [`super::responses`], whose `function_call_output` has no flag either.
+pub(super) fn result(state: &ToolState) -> &str {
     match state {
         ToolState::Completed { output, .. } => output,
         ToolState::Error { error, .. } => error,

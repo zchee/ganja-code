@@ -246,12 +246,15 @@ fn the_listing_says_what_kind_of_credential_each_row_is() {
 fn a_login_method_a_provider_does_not_have_is_refused_and_the_ones_it_has_are_named() {
     let data = data();
 
+    // Only pairings this build really lacks belong here. A provider that has
+    // the method would not be refused — it would start the login, and a browser
+    // login binds a socket on a port fixed by somebody else's client
+    // registration, which is not a thing a test may hold.
     for (provider, method, instead) in [
         // There is no Anthropic OAuth flow in the pin at all.
         ("anthropic", "device", "`api`"),
         ("anthropic", "browser", "`api`"),
-        // The two device-grant providers have no loopback flow here.
-        ("grok", "browser", "`device` and `api`"),
+        // Copilot's only OAuth flow is the device grant (`copilot.ts:182-185`).
         ("github-copilot", "browser", "`device` and `api`"),
     ] {
         ganja(&data)
