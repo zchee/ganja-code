@@ -12,7 +12,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ganja_core::tool::task::{Delegated, Delegation, Subagents, Unanswered};
+use ganja_tool::task::{Delegated, Delegation, Subagents, Unanswered};
 use tokio_util::sync::CancellationToken;
 
 /// Answers each delegation from a queued script, and records what it was asked.

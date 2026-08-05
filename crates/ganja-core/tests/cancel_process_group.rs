@@ -18,9 +18,11 @@ use std::{
 
 use futures::StreamExt as _;
 use ganja_core::{
-    Command, Engine, Event, FinishReason, PartBody, PermissionReply, Permissions, Registry,
-    ToolState,
+    Engine,
+    permission::Permissions,
+    protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState},
     provider::{FakeProvider, fake},
+    tool::Registry,
 };
 
 /// How long the command is given to announce its process group. Generous,

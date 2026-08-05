@@ -14,7 +14,8 @@ use std::{
 
 use futures::StreamExt as _;
 use ganja_core::{
-    Command, Engine, Event, FinishReason,
+    Engine,
+    protocol::{Command, Event, FinishReason},
     provider::{
         AnthropicProvider, ChatRequest, OpenAiProvider, Provider, ProviderError, ProviderEvent,
     },
@@ -231,7 +232,7 @@ fn prompt() -> ChatRequest {
     ChatRequest {
         model: "test-model".to_owned(),
         system: Some("be brief".to_owned()),
-        messages: vec![ganja_core::Message::user("hello")],
+        messages: vec![ganja_core::protocol::Message::user("hello")],
         tools: Vec::new(),
     }
 }
@@ -239,16 +240,16 @@ fn prompt() -> ChatRequest {
 /// A request carrying both halves of tool support: the tools the model is
 /// offered, and a call it already made whose result it has to be shown again.
 fn tool_prompt() -> ChatRequest {
-    let mut assistant = ganja_core::Message::assistant("test-model");
+    let mut assistant = ganja_core::protocol::Message::assistant("test-model");
     assistant
         .parts
-        .push(ganja_core::Part::text("Reading the file first."));
-    assistant.parts.push(ganja_core::Part {
-        id: ganja_core::PartId::ascending(),
-        body: ganja_core::PartBody::Tool {
+        .push(ganja_core::protocol::Part::text("Reading the file first."));
+    assistant.parts.push(ganja_core::protocol::Part {
+        id: ganja_core::protocol::PartId::ascending(),
+        body: ganja_core::protocol::PartBody::Tool {
             call_id: "call_read".to_owned(),
             tool: "read".to_owned(),
-            state: ganja_core::ToolState::Completed {
+            state: ganja_core::protocol::ToolState::Completed {
                 input: serde_json::json!({"filePath": "src/main.rs"}),
                 output: "fn main() {}".to_owned(),
                 title: "src/main.rs".to_owned(),
@@ -263,11 +264,11 @@ fn tool_prompt() -> ChatRequest {
         model: "test-model".to_owned(),
         system: Some("be brief".to_owned()),
         messages: vec![
-            ganja_core::Message::user("read src/main.rs"),
+            ganja_core::protocol::Message::user("read src/main.rs"),
             assistant,
-            ganja_core::Message::user("what does it do?"),
+            ganja_core::protocol::Message::user("what does it do?"),
         ],
-        tools: vec![ganja_core::ToolDefinition {
+        tools: vec![ganja_core::tool::ToolDefinition {
             name: "read".to_owned(),
             description: "Reads a file from disk.".to_owned(),
             schema: serde_json::json!({
@@ -846,8 +847,8 @@ async fn a_failure_mid_stream_finishes_the_turn_as_failed_and_keeps_the_text() {
     let engine = Engine::new(
         Arc::new(provider),
         "test-model",
-        Arc::new(ganja_core::Registry::new(Vec::new())),
-        ganja_core::Permissions::default(),
+        Arc::new(ganja_core::tool::Registry::new(Vec::new())),
+        ganja_core::permission::Permissions::default(),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -896,8 +897,8 @@ async fn a_cancel_mid_stream_finishes_the_turn_as_cancelled() {
     let engine = Engine::new(
         Arc::new(provider),
         "test-model",
-        Arc::new(ganja_core::Registry::new(Vec::new())),
-        ganja_core::Permissions::default(),
+        Arc::new(ganja_core::tool::Registry::new(Vec::new())),
+        ganja_core::permission::Permissions::default(),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -957,7 +958,7 @@ fn replay(events: &[Event]) -> String {
                 message
                     .parts
                     .iter()
-                    .filter_map(ganja_core::Part::as_text)
+                    .filter_map(ganja_core::protocol::Part::as_text)
                     .collect::<String>(),
             ),
             Event::PartDelta { delta, .. } => Some(delta.clone()),

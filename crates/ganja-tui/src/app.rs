@@ -1931,7 +1931,7 @@ mod tests {
             Arc::new(FakeProvider::default()),
             model,
             Arc::new(ganja_tool::Registry::new(Vec::new())),
-            ganja_core::Permissions::default(),
+            ganja_permission::Permissions::default(),
         )
     }
 
@@ -1952,7 +1952,7 @@ mod tests {
                 Arc::new(FakeProvider::default()),
                 fake::MODEL,
                 Arc::new(ganja_tool::Registry::new(Vec::new())),
-                ganja_core::Permissions::default(),
+                ganja_permission::Permissions::default(),
                 Storage::open(directory.path().join("storage")),
             ),
             None,
@@ -3311,7 +3311,7 @@ mod tests {
             Arc::new(FakeProvider::new("one two three", Duration::from_millis(2))),
             fake::MODEL,
             Arc::new(ganja_tool::Registry::new(Vec::new())),
-            ganja_core::Permissions::default(),
+            ganja_permission::Permissions::default(),
         );
         let mut events = engine.subscribe().await.expect("the test subscribes first");
         let mut app = App::new(engine, None, Themes::builtin());
@@ -3824,7 +3824,7 @@ mod tests {
             Arc::new(FakeProvider::default()),
             fake::MODEL,
             Arc::new(ganja_tool::Registry::new(Vec::new())),
-            ganja_core::Permissions::default(),
+            ganja_permission::Permissions::default(),
         )
         .with_agents(registry);
 

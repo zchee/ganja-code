@@ -70,8 +70,8 @@ use expectrl::{
     process::unix::{Signal, WaitStatus},
     session::OsSession,
 };
-use ganja_core::{Message, Part, Role, Storage};
-use ganja_protocol::PartBody;
+use ganja_core::Storage;
+use ganja_protocol::{Message, Part, PartBody, Role};
 use serde_json::json;
 use tempfile::TempDir;
 

@@ -10,10 +10,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
-    Command, Decision, Engine, EngineError, Event, FinishReason, PartBody, PermissionId,
-    PermissionReply, Permissions, Registry, Role, Tool, ToolCtx, ToolError, ToolOutput, ToolState,
-    Usage,
+    Engine, EngineError,
+    permission::{Decision, Permissions},
+    protocol::{
+        Command, Event, FinishReason, PartBody, PermissionId, PermissionReply, Role, ToolState,
+        Usage,
+    },
     provider::{ChatRequest, ProviderError, ProviderEvent},
+    tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
 };
 use ganja_testkit::{BlockingTool, RecorderTool, ScriptedProvider, drain};
 

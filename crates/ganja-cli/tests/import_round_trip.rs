@@ -19,7 +19,7 @@ use ganja_core::{
     Config,
     config::{AgentMode, CONFIG_ENV, LspConfig, McpServer},
 };
-use ganja_permission::permission::Action;
+use ganja_permission::Action;
 
 /// An imported `deny` is a rule this build carries out: it refuses the call
 /// without asking anybody.

@@ -998,8 +998,8 @@ mod tests {
         Server, Servers, Status, catalog, decoded_len, force_object, render, sanitize, tool_name,
     };
     use crate::{
-        ToolError,
         config::{MCP_CALL_TIMEOUT, MCP_LIST_TIMEOUT, McpServer},
+        tool::ToolError,
     };
 
     /// A tool definition as a server would have listed it.

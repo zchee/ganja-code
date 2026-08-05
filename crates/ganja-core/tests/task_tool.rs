@@ -11,12 +11,9 @@
 
 use std::sync::Arc;
 
-use ganja_core::{
-    Tool as _, ToolCtx, ToolError,
-    tool::{
-        Credentials, FileTimes,
-        task::{Delegated, Delegation, Offered, TaskTool, Unanswered},
-    },
+use ganja_core::tool::{
+    Credentials, FileTimes, Tool as _, ToolCtx, ToolError,
+    task::{Delegated, Delegation, Offered, TaskTool, Unanswered},
 };
 use ganja_testkit::ScriptedSubagents;
 use serde_json::json;

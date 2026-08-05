@@ -42,8 +42,8 @@ use std::{
 
 use futures::StreamExt as _;
 use ganja_core::{
-    Message,
     auth::{self, OauthCredential, grok::Refresh},
+    protocol::Message,
     provider::{ChatRequest, GrokProvider, Provider as _, ProviderError, ProviderEvent},
 };
 use secrecy::{ExposeSecret as _, SecretString};

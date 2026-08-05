@@ -7,7 +7,7 @@
 
 The engine: session orchestration, providers, and the agent loop that drives them. This crate carries **no terminal-backend dependency** — no `ratatui`, no `crossterm` — so the engine stays testable without a terminal and can later be driven over a network transport.
 
-Three things it is built on are crates of their own — `ganja-protocol`, `ganja-permission`, `ganja-tool` — and this crate re-exports each under the module name it always had, so `ganja_core::protocol`, `ganja_core::permission`, `ganja_core::project`, `ganja_core::tool` and `ganja_core::watch` all keep resolving. A caller that only wants one of the three should depend on it directly; the facade is for the callers that want the engine.
+Three things it is built on are crates of their own — `ganja-protocol`, `ganja-permission`, `ganja-tool` — and this crate re-exports each under the module name it always had, so `ganja_core::protocol`, `ganja_core::permission`, `ganja_core::project`, `ganja_core::tool` and `ganja_core::watch` all keep resolving. The crate root names the engine's own types and nothing else; a caller that only wants one of the three should depend on it directly — the facade's module names are for the callers that want the engine.
 
 ## Key Files
 
@@ -29,7 +29,7 @@ Three things it is built on are crates of their own — `ganja-protocol`, `ganja
 - **The purity rule is the crate's reason to exist.** CI asserts `cargo tree -p ganja-core -e normal` never mentions `ratatui`. Anything the UI must render is expressed as a serde type in `ganja-protocol`, never as a widget or a style.
 - **The three crates beneath this one may not name it.** `ganja-tool` in particular is asserted the same inverted way: `! cargo tree -p ganja-tool -e normal | grep -q ganja-core`. A tool that appears to need something from the engine needs a value in its `ToolCtx` instead.
 - **Everything on the protocol is serde-derived from day one.** That serialization constraint — not a trait — is what preserves the path to serving the engine and to persisted transcripts. A new field or variant should be considered wire-visible even though nothing serves it yet.
-- The public surface is re-exported from `src/lib.rs`; a new module that frontends use should re-export its types there alongside the rest.
+- The crate root's flat re-exports in `src/lib.rs` name the engine's own types only; a new core module that frontends use re-exports its types there alongside the rest, while a type that belongs to `ganja-protocol`, `ganja-permission` or `ganja-tool` is reached through those module names, never flattened into the root. A frontend that only renders must be able to build against `ganja-protocol` alone, and a root that flattens protocol types into the engine's vocabulary invites the opposite.
 
 ### Testing Requirements
 
@@ -52,7 +52,7 @@ Unit tests live in `#[cfg(test)] mod tests` at the bottom of the module they cov
 
 ### Internal
 
-`ganja-protocol`, `ganja-permission` and `ganja-tool`, all re-exported from `src/lib.rs`. `ganja-tui` and `ganja-cli` depend on this crate, and additionally on the protocol (and, for the frontend's `@` file menu, on the tool crate) where they name those types directly.
+`ganja-protocol`, `ganja-permission` and `ganja-tool`, re-exported as modules from `src/lib.rs`. `ganja-tui` and `ganja-cli` depend on this crate, and additionally on the protocol, the permission crate and (for the frontend's `@` file menu) the tool crate, where they name those types directly.
 
 ### External
 

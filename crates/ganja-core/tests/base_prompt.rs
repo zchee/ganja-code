@@ -21,7 +21,10 @@
 use std::sync::Arc;
 
 use ganja_core::{
-    AgentConfig, Command, Config, Engine, PermissionReply, Permissions, Registry, instruction,
+    AgentConfig, Config, Engine, instruction,
+    permission::Permissions,
+    protocol::{Command, Event, PermissionReply},
+    tool::Registry,
 };
 use ganja_testkit::{ScriptedProvider, agent_registry, drain, drain_answering, says, tool_call};
 use serde_json::json;
@@ -47,7 +50,7 @@ fn engine(provider: Arc<ScriptedProvider>, model: &str) -> Engine {
 }
 
 /// Sends `text` and waits for the turn it starts to finish.
-async fn ask(engine: &Engine, events: &mut futures::stream::BoxStream<'static, ganja_core::Event>) {
+async fn ask(engine: &Engine, events: &mut futures::stream::BoxStream<'static, Event>) {
     engine
         .send(Command::SendPrompt {
             text: "anything".to_owned(),

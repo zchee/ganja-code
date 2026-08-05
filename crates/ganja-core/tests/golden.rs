@@ -67,8 +67,11 @@ use std::{
 
 use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
-    Command, Engine, Event, FinishReason, PartBody, PartId, PermissionReply, Permissions, Registry,
-    ToolState, provider::OpenAiProvider,
+    Engine,
+    permission::Permissions,
+    protocol::{Command, Event, FinishReason, PartBody, PartId, PermissionReply, ToolState},
+    provider::OpenAiProvider,
+    tool::Registry,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};

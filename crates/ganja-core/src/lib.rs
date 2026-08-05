@@ -14,8 +14,14 @@
 //! rule — a tool cannot reach back into the engine, because the engine is not in
 //! its dependency graph — and the re-exports are what keep `ganja_core::tool`,
 //! `ganja_core::permission` and `ganja_core::protocol` meaning what they mean
-//! everywhere they are already written. A caller that only wants one of the
-//! three should depend on it directly.
+//! everywhere they are already written.
+//!
+//! The crate root names the engine's own types and nothing else. The three
+//! crates beneath are reachable as the modules they always were, for the
+//! callers that want the engine; a caller that wants only one of them depends
+//! on it directly. A frontend that only renders must be able to build against
+//! `ganja-protocol` alone, and a root that flattens protocol types into the
+//! engine's vocabulary invites the opposite.
 
 pub mod agent;
 pub mod auth;
@@ -52,12 +58,5 @@ pub use ganja_tool::watch;
 pub use instruction::system_prompt;
 pub use lsp::Lsp;
 pub use mcp::{Servers as McpServers, Status as McpStatus};
-pub use permission::{CallDecision, Decision, PermissionConfig, Permissions};
-pub use project::{Project, ProjectError};
-pub use protocol::{
-    Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody, PartId,
-    PermissionId, PermissionReply, RevertInfo, Role, ToolState, Usage,
-};
 pub use snapshot::{RevertState, Snapshots};
 pub use storage::{SessionId, SessionInfo, Storage, StorageError};
-pub use tool::{Registry, Tool, ToolCtx, ToolDefinition, ToolError, ToolOutput};

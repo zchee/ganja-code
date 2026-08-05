@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ganja_core::{Tool, ToolCtx, ToolError, ToolOutput};
+use ganja_tool::{Tool, ToolCtx, ToolError, ToolOutput};
 use serde_json::Value;
 
 /// A permissive placeholder schema, for a tool double whose script never

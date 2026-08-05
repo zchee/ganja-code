@@ -16,7 +16,7 @@
 //! why.
 //!
 //! [`Provider`]: ganja_core::provider::Provider
-//! [`Tool`]: ganja_core::Tool
+//! [`Tool`]: ganja_tool::Tool
 
 mod agent;
 mod drain;

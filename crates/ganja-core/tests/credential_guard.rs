@@ -13,7 +13,10 @@
 use std::sync::Arc;
 
 use ganja_core::{
-    Command, Engine, Event, PartBody, Permissions, Registry, ToolState, tool::read::ReadTool,
+    Engine,
+    permission::Permissions,
+    protocol::{Command, Event, PartBody, ToolState},
+    tool::{Registry, read::ReadTool},
 };
 use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
 use serde_json::json;
