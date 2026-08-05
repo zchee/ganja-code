@@ -37,6 +37,9 @@ ganja-core.workspace = true
 # without needing the engine's re-export to hand them over.
 ganja-permission.workspace = true
 ganja-protocol.workspace = true
+# The `serve` subcommand: the engine this binary assembles, behind the HTTP
+# routes and the SSE stream that crate owns.
+ganja-serve.workspace = true
 ganja-tui.workspace = true
 # The importer reads someone else's config, which is JSONC whatever its
 # extension says, and it has to see the keys in document order — permission

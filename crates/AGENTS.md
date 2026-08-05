@@ -16,6 +16,7 @@ Container for the workspace members. The split is architectural, not cosmetic. T
 | `ganja-tool/` | What the model can do besides talk, plus the read log and its watcher (see `ganja-tool/AGENTS.md`) |
 | `ganja-core/` | Engine: sessions, providers, the agent loop, config, storage. Re-exports the three above under their old module names (see `ganja-core/AGENTS.md`) |
 | `ganja-tui/` | ratatui frontend (see `ganja-tui/AGENTS.md`) |
+| `ganja-serve/` | The engine over a socket: REST routes and the SSE event stream (see `ganja-serve/AGENTS.md`) |
 | `ganja-cli/` | The `ganja` binary (see `ganja-cli/AGENTS.md`) |
 | `ganja-testkit/` | Dev-only scaffolding shared by `ganja-core`'s integration suites: scripted providers, recorder/blocking tools, drain and storage-seeding builders (see `ganja-testkit/AGENTS.md`) |
 
@@ -23,7 +24,7 @@ Container for the workspace members. The split is architectural, not cosmetic. T
 
 ### Working In This Directory
 
-The dependency direction is one-way, and every load-bearing edge of it is asserted in CI: frontends sit on `ganja-core`, core sits on `ganja-tool`, tool sits on `ganja-permission` — while `ganja-protocol` is a leaf that core and the frontends consume directly and that tool and permission never touch, and the two bottom crates name nothing else of ours at all. Three rules follow.
+The dependency direction is one-way, and every load-bearing edge of it is asserted in CI: frontends — `ganja-tui` and `ganja-serve` alike — sit on `ganja-core`, core sits on `ganja-tool`, tool sits on `ganja-permission` — while `ganja-protocol` is a leaf that core and the frontends consume directly and that tool and permission never touch, and the two bottom crates name nothing else of ours at all. Three rules follow.
 
 - **`ganja-core` may never depend on a terminal crate.** CI asserts `cargo tree -p ganja-core -e normal` never mentions `ratatui`. If core needs to describe something the UI will draw, it does so in serde-serializable protocol types, not in ratatui types.
 - **Nothing below the engine may name the engine.** `! cargo tree -p ganja-tool -e normal | grep -q ganja-core` is the assertion; `ganja-permission` and `ganja-protocol` name nothing of ours at all. What a tool needs from its caller arrives as a value in `ToolCtx`, which is why that type is a bag of values rather than a session handle.
@@ -33,7 +34,7 @@ The dependency direction is one-way, and every load-bearing edge of it is assert
 
 ### Testing Requirements
 
-Run the workspace gates from the repository root; see `../AGENTS.md`. Per-crate: `cargo test -p ganja-core`, and the same for `-p ganja-protocol`, `-p ganja-permission`, `-p ganja-tool`, `-p ganja-tui`, `-p ganja-cli`.
+Run the workspace gates from the repository root; see `../AGENTS.md`. Per-crate: `cargo test -p ganja-core`, and the same for `-p ganja-protocol`, `-p ganja-permission`, `-p ganja-tool`, `-p ganja-tui`, `-p ganja-serve`, `-p ganja-cli`.
 
 ### Common Patterns
 
