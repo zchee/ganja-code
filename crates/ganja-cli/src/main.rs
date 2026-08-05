@@ -20,6 +20,7 @@ use secrecy::{SecretString, zeroize::Zeroize as _};
 use tracing_appender::non_blocking::WorkerGuard;
 
 mod import;
+mod run;
 
 // A plain comment, and above the doc comment rather than below it: clap
 // renders a doc comment as the help a person reads — every line of it — and
@@ -132,6 +133,13 @@ enum Command {
         #[arg(long)]
         refresh: bool,
     },
+    /// Send one message and print the turn it produces, without the UI.
+    ///
+    /// Everything a session normally has is here — the agents, the tools, the
+    /// permission rules, the stored history — except a person to answer a
+    /// dialog, so a call that would have opened one is refused instead. Use
+    /// `--auto` to allow them, and mean it: nobody is watching.
+    Run(run::RunArgs),
     /// List the stored sessions of the project this was run in.
     Sessions,
 }
@@ -267,6 +275,7 @@ async fn main() -> Result<()> {
         Some(Command::Config { action }) => config_command(action),
         Some(Command::Mcp) => mcp_command().await,
         Some(Command::Models { provider, refresh }) => models_command(provider, refresh).await,
+        Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Sessions) => sessions_command(),
     }
 }

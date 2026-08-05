@@ -5,20 +5,20 @@
 
 ## Purpose
 
-The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login`/`list`/`logout`, `config import-opencode`) and to answer questions about it (`models`, `sessions`, `mcp`) without taking the screen over.
+The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login`/`list`/`logout`, `config import-opencode`), to answer questions about it (`models`, `sessions`, `mcp`) without taking the screen over, and — with `run` — to take one turn with no screen at all.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `Cargo.toml` | Member manifest. Declares `[[bin]] name = "ganja"`. Depends on `ratatui` for exactly one thing — the raw-mode read that keeps a typed API key off the screen — and on `secrecy` so a key is wrapped the moment it is whole. |
+| `Cargo.toml` | Member manifest. Declares `[[bin]] name = "ganja"`. Depends on `ratatui` for exactly one thing — the raw-mode read that keeps a typed API key off the screen — on `secrecy` so a key is wrapped the moment it is whole, on `futures` because `run` consumes the engine's event stream and the `Stream` trait behind a `BoxStream` has to be named to be reached, and on `serde_json` because `run --format json` writes one serde-derived object per event. |
 
 ## Subdirectories
 
 | Directory | Purpose |
 |-----------|---------|
-| `src/` | `main.rs`: clap surface and the credential prompt (see `src/AGENTS.md`) |
-| `tests/` | CLI assertions and pty smoke tests (see `tests/AGENTS.md`) |
+| `src/` | `main.rs`: clap surface and the credential prompt; `run.rs`: the headless turn (see `src/AGENTS.md`) |
+| `tests/` | CLI assertions, the headless-turn suite, and pty smoke tests (see `tests/AGENTS.md`) |
 
 ## For AI Agents
 
@@ -31,22 +31,23 @@ This crate is where a secret is most likely to escape, because it is the only pl
 ```sh
 cargo test -p ganja-cli                    # includes pty tests on unix
 cargo test -p ganja-cli --test cli         # CLI surface only, fast
+cargo test -p ganja-cli --test run         # the headless turn, fast
 ```
 
 The pty suite drives the real binary through a terminal and is unix-only (`#![cfg(unix)]`).
 
 ### Common Patterns
 
-Subcommands print to stdout and diagnostics to stderr, so a caller capturing stdout gets a clean channel; the API-key prompt writes to stderr for the same reason.
+Subcommands print to stdout and diagnostics to stderr, so a caller capturing stdout gets a clean channel; the API-key prompt writes to stderr for the same reason, and so does everything `run` has to say about a turn that is not the turn itself — a warning inside `--format json`'s stream would corrupt it.
 
 ## Dependencies
 
 ### Internal
 
-`ganja-core` (`auth`, `catalog`), `ganja-tui` (`run()`).
+`ganja-core` (`auth`, `catalog`, and — for `run` — `Engine`, `config`, `provider`, `instruction`, `permission`, `tool`), `ganja-tui` (`run()`).
 
 ### External
 
-`clap` (derive), `tokio`, `anyhow`, `secrecy`, `ratatui` (raw mode only); dev: `assert_cmd`, `predicates`, `tempfile`, `serde_json`, and `expectrl` on unix.
+`clap` (derive), `tokio`, `anyhow`, `secrecy`, `futures` (the engine's event stream), `serde_json` (`run --format json`), `ratatui` (raw mode only); dev: `assert_cmd`, `predicates`, `tempfile`, and `expectrl` on unix.
 
 <!-- MANUAL: -->
