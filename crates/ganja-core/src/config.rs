@@ -32,6 +32,10 @@
 //! [`crate::auth`], held in a `SecretString` end to end. The absence is also
 //! what makes a parse error safe to render verbatim — no curated key carries a
 //! credential, so quoting the file back at the user cannot leak one.
+//!
+//! That rule is what shapes [`ProviderConfig`]: upstream's `provider.<id>`
+//! block carries `options.apiKey`, and ganja's entry carries `key_env`, the
+//! *name* of the variable holding it, instead.
 
 use std::{
     collections::BTreeMap,
@@ -53,6 +57,10 @@ use crate::{
     // not this module's to say.
     permission::PermissionConfig,
     project::Project,
+    // Same reason: what wires a `provider` entry may name is the provider
+    // layer's to say, and a second enum here would be a second opinion about
+    // which wires exist.
+    provider::Dialect,
 };
 
 /// Environment variable naming one extra config file to read.
@@ -302,6 +310,47 @@ fn connect_by_default() -> bool {
     true
 }
 
+/// One endpoint a config declares, and how to talk to it.
+///
+/// Spec: upstream's `provider.<id>` block, narrowed to what this build can act
+/// on. Three of its keys have counterparts here — `options.baseURL`
+/// (`provider/provider.ts:356`) is [`base_url`](Self::base_url),
+/// `options.headers` is [`headers`](Self::headers), and the `npm` package that
+/// decides which SDK loads the provider is [`dialect`](Self::dialect), spelled
+/// as the wire rather than as somebody's `node_modules`. The fourth,
+/// `options.apiKey`, deliberately has **no** counterpart: it holds a key, and
+/// ganja's keys travel the environment or `auth.json` in a `SecretString` end
+/// to end. [`key_env`](Self::key_env) names the variable instead.
+///
+/// The entry is a **curated key set** like every other shape here: a field
+/// this build does not have is refused by name rather than ignored, because
+/// an ignored endpoint setting is one whose author still believes it applies.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    /// Which request/response mapping the endpoint speaks. Required: the two
+    /// wires encode a message differently, and guessing from a URL is how a
+    /// session sends an Anthropic body to a chat-completions server.
+    pub dialect: Dialect,
+    /// Where it lives. Refused unless it is `https`, or `http` to loopback —
+    /// the rule [`crate::provider`] applies to every base URL, for the reason
+    /// it applies there: the credential travels in a header on every request.
+    pub base_url: String,
+    /// The environment variable holding the endpoint's key, consulted before
+    /// the credential store.
+    ///
+    /// Absent means the store alone answers, under this entry's own id —
+    /// `ganja auth login <id>` writes exactly there.
+    pub key_env: Option<String>,
+    /// Headers sent with every request, beside the credential.
+    ///
+    /// Empty for an endpoint that asks for nothing but the key, which is most
+    /// of them. This is also somewhere a token fits, which is the second
+    /// reason [`base_url`](Self::base_url) is held to the rule above.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
 /// What the `lsp` key asked for.
 ///
 /// **Absent means no language server at all**, which is why the field holding
@@ -466,6 +515,16 @@ pub struct Config {
     /// Language servers this session may run. **Absent is none of them**; see
     /// [`LspConfig`].
     pub lsp: Option<LspConfig>,
+    /// Endpoints this build can talk to besides the ones it ships, by id.
+    ///
+    /// The id is what a session names — `GANJA_PROVIDER`, `--model <id>/…`,
+    /// this file's own `model` key — and what a stored credential and a
+    /// permission rule are filed under, so it is the whole identity of the
+    /// provider. [`crate::provider::select`] consults this after the builtins;
+    /// an entry naming a builtin is refused here rather than left to lose
+    /// silently there.
+    #[serde(default)]
+    pub provider: BTreeMap<String, ProviderConfig>,
     /// What the `webfetch` tool may reach; see [`WebfetchConfig`].
     #[serde(default)]
     pub webfetch: WebfetchConfig,
@@ -595,6 +654,11 @@ impl Config {
         // closer tier turning a `local` server into a `remote` one would
         // otherwise leave the command it no longer has behind.
         self.mcp.extend(other.mcp);
+        // An entry replaces wholesale for `mcp`'s reason turned around: the
+        // fields are one description of one endpoint, and a closer tier that
+        // moved a provider to another host without repeating its `key_env`
+        // would otherwise present the old credential to the new endpoint.
+        self.provider.extend(other.provider);
         merge_lsp(&mut self.lsp, other.lsp);
         self.permission.merge(&other.permission);
 
@@ -775,6 +839,10 @@ fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
         path: path.to_owned(),
         message,
     })?;
+    check_providers(&config.provider).map_err(|message| ConfigError::Parse {
+        path: path.to_owned(),
+        message,
+    })?;
 
     Ok(Some(config))
 }
@@ -808,6 +876,63 @@ fn check_lsp(config: Option<&LspConfig>) -> Result<(), String> {
         if entry.extensions.is_none() && !crate::lsp::server::BUILTIN_IDS.contains(&name.as_str()) {
             return Err(format!(
                 "lsp server \"{name}\": For custom LSP servers, 'extensions' array is required."
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Refuses a `provider` entry that describes an endpoint no session could use.
+///
+/// Three things are decided here rather than at selection time, each because
+/// finding it out later hides it behind a status line or, worse, behind
+/// nothing at all.
+///
+/// An id this build already ships is the one that must be caught here.
+/// [`crate::provider::select`] matches the builtins first, so such an entry
+/// would never be reached and its author would be left with an endpoint that
+/// silently does nothing — the exact failure this module's curated key set
+/// exists to prevent. A builtin's endpoint is moved with its own variable, and
+/// the message says which.
+///
+/// A `base_url` that is neither `https` nor loopback is the same refusal
+/// [`check_mcp`] makes, literally: the predicate is
+/// [`crate::provider::reachable_in_the_clear`] and only the message is this
+/// module's. The credential travels in a header on every request, and so does
+/// anything in `headers`.
+///
+/// A `key_env` that is blank names no variable. It would fall through to the
+/// credential store and read as "there is no key", which sends somebody to fix
+/// a store that was never the problem.
+///
+/// No message quotes the URL. A provider entry is configuration, and
+/// configuration is allowed to carry a credential in its userinfo.
+fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), String> {
+    for (id, entry) in providers {
+        if crate::provider::PROVIDERS.contains(&id.as_str()) {
+            return Err(format!(
+                "provider \"{id}\" is one this build already ships, so a `provider` entry \
+                 for it would never be reached; point the builtin somewhere else with its \
+                 own base-URL variable instead"
+            ));
+        }
+        if entry
+            .key_env
+            .as_ref()
+            .is_some_and(|var| var.trim().is_empty())
+        {
+            return Err(format!(
+                "provider \"{id}\" has a blank `key_env`, which names no variable"
+            ));
+        }
+
+        let parsed = Url::parse(&entry.base_url)
+            .map_err(|error| format!("provider \"{id}\" has no valid base_url: {error}"))?;
+        if !crate::provider::reachable_in_the_clear(&parsed) {
+            return Err(format!(
+                "provider \"{id}\" must be reached over https, or over http to loopback; \
+                 anything else puts its credential on the wire in the clear"
             ));
         }
     }
@@ -859,8 +984,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        AgentMode, Config, ConfigError, LspConfig, McpServer, NonZeroU64, Overrides, ThemeMode,
-        existing, merge_files, project_files, read, split_model,
+        AgentMode, Config, ConfigError, Dialect, LspConfig, McpServer, NonZeroU64, Overrides,
+        ThemeMode, existing, merge_files, project_files, read, split_model,
     };
     use crate::permission::{Action, RuleSet};
 
@@ -1201,6 +1326,185 @@ mod tests {
     /// An entry replaces rather than merging, because the two shapes carry
     /// different keys.
     #[test]
+    fn a_provider_entry_carries_every_field_it_may_hold() {
+        let config = parse(
+            r#"{"provider": {
+                "local-llama": {
+                    "dialect": "openai-chat-completions",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "key_env": "LLAMA_API_KEY",
+                    "headers": {"x-route": "gpu-0"}
+                },
+                "gateway": {
+                    "dialect": "anthropic-messages",
+                    "base_url": "https://messages.example/v1"
+                }
+            }}"#,
+        )
+        .expect("both dialects parse");
+
+        let local = &config.provider["local-llama"];
+        assert_eq!(local.dialect, Dialect::OpenaiChatCompletions);
+        assert_eq!(local.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(local.key_env.as_deref(), Some("LLAMA_API_KEY"));
+        assert_eq!(local.headers["x-route"], "gpu-0");
+
+        let gateway = &config.provider["gateway"];
+        assert_eq!(gateway.dialect, Dialect::AnthropicMessages);
+        assert_eq!(
+            gateway.key_env, None,
+            "an entry that names no variable is answered by the store alone"
+        );
+        assert!(gateway.headers.is_empty());
+    }
+
+    /// Every one of these is a config that would otherwise have described an
+    /// endpoint no session could reach — or, in the first case, one that would
+    /// have been written, loaded and then never consulted.
+    #[test]
+    fn a_provider_entry_that_describes_no_usable_endpoint_is_refused_by_name() {
+        let cases = [
+            // Selection matches the builtins first, so this entry would be
+            // dead the moment it loaded.
+            (
+                r#"{"provider": {"anthropic": {"dialect": "anthropic-messages",
+                   "base_url": "https://proxy.example"}}}"#,
+                "anthropic",
+            ),
+            // A dialect is a request/response mapping, and there is no arm for
+            // one this build does not implement.
+            (
+                r#"{"provider": {"x": {"dialect": "gemini", "base_url": "https://a.test"}}}"#,
+                "gemini",
+            ),
+            // Required: guessing the wire from a URL is how an Anthropic body
+            // reaches a chat-completions server.
+            (
+                r#"{"provider": {"x": {"base_url": "https://a.test"}}}"#,
+                "dialect",
+            ),
+            (
+                r#"{"provider": {"x": {"dialect": "anthropic-messages"}}}"#,
+                "base_url",
+            ),
+            // A key in a config file is the one thing that must not travel, so
+            // the key upstream spells it with is not a key here.
+            (
+                r#"{"provider": {"x": {"dialect": "anthropic-messages",
+                   "base_url": "https://a.test", "api_key": "sk-canary"}}}"#,
+                "api_key",
+            ),
+            (
+                r#"{"provider": {"x": {"dialect": "openai-chat-completions",
+                   "base_url": "http://gateway.example/v1"}}}"#,
+                "loopback",
+            ),
+            (
+                r#"{"provider": {"x": {"dialect": "openai-chat-completions",
+                   "base_url": "not a url"}}}"#,
+                "base_url",
+            ),
+            // A blank variable names none, and would read as "there is no key"
+            // — which sends somebody to fix a store that was never the problem.
+            (
+                r#"{"provider": {"x": {"dialect": "openai-chat-completions",
+                   "base_url": "https://a.test", "key_env": "  "}}}"#,
+                "key_env",
+            ),
+        ];
+
+        for (text, named) in cases {
+            let error = parse(text).expect_err(&format!("{text} describes no endpoint"));
+            let ConfigError::Parse { message, .. } = &error else {
+                panic!("expected a parse failure for {text}, got {error:?}");
+            };
+            assert!(message.contains(named), "{text}: {message}");
+        }
+
+        // A dialect nobody implements is refused with the two that exist named
+        // back, because "gemini is not one of them" is only half an answer.
+        let error =
+            parse(r#"{"provider": {"x": {"dialect": "gemini", "base_url": "https://a.test"}}}"#)
+                .expect_err("there is no third mapping");
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(
+            message.contains("openai-chat-completions") && message.contains("anthropic-messages"),
+            "{message}"
+        );
+    }
+
+    /// The same rule the provider endpoints obey, and the same reason twice
+    /// over: the credential travels in a header on every request, and so does
+    /// anything in `headers`.
+    #[test]
+    fn a_configured_endpoint_may_be_plain_http_only_to_loopback() {
+        let allowed = [
+            "https://gateway.example/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:8080",
+            "http://[::1]:8080/v1",
+        ];
+        let refused = [
+            "http://gateway.example/v1",
+            "http://127.0.0.1.evil.test/v1",
+            "http://localhost.evil.test/v1",
+            "http://127.0.0.1@evil.test/v1",
+        ];
+
+        for base_url in allowed {
+            let text = format!(
+                r#"{{"provider": {{"x": {{"dialect": "openai-chat-completions",
+                   "base_url": "{base_url}"}}}}}}"#
+            );
+            parse(&text).unwrap_or_else(|error| panic!("{base_url} is reachable: {error}"));
+        }
+        for base_url in refused {
+            let text = format!(
+                r#"{{"provider": {{"x": {{"dialect": "openai-chat-completions",
+                   "base_url": "{base_url}"}}}}}}"#
+            );
+            let error = parse(&text).expect_err(base_url);
+            // A base URL is allowed to carry a credential in its userinfo, so
+            // the refusal describes the rule rather than quoting the URL.
+            assert!(
+                !error.to_string().contains(base_url),
+                "{base_url} was echoed back by its own refusal: {error}"
+            );
+        }
+    }
+
+    /// A closer tier redeclaring a provider means *that* provider: the fields
+    /// are one description of one endpoint, so a half-merged entry would
+    /// present the old tier's credential to the new tier's host.
+    #[test]
+    fn a_closer_tier_replaces_a_whole_provider_entry() {
+        let directory = temporary();
+        let outer = directory.path().join("outer.json");
+        let inner = directory.path().join("inner.json");
+        plant(
+            &outer,
+            r#"{"provider": {"x": {"dialect": "openai-chat-completions",
+               "base_url": "https://old.test/v1", "key_env": "OLD_KEY"}}}"#,
+        );
+        plant(
+            &inner,
+            r#"{"provider": {"x": {"dialect": "anthropic-messages",
+               "base_url": "https://new.test"}}}"#,
+        );
+
+        let config = merge_files(&[outer, inner]).expect("both tiers parse");
+        let entry = &config.provider["x"];
+        assert_eq!(entry.dialect, Dialect::AnthropicMessages);
+        assert_eq!(entry.base_url, "https://new.test");
+        assert_eq!(
+            entry.key_env, None,
+            "the replaced entry's variable must not survive onto the new host"
+        );
+    }
+
+    #[test]
     fn a_closer_tier_replaces_a_whole_mcp_entry() {
         let directory = temporary();
         let outer = directory.path().join("outer.json");
@@ -1415,7 +1719,11 @@ mod tests {
               "keybinds": {"agent_cycle": "tab"},
               "shell": "/bin/zsh",
               "command": {"ship": {"template": "release $ARGUMENTS", "agent": "build"}},
-              "mcp": {"fs": {"type": "local", "command": ["bun", "x", "mcp-fs"]}}
+              "mcp": {"fs": {"type": "local", "command": ["bun", "x", "mcp-fs"]}},
+              "provider": {"local-llama": {
+                "dialect": "openai-chat-completions",
+                "base_url": "http://127.0.0.1:11434/v1"
+              }}
             }"#,
         )
         .expect("every curated key is a key");
@@ -1430,6 +1738,10 @@ mod tests {
         assert_eq!(config.command["ship"].agent.as_deref(), Some("build"));
         assert!(config.command["ship"].description.is_none());
         assert!(matches!(config.mcp["fs"], McpServer::Local(_)));
+        assert_eq!(
+            config.provider["local-llama"].dialect,
+            Dialect::OpenaiChatCompletions
+        );
     }
 
     #[test]

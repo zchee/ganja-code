@@ -190,9 +190,16 @@ enum Auth {
     /// Storing a credential is all this does. Which models then run on it is a
     /// separate question, and a login that succeeded is not an answer to it.
     Login {
-        /// Provider the credential belongs to.
-        #[arg(long, value_enum, default_value_t = ProviderId::Anthropic)]
-        provider: ProviderId,
+        /// Provider the credential belongs to: one this build ships
+        /// (anthropic, openai, grok, github-copilot), or an id this project's
+        /// config declares under `provider`.
+        #[arg(
+            long,
+            value_parser = named_provider,
+            default_value = "anthropic",
+            value_name = "PROVIDER"
+        )]
+        provider: NamedProvider,
         /// The key itself.
         ///
         /// Every process on the machine can read another's command line, so
@@ -228,10 +235,108 @@ enum Auth {
     List,
     /// Forget a provider's stored credential.
     Logout {
-        /// Provider to forget.
-        #[arg(long, value_enum)]
-        provider: ProviderId,
+        /// Provider to forget: one this build ships, or an id this project's
+        /// config declares under `provider`.
+        #[arg(long, value_parser = named_provider, value_name = "PROVIDER")]
+        provider: NamedProvider,
     },
+}
+
+/// A provider named on a command line.
+///
+/// Two tiers, because that is what a session may run as: the ones this build
+/// ships, and the endpoints a config declares. The split is in the type rather
+/// than in a bare string so that every place downstream has to say which it is
+/// holding — an OAuth flow exists only for the first, and only the second can
+/// fail to exist at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NamedProvider {
+    /// One this build authenticates itself.
+    Builtin(ProviderId),
+    /// An id a config's `provider` table declares. Checked when the command
+    /// runs rather than when the argument parses: clap knows nothing about a
+    /// file that has not been read, and reading one to validate a flag would
+    /// make `--help` depend on the working directory.
+    Configured(String),
+}
+
+impl NamedProvider {
+    /// The identifier `ganja-core` knows the provider by, which for a
+    /// configured one is the id its entry was written under.
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Builtin(builtin) => builtin.as_str(),
+            Self::Configured(id) => id,
+        }
+    }
+
+    /// The builtin this names, where it names one — the flows that exist per
+    /// provider rather than per credential, which is every OAuth login.
+    fn builtin(&self) -> Option<ProviderId> {
+        match self {
+            Self::Builtin(builtin) => Some(*builtin),
+            Self::Configured(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for NamedProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Parses a provider argument, preferring the builtins.
+///
+/// The `ValueEnum` still decides what a shipped name means, so `github-copilot`
+/// keeps resolving to the provider rather than to a string that happens to
+/// match one. Anything else is carried as a configured id and validated
+/// against the loaded config by [`configured_provider_exists`] — where the
+/// refusal can name the config's own entries, which is the whole point of
+/// deferring it.
+fn named_provider(spelled: &str) -> Result<NamedProvider, String> {
+    if let Ok(builtin) = ProviderId::from_str(spelled, false) {
+        return Ok(NamedProvider::Builtin(builtin));
+    }
+    if spelled.trim().is_empty() {
+        return Err("a provider name cannot be blank".to_owned());
+    }
+
+    Ok(NamedProvider::Configured(spelled.to_owned()))
+}
+
+/// Refuses a configured provider this project's config does not declare.
+///
+/// A builtin is nothing to check — clap already did. For anything else the
+/// config is the authority, and the refusal names **both** tiers, because
+/// somebody who mistyped their own entry needs to see what they actually
+/// wrote.
+fn configured_provider_exists(provider: &NamedProvider) -> Result<()> {
+    let NamedProvider::Configured(id) = provider else {
+        return Ok(());
+    };
+
+    let cwd = std::env::current_dir().context("failed to read the working directory")?;
+    let config = ganja_core::config::Config::load(&cwd).context("failed to read the config")?;
+    if config.provider.contains_key(id) {
+        return Ok(());
+    }
+
+    let declared = config
+        .provider
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "no provider `{id}`; this build ships {}{}",
+        ganja_core::provider::PROVIDERS.join(", "),
+        if declared.is_empty() {
+            ", and this project's config declares none".to_owned()
+        } else {
+            format!(", and this project's config declares {declared}")
+        }
+    )
 }
 
 /// The providers this build can authenticate.
@@ -713,7 +818,7 @@ async fn auth_command(action: Auth) -> Result<()> {
             .await
         }
         Auth::List => list(),
-        Auth::Logout { provider } => logout(provider),
+        Auth::Logout { provider } => logout(&provider),
     }
 }
 
@@ -725,18 +830,38 @@ async fn auth_command(action: Auth) -> Result<()> {
 /// lives here, because storing is the step that must not happen when anything
 /// above it failed.
 async fn login(
-    provider: ProviderId,
+    provider: NamedProvider,
     key: Option<String>,
     method: Option<login::Method>,
     deployment: login::DeploymentAnswer,
 ) -> Result<()> {
-    match login::chosen(provider, key.is_some(), method)? {
-        login::Method::Api => store_key(provider, key),
+    configured_provider_exists(&provider)?;
+
+    // A configured endpoint is key-authenticated and nothing else. Every OAuth
+    // flow this build has is a set of endpoints written per provider — an
+    // issuer, a client id, a token endpoint — and a config entry supplies none
+    // of them, so naming one here is refused rather than attempted.
+    let Some(builtin) = provider.builtin() else {
+        if let Some(method) = method
+            && method != login::Method::Api
+        {
+            bail!(
+                "`{provider}` is a provider this config declares, and those are \
+                 authenticated by a key; `--method {method}` needs a login flow that \
+                 only a provider this build ships can have"
+            );
+        }
+
+        return store_key(&provider, key);
+    };
+
+    match login::chosen(builtin, key.is_some(), method)? {
+        login::Method::Api => store_key(&provider, key),
         oauth => {
-            let credential = login::oauth(provider, oauth, deployment).await?;
+            let credential = login::oauth(builtin, oauth, deployment).await?;
             let tail = credential.tail();
 
-            warn_before_replacing(provider)?;
+            warn_before_replacing(&provider)?;
             auth::set_oauth(provider.as_str(), &credential)
                 .with_context(|| format!("failed to store the {provider} login"))?;
 
@@ -747,13 +872,13 @@ async fn login(
                 "login successful; stored the {provider} credential {tail} in {}",
                 auth::store_path()?.display()
             );
-            warn_if_shadowed(provider)
+            warn_if_shadowed(&provider)
         }
     }
 }
 
 /// Stores a key taken from wherever this invocation put it.
-fn store_key(provider: ProviderId, key: Option<String>) -> Result<()> {
+fn store_key(provider: &NamedProvider, key: Option<String>) -> Result<()> {
     let key = match key {
         // A key given on the command line was already in the shell's history
         // and its process table entry before this ran; wrapping it is all that
@@ -767,6 +892,9 @@ fn store_key(provider: ProviderId, key: Option<String>) -> Result<()> {
     let tail = auth::RedactedTail::of_secret(&key);
 
     warn_before_replacing(provider)?;
+    // Under the provider's own id, which for a configured endpoint is the id
+    // its entry was written under: `auth::storage_key` passes an id it has no
+    // alias for through unchanged, so this is exactly where `select` reads.
     auth::set_credential(provider.as_str(), key)
         .with_context(|| format!("failed to store the {provider} key"))?;
 
@@ -787,8 +915,8 @@ fn store_key(provider: ProviderId, key: Option<String>) -> Result<()> {
 ///
 /// Nothing is refused. A replacement is what `login` is for, and the point is
 /// that it not be silent.
-fn warn_before_replacing(provider: ProviderId) -> Result<()> {
-    let Some((kind, tail)) = login::stored(provider)? else {
+fn warn_before_replacing(provider: &NamedProvider) -> Result<()> {
+    let Some((kind, tail)) = login::stored(provider.as_str())? else {
         return Ok(());
     };
 
@@ -855,7 +983,9 @@ fn list() -> Result<()> {
     Ok(())
 }
 
-fn logout(provider: ProviderId) -> Result<()> {
+fn logout(provider: &NamedProvider) -> Result<()> {
+    configured_provider_exists(provider)?;
+
     // Not every stored credential is a key, and `remove_credential` takes the
     // provider rather than the storage key — so forgetting `grok` really does
     // remove the entry filed under `xai`.
@@ -885,7 +1015,7 @@ fn logout(provider: ProviderId) -> Result<()> {
 /// provider's first row: a provider now has a row per place it has a
 /// credential, and taking whichever came first would make this depend on how
 /// the listing happens to be ordered.
-fn warn_if_shadowed(provider: ProviderId) -> Result<()> {
+fn warn_if_shadowed(provider: &NamedProvider) -> Result<()> {
     let stored_as = auth::storage_key(provider.as_str());
     let shadowing = auth::list_providers()
         .context("failed to read stored credentials")?
@@ -907,7 +1037,7 @@ fn warn_if_shadowed(provider: ProviderId) -> Result<()> {
 ///
 /// Piped input is read whole so that `pass show … | ganja auth login` works;
 /// otherwise the key is typed at a prompt.
-fn read_key(provider: ProviderId) -> Result<Option<SecretString>> {
+fn read_key(provider: &NamedProvider) -> Result<Option<SecretString>> {
     let mut stdin = io::stdin();
     if stdin.is_terminal() {
         return prompt_for_key(provider);
@@ -929,7 +1059,7 @@ fn read_key(provider: ProviderId) -> Result<Option<SecretString>> {
 /// offers to suppress it, which also means this loop has to handle Enter,
 /// Backspace and Ctrl-C itself — in raw mode the terminal driver does none of
 /// that, and Ctrl-C raises no signal.
-fn prompt_for_key(provider: ProviderId) -> Result<Option<SecretString>> {
+fn prompt_for_key(provider: &NamedProvider) -> Result<Option<SecretString>> {
     use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
     /// Leaves raw mode however the read ends, panic included: a terminal left
@@ -1022,19 +1152,37 @@ async fn models_command(provider: Option<String>, refresh: bool) -> Result<()> {
     if let Some(wanted) = provider.as_deref()
         && listed.is_empty()
     {
-        // A header over no rows would read as "this provider serves nothing",
-        // which is indistinguishable from the typo it usually is. Naming what
-        // the table does carry makes the fix one keystroke.
+        // Two different situations, and telling them apart is the whole of
+        // what this command owes somebody who named a provider.
+        //
+        // A provider a session **can** run as, with no rows here, is the
+        // uncataloged tier: real, usable, and unpriced. Refusing it would call
+        // a working configuration a typo, and printing a bare header would
+        // claim it serves nothing — so the header is printed and the
+        // consequence is spelled out, which is what a person actually needs to
+        // know before they run a turn on it.
+        //
+        // A name nothing can select is the typo it looks like, and keeps the
+        // refusal it always had.
+        if selectable_here(wanted)? {
+            print_header();
+            println!(
+                "\n`{wanted}` has no catalog rows; sizing and cost display are off for it — \
+                 a session runs, and names its own model with --model, {}, or the config's \
+                 `model` key.",
+                ganja_core::provider::MODEL_ENV
+            );
+
+            return Ok(());
+        }
+
         bail!(
             "no models here are served by `{wanted}`; this table carries {}",
             providers(&table).join(", ")
         );
     }
 
-    println!(
-        "{:<10}  {:<17}  {:>8}  {:>8}  {:>10}  {:>10}",
-        "PROVIDER", "MODEL", "CONTEXT", "MAX OUT", "$/MTOK IN", "$/MTOK OUT"
-    );
+    print_header();
 
     let mut defaulted = false;
     for model in listed {
@@ -1057,6 +1205,34 @@ async fn models_command(provider: Option<String>, refresh: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The listing's column header.
+///
+/// One function rather than a literal in two places: it is printed above the
+/// rows, and *instead* of them for a provider the table has none for, and a
+/// header that drifted from the row format would misalign the whole listing.
+fn print_header() {
+    println!(
+        "{:<10}  {:<17}  {:>8}  {:>8}  {:>10}  {:>10}",
+        "PROVIDER", "MODEL", "CONTEXT", "MAX OUT", "$/MTOK IN", "$/MTOK OUT"
+    );
+}
+
+/// Whether a session in this project could run as `provider_id` — the
+/// selectable tier, which is the builtins plus whatever the config declares.
+///
+/// Asked only when the catalog has nothing to list, because that is the one
+/// moment "is this a typo or an unpriced endpoint" has two answers.
+///
+/// # Errors
+///
+/// When the working directory cannot be read, or the config cannot be.
+fn selectable_here(provider_id: &str) -> Result<bool> {
+    let cwd = std::env::current_dir().context("failed to read the working directory")?;
+    let config = ganja_core::config::Config::load(&cwd).context("failed to read the config")?;
+
+    Ok(ganja_core::provider::selectable(&config, provider_id))
 }
 
 /// Fetches the catalog before a listing reads it, saying why when it could

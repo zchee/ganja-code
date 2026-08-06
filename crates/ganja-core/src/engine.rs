@@ -48,7 +48,7 @@ use crate::{
     command,
     config::AgentMode,
     lsp, mcp,
-    permission::Permissions,
+    permission::{Permissions, Rule},
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
     session::{
@@ -432,6 +432,18 @@ pub struct Engine {
     commands: Arc<command::Registry>,
     /// Rules deciding which tool calls wait for the user.
     permissions: Arc<std::sync::Mutex<Permissions>>,
+    /// Rules the frontend imposed for the life of this engine, which sit above
+    /// whatever agent a turn runs as.
+    ///
+    /// The permission set has two tiers — the agent's ruleset beneath, the
+    /// answers a person gave on top — and neither is these. A headless run
+    /// refuses the tools that would ask a question nobody is there to answer:
+    /// that is not the agent's opinion, so it must survive the agent changing,
+    /// and it is not a person's answer, so it must not outrank one. Held here
+    /// and appended by [`Engine::baseline_for`] to every baseline the engine
+    /// installs or derives, which is what keeps it true through all five of
+    /// them (deviation: standing-rules-outlive-the-agent).
+    standing: std::sync::Mutex<Vec<Rule>>,
     /// Directory tool calls resolve relative paths against, captured once so
     /// every call in a session agrees on where it is.
     cwd: PathBuf,
@@ -574,6 +586,7 @@ impl Engine {
             tools: std::sync::Mutex::new(tools),
             commands: Arc::new(command::Registry::builtin(&root)),
             permissions: Arc::new(std::sync::Mutex::new(permissions)),
+            standing: std::sync::Mutex::new(Vec::new()),
             cwd,
             root,
             files: Arc::new(FileTimes::default()),
@@ -907,6 +920,55 @@ impl Engine {
     #[must_use]
     pub fn permissions(&self) -> Arc<std::sync::Mutex<Permissions>> {
         Arc::clone(&self.permissions)
+    }
+
+    /// Imposes `rules` above every agent's ruleset, for the life of this
+    /// engine.
+    ///
+    /// What a frontend uses to say something no agent may take back: a
+    /// headless run refuses the tools that would ask a question nobody is
+    /// there to answer. They land at the end of the baseline, so last-match-
+    /// wins puts them over the agent's own rules and the config's — and still
+    /// beneath the answers a person gave, which is where the two-tier order
+    /// already put everything a build decided.
+    ///
+    /// Reaching through [`Engine::permissions`] to install the same rules is
+    /// what this call exists to replace: a baseline written from outside is
+    /// dropped by the next agent change, and *four* things change the agent —
+    /// a resume, a `/agent` switch, an MCP server finishing its dial, and the
+    /// initial `with_agents`. Rules given here survive all of them, and the
+    /// per-turn ruleset a `/command` naming its own agent runs under carries
+    /// them too.
+    ///
+    /// Applies immediately: the set judging the very next call is recomposed
+    /// before this returns.
+    pub fn append_standing_rules(&self, rules: Vec<Rule>) {
+        {
+            let mut standing = self
+                .standing
+                .lock()
+                .expect("the standing rules are never poisoned");
+            standing.extend(rules);
+        }
+
+        // Recomposed through the same seam every other install goes through,
+        // so there is no second answer to "what is the baseline made of". An
+        // engine with no agents has no agent ruleset to sit beneath these, and
+        // then the standing rules are the whole of the baseline.
+        let name = self.active().agent.clone();
+        match self
+            .agents
+            .as_ref()
+            .zip(name.as_deref())
+            .and_then(|(registry, name)| registry.get(name))
+        {
+            Some(agent) => self.install(agent),
+            None => self
+                .permissions
+                .lock()
+                .expect("the permission rules are never poisoned")
+                .set_baseline(self.standing()),
+        }
     }
 
     /// The model the next turn will ask for.
@@ -1656,6 +1718,37 @@ impl Engine {
             .expect("the active selection is never poisoned")
     }
 
+    /// The permission baseline a turn running as `agent` is judged by: the
+    /// agent's own ruleset, with the standing rules after it.
+    ///
+    /// The one place a baseline is composed, and deliberately so. Losing the
+    /// standing rules is not one bug but one per site that writes a baseline,
+    /// and there are five: [`Engine::with_agents`], a resume's
+    /// `restore_selection`, a `/agent` switch, the tool-set rebuild an MCP
+    /// server's dial completes — all four through [`Engine::install`] — and
+    /// the ruleset a `/command` naming its own agent derives for its turn.
+    /// Composing here is what makes them one answer.
+    ///
+    /// Order is the point: last-match-wins reads the concatenation backwards,
+    /// so standing rules *after* the agent's outrank the agent's own and the
+    /// config's. The tier above them — the answers a person gave — is
+    /// untouched, because that tier lives in the permission set rather than in
+    /// any baseline.
+    fn baseline_for(&self, agent: &Agent) -> Vec<Rule> {
+        let mut rules = agent.rules.clone();
+        rules.extend(self.standing());
+
+        rules
+    }
+
+    /// The rules imposed above every agent's, cloned out from under the lock.
+    fn standing(&self) -> Vec<Rule> {
+        self.standing
+            .lock()
+            .expect("the standing rules are never poisoned")
+            .clone()
+    }
+
     /// Installs `agent`'s ruleset as the permission baseline, and rebuilds the
     /// tool set the model is offered so the task tool lists what *this* agent
     /// may delegate to.
@@ -1663,7 +1756,7 @@ impl Engine {
         self.permissions
             .lock()
             .expect("the permission rules are never poisoned")
-            .set_baseline(agent.rules.clone());
+            .set_baseline(self.baseline_for(agent));
 
         let Some(agents) = &self.agents else {
             return;
@@ -1949,6 +2042,12 @@ impl Engine {
         // the same store, so an "always" given here still outlives the process —
         // it just does not reach the session's own set until the store is read
         // again (deviation: command-agent-derives-its-rules).
+        //
+        // Derived through `baseline_for`, so the standing rules cross with it.
+        // What the session refused for every turn it runs is not the session
+        // agent's opinion for a command to leave behind by naming another
+        // agent — a headless run refuses `question` because nobody is there to
+        // answer one, and that is no less true of the turn a `/command` takes.
         let (agent, permissions) = match overrides.as_ref().and_then(|it| it.agent.as_ref()) {
             None => (session_agent, Arc::clone(&self.permissions)),
             Some(agent) => {
@@ -1956,7 +2055,7 @@ impl Engine {
                     .permissions
                     .lock()
                     .expect("the permission rules are never poisoned")
-                    .derive(agent.rules.clone());
+                    .derive(self.baseline_for(agent));
 
                 (Some(agent), Arc::new(std::sync::Mutex::new(derived)))
             }

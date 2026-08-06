@@ -18,6 +18,7 @@ use assert_cmd::Command;
 use ganja_core::{
     Config,
     config::{AgentMode, CONFIG_ENV, LspConfig, McpServer},
+    provider::Dialect,
 };
 use ganja_permission::Action;
 
@@ -190,6 +191,26 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
     assert!(
         !servers.contains_key("typescript"),
         "an entry leaning on a definition this build does not have was written anyway"
+    );
+
+    // The provider table is the other half `validate` cannot prove alone: a
+    // config's own load refuses an entry naming a builtin and one whose
+    // endpoint would carry a key in the clear, so a file that got past both is
+    // one the importer could not have written wrong.
+    let local = &config.provider["local-llama"];
+    assert_eq!(local.dialect, Dialect::OpenaiChatCompletions);
+    assert_eq!(local.base_url, "http://127.0.0.1:11434/v1");
+    assert_eq!(local.headers["x-route"], "gpu-0");
+    assert_eq!(
+        local.key_env, None,
+        "opencode's entry held the key itself, and nothing invents the name of \
+         a variable holding it"
+    );
+    assert!(
+        !config.provider.contains_key("anthropic"),
+        "an entry naming a provider this build ships is one `Config::load` \
+         refuses, so writing it would have produced a file that does not read \
+         back — this load is what proves it was not written"
     );
 
     assert!(

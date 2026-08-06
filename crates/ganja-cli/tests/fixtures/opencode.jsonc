@@ -65,10 +65,23 @@
     },
   },
   "provider": {
+    // A provider ganja ships: refused, because a `provider` entry naming one
+    // would never be reached — and its key gets a row of its own whatever
+    // happens to the entry around it.
     "anthropic": {
       "options": {
         "apiKey": "sk-fixture-0000-not-a-real-key",
         "baseURL": "https://example.invalid/v1",
+      },
+    },
+    // One ganja can carry: an SDK it has a wire for, and somewhere to point it.
+    "local-llama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "models": { "tiny": { "name": "Tiny" } },
+      "options": {
+        "baseURL": "http://127.0.0.1:11434/v1",
+        "headers": { "x-route": "gpu-0" },
+        "organization": "acme",
       },
     },
   },

@@ -2277,6 +2277,25 @@ mod tests {
         assert_eq!(storage_key("openai"), "openai");
         assert_eq!(provider_id_for_storage_key("xai"), "grok");
         assert_eq!(provider_id_for_storage_key("openai"), "openai");
+
+        // The alias table is a **closed** list over an **open** store: a name
+        // it has never heard of passes through unchanged in both directions.
+        // That is what lets a config declare a provider and
+        // `ganja auth login <id>` write exactly where selection reads — a
+        // translation applied to an unknown id would file the credential under
+        // a name nothing looks for.
+        for configured in ["local-llama", "gateway", "cursor"] {
+            assert_eq!(storage_key(configured), configured);
+            assert_eq!(provider_id_for_storage_key(configured), configured);
+        }
+        store
+            .set("local-llama", CANARY)
+            .expect("an id nothing ships is still an id");
+        assert_eq!(
+            key_of(store.get("local-llama").expect("the file reads")),
+            Some(CANARY.to_owned()),
+            "a configured provider's key is read back under the name it was written under"
+        );
     }
 
     #[test]

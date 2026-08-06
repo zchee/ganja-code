@@ -159,6 +159,17 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             "text/event-stream",
             include_str!("fixtures/anthropic_happy_path.sse"),
         ),
+        // The third turn is a config-declared endpoint's, and it is refused
+        // the same way: a provider a person configured is a request path like
+        // any other, and the redaction it inherits from the wire it rides has
+        // to be inherited in fact and not only in prose.
+        response(
+            "401 Unauthorized",
+            "application/json",
+            &format!(
+                r#"{{"error":{{"message":"Incorrect API key provided: {CANARY}","type":"invalid_request_error"}}}}"#
+            ),
+        ),
     ])
     .await;
 
@@ -213,7 +224,56 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             "the answered turn should have streamed text, got {events:?}"
         );
 
-        format!("{anthropic:?} {openai:?} {refusal} {refusal:?}")
+        // And the same drill through a provider a *config* named, which is the
+        // newest way a credential reaches a socket: the key comes from the
+        // variable the entry names, the wire is one of the two above, and the
+        // rendering is the compat provider's own.
+        let mut config = ganja_core::config::Config::default();
+        config.provider.insert(
+            "local-llama".to_owned(),
+            ganja_core::config::ProviderConfig {
+                dialect: provider::Dialect::OpenaiChatCompletions,
+                base_url: url.clone(),
+                key_env: Some("ANTHROPIC_API_KEY".to_owned()),
+                headers: std::collections::BTreeMap::new(),
+            },
+        );
+        // The flag tier, which outranks the `GANJA_PROVIDER=anthropic` this
+        // test planted, so the same process reaches both kinds of provider.
+        config.overrides.model = Some("local-llama/tiny-instruct".to_owned());
+        let configured = provider::select(&config).expect("the entry's own variable holds the key");
+        assert_eq!(configured.provider.id(), "local-llama");
+
+        let Err(compat_refusal) = configured
+            .provider
+            .stream(
+                ChatRequest {
+                    model: configured.model.clone(),
+                    system: None,
+                    messages: vec![ganja_core::protocol::Message::user("hello")],
+                    tools: Vec::new(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+        else {
+            panic!("a 401 is not answerable");
+        };
+        // Asserted here rather than only in the sweep below, because the sweep
+        // would pass on the *anthropic* refusal's mask alone: what has to be
+        // shown is that this path masked the key this endpoint quoted back.
+        assert!(
+            compat_refusal.to_string().contains("[redacted]"),
+            "a configured endpoint's refusal should mask the key it echoed: {compat_refusal}"
+        );
+
+        // The `Selection` rather than the provider, because `dyn Provider` has
+        // no `Debug` — and that is the rendering a caller actually holds. The
+        // compat provider's own is pinned beside it, in `provider/compat.rs`.
+        format!(
+            "{anthropic:?} {openai:?} {refusal} {refusal:?} \
+             {configured:?} {compat_refusal} {compat_refusal:?}"
+        )
     };
 
     // The same drill for an OAuth credential. The store is the environment for
