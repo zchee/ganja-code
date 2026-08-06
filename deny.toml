@@ -113,7 +113,16 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
 allow-workspace = false
-deny = []
+# Named bans for the two drive-by admissions the dependency plan actually
+# risks: `protobuf-src` compiles C++ protobuf in build.rs (minutes per cold
+# build, a C toolchain, and a BSD-3-Clause surface a pure-Rust proto stack
+# never needs), and `openssl-sys` is the TLS stack this workspace deliberately
+# avoids (reqwest is pinned to rustls). Either arriving transitively should be
+# a decision, not a surprise.
+deny = [
+    { crate = "protobuf-src" },
+    { crate = "openssl-sys" },
+]
 skip = []
 skip-tree = []
 
