@@ -103,6 +103,98 @@ const BETA_HEADER: &str = "openai-beta";
 /// The value [`BETA_HEADER`] carries.
 const BETA: &str = "responses=experimental";
 
+/// The models this backend serves a ChatGPT seat outright (`codex.ts:15`).
+///
+/// A positive list, and the reason it is spelled out rather than derived: three
+/// of these four are *older* than the floor [`NEWER_THAN`] sets, so the rule
+/// below would refuse them.
+const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"];
+
+/// The models it refuses although [`NEWER_THAN`] would admit them
+/// (`codex.ts:16`).
+const DISALLOWED_MODELS: [&str; 1] = ["gpt-5.5-pro"];
+
+/// The one model named in its own arm (`codex.ts:289`).
+///
+/// Newer than everything served and refused anyway, which is why neither list
+/// can express it.
+const REFUSED_MODEL: &str = "gpt-5.6";
+
+/// The generation an unlisted `gpt-N.M` has to beat (`codex.ts:290-291`).
+///
+/// Upstream's forward hedge, ported for the same reason it exists: a model this
+/// build's catalog gains later should not need a code change to be reachable.
+const NEWER_THAN: f64 = 5.4;
+
+/// Whether the ChatGPT backend will serve `model` to a subscription.
+///
+/// Ports `codex.ts:281-292` in its order, which is load-bearing — the explicit
+/// lists have to be read before the generation rule or `gpt-5.4` refuses
+/// itself.
+///
+/// **One arm is not ported.** Upstream refuses anything whose
+/// `options.reasoningMode` is `"pro"` before consulting either list; that is a
+/// per-model capability flag ganja's catalog does not carry, and inventing one
+/// here would be a guess. The only model it is known to cover, `gpt-5.5-pro`,
+/// is in [`DISALLOWED_MODELS`] anyway, so the gap is narrower than it reads.
+///
+/// Visible to the crate so that [`crate::catalog`]'s own tests can hold its
+/// `openai` default to this: a default this refuses is a seat that cannot take
+/// a turn.
+pub(crate) fn serves(model: &str) -> bool {
+    if ALLOWED_MODELS.contains(&model) {
+        return true;
+    }
+    if DISALLOWED_MODELS.contains(&model) || model == REFUSED_MODEL {
+        return false;
+    }
+
+    generation(model).is_some_and(|generation| generation > NEWER_THAN)
+}
+
+/// The `\d+\.\d+` a model id opens with after `gpt-`, as the number upstream's
+/// `parseFloat` reads.
+///
+/// Anchored and greedy per half, exactly as the regex is: `gpt-5.4-mini` reads
+/// as 5.4, `gpt-5.4.1` as 5.4, and `gpt-5` as nothing at all, because the
+/// fractional half is required rather than optional.
+fn generation(model: &str) -> Option<f64> {
+    /// The leading run of digits, and whatever follows it.
+    fn digits(text: &str) -> (&str, &str) {
+        let end = text
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(text.len());
+
+        text.split_at(end)
+    }
+
+    let (major, rest) = digits(model.strip_prefix("gpt-")?);
+    let (minor, _) = digits(rest.strip_prefix('.')?);
+
+    if major.is_empty() || minor.is_empty() {
+        return None;
+    }
+
+    format!("{major}.{minor}").parse().ok()
+}
+
+/// Says what this seat serves, rather than only that it does not serve this.
+///
+/// [`ProviderError::Transport`] for the reason [`check_base_url`]'s refusal is:
+/// the variant this crate uses for a request the provider declines to *make*.
+/// It is classified retryable, which is wrong for a model name and harmless
+/// here — the refusal is returned before [`open`] is reached, so the retry
+/// driver never sees it.
+fn unsupported(model: &str) -> ProviderError {
+    ProviderError::Transport(format!(
+        "a ChatGPT subscription cannot run `{model}`: this backend serves {served}, \
+         or a newer gpt model — name one with `--model {ID}/gpt-5.4`, or export \
+         {key} to reach the models an API key can",
+        served = ALLOWED_MODELS.join(", "),
+        key = openai::API_KEY_ENV,
+    ))
+}
+
 /// Streams replies from ChatGPT's Responses API.
 pub struct ResponsesProvider {
     client: reqwest::Client,
@@ -233,6 +325,14 @@ impl Provider for ResponsesProvider {
         // moment before the access token goes on the wire.
         check_base_url(&self.base_url)?;
 
+        // Before the credential is even read, let alone spent. The backend
+        // answers a model outside its list `400 {"detail":"The 'gpt-5.6' model
+        // is not supported when using Codex with a ChatGPT account."}` — a
+        // whole turn's latency to be told something that was knowable here.
+        if !serves(&request.model) {
+            return Err(unsupported(&request.model));
+        }
+
         // Resolved before the request is built, never captured at construction:
         // the token expires under a long session, and one renewed a moment ago
         // by another turn is the one this request should carry.
@@ -273,10 +373,52 @@ fn reauth(error: ProviderError) -> ProviderError {
 }
 
 /// The JSON a request carries.
+///
+/// # Why `include` is not one of these fields
+///
+/// `include: ["reasoning.encrypted_content"]` is [`store`](Body::store)'s
+/// companion wherever the pin sends it, and the two really are one feature:
+/// with `store: false` the backend keeps no trace, so `include` is how a
+/// reasoning model's own thinking is handed back to it — as encrypted state the
+/// *client* returns on the next request, in a `reasoning` input item
+/// (`packages/llm/test/tool-runtime.test.ts:592,601`).
+///
+/// The half that returns it is the half this build does not have. `Body::new`
+/// encodes three item kinds — what was said, a call, a call's result — because
+/// those are the three [`PartBody`] variants a transcript holds; there is no
+/// part that can carry an encrypted blob, and `ganja-protocol` is where one
+/// would have to be added. Upstream's own encoder is explicit about the pairing
+/// and *drops* a reasoning item that arrives without the state
+/// (`packages/llm/src/protocols/openai-responses.ts:446-451`).
+///
+/// So asking for it here would buy nothing and cost every turn: the backend
+/// would attach encrypted state to each reply, [`Mapping`] would log it as an
+/// unmapped item and discard it, and the next request would carry no more
+/// continuity than it does now. Upstream's Responses route agrees about the
+/// floor — its default is `store: false` alone, with `include` left to whoever
+/// can use it (`openai-responses.ts:991`, and the "omits include when no
+/// include is set" case at `test/provider/openai-responses.test.ts:638`).
+///
+/// The reasoning ganja *can* show already arrives as
+/// `response.reasoning_summary_text.delta` and needs none of this.
 #[derive(Debug, Serialize)]
 struct Body<'a> {
     model: &'a str,
     stream: bool,
+    /// Whether the backend keeps this turn on its own side.
+    ///
+    /// **Required to be `false`.** A body without it is answered
+    /// `400 {"detail":"Store must be set to false"}` by the ChatGPT backend, so
+    /// the field is the difference between a subscription that answers and one
+    /// that cannot start a turn at all.
+    ///
+    /// Not configurable, because nothing here could use `true`: a stored turn
+    /// is one the backend can be asked to continue by id, and every ganja
+    /// request rebuilds the whole conversation from ganja's own transcript.
+    /// Upstream carries it as a route-level default rather than as a
+    /// subscription special case (`openai-responses.ts:991`), which is the same
+    /// statement about the same wire.
+    store: bool,
     /// The system prompt.
     ///
     /// **A divergence, deliberately.** `@ai-sdk/openai` pushes it as an input
@@ -419,6 +561,7 @@ impl<'a> Body<'a> {
         Self {
             model: &request.model,
             stream: true,
+            store: false,
             instructions: request.system.as_deref(),
             input,
             tools: request
@@ -699,15 +842,16 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ACCOUNT_HEADER, BETA, BETA_HEADER, Body, DEFAULT_BASE_URL, ID, Mapping, ORIGINATOR,
-        ORIGINATOR_HEADER, ResponsesProvider, reauth,
+        ACCOUNT_HEADER, ALLOWED_MODELS, BETA, BETA_HEADER, Body, DEFAULT_BASE_URL, ID, Mapping,
+        ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider, generation, reauth, serves,
     };
     use crate::{
         auth::{self, AuthError, OauthCredential, RefreshOauth},
         catalog,
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
         provider::{
-            ChatRequest, PROVIDERS, Presented, ProviderError, ProviderEvent, Resolved,
+            ChatRequest, PROVIDERS, Presented, Provider as _, ProviderError, ProviderEvent,
+            Resolved,
             openai::{self, NO_RESULT},
             replay,
         },
@@ -719,6 +863,13 @@ mod tests {
 
     /// The account the credential names.
     const ACCOUNT: &str = "acct_2f7QpL9";
+
+    /// A model this backend serves (`codex.ts:15`).
+    const SERVED: &str = "gpt-5.4";
+
+    /// One it does not, and the one the live pass actually named
+    /// (`codex.ts:289`).
+    const REFUSED: &str = "gpt-5.6";
 
     /// A renewal that must never run, for the cases about construction rather
     /// than about a token endpoint.
@@ -770,10 +921,11 @@ mod tests {
         .expect("loopback may carry a token")
     }
 
-    /// One turn's worth of request.
+    /// One turn's worth of request, on a model this backend serves — anything
+    /// else is refused before a request is built at all.
     fn ask() -> ChatRequest {
         ChatRequest {
-            model: "gpt-5.6".to_owned(),
+            model: SERVED.to_owned(),
             system: None,
             messages: vec![Message::user("hello")],
             tools: Vec::new(),
@@ -898,6 +1050,110 @@ mod tests {
         assert!(info.context_window > 0 && info.max_output > 0);
     }
 
+    /// The field the live pass died on. A body without it is answered
+    /// `400 {"detail":"Store must be set to false"}`, which is every
+    /// subscription turn this build could take — so it is asserted on the
+    /// serialized body rather than on the struct that produces it.
+    #[test]
+    fn every_body_tells_the_backend_to_keep_nothing() {
+        let body = serde_json::to_value(Body::new(&ask())).expect("the body serializes");
+
+        assert_eq!(
+            body["store"],
+            json!(false),
+            "without this the backend refuses the turn outright: got {body}"
+        );
+        // The companion `include` is deliberately absent — see `Body`'s own
+        // docs. Half of a two-sided feature is bytes on every reply that
+        // nothing here can hand back.
+        assert!(
+            body["include"].is_null(),
+            "encrypted reasoning was asked for and there is no part that can \
+             return it: got {body}"
+        );
+    }
+
+    /// The backend serves a pinned list, and the first live ChatGPT turn met it
+    /// as `400 {"detail":"The 'gpt-5.6' model is not supported when using Codex
+    /// with a ChatGPT account."}`. Every arm of `codex.ts:281-292` that ganja
+    /// can express is here, in the order that makes it correct.
+    #[test]
+    fn the_backend_serves_a_pinned_list_and_the_order_of_the_rules_is_the_rule() {
+        for served in ALLOWED_MODELS {
+            assert!(serves(served), "codex.ts:15 names {served}");
+        }
+        // Three of those four are older than the floor, so a check that read
+        // the generation rule first would refuse the models the list exists to
+        // allow — including the one this build now defaults to.
+        assert!(
+            serves("gpt-5.4") && generation("gpt-5.4") == Some(5.4),
+            "gpt-5.4 is not newer than 5.4 and is served anyway, which is what \
+             makes the list order load-bearing"
+        );
+
+        for refused in ["gpt-5.6", "gpt-5.5-pro", "gpt-5.4-nano", "gpt-5.3-codex"] {
+            assert!(
+                !serves(refused),
+                "{refused} is refused by the backend and has to be refused here"
+            );
+        }
+
+        // The forward hedge: a row the catalog gains later is reachable without
+        // a code change, and anything that is not a `gpt-N.M` at all is not.
+        assert!(serves("gpt-5.7") && serves("gpt-6.0-codex"));
+        assert!(!serves("gpt-5") && !serves("o3") && !serves("claude-sonnet-5"));
+        assert_eq!(
+            generation("gpt-5.4-mini"),
+            Some(5.4),
+            "the halves are the id's"
+        );
+        assert_eq!(generation("gpt-5"), None, "the fraction is required");
+    }
+
+    /// A refusal that only says no leaves a person guessing at a list they
+    /// cannot see. This one is what they read instead of the backend's JSON.
+    #[tokio::test]
+    async fn an_unsupported_model_is_refused_here_naming_what_the_seat_does_serve() {
+        // The success arm is a boxed stream with no `Debug`, so `expect_err`
+        // would not compile; the match is the same assertion said a way that
+        // does, as elsewhere in this suite.
+        let Err(refused) = provider()
+            .stream(
+                ChatRequest {
+                    model: REFUSED.to_owned(),
+                    ..ask()
+                },
+                CancellationToken::new(),
+            )
+            .await
+        else {
+            panic!("a model this backend will not serve is not a turn to take");
+        };
+        let said = refused.to_string();
+
+        assert!(
+            said.contains(REFUSED),
+            "it has to name what was asked for: {said}"
+        );
+        for served in ALLOWED_MODELS {
+            assert!(
+                said.contains(served),
+                "the served set is the part that is actionable: {said}"
+            );
+        }
+        assert!(
+            said.contains(openai::API_KEY_ENV),
+            "the other way out is a key, which reaches models a seat cannot: {said}"
+        );
+        // Refused before the credential is read at all: this provider has no
+        // store behind it and would have panicked renewing one.
+        assert!(
+            matches!(refused, ProviderError::Transport(_)),
+            "a request the provider declines to make, the way a bad base URL \
+             is one: {refused:?}"
+        );
+    }
+
     #[test]
     fn a_refused_credential_says_which_login_repairs_it() {
         for status in [401, 403] {
@@ -945,6 +1201,9 @@ mod tests {
             json!({
                 "model": "gpt-test",
                 "stream": true,
+                // The backend answers a body without this
+                // `400 {"detail":"Store must be set to false"}`.
+                "store": false,
                 "instructions": "be brief",
                 "input": [
                     {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
