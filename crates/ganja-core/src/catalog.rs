@@ -205,28 +205,20 @@ pub enum CatalogError {
 /// to say about it.
 const DEFAULTS: &[(&str, &str)] = &[
     ("anthropic", "claude-sonnet-5"),
-    // **Not the newest openai row — do not "upgrade" it without reading this.**
-    // A default has to be a model that can take a ganja turn, and every ganja
-    // turn offers tools. `gpt-5.6` was measured refusing exactly that, live, on
-    // both wires this build spoke at the time: chat completions answered `400
-    // "Function tools with reasoning_effort are not supported for gpt-5.6 in
-    // /v1/chat/completions. To use function tools, use /v1/responses or set
-    // reasoning_effort to 'none'."`, and the ChatGPT subscription backend does
-    // not serve that model at all (`provider::responses`, from `codex.ts:289`).
-    //
-    // Half of that has since been answered rather than worked around: an API
-    // key now rides the Responses API, which is the endpoint the first refusal
-    // *named*, so this row is no longer what stands between a key session and
-    // the newest model. What it still is, is unmeasured — that turn has not been
-    // taken live yet — and `gpt-5.4` was. The other half is unchanged and always
-    // will be: the seat cannot run `gpt-5.6`. That is no longer this row's
-    // problem either, because a subscription session takes its default from
-    // `provider::responses::SUBSCRIPTION_DEFAULT` rather than from here.
-    //
-    // So this table's `openai` row is the **key** wire's default, and moving it
-    // costs one live turn's evidence rather than a version number. The newer row
-    // stays in the table below regardless: its sizing was never what was wrong.
-    ("openai", "gpt-5.4"),
+    // **This row is the key wire's default — the seat never reads it.** A
+    // default has to be a model that can take a ganja turn, and every ganja
+    // turn offers tools. That is why this row spent a round on `gpt-5.4`:
+    // chat completions had answered `400 "Function tools with reasoning_effort
+    // are not supported for gpt-5.6 in /v1/chat/completions. To use function
+    // tools, use /v1/responses or set reasoning_effort to 'none'."` — and the
+    // repair was to change wires, not defaults. An API key now rides the
+    // Responses API, and the turn that first refusal named was then taken
+    // live (2026-08-06): `gpt-5.6` ran a tool and completed on a key at the
+    // platform. The ChatGPT seat still cannot run it (`provider::responses`,
+    // from `codex.ts:289`), and still does not care: a subscription session
+    // takes its default from `provider::responses::SUBSCRIPTION_DEFAULT`,
+    // never from here.
+    ("openai", "gpt-5.6"),
     ("grok", "grok-4.3"),
     ("github-copilot", "claude-sonnet-4.6"),
 ];

@@ -483,9 +483,10 @@ fn models_lists_the_catalog_and_marks_one_default_per_provider() {
         predicate::str::contains("PROVIDER")
             .and(predicate::str::contains("$/MTOK IN"))
             .and(predicate::str::contains("claude-sonnet-5*"))
-            // The star follows `catalog::DEFAULTS`, and openai's moved: the
-            // newer row cannot serve tools on either wire this build speaks.
-            .and(predicate::str::contains("gpt-5.4*"))
+            // The star follows `catalog::DEFAULTS`, and openai's is the newest
+            // row again: the key wire speaks Responses, which is the endpoint
+            // that model needed to serve tools.
+            .and(predicate::str::contains("gpt-5.6*"))
             .and(predicate::str::contains("claude-haiku-4-5"))
             // The context window is compacted rather than spelled out.
             .and(predicate::str::contains("1.0M"))
@@ -597,11 +598,12 @@ fn a_named_provider_is_the_only_one_the_listing_carries() {
         .args(["models", "openai"])
         .assert()
         .success()
-        // The starred row is openai's default, which is `gpt-5.4`; the newer
-        // row is still listed beside it, unstarred.
+        // The starred row is openai's default, `gpt-5.6`; the previous default
+        // stays listed beside it, unstarred — it is still what a ChatGPT seat
+        // runs.
         .stdout(
-            predicate::str::contains("gpt-5.4*")
-                .and(predicate::str::contains("gpt-5.6"))
+            predicate::str::contains("gpt-5.6*")
+                .and(predicate::str::contains("gpt-5.4 "))
                 .and(predicate::str::contains("claude").not()),
         );
 }
