@@ -224,6 +224,37 @@ fn ganja(data: &TempDir, issuer: &str) -> Command {
     command
 }
 
+/// An issuer whose token exchange answers straight away.
+///
+/// [`Gate`] exists to prove that a code reaches the screen before the login
+/// blocks on it, and a test about *which login ran* is not asking that — so it
+/// opens the gate rather than dancing with it, and can then drive the whole
+/// invocation with one [`Command::output`] call.
+fn unblocked() -> String {
+    let gate = Gate::closed();
+    gate.open();
+
+    serve(&gate)
+}
+
+/// Runs `command` with `input` on its standard input, which is the shape
+/// `pass show … | ganja auth login` arrives in — and the shape every defect in
+/// this half of the file was found in.
+fn fed(command: &mut Command, input: &str) -> std::process::Output {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(input.as_bytes())
+        .expect("the input is writable");
+
+    child.wait_with_output().expect("the child is waitable")
+}
+
 /// The child's standard error, one line at a time, so a test can wait for a
 /// line without waiting for the process.
 fn watching(child: &mut Child) -> Receiver<String> {
@@ -803,6 +834,261 @@ fn a_piped_key_still_reaches_grok_now_that_it_has_more_than_one_login() {
         !String::from_utf8_lossy(&finished.stderr).contains("Login method"),
         "nothing was there to answer a menu: {:?}",
         String::from_utf8_lossy(&finished.stderr)
+    );
+}
+
+/// A provider whose only login is a device grant has to reach it from the
+/// invocation that has nobody at the keyboard, because that grant *is* its
+/// headless login — a code typed into a browser on some other machine.
+///
+/// Measured live before the fix: `ganja auth login --provider github-copilot`
+/// with a non-terminal standard input refused with "no key was given", because
+/// the pipe rule was consulted before the provider's own single login. The
+/// suite never caught it because every test here names `--method`.
+#[test]
+fn a_copilot_login_with_no_terminal_runs_its_device_flow_rather_than_asking_for_a_key() {
+    let issuer = unblocked();
+    let data = data();
+
+    let finished = ganja(&data, &issuer)
+        .args([
+            "auth",
+            "login",
+            "--provider",
+            "github-copilot",
+            "--deployment",
+            "public",
+        ])
+        .output()
+        .expect("the binary runs");
+    let stderr = String::from_utf8_lossy(&finished.stderr).into_owned();
+
+    assert!(
+        finished.status.success(),
+        "a headless Copilot login should have run: {stderr}"
+    );
+    assert!(
+        !stderr.contains("no key was given"),
+        "the pipe rule must not have claimed this invocation: {stderr}"
+    );
+    assert!(
+        stderr.contains(COPILOT_CODE) && stderr.contains(VERIFICATION_URI),
+        "the device grant is what had to run: {stderr}"
+    );
+    assert_eq!(stored(&data)["github-copilot"]["type"], "oauth");
+    assert_eq!(stored(&data)["github-copilot"]["access"], ACCESS);
+}
+
+/// And the rule the reorder had to leave alone: standard input that is not a
+/// terminal is still a key, for the provider whose only login *is* one and for
+/// the provider that was asked for one by name.
+///
+/// The two halves are the pipe rule's whole surface. A reorder that had swallowed
+/// either would take `pass show … | ganja auth login` with it.
+#[test]
+fn a_piped_key_still_stores_where_a_key_is_what_was_asked_for() {
+    let issuer = unblocked();
+    let data = data();
+
+    // anthropic's one login is a key, so it never reaches the reordered step.
+    let anthropic = fed(
+        ganja(&data, &issuer).args(["auth", "login", "--provider", "anthropic"]),
+        "sk-piped-9001\n",
+    );
+    assert!(
+        anthropic.status.success(),
+        "a piped key is a login: {}",
+        String::from_utf8_lossy(&anthropic.stderr)
+    );
+
+    // github-copilot's is not, so `--method api` is now the only way a pipe
+    // reaches its key path — and it still does.
+    let copilot = fed(
+        ganja(&data, &issuer).args([
+            "auth",
+            "login",
+            "--provider",
+            "github-copilot",
+            "--method",
+            "api",
+        ]),
+        "ghp-piped-9002\n",
+    );
+    assert!(
+        copilot.status.success(),
+        "a key named by `--method api` is still a key: {}",
+        String::from_utf8_lossy(&copilot.stderr)
+    );
+
+    let store = stored(&data);
+    assert_eq!(store["anthropic"]["type"], "api");
+    assert_eq!(store["anthropic"]["key"], "sk-piped-9001");
+    assert_eq!(store["github-copilot"]["type"], "api");
+    assert_eq!(store["github-copilot"]["key"], "ghp-piped-9002");
+}
+
+/// The public deployment is the common Copilot login, and it was the one that
+/// could not run unattended: `--enterprise-url` answered the other branch, and
+/// github.com had no flag at all.
+#[test]
+fn a_public_copilot_login_completes_with_nobody_at_the_keyboard() {
+    let issuer = unblocked();
+    let data = data();
+
+    let finished = ganja(&data, &issuer)
+        .args([
+            "auth",
+            "login",
+            "--provider",
+            "github-copilot",
+            "--method",
+            "device",
+            "--deployment",
+            "public",
+        ])
+        .output()
+        .expect("the binary runs");
+    let finished = Finished {
+        stdout: String::from_utf8_lossy(&finished.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&finished.stderr).into_owned(),
+        ok: finished.status.success(),
+    };
+
+    assert!(finished.ok, "the login should have succeeded: {finished:?}");
+    assert!(
+        !finished.stderr.contains("deployment type")
+            && !finished.stderr.contains("GitHub Enterprise URL"),
+        "a deployment given up front is asked about neither way: {:?}",
+        finished.stderr
+    );
+
+    let store = stored(&data);
+    assert_eq!(store["github-copilot"]["type"], "oauth");
+    assert_eq!(store["github-copilot"]["access"], ACCESS);
+    assert!(
+        store["github-copilot"].get("enterpriseUrl").is_none(),
+        "github.com is the deployment with no address to store: {store}"
+    );
+    leaks_nothing(&finished);
+}
+
+/// The trap the missing flag created: the obvious way to answer the deployment
+/// menu without a terminal was to pipe the answer, and a non-terminal standard
+/// input was read as an API key — so `printf '1\n' | ganja auth login …` stored
+/// **the menu answer as a credential**.
+///
+/// Named for what it forbids rather than for one invocation, because the
+/// property is about every shape a Copilot login can be asked for: none of them
+/// may turn a keystroke meant for a question into a stored key.
+#[test]
+fn no_invocation_shape_stores_a_deployment_menu_answer_as_a_credential() {
+    for arguments in [
+        // The shape D349 was found in: no flags at all.
+        &["auth", "login", "--provider", "github-copilot"][..],
+        &[
+            "auth",
+            "login",
+            "--provider",
+            "github-copilot",
+            "--method",
+            "device",
+        ],
+        &[
+            "auth",
+            "login",
+            "--provider",
+            "github-copilot",
+            "--deployment",
+            "public",
+        ],
+    ] {
+        let issuer = unblocked();
+        let data = data();
+
+        let finished = fed(ganja(&data, &issuer).args(arguments), "1\n");
+        assert!(
+            finished.status.success(),
+            "{arguments:?} should have logged in: {}",
+            String::from_utf8_lossy(&finished.stderr)
+        );
+
+        let store = stored(&data);
+        assert_eq!(
+            store["github-copilot"]["type"], "oauth",
+            "{arguments:?} stored something that was not the login: {store}"
+        );
+        assert_eq!(
+            store["github-copilot"]["access"], ACCESS,
+            "{arguments:?} stored a credential the device flow never issued: {store}"
+        );
+        assert!(
+            store["github-copilot"].get("key").is_none(),
+            "{arguments:?} wrote a key where a login belongs: {store}"
+        );
+    }
+}
+
+/// A login that landed has to stay visible when a variable outranks it, because
+/// the listing is the only thing that answers "what credentials do I have".
+///
+/// Measured live: `auth.json` held three OAuth records while `auth list`
+/// printed two rows — an exported `OPENAI_API_KEY` took the `openai` row and
+/// the ChatGPT login under it vanished, leaving the login's own shadow warning
+/// as the only sign it had ever worked. Precedence is right and unchanged; a
+/// listing that omits a credential it holds is not.
+#[test]
+fn a_stored_login_is_listed_beside_the_environment_key_that_outranks_it() {
+    let issuer = unblocked();
+    let data = data();
+
+    let login = ganja(&data, &issuer)
+        .args([
+            "auth",
+            "login",
+            "--provider",
+            "openai",
+            "--method",
+            "device",
+        ])
+        .output()
+        .expect("the binary runs");
+    assert!(
+        login.status.success(),
+        "the login should have succeeded: {}",
+        String::from_utf8_lossy(&login.stderr)
+    );
+
+    let listed = ganja(&data, &issuer)
+        .env("OPENAI_API_KEY", "sk-exported-4242")
+        .args(["auth", "list"])
+        .output()
+        .expect("the binary runs");
+    let table = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let rows: Vec<&str> = table
+        .lines()
+        .filter(|line| line.starts_with("openai"))
+        .collect();
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "both credentials for openai have a row: {table}"
+    );
+    assert!(
+        rows[0].contains("api")
+            && rows[0].contains("****4242")
+            && rows[0].contains("OPENAI_API_KEY"),
+        "the credential in use comes first and names where it came from: {rows:#?}"
+    );
+    assert!(
+        rows[1].contains("oauth")
+            && rows[1].contains("****7731")
+            && rows[1].contains("shadowed by OPENAI_API_KEY"),
+        "the stored login is listed, and says what outranks it: {rows:#?}"
+    );
+    assert!(
+        !table.contains(ACCESS) && !table.contains("sk-exported-4242"),
+        "a listing may show tails and nothing more: {table}"
     );
 }
 

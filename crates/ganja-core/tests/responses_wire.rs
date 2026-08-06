@@ -1,41 +1,54 @@
-//! A ChatGPT subscription becoming a turn, against a real socket.
+//! An OpenAI session becoming a turn, either credential, against a real socket.
 //!
-//! The credential a `ganja auth login openai` stores had no consumer until the
-//! Responses provider landed: `GANJA_PROVIDER=openai` with no API key died at
-//! startup naming `OPENAI_API_KEY`. This is what proves it now answers, and
-//! that the path a key takes is the one it always was.
+//! **The vendor picks the wire.** Everything filed under `openai` speaks the
+//! Responses API — upstream's plugin routes every model of that vendor through
+//! it without looking at the credential at all
+//! (`plugin/provider/openai.ts:185`) — and what the credential picks is which
+//! *backend* the request reaches and what it carries beside the bearer. Two
+//! things depended on that: a stored ChatGPT login had no consumer at all until
+//! the Responses provider landed, and an API key could not run tools on the
+//! newest models, because chat completions refused them live and named
+//! `/v1/responses` in the refusal.
 //!
-//! Told in phases, because six different things have to be true at once and a
+//! Told in phases, because nine different things have to be true at once and a
 //! failure should still say which sentence broke:
 //!
-//! 1. **A whole turn.** A stored ChatGPT credential drives a streamed reply
-//!    through the ordinary engine — the request asserted whole, the events
-//!    asserted as the engine published them, `store: false` included: the
-//!    backend refuses a body without it.
+//! 1. **A whole subscription turn.** A stored ChatGPT credential drives a
+//!    streamed reply through the ordinary engine — the request asserted whole,
+//!    the events asserted as the engine published them, `store: false`
+//!    included: the backend refuses a body without it.
 //! 2. **The credential is read per request.** The stored credential is rotated
 //!    between two turns and the *second* token is what the second request
 //!    carries. A provider that captured its token at construction passes every
 //!    other assertion here and fails this one.
-//! 3. **The key path is untouched.** The same socket, an API key, and a
-//!    chat-completions request compared byte for byte against what this build
-//!    has always sent.
-//! 4. **The dispatch, all three ways.** A key wins over a stored login, a
-//!    stored login serves where there is no key, and neither is the startup
-//!    failure it has always been.
-//! 5. **Nothing leaks.** No token reaches a rendering, an error or the store's
+//! 3. **A key rides the same wire, at the platform.** The same encoder, the
+//!    same grammar coming back, a bearer — and **none** of the four headers the
+//!    subscription request carries, because each of those is about borrowing
+//!    somebody else's client registration.
+//! 4. **The chat-completions encoder is unchanged.** It is no longer what an
+//!    `openai` key gets, but it is still what grok and Copilot ride, so its
+//!    body stays compared byte for byte against what this build has always
+//!    sent.
+//! 5. **The dispatch.** A key wins over a stored login; a stored login serves
+//!    where there is no key.
+//! 6. **The model each wire defaults to.** A seat's backend serves a narrower
+//!    set than the platform, so a subscription session that named no model
+//!    takes the seat's default rather than the catalog's — and a model somebody
+//!    *did* name is answered or refused, never substituted.
+//! 7. **Neither credential** is the startup failure it has always been, with
+//!    nothing on the wire.
+//! 8. **Nothing leaks.** No token reaches a rendering, an error or the store's
 //!    own `Debug`.
-//! 6. **An unsupported model costs nothing.** This backend serves a pinned
-//!    list, and a name outside it is refused here — before the credential is
-//!    read and before anything reaches the socket — rather than after a round
-//!    trip spent on the backend's own JSON.
+//! 9. **An unsupported model costs nothing** — and the seat's list does not
+//!    reach the platform, which phase 3 already took a turn on.
 //!
 //! Everything serves real bytes over loopback rather than mocking the client,
 //! the way every other provider suite here works: what is asserted on is the
 //! request that was actually built.
 //!
 //! One test, one binary, on purpose: it mutates `XDG_DATA_HOME`,
-//! `OPENAI_API_KEY` and `OPENAI_BASE_URL`, and a plain `cargo test` runs the
-//! tests inside a binary on parallel threads.
+//! `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `GANJA_PROVIDER` and `GANJA_MODEL`, and
+//! a plain `cargo test` runs the tests inside a binary on parallel threads.
 
 use std::{
     env,
@@ -46,10 +59,13 @@ use futures::StreamExt as _;
 use ganja_core::{
     Engine,
     auth::{self, AuthError, OauthCredential, RefreshOauth},
+    catalog,
     config::Config,
     permission::Permissions,
     protocol::{Command, Event, PartBody, Role},
-    provider::{ChatRequest, Provider as _, ProviderError, ResponsesProvider, openai, select},
+    provider::{
+        ChatRequest, Provider as _, ProviderError, ProviderEvent, ResponsesProvider, openai, select,
+    },
     tool::Registry,
 };
 use ganja_testkit::{RecorderTool, drain};
@@ -96,11 +112,27 @@ const SUBSCRIPTION_MODEL: &str = "gpt-5.4";
 
 /// The model the key phases ask for.
 ///
-/// Deliberately a *different* row, and deliberately one the subscription
-/// backend refuses (`codex.ts:289`): it keeps the chat-completions literal in
-/// phase 3 the bytes it has always been, and it is what phase 6 asks for to
-/// prove the two wires answer the same name differently.
+/// Deliberately a *different* row, and deliberately the one the subscription
+/// backend refuses (`codex.ts:289`). That is what makes it load-bearing here
+/// rather than arbitrary: phase 3 takes a whole turn on it through a key, phase
+/// 9 is refused it through a seat, and the pair is the proof that the seat's
+/// allow-list gates one backend and not the other. It is also the model whose
+/// live `400` — "To use function tools, use /v1/responses" — is why a key rides
+/// this wire at all.
 const KEY_MODEL: &str = "gpt-5.6";
+
+/// Headers a subscription request carries and a key request must not.
+///
+/// Each exists because the codex backend is talked to as the Codex CLI, whose
+/// client registration the stored access token was minted against; a key is the
+/// caller's own credential against the platform, and upstream sends such a
+/// request through the unwrapped `fetch` (`codex.ts:356`) with none of them.
+const SUBSCRIPTION_HEADERS: [&str; 4] = [
+    "chatgpt-account-id",
+    "originator",
+    "openai-beta",
+    "user-agent",
+];
 
 /// One request the endpoint was asked to serve.
 #[derive(Clone)]
@@ -362,10 +394,12 @@ fn responses(endpoint: &Endpoint) -> ResponsesProvider {
         .expect("loopback may carry a token")
 }
 
-/// Takes a whole turn, for the phases that assert on the request rather than
-/// on what streamed back. The body is drained rather than dropped: an
-/// unconsumed stream is a request that may never have been sent.
-async fn turn(provider: &dyn ganja_core::provider::Provider, model: &str) {
+/// Takes a whole turn and hands back what streamed.
+///
+/// The body is drained rather than dropped even where the caller only asserts
+/// on the request: an unconsumed stream is a request that may never have been
+/// sent.
+async fn turn(provider: &dyn ganja_core::provider::Provider, model: &str) -> Vec<ProviderEvent> {
     let streamed: Vec<_> = provider
         .stream(ask(model), CancellationToken::new())
         .await
@@ -374,6 +408,26 @@ async fn turn(provider: &dyn ganja_core::provider::Provider, model: &str) {
         .await;
 
     assert!(!streamed.is_empty(), "an answered turn streams something");
+    streamed
+}
+
+/// The reply text a set of provider events spells.
+fn replied(streamed: &[ProviderEvent]) -> String {
+    streamed
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::TextDelta(delta) => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The bill those events reported, if any.
+fn spent(streamed: &[ProviderEvent]) -> Option<ganja_core::protocol::Usage> {
+    streamed.iter().find_map(|event| match event {
+        ProviderEvent::Usage(usage) => Some(*usage),
+        _ => None,
+    })
 }
 
 /// A prompt command, as a frontend sends one.
@@ -385,7 +439,7 @@ fn prompt(text: &str) -> Command {
 }
 
 #[tokio::test]
-async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_chat_completions() {
+async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it_belongs_to() {
     let home = tempfile::tempdir().expect("a temp directory");
     // SAFETY: this binary holds exactly one test, so nothing else in the
     // process is reading the environment concurrently.
@@ -544,17 +598,78 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
         "the account travels from the same read the token does"
     );
 
-    // ---- 3. The key path is byte-identical. -------------------------------
+    // ---- 3. A key rides the same wire, at the platform. --------------------
+    // The model here is the one the live pass met `400 "Function tools with
+    // reasoning_effort are not supported for gpt-5.6 in /v1/chat/completions.
+    // To use function tools, use /v1/responses…"` on. This is that turn taken
+    // on the endpoint the refusal named.
     endpoint.forget();
-    endpoint.answers_turns_with(completions_transcript());
     // SAFETY: as above.
     unsafe {
         env::set_var("OPENAI_API_KEY", KEY);
         env::set_var(openai::BASE_URL_ENV, &endpoint.base_url);
     }
 
-    let keyed = openai::OpenAiProvider::from_env().expect("an exported key builds a provider");
-    turn(&keyed, KEY_MODEL).await;
+    let keyed = ResponsesProvider::from_env().expect("an exported key builds a provider");
+    let streamed = turn(&keyed, KEY_MODEL).await;
+
+    let sent = endpoint.only();
+    assert_eq!(
+        sent.path(),
+        RESPONSES,
+        "a key session is a Responses request too — the vendor picks the wire, \
+         not the credential (`plugin/provider/openai.ts:185`)"
+    );
+    assert_eq!(
+        sent.header("authorization").as_deref(),
+        Some(format!("Bearer {KEY}").as_str()),
+        "the exported key, and nothing that had to be exchanged for it"
+    );
+    for absent in SUBSCRIPTION_HEADERS {
+        assert_eq!(
+            sent.header(absent),
+            None,
+            "`{absent}` is about borrowing somebody else's client registration \
+             and travelled with an API key to a platform that never asked"
+        );
+    }
+
+    let body = sent.json();
+    assert_eq!(body["model"], json!(KEY_MODEL));
+    assert_eq!(body["stream"], json!(true));
+    assert_eq!(
+        body["store"],
+        json!(false),
+        "one encoder for both backends, so this is not a subscription special \
+         case — upstream holds it as a route-level default: {body}"
+    );
+    assert_eq!(body["instructions"], json!("be brief"));
+    assert_eq!(
+        body["input"],
+        json!([{"role": "user", "content": [{"type": "input_text", "text": "say hello"}]}]),
+        "got {body}"
+    );
+
+    // And the grammar coming back is read the same way, which is the half a
+    // request assertion cannot see.
+    assert_eq!(replied(&streamed), "Hello, world!");
+    let keyed_bill = spent(&streamed).expect("the terminal frame carries the bill");
+    assert_eq!(
+        (keyed_bill.input_tokens, keyed_bill.cache_read_tokens),
+        (26, 16),
+        "42 prompt tokens of which the cache served 16 is 26 fresh: {keyed_bill:?}"
+    );
+
+    // ---- 4. The chat-completions encoder is unchanged. ---------------------
+    // No longer what an `openai` key gets — but still what grok and Copilot
+    // ride, so the bytes stay pinned here rather than losing their only
+    // spelled-out assertion to this move.
+    endpoint.forget();
+    endpoint.answers_turns_with(completions_transcript());
+
+    let completions =
+        openai::OpenAiProvider::from_env().expect("an exported key builds a provider");
+    turn(&completions, KEY_MODEL).await;
 
     let sent = endpoint.only();
     assert_eq!(sent.path(), COMPLETIONS);
@@ -562,13 +677,6 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
         sent.header("authorization").as_deref(),
         Some(format!("Bearer {KEY}").as_str())
     );
-    for absent in ["chatgpt-account-id", "originator", "openai-beta"] {
-        assert_eq!(
-            sent.header(absent),
-            None,
-            "the key path must not have grown a header from the other wire"
-        );
-    }
     assert_eq!(
         sent.body,
         // What this build has always sent, spelled out rather than derived, so
@@ -581,10 +689,13 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
         "the chat-completions request is not this lane's to change"
     );
 
-    // ---- 4. The dispatch, all three ways. ---------------------------------
+    // ---- 5. The dispatch. --------------------------------------------------
     // A key outranks a stored login, exactly as `key_for` has always read the
-    // two. Both are present here, which is the case that can only go one way.
+    // two. Both are present here, which is the case that can only go one way —
+    // and both wires now answer on the same path, so what tells them apart is
+    // the bearer and the headers rather than the URL.
     endpoint.forget();
+    endpoint.answers_turns_with(responses_transcript());
     // SAFETY: as above. Named rather than defaulted, because an unset
     // `GANJA_PROVIDER` is the fake provider and would prove nothing.
     unsafe {
@@ -593,15 +704,20 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
     let chosen = select(&Config::default()).expect("a key is a session");
     assert_eq!(chosen.provider.id(), openai::ID, "one vendor, either wire");
     turn(chosen.provider.as_ref(), KEY_MODEL).await;
+
+    let sent = endpoint.only();
+    assert_eq!(sent.path(), RESPONSES);
     assert_eq!(
-        endpoint.only().path(),
-        COMPLETIONS,
+        sent.header("authorization").as_deref(),
+        Some(format!("Bearer {KEY}").as_str()),
         "a stored ChatGPT login must not take a session away from its API key"
     );
+    for absent in SUBSCRIPTION_HEADERS {
+        assert_eq!(sent.header(absent), None, "the key reached the platform");
+    }
 
-    // No key, a stored login: the subscription wire.
+    // No key, a stored login: the codex backend, with everything it wants.
     endpoint.forget();
-    endpoint.answers_turns_with(responses_transcript());
     // SAFETY: as above.
     unsafe {
         env::remove_var("OPENAI_API_KEY");
@@ -620,9 +736,92 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
         Some(format!("Bearer {SECOND_ACCESS}").as_str()),
         "and it is the stored one that travels"
     );
+    assert_eq!(
+        sent.header("chatgpt-account-id").as_deref(),
+        Some(SECOND_ACCOUNT),
+        "the seat's headers are still there for the seat"
+    );
 
-    // Neither: the startup failure it has always been, naming the variable and
-    // the login.
+    // ---- 6. The model each wire defaults to. -------------------------------
+    // The catalog holds one default per vendor, and this vendor has two
+    // backends with different offerings: the seat refuses `gpt-5.6` outright,
+    // so a subscription session handed the vendor-wide default would be a seat
+    // that cannot take a turn. The seat brings its own instead.
+    endpoint.forget();
+    // SAFETY: as above. `GANJA_MODEL` decides the model on its own tier, so it
+    // has to be absent for a *default* to be what is observed at all.
+    unsafe {
+        env::remove_var("GANJA_MODEL");
+    }
+    let defaulted = select(&Config::default()).expect("a stored login is a session");
+    assert_eq!(
+        defaulted.model, SUBSCRIPTION_MODEL,
+        "a ChatGPT seat that named no model takes the one its own backend \
+         serves, not the catalog's per-vendor row"
+    );
+    // Honest about what this proves *today*: the two defaults currently name
+    // the same model, so this compares equal whether or not the seat's default
+    // is consulted at all. What holds the seam while that is true is the unit
+    // test `a_backends_own_default_outranks_its_vendors_catalog_row`, which
+    // feeds it a value no catalog carries. This assertion goes sharp the moment
+    // they diverge, which is the commit that restores the newer row as the
+    // catalog's — and it is the one that would catch a seat being handed it.
+    assert!(
+        catalog::default_model(openai::ID).is_some(),
+        "the table still answers for this vendor, which is what the key wire \
+         falls through to"
+    );
+
+    // And it is genuinely the seat's rather than a coincidence of the two
+    // agreeing: a key session on the same vendor takes the catalog's.
+    // SAFETY: as above.
+    unsafe {
+        env::set_var("OPENAI_API_KEY", KEY);
+    }
+    let defaulted = select(&Config::default()).expect("a key is a session");
+    assert_eq!(
+        defaulted.model,
+        catalog::default_model(openai::ID).expect("openai has a pinned default"),
+        "the platform serves whatever it sells, so the key wire's default is \
+         the table's and no seat's list narrows it"
+    );
+
+    // A model somebody *named* is never substituted, on either wire: it is
+    // answered, or refused with what the seat does serve. Silently swapping it
+    // would answer a question nobody asked.
+    // SAFETY: as above.
+    unsafe {
+        env::remove_var("OPENAI_API_KEY");
+        env::set_var("GANJA_MODEL", KEY_MODEL);
+    }
+    let named = select(&Config::default()).expect("a stored login is a session");
+    assert_eq!(
+        named.model, KEY_MODEL,
+        "the seat's default must not overwrite an explicit choice"
+    );
+    let Err(refused_model) = named
+        .provider
+        .stream(ask(&named.model), CancellationToken::new())
+        .await
+    else {
+        panic!("the seat does not serve {KEY_MODEL}, so there is no turn to take");
+    };
+    assert!(
+        refused_model.to_string().contains(KEY_MODEL),
+        "the refusal names what was asked for: {refused_model}"
+    );
+    assert!(
+        endpoint.seen().is_empty(),
+        "and it costs no request to say so"
+    );
+    // SAFETY: as above.
+    unsafe {
+        env::remove_var("GANJA_MODEL");
+    }
+
+    // ---- 7. Neither credential. --------------------------------------------
+    // The startup failure it has always been, naming the variable and the
+    // login.
     endpoint.forget();
     assert!(
         auth::remove_credential(auth::openai::PROVIDER_ID).expect("the store is writable"),
@@ -641,7 +840,7 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
         "a session that could not start must not have reached the wire"
     );
 
-    // ---- 5. Nothing leaks. ------------------------------------------------
+    // ---- 8. Nothing leaks. ------------------------------------------------
     // SAFETY: as above.
     unsafe {
         env::remove_var(openai::BASE_URL_ENV);
@@ -670,11 +869,14 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
         );
     }
 
-    // ---- 6. A model this seat cannot run is refused before a turn is spent. --
-    // The same name phase 3 sent successfully as a key. The backend answers it
-    // `400 {"detail":"The 'gpt-5.6' model is not supported when using Codex
-    // with a ChatGPT account."}` — a round trip and somebody else's JSON to
-    // learn something `codex.ts:15` has written down.
+    // ---- 9. A model this seat cannot run is refused before a turn is spent. --
+    // The same name phase 3 took a whole turn on as a key, which is the pair
+    // that proves the seat's list gates one backend and not the other
+    // (`codex.ts:281` returns the models unfiltered for a credential that is
+    // not an OAuth one). The backend answers it `400 {"detail":"The 'gpt-5.6'
+    // model is not supported when using Codex with a ChatGPT account."}` — a
+    // round trip and somebody else's JSON to learn something `codex.ts:15` has
+    // written down.
     let Err(unsupported) = provider
         .stream(ask(KEY_MODEL), CancellationToken::new())
         .await

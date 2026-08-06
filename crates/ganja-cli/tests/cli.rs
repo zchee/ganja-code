@@ -181,6 +181,12 @@ fn logging_out_forgets_the_key_and_says_so_when_there_was_none() {
 /// A stored key that an exported variable outranks is the one way a successful
 /// login can change nothing, so the listing shows which is in use and the
 /// login says so.
+///
+/// **Both rows, and the outranked one saying what beat it.** The listing used
+/// to print only the winner, which made a credential it holds invisible to the
+/// command whose whole job is saying what it holds — so the stored tail is
+/// asserted here rather than asserted absent, and the marker is what keeps two
+/// rows from reading as two credentials in use.
 #[test]
 fn an_environment_variable_outranks_the_stored_key_and_is_pointed_out() {
     let data = data();
@@ -197,7 +203,9 @@ fn an_environment_variable_outranks_the_stored_key_and_is_pointed_out() {
         .stdout(
             predicate::str::contains("ANTHROPIC_API_KEY")
                 .and(predicate::str::contains("****4242"))
-                .and(predicate::str::contains("****8842").not()),
+                .and(predicate::str::contains("****8842"))
+                .and(predicate::str::contains("shadowed by ANTHROPIC_API_KEY"))
+                .and(predicate::str::contains(CANARY).not()),
         );
 
     ganja(&data)

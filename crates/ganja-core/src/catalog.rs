@@ -205,18 +205,27 @@ pub enum CatalogError {
 /// to say about it.
 const DEFAULTS: &[(&str, &str)] = &[
     ("anthropic", "claude-sonnet-5"),
-    // **Not the newest openai row, deliberately — do not "upgrade" it without
-    // reading this.** A default has to be a model that can take a ganja turn,
-    // and every ganja turn offers tools. `gpt-5.6` cannot, on either wire this
-    // build speaks. Chat completions refuses it live with `400 "Function tools
-    // with reasoning_effort are not supported for gpt-5.6 in
+    // **Not the newest openai row — do not "upgrade" it without reading this.**
+    // A default has to be a model that can take a ganja turn, and every ganja
+    // turn offers tools. `gpt-5.6` was measured refusing exactly that, live, on
+    // both wires this build spoke at the time: chat completions answered `400
+    // "Function tools with reasoning_effort are not supported for gpt-5.6 in
     // /v1/chat/completions. To use function tools, use /v1/responses or set
-    // reasoning_effort to 'none'."` — ganja sends no `reasoning_effort` and the
-    // API supplies its own — and the ChatGPT subscription backend does not
-    // serve that model at all (`provider::responses`, from `codex.ts:289`).
-    // `gpt-5.4` was measured taking the same turn on both. The newer row stays
-    // in the table below: it is reachable by name for a turn that offers no
-    // tools, and its sizing was never what was wrong.
+    // reasoning_effort to 'none'."`, and the ChatGPT subscription backend does
+    // not serve that model at all (`provider::responses`, from `codex.ts:289`).
+    //
+    // Half of that has since been answered rather than worked around: an API
+    // key now rides the Responses API, which is the endpoint the first refusal
+    // *named*, so this row is no longer what stands between a key session and
+    // the newest model. What it still is, is unmeasured — that turn has not been
+    // taken live yet — and `gpt-5.4` was. The other half is unchanged and always
+    // will be: the seat cannot run `gpt-5.6`. That is no longer this row's
+    // problem either, because a subscription session takes its default from
+    // `provider::responses::SUBSCRIPTION_DEFAULT` rather than from here.
+    //
+    // So this table's `openai` row is the **key** wire's default, and moving it
+    // costs one live turn's evidence rather than a version number. The newer row
+    // stays in the table below regardless: its sizing was never what was wrong.
     ("openai", "gpt-5.4"),
     ("grok", "grok-4.3"),
     ("github-copilot", "claude-sonnet-4.6"),
@@ -1246,41 +1255,48 @@ mod tests {
     /// Being in the table is not enough to be a *default*: the default is what
     /// a session runs when nobody chose, and every ganja session offers tools.
     ///
-    /// Both openai wires refused the newest row live, for two unrelated
-    /// reasons. Chat completions: `400 "Function tools with reasoning_effort
-    /// are not supported for gpt-5.6 in /v1/chat/completions"` — ganja never
-    /// sends `reasoning_effort`, so that is the API's own default colliding
-    /// with the tools every turn carries. The ChatGPT subscription backend:
-    /// `400 "The 'gpt-5.6' model is not supported when using Codex with a
-    /// ChatGPT account."` One model, two wires, no path that runs a tool.
+    /// This vendor has **two backends with different offerings**, so it has two
+    /// defaults and each is held to its own backend rather than to both. That
+    /// is the correction the live pass forced: `gpt-5.6` was refused by the
+    /// ChatGPT seat (`400 "The 'gpt-5.6' model is not supported when using
+    /// Codex with a ChatGPT account."`) *and* by chat completions (`400
+    /// "Function tools with reasoning_effort are not supported for gpt-5.6 in
+    /// /v1/chat/completions. To use function tools, use /v1/responses…"`), and
+    /// answering the second by moving a key session onto the Responses API left
+    /// only the first — which is a fact about a seat and not about the table.
     ///
-    /// So this pins the property rather than the string — that the default is a
-    /// row `provider::responses` will actually put on the wire — and the row
-    /// that failed stays reachable by name.
+    /// - The **key** wire's default is this table's row. It is deliberately
+    ///   *not* held to `responses::serves`: that predicate is the subscription
+    ///   backend's product decision, and applying it here would let somebody
+    ///   else's seat dictate what an API key defaults to.
+    /// - The **subscription** wire's default is
+    ///   `responses::SUBSCRIPTION_DEFAULT`, which must satisfy that predicate,
+    ///   because a default the backend refuses is a seat that cannot take a
+    ///   turn at all.
+    ///
+    /// Both have to be rows this table can size and price, or the turn they
+    /// start has no context window and no bill.
     #[test]
-    fn the_openai_default_is_a_model_both_of_that_vendors_wires_can_run_tools_on() {
-        let id = default_model("openai").expect("openai has a pinned default");
+    fn each_openai_wire_defaults_to_a_model_that_wire_can_run_tools_on() {
+        let key_wire = default_model("openai").expect("openai has a pinned default");
+        let subscription = crate::provider::responses::SUBSCRIPTION_DEFAULT;
 
-        assert_eq!(
-            id, "gpt-5.4",
-            "the default was measured live on both wires; changing it needs the \
-             same measurement, not a version number"
-        );
+        for id in [key_wire, subscription] {
+            assert!(
+                model(id).is_some_and(|info| info.provider_id == "openai"),
+                "{id} is a default nothing can size or price"
+            );
+        }
         assert!(
-            crate::provider::responses::serves(id),
-            "{id} is the default and the subscription backend refuses it, so a \
-             seat with no API key cannot take a turn at all"
-        );
-        assert!(
-            model(id).is_some_and(|info| info.provider_id == "openai"),
-            "a default nothing can size or price is a turn with no context \
-             window and no bill"
+            crate::provider::responses::serves(subscription),
+            "{subscription} is what a ChatGPT seat asks for when nobody chose, \
+             and its own backend refuses it"
         );
         assert!(
             model("gpt-5.6").is_some(),
-            "the newer row is kept rather than deleted: it is reachable by name \
-             for a tools-free turn, and its sizing was never the thing that was \
-             wrong"
+            "the row the live pass refused is kept rather than deleted: its \
+             sizing was never the thing that was wrong, and the wire that \
+             refused it is not the wire a key rides any more"
         );
     }
 
