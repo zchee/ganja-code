@@ -10,7 +10,9 @@
 //! 2. an environment block — the model's own name, where it is working, and
 //!    what day it is;
 //! 3. every instruction file that applies, each rendered as
-//!    `Instructions from: {path}` followed by its contents.
+//!    `Instructions from: {path}` followed by its contents;
+//! 4. the skills this session can load, when there are any — last, where
+//!    upstream puts them (`session/prompt.ts:1257-1268`).
 //!
 //! Which files apply is [`paths`], and the order is upstream's: the one global
 //! file, then the project's own, then whatever `instructions` in the config
@@ -38,7 +40,14 @@
 //! - **D25** — instruction globs do not consult ignore files, but do keep the
 //!   hidden-file rule; see [`glob`].
 //! - **D2** — `http(s)` entries in `instructions` are skipped with a warning
-//!   rather than fetched.
+//!   rather than fetched. `skills.urls` takes the same posture, in the same
+//!   words, at [`skill_roots`].
+//! - **`skills-block-omitted-when-there-are-none`** — upstream emits the
+//!   heading and the sentence "No skills are currently available." for a
+//!   session that has none (`skill/index.ts:321-323`). Here the whole block is
+//!   left out: every token of a system prompt is a token the model reads on
+//!   every request, and a paragraph announcing an empty list is a paragraph
+//!   about nothing. A session **with** skills gets upstream's block verbatim.
 
 use std::{
     collections::BTreeSet,
@@ -49,7 +58,7 @@ use std::{
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 
-use crate::{config::Config, project::Project};
+use crate::{config::Config, project::Project, tool::skill};
 
 /// Base prompt for Anthropic's models, ported verbatim (MIT; see
 /// `THIRD_PARTY_NOTICES.md`).
@@ -123,7 +132,36 @@ pub fn base_prompt(model_id: &str) -> &'static str {
 /// does not have to know that.
 #[must_use]
 pub fn system_prompt(config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
-    compose(&global_files(), config, cwd, model_id)
+    compose(
+        &global_files(),
+        &skill_roots(config, cwd),
+        config,
+        cwd,
+        model_id,
+    )
+}
+
+/// Where this session's skills are looked for: the conventional directories
+/// for `cwd`, plus whatever `skills.paths` named.
+///
+/// The one value both halves of the feature are built from. The system prompt
+/// lists what [`skill::discover`] finds here, and the same roots handed to
+/// [`skill::SkillTool::over`] are what a `skill` call loads from — which is how
+/// the list a model is offered and the list it can actually load stay the same
+/// list.
+///
+/// `skills.urls` is named in a warning and not fetched, for **D2**'s reason.
+#[must_use]
+pub fn skill_roots(config: &Config, cwd: &Path) -> skill::Roots {
+    for url in config.skill_urls() {
+        tracing::warn!(
+            url = url.as_str(),
+            "remote skills are not fetched; point skills.paths at a directory instead"
+        );
+    }
+
+    skill::Roots::standard(cwd, &crate::config::directories(cwd))
+        .with_paths(config.skill_paths(cwd))
 }
 
 /// The half of the system prompt no agent replaces: the environment block and
@@ -140,7 +178,13 @@ pub fn system_prompt(config: &Config, cwd: &Path, model_id: &str) -> Option<Stri
 /// but typed to match its consumer.
 #[must_use]
 pub fn suffix(config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
-    suffix_from(&global_files(), config, cwd, model_id)
+    suffix_from(
+        &global_files(),
+        &skill_roots(config, cwd),
+        config,
+        cwd,
+        model_id,
+    )
 }
 
 /// Puts the two halves of a system prompt together: the half an agent replaces,
@@ -163,9 +207,15 @@ pub(crate) fn joined(head: Option<&str>, suffix: Option<&str>) -> Option<String>
 /// The split is what lets the tests below prove the composition without the
 /// machine running them contributing an `AGENTS.md` of its own — and the global
 /// candidates really are an input to discovery rather than something it knows.
-fn compose(global: &[PathBuf], config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
+fn compose(
+    global: &[PathBuf],
+    roots: &skill::Roots,
+    config: &Config,
+    cwd: &Path,
+    model_id: &str,
+) -> Option<String> {
     let base = base_prompt(model_id);
-    let tail = suffix_from(global, config, cwd, model_id).unwrap_or_default();
+    let tail = suffix_from(global, roots, config, cwd, model_id).unwrap_or_default();
 
     let mut prompt = String::with_capacity(base.len() + tail.len() + 1);
     prompt.push_str(base);
@@ -175,9 +225,20 @@ fn compose(global: &[PathBuf], config: &Config, cwd: &Path, model_id: &str) -> O
     (!prompt.is_empty()).then_some(prompt)
 }
 
-/// [`suffix`], with the global instruction candidates handed in — the same
-/// test seam [`compose`] has, for the same reason.
-fn suffix_from(global: &[PathBuf], config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
+/// [`suffix`], with the global instruction candidates and the skill roots
+/// handed in — the same test seam [`compose`] has, for the same reason.
+///
+/// The roots are an input for a second reason the instruction candidates share:
+/// they name directories on the machine running this, so a test that composed a
+/// prompt without being able to say *which* directories would be a test whose
+/// answer depended on whose laptop it ran on.
+fn suffix_from(
+    global: &[PathBuf],
+    roots: &skill::Roots,
+    config: &Config,
+    cwd: &Path,
+    model_id: &str,
+) -> Option<String> {
     let mut prompt = environment(cwd, model_id);
 
     for path in discover(global, config, cwd) {
@@ -199,7 +260,65 @@ fn suffix_from(global: &[PathBuf], config: &Config, cwd: &Path, model_id: &str) 
         prompt.push_str(&content);
     }
 
+    // Last, as upstream orders it, and only when there is something to list;
+    // see the module's `skills-block-omitted-when-there-are-none`.
+    if let Some(block) = skills_block(&skill::discover(roots)) {
+        prompt.push('\n');
+        prompt.push_str(&block);
+    }
+
     (!prompt.is_empty()).then_some(prompt)
+}
+
+/// What the model is told about the skills it can load, or nothing when it can
+/// load none it could choose between.
+///
+/// Upstream's verbose rendering (`skill/index.ts:321-346`, chosen at
+/// `session/system.ts:101-109` with the comment that the model ingests the
+/// long form better here and the short form in the tool description). A skill
+/// with no description is left out of the list for upstream's reason: a name
+/// with nothing beside it gives the model nothing to choose by. It stays
+/// loadable, which is why this is a filter and not a refusal.
+fn skills_block(skills: &[skill::Skill]) -> Option<String> {
+    let described: Vec<&skill::Skill> = skills
+        .iter()
+        .filter(|skill| skill.description.is_some())
+        .collect();
+    if described.is_empty() {
+        return None;
+    }
+
+    let mut block = String::from(
+        "Skills provide specialized instructions and workflows for specific tasks.\n\
+         Use the skill tool to load a skill when a task matches its description.\n\
+         <available_skills>",
+    );
+    for skill in described {
+        let _ = write!(
+            block,
+            "\n  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    \
+             <location>{}</location>\n  </skill>",
+            skill.name,
+            skill.description.as_deref().unwrap_or_default(),
+            escaped(&skill.location.display().to_string())
+        );
+    }
+    block.push_str("\n</available_skills>");
+
+    Some(block)
+}
+
+/// `text` with the characters that would close a tag written as entities.
+///
+/// Upstream escapes the location alone (`skill/index.ts:333`), which is the
+/// one field of the three that is not a value somebody wrote for a prompt: it
+/// is a filesystem path, and a path may hold anything a filesystem allows.
+fn escaped(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// The environment block, ported from upstream's `SystemPrompt.environment`.
@@ -481,9 +600,9 @@ mod tests {
 
     use super::{
         ANTHROPIC, DEFAULT, GPT, base_prompt, civil_date, compose, discover, environment, find_up,
-        glob, resolve_entry, today,
+        glob, resolve_entry, skill, skills_block, suffix_from, today,
     };
-    use crate::config::Config;
+    use crate::config::{Config, SkillsConfig};
 
     fn temporary() -> TempDir {
         TempDir::new().expect("a temporary directory is creatable")
@@ -752,7 +871,14 @@ mod tests {
             instructions: vec!["docs/*.md".to_owned()],
             ..Config::default()
         };
-        let prompt = compose(&[], &config, &root, "claude-sonnet-5").expect("a prompt is composed");
+        let prompt = compose(
+            &[],
+            &skill::Roots::none(),
+            &config,
+            &root,
+            "claude-sonnet-5",
+        )
+        .expect("a prompt is composed");
 
         assert!(prompt.starts_with(ANTHROPIC), "the base prompt comes first");
         assert!(
@@ -790,7 +916,8 @@ mod tests {
             instructions: vec!["docs/*.md".to_owned()],
             ..Config::default()
         };
-        let prompt = compose(&[], &config, &root, "fake-1").expect("a prompt is composed");
+        let prompt = compose(&[], &skill::Roots::none(), &config, &root, "fake-1")
+            .expect("a prompt is composed");
 
         assert!(prompt.contains("kept"));
         assert!(!prompt.contains("gone.md"), "{prompt}");
@@ -831,5 +958,204 @@ mod tests {
         assert!(super::MONTHS.contains(&fields[1]), "{rendered}");
         assert_eq!(fields[2].len(), 2, "{rendered}");
         assert_eq!(fields[3].len(), 4, "{rendered}");
+    }
+
+    /// Writes a skill at `<root>/<name>/SKILL.md`.
+    fn plant_skill(root: &Path, name: &str, frontmatter: &str) {
+        plant(
+            &root.join(name).join("SKILL.md"),
+            &format!("---\n{frontmatter}\n---\n# {name}\n"),
+        );
+    }
+
+    /// The block is upstream's, field for field, and the skills in it are
+    /// sorted by name whatever order the disk offered them in.
+    #[test]
+    fn the_skills_block_is_the_one_upstream_composes() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        checkout(&root);
+        let skills = root.join("skills");
+        plant_skill(
+            &skills,
+            "porting",
+            "name: porting\ndescription: How to port.",
+        );
+        plant_skill(
+            &skills,
+            "auditing",
+            "name: auditing\ndescription: How to audit.",
+        );
+
+        let found = skill::discover(&skill::Roots::none().with_paths([skills.clone()]));
+        let block = skills_block(&found).expect("two skills are two skills");
+
+        assert_eq!(
+            block,
+            format!(
+                "Skills provide specialized instructions and workflows for specific tasks.\n\
+                 Use the skill tool to load a skill when a task matches its description.\n\
+                 <available_skills>\n  \
+                   <skill>\n    <name>auditing</name>\n    \
+                     <description>How to audit.</description>\n    \
+                     <location>{}</location>\n  </skill>\n  \
+                   <skill>\n    <name>porting</name>\n    \
+                     <description>How to port.</description>\n    \
+                     <location>{}</location>\n  </skill>\n\
+                 </available_skills>",
+                skills.join("auditing").join("SKILL.md").display(),
+                skills.join("porting").join("SKILL.md").display(),
+            )
+        );
+    }
+
+    /// A skill with no description is loadable and unlisted, which is upstream's
+    /// rule — and a session whose skills are all like that has no block at all.
+    #[test]
+    fn a_skill_with_nothing_to_choose_it_by_is_not_advertised() {
+        let directory = temporary();
+        let skills = directory.path().join("skills");
+        plant_skill(&skills, "nameless", "name: nameless");
+
+        let found = skill::discover(&skill::Roots::none().with_paths([skills]));
+
+        assert_eq!(found.len(), 1, "it is still discovered");
+        assert_eq!(skills_block(&found), None);
+        assert_eq!(skills_block(&[]), None);
+    }
+
+    /// A location is the one field of the three that nobody wrote for a
+    /// prompt, so it cannot be allowed to close a tag.
+    #[test]
+    fn a_location_holding_markup_is_escaped_where_the_other_fields_are_not() {
+        let block = skills_block(&[skill::Skill {
+            name: "porting".to_owned(),
+            description: Some("How to port.".to_owned()),
+            location: std::path::PathBuf::from("/tmp/<a>&'\"/SKILL.md"),
+            content: String::new(),
+        }])
+        .expect("a described skill is listed");
+
+        assert!(
+            block.contains("<location>/tmp/&lt;a&gt;&amp;&#39;&quot;/SKILL.md</location>"),
+            "{block}"
+        );
+    }
+
+    /// Where the block sits in the prompt, and that a session with no skills
+    /// carries no trace of the feature at all.
+    #[test]
+    fn the_skills_block_comes_last_and_only_when_there_are_skills() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        checkout(&root);
+        plant(&root.join("AGENTS.md"), "always run the tests");
+        let skills = root.join("skills");
+        plant_skill(
+            &skills,
+            "porting",
+            "name: porting\ndescription: How to port.",
+        );
+
+        let bare = suffix_from(
+            &[],
+            &skill::Roots::none(),
+            &Config::default(),
+            &root,
+            "fake-1",
+        )
+        .expect("the environment block always says something");
+        assert!(
+            !bare.contains("available_skills") && !bare.contains("Skills provide"),
+            "a session with no skills is told nothing about skills: {bare}"
+        );
+
+        let composed = suffix_from(
+            &[],
+            &skill::Roots::none().with_paths([skills]),
+            &Config::default(),
+            &root,
+            "fake-1",
+        )
+        .expect("a prompt is composed");
+
+        let instructions = composed
+            .find("always run the tests")
+            .expect("the project file is attached");
+        let block = composed
+            .find("<available_skills>")
+            .expect("the skill is advertised");
+        assert!(
+            instructions < block,
+            "upstream puts the skills after the instructions: {composed}"
+        );
+        assert!(composed.contains("<name>porting</name>"));
+    }
+
+    /// The two config keys: `paths` becomes a root, and `urls` is accepted and
+    /// left alone rather than fetched.
+    #[test]
+    fn the_config_names_directories_the_conventional_tiers_would_never_reach() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        checkout(&root);
+        let elsewhere = directory.path().join("elsewhere");
+        plant_skill(
+            &elsewhere,
+            "porting",
+            "name: porting\ndescription: How to port.",
+        );
+
+        let config = Config {
+            skills: SkillsConfig {
+                paths: vec![elsewhere.display().to_string()],
+                urls: vec!["https://example.invalid/skills/".to_owned()],
+            },
+            ..Config::default()
+        };
+        let roots = super::skill_roots(&config, &root);
+
+        assert_eq!(
+            roots.dirs().last(),
+            Some(&elsewhere),
+            "a configured path is the closest tier: {:?}",
+            roots.dirs()
+        );
+        assert!(
+            skill::discover(&skill::Roots::none().with_paths(config.skill_paths(&root)))
+                .iter()
+                .any(|found| found.name == "porting"),
+            "and it is scanned"
+        );
+        // Nothing was fetched, and nothing failed for not having been: the URL
+        // contributes no root at all.
+        assert!(
+            !roots
+                .dirs()
+                .iter()
+                .any(|dir| dir.display().to_string().contains("example.invalid")),
+            "{:?}",
+            roots.dirs()
+        );
+    }
+
+    /// A relative `skills.paths` entry resolves against the session's working
+    /// directory, and one naming nothing is dropped rather than carried.
+    #[test]
+    fn a_configured_path_resolves_where_the_session_is_and_must_exist() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        checkout(&root);
+        plant_skill(&root.join("tools"), "porting", "name: porting");
+
+        let config = Config {
+            skills: SkillsConfig {
+                paths: vec!["tools".to_owned(), "nowhere".to_owned()],
+                urls: Vec::new(),
+            },
+            ..Config::default()
+        };
+
+        assert_eq!(config.skill_paths(&root), vec![root.join("tools")]);
     }
 }

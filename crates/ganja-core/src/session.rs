@@ -46,12 +46,13 @@ use crate::{
     engine::Fanout,
     permission::{Decision, Permissions},
     protocol::{
-        Event, FinishReason, Message, Part, PartBody, PartId, PermissionId, PermissionReply, Role,
-        ToolState, Usage, now,
+        Event, FinishReason, Message, Part, PartBody, PartId, PermissionId, PermissionReply,
+        QuestionAnswer, QuestionId, QuestionInfo, QuestionOption, QuestionSource, Role, ToolState,
+        Usage, now,
     },
     provider::{ChatRequest, Provider, ProviderEvent},
     storage::{SessionId, SessionInfo, Storage, StorageError},
-    tool::{Credentials, FileTimes, Registry, ToolCtx, ToolError, shell},
+    tool::{Credentials, FileTimes, Registry, ToolCtx, ToolError, question, shell},
 };
 
 /// What the model reads when the user refuses a call, ported verbatim from
@@ -232,16 +233,54 @@ Rules:
 pub(crate) struct TurnHandle {
     /// Stops the turn: the provider stream, a running tool, a permission wait.
     pub(crate) cancel: CancellationToken,
-    /// The permission wait a reply command answers, when one is open. Shared
-    /// with the turn task, which sets and clears it.
+    /// The wait a reply command answers, when one is open. Shared with the
+    /// turn task, which sets and clears it.
     pub(crate) permission: Arc<std::sync::Mutex<Option<PendingReply>>>,
 }
 
-/// One open permission request: the id a reply must name, and the channel the
-/// turn task is blocked on.
-pub(crate) struct PendingReply {
-    pub(crate) id: PermissionId,
-    pub(crate) sender: oneshot::Sender<PermissionReply>,
+/// One open request the person owes an answer to: the id a reply must name,
+/// and the channel the turn task is blocked on.
+///
+/// **One cell, not two.** A turn is blocked *inside* whichever request is
+/// open — the tool call that raised it has not returned — so there is never
+/// more than one, and a second slot would only make it possible for a reply
+/// to be routed to a request that is not being waited on. The kinds are
+/// discriminated here instead, which is what makes a `ReplyQuestion` naming a
+/// permission id (or the reverse) a miss rather than a mis-delivery.
+pub(crate) enum PendingReply {
+    /// A permission dialog, answered by [`Command::ReplyPermission`].
+    ///
+    /// [`Command::ReplyPermission`]: crate::protocol::Command::ReplyPermission
+    Permission {
+        /// The id a reply must name.
+        id: PermissionId,
+        /// Where the answer is delivered.
+        sender: oneshot::Sender<PermissionReply>,
+    },
+    /// A question, answered by [`Command::ReplyQuestion`] or dismissed by
+    /// [`Command::RejectQuestion`].
+    ///
+    /// [`Command::ReplyQuestion`]: crate::protocol::Command::ReplyQuestion
+    /// [`Command::RejectQuestion`]: crate::protocol::Command::RejectQuestion
+    Question {
+        /// The id a reply or a rejection must name.
+        id: QuestionId,
+        /// Where the answer — or the dismissal — is delivered.
+        sender: oneshot::Sender<Answered>,
+    },
+}
+
+/// What answered a question.
+///
+/// A dismissal is its own value rather than an empty answer list, because
+/// upstream draws the same line: `question.rejected` carries its own payload,
+/// the waiting call fails instead of completing, and a consumer that read a
+/// dismissal as "answered nothing" would have to invent answers nobody gave.
+pub(crate) enum Answered {
+    /// The person's picks, one list per question, in the order asked.
+    Replied(Vec<QuestionAnswer>),
+    /// The person dismissed the question.
+    Rejected,
 }
 
 /// What a persistent engine keeps beside the transcript: the store, and which
@@ -1377,6 +1416,10 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
         files: Arc::clone(&turn.files),
         credentials: turn.credentials.clone(),
         spawn: None,
+        // A `!` passthrough is the person at the terminal running a command,
+        // not the model calling a tool. There is no call to ask about and
+        // nothing that could ask.
+        ask: None,
     };
     let tool = shell::ShellTool::new();
     let running = tool.run_reporting(input.clone(), &ctx, Some(progress));
@@ -2348,6 +2391,23 @@ async fn resolve(
                     part_id: call.part_id.clone(),
                 }) as Arc<dyn crate::tool::task::Subagents>
             }),
+            // Built per call for the same reason, and out of the same three
+            // pieces the permission wait uses: a dialog names the call it came
+            // from, and a reply has to reach the turn that is blocked in it.
+            // Present on every turn — including a subagent's, whose questions
+            // cross to the parent exactly as its permission dialogs do. What
+            // keeps a headless run from being asked is a standing rule
+            // refusing `question`, not the absence of this.
+            ask: Some(Arc::new(Ask {
+                events: Arc::clone(&turn.events),
+                session_id: turn.session_id.clone(),
+                pending: Arc::clone(&turn.pending),
+                cancel: turn.cancel.clone(),
+                source: QuestionSource {
+                    message_id: assistant.id.clone(),
+                    call_id: call.id.clone(),
+                },
+            }) as Arc<dyn question::Asker>),
         };
         let running = tool.run(args.clone(), &ctx);
         tokio::pin!(running);
@@ -2500,7 +2560,7 @@ async fn wait_permission(
     *turn
         .pending
         .lock()
-        .expect("the pending permission is never poisoned") = Some(PendingReply {
+        .expect("the pending permission is never poisoned") = Some(PendingReply::Permission {
         id: id.clone(),
         sender,
     });
@@ -2586,9 +2646,255 @@ async fn wait_permission(
     }
 }
 
+/// One question as the wire carries it, from one as the model asked it.
+///
+/// One half of the round-trip pin that holds `ganja-tool`'s copy of this shape
+/// against `ganja-protocol`'s — `ganja-core` is the only crate that sees both,
+/// because a tool may not name a wire type. See [`question_prompt`] for the
+/// other half, and `tests/question_shape.rs` for the test that compares their
+/// serde representations.
+///
+/// Both destructure **exhaustively, and never with `..`**: a field added to
+/// either copy fails to compile here until somebody decides what it means on
+/// the other side.
+#[must_use]
+pub fn question_info(prompt: &question::Prompt) -> QuestionInfo {
+    let question::Prompt {
+        question,
+        header,
+        options,
+        multiple,
+    } = prompt;
+
+    QuestionInfo {
+        question: question.clone(),
+        header: header.clone(),
+        options: options.iter().map(question_option).collect(),
+        multiple: *multiple,
+        // Upstream's `Prompt` carries no `custom`: it is the asking service's
+        // field rather than the model's, and its absence reads as the
+        // documented default — a custom answer is allowed.
+        custom: None,
+    }
+}
+
+/// One question as the model asks it, from one as the wire carries it.
+///
+/// The other half of the pin described on [`question_info`].
+#[must_use]
+pub fn question_prompt(info: &QuestionInfo) -> question::Prompt {
+    let QuestionInfo {
+        question,
+        header,
+        options,
+        multiple,
+        // Dropped on the way back, which is upstream's own asymmetry: the
+        // model's shape has no such field. Bound rather than skipped with
+        // `..` so a *new* protocol field cannot be quietly lost here — it
+        // would fail to compile until somebody decides what it means to the
+        // model.
+        custom: _,
+    } = info;
+
+    question::Prompt {
+        question: question.clone(),
+        header: header.clone(),
+        options: options.iter().map(question_choice).collect(),
+        multiple: *multiple,
+    }
+}
+
+/// One choice as the wire carries it. See [`question_info`].
+#[must_use]
+pub fn question_option(choice: &question::Choice) -> QuestionOption {
+    let question::Choice { label, description } = choice;
+
+    QuestionOption {
+        label: label.clone(),
+        description: description.clone(),
+    }
+}
+
+/// One choice as the model offers it. See [`question_info`].
+#[must_use]
+pub fn question_choice(option: &QuestionOption) -> question::Choice {
+    let QuestionOption { label, description } = option;
+
+    question::Choice {
+        label: label.clone(),
+        description: description.clone(),
+    }
+}
+
+/// What one `question` call asks the person through.
+///
+/// Built per call for the same reason [`crate::subagent::Spawn`] is: what a
+/// dialog has to name is *this* call's part, and a value that outlived the
+/// call would name the wrong one. Everything it holds belongs to the turn —
+/// the fanout the request is published on, the session it is addressed as, the
+/// slot a reply lands in, and the cancel that ends the wait.
+pub(crate) struct Ask {
+    /// The turn's fanout. A child turn's is its private channel, and the
+    /// crossing watcher re-addresses what it finds there, exactly as it does
+    /// for a permission dialog.
+    pub(crate) events: Arc<Fanout>,
+    /// The session the request is addressed as.
+    pub(crate) session_id: SessionId,
+    /// Where the reply lands, shared with the turn handle the engine routes
+    /// commands into. A subagent shares the **parent's**, because the parent
+    /// is blocked inside the call the child is running.
+    pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
+    /// Ends the wait, and the turn with it.
+    pub(crate) cancel: CancellationToken,
+    /// Where in the transcript the question was asked from.
+    pub(crate) source: QuestionSource,
+}
+
+impl std::fmt::Debug for Ask {
+    /// Hand-written because the reply slot is a channel end with no [`Debug`]
+    /// of its own, and because what is worth reading here is where the call
+    /// sits rather than the machinery behind it.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Ask")
+            .field("session_id", &self.session_id)
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl question::Asker for Ask {
+    /// Publishes the request and waits, under the same discipline the
+    /// permission wait keeps and for the same reason: **every
+    /// `QuestionAsked` that reaches a subscriber is followed by exactly one
+    /// terminal event**, so a frontend can retire its dialog unconditionally.
+    ///
+    /// The three races and their one terminal each:
+    ///
+    /// | the winner | what the subscriber sees | what the call reads |
+    /// |---|---|---|
+    /// | a reply | `QuestionReplied` | the answers |
+    /// | a dismissal | `QuestionRejected` | upstream's dismissal sentence |
+    /// | a cancel | `QuestionRejected` | a cancelled call, which ends the turn |
+    ///
+    /// A cancel wins even against an answer already in the channel: the
+    /// permission wait resolves that race the same way, and for the same
+    /// reason — the person stopped the turn, so the work the answer would
+    /// have unblocked must not happen.
+    async fn ask(
+        &self,
+        questions: Vec<question::Prompt>,
+    ) -> Result<Vec<question::Answer>, question::Unanswered> {
+        let (sender, receiver) = oneshot::channel();
+        let id = QuestionId::ascending();
+        *self
+            .pending
+            .lock()
+            .expect("the pending permission is never poisoned") = Some(PendingReply::Question {
+            id: id.clone(),
+            sender,
+        });
+
+        let asked = Event::QuestionAsked {
+            session_id: self.session_id.clone(),
+            id: id.clone(),
+            questions: questions.iter().map(question_info).collect(),
+            source: Some(self.source.clone()),
+        };
+        if self.publish(asked).await.is_break() {
+            // The request never reached the subscriber, so no reply is owed
+            // and no terminal event is either.
+            retract(&self.pending);
+            return Err(question::Unanswered::Cancelled);
+        }
+
+        let received = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => None,
+            answered = receiver => answered.ok(),
+        };
+
+        let Some(answered) = received else {
+            // Cancelled while waiting. The rejection below travels the
+            // terminal path unconditionally: it is the answer this request was
+            // promised.
+            retract(&self.pending);
+            self.terminate(&id).await;
+            return Err(question::Unanswered::Cancelled);
+        };
+
+        let (event, answer) = match answered {
+            Answered::Replied(answers) => (
+                Event::QuestionReplied {
+                    session_id: self.session_id.clone(),
+                    id: id.clone(),
+                    answers: answers.clone(),
+                },
+                Ok(answers),
+            ),
+            Answered::Rejected => (
+                Event::QuestionRejected {
+                    session_id: self.session_id.clone(),
+                    id: id.clone(),
+                },
+                Err(question::Unanswered::Dismissed),
+            ),
+        };
+
+        if self.publish(event).await.is_break() {
+            // The answer lost its race against a cancel and was never queued;
+            // what the request gets instead is the dismissal the cancel means,
+            // and the call does not complete either way.
+            self.terminate(&id).await;
+            return Err(question::Unanswered::Cancelled);
+        }
+
+        answer
+    }
+}
+
+impl Ask {
+    /// Queues `event`, or reports that the turn is over — the question seam's
+    /// [`deliver`], which cannot use that one because it holds the turn's
+    /// pieces rather than the turn.
+    async fn publish(&self, event: Event) -> ControlFlow<()> {
+        tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => ControlFlow::Break(()),
+            queued = self.events.send(event) => match queued {
+                Ok(()) => ControlFlow::Continue(()),
+                Err(_) => ControlFlow::Break(()),
+            },
+        }
+    }
+
+    /// Sends the terminal event a published request is owed, on the plain path
+    /// that is never raced against the cancel that caused it.
+    async fn terminate(&self, id: &QuestionId) {
+        let _ = self
+            .events
+            .send(Event::QuestionRejected {
+                session_id: self.session_id.clone(),
+                id: id.clone(),
+            })
+            .await;
+    }
+}
+
 /// Clears the reply slot for a request that will never be answered.
 fn retract_pending(turn: &Turn) {
-    turn.pending
+    retract(&turn.pending);
+}
+
+/// Clears a reply slot held by something other than a whole [`Turn`] — the
+/// question seam, which carries the cell without carrying the turn.
+///
+/// Takes whatever is there rather than only this request's entry, which is
+/// safe for the reason the cell is one cell: the turn is blocked inside the
+/// request being retracted, so nothing else can have installed anything.
+fn retract(pending: &std::sync::Mutex<Option<PendingReply>>) {
+    pending
         .lock()
         .expect("the pending permission is never poisoned")
         .take();

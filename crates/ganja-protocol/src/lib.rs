@@ -32,6 +32,10 @@ const PART_PREFIX: &str = "prt";
 /// Prefix for permission request ids.
 const PERMISSION_PREFIX: &str = "perm";
 
+/// Prefix for question request ids, matching upstream's `que_`
+/// (`packages/schema/src/v1/question.ts`).
+const QUESTION_PREFIX: &str = "que";
+
 /// Prefix session ids carry, matching upstream's `ses_` ids.
 const SESSION_PREFIX: &str = "ses";
 
@@ -141,6 +145,37 @@ impl PermissionId {
 }
 
 impl From<String> for PermissionId {
+    /// Adopts a stored id; see [`MessageId::from`].
+    fn from(id: String) -> Self {
+        Self(id)
+    }
+}
+
+/// Identifies one question request, so a reply or a rejection can name what it
+/// answers.
+///
+/// A type of its own rather than a reused [`PermissionId`], because the two
+/// requests are answered by different commands and a frontend holding both
+/// dialogs must not be able to send one's id where the other belongs.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct QuestionId(String);
+
+impl QuestionId {
+    /// Mints an id that sorts after every id minted before it.
+    #[must_use]
+    pub fn ascending() -> Self {
+        Self(ascending(QUESTION_PREFIX))
+    }
+
+    /// The id as it travels the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for QuestionId {
     /// Adopts a stored id; see [`MessageId::from`].
     fn from(id: String) -> Self {
         Self(id)
@@ -581,6 +616,29 @@ pub enum Command {
         /// The user's decision.
         reply: PermissionReply,
     },
+    /// Answers an [`Event::QuestionAsked`]. Ignored when nothing with this id
+    /// is waiting, which is what a reply racing a cancel becomes.
+    ///
+    /// Named for the event it answers, as [`Command::ReplyPermission`] is.
+    ReplyQuestion {
+        /// The request being answered.
+        id: QuestionId,
+        /// One answer per question, in the order they were asked. A question
+        /// the person skipped is answered with an empty list rather than
+        /// omitted: the model reads the answers positionally.
+        answers: Vec<QuestionAnswer>,
+    },
+    /// Dismisses an [`Event::QuestionAsked`] without answering it. Ignored
+    /// when nothing with this id is waiting.
+    ///
+    /// A command of its own rather than a `ReplyQuestion` carrying a refusing
+    /// value, because upstream's rejection is its own event with its own
+    /// payload and the tool call fails rather than completing — see
+    /// [`Event::QuestionRejected`].
+    RejectQuestion {
+        /// The request being dismissed.
+        id: QuestionId,
+    },
     /// Runs the rest of the session as a different agent: its prompt, its
     /// rules, and the model it prefers. Takes effect at the **next** turn —
     /// upstream re-resolves the agent per prompt and so does this — and is
@@ -660,6 +718,73 @@ pub enum PermissionReply {
     /// Refuse the call. The model is told, and decides what to do next.
     Reject,
 }
+
+/// One choice a question offers.
+///
+/// Spec: upstream `packages/schema/src/v1/question.ts`, `Option`. The two
+/// descriptions are the model's own words, written for the person who has to
+/// pick, which is why both are required rather than the label alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    /// Display text (1-5 words, concise).
+    pub label: String,
+    /// Explanation of choice.
+    pub description: String,
+}
+
+/// One question as a frontend is asked to put it.
+///
+/// Spec: upstream's `Info` — its `Prompt` plus [`custom`](Self::custom). The
+/// model sends a `Prompt`; the engine is what turns each one into an `Info`,
+/// so the extra field is the engine's to fill and never the model's to claim.
+///
+/// **This shape is declared twice**, here and as `ganja-tool`'s `question`
+/// argument struct, because `ganja-tool` may not depend on this crate. The two
+/// are held together by a round-trip pin in `ganja-core` — the one crate that
+/// sees both — which destructures exhaustively in both directions and compares
+/// serde representations, so a field, a rename or a default attribute that
+/// moves on one side reddens rather than drifting.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionInfo {
+    /// Complete question.
+    pub question: String,
+    /// Very short label (max 30 chars).
+    pub header: String,
+    /// Available choices.
+    pub options: Vec<QuestionOption>,
+    /// Allow selecting more than one choice. Absent from the wire when unset,
+    /// which is upstream's optional field and reads as "one choice".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiple: Option<bool>,
+    /// Allow typing a custom answer (default: true). Absent from the wire when
+    /// unset — and unset is what the model's own `Prompt` always produces,
+    /// since upstream's `Prompt` does not carry this field at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<bool>,
+}
+
+/// Where in the transcript a question was asked from.
+///
+/// Spec: upstream's `QuestionTool`. [`Option`]al on the request for the same
+/// reason it is optional upstream: asking is a service, and a caller that is
+/// not a tool call has no part to name. Every question this build asks comes
+/// from the `question` tool, so today it is always present — carried anyway,
+/// because a frontend that correlates the dialog with the call's part should
+/// not have to learn that fact from the absence of an alternative.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionSource {
+    /// The assistant message holding the call's part.
+    pub message_id: MessageId,
+    /// The provider's id for the call that asked.
+    pub call_id: String,
+}
+
+/// One question's answer: the labels the person picked, or typed.
+///
+/// Upstream's `Answer` is an array of strings even for a single-choice
+/// question — the same shape answers both, and `multiple` is about what the
+/// dialog permits rather than about what an answer looks like.
+pub type QuestionAnswer = Vec<String>;
 
 /// Something the engine observed, delivered to every subscriber in the order
 /// it happened, under the policy each subscriber chose: a lossless subscriber
@@ -759,6 +884,57 @@ pub enum Event {
         /// What was decided.
         reply: PermissionReply,
     },
+    /// The model asked the person something and the turn is waiting on the
+    /// answer. It holds until [`Command::ReplyQuestion`] or
+    /// [`Command::RejectQuestion`] names this id, or the turn is cancelled.
+    ///
+    /// Spec: upstream's `question.asked` (`packages/schema/src/v1/question.ts`),
+    /// whose payload is the whole request.
+    ///
+    /// Unlike a permission, this is not a gate on a call that would otherwise
+    /// run: the call *is* the asking. That is why the request carries no
+    /// tool arguments and why refusing it has an event of its own below.
+    QuestionAsked {
+        /// Session this happened in. A question that crossed from a subagent
+        /// carries the delegating session's id, because that is the
+        /// conversation whose turn is waiting on the answer.
+        session_id: SessionId,
+        /// Names this request, for the reply.
+        id: QuestionId,
+        /// What is being asked, in order. Every one of them is answered, or
+        /// none is: a reply carries an answer per question.
+        questions: Vec<QuestionInfo>,
+        /// Where in the transcript the question was asked from. Absent from
+        /// the wire when nothing named a call — see [`QuestionSource`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<QuestionSource>,
+    },
+    /// A question was answered, so a frontend can retire the dialog.
+    ///
+    /// Spec: upstream's `question.replied`, whose payload is
+    /// `{sessionID, requestID, answers}`.
+    QuestionReplied {
+        /// Session this happened in, addressed as its request was.
+        session_id: SessionId,
+        /// The request that was answered.
+        id: QuestionId,
+        /// One answer per question, in the order they were asked.
+        answers: Vec<QuestionAnswer>,
+    },
+    /// A question was dismissed — by the user, or by a cancel refusing it —
+    /// so a frontend can retire the dialog.
+    ///
+    /// Spec: upstream's `question.rejected`, which carries **its own payload**
+    /// (`{sessionID, requestID}`) rather than being a `replied` with a
+    /// refusing value. That is the shape ported: a dismissal is not an answer,
+    /// and a consumer that treats it as one would have to invent answers
+    /// nobody gave.
+    QuestionRejected {
+        /// Session this happened in, addressed as its request was.
+        session_id: SessionId,
+        /// The request that was dismissed.
+        id: QuestionId,
+    },
     /// How much of the transcript is currently reverted, and what the editor
     /// should hold.
     ///
@@ -813,9 +989,9 @@ impl Event {
     /// The session this event belongs to, whatever its variant.
     ///
     /// The field lives on every variant rather than on a wrapper, so the wire
-    /// shape stays flat; this is the one place that knows all eight spellings
-    /// of that fact, so a consumer that filters or groups by session does not
-    /// have to write the eight-arm match itself.
+    /// shape stays flat; this is the one place that knows every spelling of
+    /// that fact, so a consumer that filters or groups by session does not
+    /// have to write the whole match itself.
     #[must_use]
     pub fn session_id(&self) -> &SessionId {
         match self {
@@ -825,6 +1001,9 @@ impl Event {
             | Event::PartUpdated { session_id, .. }
             | Event::PermissionRequested { session_id, .. }
             | Event::PermissionReplied { session_id, .. }
+            | Event::QuestionAsked { session_id, .. }
+            | Event::QuestionReplied { session_id, .. }
+            | Event::QuestionRejected { session_id, .. }
             | Event::RevertChanged { session_id, .. }
             | Event::MessageFinished { session_id, .. } => session_id,
         }
@@ -847,7 +1026,8 @@ pub enum FinishReason {
 mod tests {
     use super::{
         Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody,
-        PartId, PermissionId, PermissionReply, RevertInfo, Role, SessionId, ToolState, Usage,
+        PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption,
+        QuestionSource, RevertInfo, Role, SessionId, ToolState, Usage,
     };
 
     /// The session every pinned event happens in.
@@ -1377,6 +1557,75 @@ mod tests {
                     reply: PermissionReply::Reject,
                 }),
                 r#"{"type":"permission_replied","session_id":"ses_1","id":"perm_1","reply":"reject"}"#,
+            ),
+            // A question with everything absent that may be absent: the two
+            // optional flags the model did not send, and no call to name.
+            (
+                serde_json::to_string(&Event::QuestionAsked {
+                    session_id: pinned_session(),
+                    id: QuestionId::from("que_1".to_owned()),
+                    questions: vec![QuestionInfo {
+                        question: "Which database?".to_owned(),
+                        header: "Database".to_owned(),
+                        options: vec![QuestionOption {
+                            label: "Postgres".to_owned(),
+                            description: "Relational, what the rest of the fleet runs".to_owned(),
+                        }],
+                        multiple: None,
+                        custom: None,
+                    }],
+                    source: None,
+                }),
+                r#"{"type":"question_asked","session_id":"ses_1","id":"que_1","questions":[{"question":"Which database?","header":"Database","options":[{"label":"Postgres","description":"Relational, what the rest of the fleet runs"}]}]}"#,
+            ),
+            // And the same question with every optional field carried.
+            (
+                serde_json::to_string(&Event::QuestionAsked {
+                    session_id: pinned_session(),
+                    id: QuestionId::from("que_1".to_owned()),
+                    questions: vec![QuestionInfo {
+                        question: "Which database?".to_owned(),
+                        header: "Database".to_owned(),
+                        options: Vec::new(),
+                        multiple: Some(true),
+                        custom: Some(false),
+                    }],
+                    source: Some(QuestionSource {
+                        message_id: MessageId::from("msg_1".to_owned()),
+                        call_id: "call_1".to_owned(),
+                    }),
+                }),
+                r#"{"type":"question_asked","session_id":"ses_1","id":"que_1","questions":[{"question":"Which database?","header":"Database","options":[],"multiple":true,"custom":false}],"source":{"message_id":"msg_1","call_id":"call_1"}}"#,
+            ),
+            (
+                serde_json::to_string(&Event::QuestionReplied {
+                    session_id: pinned_session(),
+                    id: QuestionId::from("que_1".to_owned()),
+                    answers: vec![vec!["Postgres".to_owned()], Vec::new()],
+                }),
+                r#"{"type":"question_replied","session_id":"ses_1","id":"que_1","answers":[["Postgres"],[]]}"#,
+            ),
+            // Rejection carries its own payload — no `answers` field, because
+            // a dismissal is not an answer.
+            (
+                serde_json::to_string(&Event::QuestionRejected {
+                    session_id: pinned_session(),
+                    id: QuestionId::from("que_1".to_owned()),
+                }),
+                r#"{"type":"question_rejected","session_id":"ses_1","id":"que_1"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::ReplyQuestion {
+                    id: QuestionId::from("que_1".to_owned()),
+                    answers: vec![vec!["Postgres".to_owned()]],
+                }),
+                r#"{"type":"reply_question","id":"que_1","answers":[["Postgres"]]}"#,
+            ),
+            (
+                serde_json::to_string(&Command::RejectQuestion {
+                    id: QuestionId::from("que_1".to_owned()),
+                }),
+                r#"{"type":"reject_question","id":"que_1"}"#,
             ),
             (
                 serde_json::to_string(&Command::SwitchAgent {

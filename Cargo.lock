@@ -1143,6 +1143,7 @@ dependencies = [
  "etcetera",
  "expectrl",
  "futures",
+ "ganja-client",
  "ganja-core",
  "ganja-permission",
  "ganja-protocol",
@@ -1159,6 +1160,19 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ganja-client"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "ganja-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]

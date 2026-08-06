@@ -29,13 +29,13 @@
 //! emitted: ganja's ask-by-default table is the `"*": "allow"`-equivalent, and
 //! the two agree everywhere except on the tools ganja deliberately gates.
 //!
-//! Upstream rules naming permissions this build has no tool for — `websearch`,
-//! `list`, `skill`, `question`, `doom_loop`, `plan_enter`, `plan_exit`, `lsp` —
-//! are not ported. A rule about a tool that cannot be called decides nothing,
-//! and carrying it would suggest the tool exists. The one exception is
-//! `task`, kept on [`PLAN`] so that the agent whose point is "do not act"
-//! already denies the subagent that would act for it, the day the task tool
-//! lands.
+//! Upstream rules naming permissions this build has no tool for — `list`,
+//! `question`, `doom_loop`, `plan_enter`, `plan_exit`, `lsp` — are not ported.
+//! A rule about a tool that cannot be called decides nothing, and carrying it
+//! would suggest the tool exists. The one exception is `task`, kept on [`PLAN`]
+//! so that the agent whose point is "do not act" already denies the subagent
+//! that would act for it, the day the task tool lands. `websearch` came off
+//! that list with the tool: [`EXPLORE`] allows it, exactly as upstream's does.
 //!
 //! Upstream also *hides* a tool from the model's schema when the last rule
 //! matching it is `"*": "deny"` (`permission/index.ts`, `disabled`). That is
@@ -294,13 +294,23 @@ fn builtins(config: &Config) -> Vec<Agent> {
             model: None,
             rules: assemble(vec![
                 // An allow-list, spelled the way upstream spells it: deny
-                // everything, then name what is left. `list`, `websearch` and
-                // `skill` are in upstream's list and have no tool here.
+                // everything, then name what is left. `list` is in upstream's
+                // list and has no tool here.
+                //
+                // **`skill` is not in that list**, and its absence is the
+                // whole point of the deny above: upstream allows this agent
+                // seven permissions and `skill` is not one of them
+                // (`agent/agent.ts:200-211`), so a search agent cannot load a
+                // skill and act on instructions nobody in this session read.
+                // The blanket deny is what enforces that, which is why no
+                // `skill` rule appears below — a rule saying `deny` here would
+                // read as the *only* thing stopping it.
                 rule(ANY, ANY, Action::Deny),
                 rule("grep", ANY, Action::Allow),
                 rule("glob", ANY, Action::Allow),
                 rule("read", ANY, Action::Allow),
                 rule("webfetch", ANY, Action::Allow),
+                rule("websearch", ANY, Action::Allow),
                 // Upstream writes `bash: "allow"`, which on top of its
                 // `"*": "allow"` default changes nothing there and would
                 // change a great deal here: it would hand a subagent
@@ -586,7 +596,7 @@ mod tests {
         let registry = registry(&Config::default());
         let rules = &registry.get(EXPLORE).expect("explore is builtin").rules;
 
-        for allowed in ["grep", "glob", "read", "webfetch"] {
+        for allowed in ["grep", "glob", "read", "webfetch", "websearch"] {
             assert_eq!(decides(rules, allowed, ANY_CALL), Some(Action::Allow));
         }
         // Shell access is undenied, not ungated.
@@ -597,6 +607,41 @@ mod tests {
         );
         for denied in ["edit", "write", "todowrite"] {
             assert_eq!(decides(rules, denied, ANY_CALL), Some(Action::Deny));
+        }
+    }
+
+    /// **The correction.** Upstream's `explore` allow-list names seven
+    /// permissions and `skill` is not among them (`agent/agent.ts:200-211`),
+    /// so a search agent may not load a skill — and a skill is a file of
+    /// instructions the model would then follow, fetched from a directory the
+    /// user may not have looked in. Pinned as its own case because the rule
+    /// enforcing it is an *absence*, and an absence is exactly what a later
+    /// edit adds to by accident.
+    #[test]
+    fn the_search_agent_may_not_load_a_skill() {
+        let registry = registry(&Config::default());
+
+        assert_eq!(
+            decides(
+                &registry.get(EXPLORE).expect("explore is builtin").rules,
+                "skill",
+                "porting"
+            ),
+            Some(Action::Deny)
+        );
+        // And the agents upstream leaves at its `"*": "allow"` default say
+        // nothing about it, so ganja's own default — not in `ASK_BY_DEFAULT`,
+        // therefore allowed — is what decides.
+        for name in [BUILD, PLAN, GENERAL] {
+            assert_eq!(
+                decides(
+                    &registry.get(name).expect("a builtin").rules,
+                    "skill",
+                    "porting"
+                ),
+                None,
+                "{name}"
+            );
         }
     }
 

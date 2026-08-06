@@ -127,6 +127,9 @@ fn shape(event: &Event) -> String {
                 PermissionReply::Reject => "reject",
             }
         ),
+        Event::QuestionAsked { questions, .. } => format!("question_asked:{}", questions.len()),
+        Event::QuestionReplied { answers, .. } => format!("question_replied:{}", answers.len()),
+        Event::QuestionRejected { .. } => "question_rejected".to_owned(),
         Event::MessageFinished { reason, .. } => format!(
             "finished:{}",
             match reason {
@@ -212,6 +215,9 @@ fn the_builtin_registry_advertises_every_tool() {
             "bash",
             "todowrite",
             "webfetch",
+            "websearch",
+            "skill",
+            "question",
         ]
     );
     assert!(

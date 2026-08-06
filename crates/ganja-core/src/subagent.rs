@@ -521,18 +521,31 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
 
     while let Some(event) = receiver.recv().await {
         match event {
-            // A subagent's question is the user's to answer, and the reply
-            // routes back through the parent's pending slot. The dialog is
-            // re-addressed to the **parent's** session as it crosses: the
-            // child session is invisible to every frontend — its events never
-            // reach the stream and no picker lists it — so a dialog naming it
-            // would hand a session-filtering client a question it cannot
-            // attribute, about a conversation it cannot see. The parent's is
-            // the conversation whose turn is actually waiting on the answer.
-            Event::PermissionRequested { .. } | Event::PermissionReplied { .. } => {
+            // Anything a subagent needs the user for is the user's to answer,
+            // and the reply routes back through the parent's pending slot —
+            // permission dialogs, and the questions the `question` tool asks.
+            // Both are re-addressed to the **parent's** session as they cross:
+            // the child session is invisible to every frontend — its events
+            // never reach the stream and no picker lists it — so a dialog
+            // naming it would hand a session-filtering client a request it
+            // cannot attribute, about a conversation it cannot see. The
+            // parent's is the conversation whose turn is actually waiting on
+            // the answer.
+            //
+            // The question terminals cross too, and must: a frontend that
+            // opened a dialog on the child's `QuestionAsked` would never
+            // retire it if the reply or the rejection stayed behind.
+            Event::PermissionRequested { .. }
+            | Event::PermissionReplied { .. }
+            | Event::QuestionAsked { .. }
+            | Event::QuestionReplied { .. }
+            | Event::QuestionRejected { .. } => {
                 let mut crossing = event;
                 if let Event::PermissionRequested { session_id, .. }
-                | Event::PermissionReplied { session_id, .. } = &mut crossing
+                | Event::PermissionReplied { session_id, .. }
+                | Event::QuestionAsked { session_id, .. }
+                | Event::QuestionReplied { session_id, .. }
+                | Event::QuestionRejected { session_id, .. } = &mut crossing
                 {
                     *session_id = watched.session_id.clone();
                 }

@@ -20,6 +20,7 @@ Its own crate for one reason, and it is the reason worth stating: **the engine i
 | Directory | Purpose |
 |-----------|---------|
 | `src/` | The tools, the read log, and the watcher (see `src/AGENTS.md`) |
+| `tests/` | The few tool behaviours that need process-wide state or the crate from outside (see `tests/AGENTS.md`) |
 
 ## For AI Agents
 
