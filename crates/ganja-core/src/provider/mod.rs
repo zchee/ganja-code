@@ -4,15 +4,23 @@
 //! engine is what maps those onto the protocol frontends see. Four wires ship:
 //! [`FakeProvider`] for demos and tests, [`AnthropicProvider`] for the Messages
 //! API, [`OpenAiProvider`] for anything speaking OpenAI chat completions, and
-//! [`ResponsesProvider`] for the Responses API a ChatGPT subscription answers
-//! on. The last two are the same vendor and answer to the same
-//! [`Provider::id`]; which of them a session gets is decided by the credential
-//! it has, in [`select`].
+//! [`ResponsesProvider`] for the Responses API.
+//!
+//! **The vendor picks the wire, not the credential.** Everything filed under
+//! `openai` speaks Responses, whether it authenticates with an API key or with
+//! a stored ChatGPT login, because that is what upstream's plugin does with no
+//! reference to the credential at all (`plugin/provider/openai.ts:185`). What
+//! the credential still picks is which *backend* the request goes to and what
+//! it carries beside the bearer, decided once per session in
+//! [`openai_provider`]. [`OpenAiProvider`] therefore no longer serves that
+//! vendor directly; it is the wire the two wrappers below ride, and the shape
+//! any other OpenAI-compatible endpoint would.
 //!
 //! Two more providers are chat completions under another name, and are
 //! deliberately not second wires: [`GrokProvider`] is xAI's endpoint and
 //! [`CopilotProvider`] is GitHub's, each a base URL, a credential source and —
-//! for Copilot — a header set over [`OpenAiProvider`].
+//! for Copilot — a header set over [`OpenAiProvider`]. Neither endpoint speaks
+//! Responses, which is why the vendor's move to it left both untouched.
 //!
 //! Every HTTP provider shares the same shape — build a request, retry it while
 //! it has not started answering, split the `text/event-stream` body into
@@ -778,40 +786,79 @@ fn require_key(provider_id: &str, variable: &str) -> Result<Presented, ProviderE
     })
 }
 
-/// Which OpenAI wire a session speaks, decided by the credential it has.
+/// A resolved provider, together with the model to ask when nothing named one.
 ///
-/// One vendor, two request/response shapes, and the credential is what picks
-/// between them — which is upstream's arrangement too: the ChatGPT plugin's
-/// loader looks at `ctx.auth?.type` and only rewrites the request when it finds
-/// an OAuth one (`plugin/openai/codex.ts:331`, `:356`).
+/// The second half is not always [`catalog::default_model`]'s answer, and the
+/// exception is the reason this type exists rather than an `Arc<dyn Provider>`.
+/// The catalog holds one default per *vendor*, which is the right shape for
+/// every vendor here but one: OpenAI serves two backends with different
+/// offerings, and a ChatGPT seat handed the vendor-wide default gets a model
+/// its backend refuses outright. Making the wire hand back its own default
+/// keeps that coupling where the wire was chosen — in [`openai_provider`] — and
+/// out of [`select`], which knows only a provider id.
+struct Wire {
+    /// The provider to drive the session with.
+    provider: Arc<dyn Provider>,
+    /// The default this wire wants, where it is not the catalog's. [`None`]
+    /// means "ask the catalog", which is every wire but the ChatGPT one.
+    default_model: Option<&'static str>,
+}
+
+impl Wire {
+    /// A provider whose default is the catalog's — every provider but the
+    /// ChatGPT subscription backend.
+    fn catalog(provider: impl Provider + 'static) -> Self {
+        Self {
+            provider: Arc::new(provider),
+            default_model: None,
+        }
+    }
+}
+
+/// Which OpenAI backend a session reaches, decided by the credential it has.
+///
+/// **One wire, two backends.** Upstream sends every OpenAI model through the
+/// Responses API with no reference to the credential at all — the plugin's
+/// whole language hook is `evt.language = evt.sdk.responses(evt.model.api.id)`
+/// (`plugin/provider/openai.ts:185`) — so the vendor picks the wire and this
+/// function only picks where the request goes and what it carries. That is
+/// `codex.ts`'s own split: `:356` hands a request whose credential is not OAuth
+/// to the unwrapped `fetch`, keeping the platform URL and adding none of the
+/// subscription headers, and `:281` returns the model list unfiltered under the
+/// same condition.
 ///
 /// - **A key** — exported, or stored, in exactly the order [`key_for`] has
-///   always read them — keeps the session on chat completions against
-///   `api.openai.com`. Nothing about that path changes, including which error
-///   a bad base URL produces, because it is still [`OpenAiProvider::from_env`]
-///   that builds it.
-/// - **No key but a stored ChatGPT login** speaks Responses against the backend
-///   that credential was minted for. Only its *presence* is read here; the
-///   token itself is resolved per request, so this costs one small file and
-///   captures nothing.
+///   always read them — reaches `api.openai.com` with a bearer and nothing
+///   else, and is held to no seat's allow-list. This is what makes the newest
+///   models usable: chat completions refuses tools on them and the Responses
+///   endpoint is what the refusal itself named.
+/// - **No key but a stored ChatGPT login** reaches the codex backend that
+///   credential was minted for, with the three headers and the allow-list.
+///   Only the login's *presence* is read here; the token is resolved per
+///   request, so this costs one small file and captures nothing. Its default
+///   model comes from the allow-list rather than the catalog — see [`Wire`].
 /// - **Neither** is the startup failure it has always been, naming the variable
 ///   and the login — [`require_key`]'s message, reached by the same call.
 ///
 /// A store that cannot be read is reported rather than treated as "no
 /// credential": those are different situations needing different repairs, and
 /// only the second can say what to fix.
-fn openai_provider() -> Result<Arc<dyn Provider>, ProviderError> {
-    if key_for(openai::ID)?.is_some() {
-        return Ok(Arc::new(OpenAiProvider::from_env()?));
+fn openai_provider() -> Result<Wire, ProviderError> {
+    if key_for(openai::ID)?.is_none() {
+        let stored =
+            auth::oauth_for(openai::ID).map_err(|error| ProviderError::Auth(error.to_string()))?;
+
+        if stored.is_some() {
+            return Ok(Wire {
+                provider: Arc::new(ResponsesProvider::from_stored()?),
+                default_model: Some(responses::SUBSCRIPTION_DEFAULT),
+            });
+        }
     }
 
-    let stored =
-        auth::oauth_for(openai::ID).map_err(|error| ProviderError::Auth(error.to_string()))?;
-    if stored.is_some() {
-        return Ok(Arc::new(ResponsesProvider::from_stored()?));
-    }
-
-    Ok(Arc::new(OpenAiProvider::from_env()?))
+    // A key, or neither — and the second is `require_key`'s error, unchanged,
+    // because it is the same lookup it always was.
+    Ok(Wire::catalog(ResponsesProvider::from_env()?))
 }
 
 /// Whether the provider `provider_id` serves a model called `model`.
@@ -938,37 +985,69 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         });
     };
 
-    let provider: Arc<dyn Provider> = match requested.as_str() {
-        fake::ID => Arc::new(FakeProvider::default()),
-        anthropic::ID => Arc::new(AnthropicProvider::from_env()?),
+    let wire = match requested.as_str() {
+        fake::ID => Wire::catalog(FakeProvider::default()),
+        anthropic::ID => Wire::catalog(AnthropicProvider::from_env()?),
         openai::ID => openai_provider()?,
-        grok::ID => Arc::new(GrokProvider::from_stored()?),
+        grok::ID => Wire::catalog(GrokProvider::from_stored()?),
         // Grok's construction shape, and grok's posture with it: neither reads
         // a token here, so a session with no stored login is built and fails at
         // its first request, with the message that names the login. What
         // Copilot does read is which deployment its login was against, because
         // that decides the endpoint rather than the credential.
-        copilot::ID => Arc::new(CopilotProvider::from_stored()?),
+        copilot::ID => Wire::catalog(CopilotProvider::from_stored()?),
         _ => return Err(SelectionError::Unknown { requested }),
     };
 
-    // The catalog owns the defaults, so a session that names no model still
-    // asks for one whose context window and price this build knows.
+    // A model the tiers above *named* never reaches the defaulting at all: an
+    // explicit choice is answered or refused, never substituted.
     let model = match named_model {
         Some(model) => model,
-        None if requested == fake::ID => fake::MODEL.to_owned(),
-        None => catalog::default_model(&requested)
-            .ok_or(SelectionError::NoDefaultModel {
-                provider: requested,
-            })?
-            .to_owned(),
+        None => defaulted_model(&requested, wire.default_model)?,
     };
 
     Ok(Selection {
-        provider,
+        provider: wire.provider,
         model,
         notice: None,
     })
+}
+
+/// The model a session asks for when no tier named one.
+///
+/// Three sources, most specific first, and the order is the whole content of
+/// this function:
+///
+/// 1. the built-in fake provider's canned model, which is deliberately in no
+///    catalog because nothing canned has a price;
+/// 2. `wire`, the default the *backend just built* wants. Set only where a
+///    provider id is not enough to decide — OpenAI's two backends serve
+///    different sets, so a ChatGPT seat handed the vendor-wide row below gets a
+///    model its backend refuses outright and a session that cannot take a turn;
+/// 3. the catalog's per-provider default, which is every other case.
+///
+/// Split out of [`select`] so the precedence is a thing a test can state.
+/// While a wire's default and the catalog's happen to name the same model, the
+/// only way to tell the two apart is to hand this a value the catalog could not
+/// have produced, which is exactly what its test does.
+///
+/// # Errors
+///
+/// Returns [`SelectionError::NoDefaultModel`] where the catalog is asked and
+/// has nothing, which is a gap in that table rather than anything the user did.
+fn defaulted_model(requested: &str, wire: Option<&'static str>) -> Result<String, SelectionError> {
+    if requested == fake::ID {
+        return Ok(fake::MODEL.to_owned());
+    }
+    if let Some(model) = wire {
+        return Ok(model.to_owned());
+    }
+
+    Ok(catalog::default_model(requested)
+        .ok_or_else(|| SelectionError::NoDefaultModel {
+            provider: requested.to_owned(),
+        })?
+        .to_owned())
 }
 
 #[cfg(test)]
@@ -979,10 +1058,67 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        Credential, Mapper, Presented, ProviderError, ProviderEvent, check_base_url, events,
-        shown_base_url, sse::Frame, unusable,
+        Credential, Mapper, Presented, ProviderError, ProviderEvent, SelectionError,
+        check_base_url, defaulted_model, events, fake, openai, responses, shown_base_url,
+        sse::Frame, unusable,
     };
-    use crate::{auth, protocol::FinishReason};
+    use crate::{auth, catalog, protocol::FinishReason};
+
+    /// A model no catalog carries, so an answer naming it can only have come
+    /// from the wire.
+    const SENTINEL: &str = "a-model-the-catalog-has-never-heard-of";
+
+    /// A backend that serves a narrower set than its vendor's catalog row has
+    /// to be able to say so, and this is the precedence that lets it.
+    ///
+    /// The sentinel is what makes this a real assertion rather than a
+    /// coincidence: `openai`'s two defaults currently name the same model, so
+    /// comparing the strings would pass whether or not the wire is consulted
+    /// at all. Handing it a value the catalog could not produce is the only way
+    /// to tell "the wire decided" from "the table did" until the two diverge.
+    #[test]
+    fn a_backends_own_default_outranks_its_vendors_catalog_row() {
+        assert!(
+            catalog::model(SENTINEL).is_none(),
+            "the sentinel has to be a model no table could have answered with"
+        );
+        assert_eq!(
+            defaulted_model(openai::ID, Some(SENTINEL)).expect("a wire default needs no table"),
+            SENTINEL,
+            "a session on a backend that named its own default got the vendor's \
+             row instead, which is how a ChatGPT seat ends up asking for a model \
+             its backend refuses"
+        );
+
+        // Naming nothing falls through to the catalog, which is every other
+        // provider and the openai key wire.
+        assert_eq!(
+            defaulted_model(openai::ID, None).expect("openai has a pinned default"),
+            catalog::default_model(openai::ID).expect("openai has a pinned default")
+        );
+        // The fake provider is deliberately in no catalog: nothing canned has a
+        // price, so it answers ahead of both.
+        assert_eq!(
+            defaulted_model(fake::ID, None).expect("the fake provider carries its own"),
+            fake::MODEL
+        );
+        assert!(matches!(
+            defaulted_model("nonexistent", None),
+            Err(SelectionError::NoDefaultModel { .. })
+        ));
+    }
+
+    /// The value the subscription backend actually hands over, held to the one
+    /// property that makes it correct. `openai_provider` is what pairs the two,
+    /// and `responses_wire.rs` is where that pairing is observed with a store
+    /// and an environment behind it.
+    #[test]
+    fn the_subscription_backends_default_is_one_that_backend_serves() {
+        assert!(
+            responses::serves(responses::SUBSCRIPTION_DEFAULT),
+            "a seat that cannot run its own default cannot take a turn at all"
+        );
+    }
 
     /// Emits whatever a frame's data spells, so that the plumbing can be
     /// tested without a provider's JSON in the way.

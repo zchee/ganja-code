@@ -1,10 +1,13 @@
-//! ChatGPT's Responses API, streamed — the wire a subscription answers on.
+//! OpenAI's Responses API, streamed — the wire this vendor speaks, both ways in.
 //!
-//! Spec: upstream `packages/core/src/plugin/provider/openai.ts:182-187`, which
-//! sends **every** OpenAI model through `sdk.responses(...)` and disables
-//! `gpt-5-chat-latest` at `:161-174` with the reason written on it — that alias
-//! is chat-completions-only, so it is the one model the routing cannot serve.
-//! What such a request actually looks like on the wire is
+//! Spec: upstream `packages/core/src/plugin/provider/openai.ts:183-186`, whose
+//! whole body for an OpenAI model is `evt.language = evt.sdk.responses(...)`.
+//! It reads no credential: **the vendor picks the wire, not the token**, which
+//! is why an API key session belongs here too and not on chat completions. The
+//! same file disables `gpt-5-chat-latest` at `:164-171` with the consequence
+//! written on it — that alias is chat-completions-only, so a Responses-only
+//! vendor cannot serve it — and [`CHAT_COMPLETIONS_ONLY`] is that arm ported.
+//! What such a request looks like on the wire is
 //! `packages/opencode/src/plugin/openai/codex.ts:341-426`, the fetch override
 //! that authenticates it and decides where it goes, cross-checked against
 //! `@ai-sdk/openai@3.0.84`'s `src/responses/*` for the body and the frames.
@@ -17,27 +20,49 @@
 //! encoder and the mapper are here, and everything else — the client, the
 //! endpoint check, the retry driver, the frame splitter — is still `mod.rs`'s.
 //!
-//! # Where a subscription request goes
+//! # Two backends, and what differs between them
 //!
-//! [`DEFAULT_BASE_URL`] is `https://chatgpt.com/backend-api/codex`, not
-//! `https://api.openai.com/v1`. That is `codex.ts:12`'s `CODEX_API_ENDPOINT`,
-//! and `codex.ts:410-418` rewrites *every* `/v1/responses` or
-//! `/chat/completions` URL to it whenever the credential is an OAuth one. The
-//! reason it is not an implementation detail of upstream's fetch layer: a
-//! ChatGPT access token is minted for that backend, and the platform API at
-//! `api.openai.com` refuses it. A session with an API key still goes to
-//! `api.openai.com` — through [`super::openai`], which is the other half of the
-//! dispatch in [`super::select`].
+//! One mapping, one encoder, two places a request can go — [`Backend`] is the
+//! whole of the difference, and it is fixed when the provider is built because
+//! it follows the credential the session resolved:
 //!
-//! [`BASE_URL_ENV`](super::openai::BASE_URL_ENV) overrides it, under the same
-//! `check_base_url` rule the sibling is held to, which is what points this
-//! provider at a loopback socket for a test.
+//! | | [`Backend::Codex`] | [`Backend::Platform`] |
+//! |---|---|---|
+//! | credential | a stored ChatGPT login | an API key |
+//! | base URL | [`DEFAULT_BASE_URL`] | [`openai::DEFAULT_BASE_URL`] |
+//! | extra headers | [`ACCOUNT_HEADER`], [`ORIGINATOR_HEADER`], [`BETA_HEADER`] | none |
+//! | model gate | [`serves`] | whatever the platform serves |
+//! | default model | [`SUBSCRIPTION_DEFAULT`] | the catalog's |
+//!
+//! Every one of those rows is upstream's, and all of them come off the same
+//! branch: `codex.ts:356` returns the *unwrapped* `fetch` for a credential that
+//! is not OAuth, so a key request keeps the URL the SDK built
+//! (`api.openai.com/v1/responses`) and gains none of the three headers
+//! `:405-408` set; `codex.ts:281` returns the models unfiltered for the same
+//! condition, so the allow-list is a property of the seat and not of the API.
+//!
+//! [`DEFAULT_BASE_URL`] being `https://chatgpt.com/backend-api/codex` rather
+//! than the platform is `codex.ts:12`'s `CODEX_API_ENDPOINT`, and
+//! `codex.ts:414-418` rewrites every Responses URL to it for an OAuth
+//! credential. The reason that is not an implementation detail of upstream's
+//! fetch layer: a ChatGPT access token is minted for that backend, and the
+//! platform API refuses it.
+//!
+//! [`BASE_URL_ENV`](super::openai::BASE_URL_ENV) overrides either default,
+//! under the same `check_base_url` rule the sibling is held to, which is what
+//! points this provider at a loopback socket for a test. **Known cost of the
+//! move, accepted deliberately**: that variable now points a *Responses* client
+//! at whatever it names, so a chat-completions-only server — a local
+//! llama.cpp — stops being reachable as `GANJA_PROVIDER=openai`. The wire is
+//! the vendor's, and a compatible endpoint that is not this vendor wants a
+//! provider id of its own rather than this one's environment.
 //!
 //! # What the credential is
 //!
-//! An access token that expires and rotates, resolved **per request** through
-//! the seam [`super::grok`] uses — `codex.ts:353` re-reads it on every call for
-//! exactly that reason. Nothing is captured at construction, so a login that
+//! A key is captured at construction and presents itself unchanged. An access
+//! token expires and rotates, so it is resolved **per request** through the
+//! seam [`super::grok`] uses — `codex.ts:353` re-reads it on every call for
+//! exactly that reason. Nothing is captured for that arm, so a login that
 //! happened after this session started, and a renewal another turn performed,
 //! are both picked up by the next request rather than the next process.
 
@@ -56,7 +81,7 @@ use crate::{
         ChatRequest, Credential, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
         check_base_url, client, open,
         openai::{self, arguments, result},
-        setting, shown_base_url,
+        require_key, setting, shown_base_url,
         sse::Frame,
         steps,
     },
@@ -66,8 +91,9 @@ use crate::{
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects this provider.
 ///
 /// The same one [`super::openai`] answers to, because it is the same vendor
-/// serving the same models at the same prices — only the wire and the
-/// credential differ, and neither of those is what a catalog row is keyed by.
+/// serving the same models at the same prices — and now the same wire as well;
+/// what [`super::openai`] still is, is the API that [`super::grok`] and
+/// [`super::copilot`] ride.
 pub const ID: &str = openai::ID;
 
 /// Where a ChatGPT subscription's requests go (`codex.ts:12`).
@@ -75,6 +101,37 @@ pub const ID: &str = openai::ID;
 /// The path this provider appends is `/responses`, so the whole URL is
 /// `codex.ts`'s `CODEX_API_ENDPOINT` exactly.
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+
+/// Which of this vendor's two backends a provider was built against.
+///
+/// Not a runtime question: it follows the credential, which is resolved once
+/// per session in [`super::openai_provider`]. Keeping it a field rather than
+/// re-deriving it per request is what makes "a key request is never filtered by
+/// the seat's allow-list" a fact about how the provider was constructed instead
+/// of a condition somebody could forget to write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backend {
+    /// The backend a ChatGPT subscription is served by, reached with an OAuth
+    /// access token (`codex.ts:12`).
+    Codex,
+    /// OpenAI's own platform API, reached with an API key.
+    Platform,
+}
+
+impl Backend {
+    /// Where this backend lives when [`BASE_URL_ENV`](openai::BASE_URL_ENV)
+    /// names nothing.
+    ///
+    /// Two hosts because the credential decides which one will take it: a
+    /// ChatGPT token is refused by the platform, and a key is refused by the
+    /// codex backend.
+    const fn default_base_url(self) -> &'static str {
+        match self {
+            Self::Codex => DEFAULT_BASE_URL,
+            Self::Platform => openai::DEFAULT_BASE_URL,
+        }
+    }
+}
 
 /// Which of a person's ChatGPT accounts to bill (`codex.ts:406-408`).
 const ACCOUNT_HEADER: &str = "chatgpt-account-id";
@@ -103,12 +160,58 @@ const BETA_HEADER: &str = "openai-beta";
 /// The value [`BETA_HEADER`] carries.
 const BETA: &str = "responses=experimental";
 
-/// The models this backend serves a ChatGPT seat outright (`codex.ts:15`).
+/// The models the **codex backend** serves a ChatGPT seat outright
+/// (`codex.ts:15`).
 ///
 /// A positive list, and the reason it is spelled out rather than derived: three
 /// of these four are *older* than the floor [`NEWER_THAN`] sets, so the rule
 /// below would refuse them.
+///
+/// **Scope: [`Backend::Codex`] only.** This is a subscription's offering, not
+/// the API's — upstream filters the model list on the same `auth.type ===
+/// "oauth"` condition the fetch override branches on (`codex.ts:281`), so a
+/// session holding a key sees whatever the platform sells. The list is a
+/// snapshot of somebody else's product decision as of v1.18.13 and **will
+/// drift**; [`NEWER_THAN`] is what keeps it from aging badly, and when the
+/// seat's offering changes these four lines are what to re-read against
+/// `codex.ts:15-16`.
 const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"];
+
+/// What a subscription session asks for when nothing named a model.
+///
+/// **Not [`crate::catalog::default_model`]**, and the reason is the shape of
+/// that table: it is one row per *vendor*, and this vendor has two backends
+/// that serve different sets. A catalog default is therefore free to name a
+/// model the platform sells and the seat does not — which is exactly what
+/// `gpt-5.6` is — and handing it to a subscription session produces a seat that
+/// cannot take a turn at all. A model named explicitly is never substituted:
+/// somebody who asked for `gpt-5.6` on a ChatGPT login is told what the seat
+/// serves ([`unsupported`]) rather than quietly answered by something else.
+///
+/// The one this names is the model the P8 live pass measured taking a whole
+/// tool-calling turn on this backend, and it has to satisfy [`serves`] — pinned
+/// below, because a default this backend refuses is the bug this constant
+/// exists to prevent.
+pub(crate) const SUBSCRIPTION_DEFAULT: &str = "gpt-5.4";
+
+/// Models this vendor publishes that no Responses request can name
+/// (`plugin/provider/openai.ts:164-171`).
+///
+/// Upstream hides `gpt-5-chat-latest` from the OpenAI catalog outright, with
+/// the reason in a comment: the plugin sends every OpenAI model through
+/// Responses and that alias is chat-completions-only. Ganja refuses it at the
+/// wire instead of hiding it, because the two builds hold their catalogs
+/// differently — ganja's compiled-in snapshot carries no such row today, but
+/// the **fetched** catalog is upstream's own file and can carry rows the
+/// snapshot does not, so a filter over the snapshot alone would be a rule that
+/// silently stops applying the first time somebody runs `ganja models
+/// --refresh`. Refusing where the request is built covers both tables and every
+/// spelling that reaches one, and costs nothing when the list is empty of
+/// whatever was asked for.
+///
+/// Unlike [`ALLOWED_MODELS`] this is **not** per-backend: it is a fact about
+/// the model rather than about the seat, so it holds for a key as well.
+const CHAT_COMPLETIONS_ONLY: [&str; 1] = ["gpt-5-chat-latest"];
 
 /// The models it refuses although [`NEWER_THAN`] would admit them
 /// (`codex.ts:16`).
@@ -127,6 +230,12 @@ const REFUSED_MODEL: &str = "gpt-5.6";
 const NEWER_THAN: f64 = 5.4;
 
 /// Whether the ChatGPT backend will serve `model` to a subscription.
+///
+/// **Asked only of a [`Backend::Codex`] provider.** `codex.ts:281` is the same
+/// early return the fetch override takes: a session that is not on an OAuth
+/// credential gets `provider.models` unfiltered, so a key is never held to a
+/// seat's offering. [`ResponsesProvider::refuses`] is where that scoping is
+/// spelled.
 ///
 /// Ports `codex.ts:281-292` in its order, which is load-bearing — the explicit
 /// lists have to be read before the generation rule or `gpt-5.4` refuses
@@ -188,18 +297,36 @@ fn generation(model: &str) -> Option<f64> {
 fn unsupported(model: &str) -> ProviderError {
     ProviderError::Transport(format!(
         "a ChatGPT subscription cannot run `{model}`: this backend serves {served}, \
-         or a newer gpt model — name one with `--model {ID}/gpt-5.4`, or export \
-         {key} to reach the models an API key can",
+         or a newer gpt model — name one with `--model {ID}/{SUBSCRIPTION_DEFAULT}`, \
+         or export {key} to reach the models an API key can",
         served = ALLOWED_MODELS.join(", "),
         key = openai::API_KEY_ENV,
     ))
 }
 
-/// Streams replies from ChatGPT's Responses API.
+/// Says why a model neither backend can name is not a turn to take.
+///
+/// Separate from [`unsupported`] because the two are different facts and only
+/// one of them has a way out: a seat's offering is escaped by exporting a key,
+/// while a chat-completions-only alias is refused on every wire this vendor
+/// speaks, so the only useful thing to say is which model to ask for instead.
+fn chat_completions_only(model: &str) -> ProviderError {
+    ProviderError::Transport(format!(
+        "`{model}` is a chat-completions-only model and {ID} speaks the Responses \
+         API: there is no wire here that can serve it — name another model with \
+         `--model {ID}/{SUBSCRIPTION_DEFAULT}`"
+    ))
+}
+
+/// Streams replies from OpenAI's Responses API, against whichever of its two
+/// backends the session's credential belongs to.
 pub struct ResponsesProvider {
     client: reqwest::Client,
     credential: Credential,
     base_url: String,
+    /// Which backend this provider was built for — see [`Backend`] for the
+    /// table of what it decides.
+    backend: Backend,
 }
 
 impl fmt::Debug for ResponsesProvider {
@@ -212,6 +339,7 @@ impl fmt::Debug for ResponsesProvider {
             .debug_struct("ResponsesProvider")
             .field("credential", &self.credential)
             .field("base_url", &shown_base_url(&self.base_url))
+            .field("backend", &self.backend)
             .finish()
     }
 }
@@ -230,18 +358,46 @@ impl ResponsesProvider {
     /// access token may not travel to — so that a misconfigured session dies at
     /// startup rather than at the first prompt.
     pub fn from_stored() -> Result<Self, ProviderError> {
-        let base_url = setting(openai::BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         let login = auth::openai::Login::new().map_err(|error| {
             // `Login::new` fails only where `client()` does, and for the same
             // reason, so it is classified the same way: nothing was refused.
             ProviderError::Transport(error.to_string())
         })?;
 
-        Self::at(base_url, Arc::new(login))
+        Self::at(configured(Backend::Codex), Arc::new(login))
     }
 
-    /// The same provider against endpoints of the caller's choosing, which is
-    /// how a test drives it against a loopback socket.
+    /// The provider against OpenAI's platform API, authenticated by the key
+    /// [`API_KEY_ENV`](openai::API_KEY_ENV) or the credential store carries.
+    ///
+    /// The order the two are read in is [`super::key_for`]'s and always has
+    /// been: exported outranks stored. What changed with the vendor's move to
+    /// this wire is only *which* provider a key builds — the lookup, the
+    /// endpoint check and the message a missing key produces are the sibling's,
+    /// unchanged, so a session that used to die at startup still does and says
+    /// the same thing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Transport`] when
+    /// [`BASE_URL_ENV`](openai::BASE_URL_ENV) names an endpoint a key may not
+    /// travel to, and [`ProviderError::Auth`] when there is no key to send —
+    /// in that order, matching [`super::openai::OpenAiProvider::from_env`], so
+    /// a session with neither a key nor a login is told about the credential
+    /// rather than about a base URL it never set.
+    pub fn from_env() -> Result<Self, ProviderError> {
+        let base_url = configured(Backend::Platform);
+        check_base_url(&base_url)?;
+
+        Self::built(
+            Credential::Key(require_key(ID, openai::API_KEY_ENV)?),
+            base_url,
+            Backend::Platform,
+        )
+    }
+
+    /// The subscription provider against endpoints of the caller's choosing,
+    /// which is how a test drives it against a loopback socket.
     ///
     /// `refresh` is the endpoint half of a renewal — [`auth::openai::Login`]
     /// for a token endpoint that is not ChatGPT's. The rest of a renewal
@@ -254,29 +410,69 @@ impl ResponsesProvider {
         base_url: impl Into<String>,
         refresh: Arc<dyn RefreshOauth>,
     ) -> Result<Self, ProviderError> {
-        let base_url = base_url.into();
+        Self::built(
+            Credential::Oauth {
+                provider_id: ID,
+                refresh,
+            },
+            base_url.into(),
+            Backend::Codex,
+        )
+    }
+
+    /// The one constructor, so that no arm can forget the endpoint check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Transport`] when no HTTP client can be built,
+    /// or when `base_url` names an endpoint a credential may not travel to.
+    fn built(
+        credential: Credential,
+        base_url: String,
+        backend: Backend,
+    ) -> Result<Self, ProviderError> {
         check_base_url(&base_url)?;
 
         Ok(Self {
             client: client()?,
-            credential: Credential::Oauth {
-                provider_id: ID,
-                refresh,
-            },
+            credential,
             base_url,
+            backend,
         })
+    }
+
+    /// Why this provider will not put `model` on the wire, where it will not.
+    ///
+    /// Two refusals, and the scope of each is the point. A chat-completions-only
+    /// alias is refused on both backends, because it is a fact about the model:
+    /// the vendor speaks Responses, and that alias does not
+    /// (`plugin/provider/openai.ts:164-171`). The seat's allow-list is refused
+    /// on [`Backend::Codex`] alone, because it is a fact about the
+    /// subscription: `codex.ts:281` hands back the unfiltered model list for
+    /// any credential that is not an OAuth one, so the platform serves whatever
+    /// it sells and a key session is never held to somebody's seat.
+    fn refuses(&self, model: &str) -> Option<ProviderError> {
+        if CHAT_COMPLETIONS_ONLY.contains(&model) {
+            return Some(chat_completions_only(model));
+        }
+        if self.backend == Backend::Codex && !serves(model) {
+            return Some(unsupported(model));
+        }
+
+        None
     }
 
     /// Builds the request one turn sends, given the credential it resolved.
     ///
     /// Split out from [`Provider::stream`] so that the header set — which is
-    /// the whole difference between a request this backend serves and one it
-    /// refuses — is provable without a socket.
+    /// the whole difference between a request the codex backend serves and one
+    /// it refuses, and the whole difference between the two backends' requests
+    /// — is provable without a socket.
     ///
     /// # Errors
     ///
     /// Returns [`ProviderError::Transport`] when the URL or a header value will
-    /// not build, with the access token scrubbed out of the message.
+    /// not build, with the credential scrubbed out of the message.
     fn request(
         &self,
         resolved: &Resolved,
@@ -285,19 +481,32 @@ impl ResponsesProvider {
         let mut built = self
             .client
             .post(format!("{}/responses", self.base_url.trim_end_matches('/')))
-            .bearer_auth(resolved.presented.expose())
-            .header(ORIGINATOR_HEADER, ORIGINATOR)
-            .header(BETA_HEADER, BETA)
-            .header(
-                reqwest::header::USER_AGENT,
-                auth::device::UPSTREAM_USER_AGENT,
-            );
+            .bearer_auth(resolved.presented.expose());
 
-        // Absent where the credential names no account: most people have
-        // exactly one, and `auth::openai` treats a token with no such claim as
-        // a login that worked rather than as a failure.
-        if let Some(account_id) = &resolved.account_id {
-            built = built.header(ACCOUNT_HEADER, account_id);
+        // Subscription-only, all four, and for one reason: each of them is
+        // about talking to the codex backend as the Codex CLI, whose client
+        // registration the stored access token was minted against
+        // (`codex.ts:405-408`, and `auth::openai`'s own originator). A key is
+        // the caller's own credential against the platform, which asks for
+        // nothing but the bearer — `codex.ts:356` hands such a request to the
+        // unwrapped `fetch`, so upstream sends it none of these either. Adding
+        // one on a hunch is a header travelling with somebody's API key to an
+        // endpoint that never asked for it.
+        if self.backend == Backend::Codex {
+            built = built
+                .header(ORIGINATOR_HEADER, ORIGINATOR)
+                .header(BETA_HEADER, BETA)
+                .header(
+                    reqwest::header::USER_AGENT,
+                    auth::device::UPSTREAM_USER_AGENT,
+                );
+
+            // Absent where the credential names no account: most people have
+            // exactly one, and `auth::openai` treats a token with no such claim
+            // as a login that worked rather than as a failure.
+            if let Some(account_id) = &resolved.account_id {
+                built = built.header(ACCOUNT_HEADER, account_id);
+            }
         }
 
         built.json(&Body::new(request)).build().map_err(|error| {
@@ -308,6 +517,16 @@ impl ResponsesProvider {
             )
         })
     }
+}
+
+/// Where a `backend` provider points, honouring the one override.
+///
+/// [`BASE_URL_ENV`](openai::BASE_URL_ENV) is read for both backends because it
+/// is one vendor's variable and this is now one vendor's wire; what it names is
+/// then held to [`check_base_url`] like every other endpoint a credential
+/// travels to.
+fn configured(backend: Backend) -> String {
+    setting(openai::BASE_URL_ENV).unwrap_or_else(|| backend.default_base_url().to_owned())
 }
 
 #[async_trait]
@@ -325,12 +544,13 @@ impl Provider for ResponsesProvider {
         // moment before the access token goes on the wire.
         check_base_url(&self.base_url)?;
 
-        // Before the credential is even read, let alone spent. The backend
-        // answers a model outside its list `400 {"detail":"The 'gpt-5.6' model
-        // is not supported when using Codex with a ChatGPT account."}` — a
-        // whole turn's latency to be told something that was knowable here.
-        if !serves(&request.model) {
-            return Err(unsupported(&request.model));
+        // Before the credential is even read, let alone spent. The codex
+        // backend answers a model outside its list `400 {"detail":"The
+        // 'gpt-5.6' model is not supported when using Codex with a ChatGPT
+        // account."}` — a whole turn's latency to be told something that was
+        // knowable here.
+        if let Some(refused) = self.refuses(&request.model) {
+            return Err(refused);
         }
 
         // Resolved before the request is built, never captured at construction:
@@ -338,6 +558,7 @@ impl Provider for ResponsesProvider {
         // by another turn is the one this request should carry.
         let resolved = self.credential.resolved().await?;
         let built = self.request(&resolved, &request)?;
+        let backend = self.backend;
 
         open(
             &self.client,
@@ -347,24 +568,30 @@ impl Provider for ResponsesProvider {
             Mapping::default(),
         )
         .await
-        .map_err(reauth)
+        .map_err(|error| reauth(backend, error))
     }
 }
 
 /// Says what a refused credential needs, rather than only what happened.
 ///
-/// A `401` or `403` here is the backend rejecting the stored access token, and
-/// the only thing that fixes it is a new login. The status alone reaches a
-/// status bar as a number, so the command goes in the message beside it. The
-/// classification changes nothing the retry driver does: neither status is in
-/// [`RETRYABLE_STATUS`](super::retry::RETRYABLE_STATUS), and
+/// A `401` or `403` on the subscription backend is it rejecting the stored
+/// access token, and the only thing that fixes it is a new login. The status
+/// alone reaches a status bar as a number, so the command goes in the message
+/// beside it. The classification changes nothing the retry driver does: neither
+/// status is in [`RETRYABLE_STATUS`](super::retry::RETRYABLE_STATUS), and
 /// [`ProviderError::Auth`] is not retryable either.
-fn reauth(error: ProviderError) -> ProviderError {
+///
+/// [`Backend::Platform`] is deliberately left alone: the same status there is
+/// the platform refusing an API key, which `ganja auth login` does not mint —
+/// telling somebody to run it would send them through a browser flow that
+/// stores a credential their session will not even reach while the key is
+/// exported. The endpoint's own message is the honest one.
+fn reauth(backend: Backend, error: ProviderError) -> ProviderError {
     match error {
         ProviderError::Status {
             status: status @ (401 | 403),
             message,
-        } => ProviderError::Auth(format!(
+        } if backend == Backend::Codex => ProviderError::Auth(format!(
             "the ChatGPT endpoint refused the stored credential (HTTP {status}): \
              {message}; run `ganja auth login {ID}`"
         )),
@@ -842,16 +1069,17 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ACCOUNT_HEADER, ALLOWED_MODELS, BETA, BETA_HEADER, Body, DEFAULT_BASE_URL, ID, Mapping,
-        ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider, generation, reauth, serves,
+        ACCOUNT_HEADER, ALLOWED_MODELS, BETA, BETA_HEADER, Backend, Body, CHAT_COMPLETIONS_ONLY,
+        DEFAULT_BASE_URL, ID, Mapping, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider,
+        SUBSCRIPTION_DEFAULT, generation, reauth, serves,
     };
     use crate::{
         auth::{self, AuthError, OauthCredential, RefreshOauth},
         catalog,
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
         provider::{
-            ChatRequest, PROVIDERS, Presented, Provider as _, ProviderError, ProviderEvent,
-            Resolved,
+            ChatRequest, Credential, PROVIDERS, Presented, Provider as _, ProviderError,
+            ProviderEvent, Resolved,
             openai::{self, NO_RESULT},
             replay,
         },
@@ -863,6 +1091,9 @@ mod tests {
 
     /// The account the credential names.
     const ACCOUNT: &str = "acct_2f7QpL9";
+
+    /// An API key no other value in this module could be mistaken for.
+    const KEY: &str = "sk-responses-key-canary-3131";
 
     /// A model this backend serves (`codex.ts:15`).
     const SERVED: &str = "gpt-5.4";
@@ -906,19 +1137,39 @@ mod tests {
 
     /// A resolved credential, the way one reaches [`ResponsesProvider::request`].
     fn resolved(account_id: Option<&str>) -> Resolved {
+        presenting(ACCESS, account_id)
+    }
+
+    /// The same, for a test that needs to say which secret travelled.
+    fn presenting(secret: &str, account_id: Option<&str>) -> Resolved {
         Resolved {
-            presented: Presented::new(ACCESS).expect("a non-blank token"),
+            presented: Presented::new(secret).expect("a non-blank credential"),
             account_id: account_id.map(str::to_owned),
         }
     }
 
-    /// A provider pointed somewhere a token may travel.
+    /// A subscription provider pointed somewhere a token may travel.
     fn provider() -> ResponsesProvider {
         ResponsesProvider::at(
             "http://127.0.0.1:8080/backend-api/codex",
             Arc::new(NeverRenews),
         )
         .expect("loopback may carry a token")
+    }
+
+    /// The same wire against the platform, authenticated by a key.
+    ///
+    /// Built through the private constructor rather than through
+    /// [`ResponsesProvider::from_env`] because that one reads the environment,
+    /// which is process-wide state a unit test must not mutate; what it would
+    /// add is the key lookup, and `credentials_env.rs` already owns that.
+    fn keyed() -> ResponsesProvider {
+        ResponsesProvider::built(
+            Credential::Key(Presented::new(KEY).expect("a non-blank key")),
+            "http://127.0.0.1:8080/v1".to_owned(),
+            Backend::Platform,
+        )
+        .expect("loopback may carry a key")
     }
 
     /// One turn's worth of request, on a model this backend serves — anything
@@ -946,14 +1197,20 @@ mod tests {
             "codex.ts:12 — a ChatGPT token is minted for this backend and \
              api.openai.com refuses it"
         );
+        assert_eq!(
+            format!("{}/responses", Backend::Platform.default_base_url()),
+            "https://api.openai.com/v1/responses",
+            "the endpoint the live 400 named: \"To use function tools, use \
+             /v1/responses\""
+        );
     }
 
-    /// Every header the backend uses to decide whether to serve a request at
-    /// all. Dropping any one of them is a turn that fails in production and
+    /// Every header the codex backend uses to decide whether to serve a request
+    /// at all. Dropping any one of them is a turn that fails in production and
     /// nowhere else, which is why this is asserted on the request rather than
     /// on the code that builds it.
     #[test]
-    fn every_request_names_the_account_the_originator_and_the_agent() {
+    fn every_subscription_request_names_the_account_the_originator_and_the_agent() {
         let built = provider()
             .request(&resolved(Some(ACCOUNT)), &ask())
             .expect("the request builds");
@@ -992,6 +1249,129 @@ mod tests {
         assert!(
             !anonymous.headers().contains_key(ACCOUNT_HEADER),
             "an account nobody named must not travel as an empty string"
+        );
+    }
+
+    /// The other backend's request, which is the same body under a bearer and
+    /// **nothing else**.
+    ///
+    /// Each of the four headers above exists because the subscription request
+    /// impersonates the Codex CLI against a client registration this project
+    /// borrowed; a key is the caller's own credential against the platform, and
+    /// upstream sends such a request through the unwrapped `fetch`
+    /// (`codex.ts:356`), so it gains none of them. Asserted as absences because
+    /// that is the failure mode — a header added on a hunch travels with
+    /// somebody's API key to an endpoint that never asked for it.
+    #[test]
+    fn a_key_request_carries_the_bearer_and_none_of_the_subscription_headers() {
+        // An account id on a key credential is impossible — `Credential::Key`
+        // resolves with `account_id: None` — but the header is skipped by
+        // *backend* rather than by whether one was resolved, so handing it one
+        // anyway proves the branch instead of the coincidence.
+        let built = keyed()
+            .request(&presenting(KEY, Some(ACCOUNT)), &ask())
+            .expect("the request builds");
+        let headers = built.headers();
+
+        assert_eq!(
+            built.url().as_str(),
+            "http://127.0.0.1:8080/v1/responses",
+            "the platform's own Responses path, under whatever base URL points \
+             at it"
+        );
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some(format!("Bearer {KEY}")).as_deref()
+        );
+        for absent in [ACCOUNT_HEADER, ORIGINATOR_HEADER, BETA_HEADER, "user-agent"] {
+            assert!(
+                !headers.contains_key(absent),
+                "`{absent}` belongs to the subscription backend and reached the \
+                 platform: {headers:?}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(Body::new(&ask())).expect("the body serializes")["store"],
+            json!(false),
+            "one encoder, so `store: false` is not a subscription special case"
+        );
+    }
+
+    /// The allow-list is a ChatGPT seat's product decision, and applying it to
+    /// a key would be somebody else's catalog deciding what an API key may ask
+    /// for. Upstream scopes it the same way and on the same condition:
+    /// `codex.ts:281` returns `provider.models` unfiltered whenever the
+    /// credential is not an OAuth one.
+    ///
+    /// The model is the one the live pass proved the seat refuses, so this
+    /// says the two backends answer the same name differently.
+    #[test]
+    fn the_seats_allow_list_gates_the_subscription_backend_and_not_the_platform() {
+        assert!(
+            provider().refuses(REFUSED).is_some(),
+            "{REFUSED} is `codex.ts:289`'s own arm and the seat cannot run it"
+        );
+        assert!(
+            keyed().refuses(REFUSED).is_none(),
+            "a key session held to a seat's allow-list cannot reach the models \
+             it is paying for, which is the whole reason this wire moved"
+        );
+
+        // Both directions of the scoping, so removing the backend check fails
+        // rather than merely widening what is served.
+        assert!(provider().refuses(SERVED).is_none() && keyed().refuses(SERVED).is_none());
+    }
+
+    /// The one refusal that is not about a seat.
+    ///
+    /// Upstream hides `gpt-5-chat-latest` from the OpenAI catalog outright,
+    /// with the reason in a comment at `plugin/provider/openai.ts:164-171`: the
+    /// plugin sends every OpenAI model through Responses and that alias is
+    /// chat-completions-only. It is therefore refused on **both** backends —
+    /// the vendor has no wire left that could serve it — and the message says
+    /// so rather than pointing at an API key that would not help.
+    #[test]
+    fn a_chat_completions_only_model_is_refused_on_both_backends() {
+        // Named literally as well as iterated: a list this test only reads out
+        // of would agree with itself however it was edited, and this is the one
+        // string `plugin/provider/openai.ts:166` actually disables.
+        assert!(
+            CHAT_COMPLETIONS_ONLY.contains(&"gpt-5-chat-latest"),
+            "the alias upstream hides is what this list is for"
+        );
+
+        for alias in CHAT_COMPLETIONS_ONLY {
+            for (backend, provider) in [("subscription", provider()), ("key", keyed())] {
+                let refused = provider
+                    .refuses(alias)
+                    .unwrap_or_else(|| panic!("{backend}: {alias} has no wire here to serve it"))
+                    .to_string();
+
+                assert!(
+                    refused.contains(alias) && refused.contains("Responses"),
+                    "{backend}: the refusal has to say why there is no wire for \
+                     it: {refused}"
+                );
+                assert!(
+                    !refused.contains(openai::API_KEY_ENV),
+                    "{backend}: a key is not the way out of this one, and \
+                     offering it sends somebody to buy nothing: {refused}"
+                );
+            }
+        }
+
+        // The catalog this build compiles in carries no such row, which is
+        // exactly why the refusal lives at the wire: `ganja models --refresh`
+        // replaces that table with upstream's own file, and this list has to
+        // keep applying to whatever it brings.
+        assert!(
+            CHAT_COMPLETIONS_ONLY
+                .iter()
+                .all(|alias| catalog::model(alias).is_none()),
+            "a row the snapshot now carries wants deciding here as well as at \
+             the wire"
         );
     }
 
@@ -1038,16 +1418,37 @@ mod tests {
         );
     }
 
-    /// The other half of the obligation `catalog`'s own table test states: a
-    /// provider a session can select has to be one the catalog can size and
-    /// price.
+    /// A subscription session that names no model does **not** take the
+    /// catalog's default, and this is the half of that statement this module
+    /// owns.
+    ///
+    /// The catalog holds one default per vendor, which is one too few here: a
+    /// row the platform sells and the seat does not — `gpt-5.6` is exactly that
+    /// — would hand a ChatGPT login a model its backend refuses outright, which
+    /// is a session that cannot take a single turn. So the seat brings its own,
+    /// and the obligations on it are both directions at once: the backend has
+    /// to serve it, and the catalog has to be able to size and price it.
+    ///
+    /// The other half — that `select` actually reaches for this rather than for
+    /// the catalog — is `responses_wire.rs`'s, because it takes an environment
+    /// and a store to observe.
     #[test]
-    fn a_subscription_session_that_names_no_model_gets_one_the_catalog_can_price() {
-        let id = catalog::default_model(ID).expect("openai has a pinned default");
-        let info = catalog::model(id).expect("the default is in the table");
+    fn a_subscription_session_that_names_no_model_gets_one_the_seat_can_run() {
+        let info =
+            catalog::model(SUBSCRIPTION_DEFAULT).expect("the subscription default is in the table");
 
         assert_eq!(info.provider_id, ID);
         assert!(info.context_window > 0 && info.max_output > 0);
+        assert!(
+            serves(SUBSCRIPTION_DEFAULT),
+            "a default this backend refuses is a seat that cannot take a turn"
+        );
+        assert!(
+            ALLOWED_MODELS.contains(&SUBSCRIPTION_DEFAULT),
+            "it is named outright by `codex.ts:15` rather than admitted by the \
+             generation rule, which is what keeps it from moving under us when \
+             the rule does"
+        );
     }
 
     /// The field the live pass died on. A body without it is answered
@@ -1157,10 +1558,13 @@ mod tests {
     #[test]
     fn a_refused_credential_says_which_login_repairs_it() {
         for status in [401, 403] {
-            let named = reauth(ProviderError::Status {
-                status,
-                message: "invalid token".to_owned(),
-            });
+            let named = reauth(
+                Backend::Codex,
+                ProviderError::Status {
+                    status,
+                    message: "invalid token".to_owned(),
+                },
+            );
 
             assert!(matches!(named, ProviderError::Auth(_)), "{named:?}");
             assert!(
@@ -1171,13 +1575,32 @@ mod tests {
                 !named.is_retryable(),
                 "retrying a refused token is a storm against an identity provider"
             );
+
+            // The same status against the platform is an API key being
+            // refused, and `ganja auth login` does not mint one: sending
+            // somebody through a browser flow would store a credential their
+            // session cannot even reach while the key is exported.
+            let keyed = reauth(
+                Backend::Platform,
+                ProviderError::Status {
+                    status,
+                    message: "invalid token".to_owned(),
+                },
+            );
+            assert!(
+                matches!(keyed, ProviderError::Status { .. }),
+                "the endpoint's own message is the honest one here: {keyed:?}"
+            );
         }
 
         // Everything else is left as it was: a rate limit is not a login.
-        let limited = reauth(ProviderError::Status {
-            status: 429,
-            message: "slow down".to_owned(),
-        });
+        let limited = reauth(
+            Backend::Codex,
+            ProviderError::Status {
+                status: 429,
+                message: "slow down".to_owned(),
+            },
+        );
         assert!(
             matches!(limited, ProviderError::Status { status: 429, .. }) && limited.is_retryable(),
             "{limited:?}"

@@ -661,6 +661,12 @@ pub struct Entry {
     pub source: Source,
     /// What kind of credential it is, since not every one is a key.
     pub kind: CredentialKind,
+    /// The environment variable that outranks this one, when one does.
+    ///
+    /// Always [`None`] on an environment entry — nothing outranks the
+    /// environment — so this is also how a caller tells a losing row from the
+    /// winning one without re-deriving the precedence rule for itself.
+    pub shadowed_by: Option<&'static str>,
 }
 
 /// A credential could not be read or written.
@@ -1548,10 +1554,20 @@ pub fn remove_credential(provider_id: &str) -> Result<bool, AuthError> {
     Store::open()?.remove(provider_id)
 }
 
-/// Every provider that has a credential, and where [`credential_for`] finds it.
+/// Every credential this build holds, and where [`credential_for`] finds each.
 ///
-/// A provider whose environment variable is set appears once, as
-/// [`Source::Environment`], because that is the credential that would be used.
+/// **A provider can appear twice**, once per place it has a credential, with
+/// the environment entry first and the stored one carrying the variable that
+/// outranks it in [`Entry::shadowed_by`]. The listing used to drop the stored
+/// row whenever a variable was exported, which made a login somebody had just
+/// completed invisible to the command whose whole job is "what credentials do I
+/// have" — measured live with three OAuth records on disk and two rows printed.
+/// Precedence is unchanged and lives where it always did, in
+/// [`credential_for`]; what changed is that being outranked is now something
+/// this reports rather than something it hides.
+///
+/// Rows are ordered by provider and then by who wins, so a caller taking the
+/// first row for a provider still gets the credential that would be used.
 ///
 /// Providers are named by the key they are stored under, which is upstream's
 /// name for them — see [`storage_key`], and [`provider_id_for_storage_key`] for
@@ -1561,32 +1577,59 @@ pub fn remove_credential(provider_id: &str) -> Result<bool, AuthError> {
 ///
 /// Returns [`AuthError`] when the stored file cannot be read.
 pub fn list_providers() -> Result<Vec<Entry>, AuthError> {
-    let mut entries: Vec<Entry> = KEY_VARS
+    // The exported keys, kept as their own list because they answer two
+    // questions: they are rows in their own right, and their presence is what
+    // makes a stored credential a shadowed one. `key_var` alone could not — it
+    // names the variable whether or not anybody exported it.
+    let exported: Vec<(&str, &'static str, RedactedTail)> = KEY_VARS
         .iter()
         .filter_map(|(provider_id, variable)| {
-            key_from_env(provider_id).map(|key| Entry {
-                provider_id: (*provider_id).to_owned(),
-                tail: RedactedTail::of_secret(&key),
-                source: Source::Environment(variable),
-                kind: CredentialKind::ApiKey,
-            })
+            key_from_env(provider_id)
+                .map(|key| (*provider_id, *variable, RedactedTail::of_secret(&key)))
+        })
+        .collect();
+    let mut entries: Vec<Entry> = exported
+        .iter()
+        .map(|(provider_id, variable, tail)| Entry {
+            provider_id: (*provider_id).to_owned(),
+            tail: tail.clone(),
+            source: Source::Environment(variable),
+            kind: CredentialKind::ApiKey,
+            shadowed_by: None,
         })
         .collect();
 
     for (provider_id, tail, kind) in Store::open()?.stored()? {
-        if entries.iter().any(|entry| entry.provider_id == provider_id) {
-            continue;
-        }
         entries.push(Entry {
+            shadowed_by: exported
+                .iter()
+                .find(|(exported_id, _, _)| *exported_id == provider_id)
+                .map(|(_, variable, _)| *variable),
             provider_id,
             tail,
             source: Source::File,
             kind,
         });
     }
-    entries.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+    entries.sort_by(|left, right| {
+        left.provider_id
+            .cmp(&right.provider_id)
+            .then(rank(left.source).cmp(&rank(right.source)))
+    });
 
     Ok(entries)
+}
+
+/// Where a source sorts among the credentials one provider has: the one that
+/// would be used first.
+///
+/// The same order [`credential_for`] resolves in, written once so that a
+/// listing cannot drift from the lookup it describes.
+const fn rank(source: Source) -> u8 {
+    match source {
+        Source::Environment(_) => 0,
+        Source::File => 1,
+    }
 }
 
 #[cfg(test)]
@@ -1605,8 +1648,8 @@ mod tests {
     use super::{
         AuthError, AuthErrorKind, Credential, CredentialKind, Entry, KEY_VARS, OauthCredential,
         REFRESH_SKEW_MS, RedactedTail, Source, Store, ZeroExpiry, credential_for, key_var,
-        list_providers, now_ms, provider_id_for_storage_key, set_credential, storage_key,
-        store_path, zero_expiry,
+        list_providers, now_ms, provider_id_for_storage_key, set_credential, set_oauth,
+        storage_key, store_path, zero_expiry,
     };
 
     /// A key that exists only to be hunted for in output. Nothing may print it
@@ -2447,6 +2490,7 @@ mod tests {
             tail: tail.clone(),
             source: Source::Environment("ANTHROPIC_API_KEY"),
             kind: CredentialKind::ApiKey,
+            shadowed_by: None,
         };
 
         let renderings = [
@@ -2563,6 +2607,7 @@ mod tests {
                 tail: RedactedTail::of("sk-stored-0001"),
                 source: Source::File,
                 kind: CredentialKind::ApiKey,
+                shadowed_by: None,
             }]
         );
 
@@ -2594,6 +2639,83 @@ mod tests {
             key_of(credential_for("anthropic").expect("the stored key reads")),
             Some("sk-stored-0001".to_owned()),
             "an empty variable must not shadow a stored key"
+        );
+
+        clear_keys();
+        set_env("XDG_DATA_HOME", None);
+    }
+
+    /// A login somebody has just completed has to be visible to the command
+    /// whose whole job is saying what credentials there are, even when a
+    /// variable outranks it.
+    ///
+    /// The shape measured live: a ChatGPT login stored under `openai` while
+    /// `OPENAI_API_KEY` was exported, and a listing that printed only the
+    /// variable — so the login looked as though it had never landed. Both rows
+    /// now, the winner first, and the loser saying what beat it.
+    #[test]
+    fn a_stored_login_stays_in_the_listing_when_a_variable_outranks_it() {
+        let _guard = environment();
+        let directory = temporary();
+
+        clear_keys();
+        set_env("XDG_DATA_HOME", Some(&directory.path().to_string_lossy()));
+
+        set_oauth(
+            "openai",
+            &OauthCredential::new(
+                SecretString::from("rt-listing-0001"),
+                SecretString::from("at-listing-0002"),
+                NOW_MS,
+            ),
+        )
+        .expect("the login stores");
+        set_env("OPENAI_API_KEY", Some(CANARY));
+
+        let listed = list_providers().expect("the listing reads");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| (entry.source, entry.kind, entry.shadowed_by))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    Source::Environment("OPENAI_API_KEY"),
+                    CredentialKind::ApiKey,
+                    None
+                ),
+                (Source::File, CredentialKind::Oauth, Some("OPENAI_API_KEY")),
+            ],
+            "the credential in use comes first and the one it outranks says so"
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| entry.tail.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                RedactedTail::of(CANARY),
+                RedactedTail::of("at-listing-0002")
+            ],
+            "each row shows its own credential rather than the winner's twice"
+        );
+        // And the precedence the listing is describing is still the one that
+        // decides a request: this reports, it does not choose.
+        assert_eq!(
+            key_of(credential_for("openai").expect("the environment reads")),
+            Some(CANARY.to_owned()),
+        );
+
+        // A provider with nothing exported keeps its single unshadowed row,
+        // which is what makes the marker a statement rather than decoration.
+        set_credential("anthropic", "sk-stored-0003").expect("the key stores");
+        assert_eq!(
+            list_providers()
+                .expect("the listing reads")
+                .iter()
+                .find(|entry| entry.provider_id == "anthropic")
+                .and_then(|entry| entry.shadowed_by),
+            None
         );
 
         clear_keys();

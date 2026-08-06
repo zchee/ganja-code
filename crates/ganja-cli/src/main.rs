@@ -206,6 +206,14 @@ enum Auth {
         /// of them, and naming one it has not is refused.
         #[arg(long, short = 'm', value_enum, value_name = "METHOD")]
         method: Option<login::Method>,
+        /// Which GitHub a Copilot login is against, instead of being asked.
+        ///
+        /// `public` is github.com and needs nothing else, which is what makes
+        /// the common Copilot login runnable with nobody at the keyboard;
+        /// `enterprise` still needs an address, from `--enterprise-url` or from
+        /// the question that follows.
+        #[arg(long, value_enum, value_name = "DEPLOYMENT")]
+        deployment: Option<login::DeploymentKind>,
         /// The GitHub Enterprise deployment a Copilot login is against.
         ///
         /// Answers both of the questions the login would otherwise ask, which
@@ -690,8 +698,20 @@ async fn auth_command(action: Auth) -> Result<()> {
             provider,
             key,
             method,
+            deployment,
             enterprise_url,
-        } => login(provider, key, method, enterprise_url).await,
+        } => {
+            login(
+                provider,
+                key,
+                method,
+                login::DeploymentAnswer {
+                    kind: deployment,
+                    enterprise_url,
+                },
+            )
+            .await
+        }
         Auth::List => list(),
         Auth::Logout { provider } => logout(provider),
     }
@@ -708,12 +728,12 @@ async fn login(
     provider: ProviderId,
     key: Option<String>,
     method: Option<login::Method>,
-    enterprise_url: Option<String>,
+    deployment: login::DeploymentAnswer,
 ) -> Result<()> {
     match login::chosen(provider, key.is_some(), method)? {
         login::Method::Api => store_key(provider, key),
         oauth => {
-            let credential = login::oauth(provider, oauth, enterprise_url).await?;
+            let credential = login::oauth(provider, oauth, deployment).await?;
             let tail = credential.tail();
 
             warn_before_replacing(provider)?;
@@ -816,8 +836,18 @@ fn list() -> Result<()> {
     // what makes "which of them is in there" a question the listing answers.
     println!("{:<16}  {:<5}  {:<9}  SOURCE", "PROVIDER", "TYPE", "KEY");
     for entry in entries {
+        // A provider with a credential in both places gets a row each, and the
+        // outranked one has to say so on its own line: two rows and no marker
+        // would read as two credentials in use, which is the opposite of what a
+        // person is being told. The variable comes from the entry rather than
+        // from a lookup here, so the listing cannot disagree with the
+        // precedence it is describing.
+        let shadowed = entry
+            .shadowed_by
+            .map(|variable| format!(" (shadowed by {variable})"))
+            .unwrap_or_default();
         println!(
-            "{:<16}  {:<5}  {:<9}  {}",
+            "{:<16}  {:<5}  {:<9}  {}{shadowed}",
             entry.provider_id, entry.kind, entry.tail, entry.source
         );
     }
@@ -850,13 +880,18 @@ fn logout(provider: ProviderId) -> Result<()> {
 /// is on the *storage* key because that is the name the listing reports, and a
 /// provider ganja and the file disagree about — `grok`, filed as `xai` — would
 /// otherwise silently never match.
+///
+/// The search is for the environment entry by name rather than for the
+/// provider's first row: a provider now has a row per place it has a
+/// credential, and taking whichever came first would make this depend on how
+/// the listing happens to be ordered.
 fn warn_if_shadowed(provider: ProviderId) -> Result<()> {
     let stored_as = auth::storage_key(provider.as_str());
     let shadowing = auth::list_providers()
         .context("failed to read stored credentials")?
         .into_iter()
-        .find(|entry| entry.provider_id == stored_as)
-        .and_then(|entry| match entry.source {
+        .filter(|entry| entry.provider_id == stored_as)
+        .find_map(|entry| match entry.source {
             auth::Source::Environment(variable) => Some(variable),
             auth::Source::File => None,
         });
