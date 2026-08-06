@@ -5,12 +5,13 @@
 //! startup naming `OPENAI_API_KEY`. This is what proves it now answers, and
 //! that the path a key takes is the one it always was.
 //!
-//! Told in phases, because five different things have to be true at once and a
+//! Told in phases, because six different things have to be true at once and a
 //! failure should still say which sentence broke:
 //!
 //! 1. **A whole turn.** A stored ChatGPT credential drives a streamed reply
 //!    through the ordinary engine — the request asserted whole, the events
-//!    asserted as the engine published them.
+//!    asserted as the engine published them, `store: false` included: the
+//!    backend refuses a body without it.
 //! 2. **The credential is read per request.** The stored credential is rotated
 //!    between two turns and the *second* token is what the second request
 //!    carries. A provider that captured its token at construction passes every
@@ -23,6 +24,10 @@
 //!    failure it has always been.
 //! 5. **Nothing leaks.** No token reaches a rendering, an error or the store's
 //!    own `Debug`.
+//! 6. **An unsupported model costs nothing.** This backend serves a pinned
+//!    list, and a name outside it is refused here — before the credential is
+//!    read and before anything reaches the socket — rather than after a round
+//!    trip spent on the backend's own JSON.
 //!
 //! Everything serves real bytes over loopback rather than mocking the client,
 //! the way every other provider suite here works: what is asserted on is the
@@ -81,9 +86,21 @@ const SECOND_ACCOUNT: &str = "acct_second_2222";
 /// The API key the chat-completions half of the test authenticates with.
 const KEY: &str = "sk-key-canary-DDDD";
 
-/// The model every phase asks for. A real catalog row, so a turn that reaches
-/// the session layer has a context window and a price to report.
-const MODEL: &str = "gpt-5.6";
+/// The model the subscription phases ask for.
+///
+/// A real catalog row, so a turn that reaches the session layer has a context
+/// window and a price to report — and one the ChatGPT backend actually serves
+/// (`codex.ts:15`), which is a second requirement the live pass discovered the
+/// hard way.
+const SUBSCRIPTION_MODEL: &str = "gpt-5.4";
+
+/// The model the key phases ask for.
+///
+/// Deliberately a *different* row, and deliberately one the subscription
+/// backend refuses (`codex.ts:289`): it keeps the chat-completions literal in
+/// phase 3 the bytes it has always been, and it is what phase 6 asks for to
+/// prove the two wires answer the same name differently.
+const KEY_MODEL: &str = "gpt-5.6";
 
 /// One request the endpoint was asked to serve.
 #[derive(Clone)]
@@ -329,10 +346,10 @@ impl RefreshOauth for NeverRenews {
     }
 }
 
-/// One turn's worth of request, offering the tool a real session would.
-fn ask() -> ChatRequest {
+/// One turn's worth of request, on the model the phase is about.
+fn ask(model: &str) -> ChatRequest {
     ChatRequest {
-        model: MODEL.to_owned(),
+        model: model.to_owned(),
         system: Some("be brief".to_owned()),
         messages: vec![ganja_core::protocol::Message::user("say hello")],
         tools: Vec::new(),
@@ -348,9 +365,9 @@ fn responses(endpoint: &Endpoint) -> ResponsesProvider {
 /// Takes a whole turn, for the phases that assert on the request rather than
 /// on what streamed back. The body is drained rather than dropped: an
 /// unconsumed stream is a request that may never have been sent.
-async fn turn(provider: &dyn ganja_core::provider::Provider) {
+async fn turn(provider: &dyn ganja_core::provider::Provider, model: &str) {
     let streamed: Vec<_> = provider
-        .stream(ask(), CancellationToken::new())
+        .stream(ask(model), CancellationToken::new())
         .await
         .expect("the endpoint answered")
         .collect()
@@ -384,7 +401,7 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
     let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
     let engine = Engine::new(
         Arc::new(responses(&endpoint)),
-        MODEL,
+        SUBSCRIPTION_MODEL,
         Arc::new(Registry::new(vec![tool])),
         Permissions::default(),
     )
@@ -424,8 +441,19 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
     );
 
     let body = sent.json();
-    assert_eq!(body["model"], json!(MODEL));
+    assert_eq!(body["model"], json!(SUBSCRIPTION_MODEL));
     assert_eq!(body["stream"], json!(true));
+    assert_eq!(
+        body["store"],
+        json!(false),
+        "the backend answers a body without this `400 {{\"detail\":\"Store must \
+         be set to false\"}}`, so every subscription turn depends on it: {body}"
+    );
+    assert!(
+        body["include"].is_null(),
+        "`reasoning.encrypted_content` is only worth asking for once a \
+         transcript can hand it back, and no protocol part carries one: {body}"
+    );
     assert_eq!(
         body["instructions"],
         json!("be brief"),
@@ -526,7 +554,7 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
     }
 
     let keyed = openai::OpenAiProvider::from_env().expect("an exported key builds a provider");
-    turn(&keyed).await;
+    turn(&keyed, KEY_MODEL).await;
 
     let sent = endpoint.only();
     assert_eq!(sent.path(), COMPLETIONS);
@@ -564,7 +592,7 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
     }
     let chosen = select(&Config::default()).expect("a key is a session");
     assert_eq!(chosen.provider.id(), openai::ID, "one vendor, either wire");
-    turn(chosen.provider.as_ref()).await;
+    turn(chosen.provider.as_ref(), KEY_MODEL).await;
     assert_eq!(
         endpoint.only().path(),
         COMPLETIONS,
@@ -580,7 +608,7 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
     }
     let chosen = select(&Config::default()).expect("a stored login is a session");
     assert_eq!(chosen.provider.id(), openai::ID);
-    turn(chosen.provider.as_ref()).await;
+    turn(chosen.provider.as_ref(), SUBSCRIPTION_MODEL).await;
     let sent = endpoint.only();
     assert_eq!(
         sent.path(),
@@ -621,7 +649,10 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
     let provider = responses(&endpoint);
     // `expect_err` would need the success arm to render, and a boxed stream has
     // no `Debug`; the match is the same assertion said a way that compiles.
-    let Err(refused_credential) = provider.stream(ask(), CancellationToken::new()).await else {
+    let Err(refused_credential) = provider
+        .stream(ask(SUBSCRIPTION_MODEL), CancellationToken::new())
+        .await
+    else {
         panic!("the credential was removed above, so there is no turn to take");
     };
     assert!(
@@ -638,4 +669,34 @@ async fn a_chatgpt_credential_drives_a_responses_turn_and_a_key_still_drives_cha
             "a credential reached a rendering: {rendered}"
         );
     }
+
+    // ---- 6. A model this seat cannot run is refused before a turn is spent. --
+    // The same name phase 3 sent successfully as a key. The backend answers it
+    // `400 {"detail":"The 'gpt-5.6' model is not supported when using Codex
+    // with a ChatGPT account."}` — a round trip and somebody else's JSON to
+    // learn something `codex.ts:15` has written down.
+    let Err(unsupported) = provider
+        .stream(ask(KEY_MODEL), CancellationToken::new())
+        .await
+    else {
+        panic!("a model the backend refuses is not a turn to take");
+    };
+    let said = unsupported.to_string();
+
+    assert!(
+        said.contains(KEY_MODEL) && said.contains(SUBSCRIPTION_MODEL),
+        "the refusal has to name both what was asked for and something that \
+         would work: {said}"
+    );
+    assert!(
+        endpoint.seen().is_empty(),
+        "the whole point is that no request was spent finding this out"
+    );
+    // Ahead of the credential read, which is the ordering this asserts: the
+    // store still has no ChatGPT credential in it, so a check that ran second
+    // would have reported the missing login instead.
+    assert!(
+        !matches!(unsupported, ProviderError::Auth(_)),
+        "the model was refused before the store was consulted: {unsupported:?}"
+    );
 }

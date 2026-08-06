@@ -475,7 +475,9 @@ fn models_lists_the_catalog_and_marks_one_default_per_provider() {
         predicate::str::contains("PROVIDER")
             .and(predicate::str::contains("$/MTOK IN"))
             .and(predicate::str::contains("claude-sonnet-5*"))
-            .and(predicate::str::contains("gpt-5.6*"))
+            // The star follows `catalog::DEFAULTS`, and openai's moved: the
+            // newer row cannot serve tools on either wire this build speaks.
+            .and(predicate::str::contains("gpt-5.4*"))
             .and(predicate::str::contains("claude-haiku-4-5"))
             // The context window is compacted rather than spelled out.
             .and(predicate::str::contains("1.0M"))
@@ -587,7 +589,13 @@ fn a_named_provider_is_the_only_one_the_listing_carries() {
         .args(["models", "openai"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("gpt-5.6*").and(predicate::str::contains("claude").not()));
+        // The starred row is openai's default, which is `gpt-5.4`; the newer
+        // row is still listed beside it, unstarred.
+        .stdout(
+            predicate::str::contains("gpt-5.4*")
+                .and(predicate::str::contains("gpt-5.6"))
+                .and(predicate::str::contains("claude").not()),
+        );
 }
 
 /// A header over no rows would read as "this provider serves nothing", which

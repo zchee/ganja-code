@@ -205,7 +205,19 @@ pub enum CatalogError {
 /// to say about it.
 const DEFAULTS: &[(&str, &str)] = &[
     ("anthropic", "claude-sonnet-5"),
-    ("openai", "gpt-5.6"),
+    // **Not the newest openai row, deliberately — do not "upgrade" it without
+    // reading this.** A default has to be a model that can take a ganja turn,
+    // and every ganja turn offers tools. `gpt-5.6` cannot, on either wire this
+    // build speaks. Chat completions refuses it live with `400 "Function tools
+    // with reasoning_effort are not supported for gpt-5.6 in
+    // /v1/chat/completions. To use function tools, use /v1/responses or set
+    // reasoning_effort to 'none'."` — ganja sends no `reasoning_effort` and the
+    // API supplies its own — and the ChatGPT subscription backend does not
+    // serve that model at all (`provider::responses`, from `codex.ts:289`).
+    // `gpt-5.4` was measured taking the same turn on both. The newer row stays
+    // in the table below: it is reachable by name for a turn that offers no
+    // tools, and its sizing was never what was wrong.
+    ("openai", "gpt-5.4"),
     ("grok", "grok-4.3"),
     ("github-copilot", "claude-sonnet-4.6"),
 ];
@@ -1229,6 +1241,47 @@ mod tests {
         }
 
         assert!(default_model("nonexistent").is_none());
+    }
+
+    /// Being in the table is not enough to be a *default*: the default is what
+    /// a session runs when nobody chose, and every ganja session offers tools.
+    ///
+    /// Both openai wires refused the newest row live, for two unrelated
+    /// reasons. Chat completions: `400 "Function tools with reasoning_effort
+    /// are not supported for gpt-5.6 in /v1/chat/completions"` — ganja never
+    /// sends `reasoning_effort`, so that is the API's own default colliding
+    /// with the tools every turn carries. The ChatGPT subscription backend:
+    /// `400 "The 'gpt-5.6' model is not supported when using Codex with a
+    /// ChatGPT account."` One model, two wires, no path that runs a tool.
+    ///
+    /// So this pins the property rather than the string — that the default is a
+    /// row `provider::responses` will actually put on the wire — and the row
+    /// that failed stays reachable by name.
+    #[test]
+    fn the_openai_default_is_a_model_both_of_that_vendors_wires_can_run_tools_on() {
+        let id = default_model("openai").expect("openai has a pinned default");
+
+        assert_eq!(
+            id, "gpt-5.4",
+            "the default was measured live on both wires; changing it needs the \
+             same measurement, not a version number"
+        );
+        assert!(
+            crate::provider::responses::serves(id),
+            "{id} is the default and the subscription backend refuses it, so a \
+             seat with no API key cannot take a turn at all"
+        );
+        assert!(
+            model(id).is_some_and(|info| info.provider_id == "openai"),
+            "a default nothing can size or price is a turn with no context \
+             window and no bill"
+        );
+        assert!(
+            model("gpt-5.6").is_some(),
+            "the newer row is kept rather than deleted: it is reachable by name \
+             for a tools-free turn, and its sizing was never the thing that was \
+             wrong"
+        );
     }
 
     /// A fetched catalog names providers the way upstream does, because it is
