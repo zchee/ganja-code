@@ -29,6 +29,12 @@ const CANARY: &str = "sk-canary-8842";
 fn ganja(data: &TempDir) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command.env("XDG_DATA_HOME", data.path());
+    // `auth login`/`logout` now validate a name that is not a builtin against
+    // the loaded config, so a developer's global `ganja.jsonc` would otherwise
+    // decide whether a provider exists here. The data home does for a config
+    // home too: what matters is that it is not theirs.
+    command.env("XDG_CONFIG_HOME", data.path());
+    command.env_remove("GANJA_CONFIG");
     for variable in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
         command.env_remove(variable);
     }
@@ -365,6 +371,13 @@ fn offline(cache: &TempDir) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command
         .env("XDG_CACHE_HOME", cache.path())
+        // The listing now asks the config whether a provider it has no rows
+        // for is one a session could still run as, so the config home is as
+        // much a part of what a test puts in front of it as the cache home is.
+        // The same directory for both: what matters is that neither is the
+        // developer's, and neither name collides inside it.
+        .env("XDG_CONFIG_HOME", cache.path())
+        .env_remove("GANJA_CONFIG")
         .env("GANJA_DISABLE_MODELS_FETCH", "1")
         .env_remove("GANJA_MODELS_URL")
         .env_remove("GANJA_MODELS_PATH");
@@ -621,6 +634,138 @@ fn a_provider_this_table_does_not_carry_is_named_rather_than_listed_as_empty() {
             predicate::str::contains("gemini")
                 .and(predicate::str::contains("anthropic"))
                 .and(predicate::str::contains("openai")),
+        );
+}
+
+/// A config file declaring one endpoint, in a project directory of its own.
+///
+/// Written as `ganja.json` in a directory carrying a checkout marker, which is
+/// where discovery's project tier looks — the same file a person would write.
+fn declaring_project() -> TempDir {
+    let directory = project();
+    fs::write(
+        directory.path().join("ganja.json"),
+        r#"{"provider": {"local-llama": {
+             "dialect": "openai-chat-completions",
+             "base_url": "http://127.0.0.1:11434/v1",
+             "key_env": "LOCAL_LLAMA_KEY"
+           }}}"#,
+    )
+    .expect("the config file is writable");
+
+    directory
+}
+
+/// A provider a session **can** run as, with no rows in the table, is not the
+/// typo the refusal above is about: it is the uncataloged tier, and what it
+/// needs is the consequence spelled out rather than an error or a bare header.
+#[test]
+fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing() {
+    let cache = cache();
+    let project = declaring_project();
+
+    // A configured endpoint: selectable because this project's own config
+    // declares it, and cataloged by nothing.
+    offline(&cache)
+        .current_dir(project.path())
+        .args(["models", "local-llama"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("PROVIDER")
+                .and(predicate::str::contains("no catalog rows"))
+                .and(predicate::str::contains("sizing and cost display are off"))
+                .and(predicate::str::contains("GANJA_MODEL")),
+        );
+
+    // And a builtin in the same tier — shipped, selectable, deliberately
+    // unpriced — answers the same way, because the tier is a fact about the
+    // table rather than about where the provider came from.
+    offline(&cache)
+        .current_dir(project.path())
+        .args(["models", "fake"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no catalog rows"));
+
+    // The typo keeps the refusal it always had: this project declares no such
+    // endpoint, so nothing could run as it.
+    offline(&cache)
+        .current_dir(project.path())
+        .args(["models", "local-lama"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("PROVIDER").not());
+}
+
+/// A key for an endpoint the config declares is stored under the id its entry
+/// was written under, which is exactly where a session reads it.
+#[test]
+fn a_config_declared_provider_can_be_logged_into_and_out_of_by_its_own_name() {
+    let data = data();
+    let project = declaring_project();
+
+    ganja(&data)
+        .current_dir(project.path())
+        .args([
+            "auth",
+            "login",
+            "--provider",
+            "local-llama",
+            "--key",
+            CANARY,
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("local-llama")
+                .and(predicate::str::contains("****8842"))
+                .and(predicate::str::contains(CANARY).not()),
+        );
+
+    ganja(&data)
+        .current_dir(project.path())
+        .args(["auth", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("local-llama"));
+
+    // An OAuth flow is a set of endpoints written per provider, and a config
+    // entry supplies none of them — so naming one is refused rather than
+    // attempted against nothing.
+    ganja(&data)
+        .current_dir(project.path())
+        .args([
+            "auth",
+            "login",
+            "--provider",
+            "local-llama",
+            "--method",
+            "device",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("key"));
+
+    ganja(&data)
+        .current_dir(project.path())
+        .args(["auth", "logout", "--provider", "local-llama"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("forgot the stored local-llama"));
+
+    // A name this project's config does not declare is refused with both tiers
+    // named, because somebody who mistyped their own entry has to see what
+    // they actually wrote.
+    ganja(&data)
+        .current_dir(project.path())
+        .args(["auth", "login", "--provider", "local-lama", "--key", CANARY])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("local-lama")
+                .and(predicate::str::contains("local-llama"))
+                .and(predicate::str::contains("anthropic")),
         );
 }
 

@@ -332,39 +332,26 @@ fn assemble(cwd: &Path, overrides: Overrides) -> Result<Assembled> {
     Ok(Assembled { engine, servers })
 }
 
-/// Installs [`REFUSED`] over whatever the agent's own ruleset says.
+/// Installs [`REFUSED`] as standing rules the engine re-applies itself.
 ///
-/// **After the engine is assembled, never before.** `Engine::with_agents`
-/// installs the default agent's ruleset as the permission baseline wholesale
-/// (`engine.rs:1325-1330`), so rules written before it would be thrown away.
-/// Appending rather than replacing keeps the agent's rules and puts these last,
-/// which is where last-match-wins needs them: a config that allowed `question`
-/// must not outrank the refusal that makes a headless run safe.
-///
-/// **One hole, named because it is exactly the one these rules exist to close.**
-/// A `--command` whose definition names its own agent runs that turn under a
-/// ruleset derived from *that* agent alone (`engine.rs:1614-1625`), which does
-/// not carry what is installed here. Inert today — none of [`REFUSED`] is a tool
-/// this build registers — and it becomes real the day one of them is added, so
-/// whoever adds it has to close this too.
+/// Standing rules survive every baseline recomposition — an agent switch, a
+/// `--command` naming its own agent, a resume, and the tool-set rebuild a
+/// finishing MCP dial triggers — because the engine appends them after the
+/// agent's own rules inside the one place a baseline is composed. That is
+/// where last-match-wins needs them: a config that allowed `question` must
+/// not outrank the refusal that makes a headless run safe, and no later
+/// recomposition may quietly drop it.
 fn refuse_interactive_permissions(engine: &Engine) {
-    let mut rules: Vec<permission::Rule> = engine
-        .agents()
-        .zip(engine.agent())
-        .and_then(|(registry, name)| registry.get(&name))
-        .map(|agent| agent.rules.clone())
-        .unwrap_or_default();
-    rules.extend(REFUSED.iter().map(|permission| permission::Rule {
-        permission: (*permission).to_owned(),
-        pattern: "*".to_owned(),
-        action: permission::Action::Deny,
-    }));
-
-    engine
-        .permissions()
-        .lock()
-        .expect("the permission rules are never poisoned")
-        .set_baseline(rules);
+    engine.append_standing_rules(
+        REFUSED
+            .iter()
+            .map(|permission| permission::Rule {
+                permission: (*permission).to_owned(),
+                pattern: "*".to_owned(),
+                action: permission::Action::Deny,
+            })
+            .collect(),
+    );
 }
 
 /// Installs the session this run continues, if it continues one.
