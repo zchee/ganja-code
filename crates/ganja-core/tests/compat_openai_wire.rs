@@ -96,7 +96,7 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
             }
         }
 
-        let body = include_str!("fixtures/openai_happy_path.sse");
+        let body = include_str!("../../ganja-provider/tests/fixtures/openai_happy_path.sse");
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()

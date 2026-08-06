@@ -41,6 +41,11 @@ ganja-core.workspace = true
 # without needing the engine's re-export to hand them over.
 ganja-permission.workspace = true
 ganja-protocol.workspace = true
+# `auth login` drives the OAuth flows directly — device codes, loopback
+# callbacks, the credential each hands back — so it names them where they live
+# rather than through the engine's re-export, which is a convenience for code
+# that has an engine and this code does not.
+ganja-provider.workspace = true
 # The `serve` subcommand: the engine this binary assembles, behind the HTTP
 # routes and the SSE stream that crate owns.
 ganja-serve.workspace = true

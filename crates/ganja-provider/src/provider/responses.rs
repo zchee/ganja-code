@@ -83,7 +83,7 @@ use crate::{
     auth::{self, RefreshOauth},
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
-        ChatRequest, Credential, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
+        ChatRequest, CredentialSource, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
         check_base_url, client, open,
         openai::{self, arguments, result},
         require_key, setting, shown_base_url,
@@ -110,7 +110,7 @@ pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 /// Which of this vendor's two backends a provider was built against.
 ///
 /// Not a runtime question: it follows the credential, which is resolved once
-/// per session in [`super::openai_provider`]. Keeping it a field rather than
+/// per session in `ganja_core::provider::openai_provider`. Keeping it a field rather than
 /// re-deriving it per request is what makes "a key request is never filtered by
 /// the seat's allow-list" a fact about how the provider was constructed instead
 /// of a condition somebody could forget to write.
@@ -197,7 +197,7 @@ const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", 
 /// tool-calling turn on this backend, and it has to satisfy [`serves`] — pinned
 /// below, because a default this backend refuses is the bug this constant
 /// exists to prevent.
-pub(crate) const SUBSCRIPTION_DEFAULT: &str = "gpt-5.4";
+pub const SUBSCRIPTION_DEFAULT: &str = "gpt-5.4";
 
 /// Models this vendor publishes that no Responses request can name
 /// (`plugin/provider/openai.ts:164-171`).
@@ -327,7 +327,7 @@ fn chat_completions_only(model: &str) -> ProviderError {
 /// backends the session's credential belongs to.
 pub struct ResponsesProvider {
     client: reqwest::Client,
-    credential: Credential,
+    credential: CredentialSource,
     base_url: String,
     /// Which backend this provider was built for — see [`Backend`] for the
     /// table of what it decides.
@@ -395,7 +395,7 @@ impl ResponsesProvider {
         check_base_url(&base_url)?;
 
         Self::built(
-            Credential::Key(require_key(ID, openai::API_KEY_ENV)?),
+            CredentialSource::Key(require_key(ID, openai::API_KEY_ENV)?),
             base_url,
             Backend::Platform,
         )
@@ -416,7 +416,7 @@ impl ResponsesProvider {
         refresh: Arc<dyn RefreshOauth>,
     ) -> Result<Self, ProviderError> {
         Self::built(
-            Credential::Oauth {
+            CredentialSource::Oauth {
                 provider_id: ID,
                 refresh,
             },
@@ -432,7 +432,7 @@ impl ResponsesProvider {
     /// Returns [`ProviderError::Transport`] when no HTTP client can be built,
     /// or when `base_url` names an endpoint a credential may not travel to.
     fn built(
-        credential: Credential,
+        credential: CredentialSource,
         base_url: String,
         backend: Backend,
     ) -> Result<Self, ProviderError> {
@@ -1240,7 +1240,7 @@ mod tests {
         catalog,
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
         provider::{
-            ChatRequest, Credential, PROVIDERS, Presented, Provider as _, ProviderError,
+            ChatRequest, CredentialSource, PROVIDERS, Presented, Provider as _, ProviderError,
             ProviderEvent, Resolved,
             openai::{self, NO_RESULT},
             replay,
@@ -1327,7 +1327,7 @@ mod tests {
     /// add is the key lookup, and `credentials_env.rs` already owns that.
     fn keyed() -> ResponsesProvider {
         ResponsesProvider::built(
-            Credential::Key(Presented::new(KEY).expect("a non-blank key")),
+            CredentialSource::Key(Presented::new(KEY).expect("a non-blank key")),
             "http://127.0.0.1:8080/v1".to_owned(),
             Backend::Platform,
         )
@@ -1426,7 +1426,7 @@ mod tests {
     /// somebody's API key to an endpoint that never asked for it.
     #[test]
     fn a_key_request_carries_the_bearer_and_none_of_the_subscription_headers() {
-        // An account id on a key credential is impossible — `Credential::Key`
+        // An account id on a key credential is impossible — `CredentialSource::Key`
         // resolves with `account_id: None` — but the header is skipped by
         // *backend* rather than by whether one was resolved, so handing it one
         // anyway proves the branch instead of the coincidence.

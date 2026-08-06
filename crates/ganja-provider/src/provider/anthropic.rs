@@ -28,7 +28,7 @@ use crate::{
     catalog,
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
-        ChatRequest, Credential, Mapper, Presented, Provider, ProviderError, ProviderEvent,
+        ChatRequest, CredentialSource, Mapper, Presented, Provider, ProviderError, ProviderEvent,
         check_base_url, client, open, require_key, setting, shown_base_url, sse::Frame, steps,
     },
 };
@@ -87,7 +87,7 @@ static NO_INPUT: LazyLock<Value> = LazyLock::new(|| Value::Object(serde_json::Ma
 /// Streams replies from the Anthropic Messages API.
 pub struct AnthropicProvider {
     client: reqwest::Client,
-    credential: Credential,
+    credential: CredentialSource,
     base_url: String,
     max_tokens: u32,
     /// What every request carries besides `x-api-key` and the pinned API
@@ -134,7 +134,7 @@ impl AnthropicProvider {
         let key = Presented::new(key)
             .ok_or_else(|| ProviderError::Auth(format!("{API_KEY_ENV} is empty")))?;
 
-        Self::with_credential(Credential::Key(key), DEFAULT_BASE_URL)
+        Self::with_credential(CredentialSource::Key(key), DEFAULT_BASE_URL)
     }
 
     /// Builds a provider from [`API_KEY_ENV`] and [`BASE_URL_ENV`].
@@ -149,7 +149,10 @@ impl AnthropicProvider {
         let base_url = setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         check_base_url(&base_url)?;
 
-        Self::with_credential(Credential::Key(require_key(ID, API_KEY_ENV)?), base_url)
+        Self::with_credential(
+            CredentialSource::Key(require_key(ID, API_KEY_ENV)?),
+            base_url,
+        )
     }
 
     /// Builds a provider that authenticates however `credential` says.
@@ -158,15 +161,16 @@ impl AnthropicProvider {
     /// through — see [`super::compat`], whose endpoint speaks this API under a
     /// name a config chose. The counterpart of
     /// [`OpenAiProvider::with_credential`](super::openai::OpenAiProvider::with_credential),
-    /// and crate-internal for its reason: [`Credential`] is, and what a caller
-    /// outside this module picks between is providers rather than credential
-    /// sources.
+    /// and module-internal for its reason: what a caller outside this module
+    /// picks between is providers rather than credential sources, so the one
+    /// caller that assembles a provider out of parts — [`super::compat`] — is
+    /// the only one here.
     ///
     /// # Errors
     ///
     /// Returns [`ProviderError::Transport`] when no HTTP client can be built.
     pub(super) fn with_credential(
-        credential: Credential,
+        credential: CredentialSource,
         base_url: impl Into<String>,
     ) -> Result<Self, ProviderError> {
         Ok(Self {

@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     auth::{self, RefreshOauth},
     provider::{
-        ChatRequest, Credential, OpenAiProvider, Provider, ProviderError, ProviderEvent,
+        ChatRequest, CredentialSource, OpenAiProvider, Provider, ProviderError, ProviderEvent,
         check_base_url,
     },
 };
@@ -137,7 +137,7 @@ impl GrokProvider {
         check_base_url(&base_url)?;
 
         Ok(Self(OpenAiProvider::with_credential(
-            Credential::Oauth {
+            CredentialSource::Oauth {
                 provider_id: ID,
                 refresh,
             },

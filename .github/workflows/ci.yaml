@@ -52,12 +52,32 @@ jobs:
           test "$internal" = "ganja-permission "
 
       # The same closed form for the engine: its internal deps are exactly the
-      # three crates beneath it, in sorted order. A split crate joining this
+      # four crates beneath it, in sorted order. A split crate joining this
       # list is a deliberate edit here, never an accident the old greps missed.
-      - name: ganja-core's internal dependencies are exactly the three beneath it
+      - name: ganja-core's internal dependencies are exactly the four beneath it
         run: |
           internal="$(cargo tree -p ganja-core -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-core$' | sort -u | tr '\n' ' ')"
+          test "$internal" = "ganja-permission ganja-protocol ganja-provider ganja-tool "
+
+      # And for the wires. `ganja-permission` is here transitively, through
+      # `ganja-tool`: a request offers the model `ToolDefinition`s, which is the
+      # only thing this crate wants of the tools. What the allowlist forbids is
+      # the edge back — a wire that named the engine would put a vendor's HTTP
+      # inside the loop it is supposed to be driven by.
+      - name: ganja-provider's internal dependencies are exactly the three beneath it
+        run: |
+          internal="$(cargo tree -p ganja-provider -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-provider$' | sort -u | tr '\n' ' ')"
           test "$internal" = "ganja-permission ganja-protocol ganja-tool "
+
+      # A wire renders nothing and copies nothing. The engine is held to the
+      # terminal rule one level up; asserting it here as well is what keeps a
+      # future login flow from reaching for a TUI prompt or the clipboard
+      # instead of handing the question back to whoever asked.
+      - name: ganja-provider stays free of terminal and clipboard dependencies
+        run: |
+          ! cargo tree -p ganja-provider -e normal | grep -q ratatui
+          ! cargo tree -p ganja-provider -e normal | grep -q crossterm
+          ! cargo tree -p ganja-provider -e normal | grep -q arboard
 
       # tail strips the crate's own header line, which would match the grep.
       - name: the bottom crates stay leaves

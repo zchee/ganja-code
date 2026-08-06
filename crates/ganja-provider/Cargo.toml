@@ -1,0 +1,67 @@
+[package]
+name = "ganja-provider"
+description = "Model-vendor wires for ganja, with the credentials they present and the catalog that sizes them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io. Also load-bearing for deny.toml: with every
+# member unpublished, `allow-wildcard-paths` exempts the workspace's own path
+# dependencies from `wildcards = "deny"`.
+publish = false
+
+[dependencies]
+# Only where dyn-safety demands it: `Provider` lives behind `Arc<dyn _>`.
+async-trait.workspace = true
+# The two encodings an OAuth login meets: a PKCE challenge on the way out, and
+# the payload of the id_token a ChatGPT login answers with on the way back.
+base64.workspace = true
+# Resolves `auth.json` under the XDG data directory and the catalog cache under
+# the XDG cache one, on every platform, macOS included — which is where upstream
+# keeps its own credentials there.
+etcetera.workspace = true
+futures.workspace = true
+# The types a request and a reply are made of, re-exported as
+# `ganja_provider::protocol` so the moved code kept the path it already wrote.
+ganja-protocol.workspace = true
+# `ToolDefinition` — what a request offers the model. The only thing this crate
+# wants of the tools, and the reason the edge points this way rather than the
+# other: a tool never learns which vendor is being asked.
+ganja-tool.workspace = true
+# A login's unguessable halves: the PKCE verifier, and the `state` and `nonce`
+# that make a loopback callback answerable only by the request that opened it.
+# Thirty-two bytes from the operating system, rendered as base64url.
+getrandom.workspace = true
+# Every wire speaks SSE, so only `stream` and `json` are load-bearing; the
+# workspace declaration pins rustls so no build here reaches for OpenSSL.
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# PKCE's S256 challenge is SHA-256 of the verifier; the provider recomputes it
+# and refuses the exchange if the two disagree. The workspace declaration picks
+# the major whose backend reaches the CPU's SHA extensions on this crate's two
+# build architectures without a separate assembly crate.
+sha2.workspace = true
+thiserror.workspace = true
+# `net` for the one socket this crate binds itself: the loopback listener a
+# browser login's callback comes back to. Naming it here rather than inheriting
+# it from `reqwest`'s unification keeps a future change to the HTTP client from
+# breaking a file that has nothing to do with HTTP.
+tokio = { workspace = true, features = ["net"] }
+tracing.workspace = true
+# `CancellationToken` lives behind `rt`; the workspace declaration carries no
+# features so crates opt into exactly the modules they use.
+tokio-util = { workspace = true, features = ["rt"] }
+# `Host`, for deciding whether an endpoint is loopback without matching strings.
+url.workspace = true
+
+[dev-dependencies]
+# The credential and catalog-cache tests write real files, with real permission
+# bits, in a directory that goes away afterwards.
+tempfile.workspace = true
+# `net` is for the wire tests: they serve canned HTTP over a loopback socket
+# rather than mocking the client, so the request really is built, sent, retried
+# and streamed. The library itself needs a listener only for a login callback.
+tokio = { workspace = true, features = ["net"] }

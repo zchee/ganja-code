@@ -56,11 +56,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-        mpsc,
-    },
+    sync::{Arc, Mutex, mpsc},
     thread,
 };
 
@@ -106,12 +102,6 @@ const QUARANTINE: &str = "corrupt";
 
 /// What a converted `storage/` tree is renamed to: `storage.migrated-<millis>`.
 const MIGRATED: &str = "migrated";
-
-/// Keeps one write's temporary file apart from another's inside this process.
-///
-/// Nothing in this module writes files any more; [`crate::catalog`] does,
-/// under the same rule, through [`temporary_beside`] and [`write_new`] below.
-static WRITES: AtomicU64 = AtomicU64::new(0);
 
 /// Every connection sets these, immediately after open.
 ///
@@ -1661,55 +1651,6 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Decoded<T> {
         Ok(value) => Decoded::Usable(value),
         Err(error) => Decoded::Unreadable(error),
     }
-}
-
-/// The sibling `path` is written through.
-///
-/// It sits beside the target so the rename stays within one filesystem, and it
-/// carries an extension no listing reads, so a write that dies before its
-/// rename cannot be mistaken for stored data.
-///
-/// Used by [`crate::catalog`], which writes a fetched catalog into the cache
-/// directory under this rule. Sessions no longer travel through files at all.
-pub(crate) fn temporary_beside(path: &Path) -> PathBuf {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-
-    path.with_file_name(format!(
-        "{name}.{}.{}.tmp",
-        std::process::id(),
-        WRITES.fetch_add(1, Ordering::Relaxed)
-    ))
-}
-
-/// Writes `bytes` to a newly created file.
-///
-/// `create_new` is `O_CREAT | O_EXCL`, which does not follow a symbolic link at
-/// the final component: the name is predictable enough for someone sharing the
-/// machine to plant one, and an open that followed it would write through to
-/// wherever it led and then rename that file over the stored data.
-pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
-
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        // Either a write that died before its rename, or something planted to
-        // catch this one. Unlinking the name and creating it again exclusively
-        // settles both: what is removed is the name, never whatever it pointed
-        // at, and a link planted in between fails the retry outright.
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            fs::remove_file(path)?;
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?
-        }
-        result => result?,
-    };
-
-    file.write_all(bytes)
 }
 
 /// Reads one stored file, or [`None`] when there is nothing this build can use

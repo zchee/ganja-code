@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
-        ChatRequest, Credential, Mapper, Presented, Provider, ProviderError, ProviderEvent,
+        ChatRequest, CredentialSource, Mapper, Presented, Provider, ProviderError, ProviderEvent,
         check_base_url, client, open, require_key, setting, shown_base_url, sse::Frame, steps,
     },
 };
@@ -70,7 +70,7 @@ pub(super) const NO_RESULT: &str = "[no result recorded]";
 /// Streams replies from an OpenAI-compatible chat completions endpoint.
 pub struct OpenAiProvider {
     client: reqwest::Client,
-    credential: Credential,
+    credential: CredentialSource,
     base_url: String,
     /// What every request carries besides the bearer token.
     ///
@@ -112,7 +112,7 @@ impl OpenAiProvider {
         let key = Presented::new(key)
             .ok_or_else(|| ProviderError::Auth(format!("{API_KEY_ENV} is empty")))?;
 
-        Self::with_credential(Credential::Key(key), DEFAULT_BASE_URL)
+        Self::with_credential(CredentialSource::Key(key), DEFAULT_BASE_URL)
     }
 
     /// Builds a provider from [`API_KEY_ENV`] and [`BASE_URL_ENV`].
@@ -127,22 +127,25 @@ impl OpenAiProvider {
         let base_url = setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         check_base_url(&base_url)?;
 
-        Self::with_credential(Credential::Key(require_key(ID, API_KEY_ENV)?), base_url)
+        Self::with_credential(
+            CredentialSource::Key(require_key(ID, API_KEY_ENV)?),
+            base_url,
+        )
     }
 
     /// Builds a provider that authenticates however `credential` says.
     ///
     /// The seam a provider which is this wire under another name is built
     /// through — see [`super::grok`], whose endpoint speaks this API and whose
-    /// credential is an OAuth access token rather than a key. Crate-internal
-    /// because [`Credential`] is: what a caller outside this module picks
-    /// between is providers, not credential sources.
+    /// credential is an OAuth access token rather than a key. Module-internal
+    /// because what a caller outside this module picks between is providers,
+    /// not credential sources.
     ///
     /// # Errors
     ///
     /// Returns [`ProviderError::Transport`] when no HTTP client can be built.
     pub(super) fn with_credential(
-        credential: Credential,
+        credential: CredentialSource,
         base_url: impl Into<String>,
     ) -> Result<Self, ProviderError> {
         Ok(Self {

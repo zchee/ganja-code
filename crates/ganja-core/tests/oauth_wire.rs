@@ -262,7 +262,7 @@ async fn serve() -> Endpoint {
         seen: Mutex::new(Vec::new()),
         chat: Mutex::new(Reply::ok(
             "text/event-stream",
-            include_str!("fixtures/openai_happy_path.sse"),
+            include_str!("../../ganja-provider/tests/fixtures/openai_happy_path.sse"),
         )),
         token: Mutex::new(Reply::ok(
             "application/json",
