@@ -563,7 +563,8 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                 PartBody::File { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
-                | PartBody::Patch { .. } => {}
+                | PartBody::Patch { .. }
+                | PartBody::Reasoning { .. } => {}
             },
             Event::PartDelta { part_id, delta, .. } => {
                 if open.as_ref() == Some(&part_id) {

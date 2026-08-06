@@ -13,15 +13,16 @@
 //!
 //! One test, one binary, on purpose: it mutates process-wide environment
 //! variables, and a plain `cargo test` runs the tests inside a binary on
-//! parallel threads. `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are redirected into
-//! a temporary tree so the machine running the suite cannot contribute a config
-//! of its own, and so nothing here can read or write a real user's state.
+//! parallel threads. `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `HOME` are
+//! redirected into a temporary tree — and `GANJA_CONFIG_HOME` cleared — so the
+//! machine running the suite cannot contribute a config of its own, and so
+//! nothing here can read or write a real user's state.
 
 use std::{env, fs, path::Path};
 
 use ganja_core::{
     Config, Overrides,
-    config::CONFIG_ENV,
+    config::{CONFIG_ENV, CONFIG_HOME_ENV},
     provider::{self, fake},
 };
 
@@ -60,6 +61,12 @@ fn each_tier_that_names_a_model_outranks_every_tier_below_it() {
     unsafe {
         env::set_var("XDG_CONFIG_HOME", &config_home);
         env::set_var("XDG_DATA_HOME", home.path().join("data"));
+        // The global tier resolves through `config_home()`, and two of its
+        // three places reach past the XDG redirect: `~/.ganja` through `HOME`,
+        // and `GANJA_CONFIG_HOME` past everything. Pin both, or a runner who
+        // adopted either feature contributes a global config to this table.
+        env::set_var("HOME", home.path());
+        env::remove_var(CONFIG_HOME_ENV);
         env::remove_var(CONFIG_ENV);
         env::remove_var(provider::PROVIDER_ENV);
         env::remove_var(provider::MODEL_ENV);

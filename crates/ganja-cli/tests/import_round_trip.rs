@@ -8,16 +8,17 @@
 //! One test, one binary, on purpose: it mutates process-wide environment
 //! variables so that the in-process load and the subprocess that wrote the file
 //! agree about where the config homes are, and a plain `cargo test` runs the
-//! tests inside a binary on parallel threads. `XDG_CONFIG_HOME` and
-//! `XDG_DATA_HOME` are redirected into a temporary tree, so the machine running
-//! the suite cannot contribute a config of its own.
+//! tests inside a binary on parallel threads. `XDG_CONFIG_HOME`,
+//! `XDG_DATA_HOME` and `HOME` are redirected into a temporary tree — and
+//! `GANJA_CONFIG_HOME` cleared — so the machine running the suite cannot
+//! contribute a config of its own.
 
 use std::{env, fs, num::NonZeroU64};
 
 use assert_cmd::Command;
 use ganja_core::{
     Config,
-    config::{AgentMode, CONFIG_ENV, LspConfig, McpServer},
+    config::{AgentMode, CONFIG_ENV, CONFIG_HOME_ENV, LspConfig, McpServer},
     provider::Dialect,
 };
 use ganja_permission::Action;
@@ -46,6 +47,11 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
     unsafe {
         env::set_var("XDG_CONFIG_HOME", home.path().join("config"));
         env::set_var("XDG_DATA_HOME", home.path().join("data"));
+        // The global tier and the `--global` destination both resolve through
+        // ganja's config-home seam, which reaches past the XDG redirect:
+        // `~/.ganja` through `HOME`, and `GANJA_CONFIG_HOME` past everything.
+        env::set_var("HOME", home.path());
+        env::remove_var(CONFIG_HOME_ENV);
         // Otherwise a developer's exported file would be read as a tier of its
         // own, on top of the one under test.
         env::remove_var(CONFIG_ENV);

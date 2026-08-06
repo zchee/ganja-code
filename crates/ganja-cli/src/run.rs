@@ -774,7 +774,15 @@ impl<'a> Reporter<'a> {
                     self.flush();
                     self.emit(Kind::StepFinish, "part", part);
                 }
-                PartBody::Tool { .. } | PartBody::File { .. } | PartBody::Patch { .. } => {}
+                // `reasoning` in [`TYPES`] names a reasoning *text* part,
+                // which this build still does not have. A sealed blob is not
+                // that: there is nothing in it a reader could be shown, and
+                // emitting it under that name would tell a consumer the model
+                // said something it can print. The slot stays unfilled.
+                PartBody::Tool { .. }
+                | PartBody::File { .. }
+                | PartBody::Patch { .. }
+                | PartBody::Reasoning { .. } => {}
             },
             Event::PartDelta { part_id, delta, .. } => {
                 if let Some((_, text)) = self.open.iter_mut().find(|(id, _)| id == part_id) {

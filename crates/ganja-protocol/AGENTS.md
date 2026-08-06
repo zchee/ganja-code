@@ -12,7 +12,7 @@ The types every side of the app speaks: the `Command`s a frontend sends, the `Ev
 | File | Description |
 |------|-------------|
 | `Cargo.toml` | Member manifest, `publish = false`. Two dependencies. Anything that would widen the list belongs on the other side of the boundary. |
-| `src/lib.rs` | The whole crate: `Command`, `Event`, `Message`, `Part`, `PartBody`, `ToolState`, `Usage`, the id types and their ascending minting, `FinishReason`, `Mention`, `RevertInfo`, `PermissionReply`. Spec: upstream `session/message-v2.ts`. |
+| `src/lib.rs` | The whole crate: `Command`, `Event`, `Message`, `Part`, `PartBody` (including `PartBody::Reasoning` and its `REASONING_TAG`), `ToolState`, `Usage`, the id types and their ascending minting, `FinishReason`, `Mention`, `RevertInfo`, `PermissionReply`. Spec: upstream `session/message-v2.ts`. `PartBody::Reasoning` is the first variant whose absence changes what the *next request* carries rather than what a transcript looks like, so its tag prefix is a contract: a later variant of it keeps the `reasoning` prefix, and a reader that cannot decode such a record must keep the rest of the message and leave a stateless one of these in its place. |
 
 ## For AI Agents
 

@@ -12,8 +12,47 @@
 //! tool hands back. Both sides read the same directories through [`discover`],
 //! so what the prompt advertises is what a call can load.
 //!
+//! Which directories those are is the whole of the next paragraph, and it is
+//! the one place this module does not port upstream.
+//!
 //! # Divergences
 //!
+//! - **`nothing-foreign-is-discovered`** — upstream scans four tiers nobody
+//!   asked it to (`skill/index.ts:173-233`): `~/.claude/skills` and
+//!   `~/.agents/skills`, those same two names walking up from the working
+//!   directory to the project root, and `skill/`+`skills/` under every
+//!   directory its config lives in. **None of those four is scanned here.**
+//!   What is scanned unasked is ganja's own two homes and nothing else —
+//!   `<XDG config>/ganja/skills` and `<project root>/.ganja/skills`, composed
+//!   by `ganja-core`'s `config::default_skill_dirs` — plus whatever a config
+//!   named in `skills.paths`.
+//!
+//!   This is a **standing ruling by the user of this build**, not a porting
+//!   judgment and not an oversight. It reads: *ganja's own homes are default
+//!   tiers; nothing foreign is discovered.* The two halves are one idea —
+//!   placing a `SKILL.md` in a directory that exists because of this tool **is**
+//!   the opt-in act, and it is exactly what a config key would otherwise stand
+//!   in for, while another tool's directory is another tool's however
+//!   conveniently it sits in the same home. On a real machine `~/.claude/skills`
+//!   holds a hundred of them, every description landing in every system prompt
+//!   of a session that never asked for one. That is what the ruling is about,
+//!   and it binds `agent`, `mcp`, and whoever ports `plugin` and `hooks`. Do
+//!   not "restore" a foreign tier here to close the gap with upstream — the gap
+//!   is the feature.
+//!
+//!   Note which project-root name is scanned: `.ganja/skills`, namespaced, and
+//!   **not** the bare `skill/` or `skills/` upstream reads. A directory called
+//!   `skills` at the top of somebody's repository is a name they may already
+//!   mean something else by; one called `.ganja` is not.
+//!
+//!   Nothing foreign is lost that naming a directory does not buy back.
+//!   Upstream's own tier is one line — `"skills": { "paths":
+//!   ["~/.claude/skills"] }` — and then it is a thing somebody did rather than
+//!   a thing that happened.
+//!
+//!   [`Roots`] itself still has no constructor that goes looking: the two
+//!   defaults are resolved by the engine, which is the layer that knows where
+//!   ganja's config lives, and handed here as a value like any other.
 //! - **`skill-discovery-runs-per-call`** — upstream discovers once per
 //!   instance and caches (`skill/index.ts:259-287`). Discovery here runs when
 //!   it is asked: a walk of a handful of directories costs less than the
@@ -48,28 +87,6 @@ use crate::{Tool, ToolCtx, ToolError, ToolOutput};
 /// The file that makes a directory a skill.
 const MANIFEST: &str = "SKILL.md";
 
-/// Directory Claude Code keeps its skills under, scanned as upstream scans it
-/// (`skill/index.ts:21-23`).
-const CLAUDE_DIR: &str = ".claude";
-
-/// The vendor-neutral spelling of the same thing (`skill/index.ts:22`).
-const AGENTS_DIR: &str = ".agents";
-
-/// The subdirectory both of the above hold their skills in.
-const EXTERNAL_SUBDIR: &str = "skills";
-
-/// The two names a project's or the global config directory may hold skills
-/// under (`skill/index.ts:24`).
-const CONFIG_SUBDIRS: [&str; 2] = ["skill", "skills"];
-
-/// Turns off the `.claude` and `.agents` tiers entirely. Upstream's is
-/// `OPENCODE_DISABLE_EXTERNAL_SKILLS`.
-pub const DISABLE_EXTERNAL_ENV: &str = "GANJA_DISABLE_EXTERNAL_SKILLS";
-
-/// Turns off the `.claude` tier alone, leaving `.agents`. Upstream's is
-/// `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS`.
-pub const DISABLE_CLAUDE_ENV: &str = "GANJA_DISABLE_CLAUDE_CODE_SKILLS";
-
 /// Most files one loaded skill lists beside its manifest
 /// (`tool/skill.ts:42`).
 const SAMPLED_FILES: usize = 10;
@@ -78,8 +95,9 @@ const SAMPLED_FILES: usize = 10;
 ///
 /// A skill lives at `<root>/<name>/SKILL.md`, and upstream's glob is
 /// unbounded. Bounded here because a root a config named could be a home
-/// directory by accident, and a prompt composition is not a good place to walk
-/// one.
+/// directory by accident — every root is one somebody wrote down, and what
+/// somebody writes down is sometimes `~` — and a prompt composition is not a
+/// good place to walk one.
 const MAX_DEPTH: usize = 6;
 
 /// What the model passes to `skill`.
@@ -105,15 +123,21 @@ pub struct Skill {
     pub content: String,
 }
 
-/// Where skills are looked for.
+/// Where skills are looked for: exactly the directories somebody handed in.
 ///
-/// A value rather than a scan of "wherever skills live", because the one thing
-/// this must be able to say is *nothing*: a fixture run, a golden differential
-/// or any test composing a prompt has to be able to hold a set of roots that
-/// cannot reach the machine it is running on.
+/// A value rather than a scan of "wherever skills live", for two reasons. The
+/// first is that the thing this must be able to say is *nothing*: a fixture
+/// run, a golden differential or any test composing a prompt has to hold a set
+/// of roots that cannot reach the machine it is running on. The second is the
+/// module's `nothing-foreign-is-discovered` — the two directories a session
+/// scans unasked are ganja's own, and *which* directories those are is a
+/// question about where this build keeps its config, which is the engine's
+/// answer and not a tool's. So there is deliberately no constructor here that
+/// goes looking: `ganja-core`'s `config::default_skill_dirs` works the two out
+/// and they arrive through [`Roots::with_paths`] like anything else.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Roots {
-    /// The directories to scan, in the order upstream scans them — later
+    /// The directories to scan, in the order they were handed in — later
     /// entries win a name collision.
     dirs: Vec<PathBuf>,
 }
@@ -121,81 +145,25 @@ pub struct Roots {
 impl Roots {
     /// No roots at all: discovery finds nothing.
     ///
-    /// What a test and a fixture-built engine hold, and the reason this type
-    /// exists.
+    /// Where every set of roots starts, a real session's included — the engine
+    /// builds its two defaults onto this — and the value a fixture keeps,
+    /// because a set that names nowhere cannot reach the machine a test is
+    /// running on.
     #[must_use]
     pub fn none() -> Self {
         Self::default()
     }
 
-    /// The roots a session working in `cwd` scans, upstream's `discoverSkills`
-    /// (`skill/index.ts:173-233`) minus the two tiers this port answers
-    /// differently:
+    /// The same roots with `paths` on the end, already expanded and resolved by
+    /// whoever worked them out.
     ///
-    /// 1. `~/.claude/skills` and `~/.agents/skills`, unless
-    ///    [`DISABLE_EXTERNAL_ENV`] or — for the first alone —
-    ///    [`DISABLE_CLAUDE_ENV`] says otherwise;
-    /// 2. the same two directory names walking up from `cwd` to the project
-    ///    root;
-    /// 3. `skill/` and `skills/` under the project root and under the global
-    ///    config directory, which is where upstream's `config.directories()`
-    ///    points.
-    ///
-    /// `config_dirs` is that third tier's roots, handed in rather than
-    /// resolved: which directory holds this build's config is the engine's
-    /// answer, and a tool that went and worked it out would be a tool that
-    /// knows where config lives.
-    #[must_use]
-    pub fn standard(cwd: &Path, config_dirs: &[PathBuf]) -> Self {
-        let mut dirs = Vec::new();
-        // `.claude` alone can be switched off, which is why the set is built
-        // rather than filtered at each use.
-        let external: Vec<&str> = if disabled(DISABLE_CLAUDE_ENV) {
-            vec![AGENTS_DIR]
-        } else {
-            vec![CLAUDE_DIR, AGENTS_DIR]
-        };
-
-        if !disabled(DISABLE_EXTERNAL_ENV) {
-            if let Some(home) = home() {
-                for name in &external {
-                    dirs.push(home.join(name).join(EXTERNAL_SUBDIR));
-                }
-            }
-            // Outermost first, so a skill nearer the file being worked on wins
-            // the name — the order every other layered thing in this workspace
-            // resolves in.
-            let root = ganja_permission::project::Project::resolve(cwd)
-                .root()
-                .to_path_buf();
-            let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-            let mut walked: Vec<PathBuf> = Vec::new();
-            for directory in start.ancestors() {
-                for name in &external {
-                    walked.push(directory.join(name).join(EXTERNAL_SUBDIR));
-                }
-                if directory == root {
-                    break;
-                }
-            }
-            walked.reverse();
-            dirs.extend(walked);
-        }
-
-        for directory in config_dirs {
-            for name in CONFIG_SUBDIRS {
-                dirs.push(directory.join(name));
-            }
-        }
-
-        Self { dirs }
-    }
-
-    /// The same roots with `paths` on the end: the directories a config's
-    /// `skills.paths` named, already expanded and resolved by whoever read it.
-    ///
-    /// Last, so a path somebody wrote down by hand outranks the tiers found by
-    /// convention.
+    /// The one way a directory gets in front of [`discover`], for ganja's own
+    /// two homes as much as for a `skills.paths` entry — which is why the
+    /// engine appends the defaults first and the configured paths after, so a
+    /// directory somebody wrote down outranks one that was there by
+    /// convention. A caller that wants upstream's `~/.claude/skills` writes it
+    /// here too, which is the difference between a directory being read and a
+    /// directory being read *on purpose*.
     #[must_use]
     pub fn with_paths(mut self, paths: impl IntoIterator<Item = PathBuf>) -> Self {
         self.dirs.extend(paths);
@@ -212,14 +180,14 @@ impl Roots {
 
 /// Every skill under `roots`, by name, sorted.
 ///
-/// A directory that is not there contributes nothing — most of the tiers above
-/// are conventions rather than promises. A `SKILL.md` that will not parse is
-/// warned about and skipped, as upstream skips it: one malformed file may not
-/// take the rest of a session's skills with it.
+/// A directory that is not there contributes nothing — a path in a config
+/// outlives the directory it named. A `SKILL.md` that will not parse is warned
+/// about and skipped, as upstream skips it: one malformed file may not take the
+/// rest of a session's skills with it.
 ///
 /// Two skills claiming one name is upstream's warning too, and upstream's
 /// answer — the later scan wins (`skill/index.ts:125-138`), which is what makes
-/// the ordering in [`Roots::standard`] mean anything.
+/// the order [`Roots::with_paths`] preserves mean anything.
 #[must_use]
 pub fn discover(roots: &Roots) -> Vec<Skill> {
     let mut found: BTreeMap<String, Skill> = BTreeMap::new();
@@ -255,9 +223,10 @@ pub fn discover(roots: &Roots) -> Vec<Skill> {
 
 /// Every `SKILL.md` under `dir`, in a stable order.
 ///
-/// Hidden directories are walked — `.claude` is one — and symbolic links are
-/// not followed: a link out of a skills directory is a way to have a prompt
-/// composition walk somewhere nobody meant it to.
+/// Hidden directories are walked — a config is free to name `~/.claude/skills`,
+/// whose every component after the home directory is hidden — and symbolic
+/// links are not followed: a link out of a skills directory is a way to have a
+/// prompt composition walk somewhere nobody meant it to.
 fn manifests(dir: &Path) -> Vec<PathBuf> {
     if !dir.is_dir() {
         return Vec::new();
@@ -401,76 +370,41 @@ fn unquote(value: &str) -> &str {
     value
 }
 
-/// Whether `variable` is set to something this build reads as true, by the
-/// same rule the model catalog's own switch uses.
-fn disabled(variable: &str) -> bool {
-    std::env::var(variable).is_ok_and(|value| {
-        let value = value.trim().to_ascii_lowercase();
-        value == "1" || value == "true"
-    })
-}
-
-/// This machine's home directory, or nothing when it has none to speak of.
-fn home() -> Option<PathBuf> {
-    etcetera::home_dir().ok()
-}
-
-/// Where a tool's roots come from.
-enum Lookup {
-    /// The conventional tiers, worked out against the working directory of
-    /// whichever call runs — which is the only directory a registry built
-    /// before a session started can be sure of.
-    Conventional,
-    /// Exactly these, wherever the call is working.
-    Fixed(Roots),
-}
-
 /// Loads a skill.
 pub struct SkillTool {
-    /// How this tool answers "where are the skills".
-    lookup: Lookup,
+    /// The directories this tool loads from.
+    roots: Roots,
 }
 
 impl SkillTool {
-    /// The tool as it ships in [`crate::Registry::with_builtins`]: the
-    /// conventional roots, resolved against the working directory of whichever
-    /// call runs it.
+    /// The tool as it ships in [`crate::Registry::with_builtins`]: **no roots
+    /// at all**, so it loads nothing.
     ///
-    /// What it cannot know is what a config said, because a tool may not read
-    /// one — see [`SkillTool::over`].
+    /// Not a placeholder so much as the only honest default: this crate may
+    /// not read a config, and it may not work out where ganja keeps its own
+    /// directories either — both answers belong to the engine (the module's
+    /// `nothing-foreign-is-discovered`). A frontend that has read a config
+    /// installs [`SkillTool::over`] on top of this with the roots
+    /// `instruction::skill_roots` composed — ganja's own two homes plus
+    /// whatever `skills.paths` named — the way it installs `task` once it knows
+    /// which agents a session may spawn.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            lookup: Lookup::Conventional,
+            roots: Roots::none(),
         }
     }
 
     /// The tool over exactly `roots`.
     ///
-    /// What an engine installs over the default once it has read a config, the
-    /// way it installs `task` once it knows which agents a session may spawn:
-    /// the caller resolves the roots — [`Roots::standard`] plus whatever
-    /// `skills.paths` named — composes the system prompt's
-    /// `<available_skills>` from [`discover`] over *those* roots, and hands the
-    /// same value here. That shared value is what makes the prompt's list and
-    /// this tool's answers the same list.
-    ///
-    /// [`Roots::none`] is the other reason it exists: a fixture, a golden
-    /// differential or any test composing a prompt holds roots that cannot
-    /// reach the machine running it.
+    /// The caller resolves the roots — ganja's own two homes, then whatever
+    /// `skills.paths` named — composes the system prompt's `<available_skills>`
+    /// from [`discover`] over *those* roots, and hands the same value here.
+    /// That shared value is what makes the prompt's list and this tool's
+    /// answers the same list.
     #[must_use]
     pub fn over(roots: Roots) -> Self {
-        Self {
-            lookup: Lookup::Fixed(roots),
-        }
-    }
-
-    /// Where this tool looks, for a call working in `cwd`.
-    fn roots(&self, cwd: &Path) -> Roots {
-        match &self.lookup {
-            Lookup::Conventional => Roots::standard(cwd, &[]),
-            Lookup::Fixed(roots) => roots.clone(),
-        }
+        Self { roots }
     }
 }
 
@@ -503,10 +437,12 @@ impl Tool for SkillTool {
         format!("skill {name}")
     }
 
-    async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
+    /// Takes no `cwd`: every root was resolved by whoever named it, so where
+    /// the call happens to be working decides nothing here.
+    async fn run(&self, args: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
         let args: Args = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArgs(error.to_string()))?;
-        let skills = discover(&self.roots(&ctx.cwd));
+        let skills = discover(&self.roots);
 
         let Some(skill) = skills.iter().find(|skill| skill.name == args.name) else {
             let available: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
@@ -719,7 +655,8 @@ mod tests {
     }
 
     /// Roots that name nothing find nothing — the property a fixture run and
-    /// the golden differential depend on.
+    /// the golden differential depend on, and the floor every other set is
+    /// built up from.
     #[test]
     fn roots_that_name_nowhere_discover_nothing() {
         assert!(super::discover(&Roots::none()).is_empty());
@@ -781,8 +718,8 @@ mod tests {
         assert_eq!(found[0].content, "the second");
     }
 
-    /// The one directory a config named is scanned; the conventional tiers are
-    /// unreachable from a temporary directory that holds none of them.
+    /// The one directory a config named is scanned, and what a call gets back
+    /// out of it.
     #[tokio::test]
     async fn a_loaded_skill_hands_over_its_body_its_base_directory_and_its_files() {
         let dir = tempfile::tempdir().expect("a scratch directory");
@@ -929,34 +866,93 @@ mod tests {
         assert_eq!(schema["required"], serde_json::json!(["name"]));
     }
 
-    /// The conventional tiers, as directories rather than as a scan: what is
-    /// asserted is the list `standard` would look in, which is the half of
-    /// discovery that cannot be tested against a temporary directory without
-    /// moving this machine's home.
-    #[test]
-    fn the_conventional_roots_are_the_ones_upstream_scans() {
+    /// Where the layering is: this crate scans what it was handed and works
+    /// nothing out for itself. Every directory name in the argument is planted
+    /// here — the two foreign ones this build never reads, the two generic
+    /// project-root names it also never reads, **and ganja's own
+    /// `.ganja/skills`, which a session does read** — and the tool as it ships
+    /// finds none of them, because which directories are default is a question
+    /// about where ganja keeps its things and that question is answered a crate
+    /// up (`ganja-core`'s `config::default_skill_dirs`, composed into roots by
+    /// `instruction::skill_roots`).
+    ///
+    /// The consequence worth having: the machine running this decides nothing.
+    /// A set of roots that is empty cannot reach a home directory, so there is
+    /// no `HOME` here to redirect and no laptop whose contents could change the
+    /// answer.
+    #[tokio::test]
+    async fn the_shipped_tool_scans_only_the_directories_it_was_handed() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        let config = dir.path().join("config");
-        let roots = Roots::standard(dir.path(), std::slice::from_ref(&config));
-        let dirs = roots.dirs();
+        let cwd = dir.path();
+        for tier in [
+            cwd.join(".claude").join("skills"),
+            cwd.join(".agents").join("skills"),
+            cwd.join("skill"),
+            cwd.join("skills"),
+            cwd.join(".ganja").join("skills"),
+        ] {
+            write(
+                &tier,
+                "ambient",
+                "---\nname: ambient\ndescription: found by convention.\n---\nb",
+            );
+        }
 
         assert!(
-            dirs.contains(&dir.path().join(".claude").join("skills"))
-                || dirs.iter().any(|root| root.ends_with(".claude/skills")),
-            "the project's own claude-code skills are a tier: {dirs:?}"
+            Roots::none().dirs().is_empty(),
+            "the floor every set is built from names nowhere"
         );
         assert!(
-            dirs.iter().any(|root| root.ends_with(".agents/skills")),
-            "and the vendor-neutral spelling of it: {dirs:?}"
+            super::discover(&Roots::none()).is_empty(),
+            "so a scan of it finds nothing, with five candidate directories on the disk"
         );
+
+        let refused = SkillTool::new()
+            .run(serde_json::json!({ "name": "ambient" }), &ctx(cwd))
+            .await
+            .expect_err("this tool was handed no directory, so it found none");
+
+        assert!(
+            matches!(&refused, ToolError::Failed(message)
+                if message == "Skill \"ambient\" not found. Available skills: none"),
+            "including ganja's own, which only a caller that resolved it can supply: got {refused:?}"
+        );
+    }
+
+    /// A foreign tier is *unasked*, not unreachable. Naming upstream's own
+    /// directory is all it takes to get upstream's own behaviour back, which is
+    /// what makes its removal from the defaults a change of default rather than
+    /// a loss of the feature.
+    #[tokio::test]
+    async fn upstreams_own_tier_is_reachable_by_naming_it() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let claude = dir.path().join(".claude").join("skills");
+        write(
+            &claude,
+            "porting",
+            "---\nname: porting\ndescription: How to port.\n---\nRead the upstream file first.",
+        );
+
+        let roots = Roots::none().with_paths([claude.clone()]);
         assert_eq!(
-            dirs.last(),
-            Some(&config.join("skills")),
-            "the config directory's tiers come last: {dirs:?}"
+            roots.dirs(),
+            [claude],
+            "the named directory is the whole of the set"
         );
+
+        let found = super::discover(&roots);
+        let names: Vec<&str> = found.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, vec!["porting"]);
+
+        let out = SkillTool::over(roots)
+            .run(serde_json::json!({ "name": "porting" }), &ctx(dir.path()))
+            .await
+            .expect("a named directory's skill is loadable");
+
         assert!(
-            dirs.contains(&config.join("skill")),
-            "both spellings upstream accepts: {dirs:?}"
+            out.output.contains("Read the upstream file first."),
+            "and it is the body that comes back: {}",
+            out.output
         );
     }
 }

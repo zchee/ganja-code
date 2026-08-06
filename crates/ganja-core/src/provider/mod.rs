@@ -185,6 +185,25 @@ pub enum ProviderEvent {
     TextDelta(String),
     /// The next fragment of the model's thinking.
     ReasoningDelta(String),
+    /// The model's thinking, sealed by the provider for the provider.
+    ///
+    /// Where [`ProviderEvent::ReasoningDelta`] is thinking a person could
+    /// read, this is thinking only the wire that sealed it can, handed over so
+    /// the next request can hand it back
+    /// (`packages/llm/test/tool-runtime.test.ts:596-605`). It becomes a
+    /// [`PartBody::Reasoning`](crate::protocol::PartBody::Reasoning) and
+    /// nothing else: no frontend renders it, and the engine never opens it.
+    ///
+    /// Reported only when the provider actually sent state. An item that
+    /// arrives without any is a step whose thinking cannot be replayed, and
+    /// there is nothing for the transcript to carry.
+    ReasoningState {
+        /// The provider's own identifier for the item, kept because it is the
+        /// item's identity and two of them are one item.
+        item: String,
+        /// The sealed state, verbatim.
+        encrypted: String,
+    },
     /// The model started calling a tool.
     ToolCallStart {
         /// Correlates the call's fragments and its result.

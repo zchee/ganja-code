@@ -110,6 +110,10 @@ fn shape(event: &Event) -> String {
                 format!("part:tool_{}:{call_id}", state_tag(state))
             }
             PartBody::Patch { files, .. } => format!("part:patch:{}", files.join(",")),
+            // The item id and never the state: a transcript line quoting a
+            // provider's sealed bytes is unreadable, and this file's whole
+            // output is meant to be read.
+            PartBody::Reasoning { item, .. } => format!("part:reasoning:{item}"),
         },
         Event::PartDelta { delta, .. } => format!("delta:{delta}"),
         Event::PartUpdated { part, .. } => match &part.body {

@@ -516,7 +516,13 @@ impl Entry {
                 PartBody::File { path, .. } => {
                     lines.push(Line::styled(format!("@{path}"), theme.dim));
                 }
-                PartBody::StepStart | PartBody::StepFinish { .. } | PartBody::Patch { .. } => {}
+                // Sealed reasoning has no rendering: what it holds is opaque
+                // to everything but the provider, so a line about it would be
+                // a line about a blob.
+                PartBody::StepStart
+                | PartBody::StepFinish { .. }
+                | PartBody::Patch { .. }
+                | PartBody::Reasoning { .. } => {}
             }
         }
         if self.interrupted {

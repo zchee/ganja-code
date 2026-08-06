@@ -140,10 +140,14 @@ fn formatted(part: &Part) -> String {
 
             rendered
         }
+        // Sealed reasoning renders as nothing on purpose: it is bytes only the
+        // provider can read, so the honest rendering of it is the one upstream
+        // gives a part it has no arm for.
         PartBody::File { .. }
         | PartBody::StepStart
         | PartBody::StepFinish { .. }
-        | PartBody::Patch { .. } => String::new(),
+        | PartBody::Patch { .. }
+        | PartBody::Reasoning { .. } => String::new(),
     }
 }
 

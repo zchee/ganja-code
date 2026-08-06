@@ -46,10 +46,6 @@ use ganja_permission::Project;
 /// Directory opencode keeps its global config in, under the XDG config home.
 const OPENCODE_DIRECTORY: &str = "opencode";
 
-/// Directory ganja's global config lives in, under the same home. Matches
-/// `ganja_core::config`, which reads what this writes.
-const GANJA_DIRECTORY: &str = "ganja";
-
 /// opencode's global tier, in merge order — all three are read and later wins,
 /// so `opencode.jsonc` has the last word (`config.ts:258-260`).
 const GLOBAL_FILES: [&str; 3] = ["config.json", "opencode.json", "opencode.jsonc"];
@@ -2124,7 +2120,7 @@ fn discover(file: Option<PathBuf>, global: bool, cwd: &Path) -> Result<Sources> 
         return Ok(sources);
     }
 
-    match config_home() {
+    match opencode_config_base() {
         Ok(home) => {
             let directory = home.join(OPENCODE_DIRECTORY);
             for name in GLOBAL_FILES {
@@ -2213,10 +2209,12 @@ fn parse(text: &str) -> Result<Json> {
     }
 }
 
-/// `$XDG_CONFIG_HOME`, or `~/.config`. The same resolution
-/// `ganja_core::config` uses for ganja's own global config, which is what makes
-/// the destination this writes the file that build will read.
-fn config_home() -> Result<PathBuf> {
+/// `$XDG_CONFIG_HOME`, or `~/.config` — where **opencode** keeps its global
+/// config. Deliberately not `ganja_core::config::config_home`: that seam
+/// resolves where *ganja's* things live and moves with `GANJA_CONFIG_HOME`,
+/// while the directory read here is another tool's home, fixed by that tool's
+/// own convention.
+fn opencode_config_base() -> Result<PathBuf> {
     use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 
     Xdg::new()
@@ -2225,9 +2223,15 @@ fn config_home() -> Result<PathBuf> {
 }
 
 /// Where the imported config is written.
+///
+/// The global destination is `ganja_core::config::config_home` — the same
+/// resolution the next launch reads the global tier through, which is what
+/// makes this write a file that build will read, wherever `GANJA_CONFIG_HOME`
+/// or a `~/.ganja` has moved it.
 fn destination(global: bool, cwd: &Path) -> Result<PathBuf> {
     let directory = if global {
-        config_home()?.join(GANJA_DIRECTORY)
+        ganja_core::config::config_home()
+            .context("the home directory holding the global config could not be located")?
     } else {
         Project::resolve(cwd).root().to_path_buf()
     };
