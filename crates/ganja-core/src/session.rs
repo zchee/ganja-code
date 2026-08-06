@@ -1049,8 +1049,11 @@ async fn request_title(
             }
             ProviderEvent::Finish(_) => break,
             // A toolless request has no business calling tools, and thinking
-            // is stripped below either way.
+            // is stripped below either way. Sealed thinking has nowhere to go
+            // at all: this request is not part of the conversation, so there
+            // is no next request of its own to hand it back on.
             ProviderEvent::ReasoningDelta(_)
+            | ProviderEvent::ReasoningState { .. }
             | ProviderEvent::ToolCallStart { .. }
             | ProviderEvent::ToolCallDelta { .. }
             | ProviderEvent::ToolCallEnd { .. }
@@ -1761,8 +1764,10 @@ async fn summarize(
             }
             ProviderEvent::Finish(_) => break,
             // The request offered no tools and thinking has no part; both are
-            // dropped the way the step loop drops orphan reasoning.
-            ProviderEvent::ReasoningDelta(_) => {}
+            // dropped the way the step loop drops orphan reasoning. A summary
+            // request is a question about the conversation rather than a step
+            // of it, so state sealed while answering it belongs to nothing.
+            ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningState { .. } => {}
             ProviderEvent::ToolCallStart { .. }
             | ProviderEvent::ToolCallDelta { .. }
             | ProviderEvent::ToolCallEnd { .. } => {
@@ -1817,7 +1822,8 @@ fn serialize_message(message: &Message) -> String {
                 PartBody::Tool { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
-                | PartBody::Patch { .. } => None,
+                | PartBody::Patch { .. }
+                | PartBody::Reasoning { .. } => None,
             })
             .collect(),
         Role::Assistant => message
@@ -1843,10 +1849,14 @@ fn serialize_message(message: &Message) -> String {
                         None => vec![call],
                     }
                 }
+                // Sealed thinking says nothing a summary could carry: it is
+                // bytes for the provider, and the conversation it summarizes
+                // is what the model said and did.
                 PartBody::File { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
-                | PartBody::Patch { .. } => Vec::new(),
+                | PartBody::Patch { .. }
+                | PartBody::Reasoning { .. } => Vec::new(),
             })
             .collect(),
     };
@@ -2146,10 +2156,36 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 interrupt!(Some(Outcome::failed(error.to_string())), STRANDED);
             }
             ProviderEvent::Finish(reason) => break reason,
-            // Reasoning has no protocol part yet. Dropping it keeps the
-            // transcript honest instead of pasting thinking into the reply.
+            // Reasoning a person could read has no protocol part yet. Dropping
+            // it keeps the transcript honest instead of pasting thinking into
+            // the reply.
             ProviderEvent::ReasoningDelta(_) => {
                 tracing::debug!("reasoning has no rendered part yet");
+            }
+            // Reasoning the *provider* will read does have one, and it is
+            // written through like any other part for one reason: the next
+            // request is built from the transcript, so state that only lived
+            // in this loop would be state the turn's second step no longer
+            // has. It reaches the event stream for the same reason — a
+            // frontend that applies every event holds exactly what the next
+            // request will carry, and this is now part of that.
+            ProviderEvent::ReasoningState { item, encrypted } => {
+                let part = Part::reasoning(turn.provider.id(), item, Some(encrypted));
+                assistant.parts.push(part.clone());
+                turn.persist_part(assistant, &part);
+
+                if let ControlFlow::Break(stop) = deliver(
+                    turn,
+                    Event::PartStarted {
+                        session_id: turn.session_id.clone(),
+                        message_id: assistant.id.clone(),
+                        part,
+                    },
+                )
+                .await
+                {
+                    interrupt!(stop, &ToolError::Cancelled.to_string());
+                }
             }
         }
     };

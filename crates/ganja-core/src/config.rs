@@ -63,13 +63,48 @@ use crate::{
     provider::Dialect,
 };
 
-/// Environment variable naming one extra config file to read.
+/// Environment variable naming one extra config **file** to read.
+///
+/// The near-twin of [`CONFIG_HOME_ENV`], and the pair is worth reading
+/// together: this one names a *file* to merge in between the global tier and
+/// the project's, and does not move where any other file is looked for. The
+/// other names the *directory* ganja's own things live in. Setting one says
+/// nothing about the other.
 pub const CONFIG_ENV: &str = "GANJA_CONFIG";
+
+/// Environment variable naming the **directory** ganja keeps its own things
+/// in, outright: the global `ganja.jsonc`/`ganja.json`, the global `AGENTS.md`,
+/// and the `skills/` folder beneath it.
+///
+/// Distinct from [`CONFIG_ENV`], which names a file. Set, this outranks both
+/// discovered locations unconditionally — see [`config_home`], which is the one
+/// place any of the three is resolved.
+pub const CONFIG_HOME_ENV: &str = "GANJA_CONFIG_HOME";
 
 /// Directory ganja's global config lives in, under the XDG *config* home.
 /// Every other store this crate keeps is state rather than configuration and
 /// hangs off the data home instead.
 const DIRECTORY: &str = "ganja";
+
+/// The dot-directory under the home directory that [`config_home`] falls back
+/// to, and the same name a project keeps ganja's things under.
+///
+/// One namespace at both levels — `~/.ganja` and `<project root>/.ganja` — so
+/// somebody who has learned where ganja puts things in a checkout has learned
+/// where it puts them in a home directory too.
+const HOME_DIRECTORY: &str = ".ganja";
+
+/// The directory a project keeps ganja's own things in, at its root.
+///
+/// Namespaced on purpose: a bare `skills/` at a repository root is a name
+/// somebody else's project may already be using for something else, where
+/// `.ganja/` says whose it is. See [`default_skill_dirs`].
+const PROJECT_DIRECTORY: &str = HOME_DIRECTORY;
+
+/// What both of ganja's own homes call the folder skills live in. One
+/// spelling, not the two upstream accepts — a second name to remember buys
+/// nothing when neither is inherited from another tool.
+const SKILLS_SUBDIR: &str = "skills";
 
 /// The config file names, in the order a directory is probed for them.
 ///
@@ -528,8 +563,8 @@ pub struct Config {
     /// What the `webfetch` tool may reach; see [`WebfetchConfig`].
     #[serde(default)]
     pub webfetch: WebfetchConfig,
-    /// Where this session looks for skills besides the conventional places;
-    /// see [`SkillsConfig`].
+    /// Where this session looks for skills besides ganja's own two homes; see
+    /// [`SkillsConfig`] and [`default_skill_dirs`].
     #[serde(default)]
     pub skills: SkillsConfig,
     /// Whether this session snapshots the working tree, which is what `/undo`
@@ -567,18 +602,24 @@ pub struct WebfetchConfig {
     pub allow_private: Option<bool>,
 }
 
-/// Where a session looks for skills beyond the conventional directories.
+/// Where a session looks for skills besides ganja's own two homes.
 ///
 /// Upstream's two keys, spelled as upstream spells them
 /// (`packages/core/src/v1/config/skills.ts`), so a config written for opencode
-/// keeps meaning what it meant.
+/// keeps meaning what it meant. What differs is what they sit on top of:
+/// upstream adds them to four tiers it walks unasked, and this build walks the
+/// two in [`default_skill_dirs`] — both its own — and nothing foreign. See
+/// `tool::skill`'s `nothing-foreign-is-discovered`, which records whose ruling
+/// that is.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SkillsConfig {
-    /// Additional directories holding skills, each scanned for `SKILL.md`
-    /// files below it. `~/` expands against the home directory and a relative
-    /// path resolves against the session's working directory, exactly as
-    /// upstream resolves them (`skill/index.ts:211-220`).
+    /// Further directories holding skills, each scanned for `SKILL.md` files
+    /// below it, and each ranking above ganja's own two. `~/` expands against
+    /// the home directory and a relative path resolves against the session's
+    /// working directory, exactly as upstream resolves them
+    /// (`skill/index.ts:211-220`) — which is what makes `["~/.claude/skills"]`
+    /// the one line that hands this build a tier upstream helps itself to.
     #[serde(default)]
     pub paths: Vec<String>,
     /// Endpoints skills would be downloaded from.
@@ -807,23 +848,89 @@ pub fn split_model(model: &str) -> (Option<&str>, &str) {
     }
 }
 
-/// The global config directory, `<XDG config>/ganja`.
+/// **The** directory ganja keeps its own things in, resolved once for
+/// everything that needs it: the global `ganja.jsonc`/`ganja.json`, the global
+/// `AGENTS.md`, and the `skills/` folder of [`default_skill_dirs`].
 ///
-/// [`None`] when there is no home directory to resolve it against, which is
-/// reported once and then behaves like an empty global config — there is
-/// nowhere for one to have been written either.
-fn global_dir() -> Option<PathBuf> {
-    match Xdg::new() {
-        Ok(base) => Some(base.config_dir().join(DIRECTORY)),
+/// Three places, in this order:
+///
+/// 1. [`CONFIG_HOME_ENV`] — taken as written, whether or not it exists;
+/// 2. `<XDG config>/ganja`, if that directory is there;
+/// 3. `~/.ganja`, if *that* directory is there.
+///
+/// [`None`] only when there is no home directory to resolve anything against,
+/// which is reported once and then behaves like an empty global config — there
+/// is nowhere for one to have been written either.
+///
+/// # Why existence decides between 2 and 3, and what happens when neither is there
+///
+/// Precedence alone would make the third place unreachable: `Xdg::new()`
+/// succeeds on every machine that has a `$HOME`, so an unconditional
+/// `<XDG config>/ganja` means `~/.ganja` is *never* read — which is not what a
+/// fallback is for. Existence is therefore what picks between them, and it is
+/// checked per call rather than cached, so a directory created while a session
+/// is open is found by that session.
+///
+/// When **neither** exists there is nothing to read either way, so the answer
+/// only matters to whoever writes next, and that answer is
+/// `<XDG config>/ganja` — the modern convention, and already where
+/// `ganja config import-opencode --global` puts the file it writes. `~/.ganja`
+/// is for people who have one, not a thing this build creates.
+///
+/// The consequence worth stating: this is **one home, not a merge**. Somebody
+/// holding both directories is served the XDG one and the dotted one is
+/// invisible, rather than the two being read together — a config that is
+/// half-read from two places is worse than one that says which place it came
+/// from. [`CONFIG_HOME_ENV`] is the way to name the other one, and
+/// `skills.paths` the way to add a skills directory without moving anything
+/// else.
+#[must_use]
+pub fn config_home() -> Option<PathBuf> {
+    if let Some(named) = env::var(CONFIG_HOME_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        // Taken as written, as [`CONFIG_ENV`]'s file is: a relative value
+        // resolves against the process working directory, and the two
+        // variables agreeing about that is worth more than a rule only one of
+        // them enforces.
+        return Some(PathBuf::from(named));
+    }
+
+    let base = match Xdg::new() {
+        Ok(base) => base,
         Err(error) => {
             tracing::warn!(
                 %error,
                 "the home directory holding the global config could not be located; \
                  only project config applies"
             );
-            None
+            return None;
         }
+    };
+    Some(discovered(
+        base.config_dir().join(DIRECTORY),
+        base.home_dir().join(HOME_DIRECTORY),
+    ))
+}
+
+/// Which of [`config_home`]'s two *discovered* candidates answers, given what
+/// is on disk.
+///
+/// Split out of the lookup around it because this is the half that was a
+/// judgment call rather than a reading of the ruling — and because a rule about
+/// what exists can then be tested against two temporary directories instead of
+/// against the home directory of whoever is running the suite.
+fn discovered(xdg: PathBuf, dotted: PathBuf) -> PathBuf {
+    if xdg.is_dir() {
+        return xdg;
     }
+    if dotted.is_dir() {
+        return dotted;
+    }
+
+    xdg
 }
 
 /// The global tier's files, in merge order.
@@ -832,7 +939,7 @@ fn global_dir() -> Option<PathBuf> {
 /// reverses: merging applies later over earlier, so the name that has to win —
 /// `ganja.jsonc` where both sit in one directory — must be merged last.
 fn global_files() -> Vec<PathBuf> {
-    global_dir()
+    config_home()
         .map(|dir| {
             let mut files = existing(&dir);
             files.reverse();
@@ -854,20 +961,54 @@ fn explicit_file(overrides: &Overrides) -> Option<PathBuf> {
     })
 }
 
-/// The directories this build reads configuration out of, least specific
-/// first: the global one, then the project's own root.
+/// Ganja's own two homes, which a session scans for skills without being told
+/// to: `skills/` under [`config_home`], and `<project root>/.ganja/skills`.
 ///
-/// Upstream's `config.directories()`, which its skill discovery hangs a tier
-/// off (`skill/index.ts:205-208`) — the `skill/` and `skills/` folders beside a
-/// config file. The order is the precedence every layered thing here resolves
-/// in, so a caller may treat the last entry as the closest.
+/// Global first, project second, so a skill in the checkout wins the name — the
+/// order every layered thing here resolves in, and the order
+/// [`skill::Roots`](crate::tool::skill::Roots) reads as precedence.
+///
+/// The first is spelled through [`config_home`] rather than against the XDG
+/// path directly, which is the whole point of that function: `GANJA_CONFIG_HOME`
+/// or a `~/.ganja` moves this build's global config, its global `AGENTS.md` and
+/// its skills together, and a session cannot end up reading one of the three
+/// out of a directory the other two are not in.
+///
+/// # Why these two and no others
+///
+/// The standing ruling this build follows is that **nothing foreign** is
+/// discovered: not `~/.claude/skills`, not `~/.agents/skills`, not those names
+/// walked up from the working directory, and not a bare `skill/` or `skills/`
+/// at a project root, which is a name somebody else's repository may already
+/// mean something by. These two are ganja's own — a file only arrives in either
+/// because somebody put it there for *this* tool — so placing one **is** the
+/// opt-in act, which is what a config key would otherwise have to stand in for.
+/// `skills.paths` remains the way to name anything else, these two included if
+/// somebody wants them twice.
+///
+/// The seams are the ones the rest of the crate already uses: the global half
+/// is [`global_dir`] (the `<XDG config>/ganja` that holds `ganja.jsonc`), and
+/// the project half hangs off `Project::resolve`, the same worktree resolution
+/// [`project_files`] stops its walk at and the permission engine files its
+/// answers under. Nothing here invents a way to find a directory.
 #[must_use]
-pub fn directories(cwd: &Path) -> Vec<PathBuf> {
+pub fn default_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    if let Some(global) = global_dir() {
-        found.push(global);
+    if let Some(global) = config_home() {
+        found.push(global.join(SKILLS_SUBDIR));
     }
-    found.push(Project::resolve(cwd).root().to_path_buf());
+    let project = Project::resolve(cwd)
+        .root()
+        .join(PROJECT_DIRECTORY)
+        .join(SKILLS_SUBDIR);
+    // The two collapse into one for somebody whose project root *is* the
+    // directory `config_home` landed on — running in `~` with a `~/.ganja`, or
+    // pointing `GANJA_CONFIG_HOME` at the checkout. Scanning it twice would
+    // find every skill twice and warn about each as a duplicate claiming its
+    // own name, which is a warning about nothing.
+    if !found.contains(&project) {
+        found.push(project);
+    }
 
     found
 }
@@ -1991,5 +2132,53 @@ mod tests {
             Config::load_with(directory.path(), &overrides).expect("an empty tree still loads");
 
         assert_eq!(config.overrides, overrides);
+    }
+
+    /// The config home's two *discovered* candidates, ruled on by what is
+    /// there. The environment tier above them needs the environment and is
+    /// pinned in `tests/skills.rs`, which owns that binary's variables; these
+    /// three need only two directories, so they say the same thing on every
+    /// machine.
+    #[test]
+    fn the_xdg_home_answers_whenever_it_is_there() {
+        let directory = temporary();
+        let xdg = directory.path().join("config").join("ganja");
+        let dotted = directory.path().join(".ganja");
+        fs::create_dir_all(&xdg).expect("the fixture is creatable");
+
+        assert_eq!(super::discovered(xdg.clone(), dotted.clone()), xdg);
+
+        // And still, with the dotted one beside it: this is one home, not a
+        // merge, and the higher tier is the one that answers.
+        fs::create_dir_all(&dotted).expect("the fixture is creatable");
+        assert_eq!(super::discovered(xdg.clone(), dotted), xdg);
+    }
+
+    #[test]
+    fn the_dotted_home_answers_only_when_the_xdg_one_is_absent() {
+        let directory = temporary();
+        let xdg = directory.path().join("config").join("ganja");
+        let dotted = directory.path().join(".ganja");
+        fs::create_dir_all(&dotted).expect("the fixture is creatable");
+
+        assert_eq!(super::discovered(xdg.clone(), dotted.clone()), dotted);
+
+        // A file where the directory would be is not a home either — the check
+        // is `is_dir`, not "something is there".
+        fs::create_dir_all(xdg.parent().expect("a parent")).expect("creatable");
+        fs::write(&xdg, "not a directory").expect("writable");
+        assert_eq!(super::discovered(xdg, dotted.clone()), dotted);
+    }
+
+    /// Nothing on disk: nothing to read either way, so what comes back is the
+    /// one whoever writes next should create. See [`super::config_home`] for
+    /// why that is the XDG path and not the dotted one.
+    #[test]
+    fn with_neither_on_disk_the_answer_is_the_one_a_writer_should_create() {
+        let directory = temporary();
+        let xdg = directory.path().join("config").join("ganja");
+        let dotted = directory.path().join(".ganja");
+
+        assert_eq!(super::discovered(xdg.clone(), dotted), xdg);
     }
 }

@@ -5,9 +5,12 @@
 //! which files discovery reads and in what order, where the result lands, and
 //! that a run which would overwrite or leak something refuses to.
 //!
-//! Every invocation redirects `XDG_CONFIG_HOME` into a fixture, so the machine
-//! running the suite cannot contribute a config of its own and nothing here can
-//! read or write a real user's. That redirection is per-subprocess, never a
+//! Every invocation redirects `XDG_CONFIG_HOME` into a fixture — and pins
+//! `HOME` while clearing `GANJA_CONFIG_HOME`, because the `--global`
+//! destination resolves through ganja's config-home seam and two of that
+//! seam's three places reach past the XDG redirect — so the machine running
+//! the suite cannot contribute a config of its own and nothing here can read
+//! or write a real user's. That redirection is per-subprocess, never a
 //! `set_var`, so these can share a binary.
 
 use std::{fs, path::Path};
@@ -48,6 +51,13 @@ fn ganja(home: &TempDir, cwd: &Path) -> Command {
     command
         .env("XDG_CONFIG_HOME", home.path().join("config"))
         .env("XDG_DATA_HOME", home.path().join("data"))
+        // The `--global` destination resolves through ganja's config-home
+        // seam, which reaches past the XDG redirect: `~/.ganja` through
+        // `HOME`, and `GANJA_CONFIG_HOME` past everything. Pin both, or a
+        // runner holding either would take this suite's global write into
+        // their real home.
+        .env("HOME", home.path())
+        .env_remove(ganja_core::config::CONFIG_HOME_ENV)
         .current_dir(cwd)
         .args(["config", "import-opencode"]);
 
