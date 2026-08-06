@@ -18,7 +18,7 @@
 
 use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use clap::ValueEnum;
 use ganja_core::auth::{
     self, OauthCredential,
@@ -72,6 +72,37 @@ impl std::fmt::Display for Method {
     }
 }
 
+/// Which GitHub a Copilot login is against, named rather than asked for.
+///
+/// Upstream's `deploymentType` prompt has two answers (`copilot.ts:186-207`)
+/// and only one of them used to have a flag: `--enterprise-url` names the
+/// enterprise branch *and* its address, while the public branch — the common
+/// one — had no way to be answered by anything but a person at a terminal. So
+/// the login every headless machine actually wants was the one that could not
+/// run unattended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum DeploymentKind {
+    /// github.com.
+    Public,
+    /// A GitHub Enterprise deployment, whose address comes from
+    /// `--enterprise-url` or from the question that follows.
+    Enterprise,
+}
+
+/// What this invocation said about the deployment, before anything is asked.
+///
+/// The two flags together rather than separately, because they answer one
+/// question between them and the combinations that contradict each other have
+/// to be refused somewhere that can see both.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DeploymentAnswer {
+    /// `--deployment`, when one was named.
+    pub(crate) kind: Option<DeploymentKind>,
+    /// `--enterprise-url`, which names the enterprise branch and its address at
+    /// once.
+    pub(crate) enterprise_url: Option<String>,
+}
+
 impl ProviderId {
     /// The logins this provider has, in the order a menu offers them.
     ///
@@ -122,11 +153,22 @@ impl ProviderId {
 ///
 /// 1. `--key` is the API-key path spelled out.
 /// 2. `--method` is the answer to the question below, given in advance.
-/// 3. **Standard input that is not a terminal is a key.** `pass show … | ganja
+/// 3. **A provider whose one login is not a key runs it, terminal or not.**
+///    That flow *is* the provider's headless login — Copilot's device grant is
+///    a code typed into a browser somewhere else entirely — so a pipe deciding
+///    it was a key instead put the only unattended login out of reach of the
+///    only unattended invocation.
+/// 4. **Standard input that is not a terminal is a key.** `pass show … | ganja
 ///    auth login` predates every OAuth login here, and an invocation being fed
 ///    rather than typed at has nobody to answer a menu.
-/// 4. A provider with one login runs it.
-/// 5. Otherwise, ask.
+/// 5. A provider with one login runs it.
+/// 6. Otherwise, ask.
+///
+/// Steps 3 and 5 are the same question asked either side of the pipe rule, and
+/// the split is what separates them: a provider whose sole login *is* a key —
+/// anthropic — answers step 5, so the piped-key case it has always had is
+/// untouched. Nothing above 3 changed either, which is why `--key` and
+/// `--method api` still store a piped key for every provider.
 ///
 /// # Errors
 ///
@@ -143,10 +185,15 @@ pub(crate) fn chosen(
     if let Some(method) = method {
         return accepted(provider, method);
     }
+
+    let only = provider.only_login();
+    if let Some(only) = only.filter(|only| *only != Method::Api) {
+        return Ok(only);
+    }
     if !io::stdin().is_terminal() {
         return Ok(Method::Api);
     }
-    if let Some(only) = provider.only_login() {
+    if let Some(only) = only {
         return Ok(only);
     }
 
@@ -208,7 +255,7 @@ fn label(provider: ProviderId, method: Method) -> String {
 pub(crate) async fn oauth(
     provider: ProviderId,
     method: Method,
-    enterprise_url: Option<String>,
+    answer: DeploymentAnswer,
 ) -> Result<OauthCredential> {
     let cancel = CancellationToken::new();
     // Held for the length of the login: dropping it stops the task watching for
@@ -227,10 +274,11 @@ pub(crate) async fn oauth(
             Ok(grok::credential_from(&tokens))
         }
         (ProviderId::GithubCopilot, Method::Device) => {
-            // The two prompts before the flow, in upstream's order
+            // The two questions before the flow, in upstream's order
             // (`copilot.ts:186-221`): which deployment, and then its address
-            // only when the answer was an enterprise one.
-            let deployment = deployment(enterprise_url)?;
+            // only when the answer was an enterprise one — each skipped when
+            // the invocation already answered it.
+            let deployment = deployment(answer)?;
             let tokens = device(&copilot_flow(&deployment)?, &cancel).await?;
 
             Ok(copilot::credential_from(&tokens, &deployment))
@@ -314,27 +362,81 @@ fn announce(url: &str, code: &str) {
     eprintln!("Waiting for authorization...");
 }
 
+/// Upstream's first Copilot prompt (`copilot.ts:186-207`).
+const DEPLOYMENT_QUESTION: &str = "Select GitHub deployment type";
+
+/// Its second, asked only when the first answer needs one (`copilot.ts:208`).
+const ENTERPRISE_QUESTION: &str = "Enter your GitHub Enterprise URL or domain";
+
 /// Which GitHub a Copilot login is against.
 ///
-/// `--enterprise-url` answers both of upstream's prompts at once, which is what
-/// makes this runnable without somebody at the keyboard. Without it the
-/// deployment is asked for, and the address only when the answer needs one —
-/// upstream's `when: {key: "deploymentType", op: "eq", value: "enterprise"}`
-/// (`copilot.ts:208`).
-fn deployment(enterprise_url: Option<String>) -> Result<Deployment> {
-    if let Some(url) = enterprise_url {
-        return enterprise(&url);
+/// Every combination the two flags can arrive in, so that each of upstream's
+/// prompts is skipped exactly when the invocation already answered it:
+/// `--deployment public` is the public branch outright, `--enterprise-url`
+/// remains the enterprise branch *and* its address, and `--deployment
+/// enterprise` alone still needs the address from somewhere.
+///
+/// **Both branches are now nameable, which is the point.** A flag existed for
+/// the enterprise answer alone, so the public login — the common one — could
+/// not complete without a terminal, and the obvious workaround was a trap: a
+/// piped `1` is a non-terminal standard input, which [`chosen`] used to read as
+/// an API key and store the menu answer as a credential. Step 3 there is what
+/// closed that; this is what makes the login somebody wanted runnable at all.
+///
+/// # Errors
+///
+/// When the two flags name different deployments, when an enterprise
+/// deployment ends up with a blank address, or when a question had to be asked
+/// and standard input ended before it was answered.
+fn deployment(answer: DeploymentAnswer) -> Result<Deployment> {
+    match (answer.kind, answer.enterprise_url) {
+        (Some(DeploymentKind::Public), None) => Ok(Deployment::Public),
+        // Refused rather than resolved by precedence: whichever this build
+        // picked would be the one somebody's other flag said not to.
+        (Some(DeploymentKind::Public), Some(url)) => bail!(
+            "`--deployment public` and `--enterprise-url {url}` name different \
+             deployments; nothing was stored"
+        ),
+        (Some(DeploymentKind::Enterprise) | None, Some(url)) => enterprise(&url),
+        (Some(DeploymentKind::Enterprise), None) => enterprise(&asked(ENTERPRISE_QUESTION)?),
+        (None, None) => prompted(),
     }
+}
 
+/// Upstream's two prompts, for an invocation that named neither answer.
+///
+/// Line-based like every other question here, so a piped answer drives it — the
+/// shape `the_enterprise_address_is_asked_for_only_when_the_deployment_is_one`
+/// pins. What a pipe may no longer do is arrive *as a credential*, which is
+/// [`chosen`]'s doing rather than this function's.
+fn prompted() -> Result<Deployment> {
     let public = choose(
-        "Select GitHub deployment type",
+        DEPLOYMENT_QUESTION,
         &["GitHub.com".to_owned(), "GitHub Enterprise".to_owned()],
-    )? == 0;
+    )
+    .with_context(named_up_front)?
+        == 0;
     if public {
         return Ok(Deployment::Public);
     }
 
-    enterprise(&ask("Enter your GitHub Enterprise URL or domain")?)
+    enterprise(&asked(ENTERPRISE_QUESTION)?)
+}
+
+/// [`ask`], with the flag that would have answered it named in the failure.
+///
+/// Without this a login run by a machine fails with "there was no answer",
+/// which is true and says nothing about what to do instead.
+fn asked(question: &str) -> Result<String> {
+    ask(question).with_context(named_up_front)
+}
+
+/// What to have passed instead of answering a question nobody was there for.
+fn named_up_front() -> String {
+    "the deployment was not named and the question could not be answered; pass \
+     `--deployment public` for github.com, or `--enterprise-url <url>` for a \
+     GitHub Enterprise deployment"
+        .to_owned()
 }
 
 /// An enterprise deployment at `url`, refusing the one spelling that names
@@ -554,17 +656,16 @@ fn line(question: &str) -> Result<String> {
 ///
 /// Two readers rather than one, because neither answers the whole question:
 ///
-/// - [`auth::oauth_for`] reads the file directly, which is the only way to see
-///   a stored login when an API-key variable is exported — `list_providers`
-///   reports the environment's key instead and would hide it.
+/// - [`auth::oauth_for`] reads the file directly, and is what distinguishes a
+///   login from a key without interpreting either.
 /// - [`auth::list_providers`] is what knows a *key* in the file is a key, and
 ///   what it may be shown as.
 ///
-/// The one case neither covers is an API key in the file while that provider's
-/// variable is also exported: the listing reports the variable. Nothing is lost
-/// by it — the same invocation says the variable outranks whatever is stored —
-/// and closing it properly wants a file-only key reader `ganja-core` does not
-/// have.
+/// The `Source::File` filter is load-bearing and now reaches everything it
+/// names: the listing used to drop a stored key whose variable was exported,
+/// so a key about to be overwritten went unmentioned in exactly the case
+/// somebody most needed to hear about it. It reports both rows, and this takes
+/// the stored one.
 ///
 /// The tail travels as a [`auth::RedactedTail`] rather than as a `String`,
 /// because that type is the whole of this build's answer to how much of a
@@ -591,7 +692,11 @@ pub(crate) fn stored(
 
 #[cfg(test)]
 mod tests {
-    use super::{Method, accepted, label, loopback_origin};
+    use ganja_core::auth::copilot::Deployment;
+
+    use super::{
+        DeploymentAnswer, DeploymentKind, Method, accepted, deployment, label, loopback_origin,
+    };
     use crate::ProviderId;
 
     /// Every pairing the CLI can be asked for, so a login that exists is never
@@ -702,6 +807,74 @@ mod tests {
         ] {
             assert_eq!(loopback_origin(refused), None, "{refused}");
         }
+    }
+
+    /// Every deployment a flag can name is resolved without a question being
+    /// asked, which is the whole of what makes a Copilot login runnable by a
+    /// machine.
+    ///
+    /// Nothing here may reach [`super::prompted`]: a test that did would block
+    /// on standard input under the runner, so the combinations below are
+    /// exactly the ones an invocation answers for itself.
+    #[test]
+    fn a_named_deployment_answers_both_questions_without_asking_either() {
+        for (kind, enterprise_url, expected) in [
+            (Some(DeploymentKind::Public), None, Deployment::Public),
+            (
+                None,
+                Some("https://company.ghe.com/"),
+                Deployment::enterprise("company.ghe.com"),
+            ),
+            (
+                Some(DeploymentKind::Enterprise),
+                Some("company.ghe.com"),
+                Deployment::enterprise("company.ghe.com"),
+            ),
+        ] {
+            let answer = DeploymentAnswer {
+                kind,
+                enterprise_url: enterprise_url.map(str::to_owned),
+            };
+            assert_eq!(
+                deployment(answer).expect("a named deployment needs nothing else"),
+                expected,
+                "{kind:?} + {enterprise_url:?}"
+            );
+        }
+    }
+
+    /// Two flags naming different deployments is a question this build cannot
+    /// answer, so it refuses instead of picking the one somebody's other flag
+    /// said not to.
+    #[test]
+    fn naming_the_public_deployment_and_an_enterprise_address_is_refused() {
+        let refused = deployment(DeploymentAnswer {
+            kind: Some(DeploymentKind::Public),
+            enterprise_url: Some("company.ghe.com".to_owned()),
+        })
+        .expect_err("the two flags contradict each other")
+        .to_string();
+
+        assert!(
+            refused.contains("--deployment public")
+                && refused.contains("company.ghe.com")
+                && refused.contains("nothing was stored"),
+            "{refused}"
+        );
+    }
+
+    /// A blank address is the one enterprise spelling that names nothing, and
+    /// it must not become `https:///login/device/code`.
+    #[test]
+    fn an_enterprise_deployment_with_a_blank_address_is_refused() {
+        let refused = deployment(DeploymentAnswer {
+            kind: Some(DeploymentKind::Enterprise),
+            enterprise_url: Some("   ".to_owned()),
+        })
+        .expect_err("a blank domain is not a deployment")
+        .to_string();
+
+        assert!(refused.contains("nothing was stored"), "{refused}");
     }
 
     /// The words `--method` takes are the words its refusal names, which is

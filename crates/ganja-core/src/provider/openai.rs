@@ -2,8 +2,18 @@
 //!
 //! Spec: `POST {base}/chat/completions` with `stream: true`, authenticated by a
 //! bearer token. The base URL is configurable because the shape is a de-facto
-//! standard: the same code drives OpenAI, a local llama.cpp server, an
-//! OpenRouter key, or anything else that copied the schema.
+//! standard: the same code drives a local llama.cpp server, an OpenRouter key,
+//! or anything else that copied the schema.
+//!
+//! **Not, any longer, the vendor whose schema it is.** A `GANJA_PROVIDER=openai`
+//! session speaks [`super::responses`] on either credential, because upstream's
+//! plugin routes every model of that vendor through the Responses API without
+//! consulting the credential at all (`plugin/provider/openai.ts:185`). What
+//! keeps this module is that two providers *are* this wire under another name —
+//! [`super::grok`] and [`super::copilot`] — and that the shape is what any
+//! other compatible endpoint would want. [`ID`], [`API_KEY_ENV`] and
+//! [`BASE_URL_ENV`] still live here because they are the vendor's names and
+//! [`super::responses`] reads them from here.
 //!
 //! Unlike Anthropic, the frames are unnamed — every one is a `data:` line
 //! holding a chunk object, and the stream ends with the literal `[DONE]`.
