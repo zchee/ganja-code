@@ -232,10 +232,11 @@ impl Registry {
             Arc::new(todo::TodoWriteTool::new()),
             Arc::new(webfetch::WebfetchTool::new()),
             Arc::new(websearch::WebsearchTool::new()),
-            // The roster's skills are the conventional ones. A config naming
-            // more directories is installed the way `task` and an MCP
-            // server's tools are — over the top of this one, once whoever
-            // read the config knows what it said.
+            // The roster's skill tool loads nothing: which directories a
+            // session scans is the engine's answer — ganja's own two homes,
+            // plus what a config named — and neither half is reachable from
+            // in here. One holding them is installed the way `task` and an
+            // MCP server's tools are, over the top of this one.
             Arc::new(skill::SkillTool::new()),
             Arc::new(question::QuestionTool),
         ])

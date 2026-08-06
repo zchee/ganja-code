@@ -22,8 +22,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use etcetera::{BaseStrategy as _, base_strategy::Xdg};
-
 use super::{
     Mode, Palette, Theme, ThemeJson,
     selection::{self, SelectionError},
@@ -39,8 +37,8 @@ pub const DEFAULT_THEME: &str = "opencode";
 /// [`Theme::terminal`].
 pub const TERMINAL_THEME: &str = "terminal";
 
-/// Directory under the XDG config directory holding a user's own themes.
-const CUSTOM_DIRECTORY: [&str; 2] = ["ganja", "themes"];
+/// Directory under ganja's config home holding a user's own themes.
+const CUSTOM_DIRECTORY: &str = "themes";
 
 /// The extension a theme file has to carry to be picked up.
 const EXTENSION: &str = "json";
@@ -326,15 +324,14 @@ impl Default for Themes {
     }
 }
 
-/// Where a user's own themes live: `<XDG config>/ganja/themes`.
+/// Where a user's own themes live: `<config home>/themes`.
+///
+/// Resolved through `ganja_core::config::config_home` rather than a private
+/// XDG lookup, so a build pointed somewhere by `GANJA_CONFIG_HOME` — or served
+/// by `~/.ganja` — reads its themes from the same directory its config,
+/// instructions and skills come from.
 fn custom_directory() -> Option<PathBuf> {
-    let base = Xdg::new().ok()?;
-
-    Some(
-        CUSTOM_DIRECTORY
-            .iter()
-            .fold(base.config_dir(), |path, part| path.join(part)),
-    )
+    Some(ganja_core::config::config_home()?.join(CUSTOM_DIRECTORY))
 }
 
 #[cfg(test)]

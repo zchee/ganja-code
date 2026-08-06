@@ -42,6 +42,13 @@
 //! - **D2** — `http(s)` entries in `instructions` are skipped with a warning
 //!   rather than fetched. `skills.urls` takes the same posture, in the same
 //!   words, at [`skill_roots`].
+//! - **`nothing-foreign-is-discovered`** — the skills half of this prompt lists
+//!   what is under ganja's own two homes plus whatever `skills.paths` named,
+//!   where upstream also walks two of another tool's directories and their
+//!   walk-ups. A **standing user ruling**, recorded in full where the scanning
+//!   happens (`tool::skill`'s module docs); named here because this is the file
+//!   that decides what a model is *told* it can load, and a reader who only
+//!   ever opens this one would otherwise find no trace of the reason.
 //! - **`skills-block-omitted-when-there-are-none`** — upstream emits the
 //!   heading and the sentence "No skills are currently available." for a
 //!   session that has none (`skill/index.ts:321-323`). Here the whole block is
@@ -77,9 +84,6 @@ const GLOBAL: &str = "AGENTS.md";
 /// Where Claude Code keeps its own global instructions, which upstream reads as
 /// a fallback when there is no `AGENTS.md`.
 const CLAUDE_GLOBAL: [&str; 2] = [".claude", "CLAUDE.md"];
-
-/// Directory the global instruction file lives in, under the XDG config home.
-const DIRECTORY: &str = "ganja";
 
 /// Project instruction file names, most preferred first. The **first name with
 /// any match at all** wins outright, so a checkout carrying both `AGENTS.md`
@@ -141,14 +145,26 @@ pub fn system_prompt(config: &Config, cwd: &Path, model_id: &str) -> Option<Stri
     )
 }
 
-/// Where this session's skills are looked for: the conventional directories
-/// for `cwd`, plus whatever `skills.paths` named.
+/// Where this session's skills are looked for: ganja's own two homes, then
+/// whatever `skills.paths` named.
 ///
 /// The one value both halves of the feature are built from. The system prompt
 /// lists what [`skill::discover`] finds here, and the same roots handed to
 /// [`skill::SkillTool::over`] are what a `skill` call loads from — which is how
 /// the list a model is offered and the list it can actually load stay the same
 /// list.
+///
+/// The two defaults are [`crate::config::default_skill_dirs`] and they are the
+/// **whole** of what is scanned unasked: a config that says nothing about
+/// skills reaches `<XDG config>/ganja/skills` and `<project root>/.ganja/skills`
+/// and no third place. Nothing foreign is read — no `~/.claude`, no
+/// `~/.agents`, neither name walked up to, and no bare `skill/` or `skills/` at
+/// a project root. That is the module's `nothing-foreign-is-discovered`, whose
+/// full text and provenance live where the scanning happens
+/// (`tool::skill`'s module docs).
+///
+/// Configured paths go **after** the defaults, so a directory somebody wrote
+/// down outranks one that was there by convention.
 ///
 /// `skills.urls` is named in a warning and not fetched, for **D2**'s reason.
 #[must_use]
@@ -160,7 +176,8 @@ pub fn skill_roots(config: &Config, cwd: &Path) -> skill::Roots {
         );
     }
 
-    skill::Roots::standard(cwd, &crate::config::directories(cwd))
+    skill::Roots::none()
+        .with_paths(crate::config::default_skill_dirs(cwd))
         .with_paths(config.skill_paths(cwd))
 }
 
@@ -413,17 +430,29 @@ fn discover(global: &[PathBuf], config: &Config, cwd: &Path) -> Vec<PathBuf> {
 }
 
 /// The global instruction candidates, most preferred first.
+///
+/// The first is `AGENTS.md` under [`crate::config::config_home`] — the same
+/// directory the global `ganja.jsonc` and the global `skills/` come out of, so
+/// `GANJA_CONFIG_HOME` or a `~/.ganja` moves all three together. Resolving it
+/// here against the XDG path directly is how a build ends up reading its
+/// instructions from one home and its config from another.
 fn global_files() -> Vec<PathBuf> {
-    let Ok(base) = Xdg::new() else {
-        return Vec::new();
-    };
+    let mut found = Vec::new();
+    if let Some(home) = crate::config::config_home() {
+        found.push(home.join(GLOBAL));
+    }
+    // Claude Code's own global file, which upstream reads as a fallback. Its
+    // home is a home directory rather than ganja's config home, so it is not
+    // the seam's to move.
+    if let Ok(base) = Xdg::new() {
+        found.push(
+            CLAUDE_GLOBAL
+                .iter()
+                .fold(base.home_dir().to_owned(), |path, part| path.join(part)),
+        );
+    }
 
-    vec![
-        base.config_dir().join(DIRECTORY).join(GLOBAL),
-        CLAUDE_GLOBAL
-            .iter()
-            .fold(base.home_dir().to_owned(), |path, part| path.join(part)),
-    ]
+    found
 }
 
 /// `path` with symbolic links and `..` resolved where the filesystem can do it.
@@ -1092,10 +1121,46 @@ mod tests {
         assert!(composed.contains("<name>porting</name>"));
     }
 
-    /// The two config keys: `paths` becomes a root, and `urls` is accepted and
-    /// left alone rather than fetched.
+    /// The names of the directories a session with no skills config scans:
+    /// ganja's own two homes, global first so the checkout wins a collision,
+    /// and nothing else. The project one is asserted against the **project
+    /// root** from a working directory two levels below it, so "project root"
+    /// is a claim the fixture can actually break.
+    ///
+    /// The global one is asserted by shape rather than by value — its path is
+    /// this machine's XDG config home, and a test that spelled that out would
+    /// be a test about the machine. Its *contents* are pinned where they can be
+    /// redirected, in `tests/skills.rs`.
     #[test]
-    fn the_config_names_directories_the_conventional_tiers_would_never_reach() {
+    fn the_default_roots_are_ganjas_own_two_homes_in_precedence_order() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        checkout(&root);
+        let cwd = root.join("crates").join("inner");
+        fs::create_dir_all(&cwd).expect("the fixture tree is creatable");
+        // Independently of `Project::resolve`, so a tier hung off the working
+        // directory instead of the project root fails here.
+        let canonical = fs::canonicalize(&root).expect("the fixture root canonicalises");
+
+        let dirs = super::skill_roots(&Config::default(), &cwd).dirs().to_vec();
+
+        assert_eq!(dirs.len(), 2, "two homes, no third place: {dirs:?}");
+        assert!(
+            dirs[0].ends_with(Path::new("ganja").join("skills")),
+            "the global home is <XDG config>/ganja/skills: {dirs:?}"
+        );
+        assert_eq!(
+            dirs[1],
+            canonical.join(".ganja").join("skills"),
+            "and the project home is the namespaced one at the root, not at the cwd: {dirs:?}"
+        );
+    }
+
+    /// The two config keys: `paths` ranks **above** the two defaults and keeps
+    /// the order it was written in, and `urls` is accepted and left alone
+    /// rather than fetched.
+    #[test]
+    fn a_configured_path_outranks_ganjas_own_homes() {
         let directory = temporary();
         let root = directory.path().join("api");
         checkout(&root);
@@ -1116,13 +1181,19 @@ mod tests {
         let roots = super::skill_roots(&config, &root);
 
         assert_eq!(
+            roots.dirs().len(),
+            3,
+            "the two homes and the one that was named: {:?}",
+            roots.dirs()
+        );
+        assert_eq!(
             roots.dirs().last(),
             Some(&elsewhere),
-            "a configured path is the closest tier: {:?}",
+            "last, so it wins a name against either home: {:?}",
             roots.dirs()
         );
         assert!(
-            skill::discover(&skill::Roots::none().with_paths(config.skill_paths(&root)))
+            skill::discover(&roots)
                 .iter()
                 .any(|found| found.name == "porting"),
             "and it is scanned"
@@ -1137,6 +1208,74 @@ mod tests {
             "{:?}",
             roots.dirs()
         );
+    }
+
+    /// The standing ruling at the layer that composes the prompt: **nothing
+    /// foreign**. Every directory upstream walks unasked is planted around a
+    /// nested working directory — the two external names at the root and at the
+    /// cwd, so a walk-up would meet one on the way, and both generic spellings
+    /// at the root — beside ganja's own `.ganja/skills`. Only the last is
+    /// discovered, and only the last reaches the prompt.
+    ///
+    /// Whose ruling it is, and why it outranks parity, is written at
+    /// `tool::skill`'s module docs.
+    #[test]
+    fn a_session_reads_ganjas_own_project_home_and_no_foreign_directory() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        checkout(&root);
+        let cwd = root.join("crates").join("inner");
+        fs::create_dir_all(&cwd).expect("the fixture tree is creatable");
+        for (tier, name) in [
+            (root.join(".claude").join("skills"), "from-root-claude"),
+            (root.join(".agents").join("skills"), "from-root-agents"),
+            (cwd.join(".claude").join("skills"), "from-cwd-claude"),
+            (root.join("skill"), "from-generic-singular"),
+            (root.join("skills"), "from-generic-plural"),
+            (root.join(".ganja").join("skills"), "from-ganjas-own"),
+        ] {
+            plant_skill(
+                &tier,
+                name,
+                &format!("name: {name}\ndescription: Found by convention."),
+            );
+        }
+
+        let roots = super::skill_roots(&Config::default(), &cwd);
+        let found: Vec<String> = skill::discover(&roots)
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        let composed = suffix_from(&[], &roots, &Config::default(), &cwd, "fake-1")
+            .expect("the environment block always says something");
+
+        assert!(
+            found.iter().any(|name| name == "from-ganjas-own"),
+            "ganja's own project home is a default tier: {found:?}"
+        );
+        assert!(
+            composed.contains("<name>from-ganjas-own</name>"),
+            "and what it holds reaches the prompt: {composed}"
+        );
+        // Membership rather than equality: this machine's own
+        // `<XDG config>/ganja/skills` is a default tier too and may hold
+        // anything. What must be true is that no *foreign* name is here.
+        for foreign in [
+            "from-root-claude",
+            "from-root-agents",
+            "from-cwd-claude",
+            "from-generic-singular",
+            "from-generic-plural",
+        ] {
+            assert!(
+                !found.iter().any(|name| name == foreign),
+                "{foreign} is not ganja's to read: {found:?}"
+            );
+            assert!(
+                !composed.contains(foreign),
+                "and the model is never told about it: {composed}"
+            );
+        }
     }
 
     /// A relative `skills.paths` entry resolves against the session's working

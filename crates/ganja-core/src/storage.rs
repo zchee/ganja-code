@@ -67,7 +67,7 @@ use std::{
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::protocol::{Message, MessageId, Part, Usage, now};
+use crate::protocol::{Message, MessageId, Part, PartBody, PartId, REASONING_TAG, Usage, now};
 
 /// The record format this build writes.
 pub const VERSION: u32 = 1;
@@ -791,8 +791,14 @@ impl Storage {
             else {
                 continue;
             };
-            if let Some(envelope) = self.usable::<Envelope<Part>>(id, &data) {
-                message.parts.push(envelope.payload);
+            // A row that did not decode is not always a row that costs only
+            // itself; see [`Self::lost_reasoning`] for which ones do not.
+            let part = self.usable::<Envelope<Part>>(id, &data).map_or_else(
+                || self.lost_reasoning(id, &data),
+                |envelope| Some(envelope.payload),
+            );
+            if let Some(part) = part {
+                message.parts.push(part);
             }
         }
 
@@ -821,6 +827,9 @@ impl Storage {
     /// both left exactly where they are — there is no rename to give a row,
     /// and deleting it would destroy the only copy of what it held. So the
     /// blast radius is what the file layout's was: one record.
+    ///
+    /// What that record *costs* is a second question, and for part rows it is
+    /// [`Self::lost_reasoning`]'s.
     fn usable<T: DeserializeOwned>(&self, id: &str, data: &str) -> Option<T> {
         match decode(data.as_bytes()) {
             Decoded::Usable(value) => Some(value),
@@ -846,6 +855,79 @@ impl Storage {
                 None
             }
         }
+    }
+
+    /// The marker a part row leaves in the transcript when this build could
+    /// not decode it, or [`None`] where dropping the row whole is still the
+    /// right answer.
+    ///
+    /// # The granularity ruling
+    ///
+    /// Dropping an undecodable record whole is right for everything a part has
+    /// ever held: a lost text part costs a line of a conversation nobody can
+    /// re-render anyway, and the row stays on disk for the build that *can*
+    /// read it. [`PartBody::Reasoning`] is the first part that is not like
+    /// that. It is **request-affecting state**: the next request is built from
+    /// the transcript, so a reasoning record that silently disappears changes
+    /// what the model is asked next — its own sealed thinking gone while the
+    /// tool calls that thinking produced remain — and nothing anywhere would
+    /// say so. That is the one shape of loss this store must not have.
+    ///
+    /// So for those rows the granularity moves from *the record* to *the
+    /// record and a marker in its place*: the message keeps every other part,
+    /// and where the unreadable one stood the transcript carries a reasoning
+    /// part with no state. The encoder that builds the next request already
+    /// drops a stateless reasoning item rather than sending it (upstream's own
+    /// rule under `store: false`, `openai-responses.ts:446-451`), so the
+    /// marker cannot become a bad request; what it does is make the loss a
+    /// thing the transcript *says* — beside a warning naming the row — instead
+    /// of an absence.
+    ///
+    /// Three decisions are worth naming, because each had a plausible
+    /// alternative:
+    ///
+    /// - **Recognition is by the record's `type` prefix**
+    ///   ([`REASONING_TAG`]), read out of the raw JSON, because a record this
+    ///   build cannot decode is precisely one whose fields it cannot trust.
+    ///   The prefix is the protocol's stated contract for every later variant
+    ///   of this part, which is what makes reading it here sound rather than a
+    ///   guess about a name.
+    /// - **Nothing is salvaged from the record**, not even a field that looks
+    ///   like the blob. The shape is what this build failed to understand, so
+    ///   a value read out of it is read under an assumption the failure
+    ///   already disproved — and a wrong blob is a refused request that fails
+    ///   the whole turn, where a missing one only costs the model a memory.
+    /// - **The marker keeps the row's id and is never written back.** The only
+    ///   path that rewrites a stored part is the interrupted-call closure in
+    ///   `engine.rs`, which touches tool parts alone; every other write belongs
+    ///   to a part the running turn minted. So the newer build's bytes stay
+    ///   exactly where they are, which is the promise the rest of this module
+    ///   makes.
+    fn lost_reasoning(&self, id: &str, data: &str) -> Option<Part> {
+        let raw: serde_json::Value = serde_json::from_str(data).ok()?;
+        let payload = &raw["payload"];
+        if !payload["type"].as_str()?.starts_with(REASONING_TAG) {
+            return None;
+        }
+
+        tracing::warn!(
+            database = %self.inner.database.display(),
+            record = id,
+            "a stored reasoning record could not be read; the message kept its \
+             other parts and the next request carries no reasoning for this step"
+        );
+
+        Some(Part {
+            id: PartId::from(id.to_owned()),
+            body: PartBody::Reasoning {
+                // Best-effort provenance: whichever of these the record still
+                // spells plainly says *whose* continuity was lost, and an
+                // empty one says even that is unknown. Neither is ever sent.
+                provider: payload["provider"].as_str().unwrap_or_default().to_owned(),
+                item: payload["item"].as_str().unwrap_or_default().to_owned(),
+                encrypted: None,
+            },
+        })
     }
 
     /// Hands one write to the writer thread and waits for its answer.
@@ -1753,7 +1835,8 @@ mod tests {
         connect,
     };
     use crate::protocol::{
-        Message, MessageId, MessageTime, Part, PartBody, PartId, Role, ToolState, Usage,
+        Message, MessageId, MessageTime, Part, PartBody, PartId, REASONING_TAG, Role, ToolState,
+        Usage,
     };
 
     fn temporary() -> TempDir {
@@ -2142,6 +2225,158 @@ mod tests {
 
         let loaded = storage.load_transcript(&id).expect("the transcript loads");
         assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0]
+                .parts
+                .iter()
+                .map(|part| part.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prt_2"]
+        );
+    }
+
+    /// The downgrade this build is written for: a session stored by a build
+    /// whose reasoning part is shaped differently. The message must survive
+    /// whole apart from that one part, the loss must be *in* the transcript
+    /// rather than only in a log line, and the record must still be there for
+    /// the build that can read it.
+    #[test]
+    fn a_reasoning_record_this_build_cannot_read_costs_continuity_and_says_so() {
+        let directory = temporary();
+        let storage = storage(&directory);
+        let id = session("ses_1");
+        store_message(
+            &storage,
+            &id,
+            &message(
+                "msg_1",
+                vec![
+                    text("prt_1", "before"),
+                    Part {
+                        id: PartId::from("prt_2".to_owned()),
+                        body: PartBody::Reasoning {
+                            provider: "openai".to_owned(),
+                            item: "rs_1".to_owned(),
+                            encrypted: Some("sealed".to_owned()),
+                        },
+                    },
+                    tool("prt_3"),
+                ],
+            ),
+        );
+
+        // What a later build's record looks like from here: the reserved tag,
+        // and a body whose required shape this one does not have.
+        let ahead = serde_json::json!({
+            "version": VERSION,
+            "payload": {
+                "id": "prt_2",
+                "type": "reasoning_v2",
+                "provider": "openai",
+                "item": "rs_1",
+                "segments": [{"sealed": "sealed", "scheme": "something-later"}],
+            },
+        })
+        .to_string();
+        let connection = beside(&storage);
+        connection
+            .execute(
+                "UPDATE part SET data = ?1 WHERE id = 'prt_2'",
+                rusqlite::params![ahead],
+            )
+            .expect("the row is replaced");
+
+        let loaded = storage.load_transcript(&id).expect("the transcript loads");
+        assert_eq!(
+            loaded[0]
+                .parts
+                .iter()
+                .map(|part| part.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prt_1", "prt_2", "prt_3"],
+            "the rest of the message survives and the lost part keeps its place"
+        );
+        assert_eq!(
+            loaded[0].parts[1].body,
+            PartBody::Reasoning {
+                provider: "openai".to_owned(),
+                item: "rs_1".to_owned(),
+                // Nothing is salvaged out of a shape this build did not
+                // understand: a wrong blob is a refused request, a missing one
+                // is a model that reasons again.
+                encrypted: None,
+            },
+            "the transcript itself has to say the continuity is gone"
+        );
+
+        let stored: String = connection
+            .query_row("SELECT data FROM part WHERE id = 'prt_2'", [], |row| {
+                row.get(0)
+            })
+            .expect("the row reads");
+        assert_eq!(
+            stored, ahead,
+            "reading a record this build cannot decode must not rewrite it"
+        );
+
+        // The other way a record becomes unreadable — a whole format this
+        // build predates — has to reach the same answer, or the marker would
+        // depend on *how* the future arrived rather than on what was lost.
+        connection
+            .execute(
+                "UPDATE part SET data = ?1 WHERE id = 'prt_2'",
+                rusqlite::params![
+                    serde_json::json!({
+                        "version": VERSION + 1,
+                        "payload": {"id": "prt_2", "type": REASONING_TAG},
+                    })
+                    .to_string()
+                ],
+            )
+            .expect("the row is replaced");
+
+        let loaded = storage.load_transcript(&id).expect("the transcript loads");
+        assert_eq!(
+            loaded[0].parts[1].body,
+            PartBody::Reasoning {
+                provider: String::new(),
+                item: String::new(),
+                encrypted: None,
+            },
+            "provenance the record does not spell plainly is left unknown \
+             rather than guessed"
+        );
+    }
+
+    /// The other half of the ruling: only request-affecting state earns a
+    /// marker. A text row that will not decode is still dropped whole, because
+    /// a marker for it would put a reasoning part where the model never
+    /// reasoned.
+    #[test]
+    fn an_unreadable_part_that_is_not_reasoning_is_still_dropped_whole() {
+        let directory = temporary();
+        let storage = storage(&directory);
+        let id = session("ses_1");
+        store_message(
+            &storage,
+            &id,
+            &message("msg_1", vec![text("prt_1", "a"), text("prt_2", "b")]),
+        );
+
+        beside(&storage)
+            .execute(
+                "UPDATE part SET data = ?1 WHERE id = 'prt_1'",
+                rusqlite::params![
+                    serde_json::json!({
+                        "version": VERSION,
+                        "payload": {"id": "prt_1", "type": "text"},
+                    })
+                    .to_string()
+                ],
+            )
+            .expect("the row is replaced");
+
+        let loaded = storage.load_transcript(&id).expect("the transcript loads");
         assert_eq!(
             loaded[0]
                 .parts

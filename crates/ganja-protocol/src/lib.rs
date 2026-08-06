@@ -270,6 +270,15 @@ pub struct Usage {
     pub cache_write_tokens: u64,
 }
 
+/// The `type` prefix reserved for [`PartBody::Reasoning`] and every later
+/// variant of it.
+///
+/// Public because the contract needs one owner and a reader is on the other
+/// side of a crate boundary: a decoder that meets a part it cannot understand
+/// asks this whether the record it is holding was request-affecting state, and
+/// a literal spelled a second time in that decoder is the contract drifting.
+pub const REASONING_TAG: &str = "reasoning";
+
 /// The kinds of content a [`Part`] can carry.
 ///
 /// The tag travels as a `type` field beside the part's id, which is the shape
@@ -320,6 +329,56 @@ pub enum PartBody {
     StepFinish {
         /// What this request cost, as the provider reported it.
         usage: Usage,
+    },
+    /// The model's own thinking, as the provider sealed it, kept so the next
+    /// request can hand it back.
+    ///
+    /// **Nothing here reads it, and nothing may.** A reasoning model that is
+    /// asked to keep no state of its own (`store: false`) is handed its
+    /// previous thinking as an opaque blob the client returns verbatim; the
+    /// blob is the provider's, and this part is the envelope it travels in.
+    /// Nothing renders it — there is no reasoning *text* part in this build —
+    /// so a frontend meeting one has nothing to draw.
+    ///
+    /// # The opacity contract, and what a build that cannot read one must do
+    ///
+    /// This is the first part whose absence changes **what the next request
+    /// carries** rather than what a transcript looks like. Every other variant
+    /// is renderable content or bookkeeping: losing one costs a line on a
+    /// screen. Losing this one silently costs the model the record of its own
+    /// reasoning while the calls that reasoning produced stay in the request —
+    /// a conversation that looks whole and is not.
+    ///
+    /// So the tag is part of the contract: **a later variant of this part
+    /// keeps the `reasoning` prefix in its `type`**, because that prefix is the
+    /// one thing a build too old to decode the record can still recognize. A
+    /// reader that cannot decode a `reasoning*` part is required to keep the
+    /// rest of the message and put a stateless one of these in its place
+    /// (`encrypted: None`), so the loss is recorded where the next request is
+    /// built instead of vanishing. `ganja-core`'s storage is that reader.
+    Reasoning {
+        /// Which provider minted it, spelled as that provider's own id.
+        ///
+        /// Sealed state means only the wire that sealed it can open it, so the
+        /// blob is handed back to that wire and to no other. A session that
+        /// changes vendors mid-conversation is the case this exists for.
+        provider: String,
+        /// The provider's own identifier for the reasoning item.
+        ///
+        /// Named `item` rather than `id` because [`Part`] flattens this body
+        /// beside its own `id`, and two `id` keys in one object is a record
+        /// that does not round-trip.
+        item: String,
+        /// The sealed state itself, absent when this build does not hold it.
+        ///
+        /// Two situations produce [`None`], and they mean the same thing to
+        /// whoever builds the next request — *there was reasoning here and it
+        /// cannot be replayed*: an item the provider streamed without state,
+        /// and a stored record a reader could not decode. Neither may be
+        /// reconstructed, and neither may be sent: a reasoning item without
+        /// state is what the provider rejects.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted: Option<String>,
     },
     /// What one step of the turn changed on disk, and the snapshot it changed
     /// it from. Appended after the step's [`PartBody::StepFinish`] when the
@@ -447,6 +506,28 @@ impl Part {
         }
     }
 
+    /// Builds a reasoning part with a fresh id, carrying the state `provider`
+    /// sealed under its own `item` id.
+    ///
+    /// Takes the state rather than defaulting it: the one caller that has none
+    /// to give is a reader recording a loss, and spelling `None` there is the
+    /// point.
+    #[must_use]
+    pub fn reasoning(
+        provider: impl Into<String>,
+        item: impl Into<String>,
+        encrypted: Option<String>,
+    ) -> Self {
+        Self {
+            id: PartId::ascending(),
+            body: PartBody::Reasoning {
+                provider: provider.into(),
+                item: item.into(),
+                encrypted,
+            },
+        }
+    }
+
     /// The text this part carries, or [`None`] when it carries something else.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
@@ -456,7 +537,8 @@ impl Part {
             | PartBody::File { .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
-            | PartBody::Patch { .. } => None,
+            | PartBody::Patch { .. }
+            | PartBody::Reasoning { .. } => None,
         }
     }
 
@@ -468,7 +550,8 @@ impl Part {
             | PartBody::File { .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
-            | PartBody::Patch { .. } => None,
+            | PartBody::Patch { .. }
+            | PartBody::Reasoning { .. } => None,
         }
     }
 }
@@ -554,12 +637,21 @@ impl Message {
     /// reason: it records what a tool did rather than being something the
     /// model said, and a message holding one always holds the tool call that
     /// earned it.
+    ///
+    /// Neither does a [`PartBody::Reasoning`], and that one is load-bearing: a
+    /// turn that died after sealing its thinking and before saying anything
+    /// would otherwise enter the history as a message whose only content is
+    /// state the model cannot be shown, and every later request would carry
+    /// it.
     #[must_use]
     pub fn has_content(&self) -> bool {
         self.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !text.is_empty(),
             PartBody::Tool { .. } | PartBody::File { .. } => true,
-            PartBody::StepStart | PartBody::StepFinish { .. } | PartBody::Patch { .. } => false,
+            PartBody::StepStart
+            | PartBody::StepFinish { .. }
+            | PartBody::Patch { .. }
+            | PartBody::Reasoning { .. } => false,
         })
     }
 }
@@ -1027,7 +1119,7 @@ mod tests {
     use super::{
         Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody,
         PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption,
-        QuestionSource, RevertInfo, Role, SessionId, ToolState, Usage,
+        QuestionSource, REASONING_TAG, RevertInfo, Role, SessionId, ToolState, Usage,
     };
 
     /// The session every pinned event happens in.
@@ -1353,6 +1445,34 @@ mod tests {
                     },
                 }),
                 r#"{"id":"prt_1","type":"file","path":"src/main.rs","mime":"text/plain"}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::Reasoning {
+                        provider: "openai".to_owned(),
+                        item: "rs_1".to_owned(),
+                        encrypted: Some("sealed".to_owned()),
+                    },
+                }),
+                // The part's own id and the provider's item id are two keys,
+                // which is why the second is not called `id`.
+                r#"{"id":"prt_1","type":"reasoning","provider":"openai","item":"rs_1","encrypted":"sealed"}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::Reasoning {
+                        provider: "openai".to_owned(),
+                        item: "rs_1".to_owned(),
+                        encrypted: None,
+                    },
+                }),
+                // State this build does not hold is written as its absence
+                // rather than as a null, so the record says "there is none"
+                // in the one spelling a reader also accepts from a build that
+                // never wrote the field.
+                r#"{"id":"prt_1","type":"reasoning","provider":"openai","item":"rs_1"}"#,
             ),
             (
                 serde_json::to_string(&Part {
@@ -1720,5 +1840,77 @@ mod tests {
             !encoded.contains("model") && !encoded.contains("usage"),
             "a user message should carry neither: {encoded}"
         );
+    }
+
+    /// The tag is the whole of the downgrade contract: a reader too old to
+    /// decode the record recognizes it by this prefix and nothing else, so a
+    /// rename would silently turn every future reasoning record into a part
+    /// that vanishes without a trace.
+    #[test]
+    fn a_reasoning_part_is_tagged_with_the_prefix_a_later_variant_must_keep() {
+        let part = Part::reasoning("openai", "rs_1", Some("sealed".to_owned()));
+        let encoded = serde_json::to_value(&part).expect("a part serializes");
+
+        assert_eq!(encoded["type"], serde_json::json!(REASONING_TAG));
+        assert!(
+            encoded["type"]
+                .as_str()
+                .is_some_and(|tag| tag.starts_with(REASONING_TAG)),
+            "the reserved prefix is what a decoder that cannot read the rest \
+             still matches on: {encoded}"
+        );
+    }
+
+    /// The two shapes a reader has to accept, and the one it must never
+    /// invent: a record whose state field was never written reads back as
+    /// state this build does not hold, not as an empty blob it could send.
+    #[test]
+    fn a_reasoning_record_without_state_reads_back_as_state_nobody_holds() {
+        let decoded: Part = serde_json::from_str(
+            r#"{"id":"prt_1","type":"reasoning","provider":"openai","item":"rs_1"}"#,
+        )
+        .expect("a record written without the field parses");
+
+        assert_eq!(
+            decoded.body,
+            PartBody::Reasoning {
+                provider: "openai".to_owned(),
+                item: "rs_1".to_owned(),
+                encrypted: None,
+            }
+        );
+
+        let held: Part = serde_json::from_str(
+            r#"{"id":"prt_1","type":"reasoning","provider":"openai","item":"rs_1","encrypted":"sealed"}"#,
+        )
+        .expect("a record written with the field parses");
+        assert_eq!(
+            held.body,
+            PartBody::Reasoning {
+                provider: "openai".to_owned(),
+                item: "rs_1".to_owned(),
+                encrypted: Some("sealed".to_owned()),
+            }
+        );
+    }
+
+    /// Sealed state is not something the model said. A turn that produced only
+    /// this is a turn that produced nothing, and letting it into the history
+    /// would carry an unreplayable blob into every later request.
+    #[test]
+    fn a_message_holding_only_sealed_reasoning_has_no_content() {
+        let mut message = Message::assistant("gpt");
+        message
+            .parts
+            .push(Part::reasoning("openai", "rs_1", Some("sealed".to_owned())));
+
+        assert!(!message.has_content());
+        assert!(
+            message.parts[0].as_text().is_none(),
+            "nothing renders sealed state, so nothing may read text out of it"
+        );
+
+        message.parts.push(Part::text("and here is the answer"));
+        assert!(message.has_content());
     }
 }

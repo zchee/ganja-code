@@ -66,7 +66,12 @@
 //! happened after this session started, and a renewal another turn performed,
 //! are both picked up by the next request rather than the next process.
 
-use std::{borrow::Cow, collections::HashMap, fmt, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -601,33 +606,21 @@ fn reauth(backend: Backend, error: ProviderError) -> ProviderError {
 
 /// The JSON a request carries.
 ///
-/// # Why `include` is not one of these fields
+/// # `include` and `store` are one feature, and both halves are here now
 ///
 /// `include: ["reasoning.encrypted_content"]` is [`store`](Body::store)'s
-/// companion wherever the pin sends it, and the two really are one feature:
-/// with `store: false` the backend keeps no trace, so `include` is how a
-/// reasoning model's own thinking is handed back to it — as encrypted state the
-/// *client* returns on the next request, in a `reasoning` input item
+/// companion: with `store: false` the backend keeps no trace of a turn, so
+/// `include` is the only way a reasoning model's own thinking survives to the
+/// next request — the backend seals it, the *client* keeps it, and the client
+/// hands it back as a `reasoning` input item
 /// (`packages/llm/test/tool-runtime.test.ts:592,601`).
 ///
-/// The half that returns it is the half this build does not have. `Body::new`
-/// encodes three item kinds — what was said, a call, a call's result — because
-/// those are the three [`PartBody`] variants a transcript holds; there is no
-/// part that can carry an encrypted blob, and `ganja-protocol` is where one
-/// would have to be added. Upstream's own encoder is explicit about the pairing
-/// and *drops* a reasoning item that arrives without the state
+/// This build sent `store` without `include` for exactly as long as it had
+/// nowhere to put what came back. It has one now
+/// ([`PartBody::Reasoning`]), so the pairing the pin describes is whole:
+/// [`Body::new`] replays the sealed state and drops any reasoning item that
+/// has none, which is upstream's own rule under `store: false`
 /// (`packages/llm/src/protocols/openai-responses.ts:446-451`).
-///
-/// So asking for it here would buy nothing and cost every turn: the backend
-/// would attach encrypted state to each reply, [`Mapping`] would log it as an
-/// unmapped item and discard it, and the next request would carry no more
-/// continuity than it does now. Upstream's Responses route agrees about the
-/// floor — its default is `store: false` alone, with `include` left to whoever
-/// can use it (`openai-responses.ts:991`, and the "omits include when no
-/// include is set" case at `test/provider/openai-responses.test.ts:638`).
-///
-/// The reasoning ganja *can* show already arrives as
-/// `response.reasoning_summary_text.delta` and needs none of this.
 #[derive(Debug, Serialize)]
 struct Body<'a> {
     model: &'a str,
@@ -646,6 +639,21 @@ struct Body<'a> {
     /// subscription special case (`openai-responses.ts:991`), which is the same
     /// statement about the same wire.
     store: bool,
+    /// What the backend should hand back beside the reply.
+    ///
+    /// One entry or nothing: the only thing this build asks for is the sealed
+    /// reasoning it can replay, and a body with no `include` at all is the
+    /// shape upstream sends where nobody opted in
+    /// (`test/provider/openai-responses.test.ts:638`).
+    ///
+    /// **Decided by the model, not by the credential**, which is where
+    /// upstream decides it: the option rides the model facade
+    /// (`packages/llm/src/providers/openai-options.ts:44-58`, applied at
+    /// `providers/openai.ts:43`), so both backends this provider reaches send
+    /// it for a model that reasons and neither sends it for one that does not.
+    /// See [`seals_reasoning`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include: Option<[&'static str; 1]>,
     /// The system prompt.
     ///
     /// **A divergence, deliberately.** `@ai-sdk/openai` pushes it as an input
@@ -715,6 +723,21 @@ enum Item<'a> {
         call_id: &'a str,
         output: &'a str,
     },
+    /// Thinking the backend sealed on an earlier request, handed back.
+    ///
+    /// The shape is upstream's replay item verbatim
+    /// (`openai-responses.ts:400-406`, asserted at
+    /// `tool-runtime.test.ts:601`), and what it does *not* carry is as
+    /// deliberate as what it does: no `id`, because under `store: false` there
+    /// is no server-side item for one to name, and `summary: []` because the
+    /// summary an id would group belongs to a reasoning *text* part this build
+    /// does not have.
+    Reasoned {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        summary: [&'static str; 0],
+        encrypted_content: &'a str,
+    },
 }
 
 /// One piece of a said item's content.
@@ -741,6 +764,9 @@ impl<'a> Body<'a> {
     ///
     /// - its text becomes one said item, `input_text` for a user and
     ///   `output_text` for the model;
+    /// - the thinking it sealed becomes a `reasoning` item, before the calls
+    ///   that thinking produced — the order the pin's second request shows
+    ///   (`tool-runtime.test.ts:599-604`);
     /// - each call becomes a `function_call` item;
     /// - each of those calls' results becomes a `function_call_output` item,
     ///   after all of them, because the API pairs them by `call_id` rather than
@@ -749,6 +775,26 @@ impl<'a> Body<'a> {
     /// A step carrying neither text nor calls contributes nothing, which is
     /// what the marker opening a turn and a turn that died before its first
     /// fragment both are.
+    ///
+    /// # Which reasoning is replayed
+    ///
+    /// Two rules, both upstream's, and both about not sending something the
+    /// backend will refuse:
+    ///
+    /// - **State or nothing.** A reasoning part with no sealed state is
+    ///   dropped, because with `store: false` the backend accepts a previous
+    ///   reasoning item only when it carries one (`openai-responses.ts:451`).
+    ///   Such a part is either a step whose thinking was never sealed or one
+    ///   whose record a reader could not decode; either way there is nothing to
+    ///   replay, and inventing something is the one thing that must not happen.
+    /// - **One item per item id.** Upstream folds a message's reasoning parts
+    ///   into one replay entry per id (`openai-responses.ts:394-406`); the same
+    ///   id twice in one request is one item said twice.
+    ///
+    /// A third rule is this build's own, and it is what the part's `provider`
+    /// field exists for: sealed state is handed back only to the wire that
+    /// sealed it. A session that changes vendors mid-conversation carries
+    /// another provider's blobs in its transcript, and they mean nothing here.
     fn new(request: &'a ChatRequest) -> Self {
         let mut input: Vec<Item<'a>> = Vec::new();
 
@@ -757,14 +803,43 @@ impl<'a> Body<'a> {
                 Role::User => ("user", "input_text"),
                 Role::Assistant => ("assistant", "output_text"),
             };
+            // Scoped to the message, as upstream's `reasoningItems` map is.
+            let mut replayed: HashSet<&str> = HashSet::new();
 
             for step in steps(&message.parts) {
-                let (texts, calls) = split(step);
+                let (texts, calls, thoughts) = split(step);
 
                 if let Some(text) = texts {
                     input.push(Item::Said {
                         role,
                         content: vec![Block { kind: block, text }],
+                    });
+                }
+                for thought in &thoughts {
+                    if thought.provider != ID {
+                        tracing::debug!(
+                            provider = thought.provider,
+                            "reasoning sealed by another provider is not this wire's to \
+                             hand back"
+                        );
+                        continue;
+                    }
+                    let Some(encrypted) = thought.encrypted else {
+                        tracing::debug!(
+                            item = thought.item,
+                            "a reasoning part carries no state; this step's thinking \
+                             cannot be replayed"
+                        );
+                        continue;
+                    };
+                    if !replayed.insert(thought.item) {
+                        continue;
+                    }
+
+                    input.push(Item::Reasoned {
+                        kind: REASONING,
+                        summary: [],
+                        encrypted_content: encrypted,
                     });
                 }
                 for part in &calls {
@@ -789,6 +864,7 @@ impl<'a> Body<'a> {
             model: &request.model,
             stream: true,
             store: false,
+            include: seals_reasoning(&request.model).then_some([REASONING_INCLUDE]),
             instructions: request.system.as_deref(),
             input,
             tools: request
@@ -812,10 +888,19 @@ struct Made<'a> {
     state: &'a ToolState,
 }
 
-/// Splits one step into the text it said and the calls it made.
-fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Made<'_>>) {
+/// One step's sealed thinking, borrowed from the part that recorded it.
+struct Thought<'a> {
+    provider: &'a str,
+    item: &'a str,
+    encrypted: Option<&'a str>,
+}
+
+/// Splits one step into the text it said, the calls it made, and the thinking
+/// it sealed.
+fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Made<'_>>, Vec<Thought<'_>>) {
     let mut texts: Vec<&str> = Vec::new();
     let mut calls = Vec::new();
+    let mut thoughts = Vec::new();
 
     for part in parts {
         match &part.body {
@@ -832,6 +917,15 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Made<'_>>) {
                 call_id,
                 tool,
                 state,
+            }),
+            PartBody::Reasoning {
+                provider,
+                item,
+                encrypted,
+            } => thoughts.push(Thought {
+                provider,
+                item,
+                encrypted: encrypted.as_deref(),
             }),
             // A mentioned file is a *reference*, resolved into a text block
             // before a request is built (`session::resolve_mentions`); see the
@@ -853,7 +947,7 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Made<'_>>) {
         many => Some(Cow::Owned(many.join("\n"))),
     };
 
-    (text, calls)
+    (text, calls, thoughts)
 }
 
 /// Accumulates what the frames so far said.
@@ -948,9 +1042,11 @@ impl Mapping {
 
     /// Opens a call the model started making.
     ///
-    /// Items of every other kind — a message, a block of reasoning, a
-    /// server-side tool this build never offered — are the stream announcing
-    /// structure rather than content, and produce nothing.
+    /// Items of every other kind — a message, a server-side tool this build
+    /// never offered, and a block of reasoning, which is still empty when it
+    /// opens — are the stream announcing structure rather than content, and
+    /// produce nothing here. What a reasoning item is worth arrives when it
+    /// closes; see [`sealed`].
     fn opened(&mut self, item: &Value, events: &mut Vec<ProviderEvent>) {
         if item["type"].as_str() != Some(FUNCTION_CALL) {
             return;
@@ -988,22 +1084,26 @@ impl Mapping {
         }
     }
 
-    /// Closes a call whose arguments are complete.
+    /// Closes an item whose content is complete: a call to execute, or the
+    /// thinking the backend has now sealed.
     ///
     /// A call is executed when it closes, so a stream that died mid-call must
     /// never reach here — which it cannot, because this event is the API's own
     /// terminator for one and an incomplete frame is not a frame.
     fn closed(&mut self, item: &Value, events: &mut Vec<ProviderEvent>) {
-        if item["type"].as_str() != Some(FUNCTION_CALL) {
-            return;
-        }
-
-        if let Some(id) = item["id"].as_str().and_then(|item_id| {
-            // Removed rather than read: the item is done, and leaving it would
-            // let a later frame quoting a reused id reopen a closed call.
-            self.calls.remove(item_id)
-        }) {
-            events.push(ProviderEvent::ToolCallEnd { id });
+        match item["type"].as_str().unwrap_or_default() {
+            FUNCTION_CALL => {
+                if let Some(id) = item["id"].as_str().and_then(|item_id| {
+                    // Removed rather than read: the item is done, and leaving
+                    // it would let a later frame quoting a reused id reopen a
+                    // closed call.
+                    self.calls.remove(item_id)
+                }) {
+                    events.push(ProviderEvent::ToolCallEnd { id });
+                }
+            }
+            REASONING => sealed(item, events),
+            _ => {}
         }
     }
 
@@ -1039,8 +1139,70 @@ impl Mapping {
     }
 }
 
+/// Reports the sealed thinking a finished reasoning item carries.
+///
+/// Only the closing frame is read. The API opens a reasoning item before the
+/// summary blocks and seals it after
+/// (`openai-responses.ts:644-650`), so `response.output_item.added` carries
+/// `encrypted_content: null` and the state arrives with
+/// `response.output_item.done` (`tool-runtime.test.ts:544-553`).
+///
+/// An item that closes without state produces nothing at all. There is no
+/// replaying it — the backend refuses a previous reasoning item that carries
+/// none — so a part recording it would be a row that can never do anything,
+/// on every turn of a session that never asked for state
+/// (deviation: a-reasoning-item-without-state-is-not-recorded). The *stateless*
+/// reasoning part this build does mint means something else entirely: state
+/// that existed and was lost, which is `storage::Storage::lost_reasoning`'s.
+fn sealed(item: &Value, events: &mut Vec<ProviderEvent>) {
+    let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
+        tracing::debug!("a reasoning item arrived without the id that identifies it");
+        return;
+    };
+    let Some(encrypted) = item["encrypted_content"]
+        .as_str()
+        .filter(|state| !state.is_empty())
+    else {
+        tracing::debug!(
+            item = id,
+            "a reasoning item arrived with no state to replay"
+        );
+        return;
+    };
+
+    events.push(ProviderEvent::ReasoningState {
+        item: id.to_owned(),
+        encrypted: encrypted.to_owned(),
+    });
+}
+
 /// The item kind a tool call arrives as.
 const FUNCTION_CALL: &str = "function_call";
+
+/// The item kind sealed thinking arrives as, and goes back as.
+const REASONING: &str = "reasoning";
+
+/// The one thing this build asks the backend to include beside the reply.
+const REASONING_INCLUDE: &str = "reasoning.encrypted_content";
+
+/// Whether a model's thinking is worth asking to have sealed.
+///
+/// Upstream's predicate, ported literally
+/// (`packages/llm/src/providers/openai-options.ts:44-48`): every `gpt-5`
+/// except the chat model and `gpt-5-pro`. It is a statement about the *model* —
+/// which is why one function answers for both backends — and the two
+/// exclusions are models that do not reason at all, so asking would spend a
+/// field on every request for state that never comes.
+///
+/// Note what the second exclusion does *not* catch: `gpt-5.5-pro` does not
+/// contain `gpt-5-pro`, so upstream asks for its state too. The literal is
+/// kept literal rather than tidied, because a tidier rule would be this
+/// build's rule and not the one the endpoint has been answering.
+fn seals_reasoning(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+
+    id.contains("gpt-5") && !id.contains("gpt-5-chat") && !id.contains("gpt-5-pro")
+}
 
 /// The chat-completions sentinel, which some deployments send here too.
 const DONE: &str = "[DONE]";
@@ -1071,7 +1233,7 @@ mod tests {
     use super::{
         ACCOUNT_HEADER, ALLOWED_MODELS, BETA, BETA_HEADER, Backend, Body, CHAT_COMPLETIONS_ONLY,
         DEFAULT_BASE_URL, ID, Mapping, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider,
-        SUBSCRIPTION_DEFAULT, generation, reauth, serves,
+        SUBSCRIPTION_DEFAULT, generation, reauth, seals_reasoning, serves,
     };
     use crate::{
         auth::{self, AuthError, OauthCredential, RefreshOauth},
@@ -1455,8 +1617,11 @@ mod tests {
     /// `400 {"detail":"Store must be set to false"}`, which is every
     /// subscription turn this build could take — so it is asserted on the
     /// serialized body rather than on the struct that produces it.
+    ///
+    /// Its companion is here too: with the backend keeping nothing, `include`
+    /// is the only reason a second request can carry the first one's thinking.
     #[test]
-    fn every_body_tells_the_backend_to_keep_nothing() {
+    fn every_body_tells_the_backend_to_keep_nothing_and_to_seal_what_it_thought() {
         let body = serde_json::to_value(Body::new(&ask())).expect("the body serializes");
 
         assert_eq!(
@@ -1464,14 +1629,241 @@ mod tests {
             json!(false),
             "without this the backend refuses the turn outright: got {body}"
         );
-        // The companion `include` is deliberately absent — see `Body`'s own
-        // docs. Half of a two-sided feature is bytes on every reply that
-        // nothing here can hand back.
+        assert_eq!(
+            body["include"],
+            json!(["reasoning.encrypted_content"]),
+            "`store: false` without this is a reasoning model whose every turn \
+             starts from nothing: got {body}"
+        );
+    }
+
+    /// Upstream attaches the include to the *model*, so this build asks the
+    /// same question of both backends rather than of the credential. The
+    /// exclusions are the two OpenAI models that do not reason — and
+    /// `gpt-5.5-pro`, which reads like one and is not spelled like one, is
+    /// deliberately still asked, because that is what the pin's literal does.
+    #[test]
+    fn asking_for_sealed_reasoning_is_a_question_about_the_model() {
+        for reasons in [
+            "gpt-5.4",
+            "gpt-5.5",
+            "gpt-5.6",
+            "gpt-5.3-codex-spark",
+            "GPT-5.4-MINI",
+            "gpt-5.5-pro",
+        ] {
+            assert!(seals_reasoning(reasons), "{reasons} reasons");
+        }
+        for plain in ["gpt-5-chat-latest", "gpt-5-pro", "gpt-4.1", "o3", "claude"] {
+            assert!(!seals_reasoning(plain), "{plain} has nothing to seal");
+        }
+
+        let plain = ChatRequest {
+            model: "gpt-4.1".to_owned(),
+            ..ask()
+        };
+        let body = serde_json::to_value(Body::new(&plain)).expect("the body serializes");
         assert!(
             body["include"].is_null(),
-            "encrypted reasoning was asked for and there is no part that can \
-             return it: got {body}"
+            "a body that asks for nothing omits the field entirely, the way \
+             upstream's does: got {body}"
         );
+        assert_eq!(body["store"], json!(false), "and still keeps nothing");
+    }
+
+    /// A step's sealed thinking goes back in the shape the pin's second
+    /// request carries — before the calls it produced, with an empty summary
+    /// and **no** item id, because under `store: false` there is no
+    /// server-side item for one to name
+    /// (`packages/llm/test/tool-runtime.test.ts:599-604`).
+    #[test]
+    fn a_sealed_thought_is_replayed_before_the_calls_it_produced() {
+        let mut assistant = Message::assistant("gpt-test");
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepStart,
+        });
+        assistant
+            .parts
+            .push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
+        assistant.parts.push(tool_part(
+            "call_read",
+            "read",
+            completed(json!({"filePath": "src/main.rs"}), "fn main() {}"),
+        ));
+
+        let request = ChatRequest {
+            model: SERVED.to_owned(),
+            system: None,
+            messages: vec![Message::user("read src/main.rs"), assistant],
+            tools: Vec::new(),
+        };
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+        assert_eq!(
+            body["input"],
+            json!([
+                {"role": "user", "content": [{"type": "input_text", "text": "read src/main.rs"}]},
+                {"type": "reasoning", "summary": [], "encrypted_content": "sealed-state"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_read",
+                    "name": "read",
+                    "arguments": r#"{"filePath":"src/main.rs"}"#,
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_read",
+                    "output": "fn main() {}",
+                },
+            ]),
+            "got {body}"
+        );
+    }
+
+    /// The three reasoning parts a request must **not** put on the wire, each
+    /// for its own reason, and each pinned because sending one is a refused
+    /// request rather than a degraded one.
+    #[test]
+    fn reasoning_with_nothing_to_replay_never_reaches_the_wire() {
+        let mut assistant = Message::assistant("gpt-test");
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepStart,
+        });
+        // 1. State this build does not hold — an item that arrived without
+        //    any, or a stored record that would not decode. Upstream drops it
+        //    at `openai-responses.ts:451` and so does this.
+        assistant.parts.push(Part::reasoning(ID, "rs_lost", None));
+        // 2. Another wire's state, which means nothing to this one.
+        assistant.parts.push(Part::reasoning(
+            "anthropic",
+            "th_1",
+            Some("someone-elses-state".to_owned()),
+        ));
+        // 3. The same item twice, which is one item said twice.
+        assistant
+            .parts
+            .push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
+        assistant
+            .parts
+            .push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
+
+        let request = ChatRequest {
+            model: SERVED.to_owned(),
+            system: None,
+            messages: vec![Message::user("hello"), assistant],
+            tools: Vec::new(),
+        };
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+        assert_eq!(
+            body["input"],
+            json!([
+                {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                {"type": "reasoning", "summary": [], "encrypted_content": "sealed-state"},
+            ]),
+            "one item survives all three rules, and it is the one this wire \
+             sealed itself: got {body}"
+        );
+    }
+
+    /// The receiving half: the state arrives on the item's *closing* frame,
+    /// the opening one having carried `encrypted_content: null`
+    /// (`tool-runtime.test.ts:544-553`).
+    #[tokio::test]
+    async fn a_reasoning_item_is_taken_when_it_closes_and_only_if_it_was_sealed() {
+        let seen = events(concat!(
+            r#"data: {"type":"response.output_item.added","item":{"type":"reasoning","id":"rs_1","encrypted_content":null}}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Short is right."}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","encrypted_content":"sealed-state"}}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        assert!(
+            seen.contains(&ProviderEvent::ReasoningState {
+                item: "rs_1".to_owned(),
+                encrypted: "sealed-state".to_owned(),
+            }),
+            "the sealed state has to reach the loop or nothing can replay it: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter()
+                .filter(|event| matches!(event, ProviderEvent::ReasoningState { .. }))
+                .count(),
+            1,
+            "the item opened once and closed once: {seen:?}"
+        );
+        assert!(
+            seen.contains(&ProviderEvent::ReasoningDelta("Short is right.".to_owned())),
+            "the readable half is unchanged by any of this: {seen:?}"
+        );
+    }
+
+    /// An item with nothing to replay produces no part at all: there is no
+    /// sending it back, and a row that can never do anything on every turn is
+    /// worse than none (deviation:
+    /// a-reasoning-item-without-state-is-not-recorded).
+    #[tokio::test]
+    async fn a_reasoning_item_that_was_never_sealed_leaves_no_trace() {
+        for (item, transcript) in [
+            (
+                "a null state",
+                concat!(
+                    r#"data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","encrypted_content":null}}"#,
+                    "\n\n",
+                    r#"data: {"type":"response.completed","response":{}}"#,
+                    "\n\n",
+                ),
+            ),
+            (
+                "no state field at all",
+                concat!(
+                    r#"data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1"}}"#,
+                    "\n\n",
+                    r#"data: {"type":"response.completed","response":{}}"#,
+                    "\n\n",
+                ),
+            ),
+            (
+                "an empty state",
+                concat!(
+                    r#"data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","encrypted_content":""}}"#,
+                    "\n\n",
+                    r#"data: {"type":"response.completed","response":{}}"#,
+                    "\n\n",
+                ),
+            ),
+            (
+                // No id is no item: upstream requires a non-empty one
+                // (`openai-responses.ts:572-573`).
+                "state on an item with no id",
+                concat!(
+                    r#"data: {"type":"response.output_item.done","item":{"type":"reasoning","encrypted_content":"sealed-state"}}"#,
+                    "\n\n",
+                    r#"data: {"type":"response.completed","response":{}}"#,
+                    "\n\n",
+                ),
+            ),
+        ] {
+            let seen = events(transcript).await;
+
+            assert!(
+                !seen
+                    .iter()
+                    .any(|event| matches!(event, ProviderEvent::ReasoningState { .. })),
+                "{item} has no state to replay: {seen:?}"
+            );
+            assert!(
+                seen.contains(&ProviderEvent::Finish(FinishReason::Completed)),
+                "and the turn still ends normally: {seen:?}"
+            );
+        }
     }
 
     /// The backend serves a pinned list, and the first live ChatGPT turn met it

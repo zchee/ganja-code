@@ -10,7 +10,7 @@
 //! newest models, because chat completions refused them live and named
 //! `/v1/responses` in the refusal.
 //!
-//! Told in phases, because nine different things have to be true at once and a
+//! Told in phases, because ten different things have to be true at once and a
 //! failure should still say which sentence broke:
 //!
 //! 1. **A whole subscription turn.** A stored ChatGPT credential drives a
@@ -41,6 +41,11 @@
 //!    own `Debug`.
 //! 9. **An unsupported model costs nothing** — and the seat's list does not
 //!    reach the platform, which phase 3 already took a turn on.
+//! 10. **Thinking survives the request that produced it.** The one phase that
+//!     needs two requests: `store: false` means the backend keeps nothing, so
+//!     a turn's second step carries the first step's reasoning only because
+//!     this build asked for it (`include`), kept it as a part, and handed it
+//!     back in the item shape the pin asserts.
 //!
 //! Everything serves real bytes over loopback rather than mocking the client,
 //! the way every other provider suite here works: what is asserted on is the
@@ -51,6 +56,7 @@
 //! a plain `cargo test` runs the tests inside a binary on parallel threads.
 
 use std::{
+    collections::VecDeque,
     env,
     sync::{Arc, Mutex},
 };
@@ -181,6 +187,12 @@ impl Recorded {
 struct State {
     seen: Mutex<Vec<Recorded>>,
     reply: Mutex<String>,
+    /// Bodies for the next requests, oldest first, ahead of [`State::reply`].
+    ///
+    /// A turn that calls a tool is two requests, and the second one cannot be
+    /// answered with the first one's body — a reply that calls the tool again
+    /// is a loop with no end.
+    scripted: Mutex<VecDeque<String>>,
 }
 
 /// A loopback endpoint serving whatever the current phase set.
@@ -229,6 +241,15 @@ impl Endpoint {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = body.into();
     }
+
+    /// Queues one body per request, consumed in order before the standing one.
+    fn answers_the_next_requests_with(&self, bodies: impl IntoIterator<Item = String>) {
+        *self
+            .state
+            .scripted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = bodies.into_iter().collect();
+    }
 }
 
 /// Starts an endpoint that answers every connection for as long as the test
@@ -243,6 +264,7 @@ async fn serve() -> Endpoint {
     let state = Arc::new(State {
         seen: Mutex::new(Vec::new()),
         reply: Mutex::new(responses_transcript()),
+        scripted: Mutex::new(VecDeque::new()),
     });
 
     let served = Arc::clone(&state);
@@ -258,10 +280,17 @@ async fn serve() -> Endpoint {
                     return;
                 };
                 let body = state
-                    .reply
+                    .scripted
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone();
+                    .pop_front()
+                    .unwrap_or_else(|| {
+                        state
+                            .reply
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone()
+                    });
                 state
                     .seen
                     .lock()
@@ -503,10 +532,11 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         "the backend answers a body without this `400 {{\"detail\":\"Store must \
          be set to false\"}}`, so every subscription turn depends on it: {body}"
     );
-    assert!(
-        body["include"].is_null(),
-        "`reasoning.encrypted_content` is only worth asking for once a \
-         transcript can hand it back, and no protocol part carries one: {body}"
+    assert_eq!(
+        body["include"],
+        json!(["reasoning.encrypted_content"]),
+        "with the backend keeping nothing, this is the only way the next \
+         request carries this one's thinking; phase 10 is that request: {body}"
     );
     assert_eq!(
         body["instructions"],
@@ -642,6 +672,12 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         json!(false),
         "one encoder for both backends, so this is not a subscription special \
          case — upstream holds it as a route-level default: {body}"
+    );
+    assert_eq!(
+        body["include"],
+        json!(["reasoning.encrypted_content"]),
+        "and its companion travels on both backends too, because upstream \
+         attaches it to the model rather than to the credential: {body}"
     );
     assert_eq!(body["instructions"], json!("be brief"));
     assert_eq!(
@@ -901,4 +937,130 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         !matches!(unsupported, ProviderError::Auth(_)),
         "the model was refused before the store was consulted: {unsupported:?}"
     );
+
+    // ---- 10. Thinking survives the request that produced it. ---------------
+    // The other half of `include`, and the only phase that needs two requests
+    // to say anything: with `store: false` the backend keeps nothing, so a
+    // turn's second step carries the first step's reasoning only if this build
+    // kept it and handed it back. The shape is upstream's, asserted at
+    // `packages/llm/test/tool-runtime.test.ts:596-605`.
+    endpoint.forget();
+    store(FIRST_ACCESS, FIRST_ACCOUNT);
+    endpoint.answers_the_next_requests_with([sealed_then_calls(), a_closing_reply()]);
+
+    let (tool, ran) = RecorderTool::new("lookup", "lookup ran", "found it");
+    let engine = Engine::new(
+        Arc::new(responses(&endpoint)),
+        SUBSCRIPTION_MODEL,
+        Arc::new(Registry::new(vec![tool])),
+        Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine
+        .send(prompt("what is the weather"))
+        .await
+        .expect("an idle engine accepts");
+    let seen = drain(&mut events).await;
+
+    assert_eq!(
+        ran.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len(),
+        1,
+        "the turn is two requests because the model called a tool between them"
+    );
+    let requests = endpoint.seen();
+    let [first, second] = requests.as_slice() else {
+        panic!(
+            "a tool call makes a turn two requests, got {}",
+            requests.len()
+        );
+    };
+
+    let opening = first.json();
+    assert!(
+        opening["input"]
+            .as_array()
+            .is_some_and(|input| input.len() == 1),
+        "the first request is the prompt and nothing else: {opening}"
+    );
+
+    let carried = second.json();
+    assert_eq!(
+        carried["include"],
+        json!(["reasoning.encrypted_content"]),
+        "the request that replays state asks for the next lot too: {carried}"
+    );
+    assert_eq!(
+        carried["input"],
+        json!([
+            {"role": "user", "content": [{"type": "input_text", "text": "what is the weather"}]},
+            // No `id`: under `store: false` there is no server-side item for
+            // one to name, and no summary, because the readable half of a
+            // thought has no part in this build.
+            {"type": "reasoning", "summary": [], "encrypted_content": "sealed-state"},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": r#"{"city":"Paris"}"#,
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "found it"},
+        ]),
+        "the model's own thinking has to come back before the call it \
+         produced, or the second step reasons from evidence with no reasoning: \
+         {carried}"
+    );
+
+    // The transcript half: the state is a part of the conversation, which is
+    // what makes it survive a process rather than a loop iteration.
+    let sealed: Vec<&PartBody> = seen
+        .iter()
+        .filter_map(|event| match event {
+            Event::PartStarted { part, .. } => {
+                matches!(part.body, PartBody::Reasoning { .. }).then_some(&part.body)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sealed,
+        vec![&PartBody::Reasoning {
+            provider: openai::ID.to_owned(),
+            item: "rs_1".to_owned(),
+            encrypted: Some("sealed-state".to_owned()),
+        }],
+        "a frontend applying every event has to hold exactly what the next \
+         request will carry, and this is now part of that: {seen:?}"
+    );
+}
+
+/// A first reply: a thought the backend seals, then the call it led to.
+///
+/// The order and the `encrypted_content: null` on the opening item are the
+/// API's own (`tool-runtime.test.ts:544-565`) — the state arrives when the
+/// item closes, and a build reading the opening one would replay nothing.
+fn sealed_then_calls() -> String {
+    [
+        r#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":null}}"#,
+        r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","summary_index":0,"delta":"Ask the tool."}"#,
+        r#"data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"sealed-state"}}"#,
+        r#"data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"lookup","arguments":""}}"#,
+        r#"data: {"type":"response.function_call_arguments.delta","item_id":"item_1","delta":"{\"city\":\"Paris\"}"}"#,
+        r#"data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"item_1","call_id":"call_1","name":"lookup","arguments":"{\"city\":\"Paris\"}"}}"#,
+        r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+    ]
+    .join("\n\n")
+        + "\n\n"
+}
+
+/// A second reply: the answer, and no further calls, so the turn ends.
+fn a_closing_reply() -> String {
+    [
+        r#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_2"}}"#,
+        r#"data: {"type":"response.output_text.delta","item_id":"msg_2","delta":"Rain."}"#,
+        r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":12,"output_tokens":3}}}"#,
+    ]
+    .join("\n\n")
+        + "\n\n"
 }

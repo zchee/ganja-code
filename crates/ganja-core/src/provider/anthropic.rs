@@ -491,10 +491,16 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
             //
             // `StepFinish` carries a step's bill rather than content, and
             // `StepStart` was consumed as the boundary this step was cut at.
+            //
+            // A `Reasoning` part is another wire's sealed state — this API's
+            // own equivalent is a `thinking` block with a signature, which
+            // this build does not port — and handing an opaque blob to the
+            // provider that did not seal it is not a thing to attempt.
             PartBody::File { .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
-            | PartBody::Patch { .. } => {}
+            | PartBody::Patch { .. }
+            | PartBody::Reasoning { .. } => {}
         }
     }
 
