@@ -12,6 +12,8 @@ What is ported from the upstream specification:
 
 The implementation is original Rust code using idiomatic patterns; it is **not a code translation** but rather a faithful behavioral port of the upstream TypeScript/JavaScript specification.
 
+**Deferred:** the cursor stub (`crates/ganja-provider/src/provider/cursor.rs`) incorporates no third-party material — it is an identity and a refusal, written here. The attribution obligation for cursor's protocol attaches when a real wire ports the opencode-cursor plugin's protocol knowledge, and lands in this file with it.
+
 ---
 
 ## Scope of this file

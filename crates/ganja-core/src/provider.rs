@@ -316,6 +316,11 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         anthropic::ID => Wire::catalog(AnthropicProvider::from_env()?),
         openai::ID => openai_provider()?,
         grok::ID => Wire::catalog(GrokProvider::from_stored()?),
+        // Selectable so the refusal is ganja's own rather than a typo's:
+        // construction reads nothing — grok's posture — and the first request
+        // answers with the stub's named refusal. Uncataloged on purpose, so a
+        // session must name its model like any config-declared endpoint.
+        cursor::ID => Wire::catalog(CursorProvider),
         // Grok's construction shape, and grok's posture with it: neither reads
         // a token here, so a session with no stored login is built and fails at
         // its first request, with the message that names the login. What
@@ -393,8 +398,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        Config, Dialect, PROVIDERS, ProviderConfig, SelectionError, defaulted_model, fake, openai,
-        selectable,
+        Config, Dialect, PROVIDERS, ProviderConfig, SelectionError, cursor, defaulted_model, fake,
+        openai, selectable,
     };
     use crate::catalog;
 
@@ -438,9 +443,11 @@ mod tests {
             );
         }
         // The tier boundary inside the builtins themselves: `fake` is
-        // selectable and deliberately uncataloged, which is the shape a wire
-        // that lands before its rows do — the deferred cursor stub — will take.
+        // selectable and deliberately uncataloged, and `cursor` — the wire
+        // that landed before its rows, exactly the shape this comment used to
+        // predict — rides the same tier until the real wire brings its rows.
         assert!(!catalog::carries(fake::ID));
+        assert!(!catalog::carries(cursor::ID));
         assert!(catalog::carries(openai::ID));
 
         assert!(!selectable(&config, "gemini"));
@@ -523,6 +530,13 @@ mod tests {
         );
         assert!(matches!(
             defaulted_model("nonexistent", None),
+            Err(SelectionError::NoDefaultModel { .. })
+        ));
+        // The cursor stub is the shipped case of the same refusal: selectable,
+        // uncataloged, so a session must name its model — the message names
+        // every tier that can.
+        assert!(matches!(
+            defaulted_model(cursor::ID, None),
             Err(SelectionError::NoDefaultModel { .. })
         ));
     }

@@ -92,6 +92,7 @@ use crate::{
 pub mod anthropic;
 pub mod compat;
 pub mod copilot;
+pub mod cursor;
 pub mod fake;
 pub mod grok;
 pub mod openai;
@@ -102,6 +103,7 @@ pub mod sse;
 pub use anthropic::AnthropicProvider;
 pub use compat::{CompatProvider, Dialect};
 pub use copilot::CopilotProvider;
+pub use cursor::CursorProvider;
 pub use fake::FakeProvider;
 pub use grok::GrokProvider;
 pub use openai::OpenAiProvider;
@@ -123,10 +125,18 @@ pub const MODEL_ENV: &str = "GANJA_MODEL";
 ///
 /// Being selectable is also not the same as being **cataloged**: the catalog
 /// prices and sizes what it has rows for, which is every builtin here except
-/// [`fake`] and none of the configured ones. [`catalog::carries`] is that
-/// second tier, and a provider outside it runs on the degradation path — no
-/// auto-compaction, no cost, a title from its own model.
-pub const PROVIDERS: [&str; 5] = [anthropic::ID, openai::ID, grok::ID, copilot::ID, fake::ID];
+/// [`fake`] and [`cursor`] and none of the configured ones.
+/// [`catalog::carries`] is that second tier, and a provider outside it runs on
+/// the degradation path — no auto-compaction, no cost, a title from its own
+/// model.
+pub const PROVIDERS: [&str; 6] = [
+    anthropic::ID,
+    openai::ID,
+    grok::ID,
+    copilot::ID,
+    fake::ID,
+    cursor::ID,
+];
 
 /// One request to a model.
 #[derive(Clone, Debug, PartialEq)]
