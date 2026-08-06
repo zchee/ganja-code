@@ -79,6 +79,15 @@ jobs:
           ! cargo tree -p ganja-provider -e normal | grep -q crossterm
           ! cargo tree -p ganja-provider -e normal | grep -q arboard
 
+      # The cursor fence, installed while trivially true: the real cursor wire
+      # is gRPC, and when it lands its stack goes in a crate of its own — this
+      # gate is what forces that split at the moment it matters, instead of a
+      # boundary argued about inside the same PR as the port.
+      - name: the gRPC stack stays out of the engine and the wires
+        run: |
+          ! cargo tree -p ganja-core -e normal | grep -qE 'prost|tonic'
+          ! cargo tree -p ganja-provider -e normal | grep -qE 'prost|tonic'
+
       # tail strips the crate's own header line, which would match the grep.
       - name: the bottom crates stay leaves
         run: |
@@ -158,15 +167,13 @@ jobs:
         os: 
           - ubuntu-26.04
           - xcode-27
-          - windows-2025
+          # windows-2025 is paused by user ruling, not deleted: the tree has
+          # never been asked to compile there, and the observational lane was
+          # costing red runs on runner infrastructure alone — a failure during
+          # job setup lands before continue-on-error can excuse it. The lane
+          # returns when the Windows behavior work (ACLs on the auth store and
+          # spill files) is implemented, blocking from the day it returns.
     runs-on: ${{ matrix.os }}
-    # The windows lane is observational: the tree has never been asked to
-    # compile there, and the suites that reach a POSIX shell, a pty or unix
-    # file modes are expected red until the Windows behavior work lands. A
-    # red here must not block a landing the unix lanes prove — but it must
-    # stay visible, which is what continue-on-error gives that dropping the
-    # lane would not. It flips to blocking when the Windows work closes.
-    continue-on-error: ${{ matrix.os == 'windows-2025' }}
     # bash exists on every runner here (Git Bash on windows), so one shell
     # keeps the run steps portable instead of forking them per OS.
     defaults:

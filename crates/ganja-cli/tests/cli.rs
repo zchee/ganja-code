@@ -257,6 +257,39 @@ fn the_listing_says_what_kind_of_credential_each_row_is() {
 /// stopped at the method name would pass against a build whose front-door check
 /// had been removed entirely.
 #[test]
+fn a_cursor_login_is_refused_naming_the_deferral_and_stores_nothing() {
+    let data = data();
+
+    // Every invocation shape, because each would otherwise store something: a
+    // key on the command line, a method asked for in advance, and the bare
+    // form that would open a menu. The refusal has to come before all of them
+    // — a stored cursor credential is one nothing ever reads, which is worse
+    // than no login because it looks like one that worked.
+    for arguments in [
+        vec!["auth", "login", "--provider", "cursor"],
+        vec!["auth", "login", "--provider", "cursor", "--method", "api"],
+        vec![
+            "auth",
+            "login",
+            "--provider",
+            "cursor",
+            "--key",
+            "not-a-real-key",
+        ],
+    ] {
+        ganja(&data).args(&arguments).assert().failure().stderr(
+            predicate::str::contains("deferred")
+                .and(predicate::str::contains("nothing a login could store")),
+        );
+    }
+
+    assert!(
+        !stored_at(&data).exists(),
+        "a refused login must leave no credential file behind"
+    );
+}
+
+#[test]
 fn a_login_method_a_provider_does_not_have_is_refused_and_the_ones_it_has_are_named() {
     let data = data();
 
@@ -684,6 +717,16 @@ fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing()
     offline(&cache)
         .current_dir(project.path())
         .args(["models", "fake"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no catalog rows"));
+
+    // The cursor stub is the third resident of the tier: shipped as an
+    // identity whose wire is deferred, so the listing spells out the same
+    // consequence instead of pretending an empty table is an error.
+    offline(&cache)
+        .current_dir(project.path())
+        .args(["models", "cursor"])
         .assert()
         .success()
         .stdout(predicate::str::contains("no catalog rows"));

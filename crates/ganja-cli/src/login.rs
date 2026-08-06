@@ -126,6 +126,11 @@ impl ProviderId {
             // opencode install also reads, and refusing to write a line into it
             // would be a refusal invented here rather than ported.
             Self::GithubCopilot => &[Method::Device, Method::Api],
+            // No logins at all: the wire is deferred and `chosen` refuses the
+            // provider before this list is ever consulted. Empty rather than
+            // absent, so the day the real wire lands the refusal is one arm to
+            // delete and this list is where its logins go.
+            Self::Cursor => &[],
         }
     }
 
@@ -143,6 +148,9 @@ impl ProviderId {
             Self::Anthropic => Some(Method::Api),
             Self::GithubCopilot => Some(Method::Device),
             Self::Grok | Self::OpenAi => None,
+            // Unreachable behind `chosen`'s front-door refusal; a menu of
+            // nothing is nothing to offer.
+            Self::Cursor => None,
         }
     }
 }
@@ -152,6 +160,10 @@ impl ProviderId {
 /// The order is the whole of it, and each step is somebody's existing
 /// invocation:
 ///
+/// 0. **cursor is refused before any of it.** Its wire is deferred, so a
+///    stored credential would be one nothing ever reads — worse than no login,
+///    because it looks like one that worked. `--key` included, which is why
+///    this sits above even step 1.
 /// 1. `--key` is the API-key path spelled out.
 /// 2. `--method` is the answer to the question below, given in advance.
 /// 3. **A provider whose one login is not a key runs it, terminal or not.**
@@ -180,6 +192,12 @@ pub(crate) fn chosen(
     has_key: bool,
     method: Option<Method>,
 ) -> Result<Method> {
+    if provider == ProviderId::Cursor {
+        bail!(
+            "cursor's login is deferred with its wire: the stub takes no credential \
+             and refuses every request, so there is nothing a login could store"
+        );
+    }
     if has_key {
         return accepted(provider, Method::Api);
     }
@@ -700,7 +718,8 @@ mod tests {
     use ganja_provider::auth::copilot::Deployment;
 
     use super::{
-        DeploymentAnswer, DeploymentKind, Method, accepted, deployment, label, loopback_origin,
+        DeploymentAnswer, DeploymentKind, Method, accepted, chosen, deployment, label,
+        loopback_origin,
     };
     use crate::ProviderId;
 
@@ -709,6 +728,12 @@ mod tests {
     #[test]
     fn a_provider_accepts_exactly_the_logins_this_build_has_for_it() {
         assert_eq!(ProviderId::Anthropic.methods(), [Method::Api]);
+        assert_eq!(
+            ProviderId::Cursor.methods(),
+            [] as [Method; 0],
+            "the deferred wire has no logins, and an empty list is what keeps \
+             the day it gains them a one-line diff here"
+        );
         assert_eq!(
             ProviderId::OpenAi.methods(),
             [Method::Browser, Method::Device, Method::Api]
@@ -736,6 +761,19 @@ mod tests {
             "a browser login and a device login answer different questions about \
              this machine, and nothing here can tell which one somebody is in"
         );
+        assert_eq!(ProviderId::Cursor.only_login(), None);
+    }
+
+    /// The refusal sits above every shape `chosen` accepts — `--key`
+    /// included — because each of them would otherwise store a credential
+    /// nothing ever reads.
+    #[test]
+    fn a_cursor_login_is_refused_in_every_invocation_shape() {
+        for (has_key, method) in [(true, None), (false, Some(Method::Api)), (false, None)] {
+            let refusal = chosen(ProviderId::Cursor, has_key, method)
+                .expect_err("a cursor login that ran would store what nothing reads");
+            assert!(refusal.to_string().contains("deferred"), "{refusal}");
+        }
     }
 
     /// The menu is what somebody without `--method` actually reads, so the words
