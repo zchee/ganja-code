@@ -40,7 +40,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     auth::{self, AuthError, OauthCredential, RefreshOauth},
     provider::{
-        ChatRequest, Credential, OpenAiProvider, Provider, ProviderError, ProviderEvent,
+        ChatRequest, CredentialSource, OpenAiProvider, Provider, ProviderError, ProviderEvent,
         check_base_url,
     },
 };
@@ -108,7 +108,7 @@ impl CopilotProvider {
     /// grok's posture inherited verbatim: neither provider refuses to be built
     /// over a missing credential, because the failure a person needs to see is
     /// the one that names the login, and that message is produced once, at the
-    /// first request, by [`Credential::resolved`]. Failing here as well would
+    /// first request, by [`CredentialSource::resolved`]. Failing here as well would
     /// be a second, earlier, differently-worded version of the same refusal.
     ///
     /// # Errors
@@ -138,7 +138,7 @@ impl CopilotProvider {
 
         Ok(Self(
             OpenAiProvider::with_credential(
-                Credential::Oauth {
+                CredentialSource::Oauth {
                     provider_id: ID,
                     refresh: Arc::new(NeverRenews),
                 },
@@ -216,7 +216,7 @@ fn headers() -> HeaderMap {
 
 /// The renewal a Copilot credential does not have.
 ///
-/// [`Credential::Oauth`] wants a [`RefreshOauth`], and this credential has no
+/// [`CredentialSource::Oauth`] wants a [`RefreshOauth`], and this credential has no
 /// endpoint that would implement one: the token never expires
 /// ([`auth::copilot`]'s `expires: 0`), so [`auth::Refresher::usable`] returns it
 /// without consulting this at all, at every clock including `u64::MAX` —

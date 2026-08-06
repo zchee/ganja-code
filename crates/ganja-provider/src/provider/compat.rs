@@ -38,7 +38,7 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::provider::{
-    AnthropicProvider, ChatRequest, Credential, OpenAiProvider, Provider, ProviderError,
+    AnthropicProvider, ChatRequest, CredentialSource, OpenAiProvider, Provider, ProviderError,
     ProviderEvent, check_base_url,
 };
 
@@ -109,10 +109,10 @@ impl CompatProvider {
     /// Builds the provider a config entry describes.
     ///
     /// Plain data by design: an id, a dialect, an endpoint, a credential and a
-    /// header set. This constructor never sees a [`Config`](crate::config) —
-    /// reading one is [`select`](super::select)'s half of the work, and
-    /// keeping the split here is what lets the wires move to a crate of their
-    /// own while selection stays where the config is.
+    /// header set. This constructor never sees a `ganja_core::config::Config`
+    /// — reading one is `ganja_core::provider::select`'s half of the work, and
+    /// keeping the split here is what let the wires move to a crate of their
+    /// own while selection stayed where the config is.
     ///
     /// # Errors
     ///
@@ -120,11 +120,11 @@ impl CompatProvider {
     /// credential may not travel — the rule every other provider's endpoint is
     /// held to, applied at construction so a bad entry fails at startup where
     /// the message is readable — or when no HTTP client can be built.
-    pub(super) fn new(
+    pub fn new(
         id: impl Into<String>,
         dialect: Dialect,
         base_url: &str,
-        credential: Credential,
+        credential: CredentialSource,
         headers: reqwest::header::HeaderMap,
     ) -> Result<Self, ProviderError> {
         check_base_url(base_url)?;
@@ -168,7 +168,7 @@ mod tests {
     use super::{CompatProvider, Dialect};
     use crate::{
         catalog,
-        provider::{Credential, PROVIDERS, Presented, Provider as _, ProviderError},
+        provider::{CredentialSource, PROVIDERS, Presented, Provider as _, ProviderError},
     };
 
     /// A credential that must never be rendered by anything here.
@@ -179,7 +179,7 @@ mod tests {
             "local-llama",
             dialect,
             base_url,
-            Credential::Key(Presented::new(CANARY).expect("a non-blank key")),
+            CredentialSource::Key(Presented::new(CANARY).expect("a non-blank key")),
             reqwest::header::HeaderMap::new(),
         )
     }

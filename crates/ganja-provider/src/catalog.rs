@@ -37,7 +37,7 @@ use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::{protocol::Usage, storage};
+use crate::{atomic, protocol::Usage};
 
 /// Tokens a price is quoted per.
 const PER: f64 = 1_000_000.0;
@@ -1088,8 +1088,8 @@ fn write_cache(path: &Path, body: &str) -> Result<(), CatalogError> {
     })?;
     fs::create_dir_all(parent).map_err(|source| cache(parent, source))?;
 
-    let temporary = storage::temporary_beside(path);
-    storage::write_new(&temporary, body.as_bytes()).map_err(|source| {
+    let temporary = atomic::temporary_beside(path);
+    atomic::write_new(&temporary, body.as_bytes()).map_err(|source| {
         let _ = fs::remove_file(&temporary);
         cache(&temporary, source)
     })?;

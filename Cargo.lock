@@ -1147,6 +1147,7 @@ dependencies = [
  "ganja-core",
  "ganja-permission",
  "ganja-protocol",
+ "ganja-provider",
  "ganja-serve",
  "ganja-tui",
  "jsonc-parser",
@@ -1185,9 +1186,9 @@ dependencies = [
  "futures",
  "ganja-permission",
  "ganja-protocol",
+ "ganja-provider",
  "ganja-testkit",
  "ganja-tool",
- "getrandom 0.4.3",
  "ignore",
  "jsonc-parser",
  "libc",
@@ -1199,7 +1200,6 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -1228,6 +1228,30 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ganja-provider"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.0",
+ "etcetera",
+ "futures",
+ "ganja-protocol",
+ "ganja-tool",
+ "getrandom 0.4.3",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
 ]
 
 [[package]]

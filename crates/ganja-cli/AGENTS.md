@@ -46,7 +46,7 @@ Subcommands print to stdout and diagnostics to stderr, so a caller capturing std
 
 ### Internal
 
-`ganja-core` (`auth`, `catalog`, and — for `run` and `serve` — `Engine`, `config`, `provider`, `instruction`, `permission`, `tool`), `ganja-tui` (`run()`), `ganja-serve` (`serve()`, behind the `serve` subcommand).
+`ganja-provider` (`auth`, for the login flows `auth login` drives — named directly because that command assembles no engine), `ganja-core` (`catalog`, and — for `run` and `serve` — `Engine`, `config`, `provider`, `instruction`, `permission`, `tool`), `ganja-tui` (`run()`), `ganja-serve` (`serve()`, behind the `serve` subcommand).
 
 ### External
 

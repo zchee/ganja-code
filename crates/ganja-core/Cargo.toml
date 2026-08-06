@@ -12,30 +12,31 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-# Only where dyn-safety demands it: `Provider` and `Tool` live behind
+# Only where dyn-safety demands it: `Tool` and the subagent seam live behind
 # `Arc<dyn _>`.
 async-trait.workspace = true
-# The two encodings an OAuth login meets: a PKCE challenge on the way out, and
-# the payload of the id_token a ChatGPT login answers with on the way back.
+# The `Authorization` header an MCP server's config declares, when it declares
+# one as a bearer token to be built rather than a literal.
 base64.workspace = true
 # The two schemas the engine builds rather than derives: an MCP tool's, handed
 # over by the server, and the no-argument one the title request advertises.
 # Generating a builtin tool's schema is `ganja-tool`'s business.
 schemars.workspace = true
-# Resolves `auth.json` under the XDG data directory on every platform, macOS
-# included, which is where upstream keeps its own credentials there.
+# Resolves the config home and the instruction files under it on every
+# platform, macOS included, which is where upstream keeps its own there.
 etcetera.workspace = true
 futures.workspace = true
-# A login's unguessable halves: the PKCE verifier, and the `state` and `nonce`
-# that make a loopback callback answerable only by the request that opened it.
-# Thirty-two bytes from the operating system, rendered as base64url.
-getrandom.workspace = true
 # Which calls are gated, and which worktree a session is in. Re-exported as
 # `ganja_core::permission` and `ganja_core::project`, the module names every
 # caller already writes.
 ganja-permission.workspace = true
 # The types a frontend speaks, re-exported as `ganja_core::protocol`.
 ganja-protocol.workspace = true
+# The wires, the credential store and the model catalog, re-exported as
+# `ganja_core::auth`, `ganja_core::catalog` and — over the half of selection
+# that reads a `Config` — `ganja_core::provider`. One way only: a wire has no
+# idea a session exists.
+ganja-provider.workspace = true
 # The builtin tools and the read log, re-exported as `ganja_core::tool` and
 # `ganja_core::watch`. The dependency runs one way only: nothing in there may
 # name this crate.
@@ -65,21 +66,10 @@ rmcp.workspace = true
 # `bundled` (declared at the workspace) keeps the pragma defaults the storage
 # layer relies on compiled in rather than inherited from the platform.
 rusqlite.workspace = true
-secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# PKCE's S256 challenge is SHA-256 of the verifier; the provider recomputes it
-# and refuses the exchange if the two disagree. The workspace declaration picks
-# the major whose backend reaches the CPU's SHA extensions on this crate's two
-# build architectures without a separate assembly crate.
-sha2.workspace = true
 thiserror.workspace = true
-# `net` for the one socket this crate binds itself: the loopback listener a
-# browser login's callback comes back to. It compiled without this, because
-# `reqwest` turns the feature on further down the graph and Cargo unifies them
-# — which would have made a future change to the HTTP client break a file that
-# has nothing to do with HTTP.
-tokio = { workspace = true, features = ["net"] }
+tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
 # `Host`, for deciding whether an endpoint is loopback without matching strings.
@@ -98,6 +88,10 @@ libc.workspace = true
 # The scripted-provider/recorder-tool/storage-seeding scaffolding
 # `tests/*.rs` shares across binaries — see `crates/ganja-testkit`.
 ganja-testkit.workspace = true
+# Only the credential tests: they build the `SecretString`s a store is seeded
+# with and read back what a redaction left. The engine itself holds no key
+# material any more — that went to `ganja-provider` with the wires.
+secrecy.workspace = true
 # The credential tests write real files, with real permission bits, in a
 # directory that goes away afterwards.
 tempfile.workspace = true
