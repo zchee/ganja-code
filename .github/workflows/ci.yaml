@@ -41,14 +41,56 @@ jobs:
       - name: ganja-core stays free of the http server
         run: '! cargo tree -p ganja-core -e normal | grep -q axum'
 
-      - name: ganja-tool never reaches back into the engine
-        run: '! cargo tree -p ganja-tool -e normal | grep -q ganja-core'
+      # Allowlist form, not a blocklist grep: a `! grep -q ganja-core` names
+      # one crate and silently weakens the day a new internal crate appears —
+      # a tool → ganja-provider edge would pass it while inverting the same
+      # layering. Asserting the exact internal set fails closed instead: a new
+      # edge fails until this line is edited deliberately.
+      - name: ganja-tool's internal dependencies are exactly the permission crate
+        run: |
+          internal="$(cargo tree -p ganja-tool -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-tool$' | sort -u | tr '\n' ' ')"
+          test "$internal" = "ganja-permission "
+
+      # The same closed form for the engine: its internal deps are exactly the
+      # three crates beneath it, in sorted order. A split crate joining this
+      # list is a deliberate edit here, never an accident the old greps missed.
+      - name: ganja-core's internal dependencies are exactly the three beneath it
+        run: |
+          internal="$(cargo tree -p ganja-core -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-core$' | sort -u | tr '\n' ' ')"
+          test "$internal" = "ganja-permission ganja-protocol ganja-tool "
 
       # tail strips the crate's own header line, which would match the grep.
       - name: the bottom crates stay leaves
         run: |
           ! cargo tree -p ganja-permission -e normal | tail -n +2 | grep -q ganja-
           ! cargo tree -p ganja-protocol -e normal | tail -n +2 | grep -q ganja-
+
+      # The leaf gate above only sees ganja-* crates, so it cannot notice the
+      # protocol quietly widening its external list — measured: a scratch
+      # `schemars.workspace = true` resolved cleanly, dragged six transitive
+      # crates into a two-dependency leaf, and left that gate green. The
+      # manifest comment forbids widening; this makes the comment a gate.
+      - name: ganja-protocol's direct dependencies are exactly serde and serde_json
+        run: |
+          external="$(cargo tree -p ganja-protocol -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' ')"
+          test "$external" = "serde serde_json "
+
+      # The frontends' own lanes, previously true but unasserted: the
+      # terminal frontend never grows the HTTP server, and the HTTP frontend
+      # never grows the terminal.
+      - name: the frontends stay in their lanes
+        run: |
+          ! cargo tree -p ganja-tui -e normal | grep -q axum
+          ! cargo tree -p ganja-serve -e normal | grep -q ratatui
+
+      # The workspace rule "every dependency version lives in the root
+      # manifest" was convention only; this makes it a gate. A member manifest
+      # naming a version inside any dependencies section fails, printed with
+      # its file and line. awk exits with bad=1 exactly when a match printed,
+      # so the step needs no inversion.
+      - name: every dependency version lives in the root manifest
+        run: |
+          awk 'FNR==1{sec=""} /^\[/{sec=$0} sec ~ /dependencies/ && /version[[:space:]]*=/ {print FILENAME ":" FNR ": " $0; bad=1} END{exit bad}' crates/*/Cargo.toml
 
   deny:
     name: deny
