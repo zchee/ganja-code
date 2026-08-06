@@ -534,6 +534,28 @@ pub fn models() -> impl Iterator<Item = Arc<ModelInfo>> {
     current().models.clone().into_iter()
 }
 
+/// Whether this table has anything to say about `provider_id`.
+///
+/// The second of the two tiers [`crate::provider::PROVIDERS`] describes:
+/// **selectable** is what a session may run as, and **cataloged** is the
+/// narrower set that has rows here. A provider outside it is not broken — it
+/// takes whole turns — but nothing can size its context window, price its
+/// tokens or pick its model, so its session runs the degradation path
+/// documented at [`crate::provider::serves`] and at `session.rs`'s two sites:
+/// the title falls back to the session's own model and auto-compaction is off
+/// with a warning.
+///
+/// Every configured endpoint is uncataloged, because no published catalog
+/// knows a private one. So is a builtin whose wire ships before its rows do,
+/// which is why this is a predicate rather than a list.
+#[must_use]
+pub fn carries(provider_id: &str) -> bool {
+    current()
+        .models
+        .iter()
+        .any(|model| model.provider_id == provider_id)
+}
+
 /// The model `provider_id` is asked for when the user names none.
 ///
 /// [`None`] for a provider this build does not pin a default for: answering
@@ -1083,8 +1105,9 @@ mod tests {
     use std::{fs, sync::Arc, time::Duration};
 
     use super::{
-        Cost, DEFAULT_SOURCE, ModelStatus, Pricing, Source, backoff, cache_name, compact_tokens,
-        cost, default_model, fresh, model, parse, read_cached, snapshot, write_cache,
+        Cost, DEFAULT_SOURCE, ModelStatus, Pricing, Source, backoff, cache_name, carries,
+        compact_tokens, cost, default_model, fresh, model, parse, read_cached, snapshot,
+        write_cache,
     };
     use crate::protocol::Usage;
 
@@ -1218,30 +1241,71 @@ mod tests {
         assert!(model("canned").is_none());
     }
 
-    /// Every provider a session can select has to have a default here, because
-    /// this table is what resolves the model when the user names none — a
-    /// provider missing from it fails at startup with `NoDefaultModel`. The
-    /// list is derived from `provider::PROVIDERS` rather than written out
-    /// again: two hand-maintained lists in different modules is precisely how
-    /// a provider gets added on one side and forgotten on the other.
+    /// The two tiers a provider now sits in, and what each owes this table.
+    ///
+    /// **Selectable** is what a session may run as: the builtins in
+    /// `provider::PROVIDERS`, plus whatever a config's `provider` table
+    /// declares. **Cataloged** — [`carries`] — is the narrower set that has
+    /// rows here. The obligation runs one way only: a *cataloged* provider
+    /// must have a default that this table can size and price, because that is
+    /// what resolves the model when the user names none. An *uncataloged* one
+    /// owes this table nothing and must not pretend to: it has to have no
+    /// default at all, or a session would be handed a model no row can price
+    /// and no window can size.
+    ///
+    /// The list of builtins is derived from `provider::PROVIDERS` rather than
+    /// written out again, for the reason it always was: two hand-maintained
+    /// lists in different modules is precisely how a provider gets added on
+    /// one side and forgotten on the other.
+    ///
+    /// **What this deliberately no longer asserts** is that every builtin has
+    /// rows. It cannot: `fake` has none by design, a configured endpoint has
+    /// none by construction, and a wire may ship before its rows do. Each real
+    /// wire's default is pinned individually instead —
+    /// `each_openai_wire_defaults_to_a_model_that_wire_can_run_tools_on` here,
+    /// and `a_*_session_that_names_no_model_gets_one_the_catalog_can_price` in
+    /// `provider/{anthropic,grok,copilot}.rs` — so a forgotten row still
+    /// reddens something that names the provider it belongs to.
     #[test]
     fn every_selectable_provider_has_a_default_this_table_can_price() {
         for provider in crate::provider::PROVIDERS {
-            // The fake provider carries its own canned model and is
-            // deliberately unpriced; nothing about it is billable.
-            if provider == crate::provider::fake::ID {
+            if !carries(provider) {
+                assert!(
+                    default_model(provider).is_none(),
+                    "{provider} has no rows here, so a default would name a model \
+                     this table can neither size nor price"
+                );
                 continue;
             }
 
             let id = default_model(provider)
-                .unwrap_or_else(|| panic!("{provider} is selectable but has no default model"));
+                .unwrap_or_else(|| panic!("{provider} is cataloged but has no default model"));
             let info = model(id)
                 .unwrap_or_else(|| panic!("{provider}'s default {id} is not in the table"));
 
             assert_eq!(info.provider_id, provider, "{id} is not {provider}'s");
         }
 
+        // The tier predicate at its boundary, on the three shapes an
+        // uncataloged provider takes. `fake` is one this build ships and
+        // deliberately does not price; `cursor` is the shape a wire that lands
+        // before its rows do takes, which is exactly what the deferred Cursor
+        // stub will be — naming it here is what keeps that landing from
+        // reopening this test; `local-llama` is a config-named endpoint, which
+        // no published catalog can ever know.
+        for uncataloged in [crate::provider::fake::ID, "cursor", "local-llama"] {
+            assert!(
+                !carries(uncataloged),
+                "{uncataloged} is not something this table has rows for"
+            );
+            assert!(
+                default_model(uncataloged).is_none(),
+                "{uncataloged} has no rows, so it must have no default either"
+            );
+        }
+
         assert!(default_model("nonexistent").is_none());
+        assert!(!carries("nonexistent"));
     }
 
     /// Being in the table is not enough to be a *default*: the default is what

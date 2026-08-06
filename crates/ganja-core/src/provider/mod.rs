@@ -22,6 +22,15 @@
 //! for Copilot — a header set over [`OpenAiProvider`]. Neither endpoint speaks
 //! Responses, which is why the vendor's move to it left both untouched.
 //!
+//! [`CompatProvider`] generalises exactly that shape to endpoints this build
+//! does not ship: a config's `provider` table names an id, a [`Dialect`], an
+//! endpoint, the variable holding its key and whatever headers it wants, and
+//! [`select`] builds one of the two wires above from that. So the set of
+//! providers a session may name is **two tiers** — the builtins in
+//! [`PROVIDERS`], plus whatever the config declares — while the narrower set
+//! the catalog can size and price is a third fact about each, and neither
+//! implies the other.
+//!
 //! Every HTTP provider shares the same shape — build a request, retry it while
 //! it has not started answering, split the `text/event-stream` body into
 //! [`sse::Frame`]s, and map those onto events — so everything except the
@@ -55,7 +64,7 @@
 //!   loopback endpoint no proxy is used.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     env::{self, VarError},
     fmt,
     sync::Arc,
@@ -72,14 +81,21 @@ use tokio_util::sync::CancellationToken;
 use url::Host;
 
 use crate::{
-    auth, catalog,
-    config::{Config, split_model},
+    auth,
+    catalog,
+    // The selection seam, and the one place in `provider/` that reads a
+    // `Config`: `select` is a chain of tiers and the config file is one of
+    // them. Everything below it — every wire, and `compat`'s construction —
+    // takes plain data instead, so the wires can move to a crate of their own
+    // without this edge moving with them.
+    config::{Config, ProviderConfig, split_model},
     protocol::{FinishReason, Message, Part, PartBody, Usage},
     provider::sse::Frame,
     tool::ToolDefinition,
 };
 
 pub mod anthropic;
+pub mod compat;
 pub mod copilot;
 pub mod fake;
 pub mod grok;
@@ -89,6 +105,7 @@ pub mod retry;
 pub mod sse;
 
 pub use anthropic::AnthropicProvider;
+pub use compat::{CompatProvider, Dialect};
 pub use copilot::CopilotProvider;
 pub use fake::FakeProvider;
 pub use grok::GrokProvider;
@@ -101,7 +118,18 @@ pub const PROVIDER_ENV: &str = "GANJA_PROVIDER";
 /// Environment variable overriding the model a session asks for.
 pub const MODEL_ENV: &str = "GANJA_MODEL";
 
-/// Every value [`PROVIDER_ENV`] accepts.
+/// Every provider this build ships.
+///
+/// **Not the whole of what [`PROVIDER_ENV`] accepts.** A config's `provider`
+/// table names endpoints of its own, and those are selectable too — see
+/// [`selectable`], which is the predicate, and [`select`], which is where the
+/// table is consulted. This list is the half that needs no configuration.
+///
+/// Being selectable is also not the same as being **cataloged**: the catalog
+/// prices and sizes what it has rows for, which is every builtin here except
+/// [`fake`] and none of the configured ones. [`catalog::carries`] is that
+/// second tier, and a provider outside it runs on the degradation path — no
+/// auto-compaction, no cost, a title from its own model.
 pub const PROVIDERS: [&str; 5] = [anthropic::ID, openai::ID, grok::ID, copilot::ID, fake::ID];
 
 /// One request to a model.
@@ -734,22 +762,68 @@ impl fmt::Debug for Selection {
 /// The environment does not describe a session this build can run.
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
-    /// [`PROVIDER_ENV`] names a provider this build does not have.
-    #[error("unsupported {PROVIDER_ENV}={requested:?}; this build ships {}", PROVIDERS.join(", "))]
+    /// [`PROVIDER_ENV`] names a provider that is neither shipped nor
+    /// configured.
+    ///
+    /// The message names **both** tiers. A refusal that listed only
+    /// [`PROVIDERS`] would tell somebody who had just declared an endpoint in
+    /// `ganja.jsonc` that their own entry does not exist, which is the one
+    /// answer that cannot be acted on.
+    #[error(
+        "unsupported {PROVIDER_ENV}={requested:?}; this build ships {}{}",
+        PROVIDERS.join(", "),
+        also_configured(configured)
+    )]
     Unknown {
         /// What the variable said.
         requested: String,
+        /// The ids this config's `provider` table declares, in the order the
+        /// table holds them. Empty for a session with no such table, which is
+        /// every session that has not asked for one.
+        configured: Vec<String>,
     },
     /// The provider was named but cannot be talked to.
     #[error(transparent)]
     Unusable(#[from] ProviderError),
-    /// The model catalog has no default for a provider this build ships, which
-    /// is a gap in the table rather than anything the user did.
-    #[error("no default model for {provider}; name one with {MODEL_ENV}")]
+    /// Nothing named a model, and the catalog has no default to supply one.
+    ///
+    /// For a builtin that is a gap in the table. For a configured endpoint it
+    /// is the ordinary case — no published catalog knows a private endpoint —
+    /// so the message names every tier that could answer rather than only the
+    /// variable.
+    #[error(
+        "no default model for {provider}; name one with {MODEL_ENV}, with --model, \
+         or with the config's `model` key"
+    )]
     NoDefaultModel {
         /// Provider the catalog has no default for.
         provider: String,
     },
+}
+
+/// The clause a refusal adds when this config declares endpoints of its own.
+///
+/// Empty where it declares none, so the common message is the one it always
+/// was rather than one carrying an empty list.
+fn also_configured(configured: &[String]) -> String {
+    if configured.is_empty() {
+        return String::new();
+    }
+
+    format!(", and this config names {}", configured.join(", "))
+}
+
+/// Whether a session may run as `provider_id` at all — the first of the two
+/// tiers [`PROVIDERS`] describes.
+///
+/// A builtin, or an id this config's `provider` table declares. The second
+/// tier — whether the catalog has rows to size and price it with — is
+/// [`catalog::carries`], and the two are deliberately separate: every
+/// configured endpoint is selectable and none of them is cataloged, and so is
+/// a builtin whose wire ships before its rows do.
+#[must_use]
+pub fn selectable(config: &Config, provider_id: &str) -> bool {
+    PROVIDERS.contains(&provider_id) || config.provider.contains_key(provider_id)
 }
 
 /// Looks up the API key for `provider_id`.
@@ -861,6 +935,101 @@ fn openai_provider() -> Result<Wire, ProviderError> {
     Ok(Wire::catalog(ResponsesProvider::from_env()?))
 }
 
+/// The provider a config's `provider` entry describes.
+///
+/// The whole of the config→wire translation, kept here rather than in
+/// [`compat`] because reading a [`Config`] is selection's half of the job:
+/// what [`CompatProvider::new`] is handed is a base URL, a credential and a
+/// header map, which is data any caller could produce.
+///
+/// # Errors
+///
+/// Returns [`ProviderError::Auth`] when nothing supplies the endpoint's
+/// credential, and [`ProviderError::Transport`] when its `headers` are not
+/// headers or its endpoint is somewhere a credential may not travel. All of
+/// them fail at startup, where the message is readable.
+fn configured_provider(id: &str, entry: &ProviderConfig) -> Result<CompatProvider, ProviderError> {
+    let credential = Credential::Key(configured_key(id, entry.key_env.as_deref())?);
+
+    CompatProvider::new(
+        id,
+        entry.dialect,
+        &entry.base_url,
+        credential,
+        configured_headers(id, &entry.headers)?,
+    )
+}
+
+/// The credential a config-named endpoint presents.
+///
+/// Two places, in the order the rest of this module reads them: the variable
+/// the entry names, then the credential store under the entry's own id.
+/// [`auth::storage_key`] passes an id it has no alias for through unchanged,
+/// so `ganja auth login local-llama` writes exactly where this reads — the
+/// open-set half of a store whose builtin half is a fixed table.
+///
+/// Only a key. [`Credential::Oauth`] carries a `&'static str` provider id and
+/// a refresh endpoint this build implements per provider, and neither is
+/// something a config file can supply: a configured endpoint is
+/// key-authenticated, and an OAuth one would be a provider rather than an
+/// entry.
+///
+/// # Errors
+///
+/// Returns [`ProviderError::Auth`] when neither place has one — naming both,
+/// because which one is missing is the whole of what the reader has to fix —
+/// or when the store exists and could not be read.
+fn configured_key(id: &str, key_env: Option<&str>) -> Result<Presented, ProviderError> {
+    if let Some(variable) = key_env
+        && let Some(exported) = setting(variable)
+        && let Some(key) = Presented::new(exported)
+    {
+        return Ok(key);
+    }
+
+    key_for(id)?.ok_or_else(|| {
+        ProviderError::Auth(match key_env {
+            Some(variable) => format!(
+                "no credential for the configured provider `{id}`; export {variable} \
+                 or run `ganja auth login {id}`"
+            ),
+            None => format!(
+                "no credential for the configured provider `{id}`; run \
+                 `ganja auth login {id}`, or name the variable holding it as \
+                 `key_env` in its config entry"
+            ),
+        })
+    })
+}
+
+/// The `headers` an entry declared, as a request carries them.
+///
+/// A name or a value the HTTP layer cannot encode fails at startup rather than
+/// at the first prompt. The message names the **header** and never its value:
+/// `headers` is exactly where a configured endpoint's token goes, which is
+/// also why [`check_base_url`]'s rule covers an entry that declares one.
+fn configured_headers(
+    id: &str,
+    declared: &BTreeMap<String, String>,
+) -> Result<reqwest::header::HeaderMap, ProviderError> {
+    let mut headers = reqwest::header::HeaderMap::with_capacity(declared.len());
+    for (name, value) in declared {
+        let name: reqwest::header::HeaderName = name.parse().map_err(|_| {
+            ProviderError::Transport(format!(
+                "provider `{id}` declares a header named {name:?}, which is not a header name"
+            ))
+        })?;
+        let value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+            ProviderError::Transport(format!(
+                "provider `{id}`'s `{name}` header holds bytes a request cannot carry"
+            ))
+        })?;
+        headers.insert(name, value);
+    }
+
+    Ok(headers)
+}
+
 /// Whether the provider `provider_id` serves a model called `model`.
 ///
 /// The catalog is the only thing that knows, and it does not know every
@@ -887,14 +1056,11 @@ pub(crate) fn adopt(provider_id: &str, spelled: &str) -> Option<String> {
 }
 
 pub(crate) fn serves(provider_id: &str, model: &str) -> bool {
-    let mut known = crate::catalog::models()
-        .filter(|known| known.provider_id == provider_id)
-        .peekable();
-
-    match known.peek() {
-        Some(_) => known.any(|known| known.id == model),
-        None => !model.trim().is_empty(),
+    if !catalog::carries(provider_id) {
+        return !model.trim().is_empty();
     }
+
+    catalog::models().any(|known| known.provider_id == provider_id && known.id == model)
 }
 
 /// Reads `variable`, treating an empty value as unset.
@@ -939,12 +1105,18 @@ pub fn from_env() -> Result<Selection, SelectionError> {
 ///    named — and, when none of them named one at all, the built-in fake
 ///    provider with a notice saying so.
 ///
+/// Whichever tier named the *provider*, the name is resolved against the
+/// builtins first and [`Config::provider`] second, so every route into this
+/// function reaches a configured endpoint the same way: `GANJA_PROVIDER=<id>`,
+/// `--model <id>/<model>` and a config `model` of `"<id>/<model>"` are one
+/// lookup written three ways.
+///
 /// # Errors
 ///
-/// Returns [`SelectionError`] when a provider is named that this build does not
-/// have, or one whose credentials are missing, or one the catalog has no
-/// default model for. All of them fail here, before the terminal is put into
-/// raw mode, so that the message is readable.
+/// Returns [`SelectionError`] when a provider is named that this build neither
+/// ships nor finds in the config table, or one whose credentials are missing,
+/// or one nothing could supply a model for. All of them fail here, before the
+/// terminal is put into raw mode, so that the message is readable.
 pub fn select(config: &Config) -> Result<Selection, SelectionError> {
     let flag = config.overrides.model.as_deref().map(split_model);
     let file = config.model.as_deref().map(split_model);
@@ -957,6 +1129,7 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         Err(VarError::NotUnicode(requested)) => {
             return Err(SelectionError::Unknown {
                 requested: requested.to_string_lossy().into_owned(),
+                configured: config.provider.keys().cloned().collect(),
             });
         }
         Err(VarError::NotPresent) => None,
@@ -996,7 +1169,19 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         // Copilot does read is which deployment its login was against, because
         // that decides the endpoint rather than the credential.
         copilot::ID => Wire::catalog(CopilotProvider::from_stored()?),
-        _ => return Err(SelectionError::Unknown { requested }),
+        // The config tier, consulted **after** the builtins so that a table
+        // entry can never quietly replace a shipped wire — `config` refuses
+        // an entry naming one by name for that reason, which is what keeps
+        // this arm from being the place a shadowing is discovered.
+        configured => match config.provider.get(configured) {
+            Some(entry) => Wire::catalog(configured_provider(configured, entry)?),
+            None => {
+                return Err(SelectionError::Unknown {
+                    requested,
+                    configured: config.provider.keys().cloned().collect(),
+                });
+            }
+        },
     };
 
     // A model the tiers above *named* never reaches the defaulting at all: an
@@ -1058,11 +1243,131 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        Credential, Mapper, Presented, ProviderError, ProviderEvent, SelectionError,
-        check_base_url, defaulted_model, events, fake, openai, responses, shown_base_url,
-        sse::Frame, unusable,
+        Config, Credential, Dialect, Mapper, PROVIDERS, Presented, ProviderConfig, ProviderError,
+        ProviderEvent, SelectionError, check_base_url, configured_headers, defaulted_model, events,
+        fake, openai, responses, selectable, shown_base_url, sse::Frame, unusable,
     };
     use crate::{auth, catalog, protocol::FinishReason};
+
+    /// A config declaring one endpoint under `id`.
+    fn declaring(id: &str) -> Config {
+        let mut config = Config::default();
+        config.provider.insert(
+            id.to_owned(),
+            ProviderConfig {
+                dialect: Dialect::OpenaiChatCompletions,
+                base_url: "http://127.0.0.1:11434/v1".to_owned(),
+                key_env: None,
+                headers: super::BTreeMap::new(),
+            },
+        );
+
+        config
+    }
+
+    /// The two tiers, at the boundary that separates them. A session may run
+    /// as anything in either, and the catalog knows only some of it — so
+    /// neither predicate may be derived from the other.
+    #[test]
+    fn a_config_named_provider_is_selectable_and_a_builtin_is_not_always_cataloged() {
+        let config = declaring("local-llama");
+
+        assert!(selectable(&config, "local-llama"));
+        assert!(
+            !PROVIDERS.contains(&"local-llama"),
+            "the config tier is what makes it selectable, not the shipped list"
+        );
+        assert!(
+            !catalog::carries("local-llama"),
+            "no published catalog knows a private endpoint"
+        );
+
+        for builtin in PROVIDERS {
+            assert!(
+                selectable(&config, builtin),
+                "{builtin} ships, so it is selectable whatever a config says"
+            );
+        }
+        // The tier boundary inside the builtins themselves: `fake` is
+        // selectable and deliberately uncataloged, which is the shape a wire
+        // that lands before its rows do — the deferred cursor stub — will take.
+        assert!(!catalog::carries(fake::ID));
+        assert!(catalog::carries(openai::ID));
+
+        assert!(!selectable(&config, "gemini"));
+        assert!(!selectable(&Config::default(), "local-llama"));
+    }
+
+    /// A refusal that listed only the shipped providers would tell somebody
+    /// who had just declared an endpoint that their own entry does not exist,
+    /// which is the one answer that cannot be acted on.
+    #[test]
+    fn the_refusal_for_an_unknown_provider_names_both_tiers() {
+        let named = SelectionError::Unknown {
+            requested: "gemini".to_owned(),
+            configured: vec!["local-llama".to_owned(), "gateway".to_owned()],
+        };
+        let rendered = named.to_string();
+
+        assert!(rendered.contains("gemini"), "{rendered}");
+        for builtin in PROVIDERS {
+            assert!(
+                rendered.contains(builtin),
+                "{builtin} is missing: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("local-llama") && rendered.contains("gateway"),
+            "the config's own endpoints are as selectable as the builtins: {rendered}"
+        );
+
+        // A session with no such table gets the message it always had, rather
+        // than one carrying an empty list.
+        let bare = SelectionError::Unknown {
+            requested: "gemini".to_owned(),
+            configured: Vec::new(),
+        }
+        .to_string();
+        assert!(
+            !bare.contains("this config names"),
+            "nothing was configured, so nothing should be listed: {bare}"
+        );
+    }
+
+    /// `headers` is where a configured endpoint's token goes, so a refusal
+    /// about one may name the header and never its value.
+    #[test]
+    fn a_header_a_request_cannot_carry_is_refused_by_name_and_not_by_value() {
+        let mut declared = super::BTreeMap::new();
+        declared.insert("x-route".to_owned(), "gpu-0".to_owned());
+        let carried = configured_headers("local-llama", &declared).expect("an ordinary header");
+        assert_eq!(carried["x-route"], "gpu-0");
+
+        let mut refused = super::BTreeMap::new();
+        refused.insert(
+            "x authorization".to_owned(),
+            "sk-test-canary-XYZ".to_owned(),
+        );
+        let error = configured_headers("local-llama", &refused)
+            .expect_err("a space is not legal in a header name");
+        let rendered = format!("{error} / {error:?}");
+        assert!(rendered.contains("x authorization"), "{rendered}");
+        assert!(
+            !rendered.contains("sk-test-canary-XYZ"),
+            "the value reached the refusal: {rendered}"
+        );
+
+        let mut unencodable = super::BTreeMap::new();
+        unencodable.insert("x-route".to_owned(), "sk-test-canary-XYZ\n".to_owned());
+        let error = configured_headers("local-llama", &unencodable)
+            .expect_err("a newline cannot travel in a header value");
+        let rendered = format!("{error} / {error:?}");
+        assert!(rendered.contains("x-route"), "{rendered}");
+        assert!(
+            !rendered.contains("sk-test-canary-XYZ"),
+            "the value reached the refusal: {rendered}"
+        );
+    }
 
     /// A model no catalog carries, so an answer naming it can only have come
     /// from the wire.

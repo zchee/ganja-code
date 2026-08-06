@@ -8,6 +8,12 @@
 //! Unknown event types are logged and skipped. Anthropic adds frame types
 //! between API versions, and a turn that panicked or failed on one would make
 //! every future addition a breaking change.
+//!
+//! Three things a wrapper may declare about itself and nothing else may —
+//! [`AnthropicProvider::with_credential`], [`AnthropicProvider::with_base_url`]
+//! and [`AnthropicProvider::with_headers`] — so an endpoint speaking this API
+//! under a name a config chose is a wrapper rather than a fork. That is
+//! [`super::openai`]'s seam set, completed here for [`super::compat`]'s sake.
 
 use std::{collections::HashMap, fmt, sync::LazyLock};
 
@@ -22,8 +28,8 @@ use crate::{
     catalog,
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
-        ChatRequest, Mapper, Presented, Provider, ProviderError, ProviderEvent, check_base_url,
-        client, open, require_key, setting, shown_base_url, sse::Frame, steps,
+        ChatRequest, Credential, Mapper, Presented, Provider, ProviderError, ProviderEvent,
+        check_base_url, client, open, require_key, setting, shown_base_url, sse::Frame, steps,
     },
 };
 
@@ -81,9 +87,21 @@ static NO_INPUT: LazyLock<Value> = LazyLock::new(|| Value::Object(serde_json::Ma
 /// Streams replies from the Anthropic Messages API.
 pub struct AnthropicProvider {
     client: reqwest::Client,
-    key: Presented,
+    credential: Credential,
     base_url: String,
     max_tokens: u32,
+    /// What every request carries besides `x-api-key` and the pinned API
+    /// version.
+    ///
+    /// Empty for Anthropic itself, and for every gateway that copied the
+    /// Messages schema and asks for nothing but the key. What fills it is a
+    /// config-named endpoint that wants one — a routing header a proxy
+    /// dispatches on, or the beta opt-in some deployments require — declared
+    /// through [`with_headers`](Self::with_headers). Held rather than passed
+    /// per request for [`super::openai::OpenAiProvider`]'s reason: headers
+    /// describe the endpoint, which is fixed when the provider is built, and
+    /// never the credential, which is not.
+    headers: reqwest::header::HeaderMap,
 }
 
 impl fmt::Debug for AnthropicProvider {
@@ -92,11 +110,13 @@ impl fmt::Debug for AnthropicProvider {
     ///
     /// That includes the base URL, which is allowed to carry a credential in
     /// its userinfo and is not exempt from the rule just because the credential
-    /// arrived as configuration.
+    /// arrived as configuration — and [`headers`](Self::headers), which is
+    /// somewhere a configured endpoint's token fits and which is therefore
+    /// rendered no more than the key is.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AnthropicProvider")
-            .field("key", &self.key)
+            .field("credential", &self.credential)
             .field("base_url", &shown_base_url(&self.base_url))
             .field("max_tokens", &self.max_tokens)
             .finish()
@@ -114,12 +134,7 @@ impl AnthropicProvider {
         let key = Presented::new(key)
             .ok_or_else(|| ProviderError::Auth(format!("{API_KEY_ENV} is empty")))?;
 
-        Ok(Self {
-            client: client()?,
-            key,
-            base_url: DEFAULT_BASE_URL.to_owned(),
-            max_tokens: DEFAULT_MAX_TOKENS,
-        })
+        Self::with_credential(Credential::Key(key), DEFAULT_BASE_URL)
     }
 
     /// Builds a provider from [`API_KEY_ENV`] and [`BASE_URL_ENV`].
@@ -134,11 +149,32 @@ impl AnthropicProvider {
         let base_url = setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         check_base_url(&base_url)?;
 
+        Self::with_credential(Credential::Key(require_key(ID, API_KEY_ENV)?), base_url)
+    }
+
+    /// Builds a provider that authenticates however `credential` says.
+    ///
+    /// The seam a provider which is this wire under another name is built
+    /// through — see [`super::compat`], whose endpoint speaks this API under a
+    /// name a config chose. The counterpart of
+    /// [`OpenAiProvider::with_credential`](super::openai::OpenAiProvider::with_credential),
+    /// and crate-internal for its reason: [`Credential`] is, and what a caller
+    /// outside this module picks between is providers rather than credential
+    /// sources.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Transport`] when no HTTP client can be built.
+    pub(super) fn with_credential(
+        credential: Credential,
+        base_url: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             client: client()?,
-            key: require_key(ID, API_KEY_ENV)?,
-            base_url,
+            credential,
+            base_url: base_url.into(),
             max_tokens: DEFAULT_MAX_TOKENS,
+            headers: reqwest::header::HeaderMap::new(),
         })
     }
 
@@ -146,6 +182,18 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Puts `headers` on every request this provider sends.
+    ///
+    /// The third thing a wrapper declares about itself, beside
+    /// [`with_credential`](Self::with_credential) and the base URL — see
+    /// [`headers`](Self::headers) for what fills it and why nothing else does.
+    /// Crate-internal for the same reason those are.
+    #[must_use]
+    pub(super) fn with_headers(mut self, headers: reqwest::header::HeaderMap) -> Self {
+        self.headers = headers;
         self
     }
 
@@ -188,6 +236,11 @@ impl Provider for AnthropicProvider {
         // on the wire.
         check_base_url(&self.base_url)?;
 
+        // Resolved before the request is built rather than captured at
+        // construction, for the reason `openai.rs` gives: a key resolves to
+        // itself and pays nothing, and the seam is what lets a wrapper name
+        // another source without forking the wire.
+        let presented = self.credential.presented().await?;
         let body = Body::new(&request, self.max_tokens(&request.model));
         let built = self
             .client
@@ -195,15 +248,19 @@ impl Provider for AnthropicProvider {
                 "{}/v1/messages",
                 self.base_url.trim_end_matches('/')
             ))
-            .header("x-api-key", self.key.expose())
+            .header("x-api-key", presented.expose())
             .header("anthropic-version", API_VERSION)
+            // After the credential, and never carrying one: these describe the
+            // endpoint, and a secret put here would travel outside the
+            // redaction `presented` is the single source of.
+            .headers(self.headers.clone())
             .json(&body)
             .build()
             .map_err(|error| {
-                ProviderError::Transport(self.key.redact(&format!("malformed request: {error}")))
+                ProviderError::Transport(presented.redact(&format!("malformed request: {error}")))
             })?;
 
-        open(&self.client, built, &self.key, cancel, Mapping::default()).await
+        open(&self.client, built, &presented, cancel, Mapping::default()).await
     }
 }
 
@@ -691,12 +748,36 @@ mod tests {
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
-    use super::{AnthropicProvider, Body, DEFAULT_MAX_TOKENS, Mapping, NO_RESULT};
+    use super::{AnthropicProvider, Body, DEFAULT_MAX_TOKENS, ID, Mapping, NO_RESULT};
     use crate::{
+        catalog,
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
-        provider::{ChatRequest, Provider as _, ProviderError, ProviderEvent, replay},
+        provider::{ChatRequest, PROVIDERS, Provider as _, ProviderError, ProviderEvent, replay},
         tool::ToolDefinition,
     };
+
+    /// The obligation `catalog`'s own table test states per *tier* and each
+    /// wire states for itself: a provider a session can select has to be one
+    /// the catalog can size and price, or the first turn has no model to ask
+    /// for and no cost to report.
+    ///
+    /// Named per provider rather than derived, because the tier predicate
+    /// deliberately excuses a provider with no rows — a wire that lost its
+    /// rows would pass there and has to fail here.
+    #[test]
+    fn an_anthropic_session_that_names_no_model_gets_one_the_catalog_can_price() {
+        assert!(PROVIDERS.contains(&ID));
+
+        let id = catalog::default_model(ID).expect("anthropic has a pinned default");
+        let info = catalog::model(id).expect("the default is in the table");
+
+        assert_eq!(info.provider_id, ID);
+        assert!(info.context_window > 0 && info.max_output > 0);
+        assert!(
+            info.pricing.input > 0.0 && info.pricing.output > 0.0,
+            "a priced provider with a free row is a row nobody filled in"
+        );
+    }
 
     /// Runs a recorded transcript through the real splitter and mapper.
     async fn events(transcript: &'static str) -> Vec<ProviderEvent> {

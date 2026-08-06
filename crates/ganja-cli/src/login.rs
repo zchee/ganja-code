@@ -675,14 +675,18 @@ fn line(question: &str) -> Result<String> {
 /// # Errors
 ///
 /// When the credential file exists and cannot be read.
+/// Takes the provider **id** rather than a [`ProviderId`], because a
+/// configured endpoint is stored the same way and has none: `auth::storage_key`
+/// passes an id it holds no alias for through unchanged, so this reads exactly
+/// where `ganja auth login <id>` wrote.
 pub(crate) fn stored(
-    provider: ProviderId,
+    provider_id: &str,
 ) -> Result<Option<(auth::CredentialKind, auth::RedactedTail)>> {
-    if let Some(credential) = auth::oauth_for(provider.as_str())? {
+    if let Some(credential) = auth::oauth_for(provider_id)? {
         return Ok(Some((auth::CredentialKind::Oauth, credential.tail())));
     }
 
-    let key = auth::storage_key(provider.as_str());
+    let key = auth::storage_key(provider_id);
 
     Ok(auth::list_providers()?
         .into_iter()

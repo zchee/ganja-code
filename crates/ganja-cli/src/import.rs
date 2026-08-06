@@ -608,13 +608,26 @@ impl Report {
         self.warnings.extend(other.warnings);
     }
 
-    /// Takes only what `other` has to *say*.
+    /// Takes what `other` has to *say*, and the rows that stay true whatever
+    /// happened to the entry.
     ///
     /// For an entry that was refused after its fields had already been read:
-    /// each of those rows names a key that landed somewhere, and none of them
-    /// did. The entry's own row covers everything under it, and the warnings
-    /// are what explain why.
+    /// each `mapped` row names a key that landed somewhere, and none of them
+    /// did, and the entry's own `skipped` row covers everything under it. The
+    /// warnings are what explain why.
+    ///
+    /// A [`reason::CREDENTIAL`] row is the exception, and it is not a
+    /// bookkeeping one: it reports that a secret was deliberately **not**
+    /// carried, which is as true of an entry that was left out as of one that
+    /// was written — and it is the row somebody has to see whatever else the
+    /// import did with the entry around it.
     fn adopt_warnings(&mut self, other: Self) {
+        self.skipped.extend(
+            other
+                .skipped
+                .into_iter()
+                .filter(|(_, reason)| reason == reason::CREDENTIAL),
+        );
         self.warnings.extend(other.warnings);
     }
 }
@@ -640,6 +653,7 @@ struct Built {
     agent: Vec<(String, Json)>,
     command: Vec<(String, Json)>,
     mcp: Vec<(String, Json)>,
+    provider: Vec<(String, Json)>,
     lsp: Option<Json>,
     snapshot: Option<bool>,
 }
@@ -657,6 +671,7 @@ impl Built {
             && self.agent.is_empty()
             && self.command.is_empty()
             && self.mcp.is_empty()
+            && self.provider.is_empty()
             && self.lsp.is_none()
             && self.snapshot.is_none()
     }
@@ -691,6 +706,9 @@ impl Built {
         }
         if !self.mcp.is_empty() {
             entries.push(("mcp".to_owned(), Json::Object(self.mcp)));
+        }
+        if !self.provider.is_empty() {
+            entries.push(("provider".to_owned(), Json::Object(self.provider)));
         }
         if let Some(lsp) = self.lsp {
             entries.push(("lsp".to_owned(), lsp));
@@ -757,7 +775,7 @@ fn map_config(source: &Json) -> (Built, Report) {
             "mcp" => built.mcp = mcp(&mut report, &at, value),
             "lsp" => built.lsp = lsp(&mut report, &at, value),
             "snapshot" => built.snapshot = boolean(&mut report, &at, value),
-            "provider" => providers(&mut report, &at, value),
+            "provider" => built.provider = providers(&mut report, &at, value),
             "autoshare" => {
                 report.skip(&at.from, reason::UNSUPPORTED);
                 if value.as_bool() == Some(true) {
@@ -1763,37 +1781,269 @@ fn initialization(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
     Some(carried)
 }
 
-/// Reports a `provider` map, which is carried nowhere.
+/// Maps a `provider` map, entry by entry, into ganja's own.
 ///
-/// Ganja sizes and prices models from a compiled-in catalog and takes an
-/// endpoint override from the environment, so there is no key here to map to —
-/// but an `apiKey` gets a row and a warning of its own, because it is the one
-/// thing in an opencode config that must not travel.
-fn providers(report: &mut Report, at: &At, value: &Json) {
+/// **Partial by construction.** Ganja's `provider` table describes one thing —
+/// an endpoint, the wire it speaks, the variable holding its key and the
+/// headers it wants — where upstream's block also carries the model catalog,
+/// the npm package and the SDK options for a dozen vendors it loads
+/// dynamically. So an entry is carried when this build has a wire for it and
+/// somewhere to point that wire, and reported by name when it does not. What
+/// is never carried is `options.apiKey`, which gets a row and a warning of its
+/// own because it is the one thing in an opencode config that must not travel.
+///
+/// Three refusals, each because writing the entry would produce something that
+/// does not work:
+///
+/// * an id this build already ships — `ganja_core::config` refuses such an
+///   entry by name, so writing it would produce a file the next launch will
+///   not read;
+/// * an `npm` package this build has no wire for, or none at all — the dialect
+///   is not derivable, and guessing it is how an Anthropic body reaches a
+///   chat-completions server;
+/// * no endpoint — upstream takes the default from the SDK it loads, and there
+///   is nothing here to take one from for a provider ganja does not ship.
+fn providers(report: &mut Report, at: &At, value: &Json) -> Vec<(String, Json)> {
     let Some(entries) = value.as_object() else {
         report.skip(&at.from, reason::CATALOG);
 
-        return;
+        return Vec::new();
     };
 
+    let mut carried = Vec::new();
     for (id, provider) in entries {
-        let entry = at.child(id);
-        report.skip(&entry.from, reason::CATALOG);
+        if let Some(entry) = provider_entry(report, &at.child(id), id, provider) {
+            insert(&mut carried, id.clone(), entry);
+        }
+    }
 
-        if provider
-            .get("options")
-            .and_then(|options| options.get("apiKey"))
-            .is_some()
-        {
-            let key = entry.child("options").child("apiKey");
-            report.skip(&key.from, reason::CREDENTIAL);
-            report.warn(format!(
-                "`{}` holds an API key; a key is never written into a config file — store it \
-                 with `ganja auth login` instead",
-                key.from
+    carried
+}
+
+/// The two npm packages whose wire this build has, and what each is in ganja's
+/// vocabulary.
+///
+/// Upstream spells "which wire does this endpoint speak" as the SDK it loads
+/// (`provider.<id>.npm`), so this is that spelling translated. Deliberately
+/// short: `@ai-sdk/openai` is **not** here, because that vendor's SDK drives
+/// the Responses API and a config-named endpoint has no Responses wire — a row
+/// for it would quietly send Responses traffic down a chat-completions
+/// encoder.
+const DIALECTS: [(&str, &str); 2] = [
+    ("@ai-sdk/openai-compatible", "openai-chat-completions"),
+    ("@ai-sdk/anthropic", "anthropic-messages"),
+];
+
+/// One provider entry's fields, in the order ganja writes them.
+#[derive(Debug, Default)]
+struct ProviderFields {
+    dialect: Option<Json>,
+    base_url: Option<Json>,
+    headers: Option<Json>,
+}
+
+impl ProviderFields {
+    fn document(self) -> Json {
+        let mut entries = Vec::new();
+        for (key, value) in [
+            ("dialect", self.dialect),
+            ("base_url", self.base_url),
+            ("headers", self.headers),
+        ] {
+            if let Some(value) = value {
+                entries.push((key.to_owned(), value));
+            }
+        }
+
+        Json::Object(entries)
+    }
+}
+
+/// Maps one provider entry, which is written whole or not at all.
+///
+/// Whole or not at all for [`mcp_server`]'s reason: a `mapped` row under an
+/// entry that was then refused would claim a setting is in force that was
+/// never written. Only what such a pass had to *say* survives the refusal —
+/// which is what keeps the `apiKey` warning, the one row here that has to
+/// reach a person whatever else happened.
+///
+/// `key_env` is deliberately never derived. Upstream's `options.apiKey` holds
+/// the key itself, and there is no honest way to turn a value into the name of
+/// a variable holding it; the row and the warning say where to put it instead.
+fn provider_entry(report: &mut Report, at: &At, id: &str, value: &Json) -> Option<Json> {
+    let Some(entries) = value.as_object() else {
+        report.skip(&at.from, reason::MALFORMED);
+
+        return None;
+    };
+
+    let mut collected = Report::default();
+    let mut fields = ProviderFields::default();
+    let mut refused: Option<Refusal> = None;
+
+    if ganja_core::provider::PROVIDERS.contains(&id) {
+        refused = Some((
+            reason::REFUSED,
+            format!(
+                "`{}` names a provider ganja already ships, and a `provider` entry for one \
+                 is refused at load; point the builtin somewhere else with its own base-URL \
+                 variable instead",
+                at.from
+            ),
+        ));
+    }
+
+    for (key, field) in entries {
+        let child = at.child(key);
+        match key.as_str() {
+            // The one key that changes name on the way across: upstream says
+            // which SDK loads the provider, ganja says which wire it speaks.
+            "npm" => {
+                let named = At {
+                    from: child.from.clone(),
+                    to: join(&at.to, "dialect"),
+                };
+                match dialect(&mut collected, &named, field) {
+                    Ok(spelled) => fields.dialect = Some(Json::String(spelled.to_owned())),
+                    Err(refusal) => refused = refused.or(Some(refusal)),
+                }
+            }
+            "options" => {
+                if let Err(refusal) = options(&mut collected, at, field, &mut fields) {
+                    refused = refused.or(Some(refusal));
+                }
+            }
+            // The catalog half of upstream's block: what a provider is called,
+            // which models it serves and what they cost. Ganja sizes and
+            // prices from a table it compiles in, so there is no key here to
+            // map any of it to.
+            _ => collected.skip(&child.from, reason::CATALOG),
+        }
+    }
+
+    if refused.is_none() {
+        if fields.dialect.is_none() {
+            refused = Some((
+                reason::UNSUPPORTED,
+                format!(
+                    "`{}` names no `npm` package this build has a wire for, so nothing says \
+                     which API its endpoint speaks; ganja carries {}",
+                    at.from,
+                    DIALECTS
+                        .iter()
+                        .map(|(package, _)| *package)
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                ),
+            ));
+        } else if fields.base_url.is_none() {
+            refused = Some((
+                reason::UNSUPPORTED,
+                format!(
+                    "`{}` names no endpoint; opencode takes one from the SDK it loads, and \
+                     ganja has no default for a provider it does not ship",
+                    at.from
+                ),
             ));
         }
     }
+
+    if let Some((reason, explanation)) = refused {
+        report.skip(&at.from, reason);
+        report.adopt_warnings(collected);
+        report.warn(format!("`{}` was left out: {explanation}", at.from));
+
+        return None;
+    }
+    report.adopt(collected);
+
+    Some(fields.document())
+}
+
+/// The dialect an entry's `npm` package names.
+fn dialect(report: &mut Report, at: &At, value: &Json) -> Result<&'static str, Refusal> {
+    let Some(package) = value.as_str() else {
+        return Err((
+            reason::MALFORMED,
+            format!("`{}` is not a package name", at.from),
+        ));
+    };
+
+    let Some((_, spelled)) = DIALECTS.iter().find(|(named, _)| *named == package) else {
+        return Err((
+            reason::UNSUPPORTED,
+            format!(
+                "`{}` loads {package}, which this build has no wire for",
+                at.from
+            ),
+        ));
+    };
+    report.map(&at.from, &at.to);
+
+    Ok(spelled)
+}
+
+/// The `options` object, whose carryable keys land **on the entry**.
+///
+/// Upstream nests the endpoint and the headers one level deeper than ganja
+/// does, so this is a flattening rather than a copy: `options` itself maps to
+/// the entry, and each child names the ganja key it becomes. `entry` is
+/// therefore the *entry's* position, not the `options` key's — the child paths
+/// on both sides are built from it.
+///
+/// `endpoint` outranks `baseURL` because upstream's own read does
+/// (`provider/provider.ts:356`, `options?.endpoint ?? options?.baseURL`).
+/// `apiKey` is rowed by the caller, before anything can refuse the entry out
+/// from under its warning.
+fn options(
+    report: &mut Report,
+    entry: &At,
+    value: &Json,
+    fields: &mut ProviderFields,
+) -> Result<(), Refusal> {
+    let from = join(&entry.from, "options");
+    let Some(entries) = value.as_object() else {
+        report.skip(&from, reason::MALFORMED);
+
+        return Ok(());
+    };
+    report.map(&from, &entry.to);
+
+    let mut endpoint: Option<Json> = None;
+    let mut base_url: Option<Json> = None;
+    // Collected rather than returned at the first failure: the loop still has
+    // rows to write after a bad endpoint, and the `apiKey` row is one of them.
+    let mut refused: Option<Refusal> = None;
+    for (key, field) in entries {
+        let at = |ganja: &str| At {
+            from: join(&from, key),
+            to: join(&entry.to, ganja),
+        };
+        match key.as_str() {
+            // The one value in an opencode config that must never travel. Its
+            // row survives the entry being refused — see
+            // [`Report::adopt_warnings`] — because "this key was not carried"
+            // is true either way, and it is the row somebody has to see.
+            "apiKey" => {
+                let from = join(&from, key);
+                report.skip(&from, reason::CREDENTIAL);
+                report.warn(format!(
+                    "`{from}` holds an API key; a key is never written into a config file — \
+                     store it with `ganja auth login` instead"
+                ));
+            }
+            "endpoint" | "baseURL" => match url(report, &at("base_url"), field) {
+                Ok(carried) if key == "endpoint" => endpoint = Some(carried),
+                Ok(carried) => base_url = Some(carried),
+                Err(refusal) => refused = refused.or(Some(refusal)),
+            },
+            "headers" => fields.headers = string_map(report, &at("headers"), field),
+            _ => report.skip(&join(&from, key), reason::UNSUPPORTED),
+        }
+    }
+    fields.base_url = endpoint.or(base_url);
+
+    refused.map_or(Ok(()), Err)
 }
 
 /// Prints what the import did, in two sections.
@@ -2083,6 +2333,18 @@ mod tests {
                 ("command.release.template", "command.release.template"),
                 ("command.release.description", "command.release.description"),
                 ("command.release.agent", "command.release.agent"),
+                // A provider entry is upstream's shape flattened: the SDK
+                // becomes the wire, and `options` becomes the entry itself.
+                ("provider.local-llama.npm", "provider.local-llama.dialect"),
+                ("provider.local-llama.options", "provider.local-llama"),
+                (
+                    "provider.local-llama.options.baseURL",
+                    "provider.local-llama.base_url",
+                ),
+                (
+                    "provider.local-llama.options.headers",
+                    "provider.local-llama.headers",
+                ),
                 // An MCP entry is ganja's shape already, `type` included.
                 ("mcp.fs.type", "mcp.fs.type"),
                 ("mcp.fs.command", "mcp.fs.command"),
@@ -2135,8 +2397,10 @@ mod tests {
                 ("agent.review.options", "unsupported"),
                 ("command.release.variant", "unsupported"),
                 ("command.release.subtask", "unsupported"),
-                ("provider.anthropic", "catalog"),
+                ("provider.anthropic", "refused"),
                 ("provider.anthropic.options.apiKey", "credential"),
+                ("provider.local-llama.models", "catalog"),
+                ("provider.local-llama.options.organization", "unsupported"),
                 ("mcp.docs.oauth", "unsupported"),
                 ("mcp.legacy", "malformed"),
                 ("lsp.typescript", "unsupported"),
@@ -2215,6 +2479,15 @@ mod tests {
       }
     }
   },
+  "provider": {
+    "local-llama": {
+      "dialect": "openai-chat-completions",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "headers": {
+        "x-route": "gpu-0"
+      }
+    }
+  },
   "lsp": {
     "rust": {
       "disabled": true
@@ -2259,28 +2532,164 @@ mod tests {
     /// is exactly what a refactor takes away without noticing.
     #[test]
     fn an_api_key_is_never_written_and_is_pointed_at_the_credential_store() {
-        let (built, report) =
-            imported(r#"{"provider": {"anthropic": {"options": {"apiKey": "sk-canary-8842"}}}}"#);
+        // Two entries, because the key's row has to survive both endings an
+        // entry can have: one that was refused whole, and one that was
+        // written. A key carried into a config file this command produced
+        // would be the one place it could sit in the clear.
+        let (built, report) = imported(
+            r#"{"provider": {
+                "anthropic": {"options": {"apiKey": "sk-canary-8842"}},
+                "local-llama": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {"apiKey": "sk-canary-4471", "baseURL": "https://a.test/v1"}
+                }
+            }}"#,
+        );
 
-        assert!(built.is_empty(), "a provider block maps to nothing");
         assert_eq!(
             rows(&report.skipped),
             vec![
-                ("provider.anthropic", "catalog"),
+                ("provider.anthropic", "refused"),
                 ("provider.anthropic.options.apiKey", "credential"),
+                ("provider.local-llama.options.apiKey", "credential"),
             ]
         );
-        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+
+        let rendered = built.document().render();
+        for canary in ["sk-canary-8842", "sk-canary-4471"] {
+            assert!(
+                !rendered.contains(canary),
+                "a key reached the written config: {rendered}"
+            );
+        }
         assert!(
-            report.warnings[0].contains("ganja auth login"),
-            "{}",
-            report.warnings[0]
+            rendered.contains("local-llama") && !rendered.contains("key_env"),
+            "the entry is written, and nothing invents the variable holding its \
+             key: {rendered}"
         );
-        assert!(
-            !report.warnings[0].contains("sk-canary-8842"),
-            "the warning must not repeat the key: {}",
-            report.warnings[0]
+
+        let credentials: Vec<&String> = report
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("ganja auth login"))
+            .collect();
+        assert_eq!(credentials.len(), 2, "{:?}", report.warnings);
+        for warning in credentials {
+            assert!(
+                !warning.contains("sk-canary-8842") && !warning.contains("sk-canary-4471"),
+                "the warning must not repeat the key: {warning}"
+            );
+        }
+    }
+
+    /// The mapping's shape: what upstream spells across `npm` and `options`
+    /// becomes one flat entry, and `endpoint` wins over `baseURL` because
+    /// upstream's own read does.
+    #[test]
+    fn a_provider_entry_this_build_has_a_wire_for_is_carried_flattened() {
+        let (built, report) = imported(
+            r#"{"provider": {"gateway": {
+                "npm": "@ai-sdk/anthropic",
+                "name": "Gateway Inc",
+                "options": {
+                    "baseURL": "https://ignored.test",
+                    "endpoint": "https://gateway.test/v1",
+                    "headers": {"x-route": "eu"}
+                }
+            }}}"#,
         );
+
+        assert_eq!(
+            built.document().render(),
+            "{\n  \"provider\": {\n    \"gateway\": {\n      \
+             \"dialect\": \"anthropic-messages\",\n      \
+             \"base_url\": \"https://gateway.test/v1\",\n      \
+             \"headers\": {\n        \"x-route\": \"eu\"\n      }\n    }\n  }\n}\n"
+        );
+        assert_eq!(
+            rows(&report.mapped),
+            vec![
+                ("provider.gateway.npm", "provider.gateway.dialect"),
+                ("provider.gateway.options", "provider.gateway"),
+                (
+                    "provider.gateway.options.baseURL",
+                    "provider.gateway.base_url"
+                ),
+                (
+                    "provider.gateway.options.endpoint",
+                    "provider.gateway.base_url"
+                ),
+                (
+                    "provider.gateway.options.headers",
+                    "provider.gateway.headers"
+                ),
+            ]
+        );
+        assert_eq!(
+            rows(&report.skipped),
+            vec![("provider.gateway.name", "catalog")]
+        );
+    }
+
+    /// Nothing is completed on a config's behalf. Each of these describes an
+    /// endpoint this build could not talk to, and each is named rather than
+    /// half-written.
+    #[test]
+    fn a_provider_entry_this_build_cannot_talk_to_is_named_rather_than_guessed_at() {
+        let cases = [
+            // No SDK this build has a wire for: the dialect is not derivable,
+            // and guessing it sends one API's body to the other's endpoint.
+            (
+                r#"{"provider": {"x": {"npm": "@ai-sdk/google",
+                   "options": {"baseURL": "https://a.test"}}}}"#,
+                "unsupported",
+                "@ai-sdk/google",
+            ),
+            // The vendor's own SDK drives the Responses API, which a
+            // config-named endpoint has no wire for.
+            (
+                r#"{"provider": {"x": {"npm": "@ai-sdk/openai",
+                   "options": {"baseURL": "https://a.test"}}}}"#,
+                "unsupported",
+                "@ai-sdk/openai",
+            ),
+            (
+                r#"{"provider": {"x": {"options": {"baseURL": "https://a.test"}}}}"#,
+                "unsupported",
+                "which API",
+            ),
+            // opencode takes the endpoint from the SDK it loads; there is
+            // nothing here to take one from.
+            (
+                r#"{"provider": {"x": {"npm": "@ai-sdk/openai-compatible"}}}"#,
+                "unsupported",
+                "no endpoint",
+            ),
+            // ganja's own config refuses this at load, so writing it would
+            // produce a file the next launch will not read.
+            (
+                r#"{"provider": {"x": {"npm": "@ai-sdk/openai-compatible",
+                   "options": {"baseURL": "http://gateway.test/v1"}}}}"#,
+                "refused",
+                "https",
+            ),
+        ];
+
+        for (source, reason, said) in cases {
+            let (built, report) = imported(source);
+
+            assert!(built.is_empty(), "{source} should have been left out");
+            assert_eq!(
+                rows(&report.skipped),
+                vec![("provider.x", reason)],
+                "{source}"
+            );
+            assert!(
+                report.warnings.iter().any(|warning| warning.contains(said)),
+                "{source}: {:?}",
+                report.warnings
+            );
+        }
     }
 
     /// Upstream expands these textually before parsing; ganja expands nothing,
