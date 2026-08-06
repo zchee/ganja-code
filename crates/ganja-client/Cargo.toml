@@ -1,0 +1,33 @@
+# The remote-engine consumer for `run --attach`: ganja-serve's REST + SSE
+# surface as a typed client. Internal dependency list is exactly the protocol
+# — CI asserts it — because a client that linked the engine would quietly
+# become a second frontend instead of a consumer of the served one.
+[package]
+name = "ganja-client"
+description = "Typed client for the ganja engine served over HTTP + SSE"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The wire types the served engine speaks; deserialized verbatim off the SSE
+# stream, which is the whole reason this crate needs no engine.
+ganja-protocol.workspace = true
+# The HTTP half: the four routes and the event stream's body.
+reqwest.workspace = true
+# The SSE frames and every request/response body are JSON documents.
+serde.workspace = true
+serde_json.workspace = true
+# The event stream is consumed as a Stream, which has to be named to be
+# returned.
+futures.workspace = true
+# Error taxonomy in the crate's own vocabulary, matching the workspace's
+# thiserror-enum convention.
+thiserror.workspace = true
+
+[dev-dependencies]
+# Tests stand up a real loopback server to speak the wire against.
+tokio = { workspace = true, features = ["net", "macros", "rt-multi-thread"] }

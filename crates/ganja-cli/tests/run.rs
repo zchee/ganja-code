@@ -534,6 +534,106 @@ fn the_rejection_warning_never_reaches_the_nd_json_stream() {
     let _ = objects(&stdout);
 }
 
+/// A script that asks the user a question — the tool upstream's
+/// non-interactive ruleset refuses first, and the one that would otherwise
+/// leave a headless run waiting on a dialog nobody can see.
+fn a_turn_that_asks_a_question() -> Value {
+    serde_json::json!({
+        "cadence_ms": 1,
+        "turns": [
+            {
+                "text": "checking with you",
+                "tool_calls": [{
+                    "name": "question",
+                    "args": {
+                        "questions": [{
+                            "question": "Which database?",
+                            "header": "Database",
+                            "options": [
+                                {"label": "Postgres", "description": "Relational"},
+                                {"label": "SQLite", "description": "One file"},
+                            ],
+                        }],
+                    },
+                }],
+            },
+            {"text": CLOSING},
+        ],
+    })
+}
+
+/// The standing refusal, observed from outside: a headless run refuses
+/// `question` **by rule**, before anything opens a dialog.
+///
+/// This is the one tool whose call cannot be auto-rejected after the fact —
+/// the asking *is* the interaction, so there is no permission request for the
+/// auto-rejecter to answer. Without the standing rules `run` installs, the
+/// tool would run, publish a request nobody is subscribed to answer, and the
+/// process would never exit. The timeout is therefore part of the assertion,
+/// not a convenience: it turns that hang into a failure a reader can diagnose.
+#[test]
+fn a_headless_run_refuses_a_question_by_rule_rather_than_waiting_on_it() {
+    let run = Run::playing(&a_turn_that_asks_a_question());
+
+    let ran = run
+        .ganja()
+        .timeout(std::time::Duration::from_secs(60))
+        .args(["run", "ask me something"])
+        .assert()
+        .success()
+        // The turn carries on after a refusal — a denial is information the
+        // model reads, never a turn abort — so the script reaches its end.
+        .stdout(predicate::str::contains(CLOSING));
+
+    // And the refusal was the *rule's*, which is what makes it safe: a dialog
+    // that was opened and then auto-rejected would already have been a request
+    // this run could not have answered.
+    let stderr = String::from_utf8(ran.get_output().stderr.clone()).expect("text");
+    assert!(
+        !stderr.contains("auto-rejecting"),
+        "a question must never reach the auto-rejecter: {stderr:?}"
+    );
+    // The rule is named, which is what stops this test from passing vacuously.
+    // A build that never registered `question` refuses the call too — with
+    // "Model tried to call unavailable tool" — and every assertion above would
+    // still hold. Measured: without the registration row the two tests here
+    // pass green while proving nothing, which is exactly the shape of the
+    // negative W2 recorded. Naming the rule is what distinguishes "the standing
+    // refusal decided" from "there was no such tool".
+    assert!(
+        stderr.contains(r#"{"permission":"question","pattern":"*","action":"deny"}"#),
+        "the refusal must be the standing rule's, named: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("unavailable tool"),
+        "the tool has to be registered for this test to mean anything: {stderr:?}"
+    );
+}
+
+/// `--auto` allows what a default run refuses — but not this. A question has
+/// nobody to answer it whatever the flags say, so the refusal that keeps the
+/// run from hanging is not one `--auto` may lift.
+#[test]
+fn even_an_auto_run_refuses_a_question_because_nobody_is_there_to_answer_one() {
+    let run = Run::playing(&a_turn_that_asks_a_question());
+
+    let ran = run
+        .ganja()
+        .timeout(std::time::Duration::from_secs(60))
+        .args(["run", "--auto", "ask me something"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(CLOSING));
+
+    // Named for the same reason as above: without it, a build that never
+    // registered the tool would pass this test too.
+    let stderr = String::from_utf8(ran.get_output().stderr.clone()).expect("text");
+    assert!(
+        stderr.contains(r#"{"permission":"question","pattern":"*","action":"deny"}"#),
+        "--auto must not lift the refusal that keeps the run from hanging: {stderr:?}"
+    );
+}
+
 #[test]
 fn auto_allows_the_call_a_default_run_refuses() {
     let run = Run::playing(&a_turn_that_asks());

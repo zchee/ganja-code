@@ -1,17 +1,24 @@
 //! `ganja run` — one turn, headless, and then the process is over.
 //!
 //! Spec: upstream `packages/opencode/src/cli/cmd/run.ts`, its non-interactive
-//! branch (`run.ts:828-872`). Upstream's other two branches — `--mini`'s
-//! split-footer interactive mode and `--attach`'s connection to a running
-//! server — are out of scope: ganja's interactive mode *is* the TUI, and there
-//! is no server to attach to (deviation: run-drives-the-engine-directly). What
-//! is left is exactly what a script wants: a message in, an ordered account of
-//! the turn out, and an exit code that says whether it worked.
+//! branch (`run.ts:828-872`). Upstream's `--mini` split-footer interactive
+//! branch is out of scope — ganja's interactive mode *is* the TUI (deviation:
+//! run-drives-the-engine-directly). What is left is exactly what a script
+//! wants: a message in, an ordered account of the turn out, and an exit code
+//! that says whether it worked.
 //!
 //! The engine here is the same [`Engine`] the TUI drives, assembled the same
 //! way and in the same order — upstream reaches its own engine through a
 //! loopback HTTP client, and this build reaches it through the call it already
-//! had. Every observable rule of the loop below is upstream's:
+//! had. **`--attach` is the other half of that sentence**: given the address of
+//! a running `ganja serve`, this command drives that engine instead, over the
+//! four routes `ganja-client` wraps (`run.ts:938-941`, which swaps its SDK for
+//! one bound to the remote base URL and otherwise runs the same loop). The
+//! account of the turn is written by the same [`Reporter`] either way, which is
+//! how the two transcripts stay identical rather than merely similar —
+//! `ganja-cli/tests/attach.rs` holds them against each other frame for frame.
+//!
+//! Every observable rule of the loop below is upstream's:
 //!
 //! * **Subscribe before prompting.** Upstream's `client.event.subscribe()`
 //!   precedes `client.session.prompt()` (`run.ts:829,859`); so does this. In
@@ -29,7 +36,12 @@
 //! * **Nothing here waits on a person.** A permission request is answered the
 //!   moment it arrives: `once` under `--auto`, and otherwise a warning and a
 //!   `reject` (`run.ts:800-815`). A headless run that opened a dialog would
-//!   hang until it was killed.
+//!   hang until it was killed. An attached run answers the same way over
+//!   `POST /permission/{id}/reply`, and refuses [`REFUSED`] there itself: a
+//!   `serve` engine deliberately keeps its dialogs interactive, so the rules
+//!   that make a headless turn safe have to be applied where the person is
+//!   absent — here — rather than on a server that is not this run's to
+//!   reconfigure (deviation: an-attached-run-refuses-at-the-client).
 //! * **Payload on stdout, diagnostics on stderr**, as every other subcommand
 //!   here does it. Upstream mixes its warnings into stdout; doing that would
 //!   corrupt `--format json`'s stream, so a warning and an error both go to
@@ -45,6 +57,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, ValueEnum};
 use futures::StreamExt as _;
+use ganja_client::Prompt;
 use ganja_core::{
     AgentRegistry, Engine, EngineError, SessionId, Storage, catalog,
     config::{Config, Overrides},
@@ -55,6 +68,7 @@ use ganja_protocol::{
     Command as EngineCommand, Event, FinishReason, Message, Part, PartBody, PartId,
     PermissionReply, Role, ToolState,
 };
+use secrecy::ExposeSecret as _;
 use serde_json::Value;
 
 use crate::{STORAGE, millis_now, printable};
@@ -106,6 +120,13 @@ impl Kind {
 /// including the fact that **ganja has none of these tools yet**. That is the
 /// point: the rules are what make a later `question` safe in `run` by
 /// construction, rather than something whoever adds it has to remember.
+///
+/// Two consumers, because a run reaches its engine two ways:
+/// [`refuse_interactive_permissions`] installs them as standing rules on an
+/// engine this process owns, and the attached loop applies the same set to the
+/// dialogs a remote engine sends. Both refuse them **even under `--auto`** —
+/// `--auto` answers the dialogs a person would have answered, and these are
+/// the ones no answer from a script can mean anything for.
 const REFUSED: [&str; 3] = ["question", "plan_enter", "plan_exit"];
 
 /// What a completed tool call is marked with in the default format, matching
@@ -127,14 +148,24 @@ pub enum Format {
 
 /// `ganja run`'s flags.
 ///
-/// A subset of upstream's, and deliberately so: `--attach`, `--port`,
-/// `--password`, `--username`, `--mini`, `--interactive`, `--demo` and
-/// `--replay*` are all about the two branches this build does not have, and
-/// `--share`, `--file`, `--title`, `--variant` and `--thinking` name features
-/// ganja has no surface for — a session is titled by its first completed turn,
-/// there is no share endpoint, no per-request variant, and no reasoning part to
-/// show (deviation: run-carries-the-flags-ganja-can-honor). A flag that parsed
-/// and then did nothing would be worse than one that is absent.
+/// A subset of upstream's, and deliberately so: `--mini`, `--interactive`,
+/// `--demo` and `--replay*` are about the interactive branch this build does
+/// not have, and `--share`, `--file`, `--title`, `--variant` and `--thinking`
+/// name features ganja has no surface for — a session is titled by its first
+/// completed turn, there is no share endpoint, no per-request variant, and no
+/// reasoning part to show (deviation: run-carries-the-flags-ganja-can-honor). A
+/// flag that parsed and then did nothing would be worse than one that is
+/// absent.
+///
+/// `--attach` is here now; the three upstream flags that travel with it are
+/// not, and each for its own reason. `--port` is upstream's *other* attach
+/// spelling (a port on localhost) and says nothing an address does not.
+/// `--password` and `--username` are read from the environment instead —
+/// `GANJA_SERVER_PASSWORD` and `GANJA_SERVER_USERNAME`, the same two variables
+/// the server was started with — because a password in `argv` is readable by
+/// every process on the machine, and a flag that leaks the credential it
+/// protects is worse than no flag (deviation:
+/// attach-reads-the-password-from-the-environment).
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// What to ask. Every argument is one word of it; they are joined with
@@ -165,6 +196,14 @@ pub struct RunArgs {
     /// Merge exactly this config file, outranking `GANJA_CONFIG` and discovery.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+    /// Drive a running `ganja serve` at this address instead of an engine in
+    /// this process, e.g. http://127.0.0.1:4096.
+    // Refused together with `--config`, which configures an engine this
+    // process no longer builds, and with `--command`, whose route is not in
+    // the attached client's surface: either would parse and then decide
+    // nothing, which is the one thing this flag table refuses to do.
+    #[arg(long, value_name = "URL", conflicts_with_all = ["config", "command"])]
+    attach: Option<String>,
     /// How to write the account of the turn.
     #[arg(long, value_enum, default_value_t = Format::Default)]
     format: Format,
@@ -213,6 +252,23 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // run-cannot-fork).
     if args.fork {
         bail!("--fork is not available in this build: nothing here copies a session");
+    }
+
+    // Everything above is about the message and is true wherever the turn
+    // runs; everything below assembles an engine, which an attached run does
+    // not have and does not want.
+    if let Some(address) = args.attach {
+        return attached(Attached {
+            address,
+            message,
+            resume_latest: args.r#continue,
+            session: args.session,
+            agent: args.agent,
+            model: args.model,
+            auto,
+            format: args.format,
+        })
+        .await;
     }
 
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
@@ -352,6 +408,165 @@ fn refuse_interactive_permissions(engine: &Engine) {
             })
             .collect(),
     );
+}
+
+/// What a run needs once `--attach` has taken the engine out of this process.
+///
+/// A struct rather than eight arguments, and a *narrow* one: what is missing
+/// from it is the point. There is no config, no provider, no tool registry and
+/// no storage here, because every one of those belongs to the server — this
+/// process asks and renders, and nothing else.
+struct Attached {
+    address: String,
+    message: String,
+    resume_latest: bool,
+    session: Option<String>,
+    agent: Option<String>,
+    model: Option<String>,
+    auto: bool,
+    format: Format,
+}
+
+/// Runs one turn on a server somebody else is running.
+///
+/// Upstream's attach branch (`run.ts:938-941`) rebinds its SDK to the remote
+/// base URL and re-enters the same `execute`; this does the same with
+/// [`ganja_client::Client`] in place of the engine. One divergence is
+/// deliberate: upstream's `finish()` returns early when attached
+/// (`run.ts:835`), so an attached run does not take the turn's failure into its
+/// exit code. Here it does — an exit code that means "the turn worked" locally
+/// and "the request was accepted" remotely would be a trap for the one thing
+/// this command exists for, which is scripts (deviation:
+/// an-attached-run-exits-on-the-turn-not-the-request).
+async fn attached(run: Attached) -> Result<()> {
+    // The credential the *server* configured, read through the server's own
+    // resolver so the two cannot disagree about which variables mean what.
+    let credentials = ganja_serve::Credentials::from_env().map(|configured| {
+        ganja_client::Credentials::new(configured.username, configured.password.expose_secret())
+    });
+    let client = ganja_client::Client::new(&run.address, credentials)?;
+
+    // Nothing is prompted before something answers: a mistyped address, a
+    // server that is not running and a password that is wrong are one sentence
+    // here instead of a failure three calls later.
+    client.health().await?;
+
+    let session = remote_session(&client, run.resume_latest, run.session.as_deref()).await?;
+
+    match drive_attached(&client, &session, &run).await? {
+        None => Ok(()),
+        Some(error) => bail!("{error}"),
+    }
+}
+
+/// The session an attached run drives.
+///
+/// Upstream resolves the same three cases through the attached SDK
+/// (`run.ts:456-533`): the session that was named, the newest root under
+/// `--continue`, or a fresh one. A named session is checked against the
+/// listing before anything is printed, so the refusal keeps both its wording
+/// and its place in the order the local path refuses in.
+async fn remote_session(
+    client: &ganja_client::Client,
+    resume_latest: bool,
+    named: Option<&str>,
+) -> Result<SessionId> {
+    if let Some(named) = named {
+        let wanted = SessionId::from(named.to_owned());
+        if !client.sessions().await?.iter().any(|row| row.id == wanted) {
+            // Upstream's wording, because a script that greps for it is
+            // greping for upstream's (`run.ts:465`).
+            bail!("Session not found");
+        }
+
+        return Ok(wanted);
+    }
+    // A `--continue` with no root falls through to a fresh session exactly as
+    // the local path does; the server mints it.
+    if resume_latest
+        && let Some(root) = client
+            .sessions()
+            .await?
+            .into_iter()
+            .find(|row| row.parent.is_none())
+    {
+        return Ok(root.id);
+    }
+
+    Ok(client.create_session().await?)
+}
+
+/// Subscribes, prompts, and reports the turn until it ends — [`drive`] with
+/// the four routes in place of the four engine calls.
+///
+/// The same [`Reporter`], deliberately: the account of a turn is one format,
+/// and two writers of it would drift on the first change to either.
+async fn drive_attached(
+    client: &ganja_client::Client,
+    session: &SessionId,
+    run: &Attached,
+) -> Result<Option<String>> {
+    // Before the prompt, always — and here the ordering is a correctness rule
+    // rather than the liveness one it is locally: the server's subscription is
+    // registered when this returns, and a prompt sent first could stream its
+    // opening events into a stream nobody had opened yet.
+    let mut events = client.events().await?;
+
+    let started = client
+        .prompt(
+            session,
+            &Prompt::new(run.message.clone())
+                .as_agent(run.agent.clone())
+                .asking(run.model.clone()),
+        )
+        .await;
+
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    let mut reporter = Reporter::new(run.format, session.as_str().to_owned(), &mut out, &mut err);
+
+    if let Err(error) = started {
+        reporter.failed(&error.to_string());
+
+        return reporter.finish();
+    }
+
+    while let Some(event) = events.next().await {
+        let event = match event {
+            Ok(event) => event,
+            // An eviction or a wire this build cannot read ends the stream;
+            // reporting it as a failed turn is honest, because a transcript
+            // that stopped early is exactly what the caller has.
+            Err(error) => {
+                reporter.failed(&error.to_string());
+                break;
+            }
+        };
+
+        if let Event::PermissionRequested {
+            id, tool, title, ..
+        } = &event
+        {
+            let reply = if run.auto && !REFUSED.contains(&tool.as_str()) {
+                PermissionReply::Once
+            } else {
+                reporter.rejecting(tool, title);
+                PermissionReply::Reject
+            };
+            // A reply nothing is waiting for is defined to be ignored, which
+            // is what a reply racing a cancelled turn becomes.
+            let _ = client.reply_permission(id, reply).await;
+
+            continue;
+        }
+        if reporter.apply(&event, run.agent.as_deref()) {
+            break;
+        }
+    }
+
+    reporter.finish()
 }
 
 /// Installs the session this run continues, if it continues one.
@@ -581,7 +796,14 @@ impl<'a> Reporter<'a> {
             }
             Event::PermissionRequested { .. }
             | Event::PermissionReplied { .. }
-            | Event::RevertChanged { .. } => {}
+            | Event::RevertChanged { .. }
+            // The quad is a dialog's lifecycle, not an account of the turn:
+            // a headless run refuses every question before one can be asked,
+            // and `--format json`'s six type names have no room for a shape
+            // no consumer was promised.
+            | Event::QuestionAsked { .. }
+            | Event::QuestionReplied { .. }
+            | Event::QuestionRejected { .. } => {}
         }
 
         false

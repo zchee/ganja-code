@@ -19,8 +19,10 @@ mod anchor;
 pub mod edit;
 pub mod glob;
 pub mod grep;
+pub mod question;
 pub mod read;
 pub mod shell;
+pub mod skill;
 pub mod task;
 pub mod todo;
 pub mod truncate;
@@ -31,6 +33,7 @@ pub mod truncate;
 /// stale belongs on the far side of the boundary from the log that records it.
 pub mod watch;
 pub mod webfetch;
+pub mod websearch;
 pub mod write;
 
 use std::{
@@ -100,6 +103,16 @@ pub struct ToolCtx {
     /// [`None`] on every turn that has no agents to spawn — and on every
     /// *child* turn, which is the entire depth guard stated a second way.
     pub spawn: Option<Arc<dyn task::Subagents>>,
+    /// What a call asks the person a question through, which only
+    /// [`question::QuestionTool`] does.
+    ///
+    /// [`None`] where there is nobody to ask — a fixture, a surface that runs
+    /// tools outside a turn — and a call then reads back the sentence a
+    /// dismissal produces. It is deliberately **not** what makes a headless
+    /// run safe: that is a standing permission rule refusing `question` at
+    /// every pattern, so the refusal is a rule somebody can see rather than a
+    /// field somebody remembered to leave empty.
+    pub ask: Option<Arc<dyn question::Asker>>,
 }
 
 impl ToolCtx {
@@ -218,6 +231,13 @@ impl Registry {
             // Upstream registers one todo tool, which owns the list.
             Arc::new(todo::TodoWriteTool::new()),
             Arc::new(webfetch::WebfetchTool::new()),
+            Arc::new(websearch::WebsearchTool::new()),
+            // The roster's skills are the conventional ones. A config naming
+            // more directories is installed the way `task` and an MCP
+            // server's tools are — over the top of this one, once whoever
+            // read the config knows what it said.
+            Arc::new(skill::SkillTool::new()),
+            Arc::new(question::QuestionTool),
         ])
     }
 
@@ -603,6 +623,7 @@ mod tests {
             files: Arc::new(FileTimes::default()),
             credentials: store.map_or(Credentials::Unguarded, Credentials::Guarded),
             spawn: None,
+            ask: None,
         }
     }
 

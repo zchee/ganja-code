@@ -1290,9 +1290,10 @@ impl App {
             call_id: MENTION_CALL.to_owned(),
             files: Arc::new(FileTimes::default()),
             // The menu is a file walk, not a conversation: it has no
-            // credentials to guard and nothing to delegate to.
+            // credentials to guard, nothing to delegate to, and nobody to ask.
             credentials: Credentials::Unguarded,
             spawn: None,
+            ask: None,
         };
 
         // A fragment is typed, not written: half of one is a pattern that does
@@ -1777,6 +1778,13 @@ impl App {
                     self.editor.set_text(&prompt);
                 }
             }
+            // The question dialog is not built yet, so the quad is applied to
+            // nothing — deliberately inert rather than absent, because a
+            // frontend that silently ignored an open request would leave the
+            // turn waiting with nothing on screen to answer it.
+            CoreEvent::QuestionAsked { .. }
+            | CoreEvent::QuestionReplied { .. }
+            | CoreEvent::QuestionRejected { .. } => {}
             CoreEvent::MessageFinished {
                 reason,
                 usage,

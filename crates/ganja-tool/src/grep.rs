@@ -362,6 +362,7 @@ mod tests {
             files: Arc::new(FileTimes::default()),
             credentials: crate::Credentials::Guarded(credentials),
             spawn: None,
+            ask: None,
         }
     }
 

@@ -31,6 +31,10 @@ etcetera.workspace = true
 # `run` consumes the engine's event stream, which arrives as a `BoxStream`.
 # Naming the crate is the only way to reach the `Stream` trait behind it.
 futures.workspace = true
+# `run --attach` drives a server somebody else is running, and this is the
+# typed consumer of its routes — the same four surfaces the engine call below
+# reaches in-process.
+ganja-client.workspace = true
 ganja-core.workspace = true
 # `sessions` prints a stored session's cost and the importer decides where a
 # project's config lives, so the binary names a worktree and a usage total
