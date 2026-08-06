@@ -349,6 +349,9 @@ pub(crate) enum ProviderId {
     OpenAi,
     Grok,
     GithubCopilot,
+    // Parses so its refusal can name the deferral; a name clap rejected would
+    // read as a typo rather than as the stub it is.
+    Cursor,
 }
 
 impl ProviderId {
@@ -369,6 +372,7 @@ impl ProviderId {
             Self::OpenAi => auth::openai::PROVIDER_ID,
             Self::Grok => auth::grok::PROVIDER_ID,
             Self::GithubCopilot => auth::copilot::PROVIDER_ID,
+            Self::Cursor => ganja_core::provider::cursor::ID,
         }
     }
 }
