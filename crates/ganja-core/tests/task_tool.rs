@@ -42,6 +42,7 @@ fn ctx(answer: Result<Delegated, Unanswered>) -> (ToolCtx, Arc<std::sync::Mutex<
             files: Arc::new(FileTimes::default()),
             credentials: Credentials::Unguarded,
             spawn: Some(subagents),
+            ask: None,
         },
         asked,
     )
@@ -185,6 +186,7 @@ async fn a_call_with_nothing_to_delegate_through_says_so() {
         files: Arc::new(FileTimes::default()),
         credentials: Credentials::Unguarded,
         spawn: None,
+        ask: None,
     };
 
     let refused = TaskTool::new(&[Offered {

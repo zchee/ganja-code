@@ -52,7 +52,8 @@ use crate::{
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
     session::{
-        LiveSession, Persist, RootParts, SessionState, Turn, TurnHandle, TurnKind, run_turn,
+        Answered, LiveSession, PendingReply, Persist, RootParts, SessionState, Turn, TurnHandle,
+        TurnKind, run_turn,
     },
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
@@ -1330,6 +1331,14 @@ impl Engine {
                 self.reply_permission(&id, reply).await;
                 Ok(())
             }
+            Command::ReplyQuestion { id, answers } => {
+                self.answer_question(&id, Answered::Replied(answers)).await;
+                Ok(())
+            }
+            Command::RejectQuestion { id } => {
+                self.answer_question(&id, Answered::Rejected).await;
+                Ok(())
+            }
             Command::SwitchAgent { name } => self.switch_agent(name).await,
             Command::SwitchModel { model } => self.switch_model(model).await,
             Command::RunShell { command } => {
@@ -2179,16 +2188,49 @@ impl Engine {
                 .lock()
                 .expect("the pending permission is never poisoned");
 
-            match pending.take_if(|waiting| waiting.id == *id) {
+            // Discriminated on the kind as well as the id: the slot holds one
+            // open request of either kind, and a reply that named a question's
+            // id would otherwise be handed to a permission wait expecting a
+            // decision.
+            match pending.take_if(
+                |waiting| matches!(waiting, PendingReply::Permission { id: open, .. } if open == id),
+            ) {
                 // A closed receiver means the turn is already tearing down,
                 // which is the same race as replying after the turn ended.
-                Some(waiting) => waiting.sender.send(reply).is_ok(),
-                None => false,
+                Some(PendingReply::Permission { sender, .. }) => sender.send(reply).is_ok(),
+                Some(PendingReply::Question { .. }) | None => false,
             }
         });
 
         if !delivered {
             tracing::debug!(id = id.as_str(), "no permission is waiting for this reply");
+        }
+    }
+
+    /// Routes an answer — or a dismissal — to the question wait that asked for
+    /// it.
+    ///
+    /// The same rule the permission route keeps: an answer nothing is waiting
+    /// for is ignored, because the turn task owns answering every request
+    /// exactly once. What differs is only that two commands land here, since
+    /// upstream makes a rejection its own thing rather than a refusing value.
+    async fn answer_question(&self, id: &crate::protocol::QuestionId, answered: Answered) {
+        let delivered = self.turn.lock().await.as_ref().is_some_and(|turn| {
+            let mut pending = turn
+                .permission
+                .lock()
+                .expect("the pending permission is never poisoned");
+
+            match pending.take_if(
+                |waiting| matches!(waiting, PendingReply::Question { id: open, .. } if open == id),
+            ) {
+                Some(PendingReply::Question { sender, .. }) => sender.send(answered).is_ok(),
+                Some(PendingReply::Permission { .. }) | None => false,
+            }
+        });
+
+        if !delivered {
+            tracing::debug!(id = id.as_str(), "no question is waiting for this reply");
         }
     }
 }
@@ -2497,6 +2539,9 @@ mod tests {
                 | Event::PartUpdated { .. }
                 | Event::PermissionRequested { .. }
                 | Event::PermissionReplied { .. }
+                | Event::QuestionAsked { .. }
+                | Event::QuestionReplied { .. }
+                | Event::QuestionRejected { .. }
                 | Event::RevertChanged { .. } => {}
             }
         }

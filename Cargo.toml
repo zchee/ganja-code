@@ -12,6 +12,12 @@ repository = "https://github.com/zchee/ganja-code"
 # Every dependency the port is expected to need through P6 is declared here so
 # that member crates only ever opt in, never choose a version.
 [workspace.dependencies]
+# A remote engine's consumer: the typed client for `ganja serve`'s REST + SSE
+# surface, which is what `run --attach` drives instead of an in-process
+# engine. Its own crate so the compiler can hold the promise that matters —
+# a client never links the engine — and CI asserts its internal dependency
+# list is exactly the protocol.
+ganja-client = { path = "crates/ganja-client" }
 # The engine both frontends drive: sessions, providers, and the loop that
 # executes what the crates below it define.
 ganja-core = { path = "crates/ganja-core" }

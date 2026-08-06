@@ -75,13 +75,25 @@ jobs:
           external="$(cargo tree -p ganja-protocol -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' ')"
           test "$external" = "serde serde_json "
 
+      # The client's whole reason to exist is what it does *not* link: an
+      # engine (it would become a second frontend rather than a consumer of
+      # the served one) or the server (it would drag axum into every build
+      # that only wanted to talk to one). Allowlist form from birth, so a
+      # ganja-serve creep — which a `∌ ganja-core` grep could not see — fails
+      # closed too.
+      - name: ganja-client's internal dependencies are exactly the protocol
+        run: |
+          internal="$(cargo tree -p ganja-client -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-client$' | sort -u | tr '\n' ' ')"
+          test "$internal" = "ganja-protocol "
+
       # The frontends' own lanes, previously true but unasserted: the
-      # terminal frontend never grows the HTTP server, and the HTTP frontend
-      # never grows the terminal.
+      # terminal frontend never grows the HTTP server, the HTTP frontend
+      # never grows the terminal, and the client grows neither.
       - name: the frontends stay in their lanes
         run: |
           ! cargo tree -p ganja-tui -e normal | grep -q axum
           ! cargo tree -p ganja-serve -e normal | grep -q ratatui
+          ! cargo tree -p ganja-client -e normal | grep -q axum
 
       # The workspace rule "every dependency version lives in the root
       # manifest" was convention only; this makes it a gate. A member manifest

@@ -528,6 +528,10 @@ pub struct Config {
     /// What the `webfetch` tool may reach; see [`WebfetchConfig`].
     #[serde(default)]
     pub webfetch: WebfetchConfig,
+    /// Where this session looks for skills besides the conventional places;
+    /// see [`SkillsConfig`].
+    #[serde(default)]
+    pub skills: SkillsConfig,
     /// Whether this session snapshots the working tree, which is what `/undo`
     /// restores from.
     ///
@@ -563,7 +567,75 @@ pub struct WebfetchConfig {
     pub allow_private: Option<bool>,
 }
 
+/// Where a session looks for skills beyond the conventional directories.
+///
+/// Upstream's two keys, spelled as upstream spells them
+/// (`packages/core/src/v1/config/skills.ts`), so a config written for opencode
+/// keeps meaning what it meant.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsConfig {
+    /// Additional directories holding skills, each scanned for `SKILL.md`
+    /// files below it. `~/` expands against the home directory and a relative
+    /// path resolves against the session's working directory, exactly as
+    /// upstream resolves them (`skill/index.ts:211-220`).
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Endpoints skills would be downloaded from.
+    ///
+    /// Accepted and **not fetched**; see [`Config::skill_urls`]. The key is
+    /// read so that a config carrying one still loads, which is the whole
+    /// reason it is here rather than refused as unknown.
+    #[serde(default)]
+    pub urls: Vec<String>,
+}
+
 impl Config {
+    /// The directories `skills.paths` named, resolved and existing.
+    ///
+    /// A path that names nothing is warned about and dropped rather than
+    /// carried as a root that can never match — upstream logs the same warning
+    /// (`skill/index.ts:214-217`), and a discovery walk over a directory that
+    /// is not there is a walk that quietly explains nothing.
+    #[must_use]
+    pub fn skill_paths(&self, cwd: &Path) -> Vec<PathBuf> {
+        self.skills
+            .paths
+            .iter()
+            .filter_map(|entry| {
+                let expanded = match entry.strip_prefix("~/") {
+                    Some(rest) => Xdg::new().ok()?.home_dir().join(rest),
+                    None => PathBuf::from(entry),
+                };
+                let path = if expanded.is_absolute() {
+                    expanded
+                } else {
+                    cwd.join(expanded)
+                };
+
+                if !path.is_dir() {
+                    tracing::warn!(path = %path.display(), "a skills path names no directory");
+                    return None;
+                }
+
+                Some(path)
+            })
+            .collect()
+    }
+
+    /// The endpoints `skills.urls` named, each of which this build declines to
+    /// fetch.
+    ///
+    /// The same posture **D2** takes for `http(s)` entries in `instructions`,
+    /// and for the same reason: composing a system prompt is not a good moment
+    /// to depend on somebody else's host being up. Returning them rather than
+    /// warning in here leaves the warning at the one place that knows a prompt
+    /// is being composed.
+    #[must_use]
+    pub fn skill_urls(&self) -> &[String] {
+        &self.skills.urls
+    }
+
     /// Whether this session snapshots the working tree; see
     /// [`Config::snapshot`].
     #[must_use]
@@ -636,6 +708,16 @@ impl Config {
             &mut self.webfetch.allow_private,
             other.webfetch.allow_private,
         );
+        // Arrays replace, which is this file's rule everywhere but
+        // `instructions`: a project that names its own skill directories means
+        // those, and a global tier that keeps applying underneath would be a
+        // list nobody wrote.
+        if !other.skills.paths.is_empty() {
+            self.skills.paths = other.skills.paths;
+        }
+        if !other.skills.urls.is_empty() {
+            self.skills.urls = other.skills.urls;
+        }
 
         for (name, incoming) in other.agent {
             self.agent.entry(name).or_default().merge(incoming);
@@ -770,6 +852,24 @@ fn explicit_file(overrides: &Overrides) -> Option<PathBuf> {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     })
+}
+
+/// The directories this build reads configuration out of, least specific
+/// first: the global one, then the project's own root.
+///
+/// Upstream's `config.directories()`, which its skill discovery hangs a tier
+/// off (`skill/index.ts:205-208`) — the `skill/` and `skills/` folders beside a
+/// config file. The order is the precedence every layered thing here resolves
+/// in, so a caller may treat the last entry as the closest.
+#[must_use]
+pub fn directories(cwd: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if let Some(global) = global_dir() {
+        found.push(global);
+    }
+    found.push(Project::resolve(cwd).root().to_path_buf());
+
+    found
 }
 
 /// Every project-tier file, outermost first so the closest directory wins.
