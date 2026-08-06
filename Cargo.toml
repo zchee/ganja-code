@@ -31,6 +31,14 @@ ganja-permission = { path = "crates/ganja-permission" }
 # that later arrives over a socket — from having to build an engine to name an
 # event.
 ganja-protocol = { path = "crates/ganja-protocol" }
+# Talking to a model vendor: the wires, the credentials they present, and the
+# catalog that sizes and prices what they serve. Its own crate for the same
+# reason `ganja-tool` is — a wire answers to a vendor's HTTP, never to the loop
+# that called it, and with the engine outside its dependency graph that is the
+# compiler's rule rather than a convention. Auth and the catalog fold in here
+# rather than standing alone because the traffic between the three is heavy in
+# one direction and a single function in the other.
+ganja-provider = { path = "crates/ganja-provider" }
 # The engine over a socket: HTTP routes and the SSE event stream. Its own
 # crate rather than a module in `ganja-core`, so that a build which only wants
 # the terminal never pulls an HTTP server — the same reasoning, one level up,

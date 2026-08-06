@@ -102,7 +102,8 @@ async fn an_uncataloged_providers_session_never_auto_compacts_and_reports_no_cos
                 }
                 let _ = counted.send(String::from_utf8_lossy(&request).into_owned());
 
-                let body = include_str!("fixtures/openai_happy_path.sse");
+                let body =
+                    include_str!("../../ganja-provider/tests/fixtures/openai_happy_path.sse");
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
                      Content-Length: {}\r\n\r\n{body}",

@@ -157,7 +157,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         response(
             "200 OK",
             "text/event-stream",
-            include_str!("fixtures/anthropic_happy_path.sse"),
+            include_str!("../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"),
         ),
         // The third turn is a config-declared endpoint's, and it is refused
         // the same way: a provider a person configured is a request path like

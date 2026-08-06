@@ -95,7 +95,7 @@ Adding a subcommand means adding its assertion there; adding anything that handl
 
 ### Internal
 
-`ganja_core::auth` (store, list, remove, redaction, and the `grok`/`copilot`/`openai` login flows with `device`'s two-call shape), `ganja_core::catalog` (the `models` table), `ganja_core::config::Config` (what the importer's output has to decode as, and what `run` assembles an engine from), `ganja_core::lsp::server::BUILTIN_IDS` (which language servers this build ships, so the CLI's answer and the engine's cannot drift), `ganja_core::Project` (the import's project walk and destination, and where `run`'s session store lives), `ganja_core::Engine` + `provider::select` + `instruction` + `permission` + `tool::Registry` (everything `run` needs to take a turn), `ganja_tui::run`.
+`ganja_provider::auth`, named directly rather than through the engine's re-export (store, list, remove, redaction, and the `grok`/`copilot`/`openai` login flows with `device`'s two-call shape) — `login.rs` has no engine and no reason to build one; `ganja_core::catalog` (the `models` table), `ganja_core::config::Config` (what the importer's output has to decode as, and what `run` assembles an engine from), `ganja_core::lsp::server::BUILTIN_IDS` (which language servers this build ships, so the CLI's answer and the engine's cannot drift), `ganja_core::Project` (the import's project walk and destination, and where `run`'s session store lives), `ganja_core::Engine` + `provider::select` + `instruction` + `permission` + `tool::Registry` (everything `run` needs to take a turn), `ganja_tui::run`.
 
 ### External
 

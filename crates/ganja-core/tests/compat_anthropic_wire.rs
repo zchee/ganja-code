@@ -87,7 +87,7 @@ async fn a_config_named_anthropic_compatible_endpoint_speaks_messages_on_the_key
             }
         }
 
-        let body = include_str!("fixtures/anthropic_happy_path.sse");
+        let body = include_str!("../../ganja-provider/tests/fixtures/anthropic_happy_path.sse");
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()

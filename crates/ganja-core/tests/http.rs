@@ -320,7 +320,9 @@ fn text(events: &[ProviderEvent]) -> String {
 #[tokio::test]
 async fn anthropic_streams_a_reply_over_a_real_socket() {
     let endpoint = serve(
-        vec![streamed(include_str!("fixtures/anthropic_happy_path.sse"))],
+        vec![streamed(include_str!(
+            "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
+        ))],
         Duration::ZERO,
     )
     .await;
@@ -340,7 +342,9 @@ async fn anthropic_streams_a_reply_over_a_real_socket() {
 #[tokio::test]
 async fn openai_streams_a_reply_over_a_real_socket() {
     let endpoint = serve(
-        vec![streamed(include_str!("fixtures/openai_happy_path.sse"))],
+        vec![streamed(include_str!(
+            "../../ganja-provider/tests/fixtures/openai_happy_path.sse"
+        ))],
         Duration::ZERO,
     )
     .await;
@@ -363,7 +367,7 @@ async fn openai_streams_a_reply_over_a_real_socket() {
 #[tokio::test]
 async fn anthropic_puts_its_tools_and_its_call_history_on_the_wire() {
     let endpoint = record(vec![streamed(include_str!(
-        "fixtures/anthropic_happy_path.sse"
+        "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
     ))])
     .await;
     let provider = AnthropicProvider::new(CANARY)
@@ -426,7 +430,7 @@ async fn anthropic_puts_its_tools_and_its_call_history_on_the_wire() {
 #[tokio::test]
 async fn openai_puts_its_tools_and_its_call_history_on_the_wire() {
     let endpoint = record(vec![streamed(include_str!(
-        "fixtures/openai_happy_path.sse"
+        "../../ganja-provider/tests/fixtures/openai_happy_path.sse"
     ))])
     .await;
     let provider = OpenAiProvider::new(CANARY)
@@ -492,10 +496,18 @@ async fn a_redirect_is_reported_rather_than_followed_to_wherever_it_points() {
     // Answers with a stream, so that following the redirect would look like a
     // perfectly successful turn rather than an error anyone would notice.
     let bait = record(vec![
-        streamed(include_str!("fixtures/anthropic_happy_path.sse")),
-        streamed(include_str!("fixtures/openai_happy_path.sse")),
-        streamed(include_str!("fixtures/anthropic_happy_path.sse")),
-        streamed(include_str!("fixtures/openai_happy_path.sse")),
+        streamed(include_str!(
+            "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
+        )),
+        streamed(include_str!(
+            "../../ganja-provider/tests/fixtures/openai_happy_path.sse"
+        )),
+        streamed(include_str!(
+            "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
+        )),
+        streamed(include_str!(
+            "../../ganja-provider/tests/fixtures/openai_happy_path.sse"
+        )),
     ])
     .await;
 
@@ -652,7 +664,9 @@ async fn a_plain_http_endpoint_off_the_machine_is_refused_before_anything_is_sen
 #[tokio::test]
 async fn a_body_that_stops_early_fails_the_turn_rather_than_finishing_it() {
     let endpoint = serve(
-        vec![streamed(include_str!("fixtures/anthropic_truncated.sse"))],
+        vec![streamed(include_str!(
+            "../../ganja-provider/tests/fixtures/anthropic_truncated.sse"
+        ))],
         Duration::ZERO,
     )
     .await;
@@ -682,7 +696,9 @@ async fn a_body_that_dies_mid_message_reports_why_without_echoing_the_base_url()
     // already removed; this holds that guarantee still, since it is a
     // dependency's promise rather than one this crate keeps itself.
     let endpoint = serve(
-        vec![cut_short(include_str!("fixtures/anthropic_truncated.sse"))],
+        vec![cut_short(include_str!(
+            "../../ganja-provider/tests/fixtures/anthropic_truncated.sse"
+        ))],
         Duration::ZERO,
     )
     .await;
@@ -721,7 +737,9 @@ async fn a_rate_limit_is_retried_and_the_retry_is_what_answers() {
                 &[("retry-after", "0")],
                 r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
             ),
-            streamed(include_str!("fixtures/anthropic_happy_path.sse")),
+            streamed(include_str!(
+                "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
+            )),
         ],
         Duration::ZERO,
     )
@@ -836,7 +854,7 @@ async fn a_server_error_is_retried_until_the_budget_runs_out() {
 async fn a_failure_mid_stream_finishes_the_turn_as_failed_and_keeps_the_text() {
     let endpoint = serve(
         vec![streamed(include_str!(
-            "fixtures/anthropic_mid_stream_error.sse"
+            "../../ganja-provider/tests/fixtures/anthropic_mid_stream_error.sse"
         ))],
         Duration::ZERO,
     )
@@ -887,7 +905,9 @@ async fn a_failure_mid_stream_finishes_the_turn_as_failed_and_keeps_the_text() {
 async fn a_cancel_mid_stream_finishes_the_turn_as_cancelled() {
     // Paced so that the body is still arriving when the cancel lands.
     let endpoint = serve(
-        vec![streamed(include_str!("fixtures/anthropic_happy_path.sse"))],
+        vec![streamed(include_str!(
+            "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
+        ))],
         Duration::from_millis(5),
     )
     .await;

@@ -63,7 +63,7 @@ Integration suites for behavior that spans modules, touches a real socket or a r
 
 | Directory | Purpose |
 |-----------|---------|
-| `fixtures/` | Recorded SSE transcripts and golden task scripts (see `fixtures/AGENTS.md`) |
+| `fixtures/` | Golden task scripts and the MCP reference servers (see `fixtures/AGENTS.md`). The recorded SSE transcripts these suites replay moved to `ganja-provider/tests/fixtures/`, beside the wires that parse them. |
 
 ## For AI Agents
 

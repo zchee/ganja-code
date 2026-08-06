@@ -10,7 +10,8 @@
 //! error, and the caller in `main.rs` is what writes it down. That is what
 //! makes "a login that was cancelled left nothing behind" a fact about which
 //! functions exist rather than a claim about which branches were taken — the
-//! same property [`ganja_core::auth::grok`] and its two siblings are built on.
+//! same property [`ganja_provider::auth::grok`] and its two siblings are built
+//! on.
 //!
 //! **A login that succeeds is a credential stored, and nothing more.** Whether
 //! a model then runs on it is a separate question with a separate answer per
@@ -20,7 +21,7 @@ use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
 
 use anyhow::{Context as _, Result, bail};
 use clap::ValueEnum;
-use ganja_core::auth::{
+use ganja_provider::auth::{
     self, OauthCredential,
     copilot::{self, Deployment},
     device::{DeviceFlow, Tokens},
@@ -34,7 +35,7 @@ use crate::ProviderId;
 ///
 /// A test needs a login it can complete, which means endpoints it controls,
 /// and this module is where the flow objects are built — so there is nowhere
-/// else in the binary to put that seam. `ganja_core::auth` already offers the
+/// else in the binary to put that seam. `ganja_provider::auth` already offers the
 /// injectable constructors this reaches for; what it cannot offer is a way for
 /// a *subprocess* to be told.
 ///
@@ -570,7 +571,7 @@ fn nothing_stored(error: impl std::fmt::Display) -> anyhow::Error {
 ///
 /// A device login waits for minutes on somebody else's browser, and the only
 /// thing that ends it early is this. The flows return promptly when the token
-/// fires and hand back [`ganja_core::auth::device::DeviceError::Cancelled`],
+/// fires and hand back [`ganja_provider::auth::device::DeviceError::Cancelled`],
 /// which is what makes the message truthful as well as prompt.
 ///
 /// The task is aborted on the way out. Left running it would hold the process's
@@ -696,7 +697,7 @@ pub(crate) fn stored(
 
 #[cfg(test)]
 mod tests {
-    use ganja_core::auth::copilot::Deployment;
+    use ganja_provider::auth::copilot::Deployment;
 
     use super::{
         DeploymentAnswer, DeploymentKind, Method, accepted, deployment, label, loopback_origin,
