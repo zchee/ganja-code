@@ -616,10 +616,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let real = dir.path().join("project");
         std::fs::create_dir(&real).expect("the fixture nests");
-        let named = dir.path().join("link");
-
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&real, &named).expect("the link plants");
+        let named = {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&real, &link).expect("the link plants");
+            link
+        };
         #[cfg(not(unix))]
         let named = real.clone();
 
