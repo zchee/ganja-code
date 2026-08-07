@@ -268,9 +268,19 @@ fn create_dir_private(dir: &Path) -> io::Result<()> {
         .create(dir)
 }
 
-/// Windows has no mode bits to set; its ACLs are a P7 problem, the same way
-/// they are for the credential store.
-#[cfg(not(unix))]
+/// Creates only the Windows leaf with an inheritable owner-only DACL.
+///
+/// Parents still go through [`fs::create_dir_all`], unlike the unix twin,
+/// whose recursive builder applies its mode to every directory it creates.
+/// Secrets land only in this leaf, so it is the boundary that must be born
+/// private; an existing leaf is somebody else's and stays exactly as found.
+#[cfg(windows)]
+fn create_dir_private(dir: &Path) -> io::Result<()> {
+    windows_acl::create_dir_private(dir)
+}
+
+/// Platforms without unix modes or Windows DACLs retain the old create.
+#[cfg(not(any(unix, windows)))]
 fn create_dir_private(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
@@ -296,8 +306,22 @@ fn create_private(path: &Path) -> io::Result<fs::File> {
         .open(path)
 }
 
-/// See [`create_dir_private`]'s twin: no modes to set here.
-#[cfg(not(unix))]
+/// Creates a Windows file with the right to replace its inherited DACL.
+#[cfg(windows)]
+fn create_private(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_WRITE, WRITE_DAC};
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .access_mode(FILE_GENERIC_WRITE | WRITE_DAC)
+        .open(path)
+}
+
+/// Platforms without unix modes or Windows DACLs retain the old open.
+#[cfg(not(any(unix, windows)))]
 fn create_private(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .write(true)
@@ -333,9 +357,301 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<fs::File> {
 
         file.set_permissions(fs::Permissions::from_mode(PRIVATE))?;
     }
+    // The handle carries WRITE_DAC from its exclusive open, so inheritance is
+    // severed before there is a tool-output byte for another identity to race
+    // for. The name cannot redirect this descriptor-anchored seal.
+    #[cfg(windows)]
+    windows_acl::seal_private(&file)?;
     file.write_all(bytes)?;
 
     Ok(file)
+}
+
+/// Windows spells the unix owner-only modes as protected DACLs granting the
+/// process token's user alone. SYSTEM and Administrators are not named: both
+/// can take ownership regardless, so explicit grants would only widen access.
+#[cfg(windows)]
+mod windows_acl {
+    use std::{
+        fs, io,
+        mem::size_of,
+        os::windows::{ffi::OsStrExt as _, io::AsRawHandle as _},
+        path::Path,
+        ptr,
+    };
+
+    use windows_sys::Win32::{
+        Foundation::{
+            CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE,
+            WIN32_ERROR,
+        },
+        Security::{
+            ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx,
+            Authorization::{SE_FILE_OBJECT, SetSecurityInfo},
+            CONTAINER_INHERIT_ACE, CopySid, DACL_SECURITY_INFORMATION, GetLengthSid,
+            GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor, IsValidSid,
+            OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
+            SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+            SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        },
+        Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    /// The revision accepted by `InitializeSecurityDescriptor`.
+    const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+
+    /// A kernel handle which is not a borrowed file or process pseudo-handle.
+    struct OwnedHandle(HANDLE);
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: this wrapper is constructed only from a successful
+            // OpenProcessToken call and owns that one handle.
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// An aligned, self-contained SID.
+    pub(super) struct OwnedSid {
+        words: Box<[usize]>,
+    }
+
+    impl OwnedSid {
+        fn zeroed(bytes: u32) -> Self {
+            let words = (bytes as usize).div_ceil(size_of::<usize>());
+            Self {
+                words: vec![0; words].into_boxed_slice(),
+            }
+        }
+
+        pub(super) fn as_psid(&self) -> PSID {
+            self.words.as_ptr().cast_mut().cast()
+        }
+
+        fn len(&self) -> u32 {
+            // SAFETY: every constructor validates the SID held by this aligned
+            // allocation.
+            unsafe { GetLengthSid(self.as_psid()) }
+        }
+
+        fn copy_from(source: PSID) -> io::Result<Self> {
+            // SAFETY: source comes from a successful token-information call.
+            if unsafe { IsValidSid(source) } == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Windows returned an invalid user SID",
+                ));
+            }
+
+            // SAFETY: IsValidSid established that this is a readable SID.
+            let length = unsafe { GetLengthSid(source) };
+            let sid = Self::zeroed(length);
+            // SAFETY: the destination is length bytes and source is a valid SID
+            // of exactly that reported length.
+            if unsafe { CopySid(length, sid.as_psid(), source) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(sid)
+        }
+    }
+
+    /// An aligned ACL whose length is carried in its own header.
+    struct OwnedAcl {
+        words: Box<[usize]>,
+    }
+
+    impl OwnedAcl {
+        fn as_mut_ptr(&mut self) -> *mut ACL {
+            self.words.as_mut_ptr().cast()
+        }
+
+        fn as_ptr(&self) -> *const ACL {
+            self.words.as_ptr().cast()
+        }
+    }
+
+    /// The current process token's user, copied out before its token closes.
+    pub(super) fn process_user() -> io::Result<OwnedSid> {
+        let mut token = ptr::null_mut();
+        // SAFETY: GetCurrentProcess is a borrowed pseudo-handle and token is a
+        // valid out pointer receiving an owned handle on success.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = OwnedHandle(token);
+
+        let mut length = 0;
+        // SAFETY: a zero-sized first query is how GetTokenInformation reports
+        // the required TOKEN_USER allocation.
+        let queried =
+            unsafe { GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut length) };
+        if queried != 0 {
+            return Err(io::Error::other(
+                "Windows returned token-user data without a buffer",
+            ));
+        }
+        let source = io::Error::last_os_error();
+        if source.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
+            return Err(source);
+        }
+
+        let words = (length as usize).div_ceil(size_of::<usize>());
+        let mut information = vec![0usize; words];
+        // SAFETY: the aligned buffer is at least length bytes and the token is
+        // live for the call.
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                information.as_mut_ptr().cast(),
+                length,
+                &mut length,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: a successful TokenUser query initializes a TOKEN_USER at the
+        // start of the suitably aligned buffer.
+        let user = unsafe { information.as_ptr().cast::<TOKEN_USER>().read() };
+        OwnedSid::copy_from(user.User.Sid)
+    }
+
+    /// Builds the one-ACE DACL written by ganja.
+    fn private_acl(user: &OwnedSid, flags: u32) -> io::Result<OwnedAcl> {
+        let bytes = size_of::<ACL>()
+            .checked_add(size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>())
+            .and_then(|bytes| bytes.checked_add(user.len() as usize))
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .ok_or_else(|| io::Error::other("the private DACL is too large"))?;
+        let words = (bytes as usize).div_ceil(size_of::<usize>());
+        let mut acl = OwnedAcl {
+            words: vec![0; words].into_boxed_slice(),
+        };
+
+        // SAFETY: acl owns an aligned allocation of bytes bytes.
+        if unsafe { InitializeAcl(acl.as_mut_ptr(), bytes, ACL_REVISION) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the initialized ACL has room for this SID-bearing ACE and
+        // user is a live, valid SID.
+        if unsafe {
+            AddAccessAllowedAceEx(
+                acl.as_mut_ptr(),
+                ACL_REVISION,
+                flags,
+                FILE_ALL_ACCESS,
+                user.as_psid(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(acl)
+    }
+
+    /// Severs inheritance and grants the process user alone full control.
+    pub(super) fn seal_private(file: &fs::File) -> io::Result<()> {
+        let user = process_user()?;
+        let acl = private_acl(&user, 0)?;
+        // SAFETY: file is live, its create access included WRITE_DAC, and acl
+        // stays live for the duration of SetSecurityInfo.
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle().cast(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                acl.as_ptr(),
+                ptr::null(),
+            )
+        };
+        win32(status)
+    }
+
+    /// Creates the leaf with an owner-only DACL inherited by its children.
+    pub(super) fn create_dir_private(dir: &Path) -> io::Result<()> {
+        let name = dir.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the private spill directory needs a leaf name",
+            )
+        })?;
+        let parent = dir
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+
+        // Canonicalizing the now-existing parent preserves std's `\\?\`
+        // conversion before this raw Win32 leaf create, including UNC paths
+        // and paths beyond the legacy CreateDirectoryW limit.
+        let path = fs::canonicalize(parent)?.join(name);
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a spill directory path contains a NUL",
+            ));
+        }
+        wide.push(0);
+
+        let user = process_user()?;
+        let acl = private_acl(&user, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)?;
+        let mut descriptor = SECURITY_DESCRIPTOR::default();
+        let descriptor_pointer = ptr::addr_of_mut!(descriptor).cast();
+        // SAFETY: descriptor is live writable storage for an absolute security
+        // descriptor and the documented revision initializes that storage.
+        if unsafe { InitializeSecurityDescriptor(descriptor_pointer, SECURITY_DESCRIPTOR_REVISION) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: descriptor is initialized and acl remains live through the
+        // CreateDirectoryW call that consumes these attributes.
+        if unsafe { SetSecurityDescriptorDacl(descriptor_pointer, 1, acl.as_ptr(), 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: descriptor is initialized; setting the protected bit is what
+        // prevents a parent grant from widening the one-ACE DACL at birth.
+        if unsafe {
+            SetSecurityDescriptorControl(descriptor_pointer, SE_DACL_PROTECTED, SE_DACL_PROTECTED)
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor_pointer,
+            bInheritHandle: 0,
+        };
+        // SAFETY: wide is NUL-terminated, attributes points to the live
+        // descriptor, and every SID/ACL allocation outlives this call.
+        if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } != 0 {
+            return Ok(());
+        }
+
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    fn win32(status: WIN32_ERROR) -> io::Result<()> {
+        if status == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(status as i32))
+        }
+    }
 }
 
 /// The ganja data directory's `tool-output` subdirectory, or [`None`] when
@@ -714,6 +1030,185 @@ mod tests {
             & 0o777
     }
 
+    #[cfg(windows)]
+    mod windows_dacl {
+        use std::{
+            ffi::c_void,
+            fs, io,
+            os::windows::{fs::OpenOptionsExt as _, io::AsRawHandle as _},
+            path::Path,
+            ptr, slice,
+        };
+
+        use windows_sys::Win32::{
+            Foundation::{LocalFree, WIN32_ERROR},
+            Security::{
+                ACCESS_ALLOWED_ACE, ACL,
+                Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
+                CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+                GetSecurityDescriptorControl, GetSecurityDescriptorLength, INHERITED_ACE,
+                OBJECT_INHERIT_ACE, SE_DACL_PROTECTED,
+            },
+            Storage::FileSystem::{FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL},
+        };
+
+        struct LocalAllocation(*mut c_void);
+
+        impl Drop for LocalAllocation {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    // SAFETY: GetSecurityInfo returns LocalAlloc-owned storage.
+                    unsafe {
+                        LocalFree(self.0);
+                    }
+                }
+            }
+        }
+
+        struct Descriptor {
+            _allocation: LocalAllocation,
+            pointer: *mut c_void,
+            dacl: *mut ACL,
+        }
+
+        impl Descriptor {
+            fn read(path: &Path, directory: bool) -> Self {
+                let flags = if directory {
+                    FILE_FLAG_BACKUP_SEMANTICS
+                } else {
+                    0
+                };
+                let file = fs::OpenOptions::new()
+                    .access_mode(READ_CONTROL)
+                    .custom_flags(flags)
+                    .open(path)
+                    .expect("the owner can inspect the security descriptor");
+                let mut dacl = ptr::null_mut();
+                let mut pointer = ptr::null_mut();
+                // SAFETY: file is live with READ_CONTROL and the requested out
+                // pointers remain valid for the call.
+                let status = unsafe {
+                    GetSecurityInfo(
+                        file.as_raw_handle().cast(),
+                        SE_FILE_OBJECT,
+                        DACL_SECURITY_INFORMATION,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        &mut dacl,
+                        ptr::null_mut(),
+                        &mut pointer,
+                    )
+                };
+                win32(status).expect("the security descriptor reads");
+
+                Self {
+                    _allocation: LocalAllocation(pointer),
+                    pointer,
+                    dacl,
+                }
+            }
+
+            fn bytes(&self) -> Vec<u8> {
+                // SAFETY: pointer is the live successful GetSecurityInfo
+                // allocation held by _allocation.
+                let length = unsafe { GetSecurityDescriptorLength(self.pointer) } as usize;
+                assert_ne!(length, 0, "the descriptor has a serialized length");
+                // SAFETY: Windows reported exactly length initialized bytes for
+                // this security descriptor allocation.
+                unsafe { slice::from_raw_parts(self.pointer.cast(), length) }.to_vec()
+            }
+        }
+
+        pub(super) fn assert_owner_only(
+            path: &Path,
+            directory: bool,
+            protected: Option<bool>,
+            inherited: bool,
+            inheritable: Option<bool>,
+        ) {
+            let descriptor = Descriptor::read(path, directory);
+            assert!(!descriptor.dacl.is_null(), "the DACL must not be NULL");
+
+            if let Some(protected) = protected {
+                let mut control = 0;
+                let mut revision = 0;
+                // SAFETY: pointer is the live successful GetSecurityInfo
+                // allocation held by descriptor.
+                assert_ne!(
+                    unsafe {
+                        GetSecurityDescriptorControl(
+                            descriptor.pointer,
+                            &mut control,
+                            &mut revision,
+                        )
+                    },
+                    0,
+                    "the descriptor control reads: {}",
+                    io::Error::last_os_error()
+                );
+                assert_eq!(
+                    control & SE_DACL_PROTECTED != 0,
+                    protected,
+                    "the DACL protection bit"
+                );
+            }
+
+            // SAFETY: GetSecurityInfo returned a valid ACL header.
+            let header = unsafe { &*descriptor.dacl };
+            assert_eq!(
+                header.AceCount, 1,
+                "only the process user should receive access"
+            );
+            let mut raw = ptr::null_mut();
+            // SAFETY: index zero exists by the assertion above.
+            assert_ne!(
+                unsafe { GetAce(descriptor.dacl, 0, &mut raw) },
+                0,
+                "the owner ACE reads: {}",
+                io::Error::last_os_error()
+            );
+            // SAFETY: ganja writes an ACCESS_ALLOWED_ACE at index zero, and an
+            // inherited copy retains that shape.
+            let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
+            let sid = ptr::addr_of!(ace.SidStart).cast_mut().cast();
+            let user =
+                super::super::windows_acl::process_user().expect("the process has a user SID");
+            assert_eq!(ace.Mask, FILE_ALL_ACCESS);
+            // SAFETY: both pointers identify live, valid SIDs.
+            assert_ne!(unsafe { EqualSid(sid, user.as_psid()) }, 0);
+
+            let flags = u32::from(ace.Header.AceFlags);
+            assert_eq!(
+                flags & INHERITED_ACE != 0,
+                inherited,
+                "the ACE inheritance origin"
+            );
+            if let Some(inheritable) = inheritable {
+                assert_eq!(
+                    flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE),
+                    if inheritable {
+                        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+                    } else {
+                        0
+                    },
+                    "only a directory's grant should propagate to children"
+                );
+            }
+        }
+
+        pub(super) fn descriptor_bytes(path: &Path, directory: bool) -> Vec<u8> {
+            Descriptor::read(path, directory).bytes()
+        }
+
+        fn win32(status: WIN32_ERROR) -> io::Result<()> {
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(status as i32))
+            }
+        }
+    }
+
     /// A spilled output holds whatever the tool read — an `env`, a `.env`, a
     /// private repository's history — and [`super::candidate_dirs`] will fall
     /// back to a world-readable `/tmp`. Neither the file nor the directory
@@ -738,6 +1233,58 @@ mod tests {
             mode(&only_entry(&spill)),
             0o600,
             "a spilled tool output must not be readable by everyone on the machine"
+        );
+    }
+
+    /// The Windows vocabulary for the unix mode test above: both descriptors
+    /// are protected and grant full control only to the process user, while
+    /// the directory grant is the one that may flow to children.
+    #[cfg(windows)]
+    #[test]
+    fn a_spilled_output_is_readable_only_by_its_owner() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let spill = dir.path().join("nested").join("tool-output");
+        let long = "x".repeat(MAX_CHARS + 1);
+
+        assert!(clamp_with(&long, &spill).truncated);
+
+        windows_dacl::assert_owner_only(&spill, true, Some(true), false, Some(true));
+        windows_dacl::assert_owner_only(&only_entry(&spill), false, Some(true), false, Some(false));
+    }
+
+    /// A child created through plain std I/O proves the directory descriptor,
+    /// rather than the spill file's own seal, is enough to keep new contents
+    /// owner-only from birth.
+    #[cfg(windows)]
+    #[test]
+    fn a_private_spill_directory_passes_its_owner_only_acl_to_a_plain_file() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let spill = dir.path().join("nested").join("tool-output");
+        super::create_dir_private(&spill).expect("the private leaf is created");
+        let child = spill.join("plain-child");
+
+        std::fs::write(&child, "not sealed by write_private").expect("the plain child is born");
+
+        windows_dacl::assert_owner_only(&child, false, None, true, None);
+    }
+
+    /// A directory somebody else made is theirs: seeing `ALREADY_EXISTS`
+    /// succeeds without replacing, protecting or otherwise rewriting its
+    /// security descriptor.
+    #[cfg(windows)]
+    #[test]
+    fn a_preexisting_spill_directory_keeps_its_security_descriptor() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let spill = dir.path().join("nested").join("tool-output");
+        std::fs::create_dir_all(&spill).expect("the fixture directory is creatable");
+        let before = windows_dacl::descriptor_bytes(&spill, true);
+
+        super::create_dir_private(&spill).expect("an existing directory is accepted");
+
+        assert_eq!(
+            windows_dacl::descriptor_bytes(&spill, true),
+            before,
+            "the existing directory's descriptor must remain byte-identical"
         );
     }
 
