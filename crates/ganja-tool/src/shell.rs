@@ -1100,9 +1100,13 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
+    // Only the unix-gated spill-failure test crosses the threshold on purpose,
+    // so the import is gated with it rather than left dead on windows.
+    #[cfg(unix)]
+    use super::SPILL_THRESHOLD;
     use super::{
-        Collector, DEFAULT_TIMEOUT, KEEP, NoPosixShell, SPILL_THRESHOLD, ShellTool, Spill, Spilled,
-        accept_shell, assemble, posix_shell, tail,
+        Collector, DEFAULT_TIMEOUT, KEEP, NoPosixShell, ShellTool, Spill, Spilled, accept_shell,
+        assemble, posix_shell, tail,
     };
     use crate::{FileTimes, Tool, ToolCtx, ToolError, truncate};
 
@@ -1601,6 +1605,9 @@ mod tests {
     }
 
     /// The files sitting in `dir`, so a test can say how many were written.
+    /// Its one caller is the unix-gated spill-failure test, so the helper is
+    /// gated with it rather than left dead on windows.
+    #[cfg(unix)]
     fn spill_files(dir: &Path) -> Vec<PathBuf> {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
             .expect("the spill directory exists")

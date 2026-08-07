@@ -68,6 +68,10 @@ use crate::ToolError;
 /// Asked of the open descriptor rather than of the path, for the reason the
 /// whole module exists: a second look at the name is a second chance for
 /// somebody to change what it means.
+///
+/// Only the unix descriptor walk asks; the windows open refuses a directory
+/// by itself, so the question is gated with its one asker.
+#[cfg(unix)]
 fn refuse_directory(file: &File, at: &Path) -> Result<(), AnchorError> {
     // A descriptor whose metadata cannot be read is not a directory anybody can
     // prove, and failing the call on that would refuse ordinary files on any
@@ -327,6 +331,10 @@ fn apply<'a>(mut base: PathBuf, rest: impl Iterator<Item = Component<'a>>) -> Pa
 /// Splits a directory path into the deepest part of it that exists —
 /// canonicalised, so the walk that follows has nothing left to resolve — and
 /// the components that do not exist yet, outermost first.
+///
+/// Only the unix `mkdirat` walk needs the split; gated with its one caller
+/// rather than left dead where the windows open creates parents itself.
+#[cfg(unix)]
 fn split_existing(dir: &Path) -> Result<(PathBuf, Vec<OsString>), AnchorError> {
     let mut head = dir.to_owned();
     let mut missing: Vec<OsString> = Vec::new();
