@@ -248,6 +248,11 @@ jobs:
           persist-credentials: false
 
       - name: cache the upstream dependency install
+        # Not on windows: bun's node_modules layout does not survive the
+        # cache tar round-trip there — a restored tree reds the golden and
+        # mcp suites with EPERM while a fresh install stays green — so the
+        # lane pays the install every run instead of inheriting the poison.
+        if: runner.os != 'Windows'
         uses: actions/cache@v6
         with:
           path: upstream/opencode-v1.18.13/node_modules
