@@ -263,6 +263,7 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
         Some("the call was cancelled"),
         "a cancelled call still closes as the cancel it was"
     );
+    stage("cancel closed as itself");
 
     // Only now is there nothing left to keep reading, so the wait for the
     // witness's silence can be a plain sleep. It runs past the moment the
@@ -271,6 +272,7 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
     if let Some(remaining) = SILENCE_WINDOW.checked_sub(waited) {
         tokio::time::sleep(remaining).await;
     }
+    stage("silence window elapsed");
     assert!(
         !survived.exists(),
         "the grandchild outlived the cancel by {SILENCE_WINDOW:?}; \
@@ -278,4 +280,8 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
     );
 
     drain.abort();
+    // The last line this test can speak: anything the runner's kill reports
+    // after it prints means the hang lives in teardown — the runtime joining
+    // something the cancelled call left behind — not in the test's own story.
+    stage("returning");
 }
