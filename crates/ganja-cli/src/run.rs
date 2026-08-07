@@ -116,10 +116,11 @@ impl Kind {
 
 /// The permissions a non-interactive turn refuses outright, at every pattern.
 ///
-/// Upstream's non-interactive ruleset (`run.ts:430-448`), ported verbatim
-/// including the fact that **ganja has none of these tools yet**. That is the
-/// point: the rules are what make a later `question` safe in `run` by
-/// construction, rather than something whoever adds it has to remember.
+/// Upstream's non-interactive ruleset (`run.ts:430-448`), ported verbatim —
+/// originally ahead of the tools it names, so that `question` would be safe
+/// in `run` by construction rather than by whoever added it remembering.
+/// `question` has since landed and the construction held; `plan_enter` and
+/// `plan_exit` are still names with nothing behind them.
 ///
 /// Two consumers, because a run reaches its engine two ways:
 /// [`refuse_interactive_permissions`] installs them as standing rules on an
@@ -353,6 +354,13 @@ fn assemble(cwd: &Path, overrides: Overrides) -> Result<Assembled> {
             ganja_core::tool::webfetch::WebfetchTool::allowing_private(),
         ));
     }
+    // Over the top of the roster's rootless one, out of the **same** value the
+    // prompt's `<available_skills>` block is built from below: a session that
+    // is offered a skill has to be able to load it, and only a caller holding
+    // the config and the directory can resolve where either half looks.
+    tools = tools.with(Arc::new(ganja_core::tool::skill::SkillTool::over(
+        instruction::skill_roots(&config, cwd),
+    )));
 
     let mut engine = Engine::persistent(
         selection.provider,

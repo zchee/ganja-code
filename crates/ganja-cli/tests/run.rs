@@ -85,6 +85,25 @@ impl Run {
         command
     }
 
+    /// [`Run::ganja`] with the three variables that decide where ganja's
+    /// **global** home lands pinned to this run's own directories.
+    ///
+    /// The rest of the suite leaves them inherited, and nothing it asserts can
+    /// tell a developer's global config apart from none. A skills assertion
+    /// can: the global tier is a second place a skill may be found, so a
+    /// machine holding one would answer the call for a reason this test is not
+    /// about, and the project tier it exists to prove would go untested on
+    /// exactly the machine that has skills of its own.
+    fn ganja_in_its_own_homes(&self) -> Command {
+        let mut command = self.ganja();
+        command
+            .env("HOME", self.data.path())
+            .env("XDG_CONFIG_HOME", self.data.path().join("config"))
+            .env_remove("GANJA_CONFIG_HOME");
+
+        command
+    }
+
     /// The session ids `ganja sessions` lists for this project, newest first.
     fn sessions(&self) -> Vec<String> {
         let listed = self.ganja().arg("sessions").assert().success();
@@ -784,6 +803,61 @@ fn a_run_with_only_piped_text_sends_it_as_the_message() {
         .stdout(predicate::str::contains(CLOSING));
 
     assert_eq!(asked(&run), "only-piped");
+}
+
+/// What the prompt offers, the call can load — proved through the binary
+/// rather than through an engine a test assembled.
+///
+/// Both halves of the feature are built from one `instruction::skill_roots`
+/// value, but only a caller holding the config and the directory can resolve
+/// it, so the roster's own skill tool holds none. A run that composed the
+/// prompt from those roots and left the tool rootless would offer a skill it
+/// then refused to load, which is a session lying to the model about what it
+/// can do; this is the assertion that a real frontend hands the tool the same
+/// value.
+#[test]
+fn a_skill_in_the_projects_own_tier_loads_through_a_headless_turn() {
+    let run = Run::playing(&serde_json::json!({
+        "cadence_ms": 1,
+        "turns": [
+            {
+                "text": "loading it",
+                "tool_calls": [{"name": "skill", "args": {"name": "porting"}}],
+            },
+            {"text": CLOSING},
+        ],
+    }));
+    let skill = run.path().join(".ganja").join("skills").join("porting");
+    fs::create_dir_all(&skill).expect("the skill's directory is creatable");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: porting\ndescription: How to port a module.\n---\nRead the upstream file first.\n",
+    )
+    .expect("the skill is writable");
+
+    let ran = run
+        .ganja_in_its_own_homes()
+        .args(["run", "--format", "json", "load the porting skill"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(ran.get_output().stdout.clone()).expect("text");
+
+    assert!(
+        stdout.contains(CLOSING),
+        "the whole script has to have run: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("<skill_content name=\\\"porting\\\">")
+            && stdout.contains("Read the upstream file first."),
+        "the call is handed the skill's own instructions: {stdout:?}"
+    );
+    // The failure this exists to catch spells itself out, so name it: a tool
+    // holding no roots answers every call with this sentence, whatever the
+    // prompt beside it offered.
+    assert!(
+        !stdout.contains("Available skills: none"),
+        "and the tool was handed the roots the prompt was composed from: {stdout:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
