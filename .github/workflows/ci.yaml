@@ -189,16 +189,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: 
+        os:
           - ubuntu-26.04
           - xcode-27
-          # windows-2025 is paused by user ruling, not deleted: the tree has
-          # never been asked to compile there, and the observational lane was
-          # costing red runs on runner infrastructure alone — a failure during
-          # job setup lands before continue-on-error can excuse it. The lane
-          # returns when the Windows behavior work (ACLs on the auth store and
-          # spill files) is implemented, blocking from the day it returns.
+          # Back by user ruling now that the windows behavior work has landed
+          # code to test: observational first, because some of this suite has
+          # never once run here and a lane that is red on arrival gates
+          # nothing. It stops excusing itself in a deliberate flip commit
+          # after consecutive runs come back green or fully named — red by
+          # red, each one a product fix, a test fix, or a divergence with a
+          # name in the plan's ledger.
+          - windows-2025
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-2025' }}
     # bash exists on every runner here (Git Bash on windows), so one shell
     # keeps the run steps portable instead of forking them per OS.
     defaults:
