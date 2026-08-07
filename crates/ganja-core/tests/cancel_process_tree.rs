@@ -80,6 +80,18 @@ const ASK_BUDGET: Duration = Duration::from_secs(30);
 /// Between polls of the marker files.
 const TICK: Duration = Duration::from_millis(50);
 
+/// Names the stage the test just reached, on stderr, where a timeout report
+/// will carry it.
+///
+/// The first lane run died at nextest's 240s kill with nothing to read even
+/// though every await below carries its own budget — so whatever is stuck
+/// sits before, or freezes, those budgets. Until that run's captured output
+/// names the last stage reached, every theory is a guess; these lines are
+/// the missing evidence, cheap enough to keep once they have answered.
+fn stage(name: &str) {
+    eprintln!("stage: {name}");
+}
+
 /// `path` as a POSIX shell will read it.
 ///
 /// The command string is handed to a POSIX shell, which reads `\` as an escape,
@@ -147,6 +159,7 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
     });
     let script_path = dir.path().join("script.json");
     std::fs::write(&script_path, script.to_string()).expect("the script is writable");
+    stage("script written");
 
     let engine = Engine::new(
         // Not `FakeProvider::default()`: that one takes its script from the
@@ -156,7 +169,9 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
         Arc::new(Registry::with_builtins()),
         Permissions::default(),
     );
+    stage("engine built, registry probed for a shell");
     let mut stream = engine.subscribe().await.expect("the first subscriber wins");
+    stage("subscribed");
 
     // See the module docs: the subscriber is lossless, so it is drained for the
     // whole test by a task that does nothing else. Everything below reads the
@@ -177,12 +192,14 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
         })
         .await
         .expect("an idle engine accepts a prompt");
+    stage("prompt accepted");
 
     // `bash` asks by default, and nothing runs until the answer arrives.
     loop {
         if let Event::PermissionRequested { id, .. } =
             next_event(&mut events, ASK_BUDGET, "the tool asked to run the command").await
         {
+            stage("permission asked");
             engine
                 .send(Command::ReplyPermission {
                     id,
@@ -190,11 +207,13 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
                 })
                 .await
                 .expect("a reply is always accepted");
+            stage("permission answered");
             break;
         }
     }
 
     wait_for(&started, "the command never forked its witness").await;
+    stage("witness started");
     assert!(
         !survived.exists(),
         "the witness announced survival before anything cancelled it; \
@@ -206,6 +225,7 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
         .send(Command::CancelTurn)
         .await
         .expect("a running engine accepts a cancel");
+    stage("cancel issued");
 
     // The turn is drained to its finish *first*. What the cancel looks like
     // from outside is unchanged: the call's part closes as an error carrying
@@ -236,6 +256,7 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
         }
     };
 
+    stage("turn finished");
     assert_eq!(reason, FinishReason::Cancelled);
     assert_eq!(
         call_error.as_deref(),
