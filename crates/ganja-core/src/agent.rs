@@ -235,8 +235,11 @@ fn builtins(config: &Config) -> Vec<Agent> {
             hidden: false,
             prompt: None,
             model: None,
-            // Upstream's delta is `question: allow` and `plan_enter: allow`,
-            // both permissions with no tool behind them here.
+            // Upstream's delta is `question: allow` and `plan_enter: allow`.
+            // `question` has a tool behind it now and `ask` is what an
+            // interactive session wants for it; `plan_enter` still names
+            // nothing. Either way the delta is not adopted, so the baseline
+            // stays what it was.
             rules: assemble(Vec::new()),
         },
         Agent {

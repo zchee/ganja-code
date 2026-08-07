@@ -63,10 +63,51 @@ fn asks_to_run_something() -> Value {
     serde_json::json!({
         "cadence_ms": 1,
         "turns": [
-            {"text": "Let me look.", "tool_calls": [{"name": "bash", "args": {"command": "echo attached"}}]},
+            {"text": "Let me look.", "tool_calls": [{"name": "bash", "args": {"command": SHELL_COMMAND}}]},
             {"text": CLOSING},
         ],
     })
+}
+
+/// What [`asks_to_run_something`] and [`asks_then_questions`] run, and what a
+/// completed call is reported under: the shell tool titles a call with its own
+/// command.
+const SHELL_COMMAND: &str = "echo attached";
+
+/// A script that first asks to run something and then asks the *person*
+/// something.
+///
+/// Two dialogs of different kinds in one turn is the whole point: `--auto`
+/// exists to answer the first, and must never answer the second, so a run that
+/// treats them alike is visible here and nowhere else.
+fn asks_then_questions() -> Value {
+    serde_json::json!({
+        "cadence_ms": 1,
+        "turns": [
+            {"text": "Let me look.", "tool_calls": [{"name": "bash", "args": {"command": SHELL_COMMAND}}]},
+            {"text": "Now to ask.", "tool_calls": [{"name": "question", "args": {"questions": [{
+                "question": "Which database?",
+                "header": "Database",
+                "options": [
+                    {"label": "Postgres", "description": "Relational"},
+                    {"label": "SQLite", "description": "A file"},
+                ],
+            }]}}]},
+            {"text": CLOSING},
+        ],
+    })
+}
+
+/// The server-side rule that puts a `question` call in front of the dialog
+/// loop at all.
+///
+/// Nothing asks about `question` by default — it is not in the permission
+/// engine's ask-by-default set — and a `serve` engine installs none of `run`'s
+/// standing refusals, so without this the call would simply be allowed and
+/// there would be no dialog to observe. A deployment that wants to see its
+/// model's questions writes exactly this.
+fn asks_before_questioning() -> Value {
+    serde_json::json!({"permission": {"question": "ask"}})
 }
 
 /// Everything a `ganja` invocation must not inherit from the machine running
@@ -142,11 +183,25 @@ struct Server {
 
 impl Server {
     fn playing(script: &Value) -> Self {
+        Self::playing_under(script, None)
+    }
+
+    /// The same, with `configured` written to the project's `ganja.json`.
+    ///
+    /// The server's config is the only tier an attached run can move: this
+    /// process assembles no engine, and the one it drives belongs to whoever
+    /// started it. A rule a test wants the *dialog loop* to meet therefore has
+    /// to be written here rather than passed on the client's command line.
+    fn playing_under(script: &Value, configured: Option<&Value>) -> Self {
         let project = temporary();
         let data = temporary();
         let config = temporary();
         fs::write(project.path().join("script.json"), script.to_string())
             .expect("the script is writable");
+        if let Some(configured) = configured {
+            fs::write(project.path().join("ganja.json"), configured.to_string())
+                .expect("the config is writable");
+        }
 
         let mut child = Spawn::new(env!("CARGO_BIN_EXE_ganja"))
             .args(["serve", "--port", "0"])
@@ -211,6 +266,12 @@ impl Server {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
         sealed(&mut command, elsewhere.path(), data.path(), config.path());
         let assert = command
+            // A run is a wait like every other in this file, and this is the
+            // one that can be made to never end: a dialog the client opened on
+            // the server and then declined to answer holds the turn open, and
+            // there is nothing left to close it. Bounded here so that becomes
+            // a named failure rather than a suite that stops progressing.
+            .timeout(DEADLINE)
             .args(["run", "--attach", &self.url()])
             .args(arguments)
             .assert()
@@ -413,6 +474,56 @@ fn an_attached_run_refuses_a_dialog_nobody_is_there_to_answer() {
     // of what ran.
     assert_eq!(attached, in_process);
     assert!(attached.contains(CLOSING), "{attached:?}");
+}
+
+/// `--auto` answers the dialogs a person would have answered, and refuses the
+/// one whose whole purpose *is* a person.
+///
+/// The distinction only exists on the attached path. A local run installs
+/// standing rules that refuse `question` inside the engine before a dialog can
+/// open; a `serve` engine deliberately keeps its dialogs interactive and is not
+/// this run's to reconfigure, so the same rule has to be applied here, on the
+/// dialogs the event stream delivers. One script exercises both halves at once
+/// — a shell call `--auto` answers and a question it must not — because a run
+/// that treated them alike would still pass every assertion either half could
+/// make on its own.
+#[test]
+fn an_attached_auto_run_answers_a_shell_dialog_and_still_refuses_a_question() {
+    let server = Server::playing_under(&asks_then_questions(), Some(&asks_before_questioning()));
+    let (attached, attached_err) =
+        server.attached_run(&["--auto", "--agent", "build", "have a look"]);
+    server.stop();
+
+    // `--auto` is really in force: the shell dialog was answered rather than
+    // refused, so the command ran and is reported as a completed call. Without
+    // this the assertions below would also hold for a run that refused
+    // everything, which is a different build.
+    assert!(
+        attached.contains(SHELL_COMMAND),
+        "the answered dialog's call has to have run: {attached:?}"
+    );
+    // One dialog was refused, and it is the question's. A second line here
+    // would mean `--auto` answered nothing; none would mean it answered this.
+    let refusals = warnings(&attached_err);
+    assert_eq!(
+        refusals.len(),
+        1,
+        "exactly one dialog is refused: {attached_err:?}"
+    );
+    assert!(
+        refusals[0].contains("permission requested: question ("),
+        "and it is the question's: {refusals:?}"
+    );
+    // A refusal is information the model reads, not the end of the turn: the
+    // call is reported failed and the script runs on to its last word.
+    assert!(
+        attached.contains("question failed"),
+        "the refused call is reported as a failed one: {attached:?}"
+    );
+    assert!(
+        attached.contains(CLOSING),
+        "the turn survived the refusal: {attached:?}"
+    );
 }
 
 /// The attached path's own refusals: a session the server does not hold is
