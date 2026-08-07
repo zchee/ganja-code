@@ -517,6 +517,18 @@ pub struct Config {
     /// Cheaper model for the requests a session makes about itself — titles
     /// and summaries.
     pub small_model: Option<String>,
+    /// Provider a session runs as when no other tier names one: a builtin id,
+    /// or one of [`provider`](Self::provider)'s.
+    ///
+    /// Not a key upstream has. It supplies only the provider — the model still
+    /// comes from the named-model tiers or the catalog's default — and it sits
+    /// *below* [`model`](Self::model)'s provider half in
+    /// [`crate::provider::select`]'s chain, because a key that names both is
+    /// more specific than one that names one. An id nothing ships or declares
+    /// is refused at selection rather than here: the `provider` table it may
+    /// point into can arrive from another tier, so a per-file check would
+    /// refuse a config that merges into a valid one.
+    pub default_provider: Option<String>,
     /// Agent a session starts on.
     pub default_agent: Option<String>,
     /// Agent definitions, by name.
@@ -740,6 +752,7 @@ impl Config {
         overlay(&mut self.schema, other.schema);
         overlay(&mut self.model, other.model);
         overlay(&mut self.small_model, other.small_model);
+        overlay(&mut self.default_provider, other.default_provider);
         overlay(&mut self.default_agent, other.default_agent);
         overlay(&mut self.theme, other.theme);
         overlay(&mut self.theme_mode, other.theme_mode);
@@ -1951,6 +1964,7 @@ mod tests {
               "$schema": "https://ganja.invalid/config.json",
               "model": "anthropic/claude-sonnet-5",
               "small_model": "anthropic/claude-haiku-4.5",
+              "default_provider": "openai",
               "default_agent": "plan",
               "agent": {"plan": {"mode": "primary", "disable": false}},
               "permission": {"bash": "ask"},
@@ -1970,6 +1984,7 @@ mod tests {
         .expect("every curated key is a key");
 
         assert!(config.schema.is_some());
+        assert_eq!(config.default_provider.as_deref(), Some("openai"));
         assert_eq!(config.default_agent.as_deref(), Some("plan"));
         assert_eq!(config.agent["plan"].mode, Some(AgentMode::Primary));
         assert_eq!(config.agent["plan"].disable, Some(false));
@@ -1983,6 +1998,18 @@ mod tests {
             config.provider["local-llama"].dialect,
             Dialect::OpenaiChatCompletions
         );
+    }
+
+    /// The key is a scalar like `model`, and merges like one: a tier that
+    /// says nothing leaves the tier below it alone, and a closer one replaces.
+    #[test]
+    fn a_closer_tier_decides_the_default_provider_only_when_it_names_one() {
+        let mut merged = parse(r#"{"default_provider": "anthropic"}"#).expect("it parses");
+        merged.merge(parse(r#"{"model": "openai/gpt-5.6"}"#).expect("it parses"));
+        assert_eq!(merged.default_provider.as_deref(), Some("anthropic"));
+
+        merged.merge(parse(r#"{"default_provider": "openai"}"#).expect("it parses"));
+        assert_eq!(merged.default_provider.as_deref(), Some("openai"));
     }
 
     #[test]

@@ -38,7 +38,10 @@ pub struct Selection {
     pub provider: Arc<dyn Provider>,
     /// Model identifier handed to every [`ChatRequest`].
     pub model: String,
-    /// Set when the provider was defaulted rather than requested.
+    /// Set only when the session fell back to the built-in fake provider — a
+    /// real provider defaulted from a stored login is a session running as
+    /// somebody the user logged in as, which is not a degradation to warn
+    /// about.
     pub notice: Option<String>,
 }
 
@@ -58,21 +61,26 @@ impl fmt::Debug for Selection {
 /// The environment does not describe a session this build can run.
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
-    /// [`PROVIDER_ENV`] names a provider that is neither shipped nor
-    /// configured.
+    /// A tier names a provider that is neither shipped nor configured.
     ///
-    /// The message names **both** tiers. A refusal that listed only
-    /// [`PROVIDERS`] would tell somebody who had just declared an endpoint in
-    /// `ganja.jsonc` that their own entry does not exist, which is the one
-    /// answer that cannot be acted on.
+    /// The message names **both** tiers of what would have been accepted. A
+    /// refusal that listed only [`PROVIDERS`] would tell somebody who had just
+    /// declared an endpoint in `ganja.jsonc` that their own entry does not
+    /// exist, which is the one answer that cannot be acted on. And it names
+    /// which tier asked: four of them can put an id here, and "unset the
+    /// variable" is no repair for a key sitting in a config file.
     #[error(
-        "unsupported {PROVIDER_ENV}={requested:?}; this build ships {}{}",
+        "{named_by} names the unsupported provider {requested:?}; this build ships {}{}",
         PROVIDERS.join(", "),
         also_configured(configured)
     )]
     Unknown {
-        /// What the variable said.
+        /// What the tier said.
         requested: String,
+        /// Which tier said it: the flag, [`PROVIDER_ENV`], or one of the two
+        /// config keys that can name a provider. Not spelled `source`, which
+        /// `thiserror` would read as this error's cause.
+        named_by: &'static str,
         /// The ids this config's `provider` table declares, in the order the
         /// table holds them. Empty for a session with no such table, which is
         /// every session that has not asked for one.
@@ -227,9 +235,11 @@ fn configured_provider(id: &str, entry: &ProviderConfig) -> Result<CompatProvide
 /// Resolves the provider named by [`PROVIDER_ENV`] and the model named by
 /// [`MODEL_ENV`].
 ///
-/// An unset [`PROVIDER_ENV`] selects the fake provider and reports a notice, so
-/// that a bare `cargo run` still demonstrates a streamed reply while making
-/// clear that nothing real is being asked.
+/// An unset [`PROVIDER_ENV`] selects the oldest stored login, when there is
+/// one this build can run as; only a machine with no logins at all falls back
+/// to the fake provider, with a notice, so that a bare `cargo run` still
+/// demonstrates a streamed reply while making clear that nothing real is being
+/// asked.
 ///
 /// Equivalent to [`select`] with a config that asks for nothing, which is what
 /// it is: the environment is one tier of a chain, and this is the chain with
@@ -246,7 +256,7 @@ pub fn from_env() -> Result<Selection, SelectionError> {
 
 /// Resolves the provider and model a session runs on.
 ///
-/// Four tiers, and the first one that says something wins each half of the
+/// Six tiers, and the first one that says something wins each half of the
 /// answer separately — a flag may name the model while the config names the
 /// provider:
 ///
@@ -254,22 +264,35 @@ pub fn from_env() -> Result<Selection, SelectionError> {
 /// 2. [`PROVIDER_ENV`] and [`MODEL_ENV`], where an empty [`MODEL_ENV`] counts
 ///    as unset and an empty [`PROVIDER_ENV`] is a provider nothing ships;
 /// 3. [`Config::model`], `"provider/model"`, split on its first slash;
-/// 4. the catalog's default model for whichever provider the tiers above
-///    named — and, when none of them named one at all, the built-in fake
-///    provider with a notice saying so.
+/// 4. [`Config::default_provider`], which names only a provider and is held
+///    to the same two-tier lookup as everything above it;
+/// 5. the **oldest stored login** this build can run as — recorded when a
+///    credential is stored, ordered by [`auth::stored_logins_oldest_first`] —
+///    chosen without a notice, because a provider the user logged into is not
+///    a degradation. Exported key variables deliberately do not count as
+///    logins: an environment override is for one run, and making it steer the
+///    default would have a borrowed shell borrow an identity;
+/// 6. the built-in fake provider with a notice saying so, which is now only
+///    the machine with no logins at all.
+///
+/// The model falls through its own tiers as before: the flag, [`MODEL_ENV`],
+/// the config's `model` key, then the catalog's default for whichever
+/// provider was chosen.
 ///
 /// Whichever tier named the *provider*, the name is resolved against the
 /// builtins first and [`Config::provider`] second, so every route into this
 /// function reaches a configured endpoint the same way: `GANJA_PROVIDER=<id>`,
-/// `--model <id>/<model>` and a config `model` of `"<id>/<model>"` are one
-/// lookup written three ways.
+/// `--model <id>/<model>`, a config `model` of `"<id>/<model>"` and a config
+/// `default_provider` of `"<id>"` are one lookup written four ways.
 ///
 /// # Errors
 ///
 /// Returns [`SelectionError`] when a provider is named that this build neither
 /// ships nor finds in the config table, or one whose credentials are missing,
-/// or one nothing could supply a model for. All of them fail here, before the
-/// terminal is put into raw mode, so that the message is readable.
+/// or one nothing could supply a model for — and when the login tier is
+/// reached and the credential store cannot be read, which is reported rather
+/// than treated as "no logins". All of them fail here, before the terminal is
+/// put into raw mode, so that the message is readable.
 pub fn select(config: &Config) -> Result<Selection, SelectionError> {
     let flag = config.overrides.model.as_deref().map(split_model);
     let file = config.model.as_deref().map(split_model);
@@ -282,33 +305,53 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         Err(VarError::NotUnicode(requested)) => {
             return Err(SelectionError::Unknown {
                 requested: requested.to_string_lossy().into_owned(),
+                named_by: PROVIDER_ENV,
                 configured: config.provider.keys().cloned().collect(),
             });
         }
         Err(VarError::NotPresent) => None,
     };
 
-    // Each half falls through the tiers on its own. A flag naming a bare model
-    // leaves the provider to whatever named one next.
+    // Each half falls through the tiers on its own, the provider's half
+    // carrying which tier named it so a refusal can say. A flag naming a bare
+    // model leaves the provider to whatever named one next.
     let requested = flag
         .and_then(|(provider, _)| provider)
-        .map(str::to_owned)
-        .or(environment)
-        .or_else(|| file.and_then(|(provider, _)| provider).map(str::to_owned));
+        .map(|provider| (provider.to_owned(), "--model"))
+        .or_else(|| environment.map(|requested| (requested, PROVIDER_ENV)))
+        .or_else(|| {
+            file.and_then(|(provider, _)| provider)
+                .map(|provider| (provider.to_owned(), "the config's `model` key"))
+        })
+        .or_else(|| {
+            config
+                .default_provider
+                .clone()
+                .map(|provider| (provider, "the config's `default_provider` key"))
+        });
     let named_model = flag
         .map(|(_, model)| model.to_owned())
         .or_else(|| setting(MODEL_ENV))
         .or_else(|| file.map(|(_, model)| model.to_owned()));
 
-    let Some(requested) = requested else {
-        return Ok(Selection {
-            provider: Arc::new(FakeProvider::default()),
-            model: named_model.unwrap_or_else(|| fake::MODEL.to_owned()),
-            notice: Some(format!(
-                "{PROVIDER_ENV} is unset - replying from the built-in {} provider",
-                fake::ID
-            )),
-        });
+    let (requested, named_by) = match requested {
+        Some(named) => named,
+        // Nothing named a provider: the oldest stored login, and only a
+        // machine with no logins at all falls through to the fake provider —
+        // which keeps its notice, because *it* is the degradation.
+        None => match oldest_stored_login(config)? {
+            Some(stored) => (stored, "the oldest stored login"),
+            None => {
+                return Ok(Selection {
+                    provider: Arc::new(FakeProvider::default()),
+                    model: named_model.unwrap_or_else(|| fake::MODEL.to_owned()),
+                    notice: Some(format!(
+                        "{PROVIDER_ENV} is unset - replying from the built-in {} provider",
+                        fake::ID
+                    )),
+                });
+            }
+        },
     };
 
     let wire = match requested.as_str() {
@@ -336,6 +379,7 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
             None => {
                 return Err(SelectionError::Unknown {
                     requested,
+                    named_by,
                     configured: config.provider.keys().cloned().collect(),
                 });
             }
@@ -354,6 +398,43 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         model,
         notice: None,
     })
+}
+
+/// The provider a session defaults to when nothing named one: the oldest
+/// stored login this build can run as, or [`None`] on a machine with none.
+///
+/// The store's failure is reported rather than read as "no logins": its own
+/// errors say what repairs them — a `chmod`, a corrupt file's position — and
+/// silently starting the fake provider over an exposed store would hide
+/// exactly the thing the store refuses to hide.
+fn oldest_stored_login(config: &Config) -> Result<Option<String>, SelectionError> {
+    let stored = auth::stored_logins_oldest_first()
+        .map_err(|error| SelectionError::Unusable(ProviderError::Auth(error.to_string())))?;
+
+    Ok(adoptable_login(config, stored))
+}
+
+/// The first of `stored` — storage keys, oldest login first — that this
+/// session could actually run as, in ganja's own vocabulary.
+///
+/// Split from [`oldest_stored_login`] so the rule is a thing a test can state
+/// without a credential store. Three filters, each with its reason:
+///
+/// - the key is read back through [`auth::provider_id_for_storage_key`],
+///   because the file stores upstream's names — a `grok` login sits under
+///   `xai` — and everything from here on speaks ganja's;
+/// - [`fake::ID`] never counts: a credential filed under that id is not a
+///   login to anything, and a session on the fake provider must keep the
+///   notice this tier exists to avoid;
+/// - everything else must be [`selectable`] — an id opencode stored for a
+///   provider this build has no wire for is a login, just not one this
+///   session can use, and skipping it beats refusing to start over somebody
+///   else's credential file.
+fn adoptable_login(config: &Config, stored: impl IntoIterator<Item = String>) -> Option<String> {
+    stored
+        .into_iter()
+        .map(|key| auth::provider_id_for_storage_key(&key).to_owned())
+        .find(|id| id != fake::ID && selectable(config, id))
 }
 
 /// The model a session asks for when no tier named one.
@@ -398,8 +479,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        Config, Dialect, PROVIDERS, ProviderConfig, SelectionError, cursor, defaulted_model, fake,
-        openai, selectable,
+        Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, adoptable_login,
+        cursor, defaulted_model, fake, grok, openai, selectable,
     };
     use crate::catalog;
 
@@ -456,16 +537,23 @@ mod tests {
 
     /// A refusal that listed only the shipped providers would tell somebody
     /// who had just declared an endpoint that their own entry does not exist,
-    /// which is the one answer that cannot be acted on.
+    /// which is the one answer that cannot be acted on — and one that did not
+    /// say which tier asked would send them to unset a variable a config key
+    /// set.
     #[test]
-    fn the_refusal_for_an_unknown_provider_names_both_tiers() {
+    fn the_refusal_for_an_unknown_provider_names_both_tiers_and_who_asked() {
         let named = SelectionError::Unknown {
             requested: "gemini".to_owned(),
+            named_by: "the config's `default_provider` key",
             configured: vec!["local-llama".to_owned(), "gateway".to_owned()],
         };
         let rendered = named.to_string();
 
         assert!(rendered.contains("gemini"), "{rendered}");
+        assert!(
+            rendered.contains("default_provider"),
+            "the tier that named the id is the thing to fix: {rendered}"
+        );
         for builtin in PROVIDERS {
             assert!(
                 rendered.contains(builtin),
@@ -481,13 +569,53 @@ mod tests {
         // than one carrying an empty list.
         let bare = SelectionError::Unknown {
             requested: "gemini".to_owned(),
+            named_by: PROVIDER_ENV,
             configured: Vec::new(),
         }
         .to_string();
         assert!(
+            bare.contains(PROVIDER_ENV),
+            "the environment tier is named as itself: {bare}"
+        );
+        assert!(
             !bare.contains("this config names"),
             "nothing was configured, so nothing should be listed: {bare}"
         );
+    }
+
+    /// The login tier's own rule, without a credential store: the oldest
+    /// login this session can actually run as, in ganja's vocabulary.
+    #[test]
+    fn the_oldest_login_that_wins_is_the_oldest_one_this_session_can_run_as() {
+        let stored = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
+
+        // The file speaks upstream's names: an `xai` login is a grok session.
+        assert_eq!(
+            adoptable_login(&Config::default(), stored(&["xai", "anthropic"])).as_deref(),
+            Some(grok::ID)
+        );
+
+        // A login this build has no wire for is skipped, not refused — the
+        // file may be shared with opencode, whose logins are its own.
+        assert_eq!(
+            adoptable_login(&Config::default(), stored(&["gemini", "anthropic"])).as_deref(),
+            Some("anthropic")
+        );
+
+        // Unless a config declares that very endpoint, which makes its stored
+        // login as runnable as a builtin's.
+        assert_eq!(
+            adoptable_login(&declaring("gemini"), stored(&["gemini", "anthropic"])).as_deref(),
+            Some("gemini")
+        );
+
+        // A credential filed under the fake id is not a login to anything,
+        // and the fake fallback must keep its notice.
+        assert_eq!(
+            adoptable_login(&Config::default(), stored(&[fake::ID])),
+            None
+        );
+        assert_eq!(adoptable_login(&Config::default(), stored(&[])), None);
     }
 
     /// A model no catalog carries, so an answer naming it can only have come
