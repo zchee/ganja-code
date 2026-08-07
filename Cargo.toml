@@ -206,6 +206,20 @@ url = "2.5.8"
 # Already in the tree via `ratatui-core`; declared here because the chat
 # viewport measures its own wrap widths instead of leaning on `Paragraph`.
 unicode-width = "0.2.2"
+# Owner-only DACLs on the two secret-bearing surfaces whose unix modes are
+# already enforced — the credential store and spilled tool output: create
+# handles sealed via `SetSecurityInfo` before the first secret byte, the
+# spill directory born private. MIT OR Apache-2.0, and already in the tree
+# transitively at three versions; this pins the newest. The feature list is
+# the set the windows lint job compiled — `LocalFree`'s module has moved
+# across windows-sys versions, so the job, not memory, fixes the list.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
 
 assert_cmd = "2.2.2"
 expectrl = "0.9.0"

@@ -61,6 +61,12 @@ tokio-util = { workspace = true, features = ["rt"] }
 # from the same crate. Windows support arrives with its own mechanism later.
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Spilled tool output sealed on its create handle and the spill directory
+# born private — the windows twin of the 0o600/0o700 the unix modes above
+# enforce, in the vocabulary this platform speaks.
+windows-sys.workspace = true
+
 [dev-dependencies]
 # Every tool that touches the disk is tested against a real directory tree that
 # goes away afterwards, rather than against a mocked filesystem.
