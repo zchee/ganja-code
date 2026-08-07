@@ -192,16 +192,13 @@ jobs:
         os:
           - ubuntu-26.04
           - xcode-27
-          # Back by user ruling now that the windows behavior work has landed
-          # code to test: observational first, because some of this suite has
-          # never once run here and a lane that is red on arrival gates
-          # nothing. It stops excusing itself in a deliberate flip commit
-          # after consecutive runs come back green or fully named — red by
-          # red, each one a product fix, a test fix, or a divergence with a
-          # name in the plan's ledger.
+          # Blocking, like every other lane. It returned observational when
+          # the windows behavior work landed, and earned this posture red by
+          # red — each one a product fix, a test fix, or a named divergence —
+          # until consecutive runs came back green; a red here is a real
+          # signal now, not weather to be excused.
           - windows-2025
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'windows-2025' }}
     # bash exists on every runner here (Git Bash on windows), so one shell
     # keeps the run steps portable instead of forking them per OS.
     defaults:
@@ -262,10 +259,10 @@ jobs:
         working-directory: upstream/opencode-v1.18.13
         run: bun install --frozen-lockfile
 
-      # The compile gate, separated from the test signal: on windows the
-      # suite reds are expected and named elsewhere, but the workspace
-      # failing to *build* is the one signal this lane exists to surface —
-      # and the part that must be green before the lane can ever block.
+      # The compile gate, kept separable from the test signal even now that
+      # both block: when this lane reds, the first question is whether the
+      # tree stopped building here or a test stopped passing, and this step
+      # answers it without reading a suite log.
       - name: the workspace compiles on windows
         if: runner.os == 'Windows'
         run: cargo check --workspace
