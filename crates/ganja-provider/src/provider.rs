@@ -864,14 +864,6 @@ pub fn configured_headers(
     Ok(headers)
 }
 
-/// Whether the provider `provider_id` serves a model called `model`.
-///
-/// The catalog is the only thing that knows, and it does not know every
-/// provider — the built-in fake one is not in it, and neither is whatever a test
-/// drives. A provider the catalog says nothing about cannot be contradicted, so
-/// any model it is asked for is taken at its word; refusing every switch there
-/// would make the command untestable in exactly the runs that are cheapest to
-/// run.
 /// The model a config spelling names, when `provider_id` serves it.
 ///
 /// Config spells a model `"provider/model"` — that is what `model`,
@@ -889,6 +881,14 @@ pub fn adopt(provider_id: &str, spelled: &str) -> Option<String> {
     serves(provider_id, model).then(|| model.to_owned())
 }
 
+/// Whether the provider `provider_id` serves a model called `model`.
+///
+/// The catalog is the only thing that knows, and it does not know every
+/// provider — the built-in fake one is not in it, and neither is whatever a test
+/// drives. A provider the catalog says nothing about cannot be contradicted, so
+/// any model it is asked for is taken at its word; refusing every switch there
+/// would make the command untestable in exactly the runs that are cheapest to
+/// run.
 pub fn serves(provider_id: &str, model: &str) -> bool {
     if !catalog::carries(provider_id) {
         return !model.trim().is_empty();

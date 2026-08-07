@@ -140,6 +140,13 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
             ganja_tool::webfetch::WebfetchTool::allowing_private(),
         ));
     }
+    // Over the top of the roster's rootless one, out of the **same** value the
+    // prompt's `<available_skills>` block is built from below: a session that
+    // is offered a skill has to be able to load it, and only a caller holding
+    // the config and the directory can resolve where either half looks.
+    tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(
+        instruction::skill_roots(&config, &cwd),
+    )));
     let mut engine = Engine::persistent(
         selection.provider,
         selection.model,
