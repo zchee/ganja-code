@@ -1365,16 +1365,28 @@ mod tests {
         std::fs::create_dir(&nested).expect("the fixture makes a directory");
         let tool = ShellTool::new();
 
+        // Git Bash mounts the user's temp directory as its own `/tmp`, and a
+        // tempdir inside it is answered as `/tmp/...` — an alias only that
+        // shell can undo, which the lane proved when `pwd` said
+        // "/tmp/.tmpD6oBQt" for a place no `C:` spelling reaches lexically.
+        // `pwd -W` asks the same shell for the native spelling, which
+        // `native` reads the way it reads any drive path. Unix keeps plain
+        // `pwd`: `-W` is MSYS vocabulary.
+        #[cfg(windows)]
+        const PWD: &str = "pwd -W";
+        #[cfg(not(windows))]
+        const PWD: &str = "pwd";
+
         let rooted = tool
             .run(
-                serde_json::json!({ "command": "pwd" }),
+                serde_json::json!({ "command": PWD }),
                 &ctx(dir.path().to_owned()),
             )
             .await
             .expect("pwd runs");
         let relative = tool
             .run(
-                serde_json::json!({ "command": "pwd", "workdir": "nested" }),
+                serde_json::json!({ "command": PWD, "workdir": "nested" }),
                 &ctx(dir.path().to_owned()),
             )
             .await
