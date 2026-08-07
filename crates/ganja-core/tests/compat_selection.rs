@@ -73,12 +73,18 @@ fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honest
     let refused = provider::select(&config).expect_err("no such provider");
     let SelectionError::Unknown {
         requested,
+        named_by,
         configured,
     } = &refused
     else {
         panic!("expected an unknown-provider refusal, got {refused:?}");
     };
     assert_eq!(requested, "local-lama");
+    assert_eq!(
+        *named_by,
+        provider::PROVIDER_ENV,
+        "the variable is what named the id, and the refusal has to say so"
+    );
     assert_eq!(configured, &[PROVIDER_ID.to_owned()]);
 
     let rendered = refused.to_string();

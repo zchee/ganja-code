@@ -32,6 +32,11 @@
 //! map back (`:79`) — an entry it cannot decode is lost on the next write. A
 //! shared `auth.json` is somebody else's territory too, so ganja does not.
 //!
+//! That same filtering write is why the one thing ganja records *about* a
+//! credential — when its login first landed, so that selection can default to
+//! the oldest one — lives in a sidecar of its own rather than inside the
+//! entries: see [`STAMPS_FILE`], which carries the evidence.
+//!
 //! Secrets never reach a log. Key material is held in a [`SecretString`], whose
 //! own [`Debug`] is a placeholder and whose contents are wiped when the last
 //! handle drops; [`Credential`] and [`OauthCredential`] render as the last four
@@ -93,6 +98,29 @@ const DIRECTORY: &str = "ganja";
 
 /// File credentials live in, named after upstream's.
 const FILE: &str = "auth.json";
+
+/// Ganja's own sidecar beside [`FILE`], recording when each stored credential
+/// first landed: `{ "<storage key>": <milliseconds since the Unix epoch> }`.
+/// It is what lets selection default to the *oldest* login when nothing named
+/// a provider.
+///
+/// A sidecar, and deliberately not a field inside the entries themselves.
+/// `auth.json` is shared territory, and upstream's `Auth.set`
+/// (`auth/index.ts:73-81`) round-trips the WHOLE store through `Auth.all`
+/// (`:58-67`), whose `Record.filterMap(data, decode)` (`:66`) rebuilds every
+/// entry as an effect `Schema.Class` instance carrying only the declared
+/// fields (`Oauth` `:14-21`, `Api` `:23-27`, `WellKnown` `:29-33`) — and `:79`
+/// then rewrites `auth.json` from those instances. An in-entry foreign field
+/// therefore dies on opencode's next write, and an entry a stricter decoder
+/// rejects is dropped from the map entirely (verified 2026-08-08 against the
+/// v1.18.13 checkout). A stamp that upstream would silently erase is a default
+/// that flips the day someone runs `opencode auth login`, so the stamps live
+/// in a file only ganja writes, and `auth.json`'s shape is never touched.
+///
+/// The file holds provider names and timestamps — no secrets — so reading it
+/// takes none of the permission checks the store itself insists on, and losing
+/// it costs an ordering preference rather than a credential.
+const STAMPS_FILE: &str = "auth-stamps.json";
 
 /// Characters of a secret that any output may show.
 const TAIL: usize = 4;
@@ -163,6 +191,34 @@ pub fn provider_id_for_storage_key(key: &str) -> &str {
         .iter()
         .find(|(_, stored)| *stored == key)
         .map_or(key, |(ganja, _)| *ganja)
+}
+
+/// Where a login nobody stamped ranks, by ganja's name for its provider.
+///
+/// A store written before [`STAMPS_FILE`] existed — or by opencode, which will
+/// never write one — holds logins with no recorded age. They rank **after**
+/// every stamped login, in this fixed order, because "I logged into anthropic
+/// last year" is information this build arrived too late to have and a stable
+/// answer beats a guessed one. An id outside this list ranks after it, in the
+/// store's own order.
+const UNSTAMPED_PRIORITY: &[&str] = &["anthropic", "openai", "grok", "github-copilot"];
+
+/// Where `key` sorts among stored logins: oldest stamp first, then the
+/// unstamped by [`UNSTAMPED_PRIORITY`], then everything else in the order the
+/// store holds it — which a stable sort preserves, so the last bucket needs no
+/// second component.
+fn login_rank(key: &str, stamps: &BTreeMap<String, u64>) -> (u8, u64) {
+    if let Some(&stored_at) = stamps.get(key) {
+        return (0, stored_at);
+    }
+
+    match UNSTAMPED_PRIORITY
+        .iter()
+        .position(|id| *id == provider_id_for_storage_key(key))
+    {
+        Some(index) => (1, index as u64),
+        None => (2, 0),
+    }
 }
 
 /// What a stored `expires` of zero means, which is not one answer.
@@ -1032,25 +1088,59 @@ impl Store {
     /// including the extras it read out of the previous one. Merging here
     /// instead would resurrect a field from an account that has since been
     /// logged out of.
+    ///
+    /// This is the **login** path — `ganja auth login` is its only caller
+    /// outside the tests — so it stamps. A renewal writes through
+    /// [`Self::renew_oauth`] instead, which never does.
     fn set_oauth(&self, provider_id: &str, credential: &OauthCredential) -> Result<(), AuthError> {
+        let key = storage_key(provider_id).to_owned();
+        let mut data = self.read()?;
+        data.insert(key.clone(), credential.to_value());
+
+        self.write(&data)?;
+        self.record_stamps(&data, Some(&key));
+
+        Ok(())
+    }
+
+    /// Stores a renewed `credential` without treating the write as a login.
+    ///
+    /// The one difference from [`Self::set_oauth`] is the stamp: a refresh
+    /// rewrites the same login it was given, so minting a stamp here would
+    /// walk a pre-feature credential into the stamped tier at whatever moment
+    /// its token happened to expire — and the oldest-login default would flip
+    /// under whoever was relying on it. A stamp the login already has is kept,
+    /// by the same rule.
+    fn renew_oauth(
+        &self,
+        provider_id: &str,
+        credential: &OauthCredential,
+    ) -> Result<(), AuthError> {
         let mut data = self.read()?;
         data.insert(storage_key(provider_id).to_owned(), credential.to_value());
 
-        self.write(&data)
+        self.write(&data)?;
+        self.record_stamps(&data, None);
+
+        Ok(())
     }
 
     /// Stores `api_key`, exposing it exactly once: the serializer that puts it
     /// on disk needs the plaintext, and there is no way to write a file without
     /// the bytes that go in it.
     fn set(&self, provider_id: &str, api_key: impl Into<SecretString>) -> Result<(), AuthError> {
+        let key = storage_key(provider_id).to_owned();
         let api_key = api_key.into();
         let mut data = self.read()?;
         data.insert(
-            storage_key(provider_id).to_owned(),
+            key.clone(),
             serde_json::json!({ "type": "api", "key": api_key.expose_secret() }),
         );
 
-        self.write(&data)
+        self.write(&data)?;
+        self.record_stamps(&data, Some(&key));
+
+        Ok(())
     }
 
     fn remove(&self, provider_id: &str) -> Result<bool, AuthError> {
@@ -1059,6 +1149,10 @@ impl Store {
             return Ok(false);
         }
         self.write(&data)?;
+        // A logout ends the login's seniority with it: logging in again later
+        // is a new login and earns a fresh stamp, where a credential merely
+        // *replaced* in place keeps the one it had.
+        self.record_stamps(&data, None);
 
         Ok(true)
     }
@@ -1087,6 +1181,94 @@ impl Store {
                 })
             })
             .collect())
+    }
+
+    /// Where this store's stamps live: [`STAMPS_FILE`], beside it.
+    fn stamps_path(&self) -> PathBuf {
+        self.path.with_file_name(STAMPS_FILE)
+    }
+
+    /// The stamps as they stand, and never an error: the sidecar holds no
+    /// secrets, so a file that is missing, unreadable or not the shape it
+    /// should be degrades to "nobody is stamped" — the [`UNSTAMPED_PRIORITY`]
+    /// order — rather than costing a session its startup. The store itself
+    /// hard-fails on corruption because reading past it could hide a
+    /// credential; there is nothing here for a failure to hide.
+    fn read_stamps(&self) -> BTreeMap<String, u64> {
+        let path = self.stamps_path();
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return BTreeMap::new(),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "the login stamps could not be read");
+                return BTreeMap::new();
+            }
+        };
+
+        serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            tracing::warn!(path = %path.display(), %error, "the login stamps could not be parsed");
+            BTreeMap::new()
+        })
+    }
+
+    /// Brings the stamps up to date with `data`, the store as it was just
+    /// written: entries the store no longer holds lose their stamps — opencode
+    /// removes credentials without knowing this file exists, so orphans are
+    /// pruned here rather than trusted to [`Self::remove`] — and `minted`, when
+    /// given, is stamped now **unless it already is**. A credential replaced in
+    /// place keeps its seniority; only a logout (which dropped the stamp) makes
+    /// the next login a new one.
+    ///
+    /// A failure is logged and swallowed. The credential write this follows has
+    /// already landed, and a login must not be reported failed over the
+    /// metadata that merely orders a default.
+    fn record_stamps(&self, data: &BTreeMap<String, Value>, minted: Option<&str>) {
+        let mut stamps = self.read_stamps();
+        stamps.retain(|key, _| data.contains_key(key));
+        if let Some(key) = minted {
+            stamps.entry(key.to_owned()).or_insert_with(now_ms);
+        }
+
+        if let Err(error) = self.write_stamps(&stamps) {
+            tracing::warn!(
+                path = %self.stamps_path().display(),
+                %error,
+                "the login stamp could not be recorded; the stored credential is unaffected",
+            );
+        }
+    }
+
+    /// Replaces the sidecar the way [`Self::write`] replaces the store —
+    /// sibling plus rename — so a crash cannot leave it torn. The content is
+    /// not secret, but the file lives in the store's directory and gets the
+    /// store's posture.
+    fn write_stamps(&self, stamps: &BTreeMap<String, u64>) -> io::Result<()> {
+        let mut json = serde_json::to_vec_pretty(stamps)?;
+        json.push(b'\n');
+
+        let temporary = self
+            .stamps_path()
+            .with_file_name(format!("{STAMPS_FILE}.{}.tmp", std::process::id()));
+        write_private(&temporary, &json)?;
+
+        fs::rename(&temporary, self.stamps_path()).inspect_err(|_| {
+            let _ = fs::remove_file(&temporary);
+        })
+    }
+
+    /// Every stored provider this build could authenticate with, oldest login
+    /// first: stamped entries by their stamps, then the unstamped by
+    /// [`UNSTAMPED_PRIORITY`], then the rest in the store's own order.
+    fn logins_oldest_first(&self) -> Result<Vec<String>, AuthError> {
+        let stamps = self.read_stamps();
+        let mut keys: Vec<String> = self
+            .stored()?
+            .into_iter()
+            .map(|(provider_id, _, _)| provider_id)
+            .collect();
+        keys.sort_by_key(|key| login_rank(key, &stamps));
+
+        Ok(keys)
     }
 }
 
@@ -1390,11 +1572,13 @@ impl Refresher {
                     // Off the executor for the reason the reads are: this is a
                     // create, a write, an fsync and a rename, and it happens
                     // while every caller that joined this renewal is waiting
-                    // on it.
+                    // on it. Through `renew_oauth`, not `set_oauth`: a refresh
+                    // is not a login, and must not mint the stamp a login
+                    // would.
                     let written = blocking({
                         let key = key.clone();
                         let renewed = renewed.clone();
-                        move || Store::open().and_then(|store| store.set_oauth(&key, &renewed))
+                        move || Store::open().and_then(|store| store.renew_oauth(&key, &renewed))
                     })
                     .await;
                     if let Err(error) = written {
@@ -1999,6 +2183,39 @@ fn key_from_env(provider_id: &str) -> Option<SecretString> {
 /// path against.
 pub fn store_path() -> Result<PathBuf, AuthError> {
     Ok(Store::open()?.path)
+}
+
+/// Where the login stamps live: [`STAMPS_FILE`], beside the store. Public for
+/// the same reason [`store_path`] is — somebody clearing ganja's state, or a
+/// test arranging one, should not have to guess the name.
+///
+/// # Errors
+///
+/// Returns [`AuthError::Io`] when there is no home directory to resolve the
+/// path against.
+pub fn stamps_path() -> Result<PathBuf, AuthError> {
+    Ok(Store::open()?.stamps_path())
+}
+
+/// Every stored provider this build could authenticate with, by storage key,
+/// **oldest login first** — the order selection defaults through when nothing
+/// named a provider.
+///
+/// Stamped logins come first, oldest stamp leading. Logins with no stamp —
+/// stored before [`STAMPS_FILE`] existed, or by opencode, which will never
+/// write one — follow in [`UNSTAMPED_PRIORITY`]'s fixed order, and anything
+/// outside that list comes last in the store's own order. Environment keys are
+/// deliberately not consulted: an exported variable is a one-shot override,
+/// not a login, and [`credential_for`]'s precedence still applies once a
+/// provider is chosen.
+///
+/// # Errors
+///
+/// Returns [`AuthError`] when the store cannot be read — reported rather than
+/// read as "no logins", because "log in again" is the one wrong answer to a
+/// store that is sitting right there.
+pub fn stored_logins_oldest_first() -> Result<Vec<String>, AuthError> {
+    Store::open()?.logins_oldest_first()
 }
 
 /// The credential to authenticate `provider_id` with, if there is one.
@@ -3118,8 +3335,16 @@ mod tests {
             fs::read_dir(directory.path())
                 .expect("the directory lists")
                 .filter_map(Result::ok)
-                .all(|entry| entry.file_name() == "auth.json"),
-            "the temporary file should not outlive the write"
+                .all(|entry| {
+                    entry.file_name() == "auth.json" || entry.file_name() == "auth-stamps.json"
+                }),
+            "no temporary file may outlive a write, the stamps' included"
+        );
+        assert_eq!(
+            mode(&store.stamps_path()),
+            0o600,
+            "the sidecar holds no secret, but it lives in the store's directory \
+             and gets the store's posture"
         );
     }
 
@@ -3481,5 +3706,230 @@ mod tests {
 
         clear_keys();
         set_env("XDG_DATA_HOME", None);
+    }
+
+    /// A login's stamp is what lets a session default to the oldest one, so
+    /// both login paths mint it — and a credential replaced in place keeps the
+    /// one it had, because the seniority is the login's, not the write's.
+    #[test]
+    fn a_login_is_stamped_when_it_lands_and_a_replacement_keeps_its_seniority() {
+        let directory = temporary();
+        let store = store(&directory);
+
+        let before = now_ms();
+        store.set("anthropic", CANARY).expect("the key stores");
+        let after = now_ms();
+
+        let minted = store.read_stamps()["anthropic"];
+        assert!(
+            (before..=after).contains(&minted),
+            "a login is stamped with the moment it landed: {minted} not in {before}..={after}"
+        );
+
+        // An aged stamp, then the same provider stored again.
+        fs::write(store.stamps_path(), r#"{"anthropic": 1000}"#).expect("the stamps rewrite");
+        store
+            .set("anthropic", "sk-rotated-0002")
+            .expect("the key stores again");
+        assert_eq!(store.read_stamps()["anthropic"], 1000);
+
+        store
+            .set_oauth(
+                "github-copilot",
+                &OauthCredential::new(
+                    SecretString::from("gho_refresh_0001"),
+                    SecretString::from("gho_access_0002"),
+                    0,
+                ),
+            )
+            .expect("the login stores");
+        assert!(
+            store.read_stamps().contains_key("github-copilot"),
+            "an OAuth login is as much a login as a key, and stamps the same way"
+        );
+    }
+
+    /// The order selection defaults through when nothing named a provider:
+    /// oldest stamp first, then the logins nothing stamped in the fixed
+    /// priority — ganja's `grok` under the file's `xai` included — then ids
+    /// the priority has never heard of, in the store's own order.
+    #[test]
+    fn the_oldest_stamped_login_leads_and_the_unstamped_follow_in_fixed_priority() {
+        let directory = temporary();
+        let store = store(&directory);
+        for provider_id in [
+            "local-llama",
+            "github-copilot",
+            "grok",
+            "openai",
+            "anthropic",
+        ] {
+            store.set(provider_id, CANARY).expect("the key stores");
+        }
+
+        // Everybody unstamped — the pre-feature store, and opencode's forever.
+        fs::write(store.stamps_path(), "{}").expect("the stamps clear");
+        assert_eq!(
+            store.logins_oldest_first().expect("the store reads"),
+            vec![
+                "anthropic",
+                "openai",
+                "xai",
+                "github-copilot",
+                "local-llama"
+            ],
+        );
+
+        // One stamp, held by the login the fixed priority ranks last: a
+        // recorded age beats every guessed one.
+        fs::write(store.stamps_path(), r#"{"github-copilot": 5000}"#).expect("the stamps rewrite");
+        assert_eq!(
+            store.logins_oldest_first().expect("the store reads"),
+            vec![
+                "github-copilot",
+                "anthropic",
+                "openai",
+                "xai",
+                "local-llama"
+            ],
+        );
+
+        // Two stamps order by time, not by name or by priority.
+        fs::write(store.stamps_path(), r#"{"anthropic": 9000, "xai": 2000}"#)
+            .expect("the stamps rewrite");
+        assert_eq!(
+            store.logins_oldest_first().expect("the store reads"),
+            vec![
+                "xai",
+                "anthropic",
+                "openai",
+                "github-copilot",
+                "local-llama"
+            ],
+        );
+    }
+
+    /// A logout drops the stamp with the credential — logging in again later
+    /// is a new login — and a stamp orphaned by a tool that does not know the
+    /// sidecar exists is pruned at the next write rather than left to vote
+    /// for a login that is gone.
+    #[test]
+    fn a_logout_ends_a_logins_seniority_and_an_orphaned_stamp_is_pruned() {
+        let directory = temporary();
+        let store = store(&directory);
+        store.set("anthropic", CANARY).expect("the key stores");
+        store.set("openai", CANARY).expect("the key stores");
+        fs::write(
+            store.stamps_path(),
+            r#"{"anthropic": 1000, "openai": 2000}"#,
+        )
+        .expect("the stamps rewrite");
+
+        assert!(store.remove("anthropic").expect("the key is removable"));
+        assert_eq!(
+            store.read_stamps(),
+            std::collections::BTreeMap::from([("openai".to_owned(), 2000)])
+        );
+
+        store
+            .set("anthropic", CANARY)
+            .expect("the key stores again");
+        assert!(
+            store.read_stamps()["anthropic"] > 2000,
+            "a login after a logout starts its seniority over"
+        );
+
+        // Opencode's `Auth.remove` rewrites `auth.json` and nothing else, so
+        // the stamp it orphans is this build's to notice.
+        fs::write(store.stamps_path(), r#"{"anthropic": 1000, "gemini": 500}"#)
+            .expect("the stamps rewrite");
+        store.set("openai", CANARY).expect("the key stores again");
+        let pruned = store.read_stamps();
+        assert!(
+            !pruned.contains_key("gemini"),
+            "a stamp with no credential under it is not a login: {pruned:?}"
+        );
+        assert_eq!(
+            pruned["anthropic"], 1000,
+            "the live stamps survive the prune"
+        );
+    }
+
+    /// A refresh rewrites the login it was given. Minting a stamp there would
+    /// walk a pre-feature credential into the stamped tier at whatever moment
+    /// its token happened to expire, and the oldest-login default would flip
+    /// under whoever was relying on it.
+    #[test]
+    fn a_renewal_is_not_a_login_and_mints_no_stamp() {
+        let directory = temporary();
+        let store = store(&directory);
+        let credential = OauthCredential::new(
+            SecretString::from("rt-renew-0001"),
+            SecretString::from("at-renew-0002"),
+            NOW_MS,
+        );
+        store
+            .set_oauth("grok", &credential)
+            .expect("the login stores");
+        // The pre-feature shape: a credential on disk, no stamp anywhere.
+        fs::write(store.stamps_path(), "{}").expect("the stamps clear");
+
+        store
+            .renew_oauth("grok", &credential)
+            .expect("the renewal stores");
+        assert!(
+            store.read_stamps().is_empty(),
+            "a renewal walked an unstamped login into the stamped tier"
+        );
+
+        // And a stamped login keeps exactly what it has.
+        fs::write(store.stamps_path(), r#"{"xai": 1000}"#).expect("the stamps rewrite");
+        store
+            .renew_oauth("grok", &credential)
+            .expect("the renewal stores");
+        assert_eq!(store.read_stamps()["xai"], 1000);
+    }
+
+    /// The sidecar holds provider names and timestamps, no secrets, so a file
+    /// that is not what it should be degrades to the fixed order instead of
+    /// failing a startup the way corruption in the store itself must.
+    #[test]
+    fn a_broken_stamps_file_degrades_to_the_fixed_priority_order() {
+        let directory = temporary();
+        let store = store(&directory);
+        store.set("openai", CANARY).expect("the key stores");
+        store.set("anthropic", CANARY).expect("the key stores");
+        fs::write(store.stamps_path(), b"{ not json").expect("the fixture writes");
+
+        assert_eq!(
+            store
+                .logins_oldest_first()
+                .expect("a broken sidecar is not a broken store"),
+            vec!["anthropic".to_owned(), "openai".to_owned()],
+        );
+    }
+
+    /// The whole reason the stamp is a sidecar: upstream's `Auth.set` rebuilds
+    /// every entry from its schema and rewrites the file (`auth/index.ts:66`,
+    /// `:79`), so anything ganja put inside an entry would die on opencode's
+    /// next write. Nothing of the stamps may land in `auth.json`.
+    #[test]
+    fn the_stamps_never_touch_the_shape_upstream_reads() {
+        let directory = temporary();
+        let store = store(&directory);
+        store.set("openai", CANARY).expect("the key stores");
+
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).expect("the file exists"))
+                .expect("the file is JSON");
+        assert_eq!(
+            written["openai"],
+            serde_json::json!({"type": "api", "key": CANARY}),
+            "the entry carries exactly the fields upstream's schema declares"
+        );
+        assert!(
+            store.stamps_path().is_file(),
+            "the stamp went beside the store, not into it"
+        );
     }
 }
