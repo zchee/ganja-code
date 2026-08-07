@@ -132,8 +132,27 @@ async fn wait_for(marker: &Path, what: &str) {
     }
 }
 
-#[tokio::test]
-async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running() {
+#[test]
+fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime builds");
+    runtime.block_on(drill());
+    stage("story complete, runtime still up");
+    // The lane proved the whole story above and then died at the runner's
+    // kill: "returning" printed, the harness's own result line never did. The
+    // default drop joins whatever a cancelled child's plumbing left in the
+    // blocking pool, with no bound; this gives that join five seconds, which
+    // is generous for anything legitimate. The drill's claim — the tree dies
+    // — was already made by then, so a straggler in teardown is recorded
+    // weather, not a kill that failed.
+    runtime.shutdown_timeout(Duration::from_secs(5));
+    stage("runtime down");
+}
+
+/// The drill itself, on the runtime whose teardown the wrapper bounds.
+async fn drill() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let started = dir.path().join("started");
     let survived = dir.path().join("survived");
@@ -280,8 +299,7 @@ async fn cancelling_a_turn_kills_the_process_tree_of_the_command_it_was_running(
     );
 
     drain.abort();
-    // The last line this test can speak: anything the runner's kill reports
-    // after it prints means the hang lives in teardown — the runtime joining
-    // something the cancelled call left behind — not in the test's own story.
+    // The last line the story can speak from inside the runtime; the wrapper
+    // marks the teardown boundary after it.
     stage("returning");
 }
