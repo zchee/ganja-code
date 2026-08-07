@@ -46,7 +46,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use notify::{RecursiveMode, Watcher as _};
+use notify::RecursiveMode;
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -170,14 +170,21 @@ async fn run(
 /// A function rather than a loop inside [`run`] so a test can hold the sender
 /// and decide exactly what is read and when; dropping that sender ends it,
 /// which is what makes the assertions below deterministic.
-pub(crate) async fn register_reads(
+pub(crate) async fn register_reads<W: notify::Watcher>(
     mut reads: mpsc::UnboundedReceiver<PathBuf>,
-    mut registrar: Registrar,
+    mut registrar: Registrar<W>,
     files: Arc<FileTimes>,
     stop: CancellationToken,
 ) {
     loop {
         tokio::select! {
+            // Biased, so that a stop which has already happened outranks a
+            // read still queued behind it: cancellation is the session
+            // ending, and a directory registered for a session that is over
+            // is a watch nobody is left to consume. Unbiased, the select
+            // flips a coin between two ready branches.
+            biased;
+
             () = stop.cancelled() => return,
             path = reads.recv() => match path {
                 Some(path) => registrar.register(&path, &files),
@@ -188,9 +195,17 @@ pub(crate) async fn register_reads(
 }
 
 /// Takes the watches, and remembers which it has.
-pub(crate) struct Registrar {
+///
+/// Generic over the watcher because its decisions have no timing in them,
+/// and the platform backend is the one piece under it that does: the
+/// windows one answers `watch` only after an unbounded round-trip to its
+/// server thread, which once held a structural drill for a runner's whole
+/// 240 seconds. Production always takes the default; the drills run on the
+/// stub watcher `notify` ships, which is what the module doc's "a test
+/// drives without a platform backend" was always meant to say.
+pub(crate) struct Registrar<W = notify::RecommendedWatcher> {
     /// The platform watcher every registration goes through.
-    watcher: notify::RecommendedWatcher,
+    watcher: W,
     /// The project. A file read outside it is left unwatched — watching
     /// `/etc` because the model read `/etc/hosts` would be a surprise, and the
     /// session is answerable for its project.
@@ -200,7 +215,7 @@ pub(crate) struct Registrar {
     watched: Arc<Mutex<BTreeSet<PathBuf>>>,
 }
 
-impl Registrar {
+impl<W: notify::Watcher> Registrar<W> {
     /// Watches the directory holding `path`, if it is in the project and is
     /// not watched already.
     ///
@@ -365,14 +380,23 @@ mod tests {
 
     /// A registrar over `root` and the set it fills, for the tests that assert
     /// on which directories a session ends up watching.
-    fn registrar(root: &Path) -> (Registrar, Arc<Mutex<BTreeSet<PathBuf>>>) {
+    ///
+    /// On the stub watcher, deliberately: these drills assert bookkeeping,
+    /// and the platform backend is where the timing lives — registering with
+    /// the real windows one blocks on an ack its server thread may take
+    /// arbitrarily long to send. What the real registration asks of its
+    /// backend is pinned by `the_watch_taken_is_never_recursive` instead.
+    fn registrar(
+        root: &Path,
+    ) -> (
+        Registrar<notify::NullWatcher>,
+        Arc<Mutex<BTreeSet<PathBuf>>>,
+    ) {
         let watched = Arc::new(Mutex::new(BTreeSet::new()));
-        let watcher = notify::recommended_watcher(|_| {})
-            .expect("this platform provides a filesystem watcher");
 
         (
             Registrar {
-                watcher,
+                watcher: notify::NullWatcher,
                 root: root.to_owned(),
                 watched: Arc::clone(&watched),
             },
