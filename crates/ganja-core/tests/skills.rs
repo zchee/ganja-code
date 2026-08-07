@@ -112,6 +112,11 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
     let home = ganja_testkit::temp_dir();
     unsafe {
         std::env::set_var("HOME", home.path());
+        // Windows asks USERPROFILE the question HOME answers everywhere else,
+        // and phase 3's tilde resolves against whichever this platform reads —
+        // so both must spell the same directory, or the planted tier sits
+        // where no expansion will look.
+        std::env::set_var("USERPROFILE", home.path());
         std::env::set_var("XDG_DATA_HOME", home.path().join("xdg"));
         std::env::set_var("XDG_CONFIG_HOME", home.path().join("config"));
         // Phase 4 sets this deliberately; a developer who exports it would

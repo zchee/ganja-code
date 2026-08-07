@@ -1386,8 +1386,14 @@ mod tests {
         // shell on Windows prints `/c/Users/...` for a place spelled
         // `C:\Users\...` and `canonicalize` knows only the second one.
         let canonical = |text: &str| {
-            std::fs::canonicalize(native(text.trim()))
-                .expect("the directory the shell reported exists")
+            std::fs::canonicalize(native(text.trim())).unwrap_or_else(|error| {
+                panic!(
+                    "the directory the shell reported exists — it said {:?}, \
+                     read here as {:?}: {error}",
+                    text.trim(),
+                    native(text.trim()),
+                )
+            })
         };
         assert_eq!(
             canonical(&rooted.output),
