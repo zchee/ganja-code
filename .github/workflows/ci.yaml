@@ -159,6 +159,31 @@ jobs:
         with:
           command: check
 
+  # The only real-time signal for cfg(windows) code: the dev hosts cannot
+  # cross-compile this workspace (the C build scripts behind the bundled
+  # sqlite and the TLS stack want MSVC headers), so this job is the compile
+  # loop, one push away. Compile and lint only — no test suite, no upstream
+  # provisioning; the test lane's return is a separate decision with its own
+  # posture. A new gate born blocking, not a paused lane flipping: there is
+  # no red history here to earn out of.
+  windows-lint:
+    name: windows-lint
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # The same date rust-toolchain.toml pins; this action does not read
+          # that file, so the date is repeated here on purpose.
+          toolchain: nightly-2026-08-07
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
     strategy:

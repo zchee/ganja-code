@@ -57,6 +57,13 @@ tokio-util = { workspace = true, features = ["rt"] }
 # `Host`, for deciding whether an endpoint is loopback without matching strings.
 url.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# The credential store's owner-only protection: a DACL sealed onto the create
+# handle before the first secret byte, and the read-back that refuses a store
+# other identities can read. The unix twin is a mode bit through `std`; this
+# is the same invariant in the vocabulary this platform speaks.
+windows-sys.workspace = true
+
 [dev-dependencies]
 # The credential and catalog-cache tests write real files, with real permission
 # bits, in a directory that goes away afterwards.

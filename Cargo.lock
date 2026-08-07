@@ -1252,6 +1252,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1316,6 +1317,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
