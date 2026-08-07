@@ -146,6 +146,9 @@ fn reference_server(name: &str) -> Config {
 }
 
 /// The fixture that ignores stdin EOF, as a config entry.
+/// Its only caller is the unix-gated kill-escalation test, so it is gated
+/// with that test rather than left dead on windows.
+#[cfg(unix)]
 fn stubborn_server(name: &str) -> Config {
     fixture_server(name, "stubborn-server.mjs")
 }
@@ -187,6 +190,10 @@ fn fixture_server(name: &str, file: &str) -> Config {
 /// to check the process this starts actually died — the whole point of the
 /// fix under test is that its group never reaches this session's own
 /// bookkeeping, which is where every other helper here would look for it.
+/// Its only caller is the unix-gated shutdown/connect race test — the shell
+/// wrapper and the pid file are POSIX vocabulary — so it is gated with that
+/// test rather than left dead on windows.
+#[cfg(unix)]
 fn delayed_reference_server(name: &str, pidfile: &Path, delay: Duration) -> Config {
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp/reference-server.mjs");
