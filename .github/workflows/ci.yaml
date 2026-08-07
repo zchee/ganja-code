@@ -24,7 +24,7 @@ jobs:
       # date matches rust-toolchain.toml, which this action does not read.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-08-03
+          toolchain: nightly-2026-08-07
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
@@ -152,7 +152,7 @@ jobs:
         with:
           # The same date rust-toolchain.toml pins; this action does not read
           # that file, so the date is repeated here on purpose.
-          toolchain: nightly-2026-08-03
+          toolchain: nightly-2026-08-07
 
       - name: dependency audit (advisories, licenses, bans, sources)
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -188,7 +188,7 @@ jobs:
           # that file. The LSP diagnostics drill spawns rust-analyzer from
           # PATH; the component ships it with the pinned toolchain on every
           # runner.
-          toolchain: nightly-2026-08-03
+          toolchain: nightly-2026-08-07
           components: rust-analyzer
 
       - uses: Swatinem/rust-cache@v2
