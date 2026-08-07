@@ -1100,14 +1100,15 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    // Only the unix-gated spill-failure test crosses the threshold on purpose,
-    // so the import is gated with it rather than left dead on windows.
-    #[cfg(unix)]
-    use super::SPILL_THRESHOLD;
     use super::{
-        Collector, DEFAULT_TIMEOUT, KEEP, NoPosixShell, ShellTool, Spill, Spilled, accept_shell,
-        assemble, posix_shell, tail,
+        Collector, DEFAULT_TIMEOUT, KEEP, NoPosixShell, ShellTool, Spilled, accept_shell,
+        posix_shell, tail,
     };
+    // Only the unix-gated spill-failure test crosses the threshold on purpose
+    // and reaches into the collector's insides, so these travel with it rather
+    // than sit dead on windows.
+    #[cfg(unix)]
+    use super::{SPILL_THRESHOLD, Spill, assemble};
     use crate::{FileTimes, Tool, ToolCtx, ToolError, truncate};
 
     /// `text`, which a shell printed, as this platform spells a path.
