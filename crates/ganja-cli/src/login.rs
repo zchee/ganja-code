@@ -24,6 +24,7 @@ use clap::ValueEnum;
 use ganja_provider::auth::{
     self, OauthCredential,
     copilot::{self, Deployment},
+    cursor,
     device::{DeviceFlow, Tokens},
     grok, openai,
 };
@@ -126,11 +127,15 @@ impl ProviderId {
             // opencode install also reads, and refusing to write a line into it
             // would be a refusal invented here rather than ported.
             Self::GithubCopilot => &[Method::Device, Method::Api],
-            // No logins at all: the wire is deferred and `chosen` refuses the
-            // provider before this list is ever consulted. Empty rather than
-            // absent, so the day the real wire lands the refusal is one arm to
-            // delete and this list is where its logins go.
-            Self::Cursor => &[],
+            // One login, an OAuth flow with no loopback and no code to type:
+            // the browser is sent to cursor.com carrying a pairing id, and
+            // the terminal long-polls until the person finishes there. The
+            // login lands ahead of its wire deliberately — a stored
+            // credential is real value the day the wire arrives, the
+            // precedent three P7 logins set. No API-key entry on purpose:
+            // cursor's backend runs on subscription tokens, and a stored key
+            // would be a credential nothing ever sends.
+            Self::Cursor => &[Method::Browser],
         }
     }
 
@@ -148,9 +153,9 @@ impl ProviderId {
             Self::Anthropic => Some(Method::Api),
             Self::GithubCopilot => Some(Method::Device),
             Self::Grok | Self::OpenAi => None,
-            // Unreachable behind `chosen`'s front-door refusal; a menu of
-            // nothing is nothing to offer.
-            Self::Cursor => None,
+            // One login worth offering, like Copilot's: a menu with one item
+            // is a keystroke charged for nothing.
+            Self::Cursor => Some(Method::Browser),
         }
     }
 }
@@ -160,10 +165,6 @@ impl ProviderId {
 /// The order is the whole of it, and each step is somebody's existing
 /// invocation:
 ///
-/// 0. **cursor is refused before any of it.** Its wire is deferred, so a
-///    stored credential would be one nothing ever reads — worse than no login,
-///    because it looks like one that worked. `--key` included, which is why
-///    this sits above even step 1.
 /// 1. `--key` is the API-key path spelled out.
 /// 2. `--method` is the answer to the question below, given in advance.
 /// 3. **A provider whose one login is not a key runs it, terminal or not.**
@@ -192,12 +193,6 @@ pub(crate) fn chosen(
     has_key: bool,
     method: Option<Method>,
 ) -> Result<Method> {
-    if provider == ProviderId::Cursor {
-        bail!(
-            "cursor's login is deferred with its wire: the stub takes no credential \
-             and refuses every request, so there is nothing a login could store"
-        );
-    }
     if has_key {
         return accepted(provider, Method::Api);
     }
@@ -304,6 +299,16 @@ pub(crate) async fn oauth(
         }
         (ProviderId::OpenAi, Method::Browser) => chatgpt_browser(&cancel).await,
         (ProviderId::OpenAi, Method::Device) => chatgpt_device(&cancel).await,
+        (ProviderId::Cursor, Method::Browser) => {
+            // The same two-step shape every flow here has: the URL reaches
+            // the screen before anything blocks on it having been opened.
+            // Nothing is bound first — the poll is the return path, so there
+            // is no socket for a browser to race.
+            let login = cursor_flow()?.start().map_err(nothing_stored)?;
+            announce(login.url(), "");
+
+            login.poll(&cancel).await.map_err(nothing_stored)
+        }
         // `chosen` is the only way to reach here and it refuses every other
         // pairing by name, so this is the shape of the match rather than a
         // case anybody can produce.
@@ -525,6 +530,22 @@ fn copilot_flow(deployment: &Deployment) -> Result<DeviceFlow> {
     .map_err(nothing_stored)
 }
 
+/// The cursor login, against cursor's own two hosts or against whatever
+/// redirected it.
+///
+/// One origin redirects both hosts. In production the deep link's page and
+/// the poll endpoint live on different hosts (`cursor.com`, `api2.cursor.sh`),
+/// but a suite that owns the poll has to be able to assert the deep link's
+/// shape too — so the override serves the pair from one roof, at the same
+/// paths the real hosts use.
+fn cursor_flow() -> Result<cursor::Flow> {
+    let Some(origin) = issuer()? else {
+        return cursor::login_flow().map_err(nothing_stored);
+    };
+
+    cursor::login_flow_at(&origin).map_err(nothing_stored)
+}
+
 /// A ChatGPT login against the real issuer, or against whatever redirected it.
 fn chatgpt() -> Result<openai::Login> {
     match issuer()? {
@@ -730,9 +751,9 @@ mod tests {
         assert_eq!(ProviderId::Anthropic.methods(), [Method::Api]);
         assert_eq!(
             ProviderId::Cursor.methods(),
-            [] as [Method; 0],
-            "the deferred wire has no logins, and an empty list is what keeps \
-             the day it gains them a one-line diff here"
+            [Method::Browser],
+            "the login landed ahead of the wire, and it is OAuth-only: a \
+             stored key would be a credential nothing ever sends"
         );
         assert_eq!(
             ProviderId::OpenAi.methods(),
@@ -761,19 +782,49 @@ mod tests {
             "a browser login and a device login answer different questions about \
              this machine, and nothing here can tell which one somebody is in"
         );
-        assert_eq!(ProviderId::Cursor.only_login(), None);
+        assert_eq!(
+            ProviderId::Cursor.only_login(),
+            Some(Method::Browser),
+            "one login worth offering means no menu, which is what makes the \
+             headless invocation reach it"
+        );
     }
 
-    /// The refusal sits above every shape `chosen` accepts — `--key`
-    /// included — because each of them would otherwise store a credential
-    /// nothing ever reads.
+    /// The standing refusal is gone — deliberately: the login landed ahead of
+    /// its wire, because a stored credential is real value the day the wire
+    /// arrives. What is refused now is only what cursor does not have: a key,
+    /// in every spelling that could store one.
     #[test]
-    fn a_cursor_login_is_refused_in_every_invocation_shape() {
-        for (has_key, method) in [(true, None), (false, Some(Method::Api)), (false, None)] {
-            let refusal = chosen(ProviderId::Cursor, has_key, method)
-                .expect_err("a cursor login that ran would store what nothing reads");
-            assert!(refusal.to_string().contains("deferred"), "{refusal}");
+    fn a_cursor_login_runs_its_browser_flow_and_a_key_for_it_is_refused() {
+        // Steps 3 and 5 of the ladder, exactly as Copilot's device grant
+        // takes them: the one login runs, terminal or not, so nothing here
+        // consults standard input.
+        assert_eq!(
+            chosen(ProviderId::Cursor, false, None).expect("cursor's one login is chosen unasked"),
+            Method::Browser
+        );
+        assert_eq!(
+            chosen(ProviderId::Cursor, false, Some(Method::Browser))
+                .expect("naming the login cursor has is not refused"),
+            Method::Browser
+        );
+
+        // `--key` and `--method api` are the shapes that would store what
+        // nothing sends, and the refusal names what to use instead.
+        for (has_key, method) in [(true, None), (false, Some(Method::Api))] {
+            let refused = chosen(ProviderId::Cursor, has_key, method)
+                .expect_err("cursor has no key to store")
+                .to_string();
+            assert!(
+                refused.contains("no `api` login") && refused.contains("`browser`"),
+                "{refused}"
+            );
         }
+
+        let refused = chosen(ProviderId::Cursor, false, Some(Method::Device))
+            .expect_err("cursor has no device grant")
+            .to_string();
+        assert!(refused.contains("no `device` login"), "{refused}");
     }
 
     /// The menu is what somebody without `--method` actually reads, so the words
