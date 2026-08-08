@@ -1,25 +1,39 @@
-//! The deferred cursor wire: a stub that refuses by name.
+//! The cursor wire: still a stub that refuses by name, with its protobuf
+//! message runtime now admitted beneath it.
 //!
-//! Cursor's agent backend speaks gRPC, and porting it means taking on protocol
-//! knowledge this build has deliberately not taken on yet — the wire, the
-//! login flows, the catalog rows and the license review are all deferred
-//! together. What ships today is the *identity and the fence*: `cursor` is
-//! selectable, so asking for it gets ganja's own refusal rather than a typo's,
-//! and CI holds this crate and the engine free of `prost`/`tonic` — so the day
-//! the real wire arrives, the red gate forces its gRPC stack into a crate of
-//! its own instead of letting it slide in here. The fence is older than what
-//! it fences, and deliberately cheaper than an empty crate would have been.
+//! Cursor's agent backend speaks gRPC/protobuf. The messages are carried by
+//! [`buffa`] — Anthropic's pure-Rust, Apache-2.0 protobuf runtime, whose
+//! license matches this workspace's. It is codegen-only by design, so the
+//! shapes live in `cursor.proto` (ganja's own, authored against the spike's
+//! recorded wire facts) and the generated Rust is checked in under
+//! [`proto`], regenerated and diffed by a drift test. What is admitted in this
+//! landing is the message runtime alone: the *transport* that carries these
+//! bytes — a Connect/gRPC dialect the live spike will name — is chosen after
+//! the spike, not here.
 //!
-//! Until then: `GANJA_PROVIDER=cursor` builds a session cheaply — grok's
-//! construction posture, nothing read at construction — and the first request
-//! is refused with [`REFUSAL`]. It rides the uncataloged tier, so it must be
-//! told which model to ask for, exactly like a config-declared endpoint.
+//! The behavior has not moved yet. `GANJA_PROVIDER=cursor` still builds a
+//! session cheaply — grok's construction posture, nothing read at construction
+//! — and the first request is still refused with [`REFUSAL`], because the
+//! request path lands in a later wave. It rides the uncataloged tier, so it
+//! must be told which model to ask for, exactly like a config-declared
+//! endpoint.
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
 use super::{ChatRequest, Provider, ProviderError, ProviderEvent};
+
+/// The cursor wire's protobuf messages, generated from `cursor.proto` by
+/// `buffa`'s codegen and checked in.
+///
+/// `@generated` — never edited by hand; `buf generate` rewrites it and the
+/// drift test in this module's tests proves the checked-in copy still matches
+/// the `.proto`. A scaffold this landing: it carries one placeholder message,
+/// replaced by the recorded request/response pair in the wire wave.
+pub mod proto {
+    include!("cursor/ganja.cursor.v1.rs");
+}
 
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects the stub.
 pub const ID: &str = "cursor";
@@ -104,5 +118,61 @@ mod tests {
     #[test]
     fn the_debug_rendering_is_the_bare_name() {
         assert_eq!(format!("{CursorProvider:?}"), "CursorProvider");
+    }
+
+    /// The admitted runtime is real, not merely named: a generated message
+    /// round-trips through `buffa`'s encode/decode. This is what makes the
+    /// dependency reach the lock (so `cargo deny` audits its license) and the
+    /// live spike run against the same version the wire will.
+    #[test]
+    fn the_admitted_protobuf_runtime_round_trips_a_generated_message() {
+        use buffa::Message as _;
+
+        let probe = super::proto::Probe::default().with_model("cursor-model-x");
+        let bytes = probe.encode_to_vec();
+        let decoded = super::proto::Probe::decode_from_slice(&bytes)
+            .expect("a message buffa encoded decodes");
+
+        assert_eq!(decoded.model.as_deref(), Some("cursor-model-x"));
+    }
+
+    /// The checked-in generated code still matches its `.proto`: regenerating
+    /// with the same remote plugin must produce byte-identical output. A drift
+    /// here means somebody edited the `@generated` file by hand or changed the
+    /// `.proto` without regenerating — either way the source of truth and the
+    /// compiled code have diverged.
+    ///
+    /// Skipped rather than failed when `buf` is absent: the drift check is a
+    /// developer-machine guard, and the workspace deliberately keeps `buf`
+    /// and `protoc` out of CI (the generated code is checked in for exactly
+    /// that reason). CI proves the code compiles and round-trips; this proves
+    /// it was not hand-edited, on a machine that can regenerate.
+    #[test]
+    fn the_checked_in_generated_code_matches_the_proto() {
+        use std::process::Command;
+
+        let crate_dir = env!("CARGO_MANIFEST_DIR");
+        if Command::new("buf").arg("--version").output().is_err() {
+            eprintln!("skipping the proto drift check: `buf` is not on PATH");
+            return;
+        }
+
+        let generated =
+            std::path::Path::new(crate_dir).join("src/provider/cursor/ganja.cursor.v1.rs");
+        let before = std::fs::read_to_string(&generated).expect("the generated file is present");
+
+        let status = Command::new("buf")
+            .arg("generate")
+            .current_dir(crate_dir)
+            .status()
+            .expect("buf generate runs");
+        assert!(status.success(), "buf generate failed");
+
+        let after = std::fs::read_to_string(&generated).expect("the generated file is present");
+        assert_eq!(
+            before, after,
+            "the checked-in cursor protobuf code has drifted from cursor.proto; \
+             run `buf generate` in crates/ganja-provider and commit the result"
+        );
     }
 }

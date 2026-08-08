@@ -17,6 +17,10 @@ async-trait.workspace = true
 # The two encodings an OAuth login meets: a PKCE challenge on the way out, and
 # the payload of the id_token a ChatGPT login answers with on the way back.
 base64.workspace = true
+# The cursor wire's protobuf messages, generated from `provider/cursor.proto`
+# and checked in under `provider/cursor/`. Runtime only — the transport that
+# carries these bytes is chosen after the live spike.
+buffa.workspace = true
 # Resolves `auth.json` under the XDG data directory and the catalog cache under
 # the XDG cache one, on every platform, macOS included — which is where upstream
 # keeps its own credentials there.

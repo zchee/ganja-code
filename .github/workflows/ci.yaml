@@ -79,14 +79,16 @@ jobs:
           ! cargo tree -p ganja-provider -e normal | grep -q crossterm
           ! cargo tree -p ganja-provider -e normal | grep -q arboard
 
-      # The cursor fence, installed while trivially true: the real cursor wire
-      # is gRPC, and when it lands its stack goes in a crate of its own — this
-      # gate is what forces that split at the moment it matters, instead of a
-      # boundary argued about inside the same PR as the port.
-      - name: the gRPC stack stays out of the engine and the wires
-        run: |
-          ! cargo tree -p ganja-core -e normal | grep -qE 'prost|tonic'
-          ! cargo tree -p ganja-provider -e normal | grep -qE 'prost|tonic'
+      # A prost/tonic fence stood here — `! grep -qE 'prost|tonic'` on the
+      # engine and the wires — while the cursor wire was a stub, to force a
+      # gRPC stack into a crate of its own the day it landed. It was removed
+      # when the real wire landed, under a ruling that dependency weight is not
+      # this project's constraint: a dependency is admitted when its license is
+      # valid (asserted by `cargo deny` below) and the workspace compiles. The
+      # cursor wire's messages ride `buffa` (pure-Rust protobuf) in the
+      # provider crate, and its transport rides the provider crate too; what
+      # keeps a vendor's HTTP *server* out of the engine is the layering
+      # allowlists below — direction, not weight.
 
       # tail strips the crate's own header line, which would match the grep.
       - name: the bottom crates stay leaves

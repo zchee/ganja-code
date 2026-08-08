@@ -1,0 +1,21 @@
+// Provenance: the message shapes here are ganja's own, authored against the
+// wire facts recorded during the live cursor spike
+// (.omc/research/cursor/spike-wire-facts.md), never copied from the
+// opencode-cursor plugin's proto/agent_pb.ts. This file starts as the minimal
+// scaffold the W0 landing admits `buffa` with; the real request/response
+// messages land in W-WIRE-1 as the spike records them.
+//
+// Generated with `buf generate` against the buf.build/anthropics/buffa remote
+// plugin; the generated Rust is checked in beside this file under cursor/, and
+// a drift test regenerates and diffs it.
+edition = "2023";
+
+package ganja.cursor.v1;
+
+// A placeholder carrying the one field every cursor turn names — the model —
+// so the admitted runtime has a real message to encode and decode before the
+// spike fills in the rest. Replaced, not extended, by W-WIRE-1's recorded
+// request/response pair.
+message Probe {
+  string model = 1;
+}
