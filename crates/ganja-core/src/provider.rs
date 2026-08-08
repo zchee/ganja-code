@@ -418,7 +418,7 @@ fn oldest_stored_login(config: &Config) -> Result<Option<String>, SelectionError
 /// session could actually run as, in ganja's own vocabulary.
 ///
 /// Split from [`oldest_stored_login`] so the rule is a thing a test can state
-/// without a credential store. Three filters, each with its reason:
+/// without a credential store. Four filters, each with its reason:
 ///
 /// - the key is read back through [`auth::provider_id_for_storage_key`],
 ///   because the file stores upstream's names — a `grok` login sits under
@@ -426,6 +426,14 @@ fn oldest_stored_login(config: &Config) -> Result<Option<String>, SelectionError
 /// - [`fake::ID`] never counts: a credential filed under that id is not a
 ///   login to anything, and a session on the fake provider must keep the
 ///   notice this tier exists to avoid;
+/// - a **stub-backed id** never counts either: `cursor`'s login landed ahead
+///   of its wire, and a machine whose oldest login is a cursor one must not
+///   have bare `ganja` walk into a session the stub refuses — uncataloged,
+///   it would refuse before that for want of a model. The default tier skips
+///   it; naming the provider still reaches the stub's own refusal, which is
+///   where somebody who asked learns why. **This line leaves with the stub**:
+///   the landing that makes `cursor` a real wire deletes it and flips its
+///   test to assert adoption;
 /// - everything else must be [`selectable`] — an id opencode stored for a
 ///   provider this build has no wire for is a login, just not one this
 ///   session can use, and skipping it beats refusing to start over somebody
@@ -434,7 +442,7 @@ fn adoptable_login(config: &Config, stored: impl IntoIterator<Item = String>) ->
     stored
         .into_iter()
         .map(|key| auth::provider_id_for_storage_key(&key).to_owned())
-        .find(|id| id != fake::ID && selectable(config, id))
+        .find(|id| id != fake::ID && id != cursor::ID && selectable(config, id))
 }
 
 /// The model a session asks for when no tier named one.
@@ -479,8 +487,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, adoptable_login,
-        cursor, defaulted_model, fake, grok, openai, selectable,
+        ChatRequest, Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError,
+        adoptable_login, cursor, defaulted_model, fake, grok, openai, select, selectable,
     };
     use crate::catalog;
 
@@ -616,6 +624,62 @@ mod tests {
             None
         );
         assert_eq!(adoptable_login(&Config::default(), stored(&[])), None);
+    }
+
+    /// The stub-backed filter, on both of its sides: a machine whose oldest
+    /// login is a cursor one keeps exactly the bare-`ganja` behavior it had
+    /// before that login landed — the next adoptable login, or the noticed
+    /// fake. The filter leaves with the stub, and this test flips to assert
+    /// adoption in the same landing.
+    #[test]
+    fn a_cursor_login_is_never_adopted_while_its_wire_is_a_stub() {
+        let stored = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
+
+        // Seniority does not put a session on the stub: the next login wins.
+        assert_eq!(
+            adoptable_login(&Config::default(), stored(&["cursor", "anthropic"])).as_deref(),
+            Some("anthropic")
+        );
+        // A machine holding only a cursor login stays on the noticed fake,
+        // which is what "byte-identical until the wire lands" means here.
+        assert_eq!(
+            adoptable_login(&Config::default(), stored(&["cursor"])),
+            None
+        );
+        // The filter is the id's, not the tier's mood: cursor stays
+        // selectable, so only the *default* is steered away.
+        assert!(selectable(&Config::default(), cursor::ID));
+    }
+
+    /// The other side of the same decision: naming cursor is answered, not
+    /// filtered — selection builds the stub, and the first request meets the
+    /// stub's own refusal, which is where somebody who asked learns why.
+    #[tokio::test]
+    async fn an_explicitly_named_cursor_still_reaches_the_stubs_refusal() {
+        // The flag tier, because it outranks every other and so cannot be
+        // perturbed by whatever this process's environment holds.
+        let mut config = Config::default();
+        config.overrides.model = Some("cursor/still-imaginary".to_owned());
+
+        let selection = select(&config).expect("an explicit cursor selection is not filtered");
+        assert_eq!(selection.provider.id(), cursor::ID);
+        assert_eq!(selection.model, "still-imaginary");
+
+        let refused = selection
+            .provider
+            .stream(
+                ChatRequest {
+                    model: selection.model,
+                    system: None,
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                },
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .err()
+            .expect("the stub refuses every request until the wire lands");
+        assert!(refused.to_string().contains("stub"), "{refused}");
     }
 
     /// A model no catalog carries, so an answer naming it can only have come

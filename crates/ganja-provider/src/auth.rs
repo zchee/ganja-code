@@ -87,6 +87,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, error::Category};
 
 pub mod copilot;
+pub mod cursor;
 pub mod device;
 pub mod grok;
 pub mod loopback;
