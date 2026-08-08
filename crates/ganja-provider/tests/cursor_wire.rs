@@ -8,14 +8,21 @@
 //! canned response really decodes to. The response bodies are the shapes the
 //! live probe recorded (`.omc/research/cursor/spike-wire-facts.md`): bare
 //! protobuf on the unary listing, Connect frames with an in-body EndStream
-//! verdict on the streaming turn. HTTP/1.1 on loopback is deliberate — the
-//! framing is transport-agnostic, and h2 against the real endpoint is the
-//! `#[ignore]`d live test's job.
+//! verdict on the streaming turn. A reply can be **gated** — written up to a
+//! byte the test chooses, then held until the test says go — which is what
+//! proves delivery is incremental: the first delta has to reach the session
+//! while the rest of the body is deliberately unwritten. HTTP/1.1 on
+//! loopback is deliberate — the framing is transport-agnostic, and h2
+//! against the real endpoint is the `#[ignore]`d live test's job.
 //!
 //! One test, one binary, on purpose: it mutates `XDG_DATA_HOME`, and a plain
 //! `cargo test` runs the tests inside a binary on parallel threads.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use buffa::Message as _;
 use futures::StreamExt as _;
@@ -31,6 +38,8 @@ use secrecy::SecretString;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
+    sync::Notify,
+    time::timeout,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -43,6 +52,11 @@ const REFRESH: &str = "rt-cursor-canary-BBBB";
 
 /// The Connect EndStream flag, as the live probe recorded it.
 const END_STREAM: u8 = 0b0000_0010;
+
+/// How long an event that should already be decodable may take to arrive.
+/// Generous because CI machines stall, and reached only when the wire has
+/// regressed to buffering the whole body.
+const PATIENCE: Duration = Duration::from_secs(10);
 
 /// A renewal that must never run: the seeded credential's expiry is far in
 /// the future, so a call here means the wire re-decided what "expired"
@@ -96,42 +110,75 @@ impl Recorded {
     }
 }
 
-/// One canned answer: a status line, a content type, and raw body bytes.
+/// A pause in a reply: the body is written up to `after` bytes, then held
+/// until `open` is notified. What it proves is that whatever the test read
+/// in between was decoded from a body still in flight.
+#[derive(Clone)]
+struct Gate {
+    after: usize,
+    open: Arc<Notify>,
+}
+
+/// One canned answer: a status line, a content type, extra headers, raw
+/// body bytes, and an optional mid-body pause.
 #[derive(Clone)]
 struct Reply {
     status: String,
     content_type: String,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
+    gate: Option<Gate>,
 }
 
 impl Reply {
-    fn ok(content_type: &str, body: Vec<u8>) -> Self {
+    fn with(status: &str, content_type: &str, body: Vec<u8>) -> Self {
         Self {
-            status: "200 OK".to_owned(),
+            status: status.to_owned(),
             content_type: content_type.to_owned(),
+            headers: Vec::new(),
             body,
+            gate: None,
         }
     }
 
-    /// The bytes on the wire, length-delimited because a protobuf body may
+    fn ok(content_type: &str, body: Vec<u8>) -> Self {
+        Self::with("200 OK", content_type, body)
+    }
+
+    fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    fn gated(mut self, after: usize, open: Arc<Notify>) -> Self {
+        self.gate = Some(Gate { after, open });
+        self
+    }
+
+    /// The head on the wire, length-delimited because a protobuf body may
     /// hold any byte.
-    fn bytes(&self) -> Vec<u8> {
+    fn head_bytes(&self) -> Vec<u8> {
         let mut rendered = format!(
-            "HTTP/1.1 {}\r\nconnection: close\r\ncontent-type: {}\r\ncontent-length: {}\r\n\r\n",
+            "HTTP/1.1 {}\r\nconnection: close\r\ncontent-type: {}\r\ncontent-length: {}\r\n",
             self.status,
             self.content_type,
             self.body.len()
-        )
-        .into_bytes();
-        rendered.extend_from_slice(&self.body);
+        );
+        for (name, value) in &self.headers {
+            rendered.push_str(&format!("{name}: {value}\r\n"));
+        }
+        rendered.push_str("\r\n");
 
-        rendered
+        rendered.into_bytes()
     }
 }
 
 struct State {
     seen: Mutex<Vec<Recorded>>,
-    reply: Mutex<Reply>,
+    /// Answers served ahead of the sticky one, oldest first.
+    queued: Mutex<VecDeque<Reply>>,
+    /// What every request is answered with once the queue is empty.
+    sticky: Mutex<Reply>,
 }
 
 /// A loopback endpoint serving whatever answer the current phase set.
@@ -173,9 +220,19 @@ impl Endpoint {
     fn answers_with(&self, reply: Reply) {
         *self
             .state
-            .reply
+            .sticky
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = reply;
+    }
+
+    /// Queues an answer served once, ahead of the sticky one — which is how
+    /// a phase says "refuse the first attempt, answer the retry".
+    fn answers_once(&self, reply: Reply) {
+        self.state
+            .queued
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(reply);
     }
 }
 
@@ -217,7 +274,8 @@ async fn serve() -> Endpoint {
         .expect("a bound socket has an address");
     let state = Arc::new(State {
         seen: Mutex::new(Vec::new()),
-        reply: Mutex::new(Reply::ok("application/proto", Vec::new())),
+        queued: Mutex::new(VecDeque::new()),
+        sticky: Mutex::new(Reply::ok("application/proto", Vec::new())),
     });
 
     let served = Arc::clone(&state);
@@ -233,17 +291,36 @@ async fn serve() -> Endpoint {
                     return;
                 };
                 let reply = state
-                    .reply
+                    .queued
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone();
+                    .pop_front()
+                    .unwrap_or_else(|| {
+                        state
+                            .sticky
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone()
+                    });
                 state
                     .seen
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .push(request);
 
-                let _ = socket.write_all(&reply.bytes()).await;
+                let _ = socket.write_all(&reply.head_bytes()).await;
+                match &reply.gate {
+                    None => {
+                        let _ = socket.write_all(&reply.body).await;
+                    }
+                    Some(gate) => {
+                        let split = gate.after.min(reply.body.len());
+                        let _ = socket.write_all(&reply.body[..split]).await;
+                        let _ = socket.flush().await;
+                        gate.open.notified().await;
+                        let _ = socket.write_all(&reply.body[split..]).await;
+                    }
+                }
                 let _ = socket.flush().await;
             });
         }
@@ -285,6 +362,24 @@ fn text_update(delta: &str) -> proto::Update {
         text_delta: buffa::MessageField::some(proto::TextDelta::default().with_text(delta)),
         ..Default::default()
     }
+}
+
+fn turn_ended_update() -> proto::Update {
+    proto::Update {
+        turn_ended: buffa::MessageField::some(proto::TurnEnded::default()),
+        ..Default::default()
+    }
+}
+
+/// The body of a clean two-delta exchange, ended the way the server ends
+/// one: the turn marked over, then the empty EndStream verdict.
+fn exchange_body() -> Vec<u8> {
+    let mut body = update_frame(text_update("Hello"));
+    body.extend(update_frame(text_update(" world")));
+    body.extend(update_frame(turn_ended_update()));
+    body.extend(frame(END_STREAM, b"{}"));
+
+    body
 }
 
 /// The one turn every phase asks for.
@@ -406,14 +501,7 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
 
     // ── One whole turn ───────────────────────────────────────────────────
     endpoint.forget();
-    let mut exchange = update_frame(text_update("Hello"));
-    exchange.extend(update_frame(text_update(" world")));
-    exchange.extend(update_frame(proto::Update {
-        turn_ended: buffa::MessageField::some(proto::TurnEnded::default()),
-        ..Default::default()
-    }));
-    exchange.extend(frame(END_STREAM, b"{}"));
-    endpoint.answers_with(Reply::ok("application/connect+proto", exchange));
+    endpoint.answers_with(Reply::ok("application/connect+proto", exchange_body()));
 
     let events: Vec<ProviderEvent> = wire
         .stream(request(), CancellationToken::new())
@@ -465,10 +553,81 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         Some("say hi")
     );
 
+    // ── Delivery is incremental ──────────────────────────────────────────
+    // The body pauses after the first frame, so the first delta can only
+    // arrive if the wire decodes frames as they land. A wire that buffered
+    // until the body ended would leave `next()` waiting on a connection the
+    // server is deliberately holding open — which the timeout turns into a
+    // readable failure instead of a hang.
+    endpoint.forget();
+    let open = Arc::new(Notify::new());
+    let first_frame = update_frame(text_update("Hello")).len();
+    endpoint.answers_with(
+        Reply::ok("application/connect+proto", exchange_body())
+            .gated(first_frame, Arc::clone(&open)),
+    );
+
+    let mut streamed = wire
+        .stream(request(), CancellationToken::new())
+        .await
+        .expect("the exchange opens");
+    let first = timeout(PATIENCE, streamed.next())
+        .await
+        .expect("the first delta must arrive while the body is still open");
+    assert_eq!(
+        first,
+        Some(ProviderEvent::TextDelta("Hello".to_owned())),
+        "decoded from a body whose remainder is deliberately unwritten"
+    );
+
+    open.notify_one();
+    let rest: Vec<ProviderEvent> = streamed.collect().await;
+    assert_eq!(
+        rest,
+        vec![
+            ProviderEvent::TextDelta(" world".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ]
+    );
+
+    // ── A cancel mid-stream ──────────────────────────────────────────────
+    // Same gate, but the person leaves: after the first delta the token
+    // fires, and the stream ends with neither a Finish nor a Failed — the
+    // engine is what reads that as Cancelled, and it cannot if a verdict
+    // arrives.
+    endpoint.forget();
+    let open = Arc::new(Notify::new());
+    endpoint.answers_with(
+        Reply::ok("application/connect+proto", exchange_body())
+            .gated(first_frame, Arc::clone(&open)),
+    );
+
+    let cancel = CancellationToken::new();
+    let mut streamed = wire
+        .stream(request(), cancel.clone())
+        .await
+        .expect("the exchange opens");
+    let first = timeout(PATIENCE, streamed.next())
+        .await
+        .expect("the first delta arrives before the cancel");
+    assert_eq!(first, Some(ProviderEvent::TextDelta("Hello".to_owned())));
+
+    cancel.cancel();
+    let rest: Vec<ProviderEvent> = streamed.collect().await;
+    assert!(
+        rest.is_empty(),
+        "a cancelled stream ends without a verdict: {rest:?}"
+    );
+    // Lets the server task finish writing into whatever is left of the
+    // socket, so nothing outlives the phase.
+    open.notify_one();
+
     // ── The recorded refusal ─────────────────────────────────────────────
     // The live probe's exact exchange: a heartbeat, then the EndStream
-    // verdict. Nothing streamed, so the turn fails at its opening with the
-    // provider's own vocabulary intact.
+    // verdict. Under incremental delivery the turn has opened by the time
+    // the verdict lands, so the refusal arrives inside the stream — the
+    // terminal Failed every wire reports an in-body death with — keeping
+    // the provider's own vocabulary intact.
     endpoint.forget();
     let mut refusal = update_frame(proto::Update {
         heartbeat: buffa::MessageField::some(proto::Heartbeat::default()),
@@ -481,15 +640,19 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     ));
     endpoint.answers_with(Reply::ok("application/connect+proto", refusal));
 
-    let refused = wire
+    let events: Vec<ProviderEvent> = wire
         .stream(request(), CancellationToken::new())
         .await
-        .err()
-        .expect("the recorded stream refuses");
+        .expect("the exchange opens on a 200")
+        .collect()
+        .await;
     assert!(
-        matches!(&refused, ProviderError::Status { status: 400, message }
-            if message.contains("invalid_argument")),
-        "{refused:?}"
+        matches!(
+            events.as_slice(),
+            [ProviderEvent::Failed(ProviderError::Status { status: 400, message })]
+                if message.contains("invalid_argument")
+        ),
+        "{events:?}"
     );
 
     // ── A dead credential, in-body ───────────────────────────────────────
@@ -502,11 +665,15 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         ),
     ));
 
-    let expired = wire
+    let events: Vec<ProviderEvent> = wire
         .stream(request(), CancellationToken::new())
         .await
-        .err()
-        .expect("a dead credential refuses the turn");
+        .expect("the exchange opens on a 200")
+        .collect()
+        .await;
+    let [ProviderEvent::Failed(expired)] = events.as_slice() else {
+        panic!("a dead credential fails the turn in-stream: {events:?}");
+    };
     let rendered = expired.to_string();
     assert!(matches!(expired, ProviderError::Auth(_)), "{rendered}");
     assert!(
@@ -516,13 +683,15 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
 
     // ── An HTTP refusal ──────────────────────────────────────────────────
     // The 415 the live probe drew by sending the wrong content type: a
-    // status outside 2xx is the provider answering, reported as such.
+    // status outside 2xx is the provider answering before the first byte of
+    // a stream existed, so it refuses the turn's opening — and it is not a
+    // status worth retrying, so exactly one request is made.
     endpoint.forget();
-    endpoint.answers_with(Reply {
-        status: "415 Unsupported Media Type".to_owned(),
-        content_type: "text/plain".to_owned(),
-        body: Vec::new(),
-    });
+    endpoint.answers_with(Reply::with(
+        "415 Unsupported Media Type",
+        "text/plain",
+        Vec::new(),
+    ));
 
     let unsupported = wire
         .stream(request(), CancellationToken::new())
@@ -532,5 +701,98 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     assert!(
         matches!(unsupported, ProviderError::Status { status: 415, .. }),
         "{unsupported:?}"
+    );
+    assert_eq!(endpoint.seen().len(), 1, "a 415 is not worth a second try");
+
+    // ── The retry the other wires ride ───────────────────────────────────
+    // One transient refusal, then the answer: the shared driver replays the
+    // request before the first byte, and what it replays is byte-identical
+    // — the same body under the same x-request-id, because the replay is
+    // the same request rather than a new one wearing a fresh stamp.
+    endpoint.forget();
+    endpoint.answers_once(
+        Reply::with(
+            "503 Service Unavailable",
+            "text/plain",
+            b"try later".to_vec(),
+        )
+        // Zero seconds so the schedule is exercised without the test
+        // waiting out a real backoff.
+        .header("retry-after", "0"),
+    );
+    endpoint.answers_with(Reply::ok("application/connect+proto", exchange_body()));
+
+    let events: Vec<ProviderEvent> = wire
+        .stream(request(), CancellationToken::new())
+        .await
+        .expect("the retry answers")
+        .collect()
+        .await;
+    assert_eq!(
+        events.last(),
+        Some(&ProviderEvent::Finish(FinishReason::Completed)),
+        "{events:?}"
+    );
+
+    let seen = endpoint.seen();
+    assert_eq!(seen.len(), 2, "one refusal, one replay");
+    assert_eq!(
+        seen[0].header("x-request-id"),
+        seen[1].header("x-request-id"),
+        "the replay is the same request under the same stamp"
+    );
+    assert_eq!(seen[0].body, seen[1].body, "and carries the same bytes");
+
+    // ── A refusal echoing the credential ─────────────────────────────────
+    // A provider that quotes back the token it rejected is a real shape,
+    // and the shared driver's redaction — which the one-shot wire's local
+    // twin lacked a zeroize behind — is what keeps it out of the error.
+    endpoint.forget();
+    endpoint.answers_with(Reply::with(
+        "401 Unauthorized",
+        "text/plain",
+        format!("bad token {ACCESS}, go away").into_bytes(),
+    ));
+
+    let rejected = wire
+        .stream(request(), CancellationToken::new())
+        .await
+        .err()
+        .expect("a 401 is not answerable");
+    let rendered = format!("{rejected} / {rejected:?}");
+    assert!(
+        matches!(rejected, ProviderError::Status { status: 401, .. }),
+        "{rendered}"
+    );
+    assert!(!rendered.contains(ACCESS), "{rendered}");
+    assert!(
+        rendered.contains("[redacted]"),
+        "the echo is masked rather than dropped: {rendered}"
+    );
+
+    // ── A redirect is refused where it stands ────────────────────────────
+    // A 3xx is an instruction to send the request — and its bearer token —
+    // somewhere else. `.invalid` never resolves, so a followed redirect
+    // would surface as a transport error; a Status 302 is the proof it was
+    // refused unfollowed, the bound every wire's client is built with.
+    endpoint.forget();
+    endpoint.answers_with(Reply::with("302 Found", "text/plain", Vec::new()).header(
+        "location",
+        "http://elsewhere.invalid/agent.v1.AgentService/Run",
+    ));
+
+    let redirected = wire
+        .stream(request(), CancellationToken::new())
+        .await
+        .err()
+        .expect("a 302 is not an answer");
+    assert!(
+        matches!(redirected, ProviderError::Status { status: 302, .. }),
+        "a redirect must be refused where it stands, not followed: {redirected:?}"
+    );
+    assert_eq!(
+        endpoint.seen().len(),
+        1,
+        "nothing followed the redirect anywhere"
     );
 }
