@@ -19,13 +19,16 @@
 //! derived from where) and the generated Rust is checked in under [`proto`],
 //! regenerated and diffed by a drift test.
 //!
-//! **One-shot, for now.** A turn sends its single run request, reads the
-//! whole response body, and hands back the events it contained; nothing is
-//! surfaced until the server has finished talking. Incremental delivery,
-//! cancellation that reaches mid-stream, the retry driver the other wires
-//! ride, and the conversation-state machinery that carries history and tool
-//! calls are all deliberately not here yet — the module boundary they land
-//! behind is [`connect`]'s, and nothing about this shape is a contract.
+//! **Streamed as it arrives.** The Run body is cut into Connect frames the
+//! moment the transport hands bytes over ([`connect::Splitter`]), each frame
+//! mapped onto events ([`decode::Mapping`]) and handed to the session while
+//! the server is still talking. The request that opens the exchange rides
+//! the shared retry driver every other wire does — before the first byte
+//! only — and a cancel mid-stream ends the stream without a verdict, which
+//! is the engine's cue to call the turn cancelled rather than failed. What
+//! is still deliberately not here is the conversation-state machinery that
+//! carries history and tool calls on cursor's content-addressed channel;
+//! [`request`]'s module docs say why.
 //!
 //! The provider rides the uncataloged tier, so a session must be told which
 //! model to ask for; [`CursorWire::usable_models`] is the listing that says
@@ -33,17 +36,17 @@
 //! the stored login is read per request, so a login that happens after a
 //! session starts is picked up by its next request.
 
-use std::{fmt, sync::Arc};
+use std::{collections::VecDeque, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use futures::{StreamExt as _, stream, stream::BoxStream};
+use futures::{Stream, StreamExt as _, stream, stream::BoxStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     auth::{self, RefreshOauth},
     provider::{
         ChatRequest, CredentialSource, Presented, Provider, ProviderError, ProviderEvent,
-        check_base_url, client, shown_base_url,
+        check_base_url, client, is_terminal, retry, shown_base_url,
     },
 };
 
@@ -92,11 +95,6 @@ const STREAMING_CONTENT_TYPE: &str = "application/connect+proto";
 /// One constant so the day the server starts gating on it there is one
 /// place to move.
 const CLIENT_VERSION: &str = "cli-2026.01.09-231024f";
-
-/// Longest error body kept for a status message. The shared trimming lives
-/// in the retry driver this wire does not ride yet; the number is kept equal
-/// so adopting the driver later changes no message.
-const BODY_LIMIT: usize = 400;
 
 /// The identity `GANJA_PROVIDER=cursor` selects.
 ///
@@ -213,53 +211,73 @@ impl CursorWire {
     /// answered, `Status` when the server refused, `Parse` when the answer
     /// could not be read.
     pub async fn usable_models(&self) -> Result<Vec<proto::ModelEntry>, ProviderError> {
+        let presented = self.credential.presented().await?;
         // The request message has no fields, and an empty message encodes to
         // no bytes at all — the zero-byte body the live probe was answered
         // on.
-        let body = self.post(MODELS_PATH, false, Vec::new()).await?;
+        let built = self.build(MODELS_PATH, false, Vec::new(), &presented)?;
+        // A listing has no cancel channel of its own, so the retry driver
+        // rides under a token nothing fires.
+        let never = CancellationToken::new();
+        let response = retry::send(&self.client, built, &presented, &never).await?;
+        let body = response.bytes().await.map_err(transport)?;
 
         decode::model_list(&body)
     }
 
-    /// One turn: the run request out, the whole exchange back in, as the
-    /// events it contained.
+    /// One turn: the run request out, events in as the server produces them.
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderError`] when the turn cannot start or the exchange
-    /// failed before anything streamed; a failure after visible text arrives
-    /// as [`ProviderEvent::Failed`] inside the stream instead.
+    /// Returns [`ProviderError`] when the turn cannot start — no credential,
+    /// an endpoint that refused or never answered, every retry spent.
+    /// Everything after the first byte arrives inside the stream instead: an
+    /// in-body EndStream verdict, a dead connection and a frame this build
+    /// cannot read all end it with [`ProviderEvent::Failed`], because by
+    /// then text may already be on somebody's screen.
     pub async fn stream(
         &self,
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
         let message = request::run_message(&request)?;
-        let body = match self.post(RUN_PATH, true, connect::envelope(&message)).await {
-            Ok(body) => body,
-            // A turn the user already left is not a failed one.
+        let presented = self.credential.presented().await?;
+        let built = self.build(RUN_PATH, true, connect::envelope(&message), &presented)?;
+
+        let response = match retry::send(&self.client, built, &presented, &cancel).await {
+            Ok(response) => response,
+            // A turn the user already left is not a failed one: the engine
+            // reads a stream that ends after a cancel as `Cancelled`.
             Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
             Err(error) => return Err(error),
         };
 
-        Ok(stream::iter(decode::exchange(&body)?).boxed())
+        Ok(events(response.bytes_stream().boxed(), cancel))
     }
 
-    /// Sends one RPC and returns its complete, successful body.
+    /// Builds one RPC's request: the recorded header set, verbatim, over
+    /// `body`.
     ///
-    /// The header set is the recorded one, verbatim; the split between the
-    /// two content types — and `connect-protocol-version` on the streaming
-    /// RPC only — is exactly what the live probe measured the server
-    /// enforcing.
-    async fn post(
+    /// The split between the two content types — and
+    /// `connect-protocol-version` on the streaming RPC only — is exactly
+    /// what the live probe measured the server enforcing. The
+    /// `x-request-id` stamp is minted here, once per turn: the retry
+    /// driver's replay is a clone of this request, so a retried request is
+    /// the same request under the same id rather than a new one wearing a
+    /// fresh stamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Transport`] when no request id can be
+    /// minted or the request cannot be assembled; nothing was sent.
+    fn build(
         &self,
         path: &str,
         streaming: bool,
         body: Vec<u8>,
-    ) -> Result<Vec<u8>, ProviderError> {
-        let presented = self.credential.presented().await?;
-
-        let mut sent = self
+        presented: &Presented,
+    ) -> Result<reqwest::Request, ProviderError> {
+        let mut built = self
             .client
             .post(format!("{}{path}", self.base_url))
             .header(
@@ -283,25 +301,126 @@ impl CursorWire {
                 },
             );
         if streaming {
-            sent = sent.header("connect-protocol-version", "1");
+            built = built.header("connect-protocol-version", "1");
         }
 
-        let response = sent.body(body).send().await.map_err(transport)?;
-        let status = response.status();
-        if !status.is_success() {
-            let echoed = response.text().await.unwrap_or_default();
-            return Err(refused(status.as_u16(), &echoed, &presented));
-        }
-
-        Ok(response.bytes().await.map_err(transport)?.to_vec())
+        built.body(body).build().map_err(|error| {
+            ProviderError::Transport(presented.redact(&format!("malformed request: {error}")))
+        })
     }
 }
 
-/// Describes a transport failure, following the cause chain the way the
-/// retry driver's twin does — `reqwest::Error` alone says only that a
-/// request failed, never why, and the URL is dropped first because a base
-/// URL may carry credentials. Local to this wire only until it rides the
-/// shared driver, which owns the shared spelling.
+/// Drives the body's chunks through the Connect splitter and the mapping,
+/// handing out each frame's events the moment the frame completes.
+///
+/// The cancellation posture is the SSE fold's, verbatim: the token is
+/// checked before handing out a buffered event as well as before pulling a
+/// new chunk, so a cancel cannot be outrun by frames that were already
+/// parsed, and a terminal event drops whatever decoded behind it. Split
+/// from [`CursorWire::stream`] so a fixture drives exactly the pipeline a
+/// live turn runs, minus the socket.
+fn events<S, C, E>(chunks: S, cancel: CancellationToken) -> BoxStream<'static, ProviderEvent>
+where
+    S: Stream<Item = Result<C, E>> + Send + Unpin + 'static,
+    C: AsRef<[u8]> + Send + 'static,
+    E: fmt::Display + Send + 'static,
+{
+    /// Everything the fold carries between polls.
+    struct State<S> {
+        chunks: S,
+        splitter: connect::Splitter,
+        mapping: decode::Mapping,
+        cancel: CancellationToken,
+        /// Events already decoded, not yet handed out.
+        ready: VecDeque<ProviderEvent>,
+        /// Reused so that mapping a frame does not allocate.
+        scratch: Vec<ProviderEvent>,
+        done: bool,
+    }
+
+    stream::unfold(
+        State {
+            chunks,
+            splitter: connect::Splitter::default(),
+            mapping: decode::Mapping::default(),
+            cancel,
+            ready: VecDeque::new(),
+            scratch: Vec::new(),
+            done: false,
+        },
+        |mut state| async move {
+            loop {
+                // Checked before handing out a buffered event as well as
+                // before pulling a new chunk, so that a cancel cannot be
+                // outrun by frames that were already parsed.
+                if state.cancel.is_cancelled() {
+                    return None;
+                }
+
+                if let Some(event) = state.ready.pop_front() {
+                    if is_terminal(&event) {
+                        state.done = true;
+                        state.ready.clear();
+                    }
+
+                    return Some((event, state));
+                }
+
+                if state.done {
+                    return None;
+                }
+
+                let chunk = tokio::select! {
+                    biased;
+                    () = state.cancel.cancelled() => return None,
+                    chunk = state.chunks.next() => chunk,
+                };
+
+                state.scratch.clear();
+                match chunk {
+                    Some(Ok(chunk)) => {
+                        state.splitter.push(chunk.as_ref());
+                        loop {
+                            match state.splitter.frame() {
+                                Ok(Some(frame)) => {
+                                    state.mapping.frame(&frame, &mut state.scratch);
+                                }
+                                Ok(None) => break,
+                                Err(error) => {
+                                    state.done = true;
+                                    state.scratch.push(ProviderEvent::Failed(error));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(error)) => {
+                        state.done = true;
+                        state
+                            .scratch
+                            .push(ProviderEvent::Failed(ProviderError::Transport(
+                                error.to_string(),
+                            )));
+                    }
+                    None => {
+                        state.done = true;
+                        state.mapping.truncated(&mut state.scratch);
+                    }
+                }
+
+                state.ready.extend(state.scratch.drain(..));
+            }
+        },
+    )
+    .boxed()
+}
+
+/// Describes a failed read of the unary body, following the cause chain the
+/// way the retry driver does for the request itself — `reqwest::Error`
+/// alone says only that something failed, never why — and dropping the URL
+/// first because a base URL may carry credentials. The driver owns every
+/// failure up to the first byte; this covers the one read after it that the
+/// unary RPC still makes whole.
 fn transport(error: reqwest::Error) -> ProviderError {
     use std::fmt::Write as _;
 
@@ -316,36 +435,35 @@ fn transport(error: reqwest::Error) -> ProviderError {
     ProviderError::Transport(message)
 }
 
-/// A non-2xx answer, trimmed to what a status bar can hold and scrubbed of
-/// the credential — a server echoing the request it refused is the leak this
-/// exists to stop. The retry driver's twin, local for [`transport`]'s
-/// reason.
-fn refused(status: u16, body: &str, presented: &Presented) -> ProviderError {
-    let trimmed = body.trim();
-    let message = if trimmed.is_empty() {
-        "no error body".to_owned()
-    } else {
-        let shortened = match trimmed.char_indices().nth(BODY_LIMIT) {
-            Some((cut, _)) => format!("{}…", &trimmed[..cut]),
-            None => trimmed.to_owned(),
-        };
-        presented.redact(&shortened)
-    };
-
-    ProviderError::Status { status, message }
+/// Feeds a recorded body through the pipeline a live turn runs.
+///
+/// Delivering the whole body as one chunk is the worst case for
+/// cancellation — every frame already parsed and waiting — which is exactly
+/// what the cancel test wants to prove is still stoppable.
+#[cfg(test)]
+fn replay(body: Vec<u8>, cancel: CancellationToken) -> BoxStream<'static, ProviderEvent> {
+    events(
+        stream::iter([Ok::<Vec<u8>, std::convert::Infallible>(body)]),
+        cancel,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
+
+    use buffa::Message as _;
+    use futures::StreamExt as _;
+    use tokio_util::sync::CancellationToken;
 
     use super::{
         super::PROVIDERS, CursorProvider, CursorWire, DEFAULT_BASE_URL, ID, Provider as _,
-        ProviderError, refused,
+        ProviderError, connect, proto,
     };
     use crate::{
         auth::{self, AuthError, OauthCredential, RefreshOauth},
-        provider::Presented,
+        protocol::FinishReason,
+        provider::ProviderEvent,
     };
 
     /// A renewal that must never run, for the cases that are about
@@ -361,6 +479,44 @@ mod tests {
         ) -> Result<OauthCredential, AuthError> {
             panic!("{provider_id} was renewed by a test that only builds a provider");
         }
+    }
+
+    /// A data frame holding one update, built with the real message types
+    /// so the fold is driven by exactly what the server would send.
+    fn framed(update: proto::Update) -> Vec<u8> {
+        let message = proto::ServerMessage {
+            interaction_update: buffa::MessageField::some(update),
+            ..Default::default()
+        };
+
+        connect::envelope(&message.encode_to_vec())
+    }
+
+    fn text(delta: &str) -> proto::Update {
+        proto::Update {
+            text_delta: buffa::MessageField::some(proto::TextDelta::default().with_text(delta)),
+            ..Default::default()
+        }
+    }
+
+    fn turn_ended() -> proto::Update {
+        proto::Update {
+            turn_ended: buffa::MessageField::some(proto::TurnEnded::default()),
+            ..Default::default()
+        }
+    }
+
+    /// An EndStream frame carrying `payload`.
+    fn end_stream(payload: &str) -> Vec<u8> {
+        let mut frame = vec![0b0000_0010];
+        frame.extend_from_slice(
+            &u32::try_from(payload.len())
+                .expect("a test payload fits")
+                .to_be_bytes(),
+        );
+        frame.extend_from_slice(payload.as_bytes());
+
+        frame
     }
 
     #[test]
@@ -418,17 +574,92 @@ mod tests {
         );
     }
 
-    /// A refused response may quote the request it refused, and the request
-    /// carried the token.
-    #[test]
-    fn a_refusal_echoing_the_credential_is_scrubbed_before_anyone_reads_it() {
-        let presented = Presented::new("at-canary-FFFF").expect("a non-blank credential");
-        let error = refused(401, "bad token at-canary-FFFF, go away", &presented);
+    /// The whole reason this fold exists: an event reaches the session while
+    /// the response body is still open. A fold that buffered until the end
+    /// of the body would leave the first `next()` waiting on a channel
+    /// nothing has closed, which the timeout turns into a readable failure.
+    #[tokio::test]
+    async fn a_delta_is_handed_over_while_the_body_is_still_open() {
+        let (sender, receiver) =
+            futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+        let mut stream = super::events(receiver, CancellationToken::new());
 
-        let rendered = error.to_string();
-        assert!(!rendered.contains("at-canary-FFFF"), "{rendered}");
-        assert!(rendered.contains("[redacted]"), "{rendered}");
-        assert!(rendered.contains("401"), "{rendered}");
+        sender
+            .unbounded_send(Ok(framed(text("Hello"))))
+            .expect("the body is open");
+        let first = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("the delta must arrive before the body ends");
+        assert_eq!(
+            first,
+            Some(ProviderEvent::TextDelta("Hello".to_owned())),
+            "the first frame's event, with the rest of the body unwritten"
+        );
+
+        let mut rest = framed(text(" world"));
+        rest.extend(framed(turn_ended()));
+        rest.extend(end_stream("{}"));
+        sender.unbounded_send(Ok(rest)).expect("the body is open");
+        drop(sender);
+
+        let tail: Vec<ProviderEvent> = stream.collect().await;
+        assert_eq!(
+            tail,
+            vec![
+                ProviderEvent::TextDelta(" world".to_owned()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ]
+        );
+    }
+
+    /// The other wires' cancellation contract, replicated from
+    /// `anthropic`'s test of the same name: the whole transcript delivered
+    /// as one chunk is the worst case — every frame already parsed and
+    /// waiting — and the cancel still wins.
+    #[tokio::test]
+    async fn a_cancel_mid_transcript_ends_the_stream_without_a_verdict() {
+        let mut body = framed(text("Hello"));
+        body.extend(framed(text(" world")));
+        body.extend(framed(turn_ended()));
+        body.extend(end_stream("{}"));
+
+        let cancel = CancellationToken::new();
+        let mut stream = super::replay(body, cancel.clone());
+
+        assert_eq!(
+            stream.next().await,
+            Some(ProviderEvent::TextDelta("Hello".to_owned()))
+        );
+        cancel.cancel();
+
+        let rest: Vec<ProviderEvent> = stream.collect().await;
+        assert!(
+            rest.is_empty(),
+            "a cancelled stream ends; the engine is what calls that Cancelled, and it \
+             cannot if a Finish or a Failed arrives: {rest:?}"
+        );
+    }
+
+    /// A terminal event drops whatever decoded behind it — the shared
+    /// folds' contract — so a body talking past its EndStream frame ends on
+    /// the verdict rather than on the splitter's complaint about the
+    /// trailing bytes.
+    #[tokio::test]
+    async fn nothing_follows_the_streams_verdict() {
+        let mut body = framed(text("done"));
+        body.extend(end_stream("{}"));
+        body.push(0x00);
+
+        let events: Vec<ProviderEvent> = super::replay(body, CancellationToken::new())
+            .collect()
+            .await;
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta("done".to_owned()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ]
+        );
     }
 
     /// The admitted runtime is real, not merely named: a generated message

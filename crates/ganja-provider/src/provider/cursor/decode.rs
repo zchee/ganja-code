@@ -1,13 +1,12 @@
-//! The cursor wire's responses, decoded whole.
+//! The cursor wire's responses, decoded as they arrive.
 //!
 //! Spec: `.omc/research/cursor/spike-wire-facts.md`. Two shapes: the unary
 //! model listing is bare protobuf with no framing at all (LIVE-OBSERVED —
 //! the reference client's tolerance for a framed unary response is dead code
-//! on the real server), and the Run stream is Connect frames whose verdict
-//! rides the in-body EndStream frame. Both arrive here as a complete body:
-//! the exchange is decoded once and handed back as the events it contained,
-//! which is what lets a truncation or an in-body failure be judged with the
-//! whole answer in hand.
+//! on the real server), decoded whole because a unary body is one message;
+//! and the Run stream is Connect frames whose verdict rides the in-body
+//! EndStream frame, mapped one frame at a time by [`Mapping`] so the reply
+//! reaches the session while the server is still talking.
 
 use buffa::Message as _;
 
@@ -31,7 +30,13 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
     Ok(decoded.models)
 }
 
-/// One Run exchange's events, from its complete streaming body.
+/// Turns Run frames into events, one frame at a time.
+///
+/// The shape is the SSE wires' `Mapper`, spelled for Connect frames:
+/// [`frame`](Self::frame) appends what one frame means, and
+/// [`truncated`](Self::truncated) judges a body that ended without its
+/// EndStream frame. [`ProviderEvent::Finish`] and [`ProviderEvent::Failed`]
+/// are terminal — the stream layer hands out nothing after either.
 ///
 /// Updates this build does not model — the tool-call and thinking arms, and
 /// whole server messages outside the update channel — are skipped, not
@@ -40,47 +45,54 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// is logged at debug, which is where "why is the reply shorter than the
 /// server's" is answered.
 ///
-/// The EndStream verdict follows the [`Provider`](crate::provider::Provider)
-/// contract's split: an error before anything streamed fails the turn's
-/// opening, one after text became visible arrives as
-/// [`ProviderEvent::Failed`] so the text is not thrown away. A body that
-/// ends with no EndStream frame and no turn-ended update is a truncation,
-/// judged the same way.
-///
-/// # Errors
-///
-/// Returns [`ProviderError::Parse`] when the framing or a frame's protobuf
-/// cannot be read, and the EndStream error itself when nothing had streamed
-/// yet.
-pub(super) fn exchange(body: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
-    let mut events: Vec<ProviderEvent> = Vec::new();
-    let mut ended = false;
+/// **`turn_ended` is noted; the verdict waits for the EndStream frame.**
+/// The two are the application and the protocol saying different things —
+/// "the turn is over" and "here is how the stream ended" — exactly the
+/// Anthropic wire's `stop_reason`/`message_stop` split, and they are handled
+/// its way: a clean EndStream finishes the turn, a body that dies after
+/// `turn_ended` lost only its terminator and finishes too, and an EndStream
+/// **error** after `turn_ended` fails the turn — the server's verdict
+/// outranks the model's goodbye. The one-shot decode this replaces broke at
+/// `turn_ended` and never read that verdict at all.
+#[derive(Debug, Default)]
+pub(super) struct Mapping {
+    /// The server marked the turn ended, so the reply is complete with or
+    /// without the terminator.
+    ended: bool,
+}
 
-    for frame in connect::frames(body)? {
+impl Mapping {
+    /// Maps `frame`, appending whatever it means to `events`.
+    pub(super) fn frame(&mut self, frame: &connect::Frame, events: &mut Vec<ProviderEvent>) {
         if frame.is_end_stream() {
-            match connect::end_stream_error(frame.payload)? {
-                Some((code, message)) => {
-                    let error = verdict(&code, &message);
-                    if events.is_empty() {
-                        return Err(error);
-                    }
-                    events.push(ProviderEvent::Failed(error));
+            match connect::end_stream_error(&frame.payload) {
+                Ok(Some((code, message))) => {
+                    events.push(ProviderEvent::Failed(verdict(&code, &message)));
                 }
-                None => events.push(ProviderEvent::Finish(FinishReason::Completed)),
+                Ok(None) => events.push(ProviderEvent::Finish(FinishReason::Completed)),
+                Err(error) => events.push(ProviderEvent::Failed(error)),
             }
-            ended = true;
-            break;
+            return;
         }
 
-        let message = proto::ServerMessage::decode_from_slice(frame.payload).map_err(|error| {
-            ProviderError::Parse(format!("a server message did not decode: {error}"))
-        })?;
+        let message = match proto::ServerMessage::decode_from_slice(&frame.payload) {
+            Ok(message) => message,
+            Err(error) => {
+                // Every data frame is a server message and every one of them
+                // means something, so stepping past a broken one would
+                // silently drop part of the reply.
+                events.push(ProviderEvent::Failed(ProviderError::Parse(format!(
+                    "a server message did not decode: {error}"
+                ))));
+                return;
+            }
+        };
         let Some(update) = message.interaction_update.as_option() else {
             tracing::debug!(
                 provider = ID,
                 "skipped a server message outside the update channel"
             );
-            continue;
+            return;
         };
 
         if let Some(delta) = update.text_delta.as_option() {
@@ -88,12 +100,7 @@ pub(super) fn exchange(body: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError>
                 delta.text.clone().unwrap_or_default(),
             ));
         } else if update.turn_ended.is_set() {
-            events.push(ProviderEvent::Finish(FinishReason::Completed));
-            ended = true;
-            // Anything after the turn's end would be dropped by the engine
-            // anyway; stopping here keeps "what the exchange meant" one
-            // place's decision.
-            break;
+            self.ended = true;
         } else if update.heartbeat.is_set() {
             // Liveness, carrying nothing.
         } else {
@@ -101,17 +108,22 @@ pub(super) fn exchange(body: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError>
         }
     }
 
-    if !ended {
-        let truncated = ProviderError::Transport(
-            "the response body ended before the exchange finished".to_owned(),
-        );
-        if events.is_empty() {
-            return Err(truncated);
+    /// Reports a body that ended without its EndStream frame.
+    ///
+    /// After `turn_ended` the reply was complete and only the terminator was
+    /// lost — the Anthropic wire's reading of a body cut off after the stop
+    /// reason. Before it, reply text nobody can recover is gone, and calling
+    /// that a short answer would be the lie this variant exists to prevent.
+    pub(super) fn truncated(&mut self, events: &mut Vec<ProviderEvent>) {
+        if self.ended {
+            events.push(ProviderEvent::Finish(FinishReason::Completed));
+            return;
         }
-        events.push(ProviderEvent::Failed(truncated));
-    }
 
-    Ok(events)
+        events.push(ProviderEvent::Failed(ProviderError::Transport(
+            "the response body ended before the exchange finished".to_owned(),
+        )));
+    }
 }
 
 /// What an EndStream error means to the session that asked.
@@ -141,7 +153,7 @@ mod tests {
 
     use super::{
         super::{connect, proto},
-        FinishReason, ProviderError, ProviderEvent, exchange, model_list, verdict,
+        FinishReason, Mapping, ProviderError, ProviderEvent, model_list, verdict,
     };
 
     /// A data frame holding one update, the way the server frames them.
@@ -188,6 +200,24 @@ mod tests {
         frame
     }
 
+    /// Runs `body` through the real splitter and one [`Mapping`], the way
+    /// the live fold does; `eof` says whether the body then ended.
+    fn mapped(body: &[u8], eof: bool) -> Vec<ProviderEvent> {
+        let mut splitter = connect::Splitter::default();
+        splitter.push(body);
+
+        let mut mapping = Mapping::default();
+        let mut events = Vec::new();
+        while let Some(frame) = splitter.frame().expect("the fixture bodies parse") {
+            mapping.frame(&frame, &mut events);
+        }
+        if eof {
+            mapping.truncated(&mut events);
+        }
+
+        events
+    }
+
     #[test]
     fn a_streamed_reply_becomes_its_deltas_and_a_finish() {
         let mut body = framed(heartbeat());
@@ -196,9 +226,8 @@ mod tests {
         body.extend(framed(turn_ended()));
         body.extend(end_stream("{}"));
 
-        let events = exchange(&body).expect("a clean exchange decodes");
         assert_eq!(
-            events,
+            mapped(&body, false),
             vec![
                 ProviderEvent::TextDelta("Hello".to_owned()),
                 ProviderEvent::TextDelta(" world".to_owned()),
@@ -213,29 +242,34 @@ mod tests {
         let mut body = framed(text("done"));
         body.extend(end_stream("{}"));
 
-        let events = exchange(&body).expect("decodes");
         assert_eq!(
-            events.last(),
+            mapped(&body, false).last(),
             Some(&ProviderEvent::Finish(FinishReason::Completed))
         );
     }
 
     /// The exact exchange the live probe recorded: one heartbeat, then the
-    /// EndStream refusal. Nothing had streamed, so the turn fails at its
-    /// opening rather than mid-reply.
+    /// EndStream refusal. Under incremental delivery the turn has already
+    /// opened by the time the verdict arrives, so it fails **inside** the
+    /// stream — the terminal [`ProviderEvent::Failed`] every wire reports a
+    /// mid-stream death with — rather than at the opening the one-shot
+    /// decode failed it at.
     #[test]
-    fn the_recorded_refusal_fails_the_turn_before_anything_streamed() {
+    fn the_recorded_refusal_arrives_as_the_turns_failure() {
         let mut body = framed(heartbeat());
         body.extend(end_stream(
             "{\"error\":{\"code\":\"invalid_argument\",\"message\":\
              \"First message must be a run request or prewarm request\"}}",
         ));
 
-        let refused = exchange(&body).expect_err("the recorded stream refuses");
+        let events = mapped(&body, false);
         assert!(
-            matches!(&refused, ProviderError::Status { status: 400, message }
-                if message.contains("invalid_argument")),
-            "{refused:?}"
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Status { status: 400, message })]
+                    if message.contains("invalid_argument")
+            ),
+            "{events:?}"
         );
     }
 
@@ -246,7 +280,7 @@ mod tests {
             r#"{"error":{"code":"internal","message":"boom"}}"#,
         ));
 
-        let events = exchange(&body).expect("the text survives");
+        let events = mapped(&body, false);
         assert_eq!(events[0], ProviderEvent::TextDelta("partial".to_owned()));
         assert!(
             matches!(
@@ -259,18 +293,74 @@ mod tests {
 
     #[test]
     fn a_body_without_an_ending_is_a_truncation_not_a_short_answer() {
-        let refused =
-            exchange(&framed(heartbeat())).expect_err("nothing streamed and nothing ended");
+        let events = mapped(&framed(heartbeat()), true);
         assert!(
-            matches!(refused, ProviderError::Transport(_)),
-            "{refused:?}"
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Transport(_))]
+            ),
+            "{events:?}"
         );
 
-        let events = exchange(&framed(text("half"))).expect("the text survives");
+        let events = mapped(&framed(text("half")), true);
+        assert_eq!(events[0], ProviderEvent::TextDelta("half".to_owned()));
         assert!(
             matches!(
                 &events[1],
                 ProviderEvent::Failed(ProviderError::Transport(_))
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// The Anthropic reading of a body cut off after the stop reason: the
+    /// reply was complete, only the terminator was lost, and failing the
+    /// turn would throw away text the server finished saying.
+    #[test]
+    fn a_body_that_dies_after_turn_ended_lost_only_its_terminator() {
+        let mut body = framed(text("whole"));
+        body.extend(framed(turn_ended()));
+
+        assert_eq!(
+            mapped(&body, true),
+            vec![
+                ProviderEvent::TextDelta("whole".to_owned()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ]
+        );
+    }
+
+    /// The verdict the one-shot decode used to drop: an EndStream error
+    /// arriving after `turn_ended`. The server's verdict outranks the
+    /// model's goodbye — the same late-error posture the SSE wires hold —
+    /// so the turn fails, keeping its text.
+    #[test]
+    fn an_end_stream_error_after_turn_ended_is_a_failure_not_a_dropped_frame() {
+        let mut body = framed(text("said"));
+        body.extend(framed(turn_ended()));
+        body.extend(end_stream(
+            r#"{"error":{"code":"resource_exhausted","message":"quota spent"}}"#,
+        ));
+
+        let events = mapped(&body, false);
+        assert_eq!(events[0], ProviderEvent::TextDelta("said".to_owned()));
+        assert!(
+            matches!(
+                &events[1],
+                ProviderEvent::Failed(ProviderError::Status { status: 429, .. })
+            ),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_is_not_a_server_message_fails_the_turn_readably() {
+        // 0xff opens a field with wire type 7, which protobuf does not have.
+        let events = mapped(&connect::envelope(&[0xff, 0xff, 0xff]), false);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Parse(_))]
             ),
             "{events:?}"
         );
@@ -293,7 +383,7 @@ mod tests {
         body.extend(framed(turn_ended()));
         body.extend(end_stream("{}"));
 
-        let events = exchange(&body).expect("the unmodelled arm is stepped over");
+        let events = mapped(&body, false);
         assert_eq!(events[0], ProviderEvent::TextDelta("still here".to_owned()));
     }
 
