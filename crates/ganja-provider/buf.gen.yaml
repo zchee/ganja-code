@@ -1,0 +1,13 @@
+# Codegen for the cursor wire's protobuf messages. Run from this crate's
+# directory: `buf generate`. Uses the published buffa remote plugin, so no
+# local protoc plugin and no protoc are required, and nothing here runs in CI
+# — the generated Rust under src/provider/cursor/ is checked in, and a drift
+# test regenerates and diffs it.
+version: v2
+inputs:
+  - directory: src/provider
+plugins:
+  - remote: buf.build/anthropics/buffa
+    out: src/provider/cursor
+    opt:
+      - file_per_package=true
