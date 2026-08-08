@@ -359,10 +359,11 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         anthropic::ID => Wire::catalog(AnthropicProvider::from_env()?),
         openai::ID => openai_provider()?,
         grok::ID => Wire::catalog(GrokProvider::from_stored()?),
-        // Selectable so the refusal is ganja's own rather than a typo's:
-        // construction reads nothing — grok's posture — and the first request
-        // answers with the stub's named refusal. Uncataloged on purpose, so a
-        // session must name its model like any config-declared endpoint.
+        // Selectable as a bare name: construction reads nothing — grok's
+        // posture — and each request reads the stored login as it is needed,
+        // refusing by naming `ganja auth login` when there is none.
+        // Uncataloged on purpose, so a session must name its model like any
+        // config-declared endpoint.
         cursor::ID => Wire::catalog(CursorProvider),
         // Grok's construction shape, and grok's posture with it: neither reads
         // a token here, so a session with no stored login is built and fails at
@@ -487,8 +488,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ChatRequest, Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError,
-        adoptable_login, cursor, defaulted_model, fake, grok, openai, select, selectable,
+        Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, adoptable_login,
+        cursor, defaulted_model, fake, grok, openai, select, selectable,
     };
     use crate::catalog;
 
@@ -652,34 +653,26 @@ mod tests {
     }
 
     /// The other side of the same decision: naming cursor is answered, not
-    /// filtered — selection builds the stub, and the first request meets the
-    /// stub's own refusal, which is where somebody who asked learns why.
-    #[tokio::test]
-    async fn an_explicitly_named_cursor_still_reaches_the_stubs_refusal() {
+    /// filtered — selection builds the wire's identity without reading
+    /// anything, and the named model travels through untouched. What the
+    /// first request then meets — the stored login, or the refusal naming
+    /// `ganja auth login` — is drilled in `ganja-provider`'s own suites
+    /// against a credential store they redirect; streaming here would read
+    /// whatever store the machine running this test really holds.
+    #[test]
+    fn an_explicitly_named_cursor_is_answered_not_filtered() {
         // The flag tier, because it outranks every other and so cannot be
         // perturbed by whatever this process's environment holds.
         let mut config = Config::default();
-        config.overrides.model = Some("cursor/still-imaginary".to_owned());
+        config.overrides.model = Some("cursor/gpt-5.3-codex".to_owned());
 
         let selection = select(&config).expect("an explicit cursor selection is not filtered");
         assert_eq!(selection.provider.id(), cursor::ID);
-        assert_eq!(selection.model, "still-imaginary");
-
-        let refused = selection
-            .provider
-            .stream(
-                ChatRequest {
-                    model: selection.model,
-                    system: None,
-                    messages: Vec::new(),
-                    tools: Vec::new(),
-                },
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await
-            .err()
-            .expect("the stub refuses every request until the wire lands");
-        assert!(refused.to_string().contains("stub"), "{refused}");
+        assert_eq!(selection.model, "gpt-5.3-codex");
+        assert!(
+            selection.notice.is_none(),
+            "the provider was asked for by name, not defaulted"
+        );
     }
 
     /// A model no catalog carries, so an answer naming it can only have come

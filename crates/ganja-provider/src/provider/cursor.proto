@@ -1,9 +1,21 @@
-// Provenance: the message shapes here are ganja's own, authored against the
-// wire facts recorded during the live cursor spike
-// (.omc/research/cursor/spike-wire-facts.md), never copied from the
-// opencode-cursor plugin's proto/agent_pb.ts. This file starts as the minimal
-// scaffold the W0 landing admits `buffa` with; the real request/response
-// messages land in W-WIRE-1 as the spike records them.
+// Provenance: the message shapes here are ganja's own, authored primarily
+// against the wire facts recorded during the live cursor spike
+// (.omc/research/cursor/spike-wire-facts.md): the Connect dialect, the service
+// paths, and the GetUsableModels response schema (field numbers, wire types,
+// and observed values) were all LIVE-OBSERVED against api2.cursor.sh. Where
+// those facts are silent — the Run request's field numbers, which the live
+// probe pinned only from the outside ("First message must be a run request or
+// prewarm request") — individual fields are derived from the opencode-cursor
+// plugin's generated descriptor, src/proto/agent_pb.ts at
+// a37a6ba9a6d6d8d176bb68248f59240271f46767 (MIT; see THIRD_PARTY_NOTICES.md),
+// each such field marked at its site. Nothing is copied wholesale: this is
+// the minimal set one one-shot turn and one model listing need, and the
+// server's oneofs are flattened to plain fields with the same numbers and
+// types, which encode identically on the wire.
+//
+// Message names are ganja's own — protobuf carries field numbers, never type
+// names, so only the service paths (constants in cursor.rs) must match the
+// server's spelling.
 //
 // Generated with `buf generate` against the buf.build/anthropics/buffa remote
 // plugin; the generated Rust is checked in beside this file under cursor/, and
@@ -12,10 +24,129 @@ edition = "2023";
 
 package ganja.cursor.v1;
 
-// A placeholder carrying the one field every cursor turn names — the model —
-// so the admitted runtime has a real message to encode and decode before the
-// spike fills in the rest. Replaced, not extended, by W-WIRE-1's recorded
-// request/response pair.
-message Probe {
-  string model = 1;
+// The request half of GetUsableModels. Deliberately fieldless: the live probe
+// sent a zero-byte body and was answered, so nothing more is modelled.
+message GetUsableModelsRequest {}
+
+// The response half: LIVE-OBSERVED as field 1, length-delimited, repeated
+// once per served model (193 at recording time).
+message GetUsableModelsResponse {
+  repeated ModelEntry models = 1;
 }
+
+// One served model, exactly the six fields the live probe decoded
+// (spike-wire-facts.md S4). The field *names* are the plugin's
+// (agent_pb.ts:2587-2617, its ModelDetails), kept because the recorded facts
+// name fields only by number and role; the numbers and wire types are the
+// live observation. The same message doubles as the Run request's model
+// description (field 3 there), which is also how the server declares it.
+message ModelEntry {
+  // LIVE-OBSERVED field 1: the id a request asks for, e.g. `gpt-5.3-codex`.
+  string model_id = 1;
+  // LIVE-OBSERVED field 3: the server-side name; `auto` on the `default`
+  // entry, elsewhere equal to model_id.
+  string display_model_id = 3;
+  // LIVE-OBSERVED field 4, e.g. `Codex 5.3 Low`.
+  string display_name = 4;
+  // LIVE-OBSERVED field 5; equal to display_name on every sampled entry.
+  string display_name_short = 5;
+  // LIVE-OBSERVED field 6, present once on sampled entries; `repeated` is the
+  // plugin's declaration (agent_pb.ts:2607), which the single observed
+  // occurrence cannot contradict.
+  repeated string aliases = 6;
+  // LIVE-OBSERVED field 7, varint, 0 on every sampled entry; the name and
+  // bool reading are the plugin's (agent_pb.ts:2617).
+  bool max_mode = 7;
+}
+
+// What the client sends on the Run stream. The server demands a run request
+// first (LIVE-OBSERVED refusal: "First message must be a run request or
+// prewarm request"); the field number is derived from the plugin's
+// AgentClientMessage oneof (agent_pb.ts:3596). The other arms of that oneof
+// belong to flows this build does not speak yet, so only this one is
+// modelled.
+message ClientMessage {
+  RunRequest run_request = 1;
+}
+
+// One turn's opening request, the minimal subset of the plugin's
+// AgentRunRequest a single user message needs. Every field number here is
+// plugin-derived: conversation_state = 1 (agent_pb.ts:2738), action = 2
+// (:2743), model_details = 3 (:2750), custom_system_prompt = 8 (:2784),
+// requested_model = 9 (:2755).
+message RunRequest {
+  // Present-but-empty on a fresh turn; the plugin always sends one.
+  ConversationState conversation_state = 1;
+  ConversationAction action = 2;
+  // The deprecated-but-still-read model description; the plugin sends both
+  // this and requested_model, so this build does too.
+  ModelEntry model_details = 3;
+  // The one inline channel for a system prompt this message set carries.
+  string custom_system_prompt = 8;
+  RequestedModel requested_model = 9;
+}
+
+// Prior-conversation state. Fieldless here on purpose: the plugin's
+// ConversationStateStructure (agent_pb.ts:2338) carries content-addressed
+// blob ids that only mean something to a client speaking the blob-serving
+// half of the stream, which this build does not yet. An empty message encodes
+// as an empty payload, marking the state present and holding nothing.
+message ConversationState {}
+
+// What the turn asks the agent to do. Field number from the plugin's
+// ConversationAction oneof (agent_pb.ts:1568); the resume/cancel/plan arms
+// are not modelled.
+message ConversationAction {
+  UserMessageAction user_message_action = 1;
+}
+
+// Field number from the plugin's UserMessageAction (agent_pb.ts:1636).
+message UserMessageAction {
+  UserMessage user_message = 1;
+}
+
+// The user's message, inline. Field numbers from the plugin's UserMessage
+// (agent_pb.ts:1814-1819); the context/mode fields beside them are not
+// modelled.
+message UserMessage {
+  string text = 1;
+  string message_id = 2;
+}
+
+// The forward-looking model selection the plugin sends beside model_details.
+// Field number from the plugin's RequestedModel (agent_pb.ts:2660).
+message RequestedModel {
+  string model_id = 1;
+}
+
+// One frame of the server's answer. Field 1 wrapping an update was
+// LIVE-OBSERVED (the recorded `0a 02 6a 00` frame); the field's role matches
+// the plugin's AgentServerMessage oneof (agent_pb.ts:3669). The exec/kv arms
+// are not modelled and survive decoding as unknown fields.
+message ServerMessage {
+  Update interaction_update = 1;
+}
+
+// The updates a one-shot text turn must understand. heartbeat = 13 was
+// LIVE-OBSERVED (`6a 00` inside the recorded frame); text_delta = 1
+// (agent_pb.ts:3160) and turn_ended = 14 (:3258) are plugin-derived. The
+// tool-call and thinking arms of the plugin's oneof are deliberately absent —
+// an update carrying only fields this build does not model decodes to an
+// empty Update and is skipped.
+message Update {
+  TextDelta text_delta = 1;
+  Heartbeat heartbeat = 13;
+  TurnEnded turn_ended = 14;
+}
+
+// Field number from the plugin's TextDeltaUpdate (agent_pb.ts:2800).
+message TextDelta {
+  string text = 1;
+}
+
+// Fieldless in the plugin too (agent_pb.ts:3014); the recorded stream carried
+// one as its only data frame.
+message Heartbeat {}
+
+// Fieldless in the plugin too (agent_pb.ts:3085): the turn's clean end.
+message TurnEnded {}
