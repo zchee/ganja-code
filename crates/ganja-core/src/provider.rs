@@ -419,7 +419,7 @@ fn oldest_stored_login(config: &Config) -> Result<Option<String>, SelectionError
 /// session could actually run as, in ganja's own vocabulary.
 ///
 /// Split from [`oldest_stored_login`] so the rule is a thing a test can state
-/// without a credential store. Four filters, each with its reason:
+/// without a credential store. Three filters, each with its reason:
 ///
 /// - the key is read back through [`auth::provider_id_for_storage_key`],
 ///   because the file stores upstream's names — a `grok` login sits under
@@ -427,23 +427,22 @@ fn oldest_stored_login(config: &Config) -> Result<Option<String>, SelectionError
 /// - [`fake::ID`] never counts: a credential filed under that id is not a
 ///   login to anything, and a session on the fake provider must keep the
 ///   notice this tier exists to avoid;
-/// - a **stub-backed id** never counts either: `cursor`'s login landed ahead
-///   of its wire, and a machine whose oldest login is a cursor one must not
-///   have bare `ganja` walk into a session the stub refuses — uncataloged,
-///   it would refuse before that for want of a model. The default tier skips
-///   it; naming the provider still reaches the stub's own refusal, which is
-///   where somebody who asked learns why. **This line leaves with the stub**:
-///   the landing that makes `cursor` a real wire deletes it and flips its
-///   test to assert adoption;
 /// - everything else must be [`selectable`] — an id opencode stored for a
 ///   provider this build has no wire for is a login, just not one this
 ///   session can use, and skipping it beats refusing to start over somebody
 ///   else's credential file.
+///
+/// A cursor login adopts like any other: the stub-era line that steered the
+/// default tier away left with the stub, exactly as its comment promised.
+/// What adoption cannot supply is a model — cursor rides the uncataloged
+/// tier, so a session adopted onto it is still asked to name one, by
+/// [`defaulted_model`]'s refusal rather than by a filter pretending the
+/// login is not there.
 fn adoptable_login(config: &Config, stored: impl IntoIterator<Item = String>) -> Option<String> {
     stored
         .into_iter()
         .map(|key| auth::provider_id_for_storage_key(&key).to_owned())
-        .find(|id| id != fake::ID && id != cursor::ID && selectable(config, id))
+        .find(|id| id != fake::ID && selectable(config, id))
 }
 
 /// The model a session asks for when no tier named one.
@@ -627,28 +626,31 @@ mod tests {
         assert_eq!(adoptable_login(&Config::default(), stored(&[])), None);
     }
 
-    /// The stub-backed filter, on both of its sides: a machine whose oldest
-    /// login is a cursor one keeps exactly the bare-`ganja` behavior it had
-    /// before that login landed — the next adoptable login, or the noticed
-    /// fake. The filter leaves with the stub, and this test flips to assert
-    /// adoption in the same landing.
+    /// The flip the stub-era filter's own comment promised: with the wire
+    /// real, a cursor login adopts like any other stored login — seniority
+    /// decides, in both directions, and a machine holding only a cursor
+    /// login runs as it rather than as the noticed fake. The other side of
+    /// the decision — naming cursor explicitly — is pinned unchanged below.
     #[test]
-    fn a_cursor_login_is_never_adopted_while_its_wire_is_a_stub() {
+    fn a_cursor_login_adopts_like_any_other_stored_login() {
         let stored = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
 
-        // Seniority does not put a session on the stub: the next login wins.
+        // Oldest wins when cursor is oldest…
         assert_eq!(
             adoptable_login(&Config::default(), stored(&["cursor", "anthropic"])).as_deref(),
+            Some("cursor")
+        );
+        // …and does not win when it is not: adoption is the ordering's
+        // verdict, never a preference for the newest wire.
+        assert_eq!(
+            adoptable_login(&Config::default(), stored(&["anthropic", "cursor"])).as_deref(),
             Some("anthropic")
         );
-        // A machine holding only a cursor login stays on the noticed fake,
-        // which is what "byte-identical until the wire lands" means here.
         assert_eq!(
-            adoptable_login(&Config::default(), stored(&["cursor"])),
-            None
+            adoptable_login(&Config::default(), stored(&["cursor"])).as_deref(),
+            Some("cursor")
         );
-        // The filter is the id's, not the tier's mood: cursor stays
-        // selectable, so only the *default* is steered away.
+        // Adopted or named, the id answers the same way everywhere else.
         assert!(selectable(&Config::default(), cursor::ID));
     }
 
@@ -717,9 +719,9 @@ mod tests {
             defaulted_model("nonexistent", None),
             Err(SelectionError::NoDefaultModel { .. })
         ));
-        // The cursor stub is the shipped case of the same refusal: selectable,
-        // uncataloged, so a session must name its model — the message names
-        // every tier that can.
+        // Cursor is the shipped case of the same refusal: selectable —
+        // adopted, even — but uncataloged, so a session must name its model,
+        // and the message names every tier that can.
         assert!(matches!(
             defaulted_model(cursor::ID, None),
             Err(SelectionError::NoDefaultModel { .. })

@@ -11,6 +11,12 @@
 //!   the RPC's failure; its absence is a clean end. The status lives *here*,
 //!   in the body — the live probe saw no HTTP/2 trailers on any stream.
 //!
+//! The body arrives in whatever pieces the transport produced — a frame may
+//! span chunks and one chunk may hold several frames — so [`Splitter`]
+//! buffers until a frame is whole and hands frames back as they complete,
+//! which is what lets the wire surface events while the server is still
+//! talking instead of after it has finished.
+//!
 //! The unary RPC needs none of this: the live probe pinned bare protobuf in
 //! both directions there, so this module is only ever handed a streaming
 //! body.
@@ -27,15 +33,19 @@ const END_STREAM_FLAG: u8 = 0b0000_0010;
 /// big-endian `u32` length.
 const PREFIX: usize = 5;
 
-/// One frame, borrowed out of a complete response body.
+/// One frame, cut whole out of the arriving body.
+///
+/// Owned rather than borrowed: a frame may span transport chunks, so there
+/// is no single buffer it could borrow from for as long as the mapping needs
+/// it.
 #[derive(Debug)]
-pub(super) struct Frame<'a> {
+pub(super) struct Frame {
     flags: u8,
     /// The payload: protobuf on a data frame, JSON on the EndStream frame.
-    pub(super) payload: &'a [u8],
+    pub(super) payload: Vec<u8>,
 }
 
-impl Frame<'_> {
+impl Frame {
     /// Whether this frame is the stream's in-body status.
     pub(super) fn is_end_stream(&self) -> bool {
         self.flags & END_STREAM_FLAG != 0
@@ -59,52 +69,75 @@ pub(super) fn envelope(message: &[u8]) -> Vec<u8> {
     framed
 }
 
-/// Splits a complete streaming body into its frames.
+/// Cuts Connect frames out of a streaming body as it arrives.
 ///
-/// The whole body is required to be frames: a prefix that runs off the end,
-/// a payload shorter than its declared length, or bytes after the EndStream
-/// frame are each a body this build does not understand, reported rather
-/// than half-read — a partial parse here would present a truncated answer as
-/// a short one.
-///
-/// # Errors
-///
-/// Returns [`ProviderError::Parse`] as above.
-pub(super) fn frames(body: &[u8]) -> Result<Vec<Frame<'_>>, ProviderError> {
-    let mut split = Vec::new();
-    let mut rest = body;
+/// Fed chunks in transport order, it hands back each frame the moment its
+/// last byte is in. The EndStream frame must be the body's last: bytes after
+/// it are a body this build does not understand, refused rather than
+/// half-read. What the splitter deliberately does **not** judge is the
+/// ending — whether running out of body mid-frame is a truncation or only a
+/// lost terminator depends on what the exchange had already said, which is
+/// the mapping's state and therefore the mapping's call.
+#[derive(Debug, Default)]
+pub(super) struct Splitter {
+    buffer: Vec<u8>,
+    /// Bytes of `buffer` already cut into frames.
+    read: usize,
+    /// An EndStream frame has been produced, so nothing more may follow.
+    ended: bool,
+}
 
-    while !rest.is_empty() {
-        if split.last().is_some_and(Frame::is_end_stream) {
+impl Splitter {
+    /// Absorbs the next piece of the body; [`frame`](Self::frame) drains
+    /// whatever it completed.
+    pub(super) fn push(&mut self, chunk: &[u8]) {
+        // Compacted before growing rather than on every cut, which keeps the
+        // buffer bounded by one frame plus one chunk instead of the whole
+        // body — the exact thing incremental delivery exists to avoid.
+        if self.read > 0 {
+            self.buffer.drain(..self.read);
+            self.read = 0;
+        }
+        self.buffer.extend_from_slice(chunk);
+    }
+
+    /// The next whole frame, or [`None`] until more of the body arrives.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Parse`] when bytes follow the EndStream
+    /// frame — the stream's status has been said, and a body that keeps
+    /// talking past it is one this build does not understand.
+    pub(super) fn frame(&mut self) -> Result<Option<Frame>, ProviderError> {
+        let rest = &self.buffer[self.read..];
+        if self.ended {
+            if rest.is_empty() {
+                return Ok(None);
+            }
             return Err(ProviderError::Parse(
                 "the response carried bytes after its EndStream frame".to_owned(),
             ));
         }
 
         let Some((prefix, tail)) = rest.split_at_checked(PREFIX) else {
-            return Err(ProviderError::Parse(format!(
-                "the response ended inside a frame prefix ({} of {PREFIX} bytes)",
-                rest.len()
-            )));
+            return Ok(None);
         };
         // The prefix split is exactly five bytes, so the length bytes are
         // there by construction.
         let declared = u32::from_be_bytes([prefix[1], prefix[2], prefix[3], prefix[4]]) as usize;
-        let Some((payload, tail)) = tail.split_at_checked(declared) else {
-            return Err(ProviderError::Parse(format!(
-                "the response ended inside a frame payload ({} of {declared} bytes)",
-                tail.len()
-            )));
+        let Some((payload, _)) = tail.split_at_checked(declared) else {
+            return Ok(None);
         };
 
-        split.push(Frame {
+        let frame = Frame {
             flags: prefix[0],
-            payload,
-        });
-        rest = tail;
-    }
+            payload: payload.to_vec(),
+        };
+        self.read += PREFIX + declared;
+        self.ended = frame.is_end_stream();
 
-    Ok(split)
+        Ok(Some(frame))
+    }
 }
 
 /// Reads the EndStream frame's payload: the error it carried, or [`None`]
@@ -174,7 +207,9 @@ pub(super) fn http_status(code: &str) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{END_STREAM_FLAG, ProviderError, end_stream_error, envelope, frames, http_status};
+    use super::{
+        END_STREAM_FLAG, Frame, ProviderError, Splitter, end_stream_error, envelope, http_status,
+    };
 
     /// The exact EndStream JSON the live probe recorded, 104 bytes, which is
     /// the `len 0x68` its frame prefix declared.
@@ -193,21 +228,50 @@ mod tests {
         body
     }
 
+    /// Every frame `splitter` has completed so far.
+    fn drained(splitter: &mut Splitter) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        while let Some(frame) = splitter.frame().expect("the fixture bodies parse") {
+            frames.push(frame);
+        }
+
+        frames
+    }
+
     #[test]
     fn the_recorded_run_body_splits_into_its_two_frames() {
-        let body = recorded_body();
-        let split = frames(&body).expect("the live recording parses");
+        let mut splitter = Splitter::default();
+        splitter.push(&recorded_body());
+        let split = drained(&mut splitter);
 
         assert_eq!(split.len(), 2);
         assert!(!split[0].is_end_stream());
         assert_eq!(split[0].payload, [0x0a, 0x02, 0x6a, 0x00]);
         assert!(split[1].is_end_stream());
 
-        let (code, message) = end_stream_error(split[1].payload)
+        let (code, message) = end_stream_error(&split[1].payload)
             .expect("the recorded JSON parses")
             .expect("the recorded frame carried an error");
         assert_eq!(code, "invalid_argument");
         assert!(message.contains("must be a run request"), "{message}");
+    }
+
+    /// The transport owes the splitter nothing about boundaries: fed one
+    /// byte at a time — every frame split across every possible seam — the
+    /// same two frames come out.
+    #[test]
+    fn a_frame_split_wherever_the_socket_likes_is_reassembled() {
+        let mut splitter = Splitter::default();
+        let mut frames = Vec::new();
+
+        for byte in recorded_body() {
+            splitter.push(&[byte]);
+            frames.extend(drained(&mut splitter));
+        }
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].payload, [0x0a, 0x02, 0x6a, 0x00]);
+        assert!(frames[1].is_end_stream());
     }
 
     #[test]
@@ -219,25 +283,49 @@ mod tests {
         assert_eq!(framed, [0x00, 0x00, 0x00, 0x00, 0x03, 0x0a, 0x01, 0x78]);
     }
 
+    /// A frame the body has not finished is held, never handed out half
+    /// read; whether the missing rest is a truncation is the mapping's call,
+    /// made at end of body with the exchange's state in hand.
     #[test]
-    fn a_body_that_ends_mid_frame_is_refused_not_half_read() {
+    fn a_body_that_ends_mid_frame_hands_nothing_back() {
         let mut body = recorded_body();
         body.truncate(body.len() - 10);
-        assert!(matches!(frames(&body), Err(ProviderError::Parse(_))));
+
+        let mut splitter = Splitter::default();
+        splitter.push(&body);
+        assert_eq!(
+            drained(&mut splitter).len(),
+            1,
+            "the whole first frame arrived, and only it comes out"
+        );
 
         // Three bytes cannot even hold a prefix.
-        assert!(matches!(
-            frames(&[0x00, 0x00, 0x00]),
-            Err(ProviderError::Parse(_))
-        ));
+        let mut short = Splitter::default();
+        short.push(&[0x00, 0x00, 0x00]);
+        assert!(short.frame().expect("nothing to refuse yet").is_none());
     }
 
     #[test]
     fn bytes_after_the_end_stream_frame_are_refused() {
         let mut body = recorded_body();
         body.push(0x00);
-        let refused = frames(&body).expect_err("nothing follows the stream's ending");
 
+        let mut splitter = Splitter::default();
+        splitter.push(&body);
+        assert!(
+            splitter.frame().expect("the data frame parses").is_some(),
+            "the real frames still come out"
+        );
+        assert!(
+            splitter
+                .frame()
+                .expect("the EndStream frame parses")
+                .is_some()
+        );
+
+        let refused = splitter
+            .frame()
+            .expect_err("nothing follows the stream's ending");
         assert!(refused.to_string().contains("EndStream"), "{refused}");
     }
 
