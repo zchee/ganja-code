@@ -114,10 +114,27 @@ pub fn challenge_for(verifier: &str) -> String {
 ///
 /// Returns [`EntropyError`] when the platform's random source fails.
 pub fn unguessable() -> Result<SecretString, EntropyError> {
-    let mut bytes = [0_u8; BYTES];
+    Ok(SecretString::from(
+        URL_SAFE_NO_PAD.encode(random_bytes::<BYTES>()?),
+    ))
+}
+
+/// `N` bytes of the operating system's entropy, raw.
+///
+/// For the value whose *shape* is somebody else's to dictate: the cursor
+/// login's pairing id is 16 bytes rendered as a UUID rather than 32 rendered
+/// as base64url, and what has to be shared is the entropy source and its
+/// failure report, not the spelling. [`unguessable`] is this plus the RFC 7636
+/// rendering.
+///
+/// # Errors
+///
+/// Returns [`EntropyError`] when the platform's random source fails.
+pub fn random_bytes<const N: usize>() -> Result<[u8; N], EntropyError> {
+    let mut bytes = [0_u8; N];
     getrandom::fill(&mut bytes).map_err(|source| EntropyError { source })?;
 
-    Ok(SecretString::from(URL_SAFE_NO_PAD.encode(bytes)))
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -193,6 +210,22 @@ mod tests {
             assert!(
                 seen.insert(value.expose_secret().to_owned()),
                 "a value repeated within {DRAWS} draws"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_bytes_are_fresh_entropy_and_not_a_repeated_buffer() {
+        // The failure this hunts is a buffer that is returned rather than
+        // refilled: sixteen bytes colliding within 64 draws is not chance.
+        const DRAWS: usize = 64;
+
+        let mut seen = HashSet::new();
+        for _ in 0..DRAWS {
+            let bytes = super::random_bytes::<16>().expect("the platform has a random source");
+            assert!(
+                seen.insert(bytes),
+                "a 16-byte draw repeated within {DRAWS} draws"
             );
         }
     }

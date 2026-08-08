@@ -247,26 +247,19 @@ fn the_listing_says_what_kind_of_credential_each_row_is() {
         );
 }
 
-/// A method a provider does not have is asking for something that does not
-/// exist, so it is refused by name rather than attempted — and the refusal says
-/// what there is instead, which is the half that makes it actionable.
+/// The deferral's blanket refusal narrowed when the login landed ahead of the
+/// wire: what is refused now is the key cursor has nowhere to send, in every
+/// spelling that could store one — named alongside the login it does have,
+/// which is the half that makes it actionable.
 ///
-/// Asserting on the "it has" clause is load-bearing rather than thorough: the
-/// flow dispatch refuses an impossible pairing a second time as the shape of
-/// its match, with a message that names only what was asked for. A test that
-/// stopped at the method name would pass against a build whose front-door check
-/// had been removed entirely.
+/// The bare invocation is deliberately absent from this list: it *runs* the
+/// OAuth login now, and that flow is driven end to end in `auth_login.rs`,
+/// where the suite owns the issuer — no test may poll the real endpoints.
 #[test]
-fn a_cursor_login_is_refused_naming_the_deferral_and_stores_nothing() {
+fn a_cursor_key_is_refused_naming_the_login_cursor_has_and_stores_nothing() {
     let data = data();
 
-    // Every invocation shape, because each would otherwise store something: a
-    // key on the command line, a method asked for in advance, and the bare
-    // form that would open a menu. The refusal has to come before all of them
-    // — a stored cursor credential is one nothing ever reads, which is worse
-    // than no login because it looks like one that worked.
     for arguments in [
-        vec!["auth", "login", "--provider", "cursor"],
         vec!["auth", "login", "--provider", "cursor", "--method", "api"],
         vec![
             "auth",
@@ -278,8 +271,8 @@ fn a_cursor_login_is_refused_naming_the_deferral_and_stores_nothing() {
         ],
     ] {
         ganja(&data).args(&arguments).assert().failure().stderr(
-            predicate::str::contains("deferred")
-                .and(predicate::str::contains("nothing a login could store")),
+            predicate::str::contains("cursor has no `api` login")
+                .and(predicate::str::contains("`browser`")),
         );
     }
 

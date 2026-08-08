@@ -117,7 +117,9 @@ fn serve(gate: &Arc<Gate>) -> String {
 
 /// What one path answers with, and which of them the gate holds.
 fn answer(path: &str, gate: &Gate) -> (u16, String) {
-    match path {
+    // The cursor poll carries its pairing id and verifier in the query
+    // string; the route is the path alone.
+    match path.split('?').next().unwrap_or(path) {
         // xAI's own paths (`xai.ts:12`, `:20`).
         "/oauth2/device/code" => (200, device_code(GROK_CODE)),
         // GitHub's (`copilot.ts:19-24`).
@@ -156,6 +158,17 @@ fn answer(path: &str, gate: &Gate) -> (u16, String) {
                 r#"{{"access_token":"{ACCESS}","refresh_token":"{REFRESH}","expires_in":3600}}"#
             ),
         ),
+        // Cursor's poll (scout §3): the tokens arrive in the poll body
+        // itself, under cursor's own key spellings. Gated like the token
+        // exchanges, so a test can prove the deep link reached the screen
+        // before the login blocked on it.
+        "/auth/poll" => {
+            gate.hold();
+            (
+                200,
+                format!(r#"{{"accessToken":"{ACCESS}","refreshToken":"{REFRESH}"}}"#),
+            )
+        }
         _ => (404, "{}".to_owned()),
     }
 }
@@ -642,6 +655,133 @@ fn a_chatgpt_device_login_stores_an_oauth_credential_under_openai() {
     assert_eq!(stored(&data)["openai"]["type"], "oauth");
     assert_eq!(stored(&data)["openai"]["access"], ACCESS);
     leaks_nothing(&finished);
+}
+
+/// Cursor's login is neither a device grant nor a loopback callback: the
+/// browser is sent off carrying a pairing id and the terminal long-polls for
+/// the tokens. The deep link is the whole of what a person has to act on, so
+/// it has to reach the screen before the login blocks — the same ordering the
+/// gate proves for every device code above.
+#[test]
+fn a_cursor_login_shows_the_deep_link_before_it_polls_and_stores_under_cursor() {
+    let gate = Gate::closed();
+    let issuer = serve(&gate);
+    let data = data();
+
+    // No `--method`: cursor's one login has to be reached by the invocation
+    // that names nothing, because that is the headless shape.
+    let mut child = ganja(&data, &issuer)
+        .args(["auth", "login", "--provider", "cursor"])
+        .spawn()
+        .expect("the binary runs");
+    let lines = watching(&mut child);
+
+    let seen = printed_before(&lines, "Waiting for authorization");
+    let link = seen
+        .iter()
+        .find(|line| line.contains("Go to: "))
+        .unwrap_or_else(|| panic!("the deep link has to be shown before the wait: {seen:#?}"));
+    assert!(
+        link.contains("/loginDeepControl?"),
+        "the browser goes to the login page: {link}"
+    );
+    for parameter in ["challenge=", "uuid=", "mode=login", "redirectTarget=cli"] {
+        assert!(
+            link.contains(parameter),
+            "{parameter} is missing from the deep link: {link}"
+        );
+    }
+
+    gate.open();
+    let finished = finish(child, &lines, seen);
+
+    assert!(finished.ok, "the login should have succeeded: {finished:?}");
+    assert!(
+        finished.stdout.contains("****7731") && finished.stdout.contains("cursor"),
+        "a stored login reports its provider and its redacted tail: {:?}",
+        finished.stdout
+    );
+    let store = stored(&data);
+    assert_eq!(store["cursor"]["type"], "oauth");
+    assert_eq!(store["cursor"]["access"], ACCESS);
+    assert_eq!(store["cursor"]["refresh"], REFRESH);
+    // The fixture's token is no JWT, so the expiry is the one-hour fallback
+    // rather than a zero nothing would ever renew.
+    assert!(
+        store["cursor"]["expires"].as_u64().expect("a number") > 0,
+        "{store}"
+    );
+    // The stamp sidecar records the login like every other login's.
+    let stamps: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(data.path().join("ganja").join("auth-stamps.json"))
+            .expect("a fresh login mints a stamp"),
+    )
+    .expect("the stamps are JSON");
+    assert!(
+        stamps.get("cursor").is_some(),
+        "the stamp is filed under the storage key: {stamps}"
+    );
+    leaks_nothing(&finished);
+
+    // And the credential round-trips: listed as the login it is, forgotten
+    // under the name it was typed as.
+    let listed = ganja(&data, &issuer)
+        .args(["auth", "list"])
+        .output()
+        .expect("the binary runs");
+    let table = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(
+        row(&table, "cursor").contains("oauth"),
+        "a cursor login is an `oauth` credential: {table}"
+    );
+
+    let out = ganja(&data, &issuer)
+        .args(["auth", "logout", "--provider", "cursor"])
+        .output()
+        .expect("the binary runs");
+    assert!(out.status.success());
+    assert!(
+        stored(&data).get("cursor").is_none(),
+        "logout has to forget the entry: {}",
+        stored(&data)
+    );
+}
+
+/// The standing refusal flipped into the narrow one: cursor takes its OAuth
+/// login now, so what is refused is only the key it has nowhere to send —
+/// with the login it does have named, exactly like every other method refusal.
+#[test]
+fn a_cursor_key_is_refused_naming_the_login_cursor_does_have() {
+    let data = data();
+
+    for arguments in [
+        &[
+            "auth",
+            "login",
+            "--provider",
+            "cursor",
+            "--key",
+            "sk-cursor-1",
+        ][..],
+        &["auth", "login", "--provider", "cursor", "--method", "api"],
+    ] {
+        let refused = ganja(&data, "")
+            .args(arguments)
+            .output()
+            .expect("the binary runs");
+        let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+
+        assert!(!refused.status.success(), "{arguments:?} stored a key");
+        assert!(
+            said.contains("no `api` login") && said.contains("`browser`"),
+            "the refusal names what to use instead: {said:?}"
+        );
+    }
+
+    assert!(
+        !stored_at(&data).exists(),
+        "no refused invocation may leave a credential behind"
+    );
 }
 
 /// A login replacing a credential of the other kind is the hazard the shared
