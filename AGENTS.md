@@ -28,6 +28,7 @@
 |-----------|---------|
 | `crates/` | The workspace members (see `crates/AGENTS.md`) |
 | `.github/` | CI configuration (see `.github/AGENTS.md`) |
+| `docs/` | Reference documents, not specs: `references/claude.{en,ja}.md` catalogue Claude Code's feature surface against ganja's — an inventory with an explicit not-a-roadmap notice, never porting obligations. |
 | `.omc/` | **Gitignored operational state**, not documented by this tree: `plans/` (the authoritative port plan), `handoffs/` (frozen per-phase contracts), `reference/opencode-v1.18.13/` (the upstream checkout the golden test drives). |
 | `target/` | Cargo build output. Never read. |
 
