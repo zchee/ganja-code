@@ -238,6 +238,7 @@ mod tests {
     /// string on every machine that runs it.
     fn session(title: Option<&str>) -> SessionInfo {
         SessionInfo {
+            variant: None,
             id: SessionId::from("ses_fixture".to_owned()),
             version: ganja_core::storage::VERSION,
             title: title.map(str::to_owned),

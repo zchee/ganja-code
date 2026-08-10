@@ -210,6 +210,75 @@ fn forking_a_session_that_exists_says_this_build_cannot_do_it() {
         .stderr(predicate::str::contains("--fork is not available"));
 }
 
+/// The catalog fixture `--variant` runs against: the fake provider's `canned`
+/// model carrying `max` and `mini`, adopted by the binary's own
+/// `catalog::load_cached()` through `GANJA_MODELS_PATH`.
+fn catalog_with_variants(run: &Run) -> std::path::PathBuf {
+    let path = run.path().join("api.json");
+    let body = serde_json::json!({
+        "fake": {
+            "models": {
+                "canned": {
+                    "limit": {"context": 200_000, "output": 64_000},
+                    "variants": {
+                        "max": {"thinking": {"type": "enabled", "budgetTokens": 32000}},
+                        "mini": {"reasoningEffort": "low"},
+                    },
+                },
+            },
+        },
+    });
+    fs::write(&path, body.to_string()).expect("the catalog fixture is writable");
+
+    path
+}
+
+/// The useful half of "no such variant" is which ones there are, and it has
+/// to arrive before the turn: a request built around a name nobody validated
+/// would spend a turn to report a typo.
+#[test]
+fn a_variant_the_model_does_not_carry_fails_naming_the_real_names() {
+    let run = Run::playing(&one_word());
+    let catalog = catalog_with_variants(&run);
+
+    run.ganja()
+        .env("GANJA_MODELS_PATH", &catalog)
+        .args(["run", "--variant", "nope", "hello"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("no variant named nope"))
+        .stderr(predicate::str::contains("max, mini"));
+}
+
+/// Without a catalog row the fake provider has no variants at all, and the
+/// refusal says why rather than listing an empty roster — the same no-catalog
+/// posture that already denies such a session sizing and pricing.
+#[test]
+fn a_variant_on_an_uncataloged_provider_is_refused_with_the_no_catalog_sentence() {
+    Run::playing(&one_word())
+        .ganja()
+        .args(["run", "--variant", "max", "hello"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("not in the catalog"));
+}
+
+/// The readable account names the variant the turn ran under, in the header
+/// beside the model; json mode's six type names are a closed set, so there
+/// the event stays generic and unrendered.
+#[test]
+fn a_readable_run_announces_the_variant_the_turn_ran_under() {
+    let run = Run::playing(&one_word());
+    let catalog = catalog_with_variants(&run);
+
+    run.ganja()
+        .env("GANJA_MODELS_PATH", &catalog)
+        .args(["run", "--variant", "max", "hello"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("canned (max)"));
+}
+
 /// Upstream's wording, because a script that greps for it is greping for
 /// upstream's (`run.ts:465`).
 #[test]

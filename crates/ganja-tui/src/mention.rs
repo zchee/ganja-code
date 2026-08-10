@@ -228,6 +228,47 @@ mod tests {
 
     use super::{Fragment, attachable, scan, split_range, token, trigger};
 
+    /// `crates/ganja-core/src/command.rs::mentions` is this scan spelled again
+    /// across the core/TUI dependency boundary. If they drift, a token the
+    /// composer attaches can be ignored by a template, or the reverse; this
+    /// table pins the one grammar both sites must keep.
+    #[test]
+    fn command_templates_and_the_composer_scan_mentions_the_same_way() {
+        let cases = [
+            "@a.rs",
+            "compare @a.rs with @b.rs and @dir/c.rs",
+            "first @a.rs\nsecond @b.rs",
+            "ask @alice about it",
+            "mail me@example.com",
+            "an @ on its own",
+            "",
+            "@a.rs#5",
+            "@a.rs#5-9",
+            "@a.rs#5-",
+            "@a.rs#20-10",
+            "@a.rs#5-5",
+            "@a.rs#0",
+            "@we#ird.rs#5-9",
+            "@a.rs#TODO",
+            "@a.rs#5-9-12",
+            "@a.rs#-5",
+            "@a.rs#+5",
+            "@a.rs#",
+            "@a.rs#99999999999999999999",
+            "@a.rs#5-9 and again @a.rs#5-9",
+            "@a.rs#5-9 then @a.rs#30-40",
+            "look at @#5-9",
+        ];
+
+        for text in cases {
+            assert_eq!(
+                scan(text),
+                ganja_core::command::mentions(text),
+                "the two mention scans drifted for {text:?}"
+            );
+        }
+    }
+
     /// The exact shape of the trigger, which is the whole difference between a
     /// file menu and a menu that pops up over an email address.
     #[test]

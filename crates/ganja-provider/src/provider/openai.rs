@@ -31,7 +31,8 @@ use crate::{
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
         ChatRequest, CredentialSource, Mapper, Presented, Provider, ProviderError, ProviderEvent,
-        check_base_url, client, open, require_key, setting, shown_base_url, sse::Frame, steps,
+        check_base_url, client, open, require_key, setting, shown_base_url, splice_variant,
+        sse::Frame, steps,
     },
 };
 
@@ -199,7 +200,10 @@ impl Provider for OpenAiProvider {
         // renewed a moment ago by another turn is the one this request should
         // carry. A key resolves to itself, so the ordinary case pays nothing.
         let presented = self.credential.presented().await?;
-        let body = Body::new(&request);
+        // The variant's options pass through under the wire's own fields —
+        // this wire maps none of them, and a collision resolves to the wire.
+        let own = Body::new(&request);
+        let body = splice_variant(&request.variant_options, &own);
         let built = self
             .client
             .post(format!(
@@ -708,7 +712,7 @@ mod tests {
     use crate::{
         catalog,
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
-        provider::{ChatRequest, ProviderError, ProviderEvent, replay},
+        provider::{ChatRequest, ProviderError, ProviderEvent, replay, splice_variant},
         tool::ToolDefinition,
     };
 
@@ -1112,6 +1116,7 @@ mod tests {
         empty.parts.push(Part::text(""));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: Some("be brief".to_owned()),
             messages: vec![Message::user("hello"), empty, Message::user("again")],
@@ -1138,6 +1143,7 @@ mod tests {
     #[test]
     fn a_request_without_a_system_prompt_starts_with_the_user() {
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("hi")],
@@ -1149,6 +1155,43 @@ mod tests {
             body["messages"],
             serde_json::json!([{"role": "user", "content": "hi"}])
         );
+    }
+
+    /// The splice order at this wire's send site: the map passes through
+    /// verbatim — this wire maps none of its keys — and still loses every key
+    /// the wire itself writes.
+    #[test]
+    fn a_variant_passes_through_but_cannot_claim_the_model() {
+        let request = ChatRequest {
+            variant_options: serde_json::json!({
+                "reasoning_effort": "high",
+                "model": "someone-elses",
+                "stream": false,
+            })
+            .as_object()
+            .cloned()
+            .expect("the fixture options are an object"),
+            model: "gpt-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("hi")],
+            tools: Vec::new(),
+        };
+
+        let own = Body::new(&request);
+        let body = serde_json::to_value(splice_variant(&request.variant_options, &own))
+            .expect("a spliced body serializes");
+
+        assert_eq!(
+            body["reasoning_effort"],
+            serde_json::json!("high"),
+            "a key the wire does not write arrives verbatim"
+        );
+        assert_eq!(
+            body["model"],
+            serde_json::json!("gpt-test"),
+            "a key the wire writes resolves to the wire"
+        );
+        assert_eq!(body["stream"], serde_json::json!(true));
     }
 
     /// A tool part carrying `state`, as an assistant message holds one.
@@ -1223,6 +1266,7 @@ mod tests {
     #[test]
     fn a_request_advertises_the_tools_it_was_given() {
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("read src/main.rs")],
@@ -1255,6 +1299,7 @@ mod tests {
     #[test]
     fn a_finished_call_is_sent_back_as_a_call_and_a_tool_message() {
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![
@@ -1356,6 +1401,7 @@ mod tests {
     #[test]
     fn a_two_step_turn_is_sent_back_one_message_pair_per_step() {
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("fix the bug"), a_turn_of_two_steps()],
@@ -1426,6 +1472,7 @@ mod tests {
         ));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("read it"), assistant],
@@ -1468,6 +1515,7 @@ mod tests {
             assistant.parts.push(tool_part("call_read", "read", state));
 
             let request = ChatRequest {
+                variant_options: Default::default(),
                 model: "gpt-test".to_owned(),
                 system: None,
                 messages: vec![Message::user("read src/main.rs"), assistant],
@@ -1532,6 +1580,7 @@ mod tests {
         });
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("hi"), assistant, markers_only],
@@ -1567,6 +1616,7 @@ mod tests {
             .push(Part::text("It holds a main function."));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("hi"), assistant],

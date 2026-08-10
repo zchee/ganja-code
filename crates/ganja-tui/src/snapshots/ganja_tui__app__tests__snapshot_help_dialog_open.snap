@@ -9,15 +9,15 @@ ganj│/new           New session                                            │
 One │/compact       Compact session                                        │    
 [don│/editor        Open editor                                            │    
 @@ -│/models        Switch model                                           │    
--let│/agents        Switch agent                                           │    
-+let│/themes        Switch theme                                     ctrl+t│    
-cont│/help          Help                                                   │    
-[err│/exit          Exit the app                     ctrl+c, ctrl+q, ctrl+d│    
-refu│/copy          Copy session transcript                                │    
+-let│/variants      Switch model variant                                   │    
++let│/agents        Switch agent                                           │    
+cont│/themes        Switch theme                                     ctrl+t│    
+[err│/help          Help                                                   │    
+refu│/exit          Exit the app                     ctrl+c, ctrl+q, ctrl+d│    
+    │/copy          Copy session transcript                                │    
     │/copy-message  Copy message                                           │    
-    │/undo          Undo previous message                                  │    
     │                                                                      │    
-    │[up/down] scroll   [Esc] close                              1-12 of 18│    
+    │[up/down] scroll   [Esc] close                              1-12 of 19│    
     └──────────────────────────────────────────────────────────────────────┘    
                                                                                 
 ┌ message ─────────────────────────────────────────────────────────────────────┐

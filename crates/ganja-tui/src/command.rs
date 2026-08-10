@@ -46,6 +46,8 @@ pub enum Action {
     Editor,
     /// Open the model list for the provider this session runs on.
     Models,
+    /// Open the flat picker over the active model's catalog variants.
+    Variants,
     /// Open the list of agents the session may switch to.
     Agents,
     /// Open the theme picker.
@@ -83,6 +85,7 @@ impl Action {
             | Self::Compact
             | Self::Editor
             | Self::Models
+            | Self::Variants
             | Self::Agents
             | Self::Help
             | Self::Copy
@@ -199,6 +202,17 @@ pub const COMMANDS: &[Entry] = &[
         description: "Ask the rest of this session of a different model",
         category: Category::Agent,
         suggested: true,
+    },
+    Entry {
+        action: Action::Variants,
+        name: "variants",
+        aliases: &[],
+        // Upstream's `variant.list` command: slash name "variants", title
+        // "Switch model variant", filed under its Agent category.
+        title: "Switch model variant",
+        description: "Run the model under one of its catalog variants",
+        category: Category::Agent,
+        suggested: false,
     },
     Entry {
         action: Action::Agents,
@@ -555,6 +569,7 @@ mod tests {
             ("compact", &["summarize"][..], Action::Compact),
             ("editor", &[][..], Action::Editor),
             ("models", &["mo"][..], Action::Models),
+            ("variants", &[][..], Action::Variants),
             ("agents", &[][..], Action::Agents),
             ("themes", &[][..], Action::Themes),
             ("help", &[][..], Action::Help),

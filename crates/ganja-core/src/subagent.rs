@@ -424,6 +424,9 @@ fn create(state: &SessionState, session: &SessionId, agent: &Agent, what: &str, 
         summary: None,
         agent: Some(agent.name.clone()),
         model: Some(model.to_owned()),
+        // A child runs no variant — see `Turn::child` — so its record claims
+        // none either.
+        variant: None,
         parent,
         revert: None,
     };
@@ -610,9 +613,12 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             // A child takes no snapshots of its own, so nothing here ever
             // reverts; the arm exists because the parent's watcher reads the
             // whole event stream and must not be surprised by one of them.
-            // The same holds for an agent change: a child is never handed the
-            // approval cell, so its stream can never carry one.
-            Event::RevertChanged { .. } | Event::AgentChanged { .. } => {}
+            // The same holds for an agent change — a child is never handed the
+            // approval cell — and for a variant change, which only the
+            // engine's command paths announce.
+            Event::RevertChanged { .. }
+            | Event::AgentChanged { .. }
+            | Event::VariantChanged { .. } => {}
         }
     }
 

@@ -587,6 +587,12 @@ pub(crate) struct Turn {
     /// only the watcher ever reads it.
     pub(crate) session_id: SessionId,
     pub(crate) model: String,
+    /// The option map of the catalog variant this turn runs under, resolved
+    /// by the engine against [`Turn::model`] before the turn started. Rides
+    /// the step and summarize requests — the two that ask this turn's model —
+    /// and never the title request, which asks a stablemate the name was
+    /// never validated against. Empty means no variant.
+    pub(crate) variant_options: serde_json::Map<String, serde_json::Value>,
     /// What the model is told before it is told anything else. Carried by
     /// every request this turn makes except the title one, which asks a
     /// different question and brings its own prompt.
@@ -661,6 +667,7 @@ pub(crate) struct RootParts {
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) session_id: SessionId,
     pub(crate) model: String,
+    pub(crate) variant_options: serde_json::Map<String, serde_json::Value>,
     pub(crate) system: Option<String>,
     pub(crate) reminders: Vec<String>,
     pub(crate) kind: TurnKind,
@@ -721,6 +728,7 @@ impl Turn {
             provider: parts.provider,
             session_id: parts.session_id,
             model: parts.model,
+            variant_options: parts.variant_options,
             system: parts.system,
             reminders: parts.reminders,
             kind: parts.kind,
@@ -766,6 +774,11 @@ impl Turn {
             provider: Arc::clone(&host.provider),
             session_id: parts.session_id,
             model: parts.model,
+            // No variant: the selection is the session's and was validated
+            // against the session's model, while a child may run a model of
+            // the subagent's own choosing that the name was never checked
+            // against.
+            variant_options: serde_json::Map::new(),
             system: parts.system,
             // Upstream's plan/build reminders are about the agent a *person*
             // switched to; a subagent runs the prompt it was built with.
@@ -1124,6 +1137,9 @@ async fn request_title(
         system: Some(TITLE_PROMPT.to_owned()),
         messages: vec![Message::user(TITLE_INSTRUCTION), first_user],
         tools: Vec::new(),
+        // No variant: this request may ask a cheaper stablemate the selected
+        // name was never validated against.
+        variant_options: serde_json::Map::new(),
     };
 
     let mut events = match provider.stream(request, CancellationToken::new()).await {
@@ -1765,6 +1781,9 @@ async fn compact_if_needed(
         system: turn.system.clone(),
         messages: vec![Message::user(prompt)],
         tools: Vec::new(),
+        // The same model as the steps, so the same variant: a session that
+        // thinks harder should not summarize with a different mind.
+        variant_options: turn.variant_options.clone(),
     };
 
     let (text, usage) = summarize(turn, request).await?;
@@ -2081,6 +2100,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             system: turn.system.clone(),
             messages,
             tools: turn.tools.definitions(),
+            variant_options: turn.variant_options.clone(),
         }
     };
 
@@ -3380,6 +3400,7 @@ mod tests {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
             session_id: SessionId::from("ses_fixture".to_owned()),
             model: fake::MODEL.to_owned(),
+            variant_options: serde_json::Map::new(),
             system: None,
             reminders: Vec::new(),
             kind: TurnKind::Prompt {

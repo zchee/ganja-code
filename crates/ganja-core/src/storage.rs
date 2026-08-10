@@ -294,6 +294,13 @@ pub struct SessionInfo {
     /// it, since the provider is fixed when the engine is built.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Catalog variant this session was last running under. Absent on every
+    /// session written before variants existed — the serde default is what
+    /// keeps those rows readable — and on every session running upstream's
+    /// "Default"; restored only when the resumed model's catalog row still
+    /// carries the name, the same rule a live model switch applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
     /// The session that delegated this one, when a `task` call created it.
     ///
     /// Present on subagent sessions and absent on every other, which is what
@@ -1808,9 +1815,36 @@ mod tests {
             summary: None,
             agent: None,
             model: None,
+            variant: None,
             parent: None,
             revert: None,
         }
+    }
+
+    /// Both directions of the row's new field, pinned where the shape lives:
+    /// a session running Default writes the exact bytes it always wrote, a
+    /// selected variant survives the round trip, and a row a build before
+    /// variants wrote still parses — its absence *is* Default.
+    #[test]
+    fn the_session_row_round_trips_the_variant_and_reads_rows_written_without_one() {
+        let mut carried = info("ses_variant", 2);
+        carried.model = Some("claude-opus-5".to_owned());
+        carried.variant = Some("max".to_owned());
+
+        let encoded = serde_json::to_string(&carried).expect("the row serializes");
+        assert!(encoded.contains(r#""variant":"max""#), "got {encoded}");
+        let decoded: SessionInfo = serde_json::from_str(&encoded).expect("the row parses back");
+        assert_eq!(decoded, carried);
+
+        let bare = serde_json::to_string(&info("ses_default", 2)).expect("the row serializes");
+        assert!(
+            !bare.contains("variant"),
+            "Default is the field's absence, so an unselected row keeps its old bytes: {bare}"
+        );
+
+        let old = r#"{"id":"ses_old","version":1,"created":1,"updated":2}"#;
+        let decoded: SessionInfo = serde_json::from_str(old).expect("a pre-variant row parses");
+        assert_eq!(decoded.variant, None);
     }
 
     /// A message with pinned ids and times, carrying `parts`.

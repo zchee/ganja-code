@@ -255,6 +255,7 @@ mod tests {
         asked.parts.push(Part::text("Answer briefly."));
 
         ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-5.3-codex".to_owned(),
             system: Some("You are terse.".to_owned()),
             messages: vec![Message::user("An older question."), asked],

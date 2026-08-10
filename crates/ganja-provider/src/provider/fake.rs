@@ -103,6 +103,12 @@ pub struct FakeProvider {
     /// script plays. Shared with every clone, so that passing a provider around
     /// does not restart its script.
     requests: Arc<AtomicUsize>,
+    /// Every request asked of this provider, oldest first, shared with every
+    /// clone. This is the fake's "sent body": it builds no HTTP request, so
+    /// what a test reads to see what would have gone on the wire — the
+    /// messages, the tools, a variant's option map — is the [`ChatRequest`]
+    /// itself, recorded verbatim.
+    recorded: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
 }
 
 impl Default for FakeProvider {
@@ -128,7 +134,17 @@ impl FakeProvider {
             cadence,
             script: None,
             requests: Arc::new(AtomicUsize::new(0)),
+            recorded: Arc::default(),
         }
+    }
+
+    /// Every request this provider has been asked so far, oldest first.
+    #[must_use]
+    pub fn recorded(&self) -> Vec<ChatRequest> {
+        self.recorded
+            .lock()
+            .expect("the request log is never poisoned")
+            .clone()
     }
 
     /// Plays the script at `path` instead of the canned reply.
@@ -252,6 +268,10 @@ impl Provider for FakeProvider {
             Some(path) => self.scripted(path, &request).await?,
             None => (self.canned(&request), self.cadence),
         };
+        self.recorded
+            .lock()
+            .expect("the request log is never poisoned")
+            .push(request);
 
         // Ending the stream on cancel is what a real provider does when its
         // response body is dropped; the engine stops the turn either way, but
@@ -431,6 +451,7 @@ mod tests {
 
     fn request(prompt: &str) -> ChatRequest {
         ChatRequest {
+            variant_options: Default::default(),
             model: MODEL.to_owned(),
             system: None,
             messages: vec![Message::user(prompt)],

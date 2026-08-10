@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The three panes the layout draws — transcript, prompt editor, status bar — plus the modals that overlay them: the permission dialog while a tool call waits on the user, the sessions picker while a stored conversation is being chosen, the theme list while a palette is being previewed, the model and agent lists while a session is being pointed somewhere else, the command palette, the reference card, and the two inline menus the editor raises — one on a leading slash, one on an `@`.
+The three panes the layout draws — transcript, prompt editor, status bar — plus the modals that overlay them: the permission dialog while a tool call waits on the user, the question dialog while the model waits on an answer, the sessions picker while a stored conversation is being chosen, the theme list while a palette is being previewed, the model, agent and variant lists while a session is being pointed somewhere else, the command palette, the reference card, and the two inline menus the editor raises — one on a leading slash, one on an `@`.
 
 ## Key Files
 
@@ -22,6 +22,8 @@ The three panes the layout draws — transcript, prompt editor, status bar — p
 | `palette.rs` | The command palette, grouped by category with a filter line and a block of suggested commands pinned while nothing is typed. Spec: upstream `packages/tui/src/component/command-palette.tsx`. |
 | `dropdown.rs` | The inline command menu, anchored above the editor. Opens only when `/` is the first character of the buffer and the cursor has not left the first whitespace-free span; matches descriptions as well as names, which the palette does not. Spec: upstream `packages/tui/src/component/prompt/autocomplete.tsx`. |
 | `files.rs` | The inline file menu, raised by an `@`. The same box `dropdown.rs` draws, over paths `ganja-tool`'s `glob` walked in-process — and **not re-ranked**, because upstream says twice in comments to trust the backend's order. |
+| `question.rs` | The question dialog: one question, its options, and — unless the tool said `custom: false` — upstream's last-row free-text entry, opened with Enter, submitted as the answer when non-empty, abandoned back to the options when empty. Esc inside the editor cancels the edit; outside it rejects the question. A batch answers its first question only. |
+| `variants.rs` | The `/variants` picker: "Default" first, then the active model's catalog variant names; a selection sends `SwitchVariant`, and the status bar's `model (variant)` segment follows `VariantChanged`. |
 | `help.rs` | The reference card: every command with its key, then the bindings no command row shows, named as a config file rebinds them. Sizes itself to its content and **scrolls** when the window cannot hold it — upstream's card is one sentence and never needed to (deviation: `help-card-scrolls`); the footer counts which rows are showing, so a clip is never silent. |
 
 ## For AI Agents

@@ -197,7 +197,8 @@ const DROPPED_AGENT_FIELDS: [&str; 7] = [
     // The agent loop has no step cap on purpose.
     "steps",
     "maxSteps",
-    // Provider-variant machinery ganja does not have.
+    // Per-agent variant pinning ganja does not have; a variant is a session
+    // selection made through the catalog, not an agent's config key.
     "variant",
     "options",
     "color",
