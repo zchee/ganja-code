@@ -154,6 +154,26 @@ impl Editor {
         (cursor.0, cursor.1)
     }
 
+    /// Whether the cursor sits on the buffer's first line.
+    ///
+    /// The edge an Up-arrow reaches history at: upstream walks the prompt
+    /// history only when moving up would otherwise leave the buffer
+    /// (`input_move_up` at the top line), so on any lower line Up is an
+    /// ordinary cursor move (`component/prompt/index.tsx`).
+    #[must_use]
+    pub fn on_first_line(&self) -> bool {
+        self.area.cursor().0 == 0
+    }
+
+    /// Whether the cursor sits on the buffer's last line.
+    ///
+    /// The mirror of [`Editor::on_first_line`]: the edge a Down-arrow reaches
+    /// history at.
+    #[must_use]
+    pub fn on_last_line(&self) -> bool {
+        self.area.cursor().0 + 1 == self.area.lines().len()
+    }
+
     /// Moves the cursor to the start of the line it is on.
     pub fn line_home(&mut self) {
         self.area.move_cursor(CursorMove::Head);

@@ -6,12 +6,14 @@
 //! reason: a headless CI has no clipboard at all, so a copy command that
 //! spoke to [`arboard`] directly would be a command no test could ever run.
 //!
-//! Two deliberate narrowings from upstream:
+//! Both channels upstream writes are written here too: this trait owns the
+//! system clipboard (through [`arboard`]), and the app's copy path writes the
+//! OSC 52 escape ([`osc52`]) beside it — the terminal's own channel, which is
+//! what carries a copy from a tmux pane or an SSH session back to the machine
+//! the terminal is attached to rather than the one the process runs on.
 //!
-//! - **OSC 52 is not written** (**D109**). Upstream writes the escape *and*
-//!   then a native tool; ganja writes only through [`arboard`], so copying
-//!   from a tmux pane or over SSH lands on the machine the process runs on
-//!   rather than on the one the terminal is attached to.
+//! One deliberate narrowing from upstream remains:
+//!
 //! - **Images are not read.** The workspace pins `arboard` without its
 //!   `image-data` feature, so this build has no way to ask for an image —
 //!   and no way to tell an image-only clipboard from an empty one, since
@@ -109,6 +111,78 @@ impl Clipboard for System {
     }
 }
 
+/// The terminal's own clipboard channel, OSC 52.
+///
+/// Spec: upstream `packages/tui/src/clipboard.ts:25`. Written beside the
+/// system clipboard on every copy, not instead of it — the escape is what
+/// reaches the terminal a tmux pane or an SSH session is really attached to,
+/// which [`arboard`] on the far machine never can.
+pub mod osc52 {
+    /// The OSC 52 sequence that puts `text` on the terminal's clipboard.
+    ///
+    /// Upstream's exact bytes: `ESC ] 52 ; c ; <base64> BEL`. When `$TMUX` or
+    /// `$STY` names an outer multiplexer, the sequence is wrapped in the
+    /// passthrough that gets it past the multiplexer to the real terminal
+    /// (`clipboard.ts:26`) — without that wrap a copy from inside tmux never
+    /// leaves the pane, which is the whole SSH/tmux case this channel exists
+    /// for.
+    ///
+    /// No size cap: upstream emits unbounded, and matching that is chosen over
+    /// guarding against a terminal that truncates a very large selection —
+    /// upstream fidelity wins, and the plan left the cap to review
+    /// (deviation-free: this is upstream's behavior).
+    #[must_use]
+    pub fn sequence(text: &str) -> String {
+        let inner = format!("\x1b]52;c;{}\x07", super::base64(text.as_bytes()));
+
+        if wrapped_for_multiplexer() {
+            // The multiplexer swallows an escape it does not recognize; the
+            // `ESC P tmux ; ESC <inner> ESC \` passthrough tells it to forward
+            // the bytes verbatim, and every `ESC` inside `inner` is doubled by
+            // being preceded with one here.
+            format!("\x1bPtmux;\x1b{inner}\x1b\\")
+        } else {
+            inner
+        }
+    }
+
+    /// Whether an outer terminal multiplexer needs the passthrough wrap.
+    fn wrapped_for_multiplexer() -> bool {
+        std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some()
+    }
+}
+
+/// `bytes` as standard (RFC 4648) base64, padded.
+///
+/// Hand-rolled rather than pulled in as a dependency: the one caller is the
+/// OSC 52 sequence above, and a full crate for one table lookup per three
+/// bytes would be weight this frontend does not otherwise carry.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        // The three input bytes packed big-endian into 24 bits, the missing
+        // ones left zero.
+        let packed = chunk.iter().enumerate().fold(0u32, |acc, (i, &byte)| {
+            acc | (u32::from(byte) << (16 - 8 * i))
+        });
+
+        // Four 6-bit groups, most significant first; a group with no input
+        // byte behind it becomes `=` rather than an `A`.
+        for group in 0..4 {
+            if group <= chunk.len() {
+                let index = (packed >> (18 - 6 * group)) & 0x3f;
+                encoded.push(ALPHABET[index as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+
+    encoded
+}
+
 /// A clipboard that remembers what it was handed and answers reads from a
 /// script.
 ///
@@ -191,7 +265,58 @@ impl Clipboard for Recording {
 
 #[cfg(test)]
 mod tests {
-    use super::{Clipboard as _, Error, Recording};
+    use super::{Clipboard as _, Error, Recording, base64, osc52};
+
+    /// The RFC 4648 test vectors, plus the padding boundaries: a hand-rolled
+    /// encoder earns its keep only if it matches the standard byte for byte.
+    #[test]
+    fn base64_matches_the_standard_encoding_including_padding() {
+        let cases = [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(base64(input.as_bytes()), expected, "encoding {input:?}");
+        }
+    }
+
+    /// Non-ASCII text is encoded as its UTF-8 bytes, the way upstream's
+    /// `Buffer.from(text)` does.
+    #[test]
+    fn base64_encodes_the_utf8_bytes_of_multibyte_text() {
+        // "é" is two UTF-8 bytes (0xC3 0xA9).
+        assert_eq!(base64("é".as_bytes()), "w6k=");
+    }
+
+    /// A copy produces the exact escape upstream writes, and its base64 decodes
+    /// to the copied text. The wrap case is the multiplexer's, so the bare form
+    /// is what a plain terminal (no `$TMUX`/`$STY`) sees.
+    #[test]
+    fn a_copy_emits_one_osc52_sequence_whose_base64_is_the_text() {
+        // The env this test process runs under decides the wrap; assert on the
+        // payload rather than the exact framing so a CI running inside tmux is
+        // not a false failure.
+        let sequence = osc52::sequence("copy me");
+
+        assert!(
+            sequence.contains("\x1b]52;c;"),
+            "the OSC 52 opener: {sequence:?}"
+        );
+        assert!(
+            sequence.contains(&base64(b"copy me")),
+            "the payload is the text's base64: {sequence:?}"
+        );
+        assert!(
+            sequence.ends_with('\u{7}') || sequence.ends_with('\\'),
+            "a terminator: {sequence:?}"
+        );
+    }
 
     #[test]
     fn a_recording_clipboard_keeps_every_write_in_order() {

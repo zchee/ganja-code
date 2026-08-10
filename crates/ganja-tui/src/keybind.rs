@@ -2,9 +2,9 @@
 //!
 //! Spec: upstream `packages/tui/src/config/keybind.ts`. Upstream binds
 //! roughly a hundred actions and layers a `<leader>` prefix over them;
-//! ganja binds the five a frontend this size actually has (**D4**), and has
+//! ganja binds the handful a frontend this size actually has (**D4**), and has
 //! no leader — a chord that exists to disambiguate a hundred bindings is
-//! nothing but a delay when there are five.
+//! nothing but a delay when there are this few.
 //!
 //! The whole table is rebindable from `keybinds` in the config file, and both
 //! ways of getting it wrong fail at startup naming what was wrong: an action
@@ -33,6 +33,8 @@ pub enum Action {
     ThemesOpen,
     /// Move to the next agent.
     AgentCycle,
+    /// Break the line in the composer instead of submitting it.
+    InputNewline,
 }
 
 /// The action a config key names, its default binding, in the order a
@@ -46,6 +48,15 @@ const ACTIONS: &[(Action, &str, &str)] = &[
     (Action::SessionsOpen, "sessions_open", "ctrl+s"),
     (Action::ThemesOpen, "themes_open", "ctrl+t"),
     (Action::AgentCycle, "agent_cycle", "tab"),
+    // Upstream's exact default (`keybind.ts:164`). A terminal without the kitty
+    // keyboard protocol cannot report `shift+enter` at all — it delivers a bare
+    // Enter — so `ctrl+j`, which is ASCII LF and arrives on every terminal, is
+    // in the default set as the break that always works.
+    (
+        Action::InputNewline,
+        "input_newline",
+        "shift+enter,ctrl+enter,alt+enter,ctrl+j",
+    ),
 ];
 
 impl Action {
@@ -224,25 +235,36 @@ fn same(bound: KeyEvent, pressed: KeyEvent) -> bool {
 
 /// One key event in the single spelling a comparison can be made in.
 ///
-/// Shift is not a modifier of a key the way ctrl is: the terminal applies it
-/// and hands over the result, so it is folded into the key itself and dropped
-/// from the modifiers. Every other modifier is left exactly as it came, and an
-/// unshifted `a` therefore still does not answer to `A`.
+/// Shift is dropped only where the key code has already spent it: a shifted
+/// character folded to uppercase, or shift-tab written as `Tab` plus shift or
+/// a bare `BackTab`; any shift riding on `BackTab` is redundant. Other shifted
+/// keys are genuine chords, so `shift+enter` remains distinct from bare Enter.
 fn canonical(key: KeyEvent) -> (KeyCode, KeyModifiers) {
     let shifted = key.modifiers.contains(KeyModifiers::SHIFT);
-    let code = match key.code {
+    let (code, folded) = match key.code {
         KeyCode::Char(character) if shifted => {
             // `to_uppercase` can yield more than one character for a few
             // letters; a key is one, and the first is the one a keyboard sends.
-            KeyCode::Char(character.to_uppercase().next().unwrap_or(character))
+            (
+                KeyCode::Char(character.to_uppercase().next().unwrap_or(character)),
+                true,
+            )
         }
         // Shift-tab has its own key code, so `shift+tab` and `backtab` are two
         // ways of writing the key every terminal reports as the second.
-        KeyCode::Tab if shifted => KeyCode::BackTab,
-        other => other,
+        KeyCode::Tab if shifted => (KeyCode::BackTab, true),
+        KeyCode::BackTab => (KeyCode::BackTab, true),
+        other => (other, false),
     };
 
-    (code, key.modifiers - KeyModifiers::SHIFT)
+    (
+        code,
+        if folded {
+            key.modifiers - KeyModifiers::SHIFT
+        } else {
+            key.modifiers
+        },
+    )
 }
 
 /// Every alternative in a comma-separated binding.
@@ -430,6 +452,12 @@ mod tests {
                 KeyModifiers::CONTROL,
             ),
             (Action::AgentCycle, KeyCode::Tab, KeyModifiers::NONE),
+            (
+                Action::InputNewline,
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+            ),
+            (Action::InputNewline, KeyCode::Enter, KeyModifiers::SHIFT),
         ];
 
         for (action, code, modifiers) in cases {
@@ -438,6 +466,62 @@ mod tests {
                 "{code:?}+{modifiers:?} should reach {action:?}"
             );
         }
+    }
+
+    /// `ctrl+j` is ASCII LF, which every terminal delivers; the three
+    /// `*+enter` chords need the kitty protocol, so the row carries all four
+    /// and the universal one is what a plain terminal falls back on.
+    #[test]
+    fn the_newline_row_carries_ctrl_j_beside_the_kitty_only_chords() {
+        let binds = Keybinds::defaults();
+        for (code, modifiers) in [
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+            (KeyCode::Enter, KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::ALT),
+        ] {
+            assert_eq!(
+                binds.action(pressed(code, modifiers)),
+                Some(Action::InputNewline),
+                "{code:?}+{modifiers:?} should break the line"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_enter_is_a_distinct_chord_from_a_bare_enter() {
+        let binds = Keybinds::defaults();
+
+        assert_eq!(
+            binds.action(pressed(KeyCode::Enter, KeyModifiers::NONE)),
+            None,
+            "a bare Enter must stay a submit, not a bound action"
+        );
+        assert_eq!(
+            binds.action(pressed(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Some(Action::InputNewline),
+            "shift+enter is the line break"
+        );
+    }
+
+    /// The chord is data, so a config file can move it like any other.
+    #[test]
+    fn the_newline_chord_is_rebindable_from_config() {
+        let binds = Keybinds::from_config(&configured(&[("input_newline", "ctrl+n")]))
+            .expect("a legible binding loads");
+
+        assert_eq!(
+            binds.action(pressed(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            Some(Action::InputNewline),
+            "the rebind reaches the action"
+        );
+        assert!(
+            !binds.binds(
+                Action::InputNewline,
+                pressed(KeyCode::Char('j'), KeyModifiers::CONTROL)
+            ),
+            "and the default is replaced, not kept alongside"
+        );
     }
 
     #[test]

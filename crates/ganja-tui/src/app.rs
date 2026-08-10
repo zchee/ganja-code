@@ -53,6 +53,7 @@ use crate::{
     },
     event::AppEvent,
     external,
+    history::{self, History},
     keybind::{self, Keybinds},
     mention,
     theme::{Theme, Themes},
@@ -268,6 +269,16 @@ pub struct App {
     /// Where a copy goes. Behind a trait so a test asserts what ganja decided
     /// to copy rather than what the machine running it has for a desktop.
     clipboard: Box<dyn clipboard::Clipboard>,
+    /// What the composer remembers across submissions; an Up-arrow on an empty
+    /// prompt walks back through it. Inert until [`App::with_history`] hands it
+    /// a real store — the default touches no disk, so a test never reads or
+    /// writes the machine's own prompt history.
+    history: History,
+    /// OSC 52 escapes waiting to reach the terminal. A copy queues one here
+    /// rather than writing it straight out, so the sequence is flushed at draw
+    /// time and serializes after a frame instead of landing in the middle of
+    /// one. See [`App::draw`].
+    pending_osc: Vec<String>,
     /// How many MCP servers this run configured, and therefore how many
     /// statuses there are still to wait for. Zero means nothing to watch, and
     /// the poll below never runs.
@@ -360,6 +371,10 @@ impl App {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             clipboard: Box::new(clipboard::System::default()),
+            // Inert until the startup lane hands over the loaded store: reading
+            // the disk here would mean every test touched the real history.
+            history: History::default(),
+            pending_osc: Vec::new(),
             mcp_servers: 0,
             mcp_notice: None,
             mcp_resolved: 0,
@@ -407,6 +422,18 @@ impl App {
     #[must_use]
     pub fn with_clipboard(mut self, clipboard: Box<dyn clipboard::Clipboard>) -> Self {
         self.clipboard = clipboard;
+
+        self
+    }
+
+    /// Remembers submitted prompts in `history` instead of the inert default.
+    ///
+    /// A builder because only the startup lane should read the disk: the
+    /// default store touches nothing, so a test that does not opt in never
+    /// reaches the machine's own prompt history.
+    #[must_use]
+    pub fn with_history(mut self, history: History) -> Self {
+        self.history = history;
 
         self
     }
@@ -703,11 +730,41 @@ impl App {
             })
             .context("failed to draw a frame")?;
 
+        // After the frame's own bytes have gone out, never during them: the
+        // OSC 52 escape is the terminal's clipboard channel, and a copy queued
+        // it here so it lands between frames rather than splitting one. Written
+        // straight to stdout — the backend the terminal is on — the way the app
+        // already writes its mouse and paste sequences. A write that fails is
+        // one lost copy over that channel, not a reason to fail the frame.
+        self.flush_osc();
+
         self.dirty = false;
         self.urgent = false;
         self.last_draw = Instant::now();
 
         Ok(())
+    }
+
+    /// Writes any queued OSC 52 escapes to the terminal and empties the queue.
+    ///
+    /// Serialized after the frame by its one caller ([`App::draw`]); pulled out
+    /// so the queue itself can be asserted on without a terminal.
+    fn flush_osc(&mut self) {
+        use std::io::Write as _;
+
+        if self.pending_osc.is_empty() {
+            return;
+        }
+
+        let mut stdout = std::io::stdout();
+        for sequence in self.pending_osc.drain(..) {
+            if let Err(error) = stdout.write_all(sequence.as_bytes()) {
+                tracing::warn!(%error, "an OSC 52 clipboard escape could not be written");
+            }
+        }
+        if let Err(error) = stdout.flush() {
+            tracing::warn!(%error, "the OSC 52 clipboard escape could not be flushed");
+        }
     }
 
     async fn handle_terminal(&mut self, event: TermEvent) -> Result<()> {
@@ -919,6 +976,16 @@ impl App {
                 self.cycle_agent().await;
                 return Ok(());
             }
+            // Resolved here, before the bare Enter below can read as a submit:
+            // every chord on this row breaks the line instead. `ctrl+j` is the
+            // one every terminal delivers; the `*+enter` chords need the kitty
+            // protocol (see the keybind row). The cursor moved, so the inline
+            // menus, which are about where it is, are re-synced.
+            Some(keybind::Action::InputNewline) => {
+                self.editor.insert_newline();
+                self.sync_menus().await;
+                return Ok(());
+            }
             // Including an exit binding whose gate said no, which falls
             // through to the editor below and deletes forward there.
             _ => {}
@@ -972,6 +1039,23 @@ impl App {
                 self.editor.line_end();
                 self.sync_menus().await;
             }
+            // History only at the edges, the way upstream reaches it from
+            // `input_move_up`/`down`: on the first line an Up walks back through
+            // remembered prompts, and on a lower line it is an ordinary cursor
+            // move. When the walk moves nothing — a dirty buffer, or the top of
+            // the history — the arrow falls through to the widget unchanged, so
+            // Up on a one-line draft the user has edited still just moves within
+            // it.
+            KeyCode::Up
+                if self.editor.on_first_line() && self.recall(history::Direction::Older) =>
+            {
+                self.sync_menus().await;
+            }
+            KeyCode::Down
+                if self.editor.on_last_line() && self.recall(history::Direction::Newer) =>
+            {
+                self.sync_menus().await;
+            }
             _ => {
                 self.editor.input(key);
                 self.sync_menus().await;
@@ -979,6 +1063,26 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Walks the prompt history one step and, if it moved, shows the recalled
+    /// prompt in the composer.
+    ///
+    /// Returns whether the walk moved: the guard is [`History::step`]'s (a walk
+    /// is refused while the buffer holds something the user typed rather than a
+    /// recalled entry), so a `false` here means the arrow should behave as an
+    /// ordinary cursor key instead. The recalled text replaces the buffer with
+    /// the cursor left at its end, so a second Up keeps climbing; the caller
+    /// re-syncs the inline menus because the recalled line may itself hold an
+    /// `@mention` or a `/command`.
+    fn recall(&mut self, direction: history::Direction) -> bool {
+        match self.history.step(direction, &self.editor.text()) {
+            Some(entry) => {
+                self.editor.set_text(&entry.input);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Switches the composer between sending prompts and running commands.
@@ -1083,9 +1187,18 @@ impl App {
     }
 
     /// Hands `text` to the clipboard and says which way it went.
+    ///
+    /// Both channels upstream writes go out together: the system clipboard
+    /// through the trait, and the terminal's OSC 52 escape queued for the next
+    /// frame ([`App::draw`] flushes it). The escape is queued only once the
+    /// system write succeeded — a copy the desktop refused is not one to claim
+    /// over the wire either.
     fn copy(&mut self, text: &str, done: &str, failed: &str) {
         let notice = match self.clipboard.write(text) {
-            Ok(()) => done.to_owned(),
+            Ok(()) => {
+                self.pending_osc.push(clipboard::osc52::sequence(text));
+                done.to_owned()
+            }
             Err(error) => format!("{failed}: {error}"),
         };
 
@@ -1770,6 +1883,12 @@ impl App {
             return;
         }
 
+        // The raw buffer is what history remembers — slash and `@` tokens
+        // included, upstream stores the literal input — so it is captured here,
+        // before `prompt` is moved into the send below, and only committed once
+        // the engine accepts it.
+        let remembered = history::PromptInfo::text(&prompt);
+
         // Set before the send rather than after it: a prompt after an undo is
         // the user keeping what the undo did, and the engine deletes those
         // messages *inside* this call — before the event announcing it can be
@@ -1803,6 +1922,12 @@ impl App {
 
         match sent {
             Ok(()) => {
+                // Remembered only once the engine took it: a refused prompt
+                // stays in the composer, and one it never accepted is not one
+                // an Up-arrow should bring back. Consecutive duplicates are
+                // suppressed inside `append`, so re-sending a recalled prompt
+                // does not fill the history with copies of it.
+                self.history.append(remembered);
                 self.editor.clear();
                 self.dropdown = None;
                 self.files = None;
@@ -1826,12 +1951,22 @@ impl App {
             return;
         };
 
+        // Captured before the move, and marked as the shell submission it is:
+        // upstream tags a shell prompt with `mode: "shell"`, so a recalled
+        // shell command reads back as one.
+        let remembered = history::PromptInfo {
+            input: command.clone(),
+            mode: Some(history::Mode::Shell),
+            parts: Vec::new(),
+        };
+
         // A shell command after an undo makes it permanent too; see
         // [`App::submit`] for why this is set before the send.
         let previously = std::mem::replace(&mut self.cleared, Cleared::Drop);
 
         match self.engine.send(Command::RunShell { command }).await {
             Ok(()) => {
+                self.history.append(remembered);
                 self.editor.clear();
                 self.set_shell(false);
                 self.status.set_notice(None);
@@ -2562,6 +2697,27 @@ mod tests {
                 "{modifier:?}+Enter should break the line"
             );
         }
+    }
+
+    /// Ctrl+J is the universal line break even when a terminal cannot report modified Enter.
+    #[tokio::test]
+    async fn ctrl_j_inserts_a_newline_and_submits_nothing() {
+        let mut app = app();
+        for event in typing("one") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Char('j'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+j is handled");
+        for event in typing("two") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("one\ntwo"),
+            "ctrl+j should break the line, not submit; a submit would have cleared the buffer"
+        );
     }
 
     #[tokio::test]
