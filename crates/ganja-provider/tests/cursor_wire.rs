@@ -17,9 +17,10 @@
 //! HTTP/1.1 cannot honestly host is the Run RPC's full duplex: its request
 //! body is a held-open chunked stream, so the fixture de-chunks exactly one
 //! Connect envelope — the run request — and never waits for a body EOF a
-//! live turn deliberately never sends; the exec-answer path is unit-driven
-//! through in-memory channels in `cursor.rs`, where both directions run
-//! without a transport to lie about.
+//! live turn deliberately never sends; the ask-answer paths — the exec
+//! channel's context ask and the kv channel's blob exchanges alike — are
+//! unit-driven through in-memory channels in `cursor.rs`, where both
+//! directions run without a transport to lie about.
 //!
 //! One test, one binary, on purpose: it mutates `XDG_DATA_HOME`, and a plain
 //! `cargo test` runs the tests inside a binary on parallel threads.
@@ -421,6 +422,13 @@ fn text_update(delta: &str) -> proto::Update {
     }
 }
 
+fn thinking_update(delta: &str) -> proto::Update {
+    proto::Update {
+        thinking_delta: buffa::MessageField::some(proto::ThinkingDelta::default().with_text(delta)),
+        ..Default::default()
+    }
+}
+
 fn turn_ended_update() -> proto::Update {
     proto::Update {
         turn_ended: buffa::MessageField::some(proto::TurnEnded::default()),
@@ -428,15 +436,32 @@ fn turn_ended_update() -> proto::Update {
     }
 }
 
-/// The body of a clean two-delta exchange, ended the way the server ends
-/// one: the turn marked over, then the empty EndStream verdict.
+/// The body of a clean exchange the way a codex-family turn opens: thinking
+/// ahead of the reply, then the turn marked over and the empty EndStream
+/// verdict. No ask frames ride this body — answering one means writing to
+/// the request body mid-response, the duplex half this fixture's HTTP/1.1
+/// close-delimited replies cannot honestly host (hyper drops the unsent
+/// request body once the whole response is in), so both ask channels are
+/// unit-driven through in-memory channels in `cursor.rs`.
 fn exchange_body() -> Vec<u8> {
-    let mut body = update_frame(text_update("Hello"));
+    let mut body = update_frame(thinking_update("Weighing a greeting."));
+    body.extend(update_frame(text_update("Hello")));
     body.extend(update_frame(text_update(" world")));
     body.extend(update_frame(turn_ended_update()));
     body.extend(frame(END_STREAM, b"{}"));
 
     body
+}
+
+/// What [`exchange_body`] decodes to, spelled once: the thinking surfaces
+/// as reasoning, the kv exchange surfaces as nothing at all.
+fn exchange_events() -> Vec<ProviderEvent> {
+    vec![
+        ProviderEvent::ReasoningDelta("Weighing a greeting.".to_owned()),
+        ProviderEvent::TextDelta("Hello".to_owned()),
+        ProviderEvent::TextDelta(" world".to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]
 }
 
 /// The one turn every phase asks for.
@@ -571,14 +596,7 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         .expect("the exchange opens")
         .collect()
         .await;
-    assert_eq!(
-        events,
-        vec![
-            ProviderEvent::TextDelta("Hello".to_owned()),
-            ProviderEvent::TextDelta(" world".to_owned()),
-            ProviderEvent::Finish(FinishReason::Completed),
-        ]
-    );
+    assert_eq!(events, exchange_events());
 
     let recorded = endpoint.only();
     assert_eq!(recorded.path(), "/agent.v1.AgentService/Run");
@@ -631,7 +649,7 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     // readable failure instead of a hang.
     endpoint.forget();
     let open = Arc::new(Notify::new());
-    let first_frame = update_frame(text_update("Hello")).len();
+    let first_frame = update_frame(thinking_update("Weighing a greeting.")).len();
     endpoint.answers_with(
         Reply::ok("application/connect+proto", exchange_body())
             .gated(first_frame, Arc::clone(&open)),
@@ -646,19 +664,15 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         .expect("the first delta must arrive while the body is still open");
     assert_eq!(
         first,
-        Some(ProviderEvent::TextDelta("Hello".to_owned())),
+        Some(ProviderEvent::ReasoningDelta(
+            "Weighing a greeting.".to_owned()
+        )),
         "decoded from a body whose remainder is deliberately unwritten"
     );
 
     open.notify_one();
     let rest: Vec<ProviderEvent> = streamed.collect().await;
-    assert_eq!(
-        rest,
-        vec![
-            ProviderEvent::TextDelta(" world".to_owned()),
-            ProviderEvent::Finish(FinishReason::Completed),
-        ]
-    );
+    assert_eq!(rest, exchange_events()[1..].to_vec());
 
     // ── A cancel mid-stream ──────────────────────────────────────────────
     // Same gate, but the person leaves: after the first delta the token
@@ -680,7 +694,12 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     let first = timeout(PATIENCE, streamed.next())
         .await
         .expect("the first delta arrives before the cancel");
-    assert_eq!(first, Some(ProviderEvent::TextDelta("Hello".to_owned())));
+    assert_eq!(
+        first,
+        Some(ProviderEvent::ReasoningDelta(
+            "Weighing a greeting.".to_owned()
+        ))
+    );
 
     cancel.cancel();
     let rest: Vec<ProviderEvent> = streamed.collect().await;

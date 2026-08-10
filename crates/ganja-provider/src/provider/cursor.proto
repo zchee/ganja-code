@@ -64,11 +64,13 @@ message ModelEntry {
 // prewarm request"); the field number is derived from the plugin's
 // AgentClientMessage oneof (agent_pb.ts:3596). The same stream then carries
 // the client's exec answers — exec_client_message = 2 (agent_pb.ts:3603).
-// The other arms of that oneof belong to flows this build does not speak
-// yet, so only these two are modelled.
+// The kv channel's answers ride the same stream — kv_client_message = 3
+// (agent_pb.ts:3617). The other arms of that oneof belong to flows this
+// build does not speak yet, so only these three are modelled.
 message ClientMessage {
   RunRequest run_request = 1;
   ExecResponse exec_response = 2;
+  KvResponse kv_response = 3;
 }
 
 // One turn's opening request, the minimal subset of the plugin's
@@ -129,28 +131,42 @@ message RequestedModel {
 // the plugin's AgentServerMessage oneof (agent_pb.ts:3669). The exec arm —
 // exec_server_message = 2 (agent_pb.ts:3676) — is a mid-stream request the
 // server waits on before it generates: a build that skipped it hung a real
-// turn (LIVE-OBSERVED 2026-08-10), which is why it is modelled. The
-// kv/checkpoint/control/query arms are not modelled and survive decoding as
-// unknown fields.
+// turn (LIVE-OBSERVED 2026-08-10), which is why it is modelled. The kv arm —
+// kv_server_message = 4 (agent_pb.ts:3697) — is the server storing and
+// reading conversation state mid-turn, and it too is waited on: the
+// 2026-08-10 live run showed four unanswered kv messages and then silence
+// until timeout, which is why it is modelled beside the exec arm. The
+// checkpoint/query arms are not modelled and survive decoding as unknown
+// fields.
 message ServerMessage {
   Update interaction_update = 1;
   ExecRequest exec_request = 2;
+  KvRequest kv_request = 4;
 }
 
 // The updates a one-shot text turn must understand. heartbeat = 13 was
 // LIVE-OBSERVED (`6a 00` inside the recorded frame); text_delta = 1
-// (agent_pb.ts:3160) and turn_ended = 14 (:3258) are plugin-derived. The
-// tool-call and thinking arms of the plugin's oneof are deliberately absent —
-// an update carrying only fields this build does not model decodes to an
-// empty Update and is skipped.
+// (agent_pb.ts:3160), thinking_delta = 4 (:3195) and turn_ended = 14
+// (:3258) are plugin-derived. The tool-call, summary, token and step arms
+// of the plugin's oneof are deliberately absent — an update carrying only
+// fields this build does not model decodes to an empty Update and is
+// skipped, named by number from its unknown fields.
 message Update {
   TextDelta text_delta = 1;
+  ThinkingDelta thinking_delta = 4;
   Heartbeat heartbeat = 13;
   TurnEnded turn_ended = 14;
 }
 
 // Field number from the plugin's TextDeltaUpdate (agent_pb.ts:2800).
 message TextDelta {
+  string text = 1;
+}
+
+// The model's readable thinking, which the plugin forwards to its clients
+// the same way it forwards reply text (proxy.ts:1059-1061). Field number
+// from the plugin's ThinkingDeltaUpdate (agent_pb.ts:2939).
+message ThinkingDelta {
   string text = 1;
 }
 
@@ -212,3 +228,51 @@ message ContextSuccess {
 message RequestContext {
   string cloud_rule = 16;
 }
+
+// A kv exchange the server opens mid-stream and waits on: the plugin's
+// KvServerMessage (agent_pb.ts:7922) — id = 1 (:7924), and its message
+// oneof's two arms, get_blob_args = 2 (:7941) and set_blob_args = 3
+// (:7948), which are the whole oneof. span_context = 4 (:7931) is tracing
+// baggage this build does not read; it survives decoding as an unknown
+// field and is never mistaken for a kind.
+message KvRequest {
+  uint32 id = 1;
+  GetBlobArgs get_blob_args = 2;
+  SetBlobArgs set_blob_args = 3;
+}
+
+// The plugin's GetBlobArgs (agent_pb.ts:7853): blob_id = 1 (:7855), a
+// content-addressed key into the state the server previously stored.
+message GetBlobArgs {
+  bytes blob_id = 1;
+}
+
+// The plugin's SetBlobArgs (agent_pb.ts:7885): blob_id = 1 (:7887) and
+// blob_data = 2 (:7892), the state the server wants held for it.
+message SetBlobArgs {
+  bytes blob_id = 1;
+  bytes blob_data = 2;
+}
+
+// The client's half of the kv exchange: the plugin's KvClientMessage
+// (agent_pb.ts:7965) — id = 1 (:7967) echoing the server's, and the result
+// oneof's two arms, get_blob_result = 2 (:7977) and set_blob_result = 3
+// (:7984).
+message KvResponse {
+  uint32 id = 1;
+  GetBlobResult get_blob_result = 2;
+  SetBlobResult set_blob_result = 3;
+}
+
+// The plugin's GetBlobResult (agent_pb.ts:7869): blob_data = 1 (:7871),
+// declared optional there because absence is the answer's not-found shape —
+// the plugin's miss reply is the result message with no data in it
+// (proxy.ts:1101-1105).
+message GetBlobResult {
+  bytes blob_data = 1;
+}
+
+// Fieldless on purpose: the plugin's SetBlobResult (agent_pb.ts:7906)
+// holds only an optional error (= 1, :7908) its own ack never sets
+// (proxy.ts:1113-1117) — the empty message is the ack.
+message SetBlobResult {}

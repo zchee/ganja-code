@@ -46,12 +46,23 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// the open request body, and an exec kind this build cannot answer fails
 /// the turn with the kind's name on it rather than reproduce the silence.
 ///
-/// Updates this build does not model — the tool-call and thinking arms, and
-/// whole server messages outside the update and exec channels — are
-/// skipped, not failed: the server adds arms between client versions, and a
-/// turn that died on one would make every addition a breaking change. A
-/// skipped update is logged at debug, which is where "why is the reply
-/// shorter than the server's" is answered.
+/// **The kv arm is never skipped either.** The server stores and reads
+/// conversation state mid-turn over the kv channel and waits on every
+/// exchange before it will end the turn — the 2026-08-10 live run left four
+/// of them unanswered and then sat silent until timeout. So a kv get or set
+/// is handed up as an [`Ask`] beside the context ask, answered by the
+/// stream layer against the turn's blob store, and a kv kind beyond get and
+/// set fails the turn with its field number on it — the exec channel's
+/// no-hang discipline, applied to the second channel the server waits on.
+///
+/// Updates this build does not model — the tool-call, summary, token and
+/// step arms, and whole server messages outside the update, exec and kv
+/// channels — are skipped, not failed: the server adds arms between client
+/// versions, and a turn that died on one would make every addition a
+/// breaking change. A skipped update is logged at debug with its set field
+/// numbers named where the plugin's descriptor knows them, which is where
+/// "why is the reply shorter than the server's" is answered — by arm, not
+/// by guesswork.
 ///
 /// **`turn_ended` is noted; the verdict waits for the EndStream frame.**
 /// The two are the application and the protocol saying different things —
@@ -69,9 +80,19 @@ pub(super) struct Mapping {
     ended: bool,
 }
 
-/// A mid-stream context ask, carried up to the stream layer: the decode
-/// layer reads frames and holds no channel to answer one on, so the layer
-/// that owns the request body sends the reply.
+/// A mid-stream question the server waits on, carried up to the stream
+/// layer: the decode layer reads frames and holds no channel to answer one
+/// on, so the layer that owns the request body sends the reply. Two kinds,
+/// because the server waits on two channels — the exec channel's context
+/// ask and the kv channel's blob exchanges.
+#[derive(Debug, PartialEq)]
+pub(super) enum Ask {
+    Context(ContextAsk),
+    Kv(KvAsk),
+}
+
+/// The server's context ask, ids and nothing else — presence is the whole
+/// question.
 #[derive(Debug, PartialEq)]
 pub(super) struct ContextAsk {
     /// The exchange ids the answer must echo, verbatim — the plugin's own
@@ -80,14 +101,33 @@ pub(super) struct ContextAsk {
     pub(super) exec_id: Option<String>,
 }
 
+/// One kv exchange the server opened: the id the answer must echo
+/// (proxy.ts:1075-1077), and which of the two operations the oneof carried.
+#[derive(Debug, PartialEq)]
+pub(super) struct KvAsk {
+    pub(super) id: Option<u32>,
+    pub(super) op: KvOp,
+}
+
+/// The kv channel's whole vocabulary — get and set are the oneof's only
+/// arms (agent_pb.ts:7941, :7948).
+#[derive(Debug, PartialEq)]
+pub(super) enum KvOp {
+    /// The server reading back what it stored; answered from the blob store,
+    /// found or not.
+    Get { blob_id: Vec<u8> },
+    /// The server storing state for the turn; answered with the empty ack.
+    Set { blob_id: Vec<u8>, data: Vec<u8> },
+}
+
 impl Mapping {
     /// Maps `frame`, appending whatever it means to `events`; a returned
-    /// [`ContextAsk`] is the server waiting, and the caller must answer it.
+    /// [`Ask`] is the server waiting, and the caller must answer it.
     pub(super) fn frame(
         &mut self,
         frame: &connect::Frame,
         events: &mut Vec<ProviderEvent>,
-    ) -> Option<ContextAsk> {
+    ) -> Option<Ask> {
         if frame.is_end_stream() {
             match connect::end_stream_error(&frame.payload) {
                 Ok(Some((code, message))) => {
@@ -114,10 +154,10 @@ impl Mapping {
 
         if let Some(exec) = message.exec_request.as_option() {
             if exec.request_context_args.is_set() {
-                return Some(ContextAsk {
+                return Some(Ask::Context(ContextAsk {
                     id: exec.id,
                     exec_id: exec.exec_id.clone(),
-                });
+                }));
             }
 
             // The server stops generating until an exec is answered, so a
@@ -128,6 +168,37 @@ impl Mapping {
                 "cursor made an exec request this build cannot answer ({}); \
                  leaving it unanswered would hang the turn",
                 exec_kind(exec)
+            ))));
+            return None;
+        }
+
+        if let Some(kv) = message.kv_request.as_option() {
+            if let Some(get) = kv.get_blob_args.as_option() {
+                return Some(Ask::Kv(KvAsk {
+                    id: kv.id,
+                    op: KvOp::Get {
+                        blob_id: get.blob_id.clone().unwrap_or_default(),
+                    },
+                }));
+            }
+            if let Some(set) = kv.set_blob_args.as_option() {
+                return Some(Ask::Kv(KvAsk {
+                    id: kv.id,
+                    op: KvOp::Set {
+                        blob_id: set.blob_id.clone().unwrap_or_default(),
+                        data: set.blob_data.clone().unwrap_or_default(),
+                    },
+                }));
+            }
+
+            // The server waits on every kv exchange the way it waits on
+            // every exec, so a kind this build cannot answer ends the turn
+            // with its number on it rather than reproduce the silence the
+            // unanswered channel produced live.
+            events.push(ProviderEvent::Failed(ProviderError::Parse(format!(
+                "cursor made a kv request this build cannot answer ({}); \
+                 leaving it unanswered would hang the turn",
+                kv_kind(kv)
             ))));
             return None;
         }
@@ -149,12 +220,31 @@ impl Mapping {
             events.push(ProviderEvent::TextDelta(
                 delta.text.clone().unwrap_or_default(),
             ));
+        } else if let Some(delta) = update.thinking_delta.as_option() {
+            // The plugin forwards thinking to its clients beside reply text,
+            // marked as thinking (proxy.ts:1059-1061); here that mark is the
+            // event the Anthropic wire's thinking blocks already arrive as.
+            events.push(ProviderEvent::ReasoningDelta(
+                delta.text.clone().unwrap_or_default(),
+            ));
         } else if update.turn_ended.is_set() {
             self.ended = true;
         } else if update.heartbeat.is_set() {
             // Liveness, carrying nothing.
         } else {
-            tracing::debug!(provider = ID, "skipped an update this build does not model");
+            // The arms are named so the next live run reads as a list of
+            // decisions rather than a count of mysteries: every number here
+            // is one the plugin's descriptor declares and this build chose
+            // not to model.
+            tracing::debug!(
+                provider = ID,
+                arms = ?update
+                    .__buffa_unknown_fields
+                    .iter()
+                    .map(|field| update_arm(field.number))
+                    .collect::<Vec<_>>(),
+                "skipped an update this build does not model"
+            );
         }
 
         None
@@ -246,13 +336,62 @@ fn exec_kind(exec: &proto::ExecRequest) -> String {
     }
 }
 
+/// Names a skipped update's arm the way the plugin's descriptor does.
+///
+/// The table is the plugin's InteractionUpdate oneof (agent_pb.ts:3160-
+/// :3272); the arms this build models — text_delta = 1, thinking_delta = 4,
+/// heartbeat = 13, turn_ended = 14 — never reach it, because a modeled arm
+/// decodes into its field rather than into the unknowns. A number outside
+/// the table is a server newer than the descriptor, reported as itself —
+/// still enough to go derive.
+fn update_arm(number: u32) -> String {
+    let named = match number {
+        2 => "tool_call_started",
+        3 => "tool_call_completed",
+        5 => "thinking_completed",
+        6 => "user_message_appended",
+        7 => "partial_tool_call",
+        8 => "token_delta",
+        9 => "summary",
+        10 => "summary_started",
+        11 => "summary_completed",
+        12 => "shell_output_delta",
+        15 => "tool_call_delta",
+        16 => "step_started",
+        17 => "step_completed",
+        _ => return format!("field {number}"),
+    };
+
+    format!("{named} ({number})")
+}
+
+/// Names the kind an unanswerable kv request carried.
+///
+/// Get and set are the plugin's whole oneof (agent_pb.ts:7941, :7948) and
+/// both are modeled, so an unanswerable kind can only be an arm newer than
+/// the descriptor, arriving as an unknown field whose number is the kind.
+/// span_context (= 4, agent_pb.ts:7931) rides beside the oneof without
+/// being a kind, so it is passed over rather than blamed.
+fn kv_kind(kv: &proto::KvRequest) -> String {
+    match kv
+        .__buffa_unknown_fields
+        .iter()
+        .map(|field| field.number)
+        .find(|number| *number != 4)
+    {
+        Some(number) => format!("field {number}"),
+        None => "no recognizable kind".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use buffa::Message as _;
 
     use super::{
         super::{connect, proto},
-        ContextAsk, FinishReason, Mapping, ProviderError, ProviderEvent, model_list, verdict,
+        Ask, ContextAsk, FinishReason, KvAsk, KvOp, Mapping, ProviderError, ProviderEvent,
+        model_list, verdict,
     };
 
     /// A data frame holding one update, the way the server frames them.
@@ -286,6 +425,25 @@ mod tests {
         }
     }
 
+    fn thinking(delta: &str) -> proto::Update {
+        proto::Update {
+            thinking_delta: buffa::MessageField::some(
+                proto::ThinkingDelta::default().with_text(delta),
+            ),
+            ..Default::default()
+        }
+    }
+
+    /// A data frame holding one kv request, the way the server frames one.
+    fn kv_framed(kv: proto::KvRequest) -> Vec<u8> {
+        let message = proto::ServerMessage {
+            kv_request: buffa::MessageField::some(kv),
+            ..Default::default()
+        };
+
+        connect::envelope(&message.encode_to_vec())
+    }
+
     /// An EndStream frame carrying `payload`.
     fn end_stream(payload: &str) -> Vec<u8> {
         let mut frame = vec![0b0000_0010];
@@ -317,7 +475,7 @@ mod tests {
 
     /// Like [`mapped`], also collecting what the mapping asked the caller
     /// to answer.
-    fn mapped_asks(body: &[u8], eof: bool) -> (Vec<ProviderEvent>, Vec<ContextAsk>) {
+    fn mapped_asks(body: &[u8], eof: bool) -> (Vec<ProviderEvent>, Vec<Ask>) {
         let mut splitter = connect::Splitter::default();
         splitter.push(body);
 
@@ -524,16 +682,136 @@ mod tests {
         );
         assert_eq!(
             asks,
-            vec![ContextAsk {
+            vec![Ask::Context(ContextAsk {
                 id: Some(7),
                 exec_id: Some("exec-abc".to_owned()),
-            }]
+            })]
         );
     }
 
     /// An exec kind this build does not model must end the turn with the
     /// kind's name on it: the server waits on every exec, and the skipped
     /// alternative was a silent hang.
+    /// The plugin forwards thinking as thinking (proxy.ts:1059-1061), and
+    /// so does this wire: a codex-family model reasons before it speaks,
+    /// and calling that reply text would put it in the transcript's mouth.
+    #[test]
+    fn a_thinking_delta_becomes_reasoning_not_reply_text() {
+        let mut body = framed(thinking("Weighing a greeting."));
+        body.extend(framed(text("Hello")));
+        body.extend(framed(turn_ended()));
+        body.extend(end_stream("{}"));
+
+        assert_eq!(
+            mapped(&body, false),
+            vec![
+                ProviderEvent::ReasoningDelta("Weighing a greeting.".to_owned()),
+                ProviderEvent::TextDelta("Hello".to_owned()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ]
+        );
+    }
+
+    /// The channel the 2026-08-10 live run left waiting: a kv set and a kv
+    /// get are questions to hand up with their ids, never events and never
+    /// skips, because the server holds the turn's ending until each is
+    /// answered.
+    #[test]
+    fn the_servers_kv_set_and_get_are_handed_up_with_their_ids() {
+        let mut body = kv_framed(proto::KvRequest {
+            id: Some(11),
+            set_blob_args: buffa::MessageField::some(
+                proto::SetBlobArgs::default()
+                    .with_blob_id(b"blob-a".to_vec())
+                    .with_blob_data(b"opaque-state".to_vec()),
+            ),
+            ..Default::default()
+        });
+        body.extend(kv_framed(proto::KvRequest {
+            id: Some(12),
+            get_blob_args: buffa::MessageField::some(
+                proto::GetBlobArgs::default().with_blob_id(b"blob-a".to_vec()),
+            ),
+            ..Default::default()
+        }));
+
+        let (events, asks) = mapped_asks(&body, false);
+        assert!(
+            events.is_empty(),
+            "a kv exchange is a question, not an event: {events:?}"
+        );
+        assert_eq!(
+            asks,
+            vec![
+                Ask::Kv(KvAsk {
+                    id: Some(11),
+                    op: KvOp::Set {
+                        blob_id: b"blob-a".to_vec(),
+                        data: b"opaque-state".to_vec(),
+                    },
+                }),
+                Ask::Kv(KvAsk {
+                    id: Some(12),
+                    op: KvOp::Get {
+                        blob_id: b"blob-a".to_vec(),
+                    },
+                }),
+            ]
+        );
+    }
+
+    /// A kv kind beyond get and set gets the exec channel's discipline: the
+    /// server waits on it, so the turn fails naming the field — and the
+    /// span context riding beside the oneof (agent_pb.ts:7931) is never
+    /// mistaken for one.
+    #[test]
+    fn a_kv_kind_this_build_cannot_answer_fails_the_turn_by_name() {
+        let mut asked = proto::KvRequest {
+            id: Some(3),
+            ..Default::default()
+        };
+        asked.__buffa_unknown_fields.push(buffa::UnknownField {
+            number: 4,
+            data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
+        });
+        asked.__buffa_unknown_fields.push(buffa::UnknownField {
+            number: 9,
+            data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
+        });
+
+        let (events, asks) = mapped_asks(&kv_framed(asked), false);
+        assert!(asks.is_empty(), "nothing to answer: {asks:?}");
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Parse(message))]
+                    if message.contains("kv request")
+                        && message.contains("field 9")
+                        && !message.contains('4')
+            ),
+            "{events:?}"
+        );
+
+        let (events, _) = mapped_asks(&kv_framed(proto::KvRequest::default()), false);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Parse(message))]
+                    if message.contains("no recognizable kind")
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// The arm names the skip log leans on: the plugin's own oneof spelling
+    /// for the numbers it declares, and the bare number for anything newer.
+    #[test]
+    fn a_skipped_arm_is_named_the_way_the_plugins_descriptor_names_it() {
+        assert_eq!(super::update_arm(8), "token_delta (8)");
+        assert_eq!(super::update_arm(16), "step_started (16)");
+        assert_eq!(super::update_arm(42), "field 42");
+    }
+
     #[test]
     fn an_exec_kind_this_build_cannot_answer_fails_the_turn_by_name() {
         // The arm arrives as an unknown field; its number is the kind. The
