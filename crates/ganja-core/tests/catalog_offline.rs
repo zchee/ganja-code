@@ -84,7 +84,7 @@ async fn the_static_table_answers_when_the_network_never_does() {
 
     assert_eq!(
         catalog::default_model("anthropic"),
-        Some("claude-sonnet-5"),
+        Some("claude-opus-4-8"),
         "the provider a session selects still resolves to a model"
     );
     assert!(

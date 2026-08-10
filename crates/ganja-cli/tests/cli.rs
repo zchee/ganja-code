@@ -526,7 +526,7 @@ fn models_lists_the_catalog_and_marks_one_default_per_provider() {
     offline(&cache()).arg("models").assert().success().stdout(
         predicate::str::contains("PROVIDER")
             .and(predicate::str::contains("$/MTOK IN"))
-            .and(predicate::str::contains("claude-sonnet-5*"))
+            .and(predicate::str::contains("claude-opus-4-8*"))
             // The star follows `catalog::DEFAULTS`, and openai's is the newest
             // row again: the key wire speaks Responses, which is the endpoint
             // that model needed to serve tools.
@@ -566,7 +566,7 @@ fn a_refresh_with_fetching_switched_off_still_lists_and_says_why() {
         .args(["models", "--refresh"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("claude-sonnet-5*"))
+        .stdout(predicate::str::contains("claude-opus-4-8*"))
         .stderr(predicate::str::contains("GANJA_DISABLE_MODELS_FETCH"));
 }
 
@@ -582,7 +582,7 @@ fn a_refresh_the_network_refuses_degrades_to_the_table_already_in_hand() {
         .args(["models", "--refresh"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("claude-sonnet-5*"))
+        .stdout(predicate::str::contains("claude-opus-4-8*"))
         .stderr(predicate::str::contains("not refreshed"));
 }
 
@@ -634,7 +634,7 @@ fn a_named_provider_is_the_only_one_the_listing_carries() {
         .success()
         .stdout(
             predicate::str::contains("PROVIDER")
-                .and(predicate::str::contains("claude-sonnet-5*"))
+                .and(predicate::str::contains("claude-opus-4-8*"))
                 .and(predicate::str::contains("gpt-5.6").not()),
         );
 
