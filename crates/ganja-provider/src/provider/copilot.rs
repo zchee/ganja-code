@@ -409,7 +409,7 @@ mod tests {
         // answer here is a *bigger* number.
         assert_eq!(
             (info.context_window, info.max_output),
-            (200_000, 32_000),
+            (200_000, 64_000),
             "a Copilot window is the proxy's, and it is not the model's"
         );
         assert_eq!(

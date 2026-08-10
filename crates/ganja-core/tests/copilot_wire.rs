@@ -583,8 +583,9 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     let chosen = select(&Config::default()).expect("a stored login is a session");
     assert_eq!(chosen.provider.id(), copilot::ID);
     assert_eq!(
-        chosen.model, MODEL,
-        "a session that names no model gets the one this build measured"
+        chosen.model, "claude-opus-4.8",
+        "a session that names no model gets the catalog's copilot pin — the \
+         measured fixture above stays on the model the recording was taken with"
     );
     assert!(
         chosen.notice.is_none(),

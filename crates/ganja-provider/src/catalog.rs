@@ -204,7 +204,7 @@ pub enum CatalogError {
 /// per-provider default, so this pin is ganja's own and a refresh has nothing
 /// to say about it.
 const DEFAULTS: &[(&str, &str)] = &[
-    ("anthropic", "claude-sonnet-5"),
+    ("anthropic", "claude-opus-4-8"),
     // **This row is the key wire's default — the seat never reads it.** A
     // default has to be a model that can take a ganja turn, and every ganja
     // turn offers tools. That is why this row spent a round on `gpt-5.4`:
@@ -219,8 +219,16 @@ const DEFAULTS: &[(&str, &str)] = &[
     // takes its default from `provider::responses::SUBSCRIPTION_DEFAULT`,
     // never from here.
     ("openai", "gpt-5.6"),
-    ("grok", "grok-4.3"),
-    ("github-copilot", "claude-sonnet-4.6"),
+    ("grok", "grok-4.5"),
+    ("github-copilot", "claude-opus-4.8"),
+    // The one uncataloged pin. `default` is not a row this table holds — it
+    // is the id cursor's own listing serves first, the server-side Auto
+    // routing the reference plugin spells `auto` and the Run API spells
+    // `default` (live roster, 2026-08-10). A default has to be an id the
+    // backend accepts when nobody chose, and for cursor the backend itself
+    // publishes that id; sizing, pricing and auto-compaction stay off
+    // exactly as for any model this table cannot see.
+    ("cursor", "default"),
 ];
 
 /// One row of the compiled-in snapshot.
@@ -400,13 +408,33 @@ const SNAPSHOT: &[Row] = &[
             cache_write: None,
         },
     },
-    // **One row, deliberately.** `api.githubcopilot.com/models` answers with
-    // dozens across the Claude, GPT and Gemini families, and this build has
-    // measured exactly one of them end to end; a row is a promise that a turn
-    // asking for that model works, and the rest are unkept until somebody
-    // checks. That is D274's precedent — grok ships one row for the same
-    // reason — and asking `api.githubcopilot.com/models` at runtime, which
+    // The default's row (2026-08-10, published catalog). xAI tiers this model
+    // — 4/12/0.6 past 200k of context — and this row carries the base rate,
+    // the same approximation the note above already owns for every tiered
+    // provider in the table.
+    Row {
+        id: "grok-4.5",
+        provider_id: "grok",
+        name: "Grok 4.5",
+        context_window: 500_000,
+        max_output: 500_000,
+        pricing: Pricing {
+            input: 2.0,
+            output: 6.0,
+            cache_read: 0.3,
+            // xAI publishes no cache-write price.
+            cache_write: None,
+        },
+    },
+    // **Two rows, deliberately — and no more.** `api.githubcopilot.com/models`
+    // answers with dozens across the Claude, GPT and Gemini families, and a
+    // row is a promise that a turn asking for that model works; the rest are
+    // unkept until somebody checks. That is D274's precedent — grok ships the
+    // same way — and asking `api.githubcopilot.com/models` at runtime, which
     // would settle the question wholesale, is deliberately out of this build.
+    // The second row exists because the seat's default moved onto it
+    // (2026-08-10, owner's pin): a default has to be a row this table can
+    // size, so the pin and the row travel together.
     // So this tier answers `provider::serves` for Copilot on its own; the
     // published catalog, when it has been fetched, replaces it with a much
     // longer list.
@@ -439,6 +467,22 @@ const SNAPSHOT: &[Row] = &[
         name: "Claude Sonnet 4.6 (Copilot)",
         context_window: 200_000,
         max_output: 32_000,
+        pricing: Pricing {
+            input: 0.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write: None,
+        },
+    },
+    // The default's row: sized from the published catalog's GitHub limits
+    // (window 200k, output 64k) and priced at the seat's honest zero, both
+    // for the reasons the tier note above already gives.
+    Row {
+        id: "claude-opus-4.8",
+        provider_id: "github-copilot",
+        name: "Claude Opus 4.8 (Copilot)",
+        context_window: 200_000,
+        max_output: 64_000,
         pricing: Pricing {
             input: 0.0,
             output: 0.0,
@@ -1269,6 +1313,19 @@ mod tests {
     #[test]
     fn every_selectable_provider_has_a_default_this_table_can_price() {
         for provider in crate::provider::PROVIDERS {
+            // The one uncataloged pin: cursor's default is `default`, the
+            // server-side Auto id the wire's own listing serves — the backend
+            // publishes the id, so the table does not have to. Every other
+            // uncataloged provider still must not pin one.
+            if provider == "cursor" {
+                assert!(!carries(provider), "cursor grew rows; move it below");
+                assert_eq!(
+                    default_model(provider),
+                    Some("default"),
+                    "cursor's pin is the wire's own Auto id, nothing else"
+                );
+                continue;
+            }
             if !carries(provider) {
                 assert!(
                     default_model(provider).is_none(),
@@ -1286,14 +1343,13 @@ mod tests {
             assert_eq!(info.provider_id, provider, "{id} is not {provider}'s");
         }
 
-        // The tier predicate at its boundary, on the three shapes an
-        // uncataloged provider takes. `fake` is one this build ships and
-        // deliberately does not price; `cursor` is the shape a wire that lands
-        // before its rows do takes, which is exactly what the deferred Cursor
-        // stub will be — naming it here is what keeps that landing from
-        // reopening this test; `local-llama` is a config-named endpoint, which
-        // no published catalog can ever know.
-        for uncataloged in [crate::provider::fake::ID, "cursor", "local-llama"] {
+        // The tier predicate at its boundary, on the two shapes an
+        // uncataloged provider without a wire-published default takes. `fake`
+        // is one this build ships and deliberately does not price;
+        // `local-llama` is a config-named endpoint, which no published
+        // catalog can ever know. `cursor` left this list when its pin landed
+        // above: its wire publishes the id, which neither of these can claim.
+        for uncataloged in [crate::provider::fake::ID, "local-llama"] {
             assert!(
                 !carries(uncataloged),
                 "{uncataloged} is not something this table has rows for"

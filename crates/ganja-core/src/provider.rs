@@ -495,10 +495,10 @@ fn oldest_stored_login(config: &Config) -> Result<Option<String>, SelectionError
 ///
 /// A cursor login adopts like any other: the stub-era line that steered the
 /// default tier away left with the stub, exactly as its comment promised.
-/// What adoption cannot supply is a model — cursor rides the uncataloged
-/// tier, so a session adopted onto it is still asked to name one, by
-/// [`defaulted_model`]'s refusal rather than by a filter pretending the
-/// login is not there.
+/// A session adopted onto it then runs the catalog's cursor pin — `default`,
+/// the server-side Auto id the wire's own listing publishes — because the
+/// uncataloged tier withholds sizing and pricing, not a default the backend
+/// itself names.
 fn adoptable_login(config: &Config, stored: impl IntoIterator<Item = String>) -> Option<String> {
     stored
         .into_iter()
@@ -803,12 +803,12 @@ mod tests {
             defaulted_model("nonexistent", None),
             Err(SelectionError::NoDefaultModel { .. })
         ));
-        // Cursor is the shipped case of the same refusal: selectable —
-        // adopted, even — but uncataloged, so a session must name its model,
-        // and the message names every tier that can.
-        assert!(matches!(
-            defaulted_model(cursor::ID, None),
-            Err(SelectionError::NoDefaultModel { .. })
-        ));
+        // Cursor left that refusal when the catalog pinned it: uncataloged —
+        // no sizing, no pricing — yet defaulted, because the id the pin names
+        // is the server-side Auto its own wire publishes.
+        assert_eq!(
+            defaulted_model(cursor::ID, None).expect("cursor has the wire-published pin"),
+            "default"
+        );
     }
 }
