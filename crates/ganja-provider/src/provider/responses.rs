@@ -540,6 +540,17 @@ impl Provider for ResponsesProvider {
         ID
     }
 
+    /// The media types the Responses API documents: `input_image` takes
+    /// png/jpeg/webp/gif and `input_file` takes PDF. `image/avif` is on the
+    /// attachment allowlist and still degrades — a block the vendor does not
+    /// document is a guess, and the engine's text fallback is not.
+    fn accepts_attachment(&self, mime: &str) -> bool {
+        matches!(
+            mime,
+            "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf"
+        )
+    }
+
     async fn stream(
         &self,
         request: ChatRequest,
@@ -742,13 +753,32 @@ enum Item<'a> {
 
 /// One piece of a said item's content.
 ///
-/// The kind differs by who said it: what reaches the model is `input_text`,
-/// what the model said is `output_text`.
+/// Untagged because the `type` value is data here, not a serde tag: text's
+/// kind differs by who said it — what reaches the model is `input_text`, what
+/// the model said is `output_text` — while the attachment kinds are fixed.
 #[derive(Debug, Serialize)]
-struct Block<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    text: Cow<'a, str>,
+#[serde(untagged)]
+enum Block<'a> {
+    /// Words, from either side of the conversation.
+    Text {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        text: Cow<'a, str>,
+    },
+    /// An image the user attached, as the data URL this API takes base64 in.
+    Image {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        image_url: String,
+    },
+    /// A PDF the user attached. `filename` is the mentioned path, which is
+    /// this build's most honest answer to a field the API wants for display.
+    File {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        filename: &'a str,
+        file_data: String,
+    },
 }
 
 impl<'a> Body<'a> {
@@ -772,9 +802,9 @@ impl<'a> Body<'a> {
     ///   after all of them, because the API pairs them by `call_id` rather than
     ///   by position.
     ///
-    /// A step carrying neither text nor calls contributes nothing, which is
-    /// what the marker opening a turn and a turn that died before its first
-    /// fragment both are.
+    /// A step carrying neither text, attachments, nor calls contributes
+    /// nothing, which is what the marker opening a turn and a turn that died
+    /// before its first fragment both are.
     ///
     /// # Which reasoning is replayed
     ///
@@ -807,13 +837,31 @@ impl<'a> Body<'a> {
             let mut replayed: HashSet<&str> = HashSet::new();
 
             for step in steps(&message.parts) {
-                let (texts, calls, thoughts) = split(step);
+                let (texts, attachments, calls, thoughts) = split(step);
 
+                let mut content: Vec<Block<'a>> = Vec::new();
                 if let Some(text) = texts {
-                    input.push(Item::Said {
-                        role,
-                        content: vec![Block { kind: block, text }],
+                    content.push(Block::Text { kind: block, text });
+                }
+                for file in attachments {
+                    // Both shapes carry base64 as a data URL; which item kind
+                    // it rides is the mime's to decide, and only mimes
+                    // `accepts_attachment` said yes to reach this point.
+                    content.push(if file.mime == "application/pdf" {
+                        Block::File {
+                            kind: "input_file",
+                            filename: file.path,
+                            file_data: format!("data:{};base64,{}", file.mime, file.content),
+                        }
+                    } else {
+                        Block::Image {
+                            kind: "input_image",
+                            image_url: format!("data:{};base64,{}", file.mime, file.content),
+                        }
                     });
+                }
+                if !content.is_empty() {
+                    input.push(Item::Said { role, content });
                 }
                 for thought in &thoughts {
                     if thought.provider != ID {
@@ -895,10 +943,26 @@ struct Thought<'a> {
     encrypted: Option<&'a str>,
 }
 
-/// Splits one step into the text it said, the calls it made, and the thinking
-/// it sealed.
-fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Made<'_>>, Vec<Thought<'_>>) {
+/// One binary attachment the engine filled at send time, borrowed from the
+/// request's own copy of the file part that carries it.
+struct Attached<'a> {
+    path: &'a str,
+    mime: &'a str,
+    content: &'a str,
+}
+
+/// Splits one step into the text it said, the attachments it carried, the
+/// calls it made, and the thinking it sealed.
+fn split(
+    parts: &[Part],
+) -> (
+    Option<Cow<'_, str>>,
+    Vec<Attached<'_>>,
+    Vec<Made<'_>>,
+    Vec<Thought<'_>>,
+) {
     let mut texts: Vec<&str> = Vec::new();
+    let mut attachments = Vec::new();
     let mut calls = Vec::new();
     let mut thoughts = Vec::new();
 
@@ -927,12 +991,25 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Made<'_>>, Vec<Thought<'_
                 item,
                 encrypted: encrypted.as_deref(),
             }),
-            // A mentioned file is a *reference*, resolved into a text block
-            // before a request is built (`session::resolve_mentions`); see the
-            // same arm in `openai.rs`. `StepFinish` carries a step's bill
-            // rather than content, and `StepStart` was consumed as the boundary
-            // this step was cut at.
-            PartBody::File { .. }
+            // A binary attachment the engine read at send time, and only for a
+            // mime `accepts_attachment` said yes to — the match is by payload
+            // shape rather than by allowlist.
+            PartBody::File {
+                path,
+                mime,
+                content: Some(content),
+                ..
+            } => attachments.push(Attached {
+                path,
+                mime,
+                content,
+            }),
+            // A mentioned *text* file is a reference, resolved into a text
+            // block before a request is built (`session::resolve_mentions`);
+            // see the same arm in `openai.rs`. `StepFinish` carries a step's
+            // bill rather than content, and `StepStart` was consumed as the
+            // boundary this step was cut at.
+            PartBody::File { content: None, .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. } => {}
@@ -947,7 +1024,7 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Made<'_>>, Vec<Thought<'_
         many => Some(Cow::Owned(many.join("\n"))),
     };
 
-    (text, calls, thoughts)
+    (text, attachments, calls, thoughts)
 }
 
 /// Accumulates what the frames so far said.
@@ -1717,6 +1794,63 @@ mod tests {
                     "output": "fn main() {}",
                 },
             ]),
+            "got {body}"
+        );
+    }
+
+    /// The exact item shapes the Responses API documents for attachments,
+    /// pinned so a drift in the encoder is a red test rather than a 400 from
+    /// the vendor: an image rides `input_image` as a base64 data URL, a PDF
+    /// rides `input_file` with the mentioned path as its `filename`, and a
+    /// file part carrying no content is a reference the engine already
+    /// resolved, encoding nothing.
+    #[test]
+    fn an_attachment_becomes_the_input_item_its_mime_names() {
+        let mut user = Message::user("what are these");
+        user.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::File {
+                path: "shot.png".to_owned(),
+                mime: "image/png".to_owned(),
+                start: None,
+                end: None,
+                content: Some("aW1n".to_owned()),
+            },
+        });
+        user.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::File {
+                path: "docs/paper.pdf".to_owned(),
+                mime: "application/pdf".to_owned(),
+                start: None,
+                end: None,
+                content: Some("cGRm".to_owned()),
+            },
+        });
+        user.parts.push(Part::file("notes.md", "text/plain"));
+
+        let request = ChatRequest {
+            model: SERVED.to_owned(),
+            system: None,
+            messages: vec![user],
+            tools: Vec::new(),
+        };
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+
+        assert_eq!(
+            body["input"],
+            json!([{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "what are these"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,aW1n"},
+                    {
+                        "type": "input_file",
+                        "filename": "docs/paper.pdf",
+                        "file_data": "data:application/pdf;base64,cGRm",
+                    },
+                ],
+            }]),
             "got {body}"
         );
     }

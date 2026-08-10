@@ -41,6 +41,10 @@ pub struct ScriptedProvider {
     scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
     seen: Arc<Mutex<Vec<ChatRequest>>>,
     on_exhausted: OnExhausted,
+    /// Whether this double claims to carry binary attachments. On by default —
+    /// a recorder that refused them could never record the base64 path — and
+    /// off for suites pinning the engine's degradation to text.
+    attachments: bool,
 }
 
 impl ScriptedProvider {
@@ -80,6 +84,18 @@ impl ScriptedProvider {
         Self::build(id, scripts, OnExhausted::Panic)
     }
 
+    /// A recorder whose wire carries no binary attachments — the shape a
+    /// suite pinning the engine's degradation-to-text path asks in.
+    pub fn text_only(
+        scripts: Vec<Vec<ProviderEvent>>,
+    ) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
+        let (provider, seen) = Self::build("recorder", scripts, OnExhausted::Complete);
+        let mut provider = Arc::into_inner(provider).expect("the pair was just built");
+        provider.attachments = false;
+
+        (Arc::new(provider), seen)
+    }
+
     fn build(
         id: &'static str,
         scripts: Vec<Vec<ProviderEvent>>,
@@ -92,6 +108,7 @@ impl ScriptedProvider {
                 scripts: Mutex::new(scripts.into()),
                 seen: Arc::clone(&seen),
                 on_exhausted,
+                attachments: true,
             }),
             seen,
         )
@@ -111,6 +128,10 @@ impl ScriptedProvider {
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
         self.id
+    }
+
+    fn accepts_attachment(&self, _mime: &str) -> bool {
+        self.attachments
     }
 
     async fn stream(

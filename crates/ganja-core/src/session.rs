@@ -125,10 +125,10 @@ const FALLBACK_TITLE_CHARS: usize = 50;
 /// is sitting in the transcript.
 const SHELL_NOTICE: &str = "The following tool was executed by the user";
 
-/// What an `@`-mentioned file is labelled as. Every mention this build attaches
-/// is text: upstream also mints `application/x-directory` for a directory, which
-/// ganja does not attach at all (deviation: mentions-resolve-files-only).
-const MENTION_MIME: &str = "text/plain";
+// What an `@`-mentioned file is labelled as moved to `crate::attachment`:
+// the mime is the extension's now, `text/plain` for everything outside the
+// allowlist. Upstream also mints `application/x-directory` for a directory,
+// which ganja does not attach at all (deviation: mentions-resolve-files-only).
 
 /// Characters of a tool's output the summarize request is shown, upstream
 /// core's `TOOL_OUTPUT_MAX_CHARS`. Counted in characters where upstream
@@ -1259,11 +1259,14 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
     // A mention is a reference and nothing more; what the file says is read
     // when a request is built. See [`PartBody::File`].
     if let TurnKind::Prompt { mentions } = &turn.kind {
-        user.parts.extend(
-            mentions
-                .iter()
-                .map(|mention| Part::file(mention.path.clone(), MENTION_MIME)),
-        );
+        user.parts.extend(mentions.iter().map(|mention| {
+            Part::file_range(
+                mention.path.clone(),
+                crate::attachment::mime(&mention.path),
+                mention.start,
+                mention.end,
+            )
+        }));
     }
     // The prompt reaches the disk before the provider hears it: a `kill -9`
     // mid-stream must still preserve what was asked.
@@ -2069,7 +2072,9 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
         // when the user attached the file is what makes the model read the
         // file as it is *now*: a mention is a reference, and a reference
         // resolved at attach time would go stale the moment the user saved.
-        resolve_mentions(&mut messages, &turn.root);
+        resolve_mentions(&mut messages, &turn.root, &|mime| {
+            turn.provider.accepts_attachment(mime)
+        });
 
         ChatRequest {
             model: turn.model.clone(),
@@ -2318,8 +2323,25 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     }
 }
 
-/// Turns every [`PartBody::File`] in `messages` into the text block the model
-/// reads, by reading the file it names **now**.
+/// Turns every [`PartBody::File`] in `messages` into what the selected wire
+/// can carry, by reading the file it names **now**.
+///
+/// Three outcomes, decided by the part's mime and by `carries` — the selected
+/// provider's [`accepts_attachment`](crate::provider::Provider::accepts_attachment)
+/// answer:
+///
+/// - a text mime (and SVG, upstream's one image that reads as text) becomes
+///   the tagged text block it always did, sliced to the mention's line range
+///   when one was named;
+/// - a binary mime the wire carries stays a file part, its `content` filled
+///   with the base64 the wire's encoder will spend — the read happens here so
+///   `ganja-protocol` never needs a base64 dependency;
+/// - a binary mime the wire does **not** carry degrades to a text block naming
+///   the file and its kind. Never a dropped part and never a failed turn: the
+///   model learns what was attached even when the wire cannot show it
+///   (graceful degradation, the LSP precedent). The frontend warned at submit
+///   time via `Engine::accepts_attachment`, so the status line already said
+///   why.
 ///
 /// Called on the request's own copy of the history, never on the history
 /// itself: the transcript keeps the reference, so the next request reads the
@@ -2334,25 +2356,69 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
 /// The read is synchronous on the turn task, like every
 /// [`Persist`](Persist) write: these are small files, and the lane that absorbs
 /// backpressure is this one.
-fn resolve_mentions(messages: &mut [Message], root: &std::path::Path) {
+fn resolve_mentions(
+    messages: &mut [Message],
+    root: &std::path::Path,
+    carries: &dyn Fn(&str) -> bool,
+) {
     for message in messages {
         for part in &mut message.parts {
-            let PartBody::File { path, .. } = &part.body else {
+            let PartBody::File {
+                path,
+                mime,
+                start,
+                end,
+                ..
+            } = &part.body
+            else {
                 continue;
             };
-            let text = attached(root, path);
-            part.body = PartBody::Text { text };
+            let (path, mime, start, end) = (path.clone(), mime.clone(), *start, *end);
+
+            part.body = if !crate::attachment::is_binary(&mime) {
+                PartBody::Text {
+                    text: attached(root, &path, start, end),
+                }
+            } else if carries(&mime) {
+                match std::fs::read(root.join(&path)) {
+                    Ok(bytes) => {
+                        use base64::{Engine as _, engine::general_purpose::STANDARD};
+                        PartBody::File {
+                            path,
+                            mime,
+                            start,
+                            end,
+                            content: Some(STANDARD.encode(bytes)),
+                        }
+                    }
+                    // The same failure block a text mention earns: the user
+                    // attached it deliberately, and a silently missing
+                    // attachment reads as a user who never mentioned anything.
+                    Err(error) => PartBody::Text {
+                        text: format!(
+                            "<attached-file path=\"{path}\">\n(could not be read: {error})\n</attached-file>"
+                        ),
+                    },
+                }
+            } else {
+                PartBody::Text {
+                    text: format!(
+                        "<attached-file path=\"{path}\" mime=\"{mime}\">\n(attached by name only: \
+                         this provider's wire does not carry {mime} content)\n</attached-file>"
+                    ),
+                }
+            };
         }
     }
 }
 
-/// One mentioned file as the model reads it: a tag naming where it came from,
-/// then whatever it says.
+/// One mentioned file as the model reads it: a tag naming where it came from
+/// — and, for an `@path#12-40` mention, which lines — then whatever it says.
 ///
 /// A path that cannot be read becomes a block saying so rather than nothing:
 /// the user attached it deliberately, and a silently missing attachment reads
 /// to the model as a user who never mentioned anything.
-fn attached(root: &std::path::Path, path: &str) -> String {
+fn attached(root: &std::path::Path, path: &str, start: Option<u32>, end: Option<u32>) -> String {
     let resolved = root.join(path);
     let body = if resolved.is_dir() {
         // Upstream attaches a directory as a part of its own; this build
@@ -2361,15 +2427,51 @@ fn attached(root: &std::path::Path, path: &str) -> String {
         "(this is a directory; name a file inside it, or use glob and grep)".to_owned()
     } else {
         match std::fs::read_to_string(&resolved) {
-            Ok(text) => crate::tool::truncate::clamp(&text).text,
+            Ok(text) => {
+                let text = match start {
+                    Some(start) => sliced(&text, start, end),
+                    None => text,
+                };
+                crate::tool::truncate::clamp(&text).text
+            }
             Err(error) => format!("(could not be read: {error})"),
         }
     };
 
     // Upstream hands the provider a file part and lets it decide; ganja has no
     // such part, so the file arrives as text that says where it came from
-    // (deviation: mention-renders-as-a-tagged-block).
-    format!("<attached-file path=\"{path}\">\n{body}\n</attached-file>")
+    // (deviation: mention-renders-as-a-tagged-block). The range rides the tag
+    // so two slices of one file stay distinguishable to the model.
+    match (start, end) {
+        (Some(start), Some(end)) => {
+            format!(
+                "<attached-file path=\"{path}\" lines=\"{start}-{end}\">\n{body}\n</attached-file>"
+            )
+        }
+        (Some(start), None) => {
+            format!("<attached-file path=\"{path}\" lines=\"{start}-\">\n{body}\n</attached-file>")
+        }
+        (None, _) => format!("<attached-file path=\"{path}\">\n{body}\n</attached-file>"),
+    }
+}
+
+/// Lines `start` through `end` of `text`, 1-indexed and inclusive; to the end
+/// of the file when `end` is absent.
+///
+/// An `end` at or before `start` is treated as absent, which is upstream's
+/// keep-the-end-only-when-`start < end` rule applied at the read as well as at
+/// the scan — the scan already normalizes what a person types, so this arm
+/// only matters for a range a wire client sent by hand.
+fn sliced(text: &str, start: u32, end: Option<u32>) -> String {
+    let lines = text.lines().skip(start.saturating_sub(1) as usize);
+
+    match end.filter(|end| *end > start) {
+        Some(end) => lines
+            .take((end - start) as usize + 1)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => lines.collect::<Vec<_>>().join("\n"),
+    }
 }
 
 /// Resolves one buffered call: parse, gate, run, and put the result — or the
@@ -3214,7 +3316,7 @@ mod tests {
 
     use super::{
         BufferedCall, ChildParts, RootParts, Turn, TurnKind, add_usage, attached, parse_args,
-        resolve, resolve_mentions,
+        resolve, resolve_mentions, sliced,
     };
     use crate::{
         engine::Fanout,
@@ -3484,7 +3586,7 @@ mod tests {
         std::fs::create_dir(&nested).expect("the fixture nests");
         std::fs::write(nested.join("main.rs"), "fn main() {}").expect("the fixture writes");
 
-        let block = attached(root.path(), "src/main.rs");
+        let block = attached(root.path(), "src/main.rs", None, None);
         assert_eq!(
             block, "<attached-file path=\"src/main.rs\">\nfn main() {}\n</attached-file>",
             "the block names the path the user typed and carries what it says"
@@ -3493,8 +3595,47 @@ mod tests {
         // An absolute path is already resolved, and joining leaves it alone.
         let absolute = nested.join("main.rs");
         assert!(
-            attached(root.path(), &absolute.to_string_lossy()).contains("fn main() {}"),
+            attached(root.path(), &absolute.to_string_lossy(), None, None).contains("fn main() {}"),
             "an absolute mention resolves to itself"
+        );
+    }
+
+    /// The `#line-range` promise at the read: 1-indexed, inclusive, sliced
+    /// before anything else sees the text, and the tag says which lines so two
+    /// slices of one file stay distinguishable.
+    #[test]
+    fn a_ranged_mention_inlines_exactly_the_lines_it_names() {
+        let root = tempfile::tempdir().expect("a scratch directory");
+        std::fs::write(root.path().join("a.txt"), "one\ntwo\nthree\nfour\nfive")
+            .expect("the fixture writes");
+
+        assert_eq!(
+            attached(root.path(), "a.txt", Some(2), Some(4)),
+            "<attached-file path=\"a.txt\" lines=\"2-4\">\ntwo\nthree\nfour\n</attached-file>"
+        );
+        assert_eq!(
+            attached(root.path(), "a.txt", Some(4), None),
+            "<attached-file path=\"a.txt\" lines=\"4-\">\nfour\nfive\n</attached-file>",
+            "no end reads from start to the end of the file"
+        );
+        assert_eq!(
+            attached(root.path(), "a.txt", Some(99), None),
+            "<attached-file path=\"a.txt\" lines=\"99-\">\n\n</attached-file>",
+            "a start past the end names an empty slice rather than failing"
+        );
+    }
+
+    /// The scan normalizes what a person types, but a wire client can send any
+    /// numbers it likes; the read applies upstream's keep-the-end-only-when-
+    /// start-is-less rule again so the two never disagree.
+    #[test]
+    fn a_range_a_client_sent_backwards_reads_from_start_to_the_end() {
+        assert_eq!(sliced("a\nb\nc\nd", 3, Some(2)), "c\nd");
+        assert_eq!(sliced("a\nb\nc\nd", 3, Some(3)), "c\nd");
+        assert_eq!(
+            sliced("a\nb\nc\nd", 0, None),
+            "a\nb\nc\nd",
+            "a zero start is the top"
         );
     }
 
@@ -3518,7 +3659,7 @@ mod tests {
             model: None,
             usage: None,
         }];
-        resolve_mentions(&mut messages, root.path());
+        resolve_mentions(&mut messages, root.path(), &|_| false);
 
         assert!(
             messages[0].parts[0]
@@ -3532,6 +3673,96 @@ mod tests {
         assert!(
             times.check_fresh(&path).is_err(),
             "and nothing recorded the file as read"
+        );
+    }
+
+    /// One user message carrying one file part for `path`, for the resolution
+    /// tests to work on.
+    fn message_mentioning(path: &str) -> Vec<Message> {
+        vec![Message {
+            id: crate::protocol::MessageId::ascending(),
+            role: crate::protocol::Role::User,
+            parts: vec![Part::file(path, crate::attachment::mime(path))],
+            time: crate::protocol::MessageTime {
+                created: 1,
+                completed: Some(1),
+            },
+            model: None,
+            usage: None,
+        }]
+    }
+
+    /// The attachment split at the request build: a binary mime the wire
+    /// carries stays a file part with its base64 filled in, and the transcript
+    /// side of the promise — the stored part — was never touched because
+    /// resolution runs on the request's own copy.
+    #[test]
+    fn a_binary_mention_becomes_base64_when_the_wire_carries_it() {
+        let root = tempfile::tempdir().expect("a scratch directory");
+        std::fs::write(root.path().join("shot.png"), b"png-bytes").expect("the fixture writes");
+
+        let mut messages = message_mentioning("shot.png");
+        resolve_mentions(&mut messages, root.path(), &|mime| mime == "image/png");
+
+        let PartBody::File {
+            path,
+            mime,
+            content: Some(content),
+            ..
+        } = &messages[0].parts[0].body
+        else {
+            panic!("the part stays a file part: {:?}", messages[0].parts[0]);
+        };
+        assert_eq!(path, "shot.png");
+        assert_eq!(mime, "image/png");
+        {
+            use base64::{Engine as _, engine::general_purpose::STANDARD};
+            assert_eq!(
+                STANDARD.decode(content).expect("the payload is base64"),
+                b"png-bytes"
+            );
+        }
+    }
+
+    /// The degradation half: a wire that answers no gets a text block naming
+    /// the file and its kind — never a dropped part, never a failed turn.
+    #[test]
+    fn a_binary_mention_the_wire_cannot_carry_degrades_to_its_name() {
+        let root = tempfile::tempdir().expect("a scratch directory");
+        std::fs::write(root.path().join("shot.png"), b"png-bytes").expect("the fixture writes");
+
+        let mut messages = message_mentioning("shot.png");
+        resolve_mentions(&mut messages, root.path(), &|_| false);
+
+        let text = messages[0].parts[0]
+            .as_text()
+            .expect("the part degraded to text");
+        assert!(
+            text.contains("shot.png"),
+            "the model learns the name: {text}"
+        );
+        assert!(
+            text.contains("image/png") && text.contains("does not carry"),
+            "and why the bytes are not there: {text}"
+        );
+    }
+
+    /// SVG is upstream's one image that reads as text: it is inlined like any
+    /// text mention, whatever the wire would have said about images.
+    #[test]
+    fn an_svg_mention_is_inlined_as_text_whatever_the_wire_accepts() {
+        let root = tempfile::tempdir().expect("a scratch directory");
+        std::fs::write(root.path().join("logo.svg"), "<svg/>").expect("the fixture writes");
+
+        let mut messages = message_mentioning("logo.svg");
+        resolve_mentions(&mut messages, root.path(), &|_| false);
+
+        assert!(
+            messages[0].parts[0]
+                .as_text()
+                .is_some_and(|text| text.contains("<svg/>")),
+            "the markup itself is inlined: {:?}",
+            messages[0].parts[0]
         );
     }
 

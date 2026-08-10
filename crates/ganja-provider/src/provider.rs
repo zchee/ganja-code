@@ -290,6 +290,24 @@ pub trait Provider: Send + Sync {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError>;
+
+    /// Whether this wire can put a binary attachment of `mime` in front of the
+    /// model as a native content block.
+    ///
+    /// The engine asks before it builds a request: a mime the wire carries is
+    /// read and base64-encoded into the request's
+    /// [`PartBody::File`](crate::protocol::PartBody::File), and one it does not
+    /// is degraded to the file's name in text — never sent as a block the API
+    /// would refuse, never dropped, never a failed turn.
+    ///
+    /// The default is **no**. A wire that never learned attachments — the
+    /// chat-completions wire, cursor's Connect wire, a compat endpoint whose
+    /// far end is anybody's guess — degrades gracefully rather than guessing
+    /// at a block shape the vendor may not document.
+    fn accepts_attachment(&self, mime: &str) -> bool {
+        let _ = mime;
+        false
+    }
 }
 
 /// The credential one request presents, whatever kind of credential it is.

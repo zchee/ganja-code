@@ -24,7 +24,7 @@ use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Line};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
-use crate::{markdown, theme::Theme};
+use crate::{markdown, mention, theme::Theme};
 
 /// Lines one wheel notch moves the viewport.
 pub const WHEEL_LINES: isize = 3;
@@ -509,12 +509,27 @@ impl Entry {
                         );
                     }
                 }
-                // A file the user attached, rendered as the `@path` they typed
+                // A file the user attached, rendered as the token they typed
+                // — `@path`, with its `#line-range` when one was named —
                 // rather than as its contents: the engine reads the file when
                 // it builds a request, and pasting it into the transcript
-                // would show the user their own file back.
-                PartBody::File { path, .. } => {
-                    lines.push(Line::styled(format!("@{path}"), theme.dim));
+                // would show the user their own file back. A mime outside
+                // `text/plain` is named beside it, which is all a transcript
+                // can honestly say about bytes it never reads.
+                PartBody::File {
+                    path,
+                    mime,
+                    start,
+                    end,
+                    ..
+                } => {
+                    let token = mention::token(path, *start, *end);
+                    let label = if mime == "text/plain" {
+                        token
+                    } else {
+                        format!("{token} ({mime})")
+                    };
+                    lines.push(Line::styled(label, theme.dim));
                 }
                 // Sealed reasoning has no rendering: what it holds is opaque
                 // to everything but the provider, so a line about it would be
@@ -954,6 +969,43 @@ mod tests {
                     .to_owned()
             })
             .collect()
+    }
+
+    /// A file part renders as the token the user typed — range and all — and
+    /// names its mime when the bytes are not text.
+    #[test]
+    fn an_attached_file_renders_as_its_token_with_range_and_mime() {
+        let mut chat = Chat::default();
+        let mut message = Message::user("look");
+        message.parts.push(Part {
+            id: PartId::from("prt_f1".to_owned()),
+            body: PartBody::File {
+                path: "src/lib.rs".to_owned(),
+                mime: "text/plain".to_owned(),
+                start: Some(5),
+                end: Some(9),
+                content: None,
+            },
+        });
+        message.parts.push(Part {
+            id: PartId::from("prt_f2".to_owned()),
+            body: PartBody::File {
+                path: "shot.png".to_owned(),
+                mime: "image/png".to_owned(),
+                start: None,
+                end: None,
+                content: None,
+            },
+        });
+        chat.start_message(message);
+
+        let screen = rendered(&mut chat, Rect::new(0, 0, 40, 8)).join("\n");
+        assert!(screen.contains("@src/lib.rs#5-9"), "{screen}");
+        assert!(
+            !screen.contains("@src/lib.rs#5-9 ("),
+            "a text mention needs no mime label:\n{screen}"
+        );
+        assert!(screen.contains("@shot.png (image/png)"), "{screen}");
     }
 
     #[test]

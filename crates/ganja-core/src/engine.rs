@@ -1193,6 +1193,19 @@ impl Engine {
         self.active().agent.clone()
     }
 
+    /// Whether this engine's provider can carry a binary attachment of `mime`
+    /// as native content, verbatim from the wire's own
+    /// [`accepts_attachment`](crate::provider::Provider::accepts_attachment).
+    ///
+    /// What a frontend consults at submit time: a mention the wire cannot
+    /// carry will be degraded to text naming the file when the request is
+    /// built, and the moment to say so in the status line is before the turn,
+    /// not inside it.
+    #[must_use]
+    pub fn accepts_attachment(&self, mime: &str) -> bool {
+        self.provider.accepts_attachment(mime)
+    }
+
     /// The agents this session may run as, for a picker to list.
     #[must_use]
     pub fn agents(&self) -> Option<&Arc<agent::Registry>> {

@@ -17,10 +17,10 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
-use ganja_core::{Engine, catalog, provider};
+use ganja_core::{Engine, attachment, catalog, provider};
 use ganja_protocol::{
-    Command, Event as CoreEvent, FinishReason, Message, PartBody, PermissionReply, Role, ToolState,
-    Usage,
+    Command, Event as CoreEvent, FinishReason, Mention, Message, PartBody, PermissionReply, Role,
+    ToolState, Usage,
 };
 use ganja_tool::{Credentials, FileTimes, ToolCtx};
 use ratatui::{
@@ -1434,7 +1434,8 @@ impl App {
         }
     }
 
-    /// Replaces the `@fragment` the file menu was opened for with `path`.
+    /// Replaces the `@fragment` the file menu was opened for with `path`,
+    /// keeping any `#line-range` the fragment carried.
     ///
     /// The literal `@path` **stays in the prompt**, with a space after it so
     /// the mention is closed: it is what the user wrote, and the engine
@@ -1444,6 +1445,10 @@ impl App {
             return;
         };
         let fragment = files.fragment();
+        // The range the user typed onto the fragment survives the completion,
+        // normalized (`#5-` → `#5`, `#20-10` → `#20`): upstream re-appends it
+        // to the chosen path the same way (`autocomplete.tsx:250,302-307`).
+        let (_, start, end) = mention::split_range(&fragment.text);
 
         let mut lines: Vec<String> = self.editor.text().split('\n').map(str::to_owned).collect();
         let Some(line) = lines.get_mut(fragment.row) else {
@@ -1462,9 +1467,10 @@ impl App {
         // the path that was just chosen — but only when there is not one
         // already, or completing mid-sentence would widen the gap every time
         // (upstream `autocomplete.tsx:172-240` makes the same exception).
+        let token = mention::token(path, start, end);
         let mention = match rest.first() {
-            Some(next) if next.is_whitespace() => format!("@{path}"),
-            _ => format!("@{path} "),
+            Some(next) if next.is_whitespace() => token,
+            _ => format!("{token} "),
         };
         let column = head.chars().count() + mention.chars().count();
         *line = format!("{head}{mention}{tail}");
@@ -1899,6 +1905,7 @@ impl App {
         // A buffer naming one of the engine's commands runs it; anything else
         // starting with a slash is text, because a command this build does not
         // have is not one the UI should intercept on the model's behalf.
+        let mut degraded: Vec<String> = Vec::new();
         let sent = match self.engine_command(&prompt) {
             Some((name, args)) => self.engine.send(Command::RunCommand { name, args }).await,
             None => {
@@ -1907,6 +1914,7 @@ impl App {
                 // attaching her would put an attachment-error block in front
                 // of the model instead of what the user wrote.
                 let mentions = mention::attachable(&prompt, &self.root);
+                degraded = self.degraded(&mentions);
 
                 self.engine
                     .send(Command::SendPrompt {
@@ -1931,7 +1939,15 @@ impl App {
                 self.editor.clear();
                 self.dropdown = None;
                 self.files = None;
-                self.status.set_notice(None);
+                // The submit-time half of graceful degradation: a mention the
+                // wire cannot carry is named *before* the turn, and the
+                // engine-side text block will name it again inside.
+                self.status.set_notice((!degraded.is_empty()).then(|| {
+                    format!(
+                        "attached by name only — this provider's wire does not carry: {}",
+                        degraded.join(", ")
+                    )
+                }));
             }
             // The editor keeps the text, so a refused prompt is never lost.
             Err(refusal) => {
@@ -1939,6 +1955,24 @@ impl App {
                 self.status.set_notice(Some(refusal.to_string()));
             }
         }
+    }
+
+    /// The mentions whose bytes the selected provider will not carry, as
+    /// `@path (mime)` labels for the status line.
+    ///
+    /// The same two questions the engine asks when it builds the request — the
+    /// mime `ganja_core::attachment` derives and the wire's
+    /// [`Engine::accepts_attachment`] answer — asked here at submit so the
+    /// warning lands before the turn rather than inside it.
+    fn degraded(&self, mentions: &[Mention]) -> Vec<String> {
+        mentions
+            .iter()
+            .filter_map(|mention| {
+                let mime = attachment::mime(&mention.path);
+                (attachment::is_binary(mime) && !self.engine.accepts_attachment(mime))
+                    .then(|| format!("@{} ({mime})", mention.path))
+            })
+            .collect()
     }
 
     /// Runs the buffer in the shell on the user's own behalf.
@@ -2196,6 +2230,13 @@ impl App {
 /// typing and cannot be mistaken for the same ranking (deviation:
 /// mention-matches-under-the-path-typed).
 fn pattern(fragment: &str) -> String {
+    // While a range is being typed the fragment carries it (`@src/app#10-20`),
+    // and the walk knows nothing about lines: the query is what sits before
+    // the last `#`, upstream's `baseQuery` (`autocomplete.tsx:32-44`), taken
+    // whether or not the tail parses yet so the list stays up while `#12` is
+    // still `#1`.
+    let fragment = fragment.rsplit_once('#').map_or(fragment, |(base, _)| base);
+
     let Some((directory, leaf)) = fragment.rsplit_once('/') else {
         return if fragment.is_empty() {
             "**/*".to_owned()
@@ -5547,6 +5588,106 @@ mod tests {
         assert_eq!(
             text, "compare @src/lib.rs with @README.md",
             "the literal tokens stay in the prompt, as upstream leaves them"
+        );
+    }
+
+    /// The range rides the fragment while it is typed, and the walk sees only
+    /// the path half — so the menu keeps offering the file the range is for.
+    #[tokio::test]
+    async fn a_range_being_typed_does_not_narrow_the_file_menu() {
+        let directory = project();
+        let mut app = app_in(&directory);
+
+        typed(&mut app, "@lib#10-20").await;
+
+        assert_eq!(offered(&app), vec!["src/lib.rs".to_owned()]);
+    }
+
+    /// Choosing a file keeps the typed range, normalized: upstream re-appends
+    /// `#start` or `#start-end` to the chosen path (`autocomplete.tsx:250`),
+    /// dropping an empty end and a reversed one.
+    #[tokio::test]
+    async fn choosing_a_file_keeps_the_normalized_typed_range() {
+        let cases = [
+            ("compare @lib#10-20", "compare @src/lib.rs#10-20 "),
+            ("compare @lib#5-", "compare @src/lib.rs#5 "),
+            ("compare @lib#20-10", "compare @src/lib.rs#20 "),
+        ];
+
+        for (text, expected) in cases {
+            let directory = project();
+            let mut app = app_in(&directory);
+            typed(&mut app, text).await;
+
+            app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+                .await
+                .expect("enter is handled");
+
+            assert_eq!(app.editor.prompt().as_deref(), Some(expected), "{text:?}");
+        }
+    }
+
+    /// The submit-time half of graceful degradation: a binary mention the
+    /// selected wire cannot carry is named in the status line before the
+    /// turn, so the engine-side text block is never the first the user hears
+    /// of it.
+    #[tokio::test]
+    async fn submitting_a_binary_mention_the_wire_refuses_warns_in_the_status_line() {
+        let directory = project();
+        fs::write(directory.path().join("shot.png"), b"png-bytes").expect("the fixture writes");
+
+        let (provider, _requests) = ganja_testkit::ScriptedProvider::text_only(Vec::new());
+        let engine = Engine::new(
+            provider,
+            "recorder-model",
+            Arc::new(ganja_tool::Registry::new(Vec::new())),
+            ganja_permission::Permissions::default(),
+        );
+        let mut app = App::new(engine, None, Themes::builtin())
+            .with_cwd(directory.path())
+            .with_root(directory.path());
+
+        typed(&mut app, "look at @shot.png").await;
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let bar = status_line(&mut app);
+        assert!(
+            bar.contains("@shot.png (image/png)"),
+            "the warning names the file and its mime: {bar}"
+        );
+        assert!(
+            bar.contains("does not carry"),
+            "and says why the bytes will not travel: {bar}"
+        );
+    }
+
+    /// The other half: a wire that carries the mime warns about nothing.
+    #[tokio::test]
+    async fn submitting_a_binary_mention_the_wire_carries_warns_about_nothing() {
+        let directory = project();
+        fs::write(directory.path().join("shot.png"), b"png-bytes").expect("the fixture writes");
+
+        let mut app = App::new(engine(), None, Themes::builtin())
+            .with_cwd(directory.path())
+            .with_root(directory.path());
+
+        typed(&mut app, "look at @shot.png").await;
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let bar = status_line(&mut app);
+        assert!(
+            !bar.contains("attached by name only"),
+            "the fake carries every mime, so there is nothing to warn about: {bar}"
         );
     }
 

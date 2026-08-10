@@ -16,8 +16,11 @@
 //!
 //! The `@path` text **stays in the prompt**. Upstream leaves it there too: the
 //! literal token is what the user wrote and what the transcript shows, and the
-//! file's content is resolved separately when the request is built.
-//! `#line-range` suffixes are not ported (**D12**).
+//! file's content is resolved separately when the request is built. A token
+//! may carry a `#line-range` suffix — `@src/lib.rs#10-20` — upstream's
+//! `extractLineRange` grammar (`autocomplete.tsx:39-50`), split off by
+//! [`split_range`] and carried on the [`Mention`] so the send-time read can
+//! slice to exactly the lines it names.
 
 use std::path::Path;
 
@@ -77,9 +80,11 @@ pub fn trigger(text: &str, cursor: (usize, usize)) -> Option<Fragment> {
 /// Every file `text` mentions, in the order it mentions them.
 ///
 /// The same trigger rule read across a whole buffer rather than up to a
-/// cursor, with a mention running to the next whitespace. Repeats collapse:
-/// upstream dedupes its file parts by name, and attaching one file twice would
-/// spend the context window on it twice.
+/// cursor, with a mention running to the next whitespace and its `#line-range`
+/// suffix split off by [`split_range`]. Repeats collapse **by whole mention**
+/// — path and range together — because `@a.rs#5-9` and `@a.rs#30-40` are two
+/// different slices, while attaching one slice twice would spend the context
+/// window on a copy.
 #[must_use]
 pub fn scan(text: &str) -> Vec<Mention> {
     let mut found: Vec<Mention> = Vec::new();
@@ -96,23 +101,96 @@ pub fn scan(text: &str) -> Vec<Mention> {
                 continue;
             }
 
-            let path: String = characters[index + 1..]
+            let token: String = characters[index + 1..]
                 .iter()
                 .take_while(|character| !character.is_whitespace())
                 .collect();
-            index += path.chars().count() + 1;
+            index += token.chars().count() + 1;
 
             // A bare `@` names nothing.
+            if token.is_empty() {
+                continue;
+            }
+            let (path, start, end) = split_range(&token);
+            // Neither does a bare range: `@#5` is lines of no file at all.
             if path.is_empty() {
                 continue;
             }
-            if !found.iter().any(|mention| mention.path == path) {
-                found.push(Mention { path });
+            let mention = Mention {
+                path: path.to_owned(),
+                start,
+                end,
+            };
+            if !found.contains(&mention) {
+                found.push(mention);
             }
         }
     }
 
     found
+}
+
+/// Splits the `#line-range` suffix off a mention token.
+///
+/// Upstream's `extractLineRange` (`autocomplete.tsx:32-57`), applied at the
+/// **last** `#`: the suffix must be the whole of `start` or `start-end` in
+/// digits (`^(\d+)(?:-(\d*))?$`), and anything else — `#TODO`, `#5-9-12`, a
+/// bare trailing `#` — is no range at all, so the whole token stays a path,
+/// because `#` is a character a file name may contain. An empty `end` (`#5-`)
+/// is a start alone, and `end` is kept only when `start < end`
+/// (`autocomplete.tsx:47`), so `#20-10` normalizes to `#20`. One narrowing:
+/// a number past `u32` is not a line this build recognizes and leaves the
+/// token a path, where upstream parses into a float and carries it.
+#[must_use]
+pub fn split_range(token: &str) -> (&str, Option<u32>, Option<u32>) {
+    let Some((path, suffix)) = token.rsplit_once('#') else {
+        return (token, None, None);
+    };
+
+    match parse_range(suffix) {
+        Some((start, end)) => (path, Some(start), end),
+        None => (token, None, None),
+    }
+}
+
+/// The `start`/`start-end` a valid suffix names, normalized; [`None`] for a
+/// suffix outside the grammar.
+fn parse_range(suffix: &str) -> Option<(u32, Option<u32>)> {
+    // Spelled out because `u32::from_str` accepts a leading `+`, which the
+    // grammar's `\d+` does not.
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+
+    let (start, end) = match suffix.split_once('-') {
+        None => (suffix, None),
+        Some((start, end)) => (start, Some(end)),
+    };
+    if !digits(start) || !end.is_none_or(|end| end.is_empty() || digits(end)) {
+        return None;
+    }
+
+    let start: u32 = start.parse().ok()?;
+    let end = match end {
+        Some(end) if !end.is_empty() => Some(end.parse::<u32>().ok()?),
+        _ => None,
+    };
+
+    Some((start, end.filter(|end| start < *end)))
+}
+
+/// The literal token a mention renders back as: `@path`, with its normalized
+/// `#start` or `#start-end` when a range was named.
+///
+/// One spelling shared by the menu's insertion and the transcript's `File`
+/// part — upstream's `filename` recomposition (`autocomplete.tsx:250`) — and
+/// the other half of [`split_range`]: scanning what this prints yields the
+/// mention it was printed from.
+#[must_use]
+pub fn token(path: &str, start: Option<u32>, end: Option<u32>) -> String {
+    match (start, end) {
+        (Some(start), Some(end)) => format!("@{path}#{start}-{end}"),
+        (Some(start), None) => format!("@{path}#{start}"),
+        (None, _) => format!("@{path}"),
+    }
 }
 
 /// Every file `text` mentions that is **actually there**, resolved against
@@ -148,7 +226,7 @@ pub fn attachable(text: &str, root: &Path) -> Vec<Mention> {
 mod tests {
     use std::path::Path;
 
-    use super::{Fragment, attachable, scan, trigger};
+    use super::{Fragment, attachable, scan, split_range, token, trigger};
 
     /// The exact shape of the trigger, which is the whole difference between a
     /// file menu and a menu that pops up over an email address.
@@ -353,5 +431,110 @@ mod tests {
             Some("src/lib.rs,"),
             "punctuation the user typed is part of what they typed"
         );
+    }
+
+    /// Upstream's suffix grammar (`autocomplete.tsx:39-50`), case by case:
+    /// split at the last `#`, digits only, end kept only when `start < end`,
+    /// and an unparseable tail stays part of the path.
+    #[test]
+    fn a_range_suffix_is_split_only_when_it_parses() {
+        let cases = [
+            ("a.rs", ("a.rs", None, None)),
+            ("a.rs#5", ("a.rs", Some(5), None)),
+            ("a.rs#5-9", ("a.rs", Some(5), Some(9))),
+            // An empty end is a start alone.
+            ("a.rs#5-", ("a.rs", Some(5), None)),
+            // A reversed or flat range keeps its start only.
+            ("a.rs#20-10", ("a.rs", Some(20), None)),
+            ("a.rs#5-5", ("a.rs", Some(5), None)),
+            // Line zero is what was typed; the read clamps it, not the scan.
+            ("a.rs#0", ("a.rs", Some(0), None)),
+            // The split is at the *last* `#`, so a path may contain one.
+            ("we#ird.rs#5-9", ("we#ird.rs", Some(5), Some(9))),
+            // Tails outside the grammar stay part of the path: `#` is a
+            // character a file name may contain.
+            ("notes#TODO", ("notes#TODO", None, None)),
+            ("a.rs#", ("a.rs#", None, None)),
+            ("a.rs#5-9-12", ("a.rs#5-9-12", None, None)),
+            ("a.rs#-5", ("a.rs#-5", None, None)),
+            ("a.rs#+5", ("a.rs#+5", None, None)),
+            // A line number past `u32` is not a line number (the narrowing
+            // named at `split_range`).
+            (
+                "a.rs#99999999999999999999",
+                ("a.rs#99999999999999999999", None, None),
+            ),
+        ];
+
+        for (mentioned, (path, start, end)) in cases {
+            assert_eq!(split_range(mentioned), (path, start, end), "{mentioned:?}");
+        }
+    }
+
+    /// `parse → render → parse`: what the menu writes, the scan reads back as
+    /// the same mention — the round-trip that keeps the two halves one
+    /// grammar.
+    #[test]
+    fn a_rendered_mention_scans_back_to_itself() {
+        for text in [
+            "@a.rs",
+            "@src/lib.rs#5",
+            "@src/lib.rs#5-9",
+            "@we#ird.rs#12-40",
+        ] {
+            let scanned = scan(text);
+            assert_eq!(scanned.len(), 1, "{text:?}");
+            let mention = &scanned[0];
+            let rendered = token(&mention.path, mention.start, mention.end);
+            assert_eq!(
+                rendered, text,
+                "the render is the token it was scanned from"
+            );
+            assert_eq!(
+                scan(&rendered),
+                scanned,
+                "{rendered:?} scans back unchanged"
+            );
+        }
+    }
+
+    /// The two normalizations a render applies, which are the grammar's own:
+    /// an empty end and a reversed range both collapse to their start.
+    #[test]
+    fn rendering_normalizes_what_the_grammar_collapsed() {
+        let (_, start, end) = split_range("lib.rs#5-");
+        assert_eq!(token("src/lib.rs", start, end), "@src/lib.rs#5");
+
+        let (_, start, end) = split_range("lib.rs#20-10");
+        assert_eq!(token("src/lib.rs", start, end), "@src/lib.rs#20");
+    }
+
+    /// Two slices of one file are two mentions; the same slice twice is one.
+    #[test]
+    fn mentions_dedupe_by_path_and_range_together() {
+        assert_eq!(scan("@a.rs#5-9 and again @a.rs#5-9").len(), 1);
+
+        let mentions = scan("@a.rs#5-9 then @a.rs#30-40 then @a.rs");
+        assert_eq!(mentions.len(), 3, "{mentions:?}");
+    }
+
+    /// A ranged mention names the file, not the range: the filter resolves
+    /// the path half alone, and the range survives it.
+    #[test]
+    fn a_ranged_mention_attaches_when_its_file_is_there() {
+        let root = project(&["src/lib.rs"]);
+
+        let mentions = attachable("read @src/lib.rs#10-20 closely", root.path());
+
+        assert_eq!(mentions.len(), 1, "{mentions:?}");
+        assert_eq!(mentions[0].path, "src/lib.rs");
+        assert_eq!(mentions[0].start, Some(10));
+        assert_eq!(mentions[0].end, Some(20));
+    }
+
+    /// `@#5` would be lines of no file at all.
+    #[test]
+    fn a_range_with_no_path_mentions_nothing() {
+        assert!(scan("look at @#5-9").is_empty());
     }
 }
