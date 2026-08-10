@@ -429,7 +429,7 @@ mod tests {
     fn stored(directory: &TempDir, prompt: &str) -> String {
         let storage = Storage::open(directory.path().join("storage"));
         let info = ganja_core::SessionInfo {
-            variant: None,
+            effort: None,
             id: ganja_core::SessionId::ascending(),
             version: ganja_core::storage::VERSION,
             title: None,

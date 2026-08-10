@@ -230,7 +230,7 @@ fn cut_short(body: &str) -> Vec<u8> {
 /// The request every test sends.
 fn prompt() -> ChatRequest {
     ChatRequest {
-        variant_options: Default::default(),
+        effort_options: Default::default(),
         model: "test-model".to_owned(),
         system: Some("be brief".to_owned()),
         messages: vec![ganja_core::protocol::Message::user("hello")],
@@ -262,7 +262,7 @@ fn tool_prompt() -> ChatRequest {
     });
 
     ChatRequest {
-        variant_options: Default::default(),
+        effort_options: Default::default(),
         model: "test-model".to_owned(),
         system: Some("be brief".to_owned()),
         messages: vec![

@@ -873,7 +873,7 @@ fn session_storage(data: &TempDir, project: &Path) -> Storage {
 fn store(storage: &Storage, id: &str, parent: Option<&str>) {
     storage
         .save_info(&SessionInfo {
-            variant: None,
+            effort: None,
             id: SessionId::from(id.to_owned()),
             version: VERSION,
             title: Some(format!("work of {id}")),

@@ -807,7 +807,7 @@ pub enum Command {
         model: String,
     },
     /// Runs the rest of the session under one of the active model's catalog
-    /// variants — a named bundle of provider options its wire splices into
+    /// efforts — a named bundle of provider options its wire splices into
     /// every request — or back under none. Takes effect at the next turn, and
     /// is refused while one is streaming.
     ///
@@ -816,12 +816,12 @@ pub enum Command {
     /// name at all on a provider the catalog has no rows for — the same
     /// no-catalog posture that already denies such a session sizing and
     /// pricing.
-    SwitchVariant {
-        /// The variant's name, or [`None`] for upstream's "Default" — no
-        /// variant at all. Absent from the wire when [`None`], so the clearing
+    SwitchEffort {
+        /// The effort's name, or [`None`] for upstream's "Default" — no
+        /// effort at all. Absent from the wire when [`None`], so the clearing
         /// command's bytes carry nothing but its type.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        variant: Option<String>,
+        effort: Option<String>,
     },
     /// Runs `command` in the shell on the user's behalf and puts both the
     /// command and its output in the transcript, where the next model request
@@ -1146,19 +1146,19 @@ pub enum Event {
         /// The model now active for this session.
         model: String,
     },
-    /// The engine adopted a model variant — or cleared one, which a switch to
-    /// a model that lacks the current variant's name also does (upstream
+    /// The engine adopted a model effort — or cleared one, which a switch to
+    /// a model that lacks the current effort's name also does (upstream
     /// `prompt.ts:654`). Announced from every path that moves the selection,
     /// so a frontend's indicator does not depend on having issued
-    /// [`Command::SwitchVariant`] itself.
-    VariantChanged {
+    /// [`Command::SwitchEffort`] itself.
+    EffortChanged {
         /// Session this happened in.
         session_id: SessionId,
-        /// The variant now active, or [`None`] for upstream's "Default".
+        /// The effort now active, or [`None`] for upstream's "Default".
         /// Absent from the wire when [`None`], matching the command that asks
         /// for it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        variant: Option<String>,
+        effort: Option<String>,
     },
     /// The turn ended and the engine is idle again. It is the last event of a
     /// turn, whatever went wrong during it, save for the one
@@ -1205,7 +1205,7 @@ impl Event {
             | Event::QuestionRejected { session_id, .. }
             | Event::RevertChanged { session_id, .. }
             | Event::AgentChanged { session_id, .. }
-            | Event::VariantChanged { session_id, .. }
+            | Event::EffortChanged { session_id, .. }
             | Event::MessageFinished { session_id, .. } => session_id,
         }
     }
@@ -1366,10 +1366,10 @@ mod tests {
             Command::SwitchModel {
                 model: "claude-haiku-4.5".to_owned(),
             },
-            Command::SwitchVariant {
-                variant: Some("max".to_owned()),
+            Command::SwitchEffort {
+                effort: Some("max".to_owned()),
             },
-            Command::SwitchVariant { variant: None },
+            Command::SwitchEffort { effort: None },
             Command::RunShell {
                 command: "git status".to_owned(),
             },
@@ -1462,13 +1462,13 @@ mod tests {
                 agent: "build".to_owned(),
                 model: "claude-sonnet-4-5".to_owned(),
             },
-            Event::VariantChanged {
+            Event::EffortChanged {
                 session_id: pinned_session(),
-                variant: Some("max".to_owned()),
+                effort: Some("max".to_owned()),
             },
-            Event::VariantChanged {
+            Event::EffortChanged {
                 session_id: pinned_session(),
-                variant: None,
+                effort: None,
             },
         ];
 
@@ -1504,18 +1504,18 @@ mod tests {
     }
 
     #[test]
-    fn variant_changed_carries_the_session_and_the_variant() {
-        let event = Event::VariantChanged {
+    fn effort_changed_carries_the_session_and_the_effort() {
+        let event = Event::EffortChanged {
             session_id: pinned_session(),
-            variant: Some("max".to_owned()),
+            effort: Some("max".to_owned()),
         };
 
         assert_eq!(event.session_id(), &pinned_session());
         match event {
-            Event::VariantChanged { variant, .. } => {
-                assert_eq!(variant.as_deref(), Some("max"));
+            Event::EffortChanged { effort, .. } => {
+                assert_eq!(effort.as_deref(), Some("max"));
             }
-            other => panic!("expected a variant change, got {other:?}"),
+            other => panic!("expected an effort change, got {other:?}"),
         }
     }
 
@@ -1989,32 +1989,32 @@ mod tests {
                 }),
                 r#"{"type":"switch_model","model":"claude-haiku-4.5"}"#,
             ),
-            // The variant travels only when there is one: `None` is upstream's
+            // The effort travels only when there is one: `None` is upstream's
             // "Default", and both the command that asks for it and the event
             // that announces it spell that as the field's absence.
             (
-                serde_json::to_string(&Command::SwitchVariant {
-                    variant: Some("max".to_owned()),
+                serde_json::to_string(&Command::SwitchEffort {
+                    effort: Some("max".to_owned()),
                 }),
-                r#"{"type":"switch_variant","variant":"max"}"#,
+                r#"{"type":"switch_effort","effort":"max"}"#,
             ),
             (
-                serde_json::to_string(&Command::SwitchVariant { variant: None }),
-                r#"{"type":"switch_variant"}"#,
+                serde_json::to_string(&Command::SwitchEffort { effort: None }),
+                r#"{"type":"switch_effort"}"#,
             ),
             (
-                serde_json::to_string(&Event::VariantChanged {
+                serde_json::to_string(&Event::EffortChanged {
                     session_id: pinned_session(),
-                    variant: Some("max".to_owned()),
+                    effort: Some("max".to_owned()),
                 }),
-                r#"{"type":"variant_changed","session_id":"ses_1","variant":"max"}"#,
+                r#"{"type":"effort_changed","session_id":"ses_1","effort":"max"}"#,
             ),
             (
-                serde_json::to_string(&Event::VariantChanged {
+                serde_json::to_string(&Event::EffortChanged {
                     session_id: pinned_session(),
-                    variant: None,
+                    effort: None,
                 }),
-                r#"{"type":"variant_changed","session_id":"ses_1"}"#,
+                r#"{"type":"effort_changed","session_id":"ses_1"}"#,
             ),
         ];
 

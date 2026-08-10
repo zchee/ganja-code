@@ -150,10 +150,9 @@ fn shape(event: &Event) -> String {
             }
         ),
         Event::AgentChanged { agent, .. } => format!("agent_changed:{agent}"),
-        Event::VariantChanged { variant, .. } => format!(
-            "variant_changed:{}",
-            variant.as_deref().unwrap_or("default")
-        ),
+        Event::EffortChanged { effort, .. } => {
+            format!("effort_changed:{}", effort.as_deref().unwrap_or("default"))
+        }
     }
 }
 

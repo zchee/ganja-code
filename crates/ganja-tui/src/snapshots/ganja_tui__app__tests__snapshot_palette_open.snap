@@ -15,7 +15,7 @@ context │  /compact       Compact session                              │
 [error] │  /editor        Open editor                                  │        
 refused:│agent                                                         │        
         │  /models        Switch model                                 │        
-        │  /variants      Switch model variant                         │        
+        │  /effort        Switch model effort                          │        
         │                                                              │        
         │[type] filter   [up/down] move   [Enter] run   [Esc] close    │        
         └──────────────────────────────────────────────────────────────┘        

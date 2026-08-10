@@ -13,9 +13,9 @@ One edit│> /compact       Compact session                              │
 +let the│system                                                        │        
 context │  /copy          Copy session transcript                      │        
 [error] │agent                                                         │        
-refused:│  /models        Switch model                                 │        
+refused:│  /effort        Switch model effort                          │        
+        │  /models        Switch model                                 │        
         │session                                                       │        
-        │  /new           New session                                  │        
         │                                                              │        
         │[type] filter   [up/down] move   [Enter] run   [Esc] close    │        
         └──────────────────────────────────────────────────────────────┘        

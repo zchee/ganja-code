@@ -1482,7 +1482,7 @@ mod tests {
     /// which is all [`title`] reads.
     fn info(name: Option<&str>) -> SessionInfo {
         SessionInfo {
-            variant: None,
+            effort: None,
             id: SessionId::from("ses_1".to_owned()),
             version: VERSION,
             title: name.map(str::to_owned),
