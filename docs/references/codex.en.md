@@ -23,6 +23,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | [Clipboard image paste](https://developers.openai.com/codex/cli) | Ctrl+V | ❌ (`@`-mention attachments ✅) |
 | [Slash-command autocomplete](https://developers.openai.com/codex/cli) | `/` | ✅ |
 | [Reasoning-effort hotkeys](https://github.com/openai/codex/blob/main/docs/config.md) | Alt+, / Alt+. | ❌ (`/effort` list picker ✅) |
+| [Status-line composition](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ❌ fixed status bar (themes ✅) |
 | Prompt history | Up / Down | ✅ |
 | Multiline input | Shift+Enter … | ✅ |
 | External editor | — | ✅ `/editor` (ganja-side advantage) |
@@ -32,12 +33,14 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | Command | Notes | ganja |
 |---|---|---|
 | [`/model`](https://developers.openai.com/codex/cli) | model **and** reasoning effort in one menu | ⚠️ `/model` ✅ + separate `/effort`; no combined menu |
-| [`/review`](https://developers.openai.com/codex/cli) | automated review of uncommitted/commit/branch diffs | ❌ |
+| [`/review`](https://developers.openai.com/codex/cli) | presets: uncommitted / commit / base-branch diff, custom focus | ❌ |
 | [`/diff`](https://developers.openai.com/codex/cli) | session-wide change viewer | ❌ (per-edit inline diffs ✅) |
 | [`/compact`](https://developers.openai.com/codex/cli) | summarize the conversation | ✅ plus auto-compaction |
 | [`/prompts` → Agent Skills](https://developers.openai.com/codex/cli) *(medium confidence)* | prompt templates deprecated toward SKILL.md | ⚠️ skills ✅ (SKILL.md-compatible); no template list UI |
 | [`/status`](https://developers.openai.com/codex/cli) | model/tokens/context/cost dashboard | ⚠️ status bar + totals only |
 | [`/init`](https://developers.openai.com/codex/cli) | generate AGENTS.md | ✅ |
+| [`/resume`](https://developers.openai.com/codex/cli) | in-TUI session picker | ✅ `/sessions` |
+| [`/feedback`](https://developers.openai.com/codex/cli) | sanitized diagnostics report to OpenAI | ❌ (no telemetry channel at all) |
 | `/new` / `/quit` | session control | ✅ equivalents |
 | [`/mcp`](https://github.com/openai/codex/blob/main/docs/config.md) | MCP connection status | ⚠️ `ganja mcp` CLI listing only |
 | `/login` / `/logout` | credential switching in-TUI | ⚠️ `auth` CLI only |
@@ -47,50 +50,77 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | Feature | Notes | ganja |
 |---|---|---|
 | [OS-kernel sandboxing](https://github.com/openai/codex/blob/main/docs/sandbox.md) | macOS Seatbelt; Linux Landlock + seccomp | ❌ permission engine only, no isolation |
-| [Approval policies](https://github.com/openai/codex/blob/main/docs/getting-started.md) | read-only / workspace-write / full-access / on-request | ⚠️ rule-based allow/ask/deny + single-tier `--auto` |
-| [Write-mode network cutoff](https://github.com/openai/codex/blob/main/docs/sandbox.md) | `network_access = false` by default under workspace-write | ❌ no such concept |
+| [Approval policies](https://github.com/openai/codex/blob/main/docs/getting-started.md) | read-only / workspace-write / full-access; on-request/untrusted/never | ⚠️ rule-based allow/ask/deny + single-tier `--auto` |
+| [Write-mode network cutoff](https://github.com/openai/codex/blob/main/docs/sandbox.md) | `network_access = false` under workspace-write | ❌ no such concept |
+| [Project trust levels](https://github.com/openai/codex/blob/main/docs/config.md) | `[projects."path"] trust_level`, prompt on untrusted dirs | ❌ |
+| [`shell_environment_policy`](https://github.com/openai/codex/blob/main/docs/config.md) | inherit all/core/none + include/exclude patterns for subshell env | ❌ tools inherit the process env |
 | [`--yolo` bypass](https://github.com/openai/codex/blob/main/docs/sandbox.md) | skip sandbox + approvals | ⚠️ `--auto` is allow-unless-denied; no sandbox to bypass |
 | [Container posture](https://github.com/openai/codex/blob/main/docs/sandbox.md) | degraded-sandbox flags for Docker/devcontainers | ❌ |
 
-## 4. Configuration and context
+## 4. Configuration surface (`config.toml`)
 
 | Feature | Notes | ganja |
 |---|---|---|
-| [`config.toml` + named `[profiles]`](https://github.com/openai/codex/blob/main/docs/config.md) | posture presets via `--profile` | ⚠️ three config tiers ✅; named profiles ❌ |
-| [AGENTS.md, project + global](https://agents.md) | `~/.codex/AGENTS.md` auto-loaded | ✅ ganja reads the family plus its global tier |
-| [`personality`](https://github.com/openai/codex/blob/main/docs/config.md) | pragmatic / friendly / none tone | ❌ |
+| [Config locations + precedence](https://github.com/openai/codex/blob/main/docs/config.md) | `$CODEX_HOME/config.toml` + trusted project `.codex/config.toml`; project files cannot override security keys | ⚠️ three-tier jsonc merge ✅; no security-key carve-out |
+| [Named `[profiles]`](https://github.com/openai/codex/blob/main/docs/config.md) | posture presets via `--profile` | ❌ |
+| [Custom `model_providers`](https://github.com/openai/codex/blob/main/docs/config.md) | `base_url` + `env_key` + `http_headers` + model list; `wire_api = "responses"` only | ✅ strong parity: ganja's `provider` table (dialect/base_url/key_env/headers) — and ganja speaks **two** dialects where Codex kept one |
 | [`notify` hooks](https://github.com/openai/codex/blob/main/docs/config.md) | run a command on completion/approval-needed | ❌ |
-| Lifecycle hooks *(low confidence)* | event-triggered scripts | ❌ |
-| [Display knobs](https://github.com/openai/codex/blob/main/docs/config.md) | `hide_agent_reasoning` and friends | ❌ |
+| [History persistence knobs](https://github.com/openai/codex/blob/main/docs/config.md) *(low confidence)* | sqlite/file/disabled, custom path, max entries | ⚠️ SQLite per project, fixed — no disable/relocate knobs |
+| [`personality`](https://github.com/openai/codex/blob/main/docs/config.md) | pragmatic / friendly / none tone | ❌ |
+| [Display knobs](https://github.com/openai/codex/blob/main/docs/config.md) | `hide_agent_reasoning`, `model_verbosity`, TUI theme/mouse/line numbers | ⚠️ themes ✅; the rest ❌ |
+| [Context-window overrides](https://github.com/openai/codex/blob/main/docs/config.md) | `model_context_window`, `model_auto_compact_token_limit` | ❌ catalog-driven sizing, fixed thresholds |
+| [Feature flags](https://github.com/openai/codex/blob/main/docs/config.md) *(low confidence)* | experimental `[features]`: multi_agent, memories, goals, hooks, shell_snapshot, unified_exec, … | ❌ |
 | [Shell completions](https://developers.openai.com/codex/cli) | bash/zsh/fish/powershell | ❌ (clap could; not wired) |
 
-## 5. Tools and agent machinery
+## 5. Context files and prompts
 
 | Feature | Notes | ganja |
 |---|---|---|
-| [`apply_patch`](https://github.com/openai/codex/blob/main/docs/getting-started.md) | structured unified-diff editing as the primary tool | ❌ ganja follows upstream's `edit`/`write`; the name exists in the permission table only |
+| [AGENTS.md, project + global](https://agents.md) | `~/.codex/AGENTS.md` + repo root | ✅ ganja reads the family plus its global tier |
+| [Nested AGENTS.md](https://agents.md) | per-subdirectory instruction files, scoped recursively | ❌ no subdirectory walk-in |
+| [Custom prompts](https://developers.openai.com/codex/cli) | `~/.codex/prompts/*.md` + project scope, argument interpolation | ⚠️ config-declared commands with `$ARGUMENTS`/`!`/`@` expansion |
+| [Skills (SKILL.md)](https://developers.openai.com/codex/cli) | cross-tool standard | ✅ ganja's two homes + `skills.paths` |
+
+## 6. Tools and agent machinery
+
+| Feature | Notes | ganja |
+|---|---|---|
+| [`apply_patch`](https://github.com/openai/codex/blob/main/docs/getting-started.md) | structured unified-diff editing as the primary tool, intercepted at the harness (`unified_exec`) | ❌ ganja follows upstream's `edit`/`write`; the name exists in the permission table only |
+| [`unified_exec`](https://developers.openai.com/codex/cli) *(low confidence)* | consolidated exec subsystem, byte-capped streaming output | ⚠️ ganja's shell has its own spill/truncation discipline |
 | [`update_plan` (plan mode)](https://developers.openai.com/codex/cli) | live checklist rendering and updates | ⚠️ `todowrite` is the nearest; no plan-specific tool |
 | [`web_search` tool](https://github.com/openai/codex/blob/main/docs/config.md) | live search opt-in | ✅ `websearch` (Exa/Parallel) |
+| [`view_image` tool](https://github.com/openai/codex/blob/main/docs/config.md) | the model reads local images by path, self-directed | ❌ image context is user-attached only |
 | Shell execution | | ✅ `bash` |
 | Best-of-N *(low confidence)* | parallel candidate generation | ❌ |
-| [MCP client](https://github.com/openai/codex/blob/main/docs/config.md) | `[mcp_servers.*]` | ✅ |
+| [MCP client](https://github.com/openai/codex/blob/main/docs/config.md) | stdio (`command`/`args`/`env`) + streamable HTTP (`url`/`bearer_token_env_var`), per-server enable + timeouts, OAuth credential store (keyring/file) | ⚠️ stdio + HTTP ✅; per-server timeouts, bearer-env, enable flags, OAuth ❌ |
 | [Codex as an MCP server](https://developers.openai.com/codex/cli) | expose the engine over MCP | ❌ |
 
-## 6. CLI, headless, cloud, integrations
+## 7. Sessions, storage, diagnostics
 
 | Feature | Notes | ganja |
 |---|---|---|
-| [`codex exec`](https://github.com/openai/codex/blob/main/docs/exec.md) | headless runs, `-o <file>` | ✅ `ganja run` (no `-o`; stdout redirection instead) |
+| [Rollout files](https://developers.openai.com/codex/cli) | append-only JSONL per session under `~/.codex/sessions/…` + SQLite index | ✅ different shape, same guarantee: write-through SQLite per project |
 | [`codex resume` / `--last` / inline prompt](https://developers.openai.com/codex/cli) | resume and continue in one line | ✅ `--continue` / `--session` + `run --continue "…"` |
-| Session forking | | ❌ |
+| Session forking | branch a conversation | ❌ |
+| [`/feedback` diagnostics](https://developers.openai.com/codex/cli) | sanitized log bundle to the vendor | ❌ by design — ganja phones nobody |
+
+## 8. CLI, headless, cloud, integrations
+
+| Feature | Notes | ganja |
+|---|---|---|
+| [`codex exec`](https://github.com/openai/codex/blob/main/docs/exec.md) | headless runs | ✅ `ganja run` |
+| [`exec --json`](https://github.com/openai/codex/blob/main/docs/exec.md) | JSONL event stream | ✅ `--format json` |
+| [`exec --output-schema`](https://github.com/openai/codex/blob/main/docs/exec.md) | JSON-Schema-constrained final message | ❌ |
+| [`exec --output-last-message <file>`](https://github.com/openai/codex/blob/main/docs/exec.md) | final text to a file | ❌ (stdout redirection instead) |
+| [`codex login --device-auth`](https://github.com/openai/codex/blob/main/docs/authentication.md) | headless device-code auth | ✅ ganja's grok and ChatGPT logins both carry device flows |
+| [ChatGPT OAuth or API key](https://github.com/openai/codex/blob/main/docs/authentication.md) | dual credentials | ✅ the same shape (ganja's `openai`) |
 | [`codex cloud` + `codex apply`](https://developers.openai.com/codex/cloud) | delegate to cloud, pull the diff back | ❌ out-of-scope territory |
-| [IDE extension](https://developers.openai.com/codex/ide) | VS Code/JetBrains via app server | ❌ out of scope |
+| [IDE extension via `app-server`](https://developers.openai.com/codex/ide) | one RPC protocol for TUI, VS Code, desktop app | ❌ (ganja-serve is REST+SSE for its own client, not an IDE protocol) |
 | [GitHub Action](https://github.com/openai/codex-action) | CI review and fixes | ❌ |
 | [`--image <path>`](https://developers.openai.com/codex/cli) | attach images from the CLI | ❌ |
-| [ChatGPT OAuth or API key login](https://github.com/openai/codex/blob/main/docs/authentication.md) | | ✅ the same dual-credential shape (ganja's `openai`) |
 | Update notifications | | ❌ |
 
 Where ganja holds its own against Codex (for perspective, not scorekeeping):
 loadable TUI themes, `/editor`, the `!` shell passthrough, arity-aware
-"always" permission answers, the serve/attach HTTP+SSE surface, and the
-golden-differential test discipline.
+"always" permission answers, dual-dialect custom providers, the
+serve/attach HTTP+SSE surface, and the golden-differential test discipline.

@@ -78,37 +78,118 @@
 | [`/doctor`](https://code.claude.com/docs/en/troubleshooting) | 自己診断 | ❌ |
 | [`/export`](https://code.claude.com/docs/en/slash-commands) | 会話のエクスポート | ⚠️ `/copy` のみ |
 | [`/cd`](https://code.claude.com/docs/en/slash-commands) *(低確度)* | 作業ディレクトリ変更 | ❌ 起動ディレクトリ固定は設計判断 |
+| [`/add-dir`](https://code.claude.com/docs/en/common-workflows) | セッション中の追加ディレクトリ許可 | ❌ |
+| [`/plugin`](https://code.claude.com/docs/en/plugins) | marketplace 追加・install・reload | ❌ |
 | [`/vim`](https://code.claude.com/docs/en/interactive-mode) | vim 編集 | ❌ |
 
-## 4. コアエージェント機能
+## 4. 内蔵ツール一覧
+
+| ツール | 補足 | ganja |
+|---|---|---|
+| [`Read`](https://code.claude.com/docs/en/settings) | 行番号付きテキスト+画像・PDF(約20頁)・notebook | ⚠️ テキスト✅・画像/PDF は `@` 添付経由でモデルに届く(read ツールでは読めない) |
+| [`Edit`](https://code.claude.com/docs/en/settings) | 厳密文字列置換・read-before-edit 強制 | ✅ 同じ規律(`FileTimes`) |
+| [`Write`](https://code.claude.com/docs/en/settings) | 生成・上書き | ✅ +symlink 差替えに対する anchored I/O |
+| [`NotebookEdit`](https://code.claude.com/docs/en/settings) | Jupyter セル操作 | ❌ |
+| [`Glob`](https://code.claude.com/docs/en/settings) | パターンファイル検索 | ✅ in-process(ripgrep crates) |
+| [`Grep`](https://code.claude.com/docs/en/settings) | 正規表現検索 | ✅ in-process |
+| [`Bash`](https://code.claude.com/docs/en/settings) | チェーン対応の権限チェック付きシェル | ✅ "always" 用の arity 表を含む |
+| [`BashOutput` / `KillShell`](https://code.claude.com/docs/en/settings) | バックグラウンドシェルの読取・停止 | ❌ バックグラウンドシェルなし |
+| [`WebFetch`](https://code.claude.com/docs/en/settings) | URL 取得・解析 | ✅ `webfetch` |
+| [`WebSearch`](https://code.claude.com/docs/en/settings) | web 検索 | ✅ `websearch`(Exa/Parallel) |
+| [`Task`](https://code.claude.com/docs/en/sub-agents) | サブエージェント起動 | ✅ `task` |
+| [`TodoWrite`](https://code.claude.com/docs/en/interactive-mode) | チェックリスト | ✅ `todowrite` |
+| [`ExitPlanMode`](https://code.claude.com/docs/en/common-workflows) | 承認付き plan 離脱 | ✅ `plan_exit`(question ゲートの build 切替) |
+| skill ツール | スキルの明示ロード | ✅ `skill` |
+| question ツール | 構造化された質問 | ✅ `question`(自由入力含む) |
+
+## 5. 権限システム詳細
 
 | 機能 | 補足 | ganja |
 |---|---|---|
-| [プロジェクトメモリー](https://code.claude.com/docs/en/memory) | CLAUDE.md 階層 | ✅ AGENTS.md 族・三層 |
-| [スコープ付き rules](https://code.claude.com/docs/en/memory) *(低確度)* | glob 発火の `.claude/rules/*.md` | ❌ |
-| [自動メモリー](https://code.claude.com/docs/en/memory) | セッション横断の MEMORY.md | ❌ |
-| [hooks](https://code.claude.com/docs/en/hooks) | 決定論的ライフサイクルスクリプト | ❌ |
-| [subagents](https://code.claude.com/docs/en/sub-agents) | 分離コンテキストへの委譲 | ✅ `task` ツール・子トランスクリプト分離 |
-| [subagents の並列実行](https://code.claude.com/docs/en/sub-agents) | 同時実行 | ❌ one-turn-at-a-time |
-| [カスタムエージェント定義](https://code.claude.com/docs/en/sub-agents) | `.claude/agents/*` ファイル | ⚠️ config 宣言 agent は✅・エージェント別ツール許可なし |
-| [skills](https://code.claude.com/docs/en/skills) | SKILL.md ロード | ✅ ganja の2ホーム + `skills.paths` |
-| [skill の自動トリガー](https://code.claude.com/docs/en/skills) | 記述マッチで発動 | ❌ 明示ロードのみ |
-| [skill の fork 実行](https://code.claude.com/docs/en/skills) *(低確度)* | `context: fork` | ❌ |
-| [プラグイン+marketplace](https://code.claude.com/docs/en/plugins) | skills/agents/hooks/MCP のバンドル | ❌ |
-| [checkpointing](https://code.claude.com/docs/en/checkpointing) | 編集前スナップショット+会話復元 | ⚠️ worktree スナップショット(`/undo`)のみ |
-| [バックグラウンドタスク](https://code.claude.com/docs/en/interactive-mode) | 非同期実行・完了通知 | ❌ |
-| [自動圧縮](https://code.claude.com/docs/en/costs) | 上限前の要約 | ✅ |
-| [権限システム](https://code.claude.com/docs/en/iam) | allow/ask/deny+保存回答 | ✅ 後勝ちルール・arity 対応 "always" |
+| [Bash コマンドパターン](https://code.claude.com/docs/en/iam) | `Bash(npm run *)`・前置/後置/複数ワイルドカード | ⚠️ パターンルールは存在(upstream 形)・ワイルドカード文法は別物 |
+| [チェーン分解](https://code.claude.com/docs/en/iam) | `&&`/`;`/`\|` を分割し全段で判定 | ⚠️ arity 表によるコマンド種別解析・分解方式ではない |
+| [gitignore 形式のパスルール](https://code.claude.com/docs/en/iam) | `Edit(src/**)`・`Read(.env)`・`//` 絶対パス | ❌ ツール別パス allow/deny なし |
+| [MCP ツールパターン](https://code.claude.com/docs/en/iam) | `mcp__server__tool`・サーバー一括許可 | ✅ 同じ命名・MCP は既定で ask |
+| [ドメイン限定 web ルール](https://code.claude.com/docs/en/iam) | `WebFetch(domain:github.com)` | ❌ |
+| [deny → ask → allow(最厳優先)](https://code.claude.com/docs/en/iam) | | ⚠️ ganja は層状 tier の後勝ち — 別のピン済みセマンティクス |
+| [設定スコープ](https://code.claude.com/docs/en/settings) | user / project / project-local / CLI フラグ / managed | ⚠️ builtin < agent < config < 保存回答。local 重ね・フラグ・managed なし |
+| [settings の `env` ブロック](https://code.claude.com/docs/en/settings) | スコープ毎の環境変数注入 | ❌ |
+| [保存される "always" 回答](https://code.claude.com/docs/en/iam) | 承認の永続化 | ✅ プロジェクト毎ストア・シェルは arity 対応 |
 | [sandbox 実行](https://code.claude.com/docs/en/sandboxing) | OS/コンテナ隔離 | ❌ 権限ゲートのみ |
-| [MCP stdio + HTTP](https://code.claude.com/docs/en/mcp) | クライアント transport | ✅ |
-| [MCP の CLI 管理](https://code.claude.com/docs/en/mcp) | `claude mcp add/list` | ⚠️ `ganja mcp` は一覧のみ・追加は config 直書き |
-| [MCP OAuth](https://code.claude.com/docs/en/mcp) | リモートサーバー認証 | ❌ config キーを明示拒否 |
-| [MCP 再接続](https://code.claude.com/docs/en/mcp) | 死んだサーバーの復帰 | ❌ 一度 dial したきり |
-| [web search / fetch ツール](https://code.claude.com/docs/en/settings) | 内蔵 web ツール | ✅ `websearch`(Exa/Parallel)・`webfetch` |
-| [todo ツール](https://code.claude.com/docs/en/interactive-mode) | タスク管理 | ✅ `todowrite` |
-| [LSP 診断](https://code.claude.com/docs/en/troubleshooting) | エディタ級フィードバック | ✅ opt-in LSP・編集結果に付加 |
 
-## 5. CLI・headless・SDK
+## 6. hooks・自動化
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [フックイベント](https://code.claude.com/docs/en/hooks) | PreToolUse・PostToolUse・UserPromptSubmit・Notification・Stop・SubagentStop・SessionStart・SessionEnd・PreCompact(+権限判定フック) | ❌ 機構ごと不在 |
+| [フックプロトコル](https://code.claude.com/docs/en/hooks) | stdin に JSON・exit 2 でツール呼出をブロック・stdout で文脈注入 | ❌ |
+| [matcher](https://code.claude.com/docs/en/hooks) | ツール別正規表現(`Edit\|Write`) | ❌ |
+
+## 7. カスタムコマンド・メモリー内部
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [コマンドファイル](https://code.claude.com/docs/en/slash-commands) | `.claude/commands/*.md` + グローバル | ✅ config 宣言コマンド |
+| [`$ARGUMENTS` / `$1`・`$2`](https://code.claude.com/docs/en/slash-commands) | 引数展開 | ✅ |
+| [テンプレート内 `` !`cmd` ``](https://code.claude.com/docs/en/slash-commands) | 起動時のシェル出力埋込 | ✅(P8) |
+| [テンプレート内 `@path`](https://code.claude.com/docs/en/slash-commands) | ファイル埋込 | ✅(P8・mention 級添付として) |
+| [frontmatter: `allowed-tools`](https://code.claude.com/docs/en/slash-commands) | コマンド毎のツール制限 | ❌(コマンド毎 agent は✅) |
+| [frontmatter: `model`・`argument-hint`](https://code.claude.com/docs/en/slash-commands) | コマンド毎モデル+ヒント | ❌ |
+| [CLAUDE.md 階層](https://code.claude.com/docs/en/memory) | グローバル→ルート→サブディレクトリを連結 | ⚠️ グローバル+プロジェクトの AGENTS.md 族・サブディレクトリ歩き込みなし |
+| [メモリー内 `@path` import](https://code.claude.com/docs/en/memory) | インポート元相対で解決するモジュール分割 | ❌ |
+| [自動メモリー](https://code.claude.com/docs/en/memory) | `~/.claude/projects/<hash>/memory/`(MEMORY.md 索引+トピックファイル)を自己保守 | ❌ |
+
+## 8. subagents・skills・plugins
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [エージェント定義ファイル](https://code.claude.com/docs/en/sub-agents) | `.claude/agents/*.md`(name/description/model/tools) | ⚠️ config 宣言 agent(model+rules)・エージェント毎ツール許可なし |
+| [記述による自動委譲](https://code.claude.com/docs/en/sub-agents) | モデルがエージェントを選ぶ | ⚠️ task ツールが記述付き roster を提示 |
+| [並列サブエージェント](https://code.claude.com/docs/en/sub-agents) | 同時実行 | ❌ one-turn-at-a-time |
+| [`isolation: worktree`](https://code.claude.com/docs/en/sub-agents) | worktree 内で実行 | ❌ |
+| [エージェントへの skill 事前ロード](https://code.claude.com/docs/en/sub-agents) | `skills:` | ❌ |
+| [SKILL.md ロード](https://code.claude.com/docs/en/skills) | | ✅ ganja の2ホーム+`skills.paths` |
+| [自動トリガー+`paths` スコープ](https://code.claude.com/docs/en/skills) | 記述・パスマッチ発動 | ❌ 明示ロードのみ |
+| [`context: fork`](https://code.claude.com/docs/en/skills) | fork したサブエージェントで実行し結果のみ返す | ❌ |
+| [skill の `allowed-tools`](https://code.claude.com/docs/en/skills) | `mcp__*` ワイルドカード含む制限 | ❌ |
+| [プラグイン: 5 コンポーネント](https://code.claude.com/docs/en/plugins) | skills・agents・hooks・MCP・LSP | ❌ |
+| [marketplace](https://code.claude.com/docs/en/plugins) | `marketplace.json`・`/plugin install`・`/reload-plugins` | ❌ |
+
+## 9. MCP 詳細
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [transport](https://code.claude.com/docs/en/mcp) | stdio・streamable HTTP・SSE | ✅ stdio+streamable HTTP・legacy SSE ❌ |
+| [設定スコープ](https://code.claude.com/docs/en/mcp) | local(`~/.claude.json`)/ project(`.mcp.json`)/ user+優先順位 | ⚠️ グローバル+プロジェクト config・repo 毎 local スコープなし |
+| [CLI 管理](https://code.claude.com/docs/en/mcp) | `claude mcp add/list --scope --transport` | ⚠️ `ganja mcp` は一覧のみ・追加は config 直書き |
+| [OAuth](https://code.claude.com/docs/en/mcp) | PKCE・メタデータ発見・トークン更新 | ❌ config キーを明示拒否 |
+| [project スコープの初回承認](https://code.claude.com/docs/en/mcp) | repo 注入サーバー対策 | ✅ より強い: 全 MCP ツールが既定で ask |
+| [タイムアウト・出力上限](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`・`MCP_TOOL_TIMEOUT`・`MAX_MCP_OUTPUT_TOKENS` | ❌ |
+| 再接続 | 死んだサーバーの復帰 | ❌ 一度 dial したきり |
+
+## 10. モデル・コンテキスト設定
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [モデルエイリアス](https://code.claude.com/docs/en/model-config) | `sonnet` / `opus` / `haiku` | ⚠️ カタログの完全 id のみ |
+| [`opusplan`](https://code.claude.com/docs/en/model-config) | plan は Opus・実行は Sonnet の自動二相 | ❌ |
+| [1M コンテキストエイリアス](https://code.claude.com/docs/en/model-config) | `sonnet[1m]`・`opus[1m]` | ❌ |
+| [`MAX_THINKING_TOKENS`](https://code.claude.com/docs/en/settings) | thinking 予算上書き | ⚠️ カタログ由来の effort variant が予算を運ぶ |
+| [自動圧縮しきい値の上書き](https://code.claude.com/docs/en/settings) *(低確度)* | 発火率の env 調整 | ❌ 固定しきい値 |
+| [小型高速モデルへのルーティング](https://code.claude.com/docs/en/settings) | 背景処理を安価モデルへ | ⚠️ ganja のタイトル要求はセッションモデルに乗る |
+| [環境変数面](https://code.claude.com/docs/en/settings) | `ANTHROPIC_MODEL`・`DISABLE_TELEMETRY`・proxy 等 | ⚠️ ganja は独自のより小さい `GANJA_*` 面 |
+
+## 11. ワークスペース・セッション保存
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [`/add-dir` / `additionalDirectories`](https://code.claude.com/docs/en/common-workflows) | マルチディレクトリアクセス | ❌ 単一起動ディレクトリは設計判断 |
+| [`--worktree`](https://code.claude.com/docs/en/common-workflows) | linked worktree でセッション実行 | ❌ |
+| [セッショントランスクリプト](https://code.claude.com/docs/en/data-usage) | セッション毎 JSONL・resume 可能 | ✅ プロジェクト毎 SQLite・resume 可能 |
+| [checkpoint ファイル履歴](https://code.claude.com/docs/en/checkpointing) | 編集前の内容ハッシュバックアップ | ⚠️ worktree スナップショット(`/undo`) |
+| [shell スナップショット](https://code.claude.com/docs/en/settings) *(低確度)* | シェル環境の再現用キャプチャ | ❌ |
+
+## 12. CLI・headless・SDK
 
 | 機能 | 補足 | ganja |
 |---|---|---|
@@ -124,7 +205,7 @@
 | [Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview) | TS/Python でのエンジン組込み | ❌ 最近縁は `ganja-serve` + `ganja-client`(HTTP/SSE) |
 | [MCP サーバーモード](https://code.claude.com/docs/en/mcp) | `claude mcp serve` | ❌ |
 
-## 6. エンタープライズ・プラットフォーム
+## 13. エンタープライズ・プラットフォーム
 
 | 機能 | 補足 | ganja |
 |---|---|---|
