@@ -403,6 +403,11 @@ fn offline(cache: &TempDir) -> Command {
         // The same directory for both: what matters is that neither is the
         // developer's, and neither name collides inside it.
         .env("XDG_CONFIG_HOME", cache.path())
+        // The cursor listing reads the credential store before it dials, so
+        // the data home is part of what a test puts in front of the command
+        // too — without this, a developer's real cursor login would send
+        // `models cursor` to the network.
+        .env("XDG_DATA_HOME", cache.path())
         .env_remove("GANJA_CONFIG")
         .env("GANJA_DISABLE_MODELS_FETCH", "1")
         .env_remove("GANJA_MODELS_URL")
@@ -714,15 +719,9 @@ fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing()
         .success()
         .stdout(predicate::str::contains("no catalog rows"));
 
-    // The cursor stub is the third resident of the tier: shipped as an
-    // identity whose wire is deferred, so the listing spells out the same
-    // consequence instead of pretending an empty table is an error.
-    offline(&cache)
-        .current_dir(project.path())
-        .args(["models", "cursor"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("no catalog rows"));
+    // Cursor left this tier's note behind: its wire carries a roster of its
+    // own, so `models cursor` is the live listing — or its refusal — and is
+    // pinned in its own test below.
 
     // The typo keeps the refusal it always had: this project declares no such
     // endpoint, so nothing could run as it.
@@ -732,6 +731,21 @@ fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing()
         .assert()
         .failure()
         .stdout(predicate::str::contains("PROVIDER").not());
+}
+
+/// The cursor roster is the wire's to serve, so `models cursor` asks the
+/// stored login before it asks anything else — and with none stored, what
+/// comes back is the wire's own refusal naming the repair, with the catalog
+/// machinery never consulted. No network is dialled on this path: the
+/// credential read fails first, which is what lets an offline test pin it.
+#[test]
+fn the_cursor_listing_without_a_login_is_refused_naming_the_login() {
+    offline(&cache())
+        .args(["models", "cursor"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("PROVIDER").not())
+        .stderr(predicate::str::contains("ganja auth login cursor"));
 }
 
 /// A key for an endpoint the config declares is stored under the id its entry

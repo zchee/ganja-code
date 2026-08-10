@@ -1133,7 +1133,8 @@ fn read_unechoed() -> Result<Option<SecretString>> {
 }
 
 /// Lists what this build can size and price, filtered to `provider` when one
-/// was named.
+/// was named — or, for a provider whose wire carries its own roster, what the
+/// stored login is served, live.
 ///
 /// The cached catalog is adopted here rather than left to the first lookup:
 /// the disk tier is a layer somebody installs, and a listing that skipped
@@ -1142,10 +1143,31 @@ fn read_unechoed() -> Result<Option<SecretString>> {
 ///
 /// # Errors
 ///
-/// When `provider` names nobody in the table. Nothing else here fails: the
-/// catalog always answers, at worst from the snapshot compiled into the
-/// binary.
+/// When `provider` names nobody in the table, or names a wire-listed provider
+/// whose listing could not be fetched — no stored login, an unreachable
+/// endpoint — in the wire's own words. The catalog half never fails: it
+/// always answers, at worst from the snapshot compiled into the binary.
 async fn models_command(provider: Option<String>, refresh: bool) -> Result<()> {
+    // The wire-listed tier answers before the catalog machinery is touched: a
+    // `Some` from the seam means the wire — not the table — knows what the
+    // stored credential may name. The listing is live on every call, which is
+    // why `--refresh` is not consulted here: it keeps its catalog meaning,
+    // and there is no cache of this to force past.
+    if let Some(wanted) = provider.as_deref()
+        && let Some(listing) = ganja_core::provider::wire_model_listing(wanted).await
+    {
+        let models = listing?;
+        println!(
+            "{wanted} models, live from the wire; uncataloged, so sizing and cost display are off"
+        );
+        println!("\n{:<32}  NAME", "MODEL");
+        for model in models {
+            println!("{:<32}  {}", model.id, model.name);
+        }
+
+        return Ok(());
+    }
+
     catalog::load_cached();
     if refresh {
         refreshed().await;
