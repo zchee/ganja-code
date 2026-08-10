@@ -585,6 +585,7 @@ mod tests {
             credentials: crate::Credentials::Unguarded,
             spawn: None,
             ask: None,
+            switch: None,
         }
     }
 

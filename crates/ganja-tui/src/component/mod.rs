@@ -13,6 +13,7 @@ pub mod help;
 pub mod list;
 pub mod palette;
 pub mod permission;
+pub mod question;
 pub mod sessions;
 pub mod status;
 pub mod themes;

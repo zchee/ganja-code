@@ -296,9 +296,10 @@ async fn a_subagent_is_handed_the_base_prompt_of_the_family_in_force() {
     drain_answering(&engine, &mut events, PermissionReply::Once).await;
 
     // Which request is the child's is not taken on trust: a subagent is offered
-    // this build's tools *minus* the one that spawns subagents, and `task` is
-    // the only tool this engine has, so the middle request is the one with no
-    // tools at all and the two around it are the parent's.
+    // this build's tools *minus* the ones only `install` adds for the parent —
+    // `task`, and the `plan_exit` a registry holding build brings with it — so
+    // the middle request is the one with no tools at all and the two around it
+    // are the parent's.
     {
         let requests = seen.lock().expect("the request log is never poisoned");
         let offered: Vec<Vec<&str>> = requests
@@ -313,7 +314,11 @@ async fn a_subagent_is_handed_the_base_prompt_of_the_family_in_force() {
             .collect();
         assert_eq!(
             offered,
-            vec![vec!["task"], Vec::new(), vec!["task"]],
+            vec![
+                vec!["task", "plan_exit"],
+                Vec::new(),
+                vec!["task", "plan_exit"]
+            ],
             "the middle request is the child's, and it really is a second loop"
         );
     }

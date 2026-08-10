@@ -610,7 +610,9 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             // A child takes no snapshots of its own, so nothing here ever
             // reverts; the arm exists because the parent's watcher reads the
             // whole event stream and must not be surprised by one of them.
-            Event::RevertChanged { .. } => {}
+            // The same holds for an agent change: a child is never handed the
+            // approval cell, so its stream can never carry one.
+            Event::RevertChanged { .. } | Event::AgentChanged { .. } => {}
         }
     }
 

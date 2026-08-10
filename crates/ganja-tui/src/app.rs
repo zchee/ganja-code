@@ -46,6 +46,7 @@ use crate::{
         list::{self, ListDialog},
         palette::Palette,
         permission::Permission,
+        question::Question,
         sessions::{self, Sessions},
         status::{Activity, Status, Totals},
         themes::ThemeList,
@@ -229,6 +230,8 @@ pub struct App {
     keys: Keybinds,
     /// The tool call currently waiting on the user's decision, if any.
     permission: Option<Permission>,
+    /// The options-only question currently waiting on the user's answer.
+    question: Option<Question>,
     /// The stored sessions the user is choosing between, while the picker is
     /// open.
     sessions: Option<Sessions>,
@@ -337,6 +340,7 @@ impl App {
             status,
             keys: Keybinds::defaults(),
             permission: None,
+            question: None,
             sessions: None,
             theme_list: None,
             chooser: None,
@@ -670,8 +674,9 @@ impl App {
                 if let Some(files) = &self.files {
                     files.render(prompt, buffer, &self.theme);
                 }
-                // The permission dialog draws last so that it is on top: it is
-                // the one modal a turn is blocked on.
+                // The two dialogs that can block a turn draw last so they are
+                // on top. Permission stays above question if an impossible
+                // overlapping pair ever arrives, matching which one owns keys.
                 if let Some(sessions) = &self.sessions {
                     sessions.render(transcript, buffer, &self.theme);
                 }
@@ -686,6 +691,9 @@ impl App {
                 }
                 if let Some(help) = &mut self.help {
                     help.render(transcript, buffer, &self.theme);
+                }
+                if let Some(question) = &self.question {
+                    question.render(transcript, buffer, &self.theme);
                 }
                 if let Some(permission) = &self.permission {
                     permission.render(transcript, buffer, &self.theme);
@@ -775,6 +783,50 @@ impl App {
                 self.engine
                     .send(Command::ReplyPermission { id, reply })
                     .await?;
+            }
+
+            return Ok(());
+        }
+
+        if self.question.is_some() {
+            // Like permission, every key belongs to the open request until its
+            // terminal event arrives; the editor beneath is not the target.
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(question) = &mut self.question {
+                        question.move_selection(-1);
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(question) = &mut self.question {
+                        question.move_selection(1);
+                    }
+                }
+                KeyCode::Enter => {
+                    let answer = self.question.as_ref().and_then(|question| {
+                        question
+                            .selected_label()
+                            .map(|label| (question.id().clone(), label.to_owned()))
+                    });
+                    if let Some((id, label)) = answer {
+                        self.engine
+                            .send(Command::ReplyQuestion {
+                                id,
+                                answers: vec![vec![label]],
+                            })
+                            .await?;
+                    }
+                }
+                KeyCode::Esc => {
+                    let id = self
+                        .question
+                        .as_ref()
+                        .expect("the open dialog still exists")
+                        .id()
+                        .clone();
+                    self.engine.send(Command::RejectQuestion { id }).await?;
+                }
+                _ => {}
             }
 
             return Ok(());
@@ -952,6 +1004,7 @@ impl App {
     /// Whether a modal is claiming the keys and the wheel.
     fn modal_open(&self) -> bool {
         self.permission.is_some()
+            || self.question.is_some()
             || self.sessions.is_some()
             || self.theme_list.is_some()
             || self.chooser.is_some()
@@ -1382,6 +1435,7 @@ impl App {
             credentials: Credentials::Unguarded,
             spawn: None,
             ask: None,
+            switch: None,
         };
 
         // A fragment is typed, not written: half of one is a pattern that does
@@ -1511,6 +1565,10 @@ impl App {
             .await
         {
             Ok(()) => {
+                // Redundant but harmless: `AgentChanged` is now the source of
+                // truth for every adoption, including this manual one, so its
+                // handler would keep the indicator correct without this eager
+                // frontend update.
                 self.agent = Some(name);
                 self.status.set_agent(self.agent.clone());
                 // An agent may name a model of its own, which the engine
@@ -1894,13 +1952,27 @@ impl App {
                     self.editor.set_text(&prompt);
                 }
             }
-            // The question dialog is not built yet, so the quad is applied to
-            // nothing — deliberately inert rather than absent, because a
-            // frontend that silently ignored an open request would leave the
-            // turn waiting with nothing on screen to answer it.
-            CoreEvent::QuestionAsked { .. }
-            | CoreEvent::QuestionReplied { .. }
-            | CoreEvent::QuestionRejected { .. } => {}
+            CoreEvent::QuestionAsked { id, questions, .. } => {
+                self.question = questions
+                    .into_iter()
+                    .next()
+                    .map(|question| Question::new(id, question));
+            }
+            CoreEvent::QuestionReplied { id, .. } | CoreEvent::QuestionRejected { id, .. } => {
+                let names_open_request = self
+                    .question
+                    .as_ref()
+                    .is_some_and(|question| *question.id() == id);
+                if names_open_request {
+                    self.question = None;
+                    self.status.set_activity(Activity::Streaming);
+                }
+            }
+            CoreEvent::AgentChanged { agent, model, .. } => {
+                self.agent = Some(agent);
+                self.status.set_agent(self.agent.clone());
+                self.model = model;
+            }
             CoreEvent::MessageFinished {
                 reason,
                 usage,
@@ -2027,6 +2099,7 @@ fn relative_paths(cwd: &Path, output: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -2218,6 +2291,78 @@ mod tests {
         let events = engine.subscribe().await.expect("the test subscribes first");
 
         (App::new(engine, None, Themes::builtin()), events)
+    }
+
+    /// An app whose real turn is stopped inside the `question` tool, plus the
+    /// stream the frontend would be reading while the dialog is open.
+    async fn questioning() -> (TempDir, App, BoxStream<'static, CoreEvent>) {
+        let directory = temporary();
+        let script = directory.path().join("question.json");
+        fs::write(
+            &script,
+            r#"{
+                "cadence_ms": 0,
+                "turns": [
+                    {
+                        "tool_calls": [{
+                            "name": "question",
+                            "args": {
+                                "questions": [{
+                                    "question": "Which database should the service use?",
+                                    "header": "Database",
+                                    "options": [
+                                        {"label": "Postgres", "description": "Relational database"},
+                                        {"label": "SQLite", "description": "One local file"}
+                                    ]
+                                }]
+                            }
+                        }]
+                    },
+                    {"text": "Thanks."}
+                ]
+            }"#,
+        )
+        .expect("the fake-provider script writes");
+
+        let engine = Engine::new(
+            Arc::new(FakeProvider::new("", Duration::ZERO).with_script(&script)),
+            fake::MODEL,
+            Arc::new(ganja_tool::Registry::new(vec![Arc::new(
+                ganja_tool::question::QuestionTool,
+            )])),
+            ganja_permission::Permissions::default(),
+        );
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, None, Themes::builtin());
+        app.engine
+            .send(ganja_protocol::Command::SendPrompt {
+                text: "ask me".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts the prompt");
+
+        for _ in 0..64 {
+            let event = next_event(&mut events).await;
+            let asked = matches!(event, CoreEvent::QuestionAsked { .. });
+            app.handle(AppEvent::core(event))
+                .await
+                .expect("an engine event is handled");
+            if asked {
+                return (directory, app, events);
+            }
+        }
+
+        panic!("the scripted turn did not ask its question");
+    }
+
+    /// The next engine event, bounded so a broken dialog test fails rather
+    /// than hanging the whole suite in the condition it is meant to prevent.
+    async fn next_event(events: &mut BoxStream<'static, CoreEvent>) -> CoreEvent {
+        tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("the engine reports before the dialog timeout")
+            .expect("the engine keeps reporting")
     }
 
     /// Feeds the app the next `count` engine events.
@@ -3458,6 +3603,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_question_dialog_offers_the_options_and_enter_replies_the_selected_label() {
+        let (_directory, mut app, mut events) = questioning().await;
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        for expected in [
+            "Database",
+            "Which database should the service use?",
+            "Postgres",
+            "Relational database",
+            "SQLite",
+            "One local file",
+        ] {
+            assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+        }
+
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE))
+            .await
+            .expect("down is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert!(
+            app.question.is_some(),
+            "the dialog waits for QuestionReplied before closing"
+        );
+
+        let mut answered = None;
+        for _ in 0..64 {
+            let event = next_event(&mut events).await;
+            if let CoreEvent::QuestionReplied { answers, .. } = &event {
+                answered = Some(answers.clone());
+            }
+            let finished = matches!(event, CoreEvent::MessageFinished { .. });
+            app.handle(AppEvent::core(event))
+                .await
+                .expect("an engine event is handled");
+            if finished {
+                break;
+            }
+        }
+
+        assert_eq!(answered, Some(vec![vec!["SQLite".to_owned()]]));
+        assert!(app.question.is_none());
+    }
+
+    #[tokio::test]
+    async fn esc_rejects_the_question_and_the_turn_reads_it_as_dismissal() {
+        let (_directory, mut app, mut events) = questioning().await;
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(
+            app.question.is_some(),
+            "the dialog waits for QuestionRejected before closing"
+        );
+
+        let mut rejected = false;
+        let mut dismissed = false;
+        for _ in 0..64 {
+            let event = next_event(&mut events).await;
+            match &event {
+                CoreEvent::QuestionRejected { .. } => rejected = true,
+                CoreEvent::PartUpdated { part, .. } => {
+                    if let PartBody::Tool { tool, state, .. } = &part.body
+                        && tool == "question"
+                        && matches!(state, ToolState::Error { error, .. } if error == ganja_tool::question::DISMISSED)
+                    {
+                        dismissed = true;
+                    }
+                }
+                _ => {}
+            }
+            let finished = matches!(event, CoreEvent::MessageFinished { .. });
+            app.handle(AppEvent::core(event))
+                .await
+                .expect("an engine event is handled");
+            if finished {
+                break;
+            }
+        }
+
+        assert!(rejected, "the engine should announce the dismissal");
+        assert!(
+            dismissed,
+            "the question tool should read its dismissal text"
+        );
+        assert!(app.question.is_none());
+    }
+
+    #[tokio::test]
     async fn control_c_still_quits_while_the_dialog_is_open() {
         let mut app = app();
         app.handle(AppEvent::core(permission_event("perm_1")))
@@ -4535,6 +4773,30 @@ mod tests {
         assert!(
             screen(&terminal).contains("plan"),
             "the bar should name the agent:\n{}",
+            screen(&terminal)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_change_the_engine_announces_moves_the_indicator() {
+        let mut app = app();
+
+        app.handle(AppEvent::core(CoreEvent::AgentChanged {
+            session_id: session(),
+            agent: "plan".to_owned(),
+            model: "provider/planner".to_owned(),
+        }))
+        .await
+        .expect("an agent change is handled");
+
+        assert_eq!(app.agent.as_deref(), Some("plan"));
+        assert_eq!(app.model, "provider/planner");
+
+        let mut terminal = terminal(80, 8);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("plan"),
+            "the status bar should name the announced agent:\n{}",
             screen(&terminal)
         );
     }

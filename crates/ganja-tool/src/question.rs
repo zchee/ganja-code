@@ -273,6 +273,7 @@ mod tests {
             credentials: Credentials::Unguarded,
             spawn: None,
             ask: asker,
+            switch: None,
         }
     }
 

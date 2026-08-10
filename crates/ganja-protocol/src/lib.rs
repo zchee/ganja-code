@@ -1055,8 +1055,25 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
     },
-    /// The turn ended and the engine is idle again. Always the last event of a
-    /// turn, whatever went wrong during it.
+    /// The engine adopted an agent after construction, whether at the
+    /// plan-approval turn boundary or through [`Command::SwitchAgent`].
+    /// Emitting from both paths keeps a frontend's indicator independent of
+    /// whether that frontend issued the command itself. The model travels with
+    /// the agent because adoption may also adopt its preferred model; the build
+    /// agent has no preference, so the boundary emission reports the exact
+    /// model that remains active.
+    AgentChanged {
+        /// Session this happened in.
+        session_id: SessionId,
+        /// The agent now active for this session, by name (e.g. "build", "plan").
+        agent: String,
+        /// The model now active for this session.
+        model: String,
+    },
+    /// The turn ended and the engine is idle again. It is the last event of a
+    /// turn, whatever went wrong during it, save for the one
+    /// [`Event::AgentChanged`] a plan approval may announce immediately after
+    /// it.
     MessageFinished {
         /// Session this happened in.
         session_id: SessionId,
@@ -1097,6 +1114,7 @@ impl Event {
             | Event::QuestionReplied { session_id, .. }
             | Event::QuestionRejected { session_id, .. }
             | Event::RevertChanged { session_id, .. }
+            | Event::AgentChanged { session_id, .. }
             | Event::MessageFinished { session_id, .. } => session_id,
         }
     }
@@ -1269,7 +1287,7 @@ mod tests {
     }
 
     /// The cases cover every variant, so the loop's accessor assertion is
-    /// also the proof that [`Event::session_id`] reads all eight of them.
+    /// also the proof that [`Event::session_id`] reads every one of them.
     #[test]
     fn events_round_trip_through_json() {
         let message = pinned_message();
@@ -1335,6 +1353,11 @@ mod tests {
                 revert: None,
                 prompt: None,
             },
+            Event::AgentChanged {
+                session_id: pinned_session(),
+                agent: "build".to_owned(),
+                model: "claude-sonnet-4-5".to_owned(),
+            },
         ];
 
         for event in cases {
@@ -1347,6 +1370,24 @@ mod tests {
             let encoded = serde_json::to_string(&event).expect("an event serializes");
             let decoded: Event = serde_json::from_str(&encoded).expect("an event deserializes");
             assert_eq!(decoded, event, "round trip changed {encoded}");
+        }
+    }
+
+    #[test]
+    fn agent_changed_carries_the_session_the_agent_and_the_model() {
+        let event = Event::AgentChanged {
+            session_id: pinned_session(),
+            agent: "build".to_owned(),
+            model: "claude-sonnet-4-5".to_owned(),
+        };
+
+        assert_eq!(event.session_id(), &pinned_session());
+        match event {
+            Event::AgentChanged { agent, model, .. } => {
+                assert_eq!(agent, "build");
+                assert_eq!(model, "claude-sonnet-4-5");
+            }
+            other => panic!("expected an agent change, got {other:?}"),
         }
     }
 
@@ -1733,6 +1774,16 @@ mod tests {
                     id: QuestionId::from("que_1".to_owned()),
                 }),
                 r#"{"type":"question_rejected","session_id":"ses_1","id":"que_1"}"#,
+            ),
+            // Agent adoption announces both values because choosing an agent
+            // may also choose its preferred model.
+            (
+                serde_json::to_string(&Event::AgentChanged {
+                    session_id: pinned_session(),
+                    agent: "build".to_owned(),
+                    model: "claude-sonnet-4-5".to_owned(),
+                }),
+                r#"{"type":"agent_changed","session_id":"ses_1","agent":"build","model":"claude-sonnet-4-5"}"#,
             ),
             (
                 serde_json::to_string(&Command::ReplyQuestion {

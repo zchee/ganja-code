@@ -162,6 +162,7 @@ async fn a_files_own_write_does_not_condemn_it() {
         credentials: Credentials::Unguarded,
         spawn: None,
         ask: None,
+        switch: None,
     };
     for content in ["what the agent wrote", "and then wrote again"] {
         WriteTool

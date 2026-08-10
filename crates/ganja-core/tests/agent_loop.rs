@@ -149,6 +149,7 @@ fn shape(event: &Event) -> String {
                 None => "cleared",
             }
         ),
+        Event::AgentChanged { agent, .. } => format!("agent_changed:{agent}"),
     }
 }
 

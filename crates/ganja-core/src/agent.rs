@@ -30,12 +30,16 @@
 //! the two agree everywhere except on the tools ganja deliberately gates.
 //!
 //! Upstream rules naming permissions this build has no tool for — `list`,
-//! `question`, `doom_loop`, `plan_enter`, `plan_exit`, `lsp` — are not ported.
+//! `question`, `doom_loop`, `plan_enter`, `lsp` — are not ported.
 //! A rule about a tool that cannot be called decides nothing, and carrying it
 //! would suggest the tool exists. The one exception is `task`, kept on [`PLAN`]
 //! so that the agent whose point is "do not act" already denies the subagent
 //! that would act for it, the day the task tool lands. `websearch` came off
-//! that list with the tool: [`EXPLORE`] allows it, exactly as upstream's does.
+//! that list with the tool: [`EXPLORE`] allows it, exactly as upstream's does
+//! — and `plan_exit` came off it with the plan tool: the shared defaults deny
+//! it and [`PLAN`] alone allows it. Denied tools are still not hidden, so
+//! build's model sees `plan_exit` in its schema and a call comes back as
+//! refusal text it reads.
 //!
 //! Upstream also *hides* a tool from the model's schema when the last rule
 //! matching it is `"*": "deny"` (`permission/index.ts`, `disabled`). That is
@@ -236,10 +240,13 @@ fn builtins(config: &Config) -> Vec<Agent> {
             prompt: None,
             model: None,
             // Upstream's delta is `question: allow` and `plan_enter: allow`.
-            // `question` has a tool behind it now and `ask` is what an
-            // interactive session wants for it; `plan_enter` still names
-            // nothing. Either way the delta is not adopted, so the baseline
-            // stays what it was.
+            // Neither is adopted, and neither would change anything:
+            // `plan_enter` still names nothing, and `question`'s un-ruled
+            // baseline is already *allow* — `decide()` falls through to allow
+            // for a tool no rule and no ask-by-default entry names, and
+            // `question` appears in neither. Whether `question` should
+            // instead gain an explicit rule is a decision deliberately not
+            // taken here.
             rules: assemble(Vec::new()),
         },
         Agent {
@@ -264,6 +271,11 @@ fn builtins(config: &Config) -> Vec<Agent> {
                 // that this port does not have (deviation: plan-denies-write).
                 rule("edit", ANY, Action::Deny),
                 rule("write", ANY, Action::Deny),
+                // The one agent whose finished plan has somewhere to go:
+                // upstream's `plan_exit: allow`, over the shared default deny.
+                // Subagents inherit refusals and never allows, so no child
+                // ever carries this one down.
+                rule("plan_exit", ANY, Action::Allow),
             ]),
         },
         Agent {
@@ -343,6 +355,12 @@ fn defaults() -> Vec<Rule> {
         // the agents below turn it off and on again, and a rule that is only
         // implied cannot be put back.
         rule(EXTERNAL_DIRECTORY, ANY, Action::Ask),
+        // Upstream defaults `plan_exit` to deny and allows it on plan alone.
+        // The deny must be written here, not merely implied: `plan_exit` is
+        // not in the ask-by-default table, so an un-ruled call would fall
+        // through `decide()` to *allow* and build could leave a mode it was
+        // never in, unasked.
+        rule("plan_exit", ANY, Action::Deny),
         // Upstream's comment: mirrors github/gitignore's Node.gitignore
         // patterns for .env files. Reading is otherwise free, so this is the
         // one place a read stops to ask.
@@ -481,7 +499,7 @@ mod tests {
     use super::{Agent, AgentError, BUILD, EXPLORE, EXPLORE_PROMPT, GENERAL, PLAN, Registry};
     use crate::{
         config::{AgentConfig, AgentMode, Config, Overrides},
-        permission::{Action, PermissionConfig, Rule},
+        permission::{Action, PermissionConfig, Permissions, Rule},
     };
 
     /// The agents a config defines, by name — the type [`Config::agent`] holds,
@@ -650,6 +668,61 @@ mod tests {
 
     /// A pattern that stands for whatever the tool was handed.
     const ANY_CALL: &str = "*";
+
+    /// Upstream's `plan_exit: allow` delta, over the shared default deny that
+    /// keeps the un-ruled fallthrough — which is allow — from deciding.
+    #[test]
+    fn the_planning_agent_alone_may_leave_planning() {
+        let registry = registry(&Config::default());
+
+        assert_eq!(
+            decides(
+                &registry.get(PLAN).expect("plan is builtin").rules,
+                "plan_exit",
+                ANY_CALL
+            ),
+            Some(Action::Allow)
+        );
+    }
+
+    #[test]
+    fn the_build_agent_is_refused_the_exit_it_does_not_need() {
+        let registry = registry(&Config::default());
+
+        assert_eq!(
+            decides(
+                &registry.get(BUILD).expect("build is builtin").rules,
+                "plan_exit",
+                ANY_CALL
+            ),
+            Some(Action::Deny)
+        );
+    }
+
+    /// A subagent's ruleset is its own rules plus what the parent session
+    /// insists on — and only refusals travel down, so a child spawned from a
+    /// *planning* session still may not call the exit its parent is allowed.
+    #[test]
+    fn a_subagent_inherits_the_refusal_and_not_the_plan_agents_allow() {
+        let registry = registry(&Config::default());
+        let mut parent = Permissions::default();
+        parent.set_baseline(registry.get(PLAN).expect("plan is builtin").rules.clone());
+
+        for name in [GENERAL, EXPLORE] {
+            let mut child = registry
+                .get(name)
+                .expect("a builtin subagent")
+                .rules
+                .clone();
+            child.extend(parent.inherited_by_subagent());
+
+            assert_eq!(
+                decides(&child, "plan_exit", ANY_CALL),
+                Some(Action::Deny),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn a_config_rule_is_appended_after_the_agents_own() {

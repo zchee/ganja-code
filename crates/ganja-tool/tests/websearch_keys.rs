@@ -23,6 +23,7 @@ fn ctx() -> ToolCtx {
         credentials: Credentials::Unguarded,
         spawn: None,
         ask: None,
+        switch: None,
     }
 }
 
