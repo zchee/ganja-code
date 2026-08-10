@@ -193,7 +193,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             .with_base_url(&url);
 
         let request = ChatRequest {
-            variant_options: Default::default(),
+            effort_options: Default::default(),
             model: "test-model".to_owned(),
             system: None,
             messages: vec![ganja_core::protocol::Message::user("hello")],
@@ -249,7 +249,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             .provider
             .stream(
                 ChatRequest {
-                    variant_options: Default::default(),
+                    effort_options: Default::default(),
                     model: configured.model.clone(),
                     system: None,
                     messages: vec![ganja_core::protocol::Message::user("hello")],

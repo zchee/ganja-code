@@ -106,7 +106,7 @@ pub struct FakeProvider {
     /// Every request asked of this provider, oldest first, shared with every
     /// clone. This is the fake's "sent body": it builds no HTTP request, so
     /// what a test reads to see what would have gone on the wire — the
-    /// messages, the tools, a variant's option map — is the [`ChatRequest`]
+    /// messages, the tools, an effort's option map — is the [`ChatRequest`]
     /// itself, recorded verbatim.
     recorded: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
 }
@@ -451,7 +451,7 @@ mod tests {
 
     fn request(prompt: &str) -> ChatRequest {
         ChatRequest {
-            variant_options: Default::default(),
+            effort_options: Default::default(),
             model: MODEL.to_owned(),
             system: None,
             messages: vec![Message::user(prompt)],

@@ -1,10 +1,10 @@
-//! Model variants end to end: the catalog names them, the engine validates
+//! Model efforts end to end: the catalog names them, the engine validates
 //! and remembers them, the request carries their options, and the session row
 //! round-trips them across a resume.
 //!
 //! In its own binary because the catalog is a process-global table and these
 //! tests install one: [`fixture_catalog`] points [`GANJA_MODELS_PATH`] at a
-//! written `api.json` whose `fake` provider carries variants, exactly once
+//! written `api.json` whose `fake` provider carries efforts, exactly once
 //! per process. Every test calls it first, so the unsafe environment writes
 //! all happen inside the `Once` before anything else in this binary reads the
 //! environment — the discipline `catalog_offline.rs` established. Storage
@@ -25,7 +25,7 @@ use ganja_core::{
 };
 use tempfile::TempDir;
 
-/// The options the fixture publishes under `canned`'s `max` variant, spelled
+/// The options the fixture publishes under `canned`'s `max` effort, spelled
 /// once: what the catalog carries is what the request must carry.
 fn max_options() -> serde_json::Map<String, serde_json::Value> {
     serde_json::json!({"thinking": {"type": "enabled", "budgetTokens": 32000}})
@@ -35,7 +35,7 @@ fn max_options() -> serde_json::Map<String, serde_json::Value> {
 }
 
 /// Installs a catalog whose `fake` provider serves two models: `canned` with
-/// the `max` and `mini` variants, and `plain` with none.
+/// the `max` and `mini` efforts, and `plain` with none.
 fn fixture_catalog() {
     static FIXTURE: OnceLock<TempDir> = OnceLock::new();
     static INSTALL: Once = Once::new();
@@ -103,7 +103,7 @@ async fn until_finished(events: &mut BoxStream<'static, Event>) -> Vec<Event> {
 }
 
 #[tokio::test]
-async fn selecting_a_variant_lands_its_option_map_in_the_next_request() {
+async fn selecting_an_effort_lands_its_option_map_in_the_next_request() {
     fixture_catalog();
     let provider = FakeProvider::new("one two", std::time::Duration::from_millis(1));
     let recorder = provider.clone();
@@ -111,12 +111,12 @@ async fn selecting_a_variant_lands_its_option_map_in_the_next_request() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchVariant {
-            variant: Some("max".to_owned()),
+        .send(Command::SwitchEffort {
+            effort: Some("max".to_owned()),
         })
         .await
         .expect("the fixture catalog carries max");
-    assert_eq!(engine.variant().as_deref(), Some("max"));
+    assert_eq!(engine.effort().as_deref(), Some("max"));
 
     engine
         .send(Command::SendPrompt {
@@ -129,7 +129,7 @@ async fn selecting_a_variant_lands_its_option_map_in_the_next_request() {
     assert!(
         seen.iter().any(|event| matches!(
             event,
-            Event::VariantChanged { variant: Some(name), .. } if name == "max"
+            Event::EffortChanged { effort: Some(name), .. } if name == "max"
         )),
         "the adoption was announced: {seen:?}"
     );
@@ -137,21 +137,21 @@ async fn selecting_a_variant_lands_its_option_map_in_the_next_request() {
     let requests = recorder.recorded();
     assert_eq!(requests.len(), 1, "one turn, one request");
     assert_eq!(
-        requests[0].variant_options,
+        requests[0].effort_options,
         max_options(),
         "the catalog's option map rides the request verbatim"
     );
 }
 
 #[tokio::test]
-async fn switching_to_a_model_without_the_variant_clears_it_and_announces_the_clear() {
+async fn switching_to_a_model_without_the_effort_clears_it_and_announces_the_clear() {
     fixture_catalog();
     let engine = engine_over(FakeProvider::new("hi", std::time::Duration::from_millis(1)));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchVariant {
-            variant: Some("mini".to_owned()),
+        .send(Command::SwitchEffort {
+            effort: Some("mini".to_owned()),
         })
         .await
         .expect("the fixture catalog carries mini");
@@ -163,18 +163,18 @@ async fn switching_to_a_model_without_the_variant_clears_it_and_announces_the_cl
         .expect("the fixture catalog carries plain");
 
     assert_eq!(
-        engine.variant(),
+        engine.effort(),
         None,
         "a model without the name cannot keep the selection (upstream prompt.ts:654)"
     );
     let adopted = events.next().await.expect("the adoption frame");
     assert!(
-        matches!(&adopted, Event::VariantChanged { variant: Some(name), .. } if name == "mini"),
+        matches!(&adopted, Event::EffortChanged { effort: Some(name), .. } if name == "mini"),
         "got {adopted:?}"
     );
     let cleared = events.next().await.expect("the clearing frame");
     assert!(
-        matches!(&cleared, Event::VariantChanged { variant: None, .. }),
+        matches!(&cleared, Event::EffortChanged { effort: None, .. }),
         "the clear is announced, not silent: {cleared:?}"
     );
 }
@@ -185,8 +185,8 @@ async fn a_wrong_name_is_refused_listing_the_real_names() {
     let engine = engine_over(FakeProvider::new("hi", std::time::Duration::from_millis(1)));
 
     let refusal = engine
-        .send(Command::SwitchVariant {
-            variant: Some("nope".to_owned()),
+        .send(Command::SwitchEffort {
+            effort: Some("nope".to_owned()),
         })
         .await
         .expect_err("the fixture catalog has no such name")
@@ -197,11 +197,11 @@ async fn a_wrong_name_is_refused_listing_the_real_names() {
         refusal.contains("max, mini"),
         "the useful half of the refusal is the names that would have worked: {refusal}"
     );
-    assert_eq!(engine.variant(), None);
+    assert_eq!(engine.effort(), None);
 }
 
 #[tokio::test]
-async fn the_stored_variant_survives_a_resume() {
+async fn the_stored_effort_survives_a_resume() {
     fixture_catalog();
     let directory = TempDir::new().expect("a temporary directory");
     let storage = || ganja_core::Storage::open(directory.path().join("storage"));
@@ -218,8 +218,8 @@ async fn the_stored_variant_survives_a_resume() {
     );
     let mut events = first.subscribe().await.expect("the first subscriber wins");
     first
-        .send(Command::SwitchVariant {
-            variant: Some("max".to_owned()),
+        .send(Command::SwitchEffort {
+            effort: Some("max".to_owned()),
         })
         .await
         .expect("the fixture catalog carries max");
@@ -254,8 +254,8 @@ async fn the_stored_variant_survives_a_resume() {
         .expect("the stored session resumes");
 
     assert_eq!(
-        second.variant().as_deref(),
+        second.effort().as_deref(),
         Some("max"),
-        "the row carried the variant across the restart"
+        "the row carried the effort across the restart"
     );
 }

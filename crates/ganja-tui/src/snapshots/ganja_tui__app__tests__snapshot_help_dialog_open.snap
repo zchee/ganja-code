@@ -9,7 +9,7 @@ ganj│/new           New session                                            │
 One │/compact       Compact session                                        │    
 [don│/editor        Open editor                                            │    
 @@ -│/models        Switch model                                           │    
--let│/variants      Switch model variant                                   │    
+-let│/effort        Switch model effort                                    │    
 +let│/agents        Switch agent                                           │    
 cont│/themes        Switch theme                                     ctrl+t│    
 [err│/help          Help                                                   │    

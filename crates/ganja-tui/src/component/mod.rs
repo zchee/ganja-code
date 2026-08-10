@@ -8,6 +8,7 @@
 pub mod chat;
 pub mod dropdown;
 pub mod editor;
+pub mod effort;
 pub mod files;
 pub mod help;
 pub mod list;
@@ -17,4 +18,3 @@ pub mod question;
 pub mod sessions;
 pub mod status;
 pub mod themes;
-pub mod variants;

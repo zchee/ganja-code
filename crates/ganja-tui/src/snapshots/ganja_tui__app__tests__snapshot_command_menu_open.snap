@@ -13,11 +13,11 @@ One edit applied, one command refused.
 │  /sessions      Reopen a conversation this project has stored                │
 │  /agents        Run the rest of this session as a different agent            │
 │  /copy          Put the whole conversation on the clipboard, as markdown     │
+│  /effort        Run the model under one of its catalog efforts               │
 │  /init          guided AGENTS.md setup                                       │
 │  /models        Ask the rest of this session of a different model            │
 │  /new           Leave this conversation and start an empty one               │
 │  /themes        Repaint the screen in another palette                        │
-│  /variants      Run the model under one of its catalog variants              │
 │  /copy-message  Put the model's last reply on the clipboard                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ message ─────────────────────────────────────────────────────────────────────┐

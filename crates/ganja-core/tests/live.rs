@@ -53,7 +53,7 @@ async fn smoke(provider: &dyn Provider, model: &str) {
     let events: Vec<ProviderEvent> = provider
         .stream(
             ChatRequest {
-                variant_options: Default::default(),
+                effort_options: Default::default(),
                 model: model.to_owned(),
                 system: Some("Answer with a single word.".to_owned()),
                 messages: vec![Message::user(PROMPT)],

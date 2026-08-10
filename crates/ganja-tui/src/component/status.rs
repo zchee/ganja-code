@@ -107,12 +107,12 @@ pub struct Status {
     /// registry — which is every scripted and golden run, and is why the bar
     /// says nothing rather than saying "none".
     agent: Option<String>,
-    /// The model and the variant it runs under, shown only while a variant is
-    /// selected: the bar never named the model before variants existed, and a
+    /// The model and the effort it runs under, shown only while an effort is
+    /// selected: the bar never named the model before efforts existed, and a
     /// session running Default keeps exactly the bar it always had. The model
-    /// rides along because a variant's name alone ("max") says nothing
+    /// rides along because an effort's name alone ("max") says nothing
     /// without the model it belongs to.
-    variant: Option<(String, String)>,
+    effort: Option<(String, String)>,
     /// Whether the composer is running shell commands, which changes which
     /// keys are worth reminding the user about.
     shell: bool,
@@ -128,7 +128,7 @@ impl Status {
             notice,
             totals: None,
             agent: None,
-            variant: None,
+            effort: None,
             shell: false,
         }
     }
@@ -138,10 +138,10 @@ impl Status {
         self.agent = agent;
     }
 
-    /// Names the `(model, variant)` the next turn runs under, or clears the
+    /// Names the `(model, effort)` the next turn runs under, or clears the
     /// segment — which a session back on Default does.
-    pub fn set_variant(&mut self, variant: Option<(String, String)>) {
-        self.variant = variant;
+    pub fn set_effort(&mut self, effort: Option<(String, String)>) {
+        self.effort = effort;
     }
 
     /// Records whether the composer is running shell commands.
@@ -194,10 +194,10 @@ impl Status {
         }
         // Beside the agent, and for the same reason: both say what the *next*
         // turn will be.
-        if let Some((model, variant)) = &self.variant {
+        if let Some((model, effort)) = &self.effort {
             left.push_str(model);
             left.push_str(" (");
-            left.push_str(variant);
+            left.push_str(effort);
             left.push(')');
             left.push_str(SEPARATOR);
         }
@@ -292,22 +292,22 @@ mod tests {
         );
     }
 
-    /// The segment appears only while a variant is selected, so every bar
-    /// drawn before variants existed — and every session on Default — renders
+    /// The segment appears only while an effort is selected, so every bar
+    /// drawn before efforts existed — and every session on Default — renders
     /// byte for byte as it always did.
     #[test]
-    fn the_bar_names_the_model_and_variant_only_while_one_is_selected() {
+    fn the_bar_names_the_model_and_effort_only_while_one_is_selected() {
         let mut status = Status::new(None);
         assert!(!rendered(&status, 100).contains('('));
 
         status.set_agent(Some("build".to_owned()));
-        status.set_variant(Some(("claude-opus-5".to_owned(), "max".to_owned())));
+        status.set_effort(Some(("claude-opus-5".to_owned(), "max".to_owned())));
 
         let line = rendered(&status, 100);
         assert!(line.starts_with("build"), "got {line:?}");
         assert!(line.contains("claude-opus-5 (max)"), "got {line:?}");
 
-        status.set_variant(None);
+        status.set_effort(None);
         assert!(!rendered(&status, 100).contains("claude-opus-5"));
     }
 

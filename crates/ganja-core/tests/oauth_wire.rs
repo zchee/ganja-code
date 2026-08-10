@@ -382,7 +382,7 @@ fn live() -> u64 {
 /// One turn's worth of request.
 fn ask() -> ChatRequest {
     ChatRequest {
-        variant_options: Default::default(),
+        effort_options: Default::default(),
         model: "grok-4.3".to_owned(),
         system: None,
         messages: vec![Message::user("hello")],

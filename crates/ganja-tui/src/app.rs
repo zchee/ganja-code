@@ -41,6 +41,7 @@ use crate::{
         chat::{Chat, WHEEL_LINES},
         dropdown::{self, Dropdown},
         editor::{self, Editor, Mode},
+        effort,
         files::Files,
         help::Help,
         list::{self, ListDialog},
@@ -50,7 +51,6 @@ use crate::{
         sessions::{self, Sessions},
         status::{Activity, Status, Totals},
         themes::ThemeList,
-        variants,
     },
     event::AppEvent,
     external,
@@ -113,9 +113,9 @@ const NOTHING_TO_COPY: &str = "there is no session to copy yet";
 /// image-notice-covers-any-non-text-clipboard).
 const IMAGE_PASTE: &str = "image paste is not supported yet";
 
-/// What `/variants` says when the active model's catalog row offers none —
-/// upstream's toast message, verbatim (`app.tsx:717`).
-const NO_VARIANTS: &str = "The current model does not support any variants.";
+/// What `/effort` says when the active model's catalog row offers none —
+/// upstream's toast message, reworded for ganja (`app.tsx:717`).
+const NO_EFFORTS: &str = "The current model does not support any efforts.";
 
 /// The one-line notice a failed MCP server earns in the status bar, or [`None`]
 /// while every configured server is either connected, disabled, or still being
@@ -168,8 +168,8 @@ enum Cleared {
 enum Chooser {
     /// The provider's catalog models.
     Models,
-    /// The active model's catalog variants, "Default" first.
-    Variants,
+    /// The active model's catalog efforts, "Default" first.
+    Effort,
     /// The agents this session may run as.
     Agents,
 }
@@ -227,10 +227,10 @@ pub struct App {
     /// Model the engine asks for, kept here because pricing a turn needs it and
     /// the engine's copy is not the frontend's business.
     model: String,
-    /// Catalog variant the next turn runs under, [`None`] for Default. Kept
+    /// Catalog effort the next turn runs under, [`None`] for Default. Kept
     /// beside [`App::model`] because the picker's active mark and the status
     /// segment both read the pair together.
-    variant: Option<String>,
+    effort: Option<String>,
     /// Agent the next turn runs as, [`None`] on a session built without a
     /// registry. Tracked here rather than read back per frame because this is
     /// the side that issues the switches.
@@ -356,9 +356,9 @@ impl App {
             engine,
             provider: String::new(),
             model,
-            // A fresh engine runs no variant, and a resumed one announces its
+            // A fresh engine runs no effort, and a resumed one announces its
             // restoration through the same accessor the resume path re-reads.
-            variant: None,
+            effort: None,
             agent,
             chat: Chat::default(),
             editor: Editor::new(&theme),
@@ -1138,7 +1138,7 @@ impl App {
             command::Action::Compact => self.compact().await,
             command::Action::Editor => self.compose_externally(),
             command::Action::Models => self.open_models(),
-            command::Action::Variants => self.open_variants(),
+            command::Action::Effort => self.open_effort(),
             command::Action::Agents => self.open_agents(),
             command::Action::Themes => self.open_themes(),
             command::Action::Help => self.help = Some(Help::new(self.keys.clone())),
@@ -1349,7 +1349,7 @@ impl App {
 
         match kind {
             Chooser::Models => self.switch_model(value).await,
-            Chooser::Variants => self.switch_variant(value).await,
+            Chooser::Effort => self.switch_effort(value).await,
             Chooser::Agents => self.switch_agent(value).await,
         }
     }
@@ -1632,23 +1632,23 @@ impl App {
             .set_notice(Some(format!("fetching {} models…", self.provider)));
     }
 
-    /// Opens the flat variant picker over the active model's catalog names.
+    /// Opens the flat effort picker over the active model's catalog names.
     ///
-    /// A model the catalog gives no variants — every uncataloged provider's,
-    /// and most cataloged rows — gets upstream's refusal sentence in the
+    /// A model the catalog gives no efforts — every uncataloged provider's,
+    /// and most cataloged rows — gets ganja's reworded refusal sentence in the
     /// status bar instead of an empty dialog (`app.tsx:717`, the `variant.list`
     /// command's toast).
-    fn open_variants(&mut self) {
+    fn open_effort(&mut self) {
         let names: Vec<String> = catalog::model(&self.model)
             .map(|info| info.variants.keys().cloned().collect())
             .unwrap_or_default();
         if names.is_empty() {
-            self.status.set_notice(Some(NO_VARIANTS.to_owned()));
+            self.status.set_notice(Some(NO_EFFORTS.to_owned()));
             return;
         }
 
-        let rows = variants::rows(names.iter().map(String::as_str), self.variant.as_deref());
-        self.chooser = Some((Chooser::Variants, ListDialog::new(" variants ", rows)));
+        let rows = effort::rows(names.iter().map(String::as_str), self.effort.as_deref());
+        self.chooser = Some((Chooser::Effort, ListDialog::new(" effort ", rows)));
     }
 
     /// Opens the agent list over the agents a user may switch to.
@@ -1748,10 +1748,10 @@ impl App {
         {
             Ok(()) => {
                 self.model = model;
-                // A model that kept the variant keeps the segment, naming the
+                // A model that kept the effort keeps the segment, naming the
                 // new model; one that lost it is announced by the engine's
-                // `VariantChanged`, whose handler clears the segment then.
-                self.sync_variant_status();
+                // `EffortChanged`, whose handler clears the segment then.
+                self.sync_effort_status();
                 self.chooser = None;
                 self.status.set_notice(None);
             }
@@ -1760,20 +1760,20 @@ impl App {
     }
 
     /// Runs the rest of the session under the picker's choice — a catalog
-    /// name, or [`variants::DEFAULT`] for none.
+    /// name, or [`effort::DEFAULT`] for none.
     ///
     /// A refusal — a switch mid-turn, a name the row does not carry — lands in
     /// the status bar and leaves the list open, exactly as the model list's
     /// does.
-    async fn switch_variant(&mut self, value: String) {
-        let variant = (value != variants::DEFAULT).then_some(value);
-        match self.engine.send(Command::SwitchVariant { variant }).await {
+    async fn switch_effort(&mut self, value: String) {
+        let effort = (value != effort::DEFAULT).then_some(value);
+        match self.engine.send(Command::SwitchEffort { effort }).await {
             Ok(()) => {
                 // Redundant but harmless, the way `switch_agent`'s eager
-                // update is: `VariantChanged` is the source of truth for
+                // update is: `EffortChanged` is the source of truth for
                 // every adoption, this manual one included.
-                self.variant = self.engine.variant();
-                self.sync_variant_status();
+                self.effort = self.engine.effort();
+                self.sync_effort_status();
                 self.chooser = None;
                 self.status.set_notice(None);
             }
@@ -1781,15 +1781,15 @@ impl App {
         }
     }
 
-    /// Re-renders the status bar's `model (variant)` segment from what this
+    /// Re-renders the status bar's `model (effort)` segment from what this
     /// frontend currently believes, which is the one place the pair is put
-    /// together — a variant shown against the wrong model would name a
+    /// together — an effort shown against the wrong model would name a
     /// selection that does not exist.
-    fn sync_variant_status(&mut self) {
-        self.status.set_variant(
-            self.variant
+    fn sync_effort_status(&mut self) {
+        self.status.set_effort(
+            self.effort
                 .as_ref()
-                .map(|variant| (self.model.clone(), variant.clone())),
+                .map(|effort| (self.model.clone(), effort.clone())),
         );
     }
 
@@ -1932,10 +1932,10 @@ impl App {
                 self.agent = self.engine.agent();
                 self.status.set_agent(self.agent.clone());
                 self.model = self.engine.model();
-                // The variant rides the same stored row the agent and the
+                // The effort rides the same stored row the agent and the
                 // model do, filtered by the engine against the resumed model.
-                self.variant = self.engine.variant();
-                self.sync_variant_status();
+                self.effort = self.engine.effort();
+                self.sync_effort_status();
                 self.status.set_notice(None);
             }
             Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
@@ -2220,14 +2220,14 @@ impl App {
                 self.status.set_agent(self.agent.clone());
                 self.model = model;
                 // The segment names the model, so a switch that kept the
-                // variant re-renders it against the model now active; a
+                // effort re-renders it against the model now active; a
                 // switch that cleared it is followed by its own
-                // `VariantChanged { variant: None }`.
-                self.sync_variant_status();
+                // `EffortChanged { effort: None }`.
+                self.sync_effort_status();
             }
-            CoreEvent::VariantChanged { variant, .. } => {
-                self.variant = variant;
-                self.sync_variant_status();
+            CoreEvent::EffortChanged { effort, .. } => {
+                self.effort = effort;
+                self.sync_effort_status();
             }
             CoreEvent::MessageFinished {
                 reason,
@@ -2389,7 +2389,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        App, Chooser, Cleared, Dropdown, FRAME, Help, ListDialog, Mode, NO_VARIANTS, Palette,
+        App, Chooser, Cleared, Dropdown, FRAME, Help, ListDialog, Mode, NO_EFFORTS, Palette,
         Permission, WireListing, permission_reply,
     };
 
@@ -2401,7 +2401,7 @@ mod tests {
     }
     use crate::{
         clipboard, command,
-        component::{sessions, variants},
+        component::{effort, sessions},
         event::AppEvent,
         theme::{DEFAULT_THEME, Themes},
     };
@@ -2460,7 +2460,7 @@ mod tests {
         let storage = Storage::open(directory.path().join("storage"));
         let updated = now.saturating_sub(ago);
         let info = SessionInfo {
-            variant: None,
+            effort: None,
             id: SessionId::from(id.to_owned()),
             version: VERSION,
             title: title.map(str::to_owned),
@@ -2494,7 +2494,7 @@ mod tests {
     fn store_child(directory: &TempDir, id: &str, parent: &str) {
         let storage = Storage::open(directory.path().join("storage"));
         let info = SessionInfo {
-            variant: None,
+            effort: None,
             id: SessionId::from(id.to_owned()),
             version: VERSION,
             title: Some("find the parser (@explore subagent)".to_owned()),
@@ -4752,31 +4752,31 @@ mod tests {
         );
     }
 
-    /// The fake model has no catalog row, so `/variants` has nothing to list
-    /// — and says upstream's sentence instead of opening an empty dialog.
+    /// The fake model has no catalog row, so `/effort` has nothing to list
+    /// — and says ganja's sentence instead of opening an empty dialog.
     #[tokio::test]
-    async fn the_variant_picker_refuses_a_model_with_nothing_to_offer() {
+    async fn the_effort_picker_refuses_a_model_with_nothing_to_offer() {
         let mut app = app();
-        app.run_command(command::Action::Variants).await;
+        app.run_command(command::Action::Effort).await;
 
         assert!(app.chooser.is_none(), "there is nothing to choose from");
         assert!(
-            status_line(&mut app).contains(NO_VARIANTS),
+            status_line(&mut app).contains(NO_EFFORTS),
             "got {:?}",
             status_line(&mut app)
         );
     }
 
-    /// Enter on the picker routes through [`Command::SwitchVariant`]; the
+    /// Enter on the picker routes through [`Command::SwitchEffort`]; the
     /// engine's refusal — the fake provider has no catalog rows — lands in
     /// the status bar and leaves the list open, exactly as a refused model
     /// switch does.
     #[tokio::test]
-    async fn choosing_a_variant_sends_the_switch_and_surfaces_the_refusal() {
+    async fn choosing_an_effort_sends_the_switch_and_surfaces_the_refusal() {
         let mut app = app();
         app.chooser = Some((
-            Chooser::Variants,
-            ListDialog::new(" variants ", variants::rows(["max"], None)),
+            Chooser::Effort,
+            ListDialog::new(" effort ", effort::rows(["max"], None)),
         ));
         app.move_chooser(1);
 
@@ -4799,26 +4799,26 @@ mod tests {
     /// issued the switch — and clearing takes the segment away whole, so a
     /// session back on Default renders the bar it always had.
     #[tokio::test]
-    async fn a_variant_change_event_moves_the_status_line_and_a_clear_empties_it() {
+    async fn an_effort_change_event_moves_the_status_line_and_a_clear_empties_it() {
         let mut app = app();
         assert!(!status_line(&mut app).contains("(max)"));
 
-        app.handle(AppEvent::core(CoreEvent::VariantChanged {
+        app.handle(AppEvent::core(CoreEvent::EffortChanged {
             session_id: session(),
-            variant: Some("max".to_owned()),
+            effort: Some("max".to_owned()),
         }))
         .await
         .expect("the announcement is handled");
-        assert_eq!(app.variant.as_deref(), Some("max"));
+        assert_eq!(app.effort.as_deref(), Some("max"));
         assert!(
             status_line(&mut app).contains("canned (max)"),
-            "the model and its variant belong together: {:?}",
+            "the model and its effort belong together: {:?}",
             status_line(&mut app)
         );
 
-        app.handle(AppEvent::core(CoreEvent::VariantChanged {
+        app.handle(AppEvent::core(CoreEvent::EffortChanged {
             session_id: session(),
-            variant: None,
+            effort: None,
         }))
         .await
         .expect("the clear is handled");

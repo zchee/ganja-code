@@ -868,7 +868,7 @@ async fn a_delegated_child_is_stored_as_a_session_of_its_own_naming_its_parent()
             summary: None,
             agent: None,
             model: None,
-            variant: None,
+            effort: None,
             parent: None,
             revert: None,
         })

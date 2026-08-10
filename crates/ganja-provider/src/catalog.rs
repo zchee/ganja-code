@@ -156,6 +156,8 @@ pub struct ModelInfo {
     /// The named variants a session may run this model under, each carrying
     /// the provider options its wire splices into the request body — upstream's
     /// `variants: Record<string, Record<string, any>>` (`provider.ts:1049`).
+    /// Ganja's own surface calls these "effort"; this field keeps the catalog
+    /// schema's name (`effort-not-variants`).
     ///
     /// Empty for every model the fetched catalog publishes none for, for every
     /// row of the compiled-in snapshot — the snapshot is a pruning of the

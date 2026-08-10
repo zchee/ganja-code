@@ -155,9 +155,9 @@ pub enum Format {
 /// ganja has no surface for — a session is titled by its first completed turn,
 /// there is no share endpoint, and no reasoning part to show (deviation:
 /// run-carries-the-flags-ganja-can-honor). A flag that parsed and then did
-/// nothing would be worse than one that is absent. `--variant` left that list
-/// when catalog variants landed: it now selects one for the turn, validated
-/// against the same catalog row the interactive `/variants` picker reads.
+/// nothing would be worse than one that is absent. `--effort` left that list
+/// when catalog efforts landed: it now selects one for the turn, validated
+/// against the same catalog row the interactive `/effort` picker reads.
 ///
 /// `--attach` is here now; the three upstream flags that travel with it are
 /// not, and each for its own reason. `--port` is upstream's *other* attach
@@ -195,12 +195,12 @@ pub struct RunArgs {
     /// Run as this agent instead of the roster's default.
     #[arg(long, value_name = "NAME")]
     agent: Option<String>,
-    /// Run the model under this catalog variant, as `/variants` lists them.
+    /// Run the model under this catalog effort, as `/effort` lists them.
     // Refused together with `--attach`: the client's surface carries no
-    // variant route, and a flag that parsed and then decided nothing is the
+    // effort route, and a flag that parsed and then decided nothing is the
     // one thing this table refuses to hold.
     #[arg(long, value_name = "NAME", conflicts_with = "attach")]
-    variant: Option<String>,
+    effort: Option<String>,
     /// Merge exactly this config file, outranking `GANJA_CONFIG` and discovery.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -291,10 +291,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let Assembled { engine, servers } = assembled;
 
     let session = select_session(&engine, args.r#continue, args.session.as_deref()).await?;
-    // After the session, so the flag outranks whatever variant a resumed row
+    // After the session, so the flag outranks whatever effort a resumed row
     // restored; before the turn, so a bad name is this refusal — listing the
     // model's real names — and never a request built around it.
-    let outcome = match variant_switch(&engine, args.variant).await {
+    let outcome = match effort_switch(&engine, args.effort).await {
         Ok(()) => {
             drive(
                 &engine,
@@ -326,17 +326,15 @@ struct Assembled {
     servers: Arc<ganja_core::McpServers>,
 }
 
-/// Applies `--variant` to the engine before the turn, or does nothing when
+/// Applies `--effort` to the engine before the turn, or does nothing when
 /// the flag was not given.
 ///
 /// The refusal is the engine's own — the catalog row's real names for a wrong
 /// one, the no-catalog sentence for a provider without rows — surfaced
 /// verbatim as this run's exit-1 message.
-async fn variant_switch(engine: &Engine, variant: Option<String>) -> Result<()> {
-    if variant.is_some() {
-        engine
-            .send(EngineCommand::SwitchVariant { variant })
-            .await?;
+async fn effort_switch(engine: &Engine, effort: Option<String>) -> Result<()> {
+    if effort.is_some() {
+        engine.send(EngineCommand::SwitchEffort { effort }).await?;
     }
 
     Ok(())
@@ -705,7 +703,7 @@ async fn drive(
     let stderr = io::stderr();
     let mut out = stdout.lock();
     let mut err = stderr.lock();
-    let mut reporter = Reporter::new(format, id, &mut out, &mut err).with_variant(engine.variant());
+    let mut reporter = Reporter::new(format, id, &mut out, &mut err).with_effort(engine.effort());
 
     if let Err(error) = started {
         // Upstream reports a refused prompt and stops without waiting on a
@@ -765,10 +763,10 @@ struct Reporter<'a> {
     err: &'a mut dyn Write,
     /// Whether the `> agent · model` header has been written.
     announced: bool,
-    /// The variant the turn runs under, which the readable header carries
-    /// beside the model. [`None`] — every run before `--variant`, every json
+    /// The effort the turn runs under, which the readable header carries
+    /// beside the model. [`None`] — every run before `--effort`, every json
     /// run — leaves the header exactly what it always was.
-    variant: Option<String>,
+    effort: Option<String>,
     /// Text parts still streaming, in the order they opened. A text part has
     /// no completion event of its own — the step's `StepFinish` marker is what
     /// closes it (`session.rs`, "writing it also flushes the step's text
@@ -792,15 +790,15 @@ impl<'a> Reporter<'a> {
             out,
             err,
             announced: false,
-            variant: None,
+            effort: None,
             open: Vec::new(),
             failure: None,
         }
     }
 
-    /// Names the variant the readable header carries beside the model.
-    fn with_variant(mut self, variant: Option<String>) -> Self {
-        self.variant = variant;
+    /// Names the effort the readable header carries beside the model.
+    fn with_effort(mut self, effort: Option<String>) -> Self {
+        self.effort = effort;
 
         self
     }
@@ -861,13 +859,13 @@ impl<'a> Reporter<'a> {
             Event::PermissionRequested { .. }
             | Event::PermissionReplied { .. }
             | Event::RevertChanged { .. }
-            // A variant switch is session state, not an account of the turn,
-            // and this run announced its own `--variant` before the turn
+            // An effort switch is session state, not an account of the turn,
+            // and this run announced its own `--effort` before the turn
             // began — the same reasoning that leaves `AgentChanged` above
             // unrendered, and the "serialized generically" half of the flag:
             // the six nd-JSON type names have no room for a shape no consumer
             // was promised.
-            | Event::VariantChanged { .. }
+            | Event::EffortChanged { .. }
             // The quad is a dialog's lifecycle, not an account of the turn:
             // a headless run refuses every question before one can be asked,
             // and `--format json`'s six type names have no room for a shape
@@ -881,9 +879,9 @@ impl<'a> Reporter<'a> {
     }
 
     /// Writes upstream's `> agent · model` header, once, above the first thing
-    /// the model says (`run.ts:705-713`) — with the variant in parentheses
+    /// the model says (`run.ts:705-713`) — with the effort in parentheses
     /// beside the model when the turn runs under one, which is the readable
-    /// announcement `--variant` promises.
+    /// announcement `--effort` promises.
     fn announce(&mut self, message: &Message, agent: Option<&str>) {
         if self.format == Format::Json || self.announced || message.role != Role::Assistant {
             return;
@@ -891,8 +889,8 @@ impl<'a> Reporter<'a> {
         self.announced = true;
 
         let mut model = message.model.as_deref().unwrap_or_default().to_owned();
-        if let Some(variant) = &self.variant {
-            model = format!("{model} ({variant})");
+        if let Some(effort) = &self.effort {
+            model = format!("{model} ({effort})");
         }
         let line = match agent {
             Some(agent) => format!("{agent} \u{b7} {model}"),

@@ -10,10 +10,11 @@
 //! the palette, because the palette has no way to take the arguments an
 //! engine command expects.
 //!
-//! The names are upstream's, **plurals and aliases included**: `/models` not
-//! `/model`, `mo` because upstream added it to bias a half-typed `/mo` toward
-//! the model list. Getting those wrong would mean muscle memory transferring
-//! from opencode and landing on nothing.
+//! The names follow upstream except the documented `/effort` deviation,
+//! **plurals and aliases included**: `/models` not `/model`, `mo` because
+//! upstream added it to bias a half-typed `/mo` toward the model list. Getting
+//! those wrong would mean muscle memory transferring from opencode and landing
+//! on nothing.
 //!
 //! Ranking is [`nucleo_matcher`]'s, not upstream's `fuzzysort`'s. Two
 //! libraries scoring the same fragment identically is not something either of
@@ -46,8 +47,8 @@ pub enum Action {
     Editor,
     /// Open the model list for the provider this session runs on.
     Models,
-    /// Open the flat picker over the active model's catalog variants.
-    Variants,
+    /// Open the flat picker over the active model's catalog efforts.
+    Effort,
     /// Open the list of agents the session may switch to.
     Agents,
     /// Open the theme picker.
@@ -85,7 +86,7 @@ impl Action {
             | Self::Compact
             | Self::Editor
             | Self::Models
-            | Self::Variants
+            | Self::Effort
             | Self::Agents
             | Self::Help
             | Self::Copy
@@ -204,13 +205,15 @@ pub const COMMANDS: &[Entry] = &[
         suggested: true,
     },
     Entry {
-        action: Action::Variants,
-        name: "variants",
+        action: Action::Effort,
+        name: "effort",
         aliases: &[],
-        // Upstream's `variant.list` command: slash name "variants", title
-        // "Switch model variant", filed under its Agent category.
-        title: "Switch model variant",
-        description: "Run the model under one of its catalog variants",
+        // Upstream's `variant.list` command, filed under its Agent category. Deviation
+        // `effort-not-variants`: upstream's slash name is "variants" and its title
+        // "Switch model variant"; ganja surfaces the same catalog mechanism as
+        // "effort" by owner decision. The catalog field keeps upstream's schema name.
+        title: "Switch model effort",
+        description: "Run the model under one of its catalog efforts",
         category: Category::Agent,
         suggested: false,
     },
@@ -558,18 +561,17 @@ mod tests {
         }]
     }
 
-    /// The plurals are the whole point of porting the names rather than
-    /// inventing them: `/model` is upstream's *feature*, `/models` is its
-    /// command.
+    /// The spellings and aliases are the command surface's contract, including
+    /// ganja's deliberate `/effort` deviation.
     #[test]
-    fn the_command_names_are_upstreams_plurals_with_upstreams_aliases() {
+    fn the_command_names_and_aliases_match_their_surface_contract() {
         let cases = [
             ("sessions", &["resume", "continue"][..], Action::Sessions),
             ("new", &["clear"][..], Action::New),
             ("compact", &["summarize"][..], Action::Compact),
             ("editor", &[][..], Action::Editor),
             ("models", &["mo"][..], Action::Models),
-            ("variants", &[][..], Action::Variants),
+            ("effort", &[][..], Action::Effort),
             ("agents", &[][..], Action::Agents),
             ("themes", &[][..], Action::Themes),
             ("help", &[][..], Action::Help),

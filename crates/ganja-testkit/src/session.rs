@@ -28,7 +28,7 @@ pub fn seeded_session_info(id: SessionId, context_tokens: u64) -> SessionInfo {
         summary: None,
         agent: None,
         model: None,
-        variant: None,
+        effort: None,
         parent: None,
         revert: None,
     }

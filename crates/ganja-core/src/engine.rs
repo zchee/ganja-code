@@ -120,27 +120,24 @@ pub enum EngineError {
         /// The provider that was asked for it.
         provider: String,
     },
-    /// [`Command::SwitchVariant`] named a variant the active model's catalog
+    /// [`Command::SwitchEffort`] named an effort the active model's catalog
     /// row does not carry. The message lists the row's real names, because the
-    /// useful half of "no such variant" is which ones there are.
-    #[error(
-        "{model} has no variant named {variant}; {}",
-        spell_variants(available)
-    )]
-    UnknownVariant {
+    /// useful half of "no such effort" is which ones there are.
+    #[error("{model} has no effort named {effort}; {}", spell_efforts(available))]
+    UnknownEffort {
         /// The name nothing answers to.
-        variant: String,
+        effort: String,
         /// The model it was asked of.
         model: String,
-        /// Every variant that would have worked, in the catalog's order.
+        /// Every effort that would have worked, in the catalog's order.
         available: Vec<String>,
     },
-    /// [`Command::SwitchVariant`] reached a provider the catalog has no rows
-    /// for. Variants are catalog rows (upstream `provider.ts:1049`), so a
+    /// [`Command::SwitchEffort`] reached a provider the catalog has no rows
+    /// for. Efforts are catalog rows (upstream `provider.ts:1049`), so a
     /// session already running without sizing or pricing has no names to
     /// select from — the same no-catalog posture, stated for this command.
-    #[error("{provider} is not in the catalog, so its models have no variants to select")]
-    UncatalogedVariant {
+    #[error("{provider} is not in the catalog, so its models have no efforts to select")]
+    UncatalogedEffort {
         /// The provider whose models the catalog cannot describe.
         provider: String,
     },
@@ -177,12 +174,12 @@ pub enum EngineError {
     NothingToRedo,
 }
 
-/// The half of [`EngineError::UnknownVariant`]'s sentence that names what
+/// The half of [`EngineError::UnknownEffort`]'s sentence that names what
 /// *would* have worked — or owns that nothing would, which a model with no
-/// variants at all has to say rather than trailing an empty list.
-fn spell_variants(available: &[String]) -> String {
+/// efforts at all has to say rather than trailing an empty list.
+fn spell_efforts(available: &[String]) -> String {
     if available.is_empty() {
-        return "it has no variants at all".to_owned();
+        return "it has no efforts at all".to_owned();
     }
 
     format!("it has {}", available.join(", "))
@@ -369,12 +366,12 @@ struct Overrides {
 struct Active {
     /// Model the next request asks for.
     model: String,
-    /// Catalog variant the next request runs under, [`None`] for upstream's
+    /// Catalog effort the next request runs under, [`None`] for upstream's
     /// "Default". Only ever a name the active model's catalog row carries:
-    /// [`Engine::switch_variant`] validates on the way in, and every model
-    /// change runs [`Engine::reconcile_variant`] so a model that lacks the
+    /// [`Engine::switch_effort`] validates on the way in, and every model
+    /// change runs [`Engine::reconcile_effort`] so a model that lacks the
     /// name clears it (upstream `prompt.ts:654`).
-    variant: Option<String>,
+    effort: Option<String>,
     /// Agent whose prompt and rules the next turn runs under. [`None`] on an
     /// engine built without a registry, where there is nothing to run as.
     agent: Option<String>,
@@ -815,7 +812,7 @@ impl Engine {
             provider,
             active: std::sync::Mutex::new(Active {
                 model,
-                variant: None,
+                effort: None,
                 agent: None,
                 previous_agent: None,
             }),
@@ -1235,12 +1232,12 @@ impl Engine {
         self.active().agent.clone()
     }
 
-    /// The catalog variant the next turn will run under, or [`None`] for
+    /// The catalog effort the next turn will run under, or [`None`] for
     /// upstream's "Default" — which every session starts on, and the only
     /// value an uncataloged provider's session ever holds.
     #[must_use]
-    pub fn variant(&self) -> Option<String> {
-        self.active().variant.clone()
+    pub fn effort(&self) -> Option<String> {
+        self.active().effort.clone()
     }
 
     /// Whether this engine's provider can carry a binary attachment of `mime`
@@ -1478,16 +1475,16 @@ impl Engine {
             }
         }
 
-        // The stored variant is restored against whatever model the lines
+        // The stored effort is restored against whatever model the lines
         // above settled on, and dropped when that model's row no longer
         // carries it — the same rule a live model switch applies
         // (upstream `prompt.ts:654`), met again on the resume path.
-        self.active().variant = info.variant.clone();
-        if self.reconcile_variant() {
+        self.active().effort = info.effort.clone();
+        if self.reconcile_effort() {
             tracing::warn!(
                 session = info.id.as_str(),
-                variant = info.variant.as_deref().unwrap_or_default(),
-                "the stored variant is not one the resumed model carries; \
+                effort = info.effort.as_deref().unwrap_or_default(),
+                "the stored effort is not one the resumed model carries; \
                  resuming without one"
             );
         }
@@ -1629,7 +1626,7 @@ impl Engine {
             }
             Command::SwitchAgent { name } => self.switch_agent(name).await,
             Command::SwitchModel { model } => self.switch_model(model).await,
-            Command::SwitchVariant { variant } => self.switch_variant(variant).await,
+            Command::SwitchEffort { effort } => self.switch_effort(effort).await,
             Command::RunShell { command } => {
                 self.start_turn(command.clone(), TurnKind::Shell { command }, None)
                     .await
@@ -2228,7 +2225,7 @@ impl Engine {
     /// — the announced half belongs to [`Engine::adopt_agent`] on the manual
     /// path and to the turn boundary on the approval path, and a shared
     /// function that emitted would make one of them say it twice. Returns
-    /// whether adopting the agent's preferred model cleared the variant, for
+    /// whether adopting the agent's preferred model cleared the effort, for
     /// the announcing caller to say so.
     fn apply_agent(&self, agent: &Agent) -> bool {
         self.install(agent);
@@ -2243,7 +2240,7 @@ impl Engine {
                 active.model = model;
             }
         }
-        let cleared = self.reconcile_variant();
+        let cleared = self.reconcile_effort();
         self.recompose_environment();
         self.recompose_base();
         self.remember_selection();
@@ -2274,13 +2271,13 @@ impl Engine {
             })
             .await;
         // After the agent frame, so a subscriber reads the model that made
-        // the variant impossible before the clear that answers it.
+        // the effort impossible before the clear that answers it.
         if cleared {
             let _ = self
                 .fanout
-                .send(Event::VariantChanged {
+                .send(Event::EffortChanged {
                     session_id: self.session_id(),
-                    variant: None,
+                    effort: None,
                 })
                 .await;
         }
@@ -2329,16 +2326,16 @@ impl Engine {
         }
 
         self.active().model = model;
-        let cleared = self.reconcile_variant();
+        let cleared = self.reconcile_effort();
         self.recompose_environment();
         self.recompose_base();
         self.remember_selection();
         if cleared {
             let _ = self
                 .fanout
-                .send(Event::VariantChanged {
+                .send(Event::EffortChanged {
                     session_id: self.session_id(),
-                    variant: None,
+                    effort: None,
                 })
                 .await;
         }
@@ -2347,48 +2344,48 @@ impl Engine {
         Ok(())
     }
 
-    /// Runs the rest of the session under the named variant of the active
+    /// Runs the rest of the session under the named effort of the active
     /// model, or back under none.
     ///
-    /// Validation is the catalog's, in two tiers matching how variants exist
+    /// Validation is the catalog's, in two tiers matching how efforts exist
     /// at all: a provider with no rows has no names to select from, and a
     /// cataloged model refuses a name its row does not carry — with the row's
     /// real names in the refusal. Clearing (`None`) is never refused: it asks
     /// for the state every session starts in.
-    async fn switch_variant(&self, variant: Option<String>) -> Result<(), EngineError> {
+    async fn switch_effort(&self, effort: Option<String>) -> Result<(), EngineError> {
         // An announced approval is applied first, exactly as `switch_model`
         // applies it: this entry's `remember_selection` writes the row.
         let turn = self.lock_entry(PendingPolicy::Apply).await?;
 
-        if let Some(name) = &variant {
+        if let Some(name) = &effort {
             if !catalog::carries(self.provider.id()) {
-                return Err(EngineError::UncatalogedVariant {
+                return Err(EngineError::UncatalogedEffort {
                     provider: self.provider.id().to_owned(),
                 });
             }
             let model = self.active().model.clone();
             // A cataloged provider may still be asked for an uncataloged model
             // (`GANJA_MODEL` takes any spelling), and a row it does not have
-            // carries no variants — the empty list, not a panic.
+            // carries no efforts — the empty list, not a panic.
             let available: Vec<String> = catalog::model(&model)
                 .map(|info| info.variants.keys().cloned().collect())
                 .unwrap_or_default();
             if !available.iter().any(|carried| carried == name) {
-                return Err(EngineError::UnknownVariant {
-                    variant: name.clone(),
+                return Err(EngineError::UnknownEffort {
+                    effort: name.clone(),
                     model,
                     available,
                 });
             }
         }
 
-        self.active().variant = variant.clone();
+        self.active().effort = effort.clone();
         self.remember_selection();
         let _ = self
             .fanout
-            .send(Event::VariantChanged {
+            .send(Event::EffortChanged {
                 session_id: self.session_id(),
-                variant,
+                effort,
             })
             .await;
         drop(turn);
@@ -2396,21 +2393,21 @@ impl Engine {
         Ok(())
     }
 
-    /// Clears the selected variant when the active model's catalog row no
+    /// Clears the selected effort when the active model's catalog row no
     /// longer carries its name, returning whether it did — upstream clears at
     /// the same boundary (`prompt.ts:654`). The caller owns announcing a
     /// clear, because two of the three model-moving paths announce from an
     /// async context this helper does not have.
-    fn reconcile_variant(&self) -> bool {
+    fn reconcile_effort(&self) -> bool {
         let mut active = self.active();
-        let Some(name) = active.variant.as_ref() else {
+        let Some(name) = active.effort.as_ref() else {
             return false;
         };
         if catalog::model(&active.model).is_some_and(|info| info.variants.contains_key(name)) {
             return false;
         }
 
-        active.variant = None;
+        active.effort = None;
         true
     }
 
@@ -2423,11 +2420,11 @@ impl Engine {
         let Some(state) = &self.persistence else {
             return;
         };
-        let (model, variant, agent) = {
+        let (model, effort, agent) = {
             let active = self.active();
             (
                 active.model.clone(),
-                active.variant.clone(),
+                active.effort.clone(),
                 active.agent.clone(),
             )
         };
@@ -2440,7 +2437,7 @@ impl Engine {
             return;
         };
         info.model = Some(model);
-        info.variant = variant;
+        info.effort = effort;
         info.agent = agent;
         info.updated = now();
 
@@ -2481,15 +2478,15 @@ impl Engine {
                     .and_then(|registry| registry.get(agent::BUILD))
                     .expect("a plan approval is only ever pending where the registry holds build");
                 // The AgentChanged half of this boundary was already announced
-                // by the turn that moved the cell; a variant the build model
+                // by the turn that moved the cell; an effort the build model
                 // cannot carry still owes its own frame, or a frontend keeps
                 // showing a selection the row no longer holds.
                 if self.apply_agent(build) {
                     let _ = self
                         .fanout
-                        .send(Event::VariantChanged {
+                        .send(Event::EffortChanged {
                             session_id: self.session_id(),
-                            variant: None,
+                            effort: None,
                         })
                         .await;
                 }
@@ -2546,7 +2543,7 @@ impl Engine {
         // spend a notice that was never delivered (deviation:
         // build-switch-counts-only-turns-that-ask).
         let asks_the_model = matches!(kind, TurnKind::Prompt { .. });
-        let (mut model, variant, name, previous) = {
+        let (mut model, effort, name, previous) = {
             let mut active = self.active();
             let name = active.agent.clone();
             let previous = if asks_the_model {
@@ -2555,7 +2552,7 @@ impl Engine {
                 active.previous_agent.clone()
             };
 
-            (active.model.clone(), active.variant.clone(), name, previous)
+            (active.model.clone(), active.effort.clone(), name, previous)
         };
         let session_agent = self
             .agents
@@ -2594,10 +2591,10 @@ impl Engine {
         // Resolved per turn against the model this turn will actually ask —
         // upstream re-resolves from each user message (`prompt.ts:649-666`) —
         // so a `/command`'s one-turn model override that lacks the session's
-        // variant runs without it for that turn, and the session's selection
-        // stands untouched. An empty map is "no variant", the shape every
-        // request had before variants existed.
-        let variant_options = variant
+        // effort runs without it for that turn, and the session's selection
+        // stands untouched. An empty map is "no effort", the shape every
+        // request had before efforts existed.
+        let effort_options = effort
             .as_ref()
             .and_then(|name| catalog::model(&model)?.variants.get(name).cloned())
             .unwrap_or_default();
@@ -2650,7 +2647,7 @@ impl Engine {
                             self.session_id(),
                             name.clone(),
                             model.clone(),
-                            variant.clone(),
+                            effort.clone(),
                         )
                     })
                     .id
@@ -2679,7 +2676,7 @@ impl Engine {
             spawn: self.spawn_host(model.clone()),
             session_id: self.session_id(),
             model,
-            variant_options,
+            effort_options,
             system,
             reminders,
             kind,
@@ -2883,7 +2880,7 @@ fn fresh_session(
     id: SessionId,
     agent: Option<String>,
     model: String,
-    variant: Option<String>,
+    effort: Option<String>,
 ) -> SessionInfo {
     let created = now();
     let info = SessionInfo {
@@ -2897,7 +2894,7 @@ fn fresh_session(
         summary: None,
         agent,
         model: Some(model),
-        variant,
+        effort,
         // A session a person started, not one a tool call delegated.
         parent: None,
         // Nothing has been undone in a session that has not run a turn.
@@ -3118,7 +3115,7 @@ mod tests {
                 | Event::QuestionRejected { .. }
                 | Event::RevertChanged { .. }
                 | Event::AgentChanged { .. }
-                | Event::VariantChanged { .. } => {}
+                | Event::EffortChanged { .. } => {}
             }
         }
 
@@ -3358,7 +3355,7 @@ mod tests {
         let storage = Storage::open(directory.path().join("storage"));
         let session = SessionId::ascending();
         let info = SessionInfo {
-            variant: None,
+            effort: None,
             id: session.clone(),
             version: storage::VERSION,
             // Pre-titled, so the title machinery stays out of a test that is
@@ -3854,39 +3851,39 @@ mod tests {
         );
     }
 
-    /// The variant rule's outer tier: the fake provider has no catalog rows,
+    /// The effort rule's outer tier: the fake provider has no catalog rows,
     /// so *any* name is refused with the no-catalog sentence — the same
     /// posture that already denies such a session sizing and pricing — while
     /// clearing asks for the state the session is already in and is accepted
     /// and announced like any adoption.
     #[tokio::test]
-    async fn a_variant_on_an_uncataloged_provider_is_refused_naming_the_catalog() {
+    async fn an_effort_on_an_uncataloged_provider_is_refused_naming_the_catalog() {
         let engine = engine();
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
         let refusal = engine
-            .send(Command::SwitchVariant {
-                variant: Some("max".to_owned()),
+            .send(Command::SwitchEffort {
+                effort: Some("max".to_owned()),
             })
             .await
             .expect_err("the fake provider has no catalog rows");
         assert!(
-            matches!(refusal, EngineError::UncatalogedVariant { .. }),
+            matches!(refusal, EngineError::UncatalogedEffort { .. }),
             "got {refusal:?}"
         );
         assert!(
             refusal.to_string().contains("not in the catalog"),
             "the refusal names the reason: {refusal}"
         );
-        assert_eq!(engine.variant(), None, "a refused switch adopts nothing");
+        assert_eq!(engine.effort(), None, "a refused switch adopts nothing");
 
         engine
-            .send(Command::SwitchVariant { variant: None })
+            .send(Command::SwitchEffort { effort: None })
             .await
             .expect("clearing needs no catalog: it asks for the state every session starts in");
         let event = events.next().await.expect("the adoption is announced");
         assert!(
-            matches!(event, Event::VariantChanged { variant: None, .. }),
+            matches!(event, Event::EffortChanged { effort: None, .. }),
             "got {event:?}"
         );
     }
