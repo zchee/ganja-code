@@ -10,12 +10,14 @@
 //!
 //! **The newest user message, deliberately.** Everything a conversation
 //! already holds — earlier turns, tool calls and their results — travels on
-//! cursor's wire as content-addressed state served over the stream's
-//! blob-store half, which this build does not speak yet. Encoding history
-//! into this message set would invent a channel the server does not read,
-//! so the request carries what it can carry truthfully and the rest arrives
-//! with the state machinery. The advertised tools are unsent for the same
-//! reason: cursor's native tool protocol is a channel of its own.
+//! cursor's wire as content-addressed state over the stream's kv half.
+//! [`kv_answer`] speaks that channel's serving side — mid-turn the server
+//! stores blobs with this client and reads its own back, and it will not
+//! end the turn while one is unanswered — but composing *history* into
+//! blobs the request could name is still ahead, so the request carries what
+//! it can carry truthfully and the rest arrives with the state machinery.
+//! The advertised tools are unsent for the same reason: cursor's native
+//! tool protocol is a channel of its own.
 //!
 //! **The system prompt rides the answer, not the request.** The
 //! descriptor's one inline member for it, `custom_system_prompt = 8`, is an
@@ -31,11 +33,11 @@
 //! on the one channel the server honors, and never through the member it
 //! demonstrably refuses.
 
-use std::fmt::Write as _;
+use std::{collections::HashMap, fmt::Write as _};
 
 use buffa::Message as _;
 
-use super::{decode, proto};
+use super::{ID, decode, proto};
 use crate::{
     auth::pkce,
     protocol::{Message, PartBody, Role},
@@ -141,6 +143,74 @@ pub(super) fn context_answer(ask: decode::ContextAsk, system: Option<&str>) -> V
     .encode_to_vec()
 }
 
+/// The bytes answering one kv exchange, serviced against `blobs` — the
+/// turn's in-memory blob store — the way the plugin's `handleKvMessage`
+/// services its own (proxy.ts:1087-1120): a set stores the bytes and acks
+/// with the empty result (proxy.ts:1113-1117), a get returns what was
+/// stored or the not-found shape — a present result holding no data
+/// (proxy.ts:1101-1105) — and every answer echoes the id the server minted
+/// (proxy.ts:1075-1077).
+///
+/// The blob bytes are conversation state and never reach a log line: what
+/// is logged is the id's leading hex and the sizes, the plugin's own debug
+/// discipline.
+pub(super) fn kv_answer(ask: decode::KvAsk, blobs: &mut HashMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
+    let answer = match ask.op {
+        decode::KvOp::Get { blob_id } => {
+            let found = blobs.get(&blob_id).cloned();
+            tracing::debug!(
+                provider = ID,
+                blob = blob_key(&blob_id),
+                found = found.as_deref().map(<[u8]>::len),
+                "answering the server's kv get"
+            );
+            let result = match found {
+                Some(data) => proto::GetBlobResult::default().with_blob_data(data),
+                None => proto::GetBlobResult::default(),
+            };
+
+            proto::KvResponse {
+                id: ask.id,
+                get_blob_result: buffa::MessageField::some(result),
+                ..Default::default()
+            }
+        }
+        decode::KvOp::Set { blob_id, data } => {
+            tracing::debug!(
+                provider = ID,
+                blob = blob_key(&blob_id),
+                size = data.len(),
+                "answering the server's kv set"
+            );
+            blobs.insert(blob_id, data);
+
+            proto::KvResponse {
+                id: ask.id,
+                set_blob_result: buffa::MessageField::some(proto::SetBlobResult::default()),
+                ..Default::default()
+            }
+        }
+    };
+
+    proto::ClientMessage {
+        kv_response: buffa::MessageField::some(answer),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+/// A blob id's leading eight bytes as hex — sixteen characters, the width
+/// the plugin's own kv debug lines truncate to. Enough to correlate a get
+/// with the set that stored it, and never the data.
+fn blob_key(id: &[u8]) -> String {
+    id.iter()
+        .take(8)
+        .fold(String::with_capacity(16), |mut rendered, byte| {
+            let _ = write!(rendered, "{byte:02x}");
+            rendered
+        })
+}
+
 /// The text of the conversation's newest user message: its text parts in
 /// order, joined the way distinct parts read as distinct paragraphs.
 ///
@@ -168,11 +238,13 @@ fn newest_user_text(messages: &[Message]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use buffa::Message as _;
 
     use super::{
-        super::proto, ChatRequest, Message, context_answer, decode, fresh_id, newest_user_text,
-        run_message,
+        super::proto, ChatRequest, Message, context_answer, decode, fresh_id, kv_answer,
+        newest_user_text, run_message,
     };
     use crate::protocol::Part;
 
@@ -309,6 +381,94 @@ mod tests {
                 "an absent prompt is absent, not empty"
             );
         }
+    }
+
+    /// The plugin's kv semantics, end to end: the set is stored and acked
+    /// with the empty result, and the get that follows is answered with the
+    /// bytes the server handed over — id echoed on each, because the id is
+    /// how the server matches answer to question.
+    #[test]
+    fn a_kv_set_is_stored_and_acked_and_the_get_that_follows_returns_it() {
+        let mut blobs = HashMap::new();
+
+        let stored = kv_answer(
+            decode::KvAsk {
+                id: Some(11),
+                op: decode::KvOp::Set {
+                    blob_id: b"blob-a".to_vec(),
+                    data: b"opaque-state".to_vec(),
+                },
+            },
+            &mut blobs,
+        );
+        let decoded = proto::ClientMessage::decode_from_slice(&stored).expect("decodes");
+        assert!(
+            decoded.run_request.as_option().is_none()
+                && decoded.exec_response.as_option().is_none(),
+            "a kv answer is a kv answer and nothing else"
+        );
+        let answer = decoded.kv_response.as_option().expect("the kv answer");
+        assert_eq!(answer.id, Some(11), "the id the server minted comes back");
+        assert!(
+            answer.set_blob_result.is_set(),
+            "the ack is the present-but-empty result the plugin sends"
+        );
+        assert!(answer.get_blob_result.as_option().is_none());
+
+        let read = kv_answer(
+            decode::KvAsk {
+                id: Some(12),
+                op: decode::KvOp::Get {
+                    blob_id: b"blob-a".to_vec(),
+                },
+            },
+            &mut blobs,
+        );
+        let decoded = proto::ClientMessage::decode_from_slice(&read).expect("decodes");
+        let answer = decoded.kv_response.as_option().expect("the kv answer");
+        assert_eq!(answer.id, Some(12));
+        assert_eq!(
+            answer
+                .get_blob_result
+                .as_option()
+                .and_then(|result| result.blob_data.as_deref()),
+            Some(b"opaque-state".as_slice()),
+            "the get reads back exactly what the set stored"
+        );
+    }
+
+    /// The plugin's miss shape (proxy.ts:1101-1105): the result message is
+    /// present, the data member is absent — never empty bytes pretending to
+    /// be a blob, and never a failure, because a fresh turn holding nothing
+    /// is a state the server itself created.
+    #[test]
+    fn a_kv_get_before_any_set_answers_not_found_without_inventing_bytes() {
+        let mut blobs = HashMap::new();
+
+        let read = kv_answer(
+            decode::KvAsk {
+                id: None,
+                op: decode::KvOp::Get {
+                    blob_id: b"blob-b".to_vec(),
+                },
+            },
+            &mut blobs,
+        );
+        let decoded = proto::ClientMessage::decode_from_slice(&read).expect("decodes");
+        let answer = decoded.kv_response.as_option().expect("the kv answer");
+        assert_eq!(
+            answer.id, None,
+            "an id the server never sent is not invented"
+        );
+        let result = answer
+            .get_blob_result
+            .as_option()
+            .expect("the result is present even without the blob");
+        assert_eq!(
+            result.blob_data, None,
+            "not-found is absence, not empty bytes"
+        );
+        assert!(blobs.is_empty(), "a get stores nothing");
     }
 
     #[test]

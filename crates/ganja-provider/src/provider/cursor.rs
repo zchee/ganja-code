@@ -48,7 +48,12 @@
 //! the stored login is read per request, so a login that happens after a
 //! session starts is picked up by its next request.
 
-use std::{collections::VecDeque, convert::Infallible, fmt, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    convert::Infallible,
+    fmt,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt as _, channel::mpsc, stream, stream::BoxStream};
@@ -319,6 +324,7 @@ impl CursorWire {
             Duplex {
                 answers,
                 system: request.system.clone(),
+                blobs: HashMap::new(),
             },
         ))
     }
@@ -390,17 +396,27 @@ impl CursorWire {
 struct Duplex {
     answers: mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
     system: Option<String>,
+    /// The turn's blob store: what the server asked this client to hold
+    /// mid-turn, read back by the server's own gets. Per-turn on purpose —
+    /// this build carries no conversation state across turns, so every turn
+    /// starts the way the plugin's fresh conversation does, holding nothing
+    /// (proxy.ts:585) — and a get before any set is answered not-found
+    /// rather than failed, because an empty store is a state the server
+    /// itself put there.
+    blobs: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 /// Drives the body's chunks through the Connect splitter and the mapping,
 /// handing out each frame's events the moment the frame completes.
 ///
-/// The duplex's answer path rides here too: a frame that decodes to the
-/// server's context ask is answered on the held-open request body before
-/// the next frame is read, because the server holds generation until the
+/// The duplex's answer path rides here too: a frame that decodes to one of
+/// the server's asks — the exec channel's context ask, the kv channel's
+/// blob exchanges — is answered on the held-open request body before the
+/// next frame is read, because the server holds generation until the
 /// answer lands. An ask the body can no longer carry an answer to fails the
-/// turn readably — an unanswered exec is the silent hang the 2026-08-10
-/// live turn died of, and never again an outcome.
+/// turn readably — an unanswered ask is the silent hang the 2026-08-10
+/// live turns died of, once on the exec channel and once on the kv channel,
+/// and never again an outcome.
 ///
 /// The cancellation posture is the SSE fold's, verbatim: the token is
 /// checked before handing out a buffered event as well as before pulling a
@@ -485,23 +501,35 @@ where
                                     // Answered the moment it decodes: the
                                     // server holds generation until the
                                     // reply lands on the body the run
-                                    // request opened.
-                                    let answer = connect::envelope(&request::context_answer(
-                                        ask,
-                                        state.duplex.system.as_deref(),
-                                    ));
-                                    if state.duplex.answers.unbounded_send(Ok(answer)).is_err() {
+                                    // request opened. Both kinds go out on
+                                    // that one channel in frame order, so a
+                                    // kv answer can never overtake the
+                                    // context answer ahead of it.
+                                    let (answer, asked) = match ask {
+                                        decode::Ask::Context(ask) => (
+                                            request::context_answer(
+                                                ask,
+                                                state.duplex.system.as_deref(),
+                                            ),
+                                            "context ask",
+                                        ),
+                                        decode::Ask::Kv(ask) => (
+                                            request::kv_answer(ask, &mut state.duplex.blobs),
+                                            "kv ask",
+                                        ),
+                                    };
+                                    let enveloped = connect::envelope(&answer);
+                                    if state.duplex.answers.unbounded_send(Ok(enveloped)).is_err() {
                                         // A body nothing holds open cannot
                                         // carry the answer, and an
-                                        // unanswered exec is a hang — so
+                                        // unanswered ask is a hang — so
                                         // the turn fails, readably.
                                         state.done = true;
                                         state.scratch.push(ProviderEvent::Failed(
-                                            ProviderError::Transport(
+                                            ProviderError::Transport(format!(
                                                 "the request body closed before the server's \
-                                                 context ask could be answered"
-                                                    .to_owned(),
-                                            ),
+                                                 {asked} could be answered"
+                                            )),
                                         ));
                                         break;
                                     }
@@ -573,6 +601,7 @@ fn replay(body: Vec<u8>, cancel: CancellationToken) -> BoxStream<'static, Provid
         Duplex {
             answers,
             system: None,
+            blobs: std::collections::HashMap::new(),
         },
     )
 }
@@ -659,7 +688,41 @@ mod tests {
         super::Duplex {
             answers,
             system: None,
+            blobs: std::collections::HashMap::new(),
         }
+    }
+
+    /// A data frame holding one kv exchange, built with the real message
+    /// types the way the server frames them.
+    fn kv_framed(kv: proto::KvRequest) -> Vec<u8> {
+        let message = proto::ServerMessage {
+            kv_request: buffa::MessageField::some(kv),
+            ..Default::default()
+        };
+
+        connect::envelope(&message.encode_to_vec())
+    }
+
+    fn kv_set(id: u32, blob_id: &[u8], data: &[u8]) -> Vec<u8> {
+        kv_framed(proto::KvRequest {
+            id: Some(id),
+            set_blob_args: buffa::MessageField::some(
+                proto::SetBlobArgs::default()
+                    .with_blob_id(blob_id.to_vec())
+                    .with_blob_data(data.to_vec()),
+            ),
+            ..Default::default()
+        })
+    }
+
+    fn kv_get(id: u32, blob_id: &[u8]) -> Vec<u8> {
+        kv_framed(proto::KvRequest {
+            id: Some(id),
+            get_blob_args: buffa::MessageField::some(
+                proto::GetBlobArgs::default().with_blob_id(blob_id.to_vec()),
+            ),
+            ..Default::default()
+        })
     }
 
     /// An EndStream frame carrying `payload`.
@@ -784,6 +847,7 @@ mod tests {
             super::Duplex {
                 answers,
                 system: Some("You are terse.".to_owned()),
+                blobs: std::collections::HashMap::new(),
             },
         );
 
@@ -843,6 +907,134 @@ mod tests {
                 ProviderEvent::TextDelta("Hello".to_owned()),
                 ProviderEvent::Finish(FinishReason::Completed),
             ]
+        );
+    }
+
+    /// The channel the second 2026-08-10 live run left waiting: the server
+    /// stores state with the client and reads its own writes back, all
+    /// mid-stream, and every answer rides the same open body the context
+    /// answer does — in frame order, because an answer overtaking the one
+    /// ahead of it would cross the server's questions.
+    #[tokio::test]
+    async fn the_kv_channel_is_answered_in_frame_order_behind_the_context_answer() {
+        let (sender, receiver) =
+            futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+        let (answers, answered) = futures::channel::mpsc::unbounded();
+        let stream = super::events(
+            receiver,
+            CancellationToken::new(),
+            super::Duplex {
+                answers,
+                system: Some("You are terse.".to_owned()),
+                blobs: std::collections::HashMap::new(),
+            },
+        );
+
+        let mut body = exec_framed(7, "exec-abc");
+        body.extend(kv_set(8, b"blob-a", b"opaque-state"));
+        body.extend(kv_get(9, b"blob-a"));
+        body.extend(kv_get(10, b"blob-b"));
+        body.extend(framed(text("Hello")));
+        body.extend(framed(turn_ended()));
+        body.extend(end_stream("{}"));
+        sender.unbounded_send(Ok(body)).expect("the body is open");
+        drop(sender);
+
+        // Collecting drives the fold to the end; the asks are answered as
+        // their frames decode, and dropping the drained stream closes the
+        // answer channel so the collect below has an end.
+        let events: Vec<ProviderEvent> =
+            tokio::time::timeout(Duration::from_secs(10), stream.collect())
+                .await
+                .expect("a fully-answered turn ends");
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta("Hello".to_owned()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ],
+            "the kv exchanges are questions, never events"
+        );
+
+        let sent: Vec<Vec<u8>> = answered
+            .map(|answer| answer.expect("the channel's error type is infallible"))
+            .collect()
+            .await;
+        assert_eq!(sent.len(), 4, "every ask was answered, none twice");
+        let decoded: Vec<proto::ClientMessage> = sent
+            .iter()
+            .map(|answer| {
+                assert_eq!(answer[0], 0, "an ordinary data frame");
+                proto::ClientMessage::decode_from_slice(&answer[5..])
+                    .expect("the answered bytes are client messages")
+            })
+            .collect();
+
+        // First out: the context answer, because its frame came first.
+        assert_eq!(
+            decoded[0]
+                .exec_response
+                .as_option()
+                .and_then(|exec| exec.id),
+            Some(7),
+            "the context answer went out ahead of every kv answer"
+        );
+
+        let set_ack = decoded[1].kv_response.as_option().expect("the set's ack");
+        assert_eq!(set_ack.id, Some(8));
+        assert!(
+            set_ack.set_blob_result.is_set(),
+            "the ack is the present-but-empty result the plugin sends"
+        );
+
+        let hit = decoded[2]
+            .kv_response
+            .as_option()
+            .expect("the get's answer");
+        assert_eq!(hit.id, Some(9));
+        assert_eq!(
+            hit.get_blob_result
+                .as_option()
+                .and_then(|result| result.blob_data.as_deref()),
+            Some(b"opaque-state".as_slice()),
+            "the get reads back exactly what the set stored"
+        );
+
+        let miss = decoded[3].kv_response.as_option().expect("the miss answer");
+        assert_eq!(miss.id, Some(10));
+        assert_eq!(
+            miss.get_blob_result
+                .as_option()
+                .and_then(|result| result.blob_data.as_deref()),
+            None,
+            "a blob nobody stored is answered not-found, not failed"
+        );
+    }
+
+    /// A kv ask arriving after nothing holds the request body open gets the
+    /// context ask's discipline: the turn fails with the reason on it
+    /// instead of reproducing the silence.
+    #[tokio::test]
+    async fn a_kv_ask_nobody_can_answer_fails_the_turn_instead_of_hanging() {
+        let events: Vec<ProviderEvent> = super::events(
+            futures::stream::iter([Ok::<Vec<u8>, std::convert::Infallible>(kv_set(
+                1,
+                b"blob-a",
+                b"opaque-state",
+            ))]),
+            CancellationToken::new(),
+            promptless_duplex(),
+        )
+        .collect()
+        .await;
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Transport(message))]
+                    if message.contains("kv ask")
+            ),
+            "{events:?}"
         );
     }
 
