@@ -58,7 +58,7 @@ use crate::{
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
     subagent,
-    tool::{Credentials, FileTimes, Registry, task},
+    tool::{Credentials, FileTimes, Registry, plan, task},
     watch,
 };
 
@@ -344,6 +344,208 @@ struct Active {
     previous_agent: Option<String>,
 }
 
+/// Where a plan approval stands, from the tool's Yes to the prompt that
+/// finally reads the approval sentence.
+///
+/// Four states, because three could not express the policy table on
+/// [`Engine::lock_entry`]: "switch applied, sentence still riding" is a real
+/// place a session stands after a shell turn or a model switch, and folding it
+/// into either neighbour would make one of them mean two things. The sentence
+/// itself is a constant ([`APPROVAL_SENTENCE`]), so no state carries payload.
+///
+/// Two owned deviations live on this cell. **approval-persists-at-the-boundary**:
+/// upstream persists its synthetic approval message the moment the tool
+/// returns, so its process-death window is zero; ganja persists at the turn
+/// boundary, so a crash between the Yes and the end of that turn loses both
+/// the switch and the sentence — the window is the remainder of one turn,
+/// typically seconds, because the model was told to wait. And on an engine
+/// with no persistence at all (`Turn::persist` is [`None`] — scripted and
+/// test engines) the boundary degrades to announce-only while the
+/// apply-at-entry half still runs: correct by construction, since such an
+/// engine has no row for a restart to read. **approval-rides-the-request**:
+/// upstream stores a synthetic user message; ganja's reminders are
+/// request-time, so the sentence does not survive a restart, a `NewSession`,
+/// or a manual supersede — the same family as build-switch-once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingSwitch {
+    /// Nothing pending.
+    None,
+    /// The tool's Yes, recorded while its turn is still in flight. Only ever
+    /// observable from inside that turn: the boundary moves it on before the
+    /// slot is released.
+    Requested,
+    /// The boundary persisted and announced the switch; the next engine entry
+    /// still owes the in-memory half.
+    Announced,
+    /// The switch is applied in memory; the approval sentence has not yet
+    /// reached a prompt that could deliver it.
+    SentencePending,
+}
+
+/// What the first build prompt after an approval reads, ported verbatim from
+/// upstream `tool/plan.ts` minus its plan-file path — ganja's plan is prose
+/// already in the transcript (deviation: plan-is-prose).
+pub(crate) const APPROVAL_SENTENCE: &str =
+    "The plan has been approved, you can now edit files. Execute the plan";
+
+/// The engine's side of the [`plan::Switcher`] seam: a Yes writes
+/// [`PendingSwitch::Requested`] and nothing else.
+///
+/// Synchronous and infallible because it records intent and waits for
+/// nothing — the boundary announces, the next entry applies. Wired into a
+/// [`crate::tool::ToolCtx`] only on a parent turn of an engine whose registry
+/// holds build, which is what makes the trait's presence-is-ability promise
+/// true.
+#[derive(Debug)]
+pub(crate) struct SwitchToBuild {
+    pub(crate) pending: Arc<std::sync::Mutex<PendingSwitch>>,
+}
+
+impl plan::Switcher for SwitchToBuild {
+    fn switch_to_build(&self) {
+        *self
+            .pending
+            .lock()
+            .expect("the pending switch is never poisoned") = PendingSwitch::Requested;
+    }
+}
+
+/// How an engine entry disposes of a pending plan approval — the misfire
+/// policy, named at every entry because [`TurnSlot::entry`] cannot be reached
+/// without one.
+#[derive(Clone, Copy, Debug)]
+enum PendingPolicy {
+    /// `start_turn` and `switch_model`: an announced switch is applied before
+    /// the entry's own work, so the task-roster rebuild, the reminder gates
+    /// and the entry's `remember_selection` all see build rather than the
+    /// stale plan selection. A riding sentence keeps riding; only the
+    /// reminder assembly consumes it.
+    Apply,
+    /// `switch_agent`: the person's later explicit choice outranks the
+    /// earlier Yes, so both the switch and the sentence are dropped
+    /// (deviation: a-later-switch-outranks-a-yes — upstream's stored
+    /// synthetic message has no supersede).
+    Discard,
+    /// `new_session`, `resume`, `redo`: the Yes belonged to a conversation
+    /// that is over — or, for `redo`, was already cleared by the `undo` that
+    /// made a redo possible, so this is defensive totality. The row a
+    /// boundary already wrote is untouched: resuming that session later still
+    /// resumes as build.
+    Clear,
+    /// `undo`: the approval goes back with the plan it approved. An
+    /// unapplied switch is revoked two-sidedly — cell cleared *and* the row
+    /// re-asserted to the still-active selection, without which the row would
+    /// keep saying build for a session that continues as plan and a restart
+    /// would resume wrong. An already-applied switch survives, exactly as a
+    /// manual switch survives an undo; only the sentence is dropped.
+    Revoke,
+}
+
+/// The engine-side follow-up a [`TurnSlot::entry`] leaves its caller owing,
+/// because the cell transition lives in the newtype and `apply_agent` /
+/// `remember_selection` live on the [`Engine`]. Settled by
+/// [`Engine::lock_entry`] while the guard is still held.
+#[must_use]
+enum Owed {
+    Nothing,
+    /// Apply the build switch in memory through the non-emitting
+    /// [`Engine::apply_agent`] — the boundary already announced.
+    ApplyBuild,
+    /// Re-run [`Engine::remember_selection`] so the row returns to the
+    /// selection that is actually active.
+    ReassertRow,
+}
+
+/// The turn slot behind the engine's Busy discipline, and the pending plan
+/// approval beside it.
+///
+/// The slot holds the handle of the turn in flight and doubles as the
+/// idle/busy flag; the handle carries the turn's cancellation token and the
+/// permission wait a [`Command::ReplyPermission`] routes into. It is wrapped
+/// in this newtype so its **only acquisition paths are [`TurnSlot::entry`]
+/// and the read-only [`TurnSlot::observe`]**: a state-changing entry cannot
+/// reach the slot without naming its [`PendingPolicy`], which turns the
+/// per-entry misfire table from a prose convention — one that had already
+/// lost two rows to drift — into structure. The one thing threaded past the
+/// methods is a clone of the raw `slot` Arc into each root turn's
+/// [`RootParts`], and that is a *release* handle, not an acquisition path:
+/// the boundary in `run_turn` only ever writes [`None`] into it.
+///
+/// **Race-freedom proof.** The cell is only ever
+/// [`PendingSwitch::Requested`] while the slot is occupied — the tool that
+/// writes it runs inside a turn — and the boundary moves it to
+/// [`PendingSwitch::Announced`] before the slot is released. Every entry
+/// Busy-checks the slot first, through [`TurnSlot::entry`], which cannot be
+/// bypassed without bypassing the Busy check itself. Therefore no entry can
+/// observe `Requested`, and no turn can start with an unapplied `Announced`.
+/// `SentencePending` is post-apply: the in-memory selection and the row
+/// already agree there, and the state gates only the one-shot sentence.
+struct TurnSlot {
+    slot: Arc<Mutex<Option<TurnHandle>>>,
+    pending: Arc<std::sync::Mutex<PendingSwitch>>,
+}
+
+impl TurnSlot {
+    fn new() -> Self {
+        Self {
+            slot: Arc::default(),
+            pending: Arc::new(std::sync::Mutex::new(PendingSwitch::None)),
+        }
+    }
+
+    /// The Busy check every state-changing entry starts with, plus the cell
+    /// half of `policy`. The engine half comes back as the [`Owed`] the
+    /// caller must settle while still holding the guard.
+    async fn entry(
+        &self,
+        policy: PendingPolicy,
+    ) -> Result<(tokio::sync::MutexGuard<'_, Option<TurnHandle>>, Owed), EngineError> {
+        let guard = self.slot.lock().await;
+        if guard.is_some() {
+            return Err(EngineError::Busy);
+        }
+
+        let mut pending = self
+            .pending
+            .lock()
+            .expect("the pending switch is never poisoned");
+        let owed = match (policy, *pending) {
+            // By the proof on the type: `Requested` exists only while the
+            // slot is occupied, and this entry just found it empty.
+            (_, PendingSwitch::Requested) => {
+                unreachable!("a plan approval can only be Requested while a turn holds the slot")
+            }
+            (_, PendingSwitch::None) => Owed::Nothing,
+            (PendingPolicy::Apply, PendingSwitch::Announced) => {
+                *pending = PendingSwitch::SentencePending;
+                Owed::ApplyBuild
+            }
+            (PendingPolicy::Apply, PendingSwitch::SentencePending) => Owed::Nothing,
+            (PendingPolicy::Discard | PendingPolicy::Clear, _) => {
+                *pending = PendingSwitch::None;
+                Owed::Nothing
+            }
+            (PendingPolicy::Revoke, PendingSwitch::Announced) => {
+                *pending = PendingSwitch::None;
+                Owed::ReassertRow
+            }
+            (PendingPolicy::Revoke, PendingSwitch::SentencePending) => {
+                *pending = PendingSwitch::None;
+                Owed::Nothing
+            }
+        };
+        drop(pending);
+
+        Ok((guard, owed))
+    }
+
+    /// A read-only look at the turn in flight, for the cancel and reply
+    /// observers — the paths that mutate nothing and therefore owe no policy.
+    async fn observe<R>(&self, look: impl FnOnce(Option<&TurnHandle>) -> R) -> R {
+        look(self.slot.lock().await.as_ref())
+    }
+}
+
 /// Composes the environment half of the system prompt for a model.
 ///
 /// Taken as a function rather than as the config and directory it is composed
@@ -356,6 +558,13 @@ type Environment = dyn Fn(&str) -> Option<String> + Send + Sync;
 pub struct Engine {
     provider: Arc<dyn Provider>,
     /// The model and agent the next turn runs as; see [`Active`].
+    ///
+    /// Between a plan approval's boundary and the next engine entry this can
+    /// lag: the session row and the emitted `AgentChanged` already say build
+    /// while the agent here still says plan. **In that bounded window the row
+    /// and the event are the truth about the agent**, and nothing reads this
+    /// field for the agent without first passing an entry that applies the
+    /// switch — see the proof on [`TurnSlot`].
     active: std::sync::Mutex<Active>,
     /// The half of the system prompt an agent replaces: the base prompt for
     /// the model's family, composed by [`crate::instruction::system_prompt`].
@@ -489,10 +698,9 @@ pub struct Engine {
     /// a resume's `RevertChanged` most of all — is buffered here rather than
     /// lost, which is what lets a frontend resume first and subscribe second.
     unclaimed: Mutex<Option<mpsc::Receiver<Event>>>,
-    /// Holds the handle of the turn in flight, and doubles as the idle/busy
-    /// flag. The handle carries the turn's cancellation token and the
-    /// permission wait a [`Command::ReplyPermission`] routes into.
-    turn: Arc<Mutex<Option<TurnHandle>>>,
+    /// The turn in flight and the pending plan approval, behind the two-path
+    /// discipline documented on [`TurnSlot`].
+    turn: TurnSlot,
     /// The conversation the next request carries. On a persistent engine this
     /// is the live window — everything from the compaction summary onward —
     /// rather than the whole stored transcript.
@@ -600,7 +808,7 @@ impl Engine {
             session: std::sync::Mutex::new(SessionId::ascending()),
             fanout: Arc::new(Fanout::new(events)),
             unclaimed: Mutex::new(Some(receiver)),
-            turn: Arc::default(),
+            turn: TurnSlot::new(),
             history: Arc::default(),
             persistence,
         }
@@ -1074,10 +1282,13 @@ impl Engine {
         // arrives mid-resume waits and then lands on the freshly installed
         // session instead of racing the old one. No turn exists while it is
         // held, so nothing on the event path can contend for it.
-        let slot = self.turn.lock().await;
-        if slot.is_some() {
-            return Err(EngineError::Busy);
-        }
+        //
+        // A pending plan approval is cleared: it belonged to the conversation
+        // being left. The switch itself still survives — the boundary already
+        // wrote it onto that session's row, and the row is what a later
+        // resume of *that* session reads — while the sentence does not (the
+        // approval-rides-the-request family).
+        let slot = self.lock_entry(PendingPolicy::Clear).await?;
 
         let storage = state.storage.clone();
         let wanted = id.clone();
@@ -1435,11 +1646,11 @@ impl Engine {
     /// Forgets the live session so the next prompt starts a fresh one.
     async fn new_session(&self) -> Result<(), EngineError> {
         // Held for the same reason `resume` holds it: a prompt arriving
-        // mid-clear must land on the new session, not race the old one.
-        let turn = self.turn.lock().await;
-        if turn.is_some() {
-            return Err(EngineError::Busy);
-        }
+        // mid-clear must land on the new session, not race the old one. A
+        // pending approval clears with the conversation it belonged to; the
+        // old session's row already says build, so reopening it later is
+        // still right.
+        let turn = self.lock_entry(PendingPolicy::Clear).await?;
 
         self.history.lock().await.clear();
         // The next conversation is a different session, so it gets a
@@ -1484,10 +1695,18 @@ impl Engine {
         // turn already in flight is refused rather than aborted — upstream
         // aborts and then reverts, where here the person at the terminal
         // cancels and then undoes (**D119**).
-        let turn = self.turn.lock().await;
-        if turn.is_some() {
-            return Err(EngineError::Busy);
-        }
+        //
+        // An undo revokes a pending plan approval with the plan it approved.
+        // The two candidate rules — clear on any undo, or only when the
+        // revert covers the approving turn — coincide for an unapplied
+        // approval: `Announced` ends at the next entry, so no prompt can have
+        // intervened, and the one prompt this undo can hide *is* the
+        // approving turn (upstream parity for free: its revert deletes the
+        // stored approval message the same way). An applied switch survives
+        // and only the sentence drops — an undo here may hide a later turn
+        // than the approving one, and dropping the sentence on any undo is
+        // the simple rule, owned in the build-switch-once family.
+        let turn = self.lock_entry(PendingPolicy::Revoke).await?;
         let snapshots = self.snapshotting()?;
 
         let current = self.reverted();
@@ -1511,10 +1730,11 @@ impl Engine {
 
     /// Steps one prompt forward through what an undo hid.
     async fn redo(&self) -> Result<(), EngineError> {
-        let turn = self.turn.lock().await;
-        if turn.is_some() {
-            return Err(EngineError::Busy);
-        }
+        // A non-empty approval cell is unreachable here — reaching `redo`
+        // requires a prior `undo`, which cleared it — so the clear is
+        // defensive totality. The asymmetry is owned: a revoked Yes does not
+        // return on redo, the same family as the sentence's non-survival.
+        let turn = self.lock_entry(PendingPolicy::Clear).await?;
         let snapshots = self.snapshotting()?;
         let current = self.reverted().ok_or(EngineError::NothingToRedo)?;
 
@@ -1770,11 +1990,23 @@ impl Engine {
         let Some(agents) = &self.agents else {
             return;
         };
-        let rebuilt = self
+        let mut rebuilt = self
             .lent()
             .with(Arc::new(task::TaskTool::new(&subagent::roster(
                 agents, agent,
             ))));
+        // `plan_exit` rides the same rebuild the task tool does, and for the
+        // same doctrine: presence is ability, and the registry holding build
+        // is what makes "switch to the build agent" a promise the engine can
+        // keep. Registered here and nowhere else because `install` runs from
+        // five sites including the MCP-dial rebuild at every turn start — a
+        // tool added anywhere else is dropped on the first rebuild — and
+        // never in `with_builtins`, whose surface the golden differential
+        // pins. Every agent's model sees it (denied tools are not hidden);
+        // the rules refuse everyone but plan.
+        if agents.get(agent::BUILD).is_some() {
+            rebuilt = rebuilt.with(Arc::new(plan::PlanExitTool));
+        }
         *self
             .tools
             .lock()
@@ -1895,26 +2127,12 @@ impl Engine {
         crate::provider::adopt(self.provider.id(), spelled)
     }
 
-    /// Runs the rest of the session as `name`.
-    async fn switch_agent(&self, name: String) -> Result<(), EngineError> {
-        // Held across the whole switch, exactly as `resume` holds it: a prompt
-        // that arrives mid-switch waits and then runs as the agent that was
-        // asked for, rather than racing it.
-        let turn = self.turn.lock().await;
-        if turn.is_some() {
-            return Err(EngineError::Busy);
-        }
-
-        let Some(registry) = &self.agents else {
-            return Err(EngineError::NoAgents);
-        };
-        let Some(agent) = registry.get(&name) else {
-            return Err(EngineError::UnknownAgent { name });
-        };
-        if agent.mode == AgentMode::Subagent {
-            return Err(EngineError::SubagentNotSelectable { name });
-        }
-
+    /// The in-memory half of adopting `agent`: the tool rebuild, the active
+    /// selection, both prompt halves, and the durable row. Emits **nothing**
+    /// — the announced half belongs to [`Engine::adopt_agent`] on the manual
+    /// path and to the turn boundary on the approval path, and a shared
+    /// function that emitted would make one of them say it twice.
+    fn apply_agent(&self, agent: &Agent) {
         self.install(agent);
         {
             let mut active = self.active();
@@ -1930,6 +2148,54 @@ impl Engine {
         self.recompose_environment();
         self.recompose_base();
         self.remember_selection();
+    }
+
+    /// [`Engine::apply_agent`], announced: exactly one `agent_changed` frame
+    /// per adoption, which is what makes a manual `/agents` switch visible to
+    /// every subscriber rather than only to the frontend that issued it.
+    ///
+    /// Emitting under a held slot guard is established practice here, not a
+    /// new hazard: `resume`, `revert_to` and `truncate_reverted` all publish
+    /// the same way.
+    async fn adopt_agent(&self, agent: &Agent) {
+        self.apply_agent(agent);
+
+        let (name, model) = {
+            let active = self.active();
+            (agent.name.clone(), active.model.clone())
+        };
+        let _ = self
+            .fanout
+            .send(Event::AgentChanged {
+                session_id: self.session_id(),
+                agent: name,
+                model,
+            })
+            .await;
+    }
+
+    /// Runs the rest of the session as `name`.
+    async fn switch_agent(&self, name: String) -> Result<(), EngineError> {
+        // Held across the whole switch, exactly as `resume` holds it: a prompt
+        // that arrives mid-switch waits and then runs as the agent that was
+        // asked for, rather than racing it. A pending approval is discarded
+        // whole: the person's later explicit choice outranks the earlier Yes,
+        // which is what keeps an approval sentence from ever landing beside
+        // `PLAN_REMINDER` in a plan turn (deviation:
+        // a-later-switch-outranks-a-yes).
+        let turn = self.lock_entry(PendingPolicy::Discard).await?;
+
+        let Some(registry) = &self.agents else {
+            return Err(EngineError::NoAgents);
+        };
+        let Some(agent) = registry.get(&name) else {
+            return Err(EngineError::UnknownAgent { name });
+        };
+        if agent.mode == AgentMode::Subagent {
+            return Err(EngineError::SubagentNotSelectable { name });
+        }
+
+        self.adopt_agent(agent).await;
         drop(turn);
 
         Ok(())
@@ -1937,10 +2203,11 @@ impl Engine {
 
     /// Asks the rest of the session's requests of `model`.
     async fn switch_model(&self, model: String) -> Result<(), EngineError> {
-        let turn = self.turn.lock().await;
-        if turn.is_some() {
-            return Err(EngineError::Busy);
-        }
+        // An announced approval is applied *first*: this entry's own
+        // `remember_selection` below would otherwise write the stale plan
+        // agent over the row's build. The sentence keeps riding — a model
+        // switch is not the prompt that delivers it.
+        let turn = self.lock_entry(PendingPolicy::Apply).await?;
 
         if !self.serves(&model) {
             return Err(EngineError::UnknownModel {
@@ -1993,16 +2260,62 @@ impl Engine {
         }
     }
 
+    /// The one door to the turn slot for a state-changing entry: Busy-check,
+    /// then the named [`PendingPolicy`] applied while the guard is held —
+    /// [`TurnSlot::entry`] moves the cell, and whatever engine-side work that
+    /// transition owes is settled here before the guard is handed back.
+    ///
+    /// All seven entries route through this — `start_turn`, `switch_agent`,
+    /// `switch_model`, `new_session`, `resume`, `undo`, `redo` — so a future
+    /// entry cannot Busy-check without naming what it does to a pending
+    /// approval, which is the structural fix for the drift a prose table
+    /// already suffered once.
+    async fn lock_entry(
+        &self,
+        policy: PendingPolicy,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<TurnHandle>>, EngineError> {
+        let (guard, owed) = self.turn.entry(policy).await?;
+        match owed {
+            Owed::Nothing => {}
+            Owed::ApplyBuild => {
+                // Presence is ability: the cell only reaches `Announced` on an
+                // engine whose registry holds build, because the cell is only
+                // threaded into turns of such an engine.
+                let build = self
+                    .agents
+                    .as_ref()
+                    .and_then(|registry| registry.get(agent::BUILD))
+                    .expect("a plan approval is only ever pending where the registry holds build");
+                self.apply_agent(build);
+            }
+            Owed::ReassertRow => self.remember_selection(),
+        }
+
+        Ok(guard)
+    }
+
+    /// The pending-approval cell, cloned for a root turn that could write or
+    /// announce it — which is a turn of an engine whose registry holds build,
+    /// and nothing else. [`None`] here is what makes `ToolCtx::switch` [`None`]
+    /// and phase one inert on every other engine, the same presence-is-ability
+    /// gate that decides whether `plan_exit` is registered at all.
+    fn pending_for_turn(&self) -> Option<Arc<std::sync::Mutex<PendingSwitch>>> {
+        self.agents.as_ref()?.get(agent::BUILD)?;
+
+        Some(Arc::clone(&self.turn.pending))
+    }
+
     async fn start_turn(
         &self,
         prompt: String,
         kind: TurnKind,
         overrides: Option<Overrides>,
     ) -> Result<(), EngineError> {
-        let mut turn = self.turn.lock().await;
-        if turn.is_some() {
-            return Err(EngineError::Busy);
-        }
+        // An announced approval is applied inside `lock_entry` — before the
+        // `refresh_mcp` below, so the task-roster rebuild sees build, and
+        // before the `previous_agent` bookkeeping, so the
+        // `previous == plan && agent == build` reminder gate does too.
+        let mut turn = self.lock_entry(PendingPolicy::Apply).await?;
 
         // Between turns and never during one: a server that connected while
         // the last turn was streaming is offered to the model here, and a
@@ -2076,8 +2389,16 @@ impl Engine {
         let system = self.system_for(agent);
         // A command that runs as another agent is not the session switching to
         // it, so the plan-to-build notice — which is about what the *user*
-        // switched to — is left to the session's own agent.
-        let mut reminders = reminders(name.as_deref(), previous.as_deref());
+        // switched to — is left to the session's own agent. The approval cell
+        // travels only when this turn asks the model: a shell or compact turn
+        // never delivers a reminder, so letting it consume the sentence would
+        // spend a notice that was never shown — the misfire `SentencePending`
+        // exists to prevent.
+        let mut reminders = reminders(
+            name.as_deref(),
+            previous.as_deref(),
+            asks_the_model.then_some(self.turn.pending.as_ref()),
+        );
         // Files that went stale while nobody was asking are named here, at the
         // top of the first turn that could act on what it read of them. Only a
         // turn that asks the model can deliver one — a `!` passthrough asks
@@ -2156,8 +2477,11 @@ impl Engine {
             cancel,
             pending,
             events: Arc::clone(&self.fanout),
-            slot: Arc::clone(&self.turn),
+            // The turn's release handle for its own boundary — not an
+            // acquisition path; those stay behind `entry` and `observe`.
+            slot: Arc::clone(&self.turn.slot),
             history: Arc::clone(&self.history),
+            pending_switch: self.pending_for_turn(),
             persist,
         });
         tokio::spawn(run_turn(turn));
@@ -2166,9 +2490,13 @@ impl Engine {
     }
 
     async fn cancel_turn(&self) {
-        if let Some(turn) = self.turn.lock().await.as_ref() {
-            turn.cancel.cancel();
-        }
+        self.turn
+            .observe(|turn| {
+                if let Some(turn) = turn {
+                    turn.cancel.cancel();
+                }
+            })
+            .await;
     }
 
     /// Routes a reply to the permission wait that asked for it.
@@ -2182,7 +2510,7 @@ impl Engine {
         id: &crate::protocol::PermissionId,
         reply: crate::protocol::PermissionReply,
     ) {
-        let delivered = self.turn.lock().await.as_ref().is_some_and(|turn| {
+        let delivered = self.turn.observe(|turn| turn.is_some_and(|turn| {
             let mut pending = turn
                 .permission
                 .lock()
@@ -2200,7 +2528,7 @@ impl Engine {
                 Some(PendingReply::Permission { sender, .. }) => sender.send(reply).is_ok(),
                 Some(PendingReply::Question { .. }) | None => false,
             }
-        });
+        })).await;
 
         if !delivered {
             tracing::debug!(id = id.as_str(), "no permission is waiting for this reply");
@@ -2215,19 +2543,24 @@ impl Engine {
     /// exactly once. What differs is only that two commands land here, since
     /// upstream makes a rejection its own thing rather than a refusing value.
     async fn answer_question(&self, id: &crate::protocol::QuestionId, answered: Answered) {
-        let delivered = self.turn.lock().await.as_ref().is_some_and(|turn| {
-            let mut pending = turn
-                .permission
-                .lock()
-                .expect("the pending permission is never poisoned");
+        let delivered = self
+            .turn
+            .observe(|turn| {
+                turn.is_some_and(|turn| {
+                    let mut pending = turn
+                        .permission
+                        .lock()
+                        .expect("the pending permission is never poisoned");
 
-            match pending.take_if(
+                    match pending.take_if(
                 |waiting| matches!(waiting, PendingReply::Question { id: open, .. } if open == id),
             ) {
                 Some(PendingReply::Question { sender, .. }) => sender.send(answered).is_ok(),
                 Some(PendingReply::Permission { .. }) | None => false,
             }
-        });
+                })
+            })
+            .await;
 
         if !delivered {
             tracing::debug!(id = id.as_str(), "no question is waiting for this reply");
@@ -2251,7 +2584,19 @@ const INTERRUPTED: &str = "the session was interrupted before this call finished
 /// said once, where it means something (deviation: build-switch-once). The
 /// cost is that neither survives a restart, since a stored message does not
 /// record the agent that produced it.
-fn reminders(agent: Option<&str>, previous: Option<&str>) -> Vec<String> {
+///
+/// `pending` is the plan-approval cell, handed over only by a turn that asks
+/// the model — the one kind that can deliver a reminder. A riding
+/// [`APPROVAL_SENTENCE`] is consumed here, exactly once, on the first build
+/// prompt that assembles: injection is what moves the cell to
+/// [`PendingSwitch::None`], so the sentence rides one request and never
+/// returns (deviation: approval-rides-the-request — upstream stores a
+/// synthetic user message instead).
+fn reminders(
+    agent: Option<&str>,
+    previous: Option<&str>,
+    pending: Option<&std::sync::Mutex<PendingSwitch>>,
+) -> Vec<String> {
     let mut found = Vec::new();
 
     if agent == Some(agent::PLAN) {
@@ -2259,6 +2604,15 @@ fn reminders(agent: Option<&str>, previous: Option<&str>) -> Vec<String> {
     }
     if agent == Some(agent::BUILD) && previous == Some(agent::PLAN) {
         found.push(agent::BUILD_SWITCH_REMINDER.to_owned());
+    }
+    if agent == Some(agent::BUILD)
+        && let Some(cell) = pending
+    {
+        let mut pending = cell.lock().expect("the pending switch is never poisoned");
+        if *pending == PendingSwitch::SentencePending {
+            *pending = PendingSwitch::None;
+            found.push(APPROVAL_SENTENCE.to_owned());
+        }
     }
 
     found
@@ -2542,7 +2896,8 @@ mod tests {
                 | Event::QuestionAsked { .. }
                 | Event::QuestionReplied { .. }
                 | Event::QuestionRejected { .. }
-                | Event::RevertChanged { .. } => {}
+                | Event::RevertChanged { .. }
+                | Event::AgentChanged { .. } => {}
             }
         }
 

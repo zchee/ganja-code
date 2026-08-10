@@ -119,8 +119,8 @@ impl Kind {
 /// Upstream's non-interactive ruleset (`run.ts:430-448`), ported verbatim —
 /// originally ahead of the tools it names, so that `question` would be safe
 /// in `run` by construction rather than by whoever added it remembering.
-/// `question` has since landed and the construction held; `plan_enter` and
-/// `plan_exit` are still names with nothing behind them.
+/// `question` and `plan_exit` have since landed and the construction held for
+/// both; `plan_enter` alone is still a name with nothing behind it.
 ///
 /// Two consumers, because a run reaches its engine two ways:
 /// [`refuse_interactive_permissions`] installs them as standing rules on an
@@ -810,6 +810,11 @@ impl<'a> Reporter<'a> {
 
                 return true;
             }
+            // `run` has no mid-turn agent switch and refuses `plan_exit` even
+            // under `--auto`, so an adoption announcement is unreachable in
+            // its own turn; the arm keeps the protocol match honest without
+            // inventing a seventh JSON kind for an event it cannot receive.
+            Event::AgentChanged { .. } => {}
             Event::PermissionRequested { .. }
             | Event::PermissionReplied { .. }
             | Event::RevertChanged { .. }
@@ -895,9 +900,10 @@ impl<'a> Reporter<'a> {
     /// Upstream accumulates the same way (`run.ts:783`) and reports each
     /// failure to stderr where it happened; here the caller reports it once,
     /// on its way to the exit code. The two are the same account in the same
-    /// order — `MessageFinished` is the last event of a ganja turn, so there is
-    /// never anything after a failure to interleave with it — and it is one
-    /// line rather than the same sentence twice.
+    /// order. In `run`'s world `MessageFinished` is still last because
+    /// `plan_exit` is refused here, so no trailing `AgentChanged` can
+    /// interleave with a failure; it is one line rather than the same sentence
+    /// twice.
     fn failed(&mut self, error: &str) {
         self.emit_value(Kind::Error, "error", Value::from(error));
         self.failure = Some(match self.failure.take() {

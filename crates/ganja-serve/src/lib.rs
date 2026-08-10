@@ -22,6 +22,12 @@
 //! * **The serve layer never logs a request's query string** — paths and
 //!   methods only — because `?auth_token=` puts a credential in the URL, and
 //!   a log line is the one place it must never land.
+//! * **Question events are observable but not answerable from this side.** A
+//!   served session's `QuestionAsked`, `QuestionReplied` and
+//!   `QuestionRejected` reach subscribers on `GET /event` like every other
+//!   protocol event, but there is no `/question` or
+//!   `/question/{id}/reply` route yet. Mirroring the existing `GET
+//!   /permission` plus `POST /permission/{id}/reply` pair is follow-up work.
 
 mod auth;
 mod error;

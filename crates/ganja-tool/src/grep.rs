@@ -363,6 +363,7 @@ mod tests {
             credentials: crate::Credentials::Guarded(credentials),
             spawn: None,
             ask: None,
+            switch: None,
         }
     }
 

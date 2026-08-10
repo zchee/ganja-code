@@ -43,6 +43,7 @@ fn ctx(answer: Result<Delegated, Unanswered>) -> (ToolCtx, Arc<std::sync::Mutex<
             credentials: Credentials::Unguarded,
             spawn: Some(subagents),
             ask: None,
+            switch: None,
         },
         asked,
     )
@@ -187,6 +188,7 @@ async fn a_call_with_nothing_to_delegate_through_says_so() {
         credentials: Credentials::Unguarded,
         spawn: None,
         ask: None,
+        switch: None,
     };
 
     let refused = TaskTool::new(&[Offered {

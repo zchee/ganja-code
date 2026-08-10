@@ -42,8 +42,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    catalog,
-    engine::Fanout,
+    agent, catalog,
+    engine::{Fanout, PendingSwitch, SwitchToBuild},
     permission::{Decision, Permissions},
     protocol::{
         Event, FinishReason, Message, Part, PartBody, PartId, PermissionId, PermissionReply,
@@ -508,6 +508,33 @@ impl Persist {
         }
     }
 
+    /// The boundary's durable half of a plan approval: the same row write
+    /// `remember_selection` produces, made from what the turn already holds —
+    /// `run_turn` has no engine to ask. The model rides along because the
+    /// row's two selection fields are written together everywhere else, and
+    /// a mid-turn model switch is refused Busy, so the turn's model *is* the
+    /// active one.
+    fn remember_agent(&self, agent: &str, model: &str) {
+        let mut live = self
+            .state
+            .live
+            .lock()
+            .expect("the live session is never poisoned");
+        let Some(info) = live.info.as_mut() else {
+            return;
+        };
+        if info.id != self.session {
+            return;
+        }
+
+        info.agent = Some(agent.to_owned());
+        info.model = Some(model.to_owned());
+        info.updated = now();
+        if let Err(error) = self.state.storage.save_info(info) {
+            self.complain("the approved agent switch", &error);
+        }
+    }
+
     /// The one call that touches `save_part`, so every write shares the
     /// warning path.
     fn write(&self, owner: &Message, part: &Part) {
@@ -610,6 +637,14 @@ pub(crate) struct Turn {
     /// turn with no agents to spawn, and on every turn a subagent runs — which
     /// is the depth limit, stated where the loop can see it.
     pub(crate) spawn: Option<Arc<crate::subagent::Host>>,
+    /// The engine's plan-approval cell, when this turn could write or
+    /// announce it: a `plan_exit` Yes records `Requested` here through
+    /// [`ToolCtx::switch`], and this turn's boundary moves it to `Announced`.
+    /// [`None`] on an engine whose registry holds no build agent — nothing to
+    /// switch to — and on every turn a subagent runs, with the same
+    /// discipline as `spawn: None`: a child's tail must never run phase one
+    /// against its private fanout and its own persist.
+    pub(crate) pending_switch: Option<Arc<std::sync::Mutex<PendingSwitch>>>,
     /// Write-through and session bookkeeping, when the engine persists.
     /// [`None`] is an in-memory engine, and every hook below is a no-op.
     pub(crate) persist: Option<Persist>,
@@ -644,6 +679,7 @@ pub(crate) struct RootParts {
     pub(crate) slot: Arc<Mutex<Option<TurnHandle>>>,
     pub(crate) history: Arc<Mutex<Vec<Message>>>,
     pub(crate) spawn: Option<Arc<crate::subagent::Host>>,
+    pub(crate) pending_switch: Option<Arc<std::sync::Mutex<PendingSwitch>>>,
     pub(crate) persist: Option<Persist>,
 }
 
@@ -703,6 +739,7 @@ impl Turn {
             slot: parts.slot,
             history: parts.history,
             spawn: parts.spawn,
+            pending_switch: parts.pending_switch,
             persist: parts.persist,
         }
     }
@@ -763,6 +800,13 @@ impl Turn {
             // The child's task tool is absent from its registry, so nothing
             // below it can spawn anything.
             spawn: None,
+            // The approval cell is the parent engine's, and a child never
+            // holds it — same discipline as `spawn: None`. A child that did
+            // would run phase one at its own tail, announcing on a private
+            // fanout nobody subscribes to and persisting through a child
+            // session's row; and its rules already deny `plan_exit`, so
+            // the belt has braces.
+            pending_switch: None,
             persist: parts.persist,
         }
     }
@@ -876,12 +920,18 @@ pub(crate) async fn run_turn(turn: Turn) {
     }
 
     // The finish event is queued BEFORE the slot is released: MessageFinished
-    // is defined to be the last event of a turn, and an engine that goes idle
-    // first opens a window where the next turn's opening events overtake the
-    // finish on a multi-thread runtime. The Busy a frontend can still see at
-    // the boundary is bounded by this one channel send, and a refused prompt
-    // keeps its text. Everything persisted above happens earlier for the same
-    // reason: nothing that could admit a new turn may precede this send.
+    // is defined to be the last event of a turn — save for the one
+    // `AgentChanged` a plan approval announces immediately after it — and an
+    // engine that goes idle first opens a window where the next turn's
+    // opening events overtake the finish on a multi-thread runtime. The
+    // pinned order of this tail is **MessageFinished (when the turn produced
+    // one) → AgentChanged (when a switch is pending) → slot release**;
+    // draining the approval after the release instead would let a raced
+    // prompt observe the events out of order. The Busy a frontend can still
+    // see at the boundary is bounded by these channel sends, and a refused
+    // prompt keeps its text. Everything persisted above happens earlier for
+    // the same reason: nothing that could admit a new turn may precede this
+    // send.
     if let Some(outcome) = outcome {
         let _ = turn
             .events
@@ -896,11 +946,56 @@ pub(crate) async fn run_turn(turn: Turn) {
             .await;
     }
 
+    // Phase one of a plan approval. Positional, not conditional on the finish
+    // above — `outcome` is `None` on the fanout-dead bails, and the durable
+    // half must land even with nobody left to tell. Cancel converges through
+    // this same tail: there is no second site to drift.
+    announce_pending_switch(&turn).await;
+
     *turn.slot.lock().await = None;
 
     if finished_clean {
         spawn_title_if_untitled(&turn).await;
     }
+}
+
+/// Phase one of a plan approval, at the one boundary every turn ends
+/// through: if this turn's Yes is still `Requested`, persist the switch
+/// durably, announce it, and hand the in-memory half to the next engine
+/// entry by moving the cell to `Announced`.
+///
+/// The durable write goes first — disk, then the announcement, like every
+/// other write-through point — and produces the same row `remember_selection`
+/// would: a restart between here and the next prompt resumes as build
+/// (deviation: approval-persists-at-the-boundary — upstream's window is
+/// zero, ganja's is the turn that just ended). On an engine with no
+/// persistence the write degrades to announce-only, correct by construction:
+/// there is no row for a restart to read. The event's model is exact because
+/// build prefers no model of its own, so the turn's model is the model the
+/// session keeps.
+async fn announce_pending_switch(turn: &Turn) {
+    let Some(cell) = &turn.pending_switch else {
+        return;
+    };
+    {
+        let mut pending = cell.lock().expect("the pending switch is never poisoned");
+        if *pending != PendingSwitch::Requested {
+            return;
+        }
+        *pending = PendingSwitch::Announced;
+    }
+
+    if let Some(persist) = &turn.persist {
+        persist.remember_agent(agent::BUILD, &turn.model);
+    }
+    let _ = turn
+        .events
+        .send(Event::AgentChanged {
+            session_id: turn.session_id.clone(),
+            agent: agent::BUILD.to_owned(),
+            model: turn.model.clone(),
+        })
+        .await;
 }
 
 /// Whether this turn's provider is the fake one running without
@@ -1421,8 +1516,10 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
         spawn: None,
         // A `!` passthrough is the person at the terminal running a command,
         // not the model calling a tool. There is no call to ask about and
-        // nothing that could ask.
+        // nothing that could ask — and nothing that could approve a plan, so
+        // the switch seam stays empty too.
         ask: None,
+        switch: None,
     };
     let tool = shell::ShellTool::new();
     let running = tool.run_reporting(input.clone(), &ctx, Some(progress));
@@ -2444,6 +2541,15 @@ async fn resolve(
                     call_id: call.id.clone(),
                 },
             }) as Arc<dyn question::Asker>),
+            // Present exactly where the approval cell was threaded: a parent
+            // turn of an engine whose registry holds build. A child turn
+            // carries no cell, so a subagent's call reads the no-build
+            // refusal even before its rules refuse it.
+            switch: turn.pending_switch.as_ref().map(|cell| {
+                Arc::new(SwitchToBuild {
+                    pending: Arc::clone(cell),
+                }) as Arc<dyn crate::tool::plan::Switcher>
+            }),
         };
         let running = tool.run(args.clone(), &ctx);
         tokio::pin!(running);
@@ -3192,6 +3298,7 @@ mod tests {
             slot: Arc::new(Mutex::new(None)),
             history: Arc::new(Mutex::new(Vec::new())),
             spawn: None,
+            pending_switch: None,
             persist: None,
         });
 

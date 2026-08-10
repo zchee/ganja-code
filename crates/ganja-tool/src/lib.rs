@@ -19,6 +19,7 @@ mod anchor;
 pub mod edit;
 pub mod glob;
 pub mod grep;
+pub mod plan;
 pub mod question;
 pub mod read;
 pub mod shell;
@@ -113,6 +114,13 @@ pub struct ToolCtx {
     /// every pattern, so the refusal is a rule somebody can see rather than a
     /// field somebody remembered to leave empty.
     pub ask: Option<Arc<dyn question::Asker>>,
+    /// What a call switches the session to the build agent through, which only
+    /// [`plan::PlanExitTool`] does.
+    ///
+    /// [`None`] on every child turn, every fixture, and the `!` shell
+    /// passthrough — the same depth guard as [`ToolCtx::spawn`]. [`Some`] only
+    /// when the engine's registry holds a build agent: presence is ability.
+    pub switch: Option<Arc<dyn plan::Switcher>>,
 }
 
 impl ToolCtx {
@@ -625,6 +633,7 @@ mod tests {
             credentials: store.map_or(Credentials::Unguarded, Credentials::Guarded),
             spawn: None,
             ask: None,
+            switch: None,
         }
     }
 
