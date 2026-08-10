@@ -38,12 +38,20 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// EndStream frame. [`ProviderEvent::Finish`] and [`ProviderEvent::Failed`]
 /// are terminal — the stream layer hands out nothing after either.
 ///
+/// **The exec arm is never skipped.** The server sends its context ask as an
+/// exec request and waits on the answer before generating — a build that
+/// skipped it hung a real turn in silence (LIVE-OBSERVED 2026-08-10, one
+/// debug line then nothing until the process was killed). So [`frame`](Self::frame)
+/// hands the ask up as a [`ContextAsk`] for the stream layer to answer on
+/// the open request body, and an exec kind this build cannot answer fails
+/// the turn with the kind's name on it rather than reproduce the silence.
+///
 /// Updates this build does not model — the tool-call and thinking arms, and
-/// whole server messages outside the update channel — are skipped, not
-/// failed: the server adds arms between client versions, and a turn that
-/// died on one would make every addition a breaking change. A skipped update
-/// is logged at debug, which is where "why is the reply shorter than the
-/// server's" is answered.
+/// whole server messages outside the update and exec channels — are
+/// skipped, not failed: the server adds arms between client versions, and a
+/// turn that died on one would make every addition a breaking change. A
+/// skipped update is logged at debug, which is where "why is the reply
+/// shorter than the server's" is answered.
 ///
 /// **`turn_ended` is noted; the verdict waits for the EndStream frame.**
 /// The two are the application and the protocol saying different things —
@@ -61,9 +69,25 @@ pub(super) struct Mapping {
     ended: bool,
 }
 
+/// A mid-stream context ask, carried up to the stream layer: the decode
+/// layer reads frames and holds no channel to answer one on, so the layer
+/// that owns the request body sends the reply.
+#[derive(Debug, PartialEq)]
+pub(super) struct ContextAsk {
+    /// The exchange ids the answer must echo, verbatim — the plugin's own
+    /// answers are built that way (proxy.ts:1307-1310).
+    pub(super) id: Option<u32>,
+    pub(super) exec_id: Option<String>,
+}
+
 impl Mapping {
-    /// Maps `frame`, appending whatever it means to `events`.
-    pub(super) fn frame(&mut self, frame: &connect::Frame, events: &mut Vec<ProviderEvent>) {
+    /// Maps `frame`, appending whatever it means to `events`; a returned
+    /// [`ContextAsk`] is the server waiting, and the caller must answer it.
+    pub(super) fn frame(
+        &mut self,
+        frame: &connect::Frame,
+        events: &mut Vec<ProviderEvent>,
+    ) -> Option<ContextAsk> {
         if frame.is_end_stream() {
             match connect::end_stream_error(&frame.payload) {
                 Ok(Some((code, message))) => {
@@ -72,7 +96,7 @@ impl Mapping {
                 Ok(None) => events.push(ProviderEvent::Finish(FinishReason::Completed)),
                 Err(error) => events.push(ProviderEvent::Failed(error)),
             }
-            return;
+            return None;
         }
 
         let message = match proto::ServerMessage::decode_from_slice(&frame.payload) {
@@ -84,15 +108,41 @@ impl Mapping {
                 events.push(ProviderEvent::Failed(ProviderError::Parse(format!(
                     "a server message did not decode: {error}"
                 ))));
-                return;
+                return None;
             }
         };
+
+        if let Some(exec) = message.exec_request.as_option() {
+            if exec.request_context_args.is_set() {
+                return Some(ContextAsk {
+                    id: exec.id,
+                    exec_id: exec.exec_id.clone(),
+                });
+            }
+
+            // The server stops generating until an exec is answered, so a
+            // kind this build cannot answer ends the turn with its name on
+            // it — the alternative was the silent hang this arm's modelling
+            // exists to end.
+            events.push(ProviderEvent::Failed(ProviderError::Parse(format!(
+                "cursor made an exec request this build cannot answer ({}); \
+                 leaving it unanswered would hang the turn",
+                exec_kind(exec)
+            ))));
+            return None;
+        }
+
         let Some(update) = message.interaction_update.as_option() else {
             tracing::debug!(
                 provider = ID,
+                fields = ?message
+                    .__buffa_unknown_fields
+                    .iter()
+                    .map(|field| field.number)
+                    .collect::<Vec<_>>(),
                 "skipped a server message outside the update channel"
             );
-            return;
+            return None;
         };
 
         if let Some(delta) = update.text_delta.as_option() {
@@ -106,6 +156,8 @@ impl Mapping {
         } else {
             tracing::debug!(provider = ID, "skipped an update this build does not model");
         }
+
+        None
     }
 
     /// Reports a body that ended without its EndStream frame.
@@ -147,13 +199,60 @@ fn verdict(code: &str, message: &str) -> ProviderError {
     }
 }
 
+/// Names the kind an unanswerable exec request carried.
+///
+/// The kinds this build does not model arrive as unknown fields, and the
+/// field number *is* the kind: the table is the plugin's args oneof
+/// (agent_pb.ts:6885-:6997), so the refusal names what the descriptor
+/// names. A number the table does not know is reported as itself — still
+/// enough to go derive — and span_context (= 19, agent_pb.ts:6875) rides
+/// beside the oneof without being a kind, so it is passed over rather than
+/// blamed.
+fn exec_kind(exec: &proto::ExecRequest) -> String {
+    let named = |number: u32| {
+        Some(match number {
+            2 => "shell_args",
+            3 => "write_args",
+            4 => "delete_args",
+            5 => "grep_args",
+            7 => "read_args",
+            8 => "ls_args",
+            9 => "diagnostics_args",
+            11 => "mcp_args",
+            14 => "shell_stream_args",
+            16 => "background_shell_spawn_args",
+            17 => "list_mcp_resources_exec_args",
+            18 => "read_mcp_resource_exec_args",
+            20 => "fetch_args",
+            21 => "record_screen_args",
+            22 => "computer_use_args",
+            23 => "write_shell_stdin_args",
+            _ => return None,
+        })
+    };
+
+    let fields = &exec.__buffa_unknown_fields;
+    if let Some(kind) = fields.iter().find_map(|field| named(field.number)) {
+        return kind.to_owned();
+    }
+
+    match fields
+        .iter()
+        .map(|field| field.number)
+        .find(|number| *number != 19)
+    {
+        Some(number) => format!("field {number}"),
+        None => "no recognizable kind".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use buffa::Message as _;
 
     use super::{
         super::{connect, proto},
-        FinishReason, Mapping, ProviderError, ProviderEvent, model_list, verdict,
+        ContextAsk, FinishReason, Mapping, ProviderError, ProviderEvent, model_list, verdict,
     };
 
     /// A data frame holding one update, the way the server frames them.
@@ -200,22 +299,39 @@ mod tests {
         frame
     }
 
+    /// A data frame holding one exec request, the way the server frames one.
+    fn exec_framed(exec: proto::ExecRequest) -> Vec<u8> {
+        let message = proto::ServerMessage {
+            exec_request: buffa::MessageField::some(exec),
+            ..Default::default()
+        };
+
+        connect::envelope(&message.encode_to_vec())
+    }
+
     /// Runs `body` through the real splitter and one [`Mapping`], the way
     /// the live fold does; `eof` says whether the body then ended.
     fn mapped(body: &[u8], eof: bool) -> Vec<ProviderEvent> {
+        mapped_asks(body, eof).0
+    }
+
+    /// Like [`mapped`], also collecting what the mapping asked the caller
+    /// to answer.
+    fn mapped_asks(body: &[u8], eof: bool) -> (Vec<ProviderEvent>, Vec<ContextAsk>) {
         let mut splitter = connect::Splitter::default();
         splitter.push(body);
 
         let mut mapping = Mapping::default();
         let mut events = Vec::new();
+        let mut asks = Vec::new();
         while let Some(frame) = splitter.frame().expect("the fixture bodies parse") {
-            mapping.frame(&frame, &mut events);
+            asks.extend(mapping.frame(&frame, &mut events));
         }
         if eof {
             mapping.truncated(&mut events);
         }
 
-        events
+        (events, asks)
     }
 
     #[test]
@@ -385,6 +501,96 @@ mod tests {
 
         let events = mapped(&body, false);
         assert_eq!(events[0], ProviderEvent::TextDelta("still here".to_owned()));
+    }
+
+    /// The exchange the 2026-08-10 live turn hung on: the server's context
+    /// ask is not an update to skip but a question to hand up, ids intact,
+    /// so the stream layer can answer it on the open request body.
+    #[test]
+    fn the_servers_context_ask_is_handed_up_with_its_ids() {
+        let body = exec_framed(
+            proto::ExecRequest {
+                request_context_args: buffa::MessageField::some(proto::ContextArgs::default()),
+                ..Default::default()
+            }
+            .with_id(7)
+            .with_exec_id("exec-abc"),
+        );
+
+        let (events, asks) = mapped_asks(&body, false);
+        assert!(
+            events.is_empty(),
+            "an ask is a question, not an event: {events:?}"
+        );
+        assert_eq!(
+            asks,
+            vec![ContextAsk {
+                id: Some(7),
+                exec_id: Some("exec-abc".to_owned()),
+            }]
+        );
+    }
+
+    /// An exec kind this build does not model must end the turn with the
+    /// kind's name on it: the server waits on every exec, and the skipped
+    /// alternative was a silent hang.
+    #[test]
+    fn an_exec_kind_this_build_cannot_answer_fails_the_turn_by_name() {
+        // The arm arrives as an unknown field; its number is the kind. The
+        // shell_args arm is field 2 of the plugin's oneof (agent_pb.ts:6885).
+        let mut asked = proto::ExecRequest::default().with_id(3);
+        asked.__buffa_unknown_fields.push(buffa::UnknownField {
+            number: 2,
+            data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
+        });
+
+        let (events, asks) = mapped_asks(&exec_framed(asked), false);
+        assert!(asks.is_empty(), "nothing to answer: {asks:?}");
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Parse(message))]
+                    if message.contains("shell_args")
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// A kind the table has never heard of is still named — by number —
+    /// and the span context riding beside the oneof is never mistaken for
+    /// one.
+    #[test]
+    fn an_unheard_of_exec_kind_is_named_by_its_field_number() {
+        let mut asked = proto::ExecRequest::default();
+        // span_context = 19 rides beside the args oneof (agent_pb.ts:6875).
+        asked.__buffa_unknown_fields.push(buffa::UnknownField {
+            number: 19,
+            data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
+        });
+        asked.__buffa_unknown_fields.push(buffa::UnknownField {
+            number: 42,
+            data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
+        });
+
+        let (events, _) = mapped_asks(&exec_framed(asked), false);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Parse(message))]
+                    if message.contains("field 42") && !message.contains("19")
+            ),
+            "{events:?}"
+        );
+
+        let (events, _) = mapped_asks(&exec_framed(proto::ExecRequest::default()), false);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Parse(message))]
+                    if message.contains("no recognizable kind")
+            ),
+            "{events:?}"
+        );
     }
 
     #[test]

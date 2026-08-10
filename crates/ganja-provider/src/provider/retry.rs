@@ -91,8 +91,10 @@ pub(super) async fn send(
     let mut attempt = 1;
 
     loop {
-        // A body that cannot be replayed cannot be retried. Ours is always an
-        // in-memory `Vec<u8>`, so this is belt and braces.
+        // A body that cannot be replayed cannot be retried. Buffered bodies
+        // clone and take the retry loop below; a streamed body (cursor's
+        // duplex run) lands here by design and is sent exactly once — its
+        // wire owns the retry schedule instead.
         let Some(replay) = request.try_clone() else {
             return match client.execute(request).await {
                 Ok(response) if response.status().is_success() => Ok(response),

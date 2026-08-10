@@ -62,18 +62,25 @@ message ModelEntry {
 // What the client sends on the Run stream. The server demands a run request
 // first (LIVE-OBSERVED refusal: "First message must be a run request or
 // prewarm request"); the field number is derived from the plugin's
-// AgentClientMessage oneof (agent_pb.ts:3596). The other arms of that oneof
-// belong to flows this build does not speak yet, so only this one is
-// modelled.
+// AgentClientMessage oneof (agent_pb.ts:3596). The same stream then carries
+// the client's exec answers — exec_client_message = 2 (agent_pb.ts:3603).
+// The other arms of that oneof belong to flows this build does not speak
+// yet, so only these two are modelled.
 message ClientMessage {
   RunRequest run_request = 1;
+  ExecResponse exec_response = 2;
 }
 
 // One turn's opening request, the minimal subset of the plugin's
 // AgentRunRequest a single user message needs. Every field number here is
 // plugin-derived: conversation_state = 1 (agent_pb.ts:2738), action = 2
-// (:2743), model_details = 3 (:2750), custom_system_prompt = 8 (:2784),
-// requested_model = 9 (:2755).
+// (:2743), model_details = 3 (:2750), requested_model = 9 (:2755). The
+// descriptor's custom_system_prompt = 8 is deliberately absent: it is an
+// allowlist-gated override ("Allowlisted for specific teams only",
+// agent_pb.ts:2782) the plugin never sets, and the live server refused an
+// ordinary seat's turn carrying it (400 invalid_argument: "unknown option
+// '--system-prompt'"); the system prompt travels the context answer's
+// RequestContext.cloud_rule instead (the ExecResponse chain below).
 message RunRequest {
   // Present-but-empty on a fresh turn; the plugin always sends one.
   ConversationState conversation_state = 1;
@@ -81,8 +88,6 @@ message RunRequest {
   // The deprecated-but-still-read model description; the plugin sends both
   // this and requested_model, so this build does too.
   ModelEntry model_details = 3;
-  // The one inline channel for a system prompt this message set carries.
-  string custom_system_prompt = 8;
   RequestedModel requested_model = 9;
 }
 
@@ -121,10 +126,15 @@ message RequestedModel {
 
 // One frame of the server's answer. Field 1 wrapping an update was
 // LIVE-OBSERVED (the recorded `0a 02 6a 00` frame); the field's role matches
-// the plugin's AgentServerMessage oneof (agent_pb.ts:3669). The exec/kv arms
-// are not modelled and survive decoding as unknown fields.
+// the plugin's AgentServerMessage oneof (agent_pb.ts:3669). The exec arm —
+// exec_server_message = 2 (agent_pb.ts:3676) — is a mid-stream request the
+// server waits on before it generates: a build that skipped it hung a real
+// turn (LIVE-OBSERVED 2026-08-10), which is why it is modelled. The
+// kv/checkpoint/control/query arms are not modelled and survive decoding as
+// unknown fields.
 message ServerMessage {
   Update interaction_update = 1;
+  ExecRequest exec_request = 2;
 }
 
 // The updates a one-shot text turn must understand. heartbeat = 13 was
@@ -150,3 +160,55 @@ message Heartbeat {}
 
 // Fieldless in the plugin too (agent_pb.ts:3085): the turn's clean end.
 message TurnEnded {}
+
+// A request the server makes mid-stream and waits on before generating: the
+// minimal subset of the plugin's ExecServerMessage (agent_pb.ts:6859) an
+// answered turn needs. id = 1 (:6861) and exec_id = 15 (:6868) are the echo
+// every answer must carry (proxy.ts:1307-1310); request_context_args = 10
+// (:6934) is the one kind this build answers. The other arms of the args
+// oneof (:6885-:6997) are tools this build does not run for the server; they
+// survive decoding as unknown fields, whose numbers decode.rs names when it
+// refuses the turn — an unanswered exec is a hang, never an outcome.
+message ExecRequest {
+  uint32 id = 1;
+  ContextArgs request_context_args = 10;
+  string exec_id = 15;
+}
+
+// Fieldless on purpose: the plugin's RequestContextArgs (agent_pb.ts:9874)
+// holds only an optional notes-session id (= 2, :9876) and workspace id
+// (= 3, :9881) this build does not read. Presence is the whole question.
+message ContextArgs {}
+
+// The client's half of the exec exchange: the plugin's ExecClientMessage
+// (agent_pb.ts:7014) — id = 1 (:7016), exec_id = 15 (:7023),
+// request_context_result = 10 (:7082) — narrowed to the one result this
+// build sends.
+message ExecResponse {
+  uint32 id = 1;
+  ContextResult request_context_result = 10;
+  string exec_id = 15;
+}
+
+// The plugin's RequestContextResult oneof (agent_pb.ts:9895) narrowed to
+// success = 1 (:9902); the error/rejected arms are answers this build never
+// gives.
+message ContextResult {
+  ContextSuccess success = 1;
+}
+
+// The plugin's RequestContextSuccess (agent_pb.ts:9933): request_context = 1
+// (:9935).
+message ContextSuccess {
+  RequestContext request_context = 1;
+}
+
+// The plugin's RequestContext (agent_pb.ts:10232) narrowed to cloud_rule =
+// 16 (:10286) — the prompt channel cursor's agent actually honors: the
+// plugin's own answer records that plain system messages are ignored
+// server-side (proxy.ts:1133). Its other members are all empty on that
+// answer, and an absent member encodes identically to an empty one, so this
+// one field is the whole message a bare turn needs.
+message RequestContext {
+  string cloud_rule = 16;
+}
