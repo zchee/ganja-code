@@ -2366,8 +2366,10 @@ impl Engine {
             let model = self.active().model.clone();
             // A cataloged provider may still be asked for an uncataloged model
             // (`GANJA_MODEL` takes any spelling), and a row it does not have
-            // carries no efforts — the empty list, not a panic.
-            let available: Vec<String> = catalog::model(&model)
+            // carries no efforts — the empty list, not a panic. The lookup is
+            // provider-scoped because two providers publish the same id with
+            // rosters spliced for different wires (`catalog::model_for`).
+            let available: Vec<String> = catalog::model_for(self.provider.id(), &model)
                 .map(|info| info.variants.keys().cloned().collect())
                 .unwrap_or_default();
             if !available.iter().any(|carried| carried == name) {
@@ -2403,7 +2405,9 @@ impl Engine {
         let Some(name) = active.effort.as_ref() else {
             return false;
         };
-        if catalog::model(&active.model).is_some_and(|info| info.variants.contains_key(name)) {
+        if catalog::model_for(self.provider.id(), &active.model)
+            .is_some_and(|info| info.variants.contains_key(name))
+        {
             return false;
         }
 
@@ -2596,7 +2600,12 @@ impl Engine {
         // request had before efforts existed.
         let effort_options = effort
             .as_ref()
-            .and_then(|name| catalog::model(&model)?.variants.get(name).cloned())
+            .and_then(|name| {
+                catalog::model_for(self.provider.id(), &model)?
+                    .variants
+                    .get(name)
+                    .cloned()
+            })
             .unwrap_or_default();
 
         let system = self.system_for(agent);

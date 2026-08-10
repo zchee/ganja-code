@@ -47,6 +47,7 @@
 pub(crate) mod atomic;
 pub mod auth;
 pub mod catalog;
+pub(crate) mod effort;
 pub mod provider;
 
 pub use ganja_protocol as protocol;

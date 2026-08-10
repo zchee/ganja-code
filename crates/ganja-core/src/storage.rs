@@ -299,7 +299,6 @@ pub struct SessionInfo {
     /// keeps those rows readable — and on every session running upstream's
     /// "Default"; restored only when the resumed model's catalog row still
     /// carries the name, the same rule a live model switch applies.
-    // Rows written under the old name are still on disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     /// The session that delegated this one, when a `task` call created it.
@@ -1824,9 +1823,9 @@ mod tests {
 
     /// Every persisted shape of the effort field, pinned where the row lives:
     /// a session running Default writes the exact bytes it always wrote, a
-    /// selected effort survives the round trip, a row written under the old
-    /// name parses through the alias, and a row from before the field existed
-    /// parses through the serde default.
+    /// selected effort survives the round trip, and a row from before the
+    /// field existed parses through the serde default — which is also how a
+    /// row written under the field's old name reads, as effort-unselected.
     #[test]
     fn the_session_row_preserves_default_bytes_round_trips_effort_and_reads_older_rows() {
         let mut carried = info("ses_effort", 2);
@@ -1845,11 +1844,6 @@ mod tests {
             r#"{"id":"ses_default","version":1,"created":1,"updated":2,"usage":{"input_tokens":0,"output_tokens":0,"reasoning_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0},"context_tokens":0}"#,
             "Default is the field's absence, so an unselected row keeps its old bytes"
         );
-
-        let old = r#"{"id":"ses_old","version":1,"created":1,"updated":2,"variant":"max"}"#;
-        let decoded: SessionInfo =
-            serde_json::from_str(old).expect("the alias reads a row written under the old name");
-        assert_eq!(decoded.effort.as_deref(), Some("max"));
 
         let older = r#"{"id":"ses_older","version":1,"created":1,"updated":2}"#;
         let decoded: SessionInfo = serde_json::from_str(older)
