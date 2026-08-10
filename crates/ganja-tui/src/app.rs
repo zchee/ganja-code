@@ -17,7 +17,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
-use ganja_core::{Engine, catalog};
+use ganja_core::{Engine, catalog, provider};
 use ganja_protocol::{
     Command, Event as CoreEvent, FinishReason, Message, PartBody, PermissionReply, Role, ToolState,
     Usage,
@@ -32,6 +32,7 @@ use ratatui::{
     },
     layout::{Constraint, Layout},
 };
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -164,6 +165,26 @@ enum Chooser {
     Agents,
 }
 
+/// What the background model-listing fetch resolves to: the seam's whole
+/// answer, with [`None`] still meaning the catalog owns this provider.
+type WireListing = Option<Result<Vec<provider::ListedModel>, provider::ProviderError>>;
+
+/// The chooser rows a wire listing becomes: the id is what a switch sends,
+/// the display name rides beside it, and the active mark follows the model
+/// the session is on — absent when the listing does not carry that model,
+/// which refuses nothing.
+fn wire_rows(models: &[provider::ListedModel], current: &str) -> Vec<list::Row> {
+    models
+        .iter()
+        .map(|model| list::Row {
+            value: model.id.clone(),
+            label: model.id.clone(),
+            detail: Some(model.name.clone()),
+            active: model.id == current,
+        })
+        .collect()
+}
+
 /// Whether the editor itself would do something with `key`.
 ///
 /// The one exit binding that is also an editing key. Upstream gates its whole
@@ -253,6 +274,14 @@ pub struct App {
     mcp_notice: Option<String>,
     /// How many of them have answered.
     mcp_resolved: usize,
+    /// The wire-served model rows for this session's provider, once a fetch
+    /// has landed them. Held for the App's lifetime on purpose: a login
+    /// stored mid-session is picked up by a restart, not by a later fetch.
+    wire_models: Option<Vec<provider::ListedModel>>,
+    /// The listing fetch while one is in flight, reaped on Tick the way the
+    /// MCP dial is polled. Also the guard that keeps a second `/model` from
+    /// spawning a second fetch.
+    wire_fetch: Option<JoinHandle<WireListing>>,
     /// The tools the `@` menu drives. The registry rather than the glob tool
     /// alone, so the menu asks for its walker by the name the engine knows it
     /// by instead of holding a second copy of the decision.
@@ -330,6 +359,8 @@ impl App {
             mcp_servers: 0,
             mcp_notice: None,
             mcp_resolved: 0,
+            wire_models: None,
+            wire_fetch: None,
             tools: ganja_tool::Registry::with_builtins(),
             themes,
             theme,
@@ -495,7 +526,10 @@ impl App {
                 self.handle_core(*event);
                 self.dirty = true;
             }
-            AppEvent::Tick => self.poll_mcp(),
+            AppEvent::Tick => {
+                self.poll_mcp();
+                self.poll_wire_models().await;
+            }
         }
 
         Ok(())
@@ -535,6 +569,60 @@ impl App {
     /// and this settles for good a moment after startup.
     fn pending_mcp(&self) -> bool {
         self.mcp_resolved < self.mcp_servers
+    }
+
+    /// Reaps a finished model-listing fetch, and opens the list it was for.
+    ///
+    /// Polled on the same tick the MCP dial rides, and awaited only once the
+    /// handle reports finished, so the loop never blocks on the RPC. Every
+    /// arm clears the slot: a retry is another `/model` away, never
+    /// automatic.
+    async fn poll_wire_models(&mut self) {
+        if !self
+            .wire_fetch
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            return;
+        }
+        let handle = self.wire_fetch.take().expect("checked finished above");
+
+        // A modal already up keeps the keys it claimed, so the list does not
+        // open over it: the rows are cached and the next `/model` opens
+        // instantly instead. The set is the one the key router checks, the
+        // inline menus included.
+        let claimed = self.modal_open() || self.dropdown.is_some() || self.files.is_some();
+
+        match handle.await {
+            Ok(Some(Ok(models))) if models.is_empty() => {
+                self.status
+                    .set_notice(Some(format!("the {} wire served no models", self.provider)));
+            }
+            Ok(Some(Ok(models))) => {
+                self.status.set_notice(None);
+                if !claimed {
+                    let rows = wire_rows(&models, &self.model);
+                    self.chooser = Some((Chooser::Models, ListDialog::new(" models ", rows)));
+                }
+                self.wire_models = Some(models);
+            }
+            // The catalog is this provider's source of truth and it had no
+            // rows: the empty list a `/model` on such a provider has always
+            // opened, one tick later. Nothing is cached — the answer is
+            // recomputed in microseconds, and an empty cache entry would
+            // shadow the day the catalog does grow rows for it.
+            Ok(None) => {
+                self.status.set_notice(None);
+                if !claimed {
+                    self.chooser = Some((Chooser::Models, ListDialog::new(" models ", Vec::new())));
+                }
+            }
+            Ok(Some(Err(error))) => self.status.set_notice(Some(error.to_string())),
+            // A panic inside the fetch task; its message is all there is.
+            Err(joining) => self.status.set_notice(Some(joining.to_string())),
+        }
+
+        self.dirty = true;
     }
 
     /// Renders one frame.
@@ -1308,10 +1396,15 @@ impl App {
         relative_paths(&self.cwd, &found.output)
     }
 
-    /// Opens the model list over this provider's catalog entries.
+    /// Opens the model list over this provider's catalog entries — or, when
+    /// the catalog has none, over the roster its wire serves.
     ///
     /// This provider's only: a switch is same-provider by construction, so a
     /// row for anything else would be a refusal with a nice label on it.
+    ///
+    /// The wire path runs off the render loop: the fetch is spawned, the tick
+    /// that reaps it opens the list, and until then a slow endpoint costs a
+    /// status line rather than a frozen frame.
     fn open_models(&mut self) {
         let rows: Vec<list::Row> = catalog::models()
             .filter(|model| model.provider_id == self.provider)
@@ -1322,8 +1415,31 @@ impl App {
                 active: model.id == self.model,
             })
             .collect();
+        if !rows.is_empty() {
+            self.chooser = Some((Chooser::Models, ListDialog::new(" models ", rows)));
+            return;
+        }
 
-        self.chooser = Some((Chooser::Models, ListDialog::new(" models ", rows)));
+        // The catalog has nothing, so the wire's listing answers — from the
+        // App-lifetime cache when a fetch already landed it.
+        if let Some(models) = &self.wire_models {
+            let rows = wire_rows(models, &self.model);
+            self.chooser = Some((Chooser::Models, ListDialog::new(" models ", rows)));
+            return;
+        }
+        // One fetch at a time: the tick that reaps the one in flight opens
+        // the list, and a second `/model` before then changes nothing.
+        if self.wire_fetch.is_some() {
+            return;
+        }
+
+        // The task owns its provider id because the seam borrows.
+        let id = self.provider.clone();
+        self.wire_fetch = Some(tokio::spawn(async move {
+            provider::wire_model_listing(&id).await
+        }));
+        self.status
+            .set_notice(Some(format!("fetching {} models…", self.provider)));
     }
 
     /// Opens the agent list over the agents a user may switch to.
@@ -1847,9 +1963,12 @@ impl App {
     ///
     /// The third arm is the MCP dial: nothing else would wake an idle app
     /// while servers connect in the background, so without it a failed server
-    /// would sit unreported until the user's next keystroke.
+    /// would sit unreported until the user's next keystroke. The fourth is
+    /// the model-listing fetch, for the same reason: the tick is what reaps
+    /// it, and without this arm the finished fetch would sit unopened until
+    /// an unrelated keypress.
     fn wants_wakeup(&self) -> bool {
-        self.dirty || self.status.is_streaming() || self.pending_mcp()
+        self.dirty || self.status.is_streaming() || self.pending_mcp() || self.wire_fetch.is_some()
     }
 
     fn until_next_frame(&self) -> Duration {
@@ -1934,7 +2053,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        App, Chooser, Cleared, Dropdown, FRAME, Mode, Palette, Permission, permission_reply,
+        App, Chooser, Cleared, Dropdown, FRAME, Help, Mode, Palette, Permission, WireListing,
+        permission_reply,
     };
 
     /// The session every hand-built fixture event happens in. One pinned id,
@@ -4102,15 +4222,211 @@ mod tests {
             !dialog.1.is_empty(),
             "anthropic has models in the compiled-in catalog"
         );
+        assert!(
+            served.wire_fetch.is_none(),
+            "a cataloged provider never consults the wire"
+        );
+    }
 
+    /// A wire-listed model row, in the shape the seam hands back.
+    fn listed(id: &str, name: &str) -> ganja_core::provider::ListedModel {
+        ganja_core::provider::ListedModel {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    /// Ticks until the in-flight listing fetch has been reaped.
+    ///
+    /// The loop the real select loop runs, minus the frame budget: the fetch
+    /// finishes on its own schedule and the tick is what notices.
+    async fn reap_wire_fetch(app: &mut App) {
+        for _ in 0..400 {
+            app.handle(AppEvent::Tick).await.expect("a tick is handled");
+            if app.wire_fetch.is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        panic!("the listing fetch never finished");
+    }
+
+    /// A provider with no catalog rows goes to the wire's listing, and one
+    /// the seam does not serve either ends where it always did: the empty
+    /// list, one tick later.
+    #[tokio::test]
+    async fn a_provider_no_listing_serves_still_opens_the_empty_list_it_always_did() {
         let mut unknown = app().with_provider("a-provider-nothing-ships");
         unknown.open_models();
+        assert!(
+            unknown.chooser.is_none(),
+            "nothing opens until the fetch lands"
+        );
+
+        reap_wire_fetch(&mut unknown).await;
         assert!(
             unknown
                 .chooser
                 .as_ref()
                 .is_some_and(|(_, list)| list.is_empty()),
             "a provider with no catalog entries has nothing to offer"
+        );
+    }
+
+    /// The wire path's row shape, from the cache: value and label are the id,
+    /// the display name rides beside it, and the session's model is the
+    /// active row the cursor starts on.
+    #[tokio::test]
+    async fn a_cached_wire_listing_opens_the_chooser_with_its_rows_and_marks_the_active_model() {
+        let mut app = app().with_provider("cursor");
+        app.model = "claude-4.5-opus".to_owned();
+        app.wire_models = Some(vec![
+            listed("gpt-5.3-codex", "Codex 5.3"),
+            listed("claude-4.5-opus", "Claude 4.5 Opus"),
+        ]);
+
+        app.open_models();
+
+        let (kind, dialog) = app.chooser.as_ref().expect("the cache opens the list");
+        assert_eq!(*kind, Chooser::Models);
+        assert_eq!(
+            dialog.selected(),
+            Some("claude-4.5-opus"),
+            "the cursor starts on the model the session is on"
+        );
+        assert!(app.wire_fetch.is_none(), "a cache hit fetches nothing");
+
+        let mut terminal = terminal(80, 14);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(screen.contains("gpt-5.3-codex"), "{screen}");
+        assert!(
+            screen.contains("Codex 5.3"),
+            "the display name rides beside the id: {screen}"
+        );
+    }
+
+    /// While the fetch is out, the status bar says so instead of the frame
+    /// freezing on the RPC or an empty dialog opening early.
+    #[tokio::test]
+    async fn an_uncataloged_model_list_says_it_is_fetching_while_the_wire_answers() {
+        let mut app = app().with_provider("a-provider-nothing-ships");
+        app.open_models();
+
+        assert!(app.wire_fetch.is_some(), "the fetch is in flight");
+        assert!(
+            status_line(&mut app).contains("fetching a-provider-nothing-ships models"),
+            "got: {}",
+            status_line(&mut app)
+        );
+    }
+
+    /// The guard the fetch slot doubles as: after a second `/model`, the
+    /// planted fetch is still the one the tick reaps, so completing it fills
+    /// the cache — a second spawn would have replaced it and answered
+    /// differently.
+    #[tokio::test]
+    async fn a_second_model_list_while_the_fetch_is_in_flight_does_not_spawn_another() {
+        let mut app = app().with_provider("cursor");
+        let (landing, planted) = tokio::sync::oneshot::channel();
+        app.wire_fetch = Some(tokio::spawn(async move {
+            planted.await.expect("the test completes the fetch")
+        }));
+
+        app.open_models();
+        assert!(app.chooser.is_none(), "nothing to show yet");
+
+        landing
+            .send(Some(Ok(vec![listed("planted-one", "Planted One")])))
+            .expect("the fetch is still listening");
+        reap_wire_fetch(&mut app).await;
+
+        assert!(
+            app.wire_models
+                .as_ref()
+                .is_some_and(|models| models[0].id == "planted-one"),
+            "the planted fetch is the one that landed"
+        );
+        assert!(
+            app.chooser
+                .as_ref()
+                .is_some_and(|(kind, list)| *kind == Chooser::Models && !list.is_empty()),
+            "and its rows are what opened"
+        );
+    }
+
+    /// Without this arm the tick never fires on an idle app and the finished
+    /// fetch waits for an unrelated keypress — the same reason the MCP dial
+    /// keeps the loop waking.
+    #[tokio::test]
+    async fn an_in_flight_wire_fetch_keeps_the_loop_waking_up() {
+        let mut app = app().with_provider("cursor");
+        let (_landing, planted) = tokio::sync::oneshot::channel::<WireListing>();
+        app.wire_fetch = Some(tokio::spawn(async move { planted.await.unwrap_or(None) }));
+        app.draw(&mut terminal(80, 24)).expect("a frame draws");
+
+        assert!(!app.dirty, "the frame above cleared it");
+        assert!(app.wants_wakeup(), "the fetch is what keeps it awake");
+    }
+
+    /// Rows landing under an open modal wait in the cache rather than
+    /// stealing the keys the modal claimed, and the next `/model` opens
+    /// instantly from what was kept.
+    #[tokio::test]
+    async fn a_listing_that_lands_under_a_modal_waits_in_the_cache() {
+        let mut app = app().with_provider("cursor");
+        app.help = Some(Help::new(app.keys.clone()));
+        app.wire_fetch = Some(tokio::spawn(async {
+            Some(Ok(vec![listed("planted-one", "Planted One")]))
+        }));
+
+        reap_wire_fetch(&mut app).await;
+        assert!(app.chooser.is_none(), "the modal keeps its keys");
+        assert!(app.wire_models.is_some(), "but the rows are kept");
+
+        app.help = None;
+        app.open_models();
+        assert!(
+            app.chooser.is_some(),
+            "the next `/model` opens instantly from the cache"
+        );
+    }
+
+    /// An empty roster is an answer, and an empty dialog is not a way to
+    /// show it.
+    #[tokio::test]
+    async fn a_wire_that_serves_no_models_says_so_instead_of_opening_an_empty_dialog() {
+        let mut app = app().with_provider("cursor");
+        app.wire_fetch = Some(tokio::spawn(async { Some(Ok(Vec::new())) }));
+
+        reap_wire_fetch(&mut app).await;
+        assert!(app.chooser.is_none(), "no dialog opens over nothing");
+        assert!(
+            status_line(&mut app).contains("the cursor wire served no models"),
+            "got: {}",
+            status_line(&mut app)
+        );
+    }
+
+    /// A failure is a status line, never a dialog — and the cleared slot is
+    /// what makes the next `/model` a retry rather than a dead end.
+    #[tokio::test]
+    async fn a_failed_wire_listing_lands_in_the_status_bar_and_clears_the_slot_for_a_retry() {
+        let mut app = app().with_provider("cursor");
+        app.wire_fetch = Some(tokio::spawn(async {
+            Some(Err(ganja_core::provider::ProviderError::Auth(
+                "no cursor credential is stored; run `ganja auth login cursor`".to_owned(),
+            )))
+        }));
+
+        reap_wire_fetch(&mut app).await;
+        assert!(app.chooser.is_none(), "a failure opens nothing");
+        assert!(app.wire_models.is_none(), "and caches nothing");
+        assert!(
+            status_line(&mut app).contains("ganja auth login cursor"),
+            "the wire's own words reach the status bar: {}",
+            status_line(&mut app)
         );
     }
 

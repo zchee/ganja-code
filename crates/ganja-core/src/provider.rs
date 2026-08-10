@@ -130,6 +130,67 @@ pub fn selectable(config: &Config, provider_id: &str) -> bool {
     PROVIDERS.contains(&provider_id) || config.provider.contains_key(provider_id)
 }
 
+/// A model a wire says the current credential may name, for surfaces that
+/// list rather than price. [`None`] from [`wire_model_listing`] means the
+/// catalog is this provider's source of truth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedModel {
+    /// The id a request asks for — what `--model` and the chooser hand on.
+    pub id: String,
+    /// The human name beside it; the id again where the wire carried none.
+    pub name: String,
+}
+
+/// The live roster for a provider whose *wire*, not the catalog, knows what
+/// the stored credential may name — today exactly cursor, whose
+/// `GetUsableModels` listing is the only source its uncataloged tier has.
+/// Everyone else answers [`None`], and the catalog keeps describing them.
+///
+/// Live on every call, deliberately: upstream's cursor plugin caches its
+/// discovery per process, but both callers here already hold the answer the
+/// way they need it — the TUI caches for the App's lifetime and the CLI is
+/// one-shot — so a cache at this seam would only be a second staleness to
+/// reason about (deviation: cursor-model-listing-uncached-at-the-seam).
+///
+/// # Errors
+///
+/// The inner [`ProviderError`] is the wire's own: `Auth` naming
+/// `ganja auth login cursor` when no login is stored — the store is read
+/// before anything is dialled — and the transport, status and parse classes
+/// after that.
+pub async fn wire_model_listing(
+    provider_id: &str,
+) -> Option<Result<Vec<ListedModel>, ProviderError>> {
+    if provider_id != cursor::ID {
+        return None;
+    }
+
+    Some(cursor_models().await)
+}
+
+/// The cursor half of [`wire_model_listing`]: the stored login, one listing
+/// call, and the entries in the order the server sent them.
+async fn cursor_models() -> Result<Vec<ListedModel>, ProviderError> {
+    let wire = cursor::CursorWire::from_stored()?;
+    let entries = wire.usable_models().await?;
+
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| {
+            // An entry with no id is nothing a request could ask for. The
+            // name is `display_name` — proto field 4, the human string —
+            // never `display_model_id`, which is the server-side id again.
+            let id = entry.model_id.filter(|id| !id.is_empty())?;
+            let name = entry
+                .display_name
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| id.clone());
+
+            Some(ListedModel { id, name })
+        })
+        .collect())
+}
+
 /// A resolved provider, together with the model to ask when nothing named one.
 ///
 /// The second half is not always [`catalog::default_model`]'s answer, and the
@@ -488,7 +549,7 @@ mod tests {
 
     use super::{
         Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, adoptable_login,
-        cursor, defaulted_model, fake, grok, openai, select, selectable,
+        cursor, defaulted_model, fake, grok, openai, select, selectable, wire_model_listing,
     };
     use crate::catalog;
 
@@ -675,6 +736,29 @@ mod tests {
             selection.notice.is_none(),
             "the provider was asked for by name, not defaulted"
         );
+    }
+
+    /// The listing seam's whole negative half: for everything that is not
+    /// cursor — cataloged builtins, the fake provider, config-declared
+    /// endpoints, outright typos — the answer is [`None`] before anything is
+    /// read or dialled, and the catalog stays the source of truth. The
+    /// positive half mutates `XDG_DATA_HOME` and so lives in its own test
+    /// binary, `tests/cursor_models_listing.rs`.
+    #[tokio::test]
+    async fn the_wire_listing_answers_none_where_the_catalog_is_the_source_of_truth() {
+        for provider in [
+            "anthropic",
+            openai::ID,
+            grok::ID,
+            fake::ID,
+            "local-llama",
+            "a-provider-nothing-ships",
+        ] {
+            assert!(
+                wire_model_listing(provider).await.is_none(),
+                "{provider} is the catalog's to describe, not a wire's"
+            );
+        }
     }
 
     /// A model no catalog carries, so an answer naming it can only have come
