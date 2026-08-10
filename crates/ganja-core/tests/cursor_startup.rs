@@ -53,6 +53,7 @@ async fn a_cursor_session_without_a_login_is_refused_naming_the_login() {
         .provider
         .stream(
             ChatRequest {
+                variant_options: Default::default(),
                 model: selection.model,
                 system: None,
                 messages: Vec::new(),

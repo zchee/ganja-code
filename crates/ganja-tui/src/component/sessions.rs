@@ -272,6 +272,7 @@ mod tests {
 
     fn info(id: &str, title: Option<&str>, updated: u64, tokens: u64) -> SessionInfo {
         SessionInfo {
+            variant: None,
             id: SessionId::from(id.to_owned()),
             version: VERSION,
             title: title.map(str::to_owned),

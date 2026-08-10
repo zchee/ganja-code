@@ -12,18 +12,14 @@
 //! — is *prompt* semantics. There is no file handling here and none upstream:
 //! the model reaches for `write` and `edit` like it would for any other file.
 //!
-//! # What is not ported
-//!
-//! Two of upstream's expansion steps (deviation **D5**, pre-declared):
-//!
-//! - ``!`cmd` `` — running a shell command and substituting its output into the
-//!   template. Reachable only from a template a user wrote.
-//! - `@file` inside a template. Mentions come from the composer, where the user
-//!   can see what they are attaching.
-//!
-//! Neither is reachable from `/init`, which is what made them deferrable.
+//! Expansion keeps upstream's order: fill the argument placeholders, run each
+//! ``!`command` `` the filled template names, trim the result, then resolve the
+//! `@file` tokens that survived as file parts beside the prompt. That order is
+//! load-bearing: arguments may themselves name a command to run or a file to
+//! attach, and both mean exactly what they would in text the person composed
+//! without a slash command.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, ops::Range, path::Path};
 
 use crate::config::{CommandConfig, Config};
 
@@ -47,6 +43,15 @@ const PATH_PLACEHOLDER: &str = "${path}";
 /// The placeholder that stands for everything the user typed, untokenized.
 const ARGUMENTS: &str = "$ARGUMENTS";
 
+/// A command template after every expansion step upstream applies.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Expanded {
+    /// The final, trimmed text sent as the user's prompt.
+    pub prompt: String,
+    /// Existing files the final text mentions, in mention order.
+    pub mentions: Vec<crate::protocol::Mention>,
+}
+
 /// One command a session can run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Definition {
@@ -65,9 +70,74 @@ pub struct Definition {
 
 impl Definition {
     /// What this command sends when it is run with `arguments`.
-    #[must_use]
-    pub fn expand(&self, arguments: &str) -> String {
-        expand(&self.template, arguments)
+    ///
+    /// `ctx.cwd` is the project root: it is both where shell substitutions run
+    /// and where mentions resolve. One context keeps a template from running a
+    /// command in one place while naming files in another.
+    pub async fn expand(&self, arguments: &str, ctx: &crate::tool::ToolCtx) -> Expanded {
+        let filled = fill_template(&self.template, arguments);
+        // The scan follows filling, so a command that arrived through
+        // `$ARGUMENTS` runs too. The person who typed those arguments is the
+        // person the shell answers to, which is upstream's own ordering and
+        // the same trust statement as a command written into the template.
+        let substitutions = shell_substitutions(&filled);
+        let shell = crate::tool::shell::ShellTool::new();
+        let mut prompt = String::with_capacity(filled.len());
+        let mut copied = 0;
+
+        // Upstream fires these concurrently and substitutes their results in
+        // match order. One at a time produces the same text and gives commands
+        // that touch the same files the order their author wrote down.
+        for substitution in substitutions {
+            let ShellSubstitution { span, command } = substitution;
+            prompt.push_str(&filled[copied..span.start]);
+
+            // This is deviation-free: no permission question belongs here. A
+            // template declared by the user's own config is the user typing,
+            // exactly like the ungated `!` passthrough (D13), and upstream
+            // gates neither surface.
+            let result = shell
+                .run_reporting(serde_json::json!({ "command": command }), ctx, None)
+                .await;
+            let output = match result {
+                Ok(output) => {
+                    // A non-zero exit still lands here with whatever it wrote,
+                    // matching upstream's `nothrow: true`. Unlike upstream's
+                    // stdout-only answer, the shared shell path interleaves
+                    // stderr too: the transcript and a template should not give
+                    // two shapes to the same command
+                    // (deviation: template-shell-merges-stderr).
+                    output.output
+                }
+                Err(error) => {
+                    // Upstream throws when the command could not run at all.
+                    // This engine makes tool failures information rather than
+                    // control flow, so a prompt saying why is more useful than
+                    // a turn that never starts
+                    // (deviation: template-shell-reports-its-own-failure).
+                    error.to_string()
+                }
+            };
+            prompt.push_str(&output);
+            copied = span.end;
+        }
+        prompt.push_str(&filled[copied..]);
+
+        // Upstream trims after the shell has answered, not before it.
+        let prompt = prompt.trim().to_owned();
+        // `SessionPrompt.command` then gives that final, trimmed template to
+        // `resolvePromptParts` (`packages/opencode/src/session/prompt.ts:1432`;
+        // `packages/opencode/src/session/prompt.ts:157-190`), which pushes a
+        // file part only for a name that stats.
+        let mentions = mentions(&prompt)
+            .into_iter()
+            // Upstream's stat rule is the TUI's attachable filter too
+            // (D113/R15(a)): `@alice` stays the person named in the sentence
+            // rather than becoming an attachment-error block.
+            .filter(|mention| ctx.cwd.join(&mention.path).is_file())
+            .collect();
+
+        Expanded { prompt, mentions }
     }
 }
 
@@ -156,6 +226,146 @@ fn configured(name: &str, definition: &CommandConfig) -> Definition {
     }
 }
 
+/// One shell substitution in a filled template.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShellSubstitution {
+    /// The whole ``!`command` `` expression, including its delimiters.
+    span: Range<usize>,
+    /// The text between the backticks.
+    command: String,
+}
+
+/// Every complete, non-empty ``!`command` `` in `text`, in match order.
+///
+/// Spelled out rather than reached through a regex dependency for this one
+/// grammar: a literal `!` and backtick, one or more non-backticks, then the
+/// closing backtick. An empty pair is not a match and remains literal text.
+/// The grammar is upstream's `bashRegex`, also collected by
+/// `ConfigMarkdown.shell` under the same `SHELL_REGEX`
+/// (`packages/opencode/src/session/prompt.ts:1592`;
+/// `packages/opencode/src/config/markdown.ts:12`); its match-order replacement
+/// loop is `packages/opencode/src/session/prompt.ts:1397-1407`.
+fn shell_substitutions(text: &str) -> Vec<ShellSubstitution> {
+    let mut found = Vec::new();
+    let mut offset = 0;
+
+    while let Some(relative_start) = text[offset..].find("!`") {
+        let start = offset + relative_start;
+        let command_start = start + 2;
+        let Some(relative_end) = text[command_start..].find('`') else {
+            break;
+        };
+        let command_end = command_start + relative_end;
+        let end = command_end + 1;
+
+        if command_start != command_end {
+            found.push(ShellSubstitution {
+                span: start..end,
+                command: text[command_start..command_end].to_owned(),
+            });
+        }
+        offset = end;
+    }
+
+    found
+}
+
+/// Every file-like token `text` mentions, in the order it mentions them.
+///
+/// This is deliberately a mirror of
+/// `crates/ganja-tui/src/mention.rs::scan`, not a shared frontend helper:
+/// core cannot reach the TUI without reversing the dependency that keeps the
+/// engine terminal-free. A test in that module pins the two scans equal over a
+/// shared table of cases so their grammars cannot drift quietly.
+///
+/// A mention opens at an `@` that starts a line or follows whitespace and runs
+/// to the next whitespace. Repeats collapse by the whole mention — path and
+/// range together — because two slices of one file are distinct attachments.
+#[must_use]
+pub fn mentions(text: &str) -> Vec<crate::protocol::Mention> {
+    let mut found: Vec<crate::protocol::Mention> = Vec::new();
+
+    for line in text.split('\n') {
+        let characters: Vec<char> = line.chars().collect();
+        let mut index = 0;
+
+        while index < characters.len() {
+            let opens =
+                characters[index] == '@' && (index == 0 || characters[index - 1].is_whitespace());
+            if !opens {
+                index += 1;
+                continue;
+            }
+
+            let token: String = characters[index + 1..]
+                .iter()
+                .take_while(|character| !character.is_whitespace())
+                .collect();
+            index += token.chars().count() + 1;
+
+            // A bare `@` names nothing.
+            if token.is_empty() {
+                continue;
+            }
+            let (path, start, end) = split_range(&token);
+            // Neither does a bare range: `@#5` is lines of no file at all.
+            if path.is_empty() {
+                continue;
+            }
+            let mention = crate::protocol::Mention {
+                path: path.to_owned(),
+                start,
+                end,
+            };
+            if !found.contains(&mention) {
+                found.push(mention);
+            }
+        }
+    }
+
+    found
+}
+
+/// Splits a valid `#line-range` suffix from one mention token.
+///
+/// The last `#` is the separator, and the suffix must be all of `start` or
+/// `start-end` in ASCII digits. Anything else leaves the whole token as a path,
+/// because `#` is a character a file name may contain. An empty end is absent,
+/// and an end at or before its start is discarded.
+fn split_range(token: &str) -> (&str, Option<u32>, Option<u32>) {
+    let Some((path, suffix)) = token.rsplit_once('#') else {
+        return (token, None, None);
+    };
+
+    match parse_range(suffix) {
+        Some((start, end)) => (path, Some(start), end),
+        None => (token, None, None),
+    }
+}
+
+/// The normalized `start` or `start-end` a suffix names.
+fn parse_range(suffix: &str) -> Option<(u32, Option<u32>)> {
+    // Spelled out because `u32::from_str` accepts a leading `+`, which the
+    // grammar's `\d+` does not.
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+
+    let (start, end) = match suffix.split_once('-') {
+        None => (suffix, None),
+        Some((start, end)) => (start, Some(end)),
+    };
+    if !digits(start) || !end.is_none_or(|end| end.is_empty() || digits(end)) {
+        return None;
+    }
+
+    let start: u32 = start.parse().ok()?;
+    let end = match end {
+        Some(end) if !end.is_empty() => Some(end.parse::<u32>().ok()?),
+        _ => None,
+    };
+
+    Some((start, end.filter(|end| start < *end)))
+}
+
 /// Fills `template`'s placeholders from `arguments`, upstream's four steps in
 /// upstream's order (`session/prompt.ts`, `SessionPrompt.command`).
 ///
@@ -170,7 +380,7 @@ fn configured(name: &str, definition: &CommandConfig) -> Definition {
 ///    for a template that never thought about arguments.
 ///
 /// The result is trimmed, as upstream trims it.
-fn expand(template: &str, arguments: &str) -> String {
+fn fill_template(template: &str, arguments: &str) -> String {
     let tokens = tokenize(arguments);
     let positions = placeholders(template);
     let greedy = positions.iter().copied().max();
@@ -293,10 +503,16 @@ fn unquote(token: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, sync::Arc};
 
-    use super::{INIT, INIT_TEMPLATE, PATH_PLACEHOLDER, Registry, expand, tokenize};
-    use crate::config::{CommandConfig, Config};
+    use super::{
+        Definition, INIT, INIT_TEMPLATE, PATH_PLACEHOLDER, Registry, fill_template, mentions,
+        shell_substitutions, split_range, tokenize,
+    };
+    use crate::{
+        config::{CommandConfig, Config},
+        tool::{Credentials, FileTimes, ToolCtx},
+    };
 
     #[test]
     fn the_init_template_is_upstreams_verbatim_with_the_worktree_filled_in() {
@@ -366,10 +582,34 @@ mod tests {
 
         for (template, arguments, expected) in cases {
             assert_eq!(
-                expand(template, arguments),
+                fill_template(template, arguments),
                 expected,
                 "expanding {template:?} with {arguments:?}"
             );
+        }
+    }
+
+    #[test]
+    fn shell_substitutions_match_complete_nonempty_commands_in_written_order() {
+        let cases: &[(&str, &[&str])] = &[
+            (r#"!`echo hi`"#, &["echo hi"]),
+            (r#"!`first` between !`second`"#, &["first", "second"]),
+            // An empty command does not satisfy the one-or-more grammar.
+            (r#"!``"#, &[]),
+            ("`", &[]),
+            ("!", &[]),
+            (r#"!`without a close"#, &[]),
+            // The first backtick closes the match; it cannot be command text.
+            (r#"!`echo `tail`"#, &["echo "]),
+        ];
+
+        for (text, expected) in cases {
+            let matches = shell_substitutions(text);
+            let commands = matches
+                .iter()
+                .map(|substitution| substitution.command.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(commands, *expected, "scanning {text:?}");
         }
     }
 
@@ -388,6 +628,117 @@ mod tests {
         for (arguments, expected) in cases {
             assert_eq!(tokenize(arguments), expected, "tokenizing {arguments:?}");
         }
+    }
+
+    #[test]
+    fn mentions_open_only_at_a_word_boundary_and_require_a_path() {
+        let cases: &[(&str, &[&str])] = &[
+            ("@a.rs", &["a.rs"]),
+            ("look at @a.rs\nthen @b.rs", &["a.rs", "b.rs"]),
+            ("mail me@example.com", &[]),
+            ("an @ on its own", &[]),
+            ("@#5", &[]),
+        ];
+
+        for (text, expected) in cases {
+            let found = mentions(text);
+            let paths = found
+                .iter()
+                .map(|mention| mention.path.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(paths, *expected, "scanning {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_range_suffix_is_split_only_when_it_parses() {
+        let cases = [
+            ("a.rs", ("a.rs", None, None)),
+            ("a.rs#5", ("a.rs", Some(5), None)),
+            ("a.rs#5-9", ("a.rs", Some(5), Some(9))),
+            // An empty end is a start alone.
+            ("a.rs#5-", ("a.rs", Some(5), None)),
+            // A reversed or flat range keeps its start only.
+            ("a.rs#20-10", ("a.rs", Some(20), None)),
+            ("a.rs#5-5", ("a.rs", Some(5), None)),
+            // Line zero is what was typed; the read clamps it, not the scan.
+            ("a.rs#0", ("a.rs", Some(0), None)),
+            // The split is at the *last* `#`, so a path may contain one.
+            ("we#ird.rs#5-9", ("we#ird.rs", Some(5), Some(9))),
+            // Tails outside the grammar stay part of the path: `#` is a
+            // character a file name may contain.
+            ("notes#TODO", ("notes#TODO", None, None)),
+            ("a.rs#", ("a.rs#", None, None)),
+            ("a.rs#5-9-12", ("a.rs#5-9-12", None, None)),
+            ("a.rs#-5", ("a.rs#-5", None, None)),
+            ("a.rs#+5", ("a.rs#+5", None, None)),
+            // A line number past `u32` is not a line number.
+            (
+                "a.rs#99999999999999999999",
+                ("a.rs#99999999999999999999", None, None),
+            ),
+        ];
+
+        for (mentioned, (path, start, end)) in cases {
+            assert_eq!(split_range(mentioned), (path, start, end), "{mentioned:?}");
+        }
+    }
+
+    #[test]
+    fn mentions_dedupe_by_path_and_range_together() {
+        assert_eq!(mentions("@a.rs#5-9 and again @a.rs#5-9").len(), 1);
+
+        let mentions = mentions("@a.rs#5-9 then @a.rs#30-40 then @a.rs");
+        assert_eq!(mentions.len(), 3, "{mentions:?}");
+    }
+
+    #[tokio::test]
+    async fn template_expansion_runs_shells_and_attaches_only_files_that_exist() {
+        let root = tempfile::TempDir::new().expect("a temporary project is creatable");
+        std::fs::write(root.path().join("present.md"), "present")
+            .expect("the mentioned fixture is writable");
+        let ctx = ToolCtx {
+            cwd: root.path().to_owned(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            call_id: String::new(),
+            files: Arc::new(FileTimes::default()),
+            credentials: Credentials::Unguarded,
+            spawn: None,
+            ask: None,
+            switch: None,
+        };
+        let command = |template: &str| Definition {
+            name: "fixture".to_owned(),
+            description: None,
+            template: template.to_owned(),
+            agent: None,
+            model: None,
+        };
+
+        let echoed = command(r#"!`echo hi`"#).expand("", &ctx).await;
+        assert_eq!(echoed.prompt, "hi");
+
+        let failed = command(r#"!`printf still-here; exit 7`"#)
+            .expand("", &ctx)
+            .await;
+        assert_eq!(
+            failed.prompt, "still-here",
+            "a non-zero exit still substitutes what the command wrote"
+        );
+
+        let attached = command("read @present.md and ask @alice")
+            .expand("", &ctx)
+            .await;
+        assert_eq!(attached.prompt, "read @present.md and ask @alice");
+        assert_eq!(
+            attached.mentions,
+            vec![crate::protocol::Mention {
+                path: "present.md".to_owned(),
+                start: None,
+                end: None,
+            }],
+            "only the path that exists becomes a file part"
+        );
     }
 
     #[test]
@@ -428,7 +779,7 @@ mod tests {
         );
         let review = registry.get("review").expect("the config command is there");
         assert_eq!(review.agent.as_deref(), Some("plan"));
-        assert_eq!(review.expand("src/"), "review src/");
+        assert_eq!(fill_template(&review.template, "src/"), "review src/");
         assert!(registry.get("nope").is_none());
     }
 }

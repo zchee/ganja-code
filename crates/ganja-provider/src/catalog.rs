@@ -153,6 +153,16 @@ pub struct ModelInfo {
     pub tool_call: bool,
     /// How far along its life the catalog says it is.
     pub status: ModelStatus,
+    /// The named variants a session may run this model under, each carrying
+    /// the provider options its wire splices into the request body — upstream's
+    /// `variants: Record<string, Record<string, any>>` (`provider.ts:1049`).
+    ///
+    /// Empty for every model the fetched catalog publishes none for, for every
+    /// row of the compiled-in snapshot — the snapshot is a pruning of the
+    /// published catalog and is not regenerated here; a fresh fetch picks
+    /// variants up naturally — and therefore for every uncataloged provider,
+    /// which is what makes "no catalog, no variants" one rule rather than two.
+    pub variants: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
 }
 
 /// What one turn cost, in US dollars.
@@ -546,6 +556,7 @@ fn snapshot() -> Catalog {
                     release_date: None,
                     tool_call: true,
                     status: ModelStatus::Active,
+                    variants: BTreeMap::new(),
                 })
             })
             .collect(),
@@ -954,6 +965,10 @@ struct Wire {
     cost: Option<WireCost>,
     /// Sizes, in tokens.
     limit: Option<WireLimit>,
+    /// Named variants, each a map of provider options. The struct-level
+    /// default is what lets a cache written before variants existed — and
+    /// every row that publishes none — parse unchanged.
+    variants: Option<BTreeMap<String, serde_json::Map<String, serde_json::Value>>>,
 }
 
 /// The `cost` object.
@@ -1008,6 +1023,7 @@ impl Wire {
             release_date: self.release_date,
             tool_call: self.tool_call.unwrap_or(true),
             status: status(self.status.as_deref()),
+            variants: self.variants.unwrap_or_default(),
         })
     }
 }
@@ -1185,7 +1201,11 @@ mod tests {
                 "reasoning_options": [{ "type": "toggle" }],
                 "a_field_this_build_has_never_heard_of": { "nested": [1, 2, 3] },
                 "cost": { "input": 4.0, "output": 20.0, "cache_read": 0.4, "cache_write": 5.0 },
-                "limit": { "context": 500000, "input": 400000, "output": 32000 }
+                "limit": { "context": 500000, "input": 400000, "output": 32000 },
+                "variants": {
+                  "max": { "thinking": { "type": "enabled", "budgetTokens": 32000 } },
+                  "mini": { "reasoningEffort": "low" }
+                }
               },
               "fixture-small": {
                 "id": "fixture-small",
@@ -1554,6 +1574,19 @@ mod tests {
         assert!(large.tool_call);
         assert!(close(large.pricing.input, 4.0));
         assert_eq!(large.pricing.cache_write, Some(5.0));
+        assert_eq!(
+            large.variants.keys().collect::<Vec<_>>(),
+            ["max", "mini"],
+            "the published variant names are the table's"
+        );
+        assert_eq!(
+            large.variants["mini"],
+            serde_json::json!({ "reasoningEffort": "low" })
+                .as_object()
+                .cloned()
+                .expect("the fixture variant is an object"),
+            "a variant's option map arrives verbatim"
+        );
 
         let small = catalog
             .models
@@ -1567,6 +1600,10 @@ mod tests {
         assert_eq!(small.input_limit, None);
         assert_eq!(small.status, ModelStatus::Active, "absent means active");
         assert!(small.tool_call, "absent means it takes tools");
+        assert!(
+            small.variants.is_empty(),
+            "a row publishing no variants has none, not a parse failure"
+        );
     }
 
     /// A row that does not say what it holds cannot size a session, and a zero

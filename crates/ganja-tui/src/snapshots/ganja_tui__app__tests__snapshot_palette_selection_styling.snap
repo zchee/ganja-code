@@ -15,7 +15,7 @@ expression: styled_screen(&terminal)
 10 ["[error] " Rgb(255, 117, 127) on Rgb(26, 27, 38)] ["│  /editor        Open editor                                  │" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["        " Reset on Rgb(26, 27, 38)]
 11 ["refused:" Rgb(255, 117, 127) on Rgb(26, 27, 38)] ["│" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["agent" Rgb(255, 150, 108) on Rgb(30, 32, 48)] ["                                                         │" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["        " Reset on Rgb(26, 27, 38)]
 12 ["        " Reset on Rgb(26, 27, 38)] ["│  /models        Switch model                                 │" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["        " Reset on Rgb(26, 27, 38)]
-13 ["        " Reset on Rgb(26, 27, 38)] ["│  /agents        Switch agent                                 │" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["        " Reset on Rgb(26, 27, 38)]
+13 ["        " Reset on Rgb(26, 27, 38)] ["│  /variants      Switch model variant                         │" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["        " Reset on Rgb(26, 27, 38)]
 14 ["        " Reset on Rgb(26, 27, 38)] ["│                                                              │" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["        " Reset on Rgb(26, 27, 38)]
 15 ["        " Reset on Rgb(26, 27, 38)] ["│" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["[type] filter   [up/down] move   [Enter] run   [Esc] close" Rgb(130, 139, 184) on Rgb(30, 32, 48)] ["    │" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["        " Reset on Rgb(26, 27, 38)]
 16 ["        " Reset on Rgb(26, 27, 38)] ["└──────────────────────────────────────────────────────────────┘" Rgb(200, 211, 245) on Rgb(30, 32, 48)] ["        " Reset on Rgb(26, 27, 38)]

@@ -467,6 +467,7 @@ fn exchange_events() -> Vec<ProviderEvent> {
 /// The one turn every phase asks for.
 fn request() -> ChatRequest {
     ChatRequest {
+        variant_options: Default::default(),
         model: "gpt-5.3-codex".to_owned(),
         system: Some("You are terse.".to_owned()),
         messages: vec![Message::user("say hi")],

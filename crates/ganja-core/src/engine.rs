@@ -45,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     agent::{self, Agent},
-    command,
+    catalog, command,
     config::AgentMode,
     lsp, mcp,
     permission::{Permissions, Rule},
@@ -120,6 +120,30 @@ pub enum EngineError {
         /// The provider that was asked for it.
         provider: String,
     },
+    /// [`Command::SwitchVariant`] named a variant the active model's catalog
+    /// row does not carry. The message lists the row's real names, because the
+    /// useful half of "no such variant" is which ones there are.
+    #[error(
+        "{model} has no variant named {variant}; {}",
+        spell_variants(available)
+    )]
+    UnknownVariant {
+        /// The name nothing answers to.
+        variant: String,
+        /// The model it was asked of.
+        model: String,
+        /// Every variant that would have worked, in the catalog's order.
+        available: Vec<String>,
+    },
+    /// [`Command::SwitchVariant`] reached a provider the catalog has no rows
+    /// for. Variants are catalog rows (upstream `provider.ts:1049`), so a
+    /// session already running without sizing or pricing has no names to
+    /// select from — the same no-catalog posture, stated for this command.
+    #[error("{provider} is not in the catalog, so its models have no variants to select")]
+    UncatalogedVariant {
+        /// The provider whose models the catalog cannot describe.
+        provider: String,
+    },
     /// [`Command::RunCommand`] named a command nothing answers to. The message
     /// carries the roster, because the useful half of "no such command" is
     /// which ones there are.
@@ -151,6 +175,17 @@ pub enum EngineError {
     /// [`Command::Redo`] reached a session that is not reverted.
     #[error("nothing to redo")]
     NothingToRedo,
+}
+
+/// The half of [`EngineError::UnknownVariant`]'s sentence that names what
+/// *would* have worked — or owns that nothing would, which a model with no
+/// variants at all has to say rather than trailing an empty list.
+fn spell_variants(available: &[String]) -> String {
+    if available.is_empty() {
+        return "it has no variants at all".to_owned();
+    }
+
+    format!("it has {}", available.join(", "))
 }
 
 /// How a droppable subscriber's stream ends when it fell behind.
@@ -334,6 +369,12 @@ struct Overrides {
 struct Active {
     /// Model the next request asks for.
     model: String,
+    /// Catalog variant the next request runs under, [`None`] for upstream's
+    /// "Default". Only ever a name the active model's catalog row carries:
+    /// [`Engine::switch_variant`] validates on the way in, and every model
+    /// change runs [`Engine::reconcile_variant`] so a model that lacks the
+    /// name clears it (upstream `prompt.ts:654`).
+    variant: Option<String>,
     /// Agent whose prompt and rules the next turn runs under. [`None`] on an
     /// engine built without a registry, where there is nothing to run as.
     agent: Option<String>,
@@ -774,6 +815,7 @@ impl Engine {
             provider,
             active: std::sync::Mutex::new(Active {
                 model,
+                variant: None,
                 agent: None,
                 previous_agent: None,
             }),
@@ -1193,6 +1235,14 @@ impl Engine {
         self.active().agent.clone()
     }
 
+    /// The catalog variant the next turn will run under, or [`None`] for
+    /// upstream's "Default" — which every session starts on, and the only
+    /// value an uncataloged provider's session ever holds.
+    #[must_use]
+    pub fn variant(&self) -> Option<String> {
+        self.active().variant.clone()
+    }
+
     /// Whether this engine's provider can carry a binary attachment of `mime`
     /// as native content, verbatim from the wire's own
     /// [`accepts_attachment`](crate::provider::Provider::accepts_attachment).
@@ -1428,6 +1478,20 @@ impl Engine {
             }
         }
 
+        // The stored variant is restored against whatever model the lines
+        // above settled on, and dropped when that model's row no longer
+        // carries it — the same rule a live model switch applies
+        // (upstream `prompt.ts:654`), met again on the resume path.
+        self.active().variant = info.variant.clone();
+        if self.reconcile_variant() {
+            tracing::warn!(
+                session = info.id.as_str(),
+                variant = info.variant.as_deref().unwrap_or_default(),
+                "the stored variant is not one the resumed model carries; \
+                 resuming without one"
+            );
+        }
+
         // Nothing in the transcript says which agent produced which message,
         // so a resumed session has no previous turn to compare against and
         // does not replay the plan-to-build reminder.
@@ -1565,6 +1629,7 @@ impl Engine {
             }
             Command::SwitchAgent { name } => self.switch_agent(name).await,
             Command::SwitchModel { model } => self.switch_model(model).await,
+            Command::SwitchVariant { variant } => self.switch_variant(variant).await,
             Command::RunShell { command } => {
                 self.start_turn(command.clone(), TurnKind::Shell { command }, None)
                     .await
@@ -1624,10 +1689,28 @@ impl Engine {
             });
         let overrides = (agent.is_some() || model.is_some()).then_some(Overrides { agent, model });
 
+        let ctx = crate::tool::ToolCtx {
+            // A person running a command means "here" as in this project, not
+            // whichever process directory happened to launch ganja — the same
+            // ground the `!` passthrough gives its shell.
+            cwd: self.root.clone(),
+            // Expansion precedes the turn, so no turn token exists to parent
+            // this one. The shell tool's own default timeout bounds a runaway
+            // template command; there is not yet a cancellation to receive.
+            cancel: CancellationToken::new(),
+            call_id: String::new(),
+            files: Arc::clone(&self.files),
+            credentials: self.credentials.clone(),
+            spawn: None,
+            ask: None,
+            switch: None,
+        };
+        let expanded = definition.expand(args, &ctx).await;
+
         self.start_turn(
-            definition.expand(args),
+            expanded.prompt,
             TurnKind::Prompt {
-                mentions: Vec::new(),
+                mentions: expanded.mentions,
             },
             overrides,
         )
@@ -2144,8 +2227,10 @@ impl Engine {
     /// selection, both prompt halves, and the durable row. Emits **nothing**
     /// — the announced half belongs to [`Engine::adopt_agent`] on the manual
     /// path and to the turn boundary on the approval path, and a shared
-    /// function that emitted would make one of them say it twice.
-    fn apply_agent(&self, agent: &Agent) {
+    /// function that emitted would make one of them say it twice. Returns
+    /// whether adopting the agent's preferred model cleared the variant, for
+    /// the announcing caller to say so.
+    fn apply_agent(&self, agent: &Agent) -> bool {
         self.install(agent);
         {
             let mut active = self.active();
@@ -2158,9 +2243,12 @@ impl Engine {
                 active.model = model;
             }
         }
+        let cleared = self.reconcile_variant();
         self.recompose_environment();
         self.recompose_base();
         self.remember_selection();
+
+        cleared
     }
 
     /// [`Engine::apply_agent`], announced: exactly one `agent_changed` frame
@@ -2171,7 +2259,7 @@ impl Engine {
     /// new hazard: `resume`, `revert_to` and `truncate_reverted` all publish
     /// the same way.
     async fn adopt_agent(&self, agent: &Agent) {
-        self.apply_agent(agent);
+        let cleared = self.apply_agent(agent);
 
         let (name, model) = {
             let active = self.active();
@@ -2185,6 +2273,17 @@ impl Engine {
                 model,
             })
             .await;
+        // After the agent frame, so a subscriber reads the model that made
+        // the variant impossible before the clear that answers it.
+        if cleared {
+            let _ = self
+                .fanout
+                .send(Event::VariantChanged {
+                    session_id: self.session_id(),
+                    variant: None,
+                })
+                .await;
+        }
     }
 
     /// Runs the rest of the session as `name`.
@@ -2230,12 +2329,89 @@ impl Engine {
         }
 
         self.active().model = model;
+        let cleared = self.reconcile_variant();
         self.recompose_environment();
         self.recompose_base();
         self.remember_selection();
+        if cleared {
+            let _ = self
+                .fanout
+                .send(Event::VariantChanged {
+                    session_id: self.session_id(),
+                    variant: None,
+                })
+                .await;
+        }
         drop(turn);
 
         Ok(())
+    }
+
+    /// Runs the rest of the session under the named variant of the active
+    /// model, or back under none.
+    ///
+    /// Validation is the catalog's, in two tiers matching how variants exist
+    /// at all: a provider with no rows has no names to select from, and a
+    /// cataloged model refuses a name its row does not carry — with the row's
+    /// real names in the refusal. Clearing (`None`) is never refused: it asks
+    /// for the state every session starts in.
+    async fn switch_variant(&self, variant: Option<String>) -> Result<(), EngineError> {
+        // An announced approval is applied first, exactly as `switch_model`
+        // applies it: this entry's `remember_selection` writes the row.
+        let turn = self.lock_entry(PendingPolicy::Apply).await?;
+
+        if let Some(name) = &variant {
+            if !catalog::carries(self.provider.id()) {
+                return Err(EngineError::UncatalogedVariant {
+                    provider: self.provider.id().to_owned(),
+                });
+            }
+            let model = self.active().model.clone();
+            // A cataloged provider may still be asked for an uncataloged model
+            // (`GANJA_MODEL` takes any spelling), and a row it does not have
+            // carries no variants — the empty list, not a panic.
+            let available: Vec<String> = catalog::model(&model)
+                .map(|info| info.variants.keys().cloned().collect())
+                .unwrap_or_default();
+            if !available.iter().any(|carried| carried == name) {
+                return Err(EngineError::UnknownVariant {
+                    variant: name.clone(),
+                    model,
+                    available,
+                });
+            }
+        }
+
+        self.active().variant = variant.clone();
+        self.remember_selection();
+        let _ = self
+            .fanout
+            .send(Event::VariantChanged {
+                session_id: self.session_id(),
+                variant,
+            })
+            .await;
+        drop(turn);
+
+        Ok(())
+    }
+
+    /// Clears the selected variant when the active model's catalog row no
+    /// longer carries its name, returning whether it did — upstream clears at
+    /// the same boundary (`prompt.ts:654`). The caller owns announcing a
+    /// clear, because two of the three model-moving paths announce from an
+    /// async context this helper does not have.
+    fn reconcile_variant(&self) -> bool {
+        let mut active = self.active();
+        let Some(name) = active.variant.as_ref() else {
+            return false;
+        };
+        if catalog::model(&active.model).is_some_and(|info| info.variants.contains_key(name)) {
+            return false;
+        }
+
+        active.variant = None;
+        true
     }
 
     /// Writes the current selection onto the live session record, so that
@@ -2247,9 +2423,13 @@ impl Engine {
         let Some(state) = &self.persistence else {
             return;
         };
-        let (model, agent) = {
+        let (model, variant, agent) = {
             let active = self.active();
-            (active.model.clone(), active.agent.clone())
+            (
+                active.model.clone(),
+                active.variant.clone(),
+                active.agent.clone(),
+            )
         };
 
         let mut live = state
@@ -2260,6 +2440,7 @@ impl Engine {
             return;
         };
         info.model = Some(model);
+        info.variant = variant;
         info.agent = agent;
         info.updated = now();
 
@@ -2299,7 +2480,19 @@ impl Engine {
                     .as_ref()
                     .and_then(|registry| registry.get(agent::BUILD))
                     .expect("a plan approval is only ever pending where the registry holds build");
-                self.apply_agent(build);
+                // The AgentChanged half of this boundary was already announced
+                // by the turn that moved the cell; a variant the build model
+                // cannot carry still owes its own frame, or a frontend keeps
+                // showing a selection the row no longer holds.
+                if self.apply_agent(build) {
+                    let _ = self
+                        .fanout
+                        .send(Event::VariantChanged {
+                            session_id: self.session_id(),
+                            variant: None,
+                        })
+                        .await;
+                }
             }
             Owed::ReassertRow => self.remember_selection(),
         }
@@ -2353,7 +2546,7 @@ impl Engine {
         // spend a notice that was never delivered (deviation:
         // build-switch-counts-only-turns-that-ask).
         let asks_the_model = matches!(kind, TurnKind::Prompt { .. });
-        let (mut model, name, previous) = {
+        let (mut model, variant, name, previous) = {
             let mut active = self.active();
             let name = active.agent.clone();
             let previous = if asks_the_model {
@@ -2362,7 +2555,7 @@ impl Engine {
                 active.previous_agent.clone()
             };
 
-            (active.model.clone(), name, previous)
+            (active.model.clone(), active.variant.clone(), name, previous)
         };
         let session_agent = self
             .agents
@@ -2398,6 +2591,16 @@ impl Engine {
         if let Some(asked) = overrides.as_ref().and_then(|it| it.model.clone()) {
             model = asked;
         }
+        // Resolved per turn against the model this turn will actually ask —
+        // upstream re-resolves from each user message (`prompt.ts:649-666`) —
+        // so a `/command`'s one-turn model override that lacks the session's
+        // variant runs without it for that turn, and the session's selection
+        // stands untouched. An empty map is "no variant", the shape every
+        // request had before variants existed.
+        let variant_options = variant
+            .as_ref()
+            .and_then(|name| catalog::model(&model)?.variants.get(name).cloned())
+            .unwrap_or_default();
 
         let system = self.system_for(agent);
         // A command that runs as another agent is not the session switching to
@@ -2447,6 +2650,7 @@ impl Engine {
                             self.session_id(),
                             name.clone(),
                             model.clone(),
+                            variant.clone(),
                         )
                     })
                     .id
@@ -2475,6 +2679,7 @@ impl Engine {
             spawn: self.spawn_host(model.clone()),
             session_id: self.session_id(),
             model,
+            variant_options,
             system,
             reminders,
             kind,
@@ -2678,6 +2883,7 @@ fn fresh_session(
     id: SessionId,
     agent: Option<String>,
     model: String,
+    variant: Option<String>,
 ) -> SessionInfo {
     let created = now();
     let info = SessionInfo {
@@ -2691,6 +2897,7 @@ fn fresh_session(
         summary: None,
         agent,
         model: Some(model),
+        variant,
         // A session a person started, not one a tool call delegated.
         parent: None,
         // Nothing has been undone in a session that has not run a turn.
@@ -2910,7 +3117,8 @@ mod tests {
                 | Event::QuestionReplied { .. }
                 | Event::QuestionRejected { .. }
                 | Event::RevertChanged { .. }
-                | Event::AgentChanged { .. } => {}
+                | Event::AgentChanged { .. }
+                | Event::VariantChanged { .. } => {}
             }
         }
 
@@ -3150,6 +3358,7 @@ mod tests {
         let storage = Storage::open(directory.path().join("storage"));
         let session = SessionId::ascending();
         let info = SessionInfo {
+            variant: None,
             id: session.clone(),
             version: storage::VERSION,
             // Pre-titled, so the title machinery stays out of a test that is
@@ -3642,6 +3851,43 @@ mod tests {
                 .iter()
                 .any(|text| text.starts_with(STALE_FILES) && text.contains("notes.md")),
             "the notice waited for the turn that could deliver it: {carried:?}"
+        );
+    }
+
+    /// The variant rule's outer tier: the fake provider has no catalog rows,
+    /// so *any* name is refused with the no-catalog sentence — the same
+    /// posture that already denies such a session sizing and pricing — while
+    /// clearing asks for the state the session is already in and is accepted
+    /// and announced like any adoption.
+    #[tokio::test]
+    async fn a_variant_on_an_uncataloged_provider_is_refused_naming_the_catalog() {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        let refusal = engine
+            .send(Command::SwitchVariant {
+                variant: Some("max".to_owned()),
+            })
+            .await
+            .expect_err("the fake provider has no catalog rows");
+        assert!(
+            matches!(refusal, EngineError::UncatalogedVariant { .. }),
+            "got {refusal:?}"
+        );
+        assert!(
+            refusal.to_string().contains("not in the catalog"),
+            "the refusal names the reason: {refusal}"
+        );
+        assert_eq!(engine.variant(), None, "a refused switch adopts nothing");
+
+        engine
+            .send(Command::SwitchVariant { variant: None })
+            .await
+            .expect("clearing needs no catalog: it asks for the state every session starts in");
+        let event = events.next().await.expect("the adoption is announced");
+        assert!(
+            matches!(event, Event::VariantChanged { variant: None, .. }),
+            "got {event:?}"
         );
     }
 }

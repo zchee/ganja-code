@@ -17,3 +17,4 @@ pub mod question;
 pub mod sessions;
 pub mod status;
 pub mod themes;
+pub mod variants;

@@ -29,7 +29,8 @@ use crate::{
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
         ChatRequest, CredentialSource, Mapper, Presented, Provider, ProviderError, ProviderEvent,
-        check_base_url, client, open, require_key, setting, shown_base_url, sse::Frame, steps,
+        check_base_url, client, open, require_key, setting, shown_base_url, splice_variant,
+        sse::Frame, steps,
     },
 };
 
@@ -257,7 +258,10 @@ impl Provider for AnthropicProvider {
         // itself and pays nothing, and the seam is what lets a wrapper name
         // another source without forking the wire.
         let presented = self.credential.presented().await?;
-        let body = Body::new(&request, self.max_tokens(&request.model));
+        // The variant's options go under the wire's own fields, so a catalog
+        // row can add `thinking` but can never unmake `model` or `max_tokens`.
+        let own = Body::new(&request, self.max_tokens(&request.model));
+        let body = splice_variant(&request.variant_options, &own);
         let built = self
             .client
             .post(format!(
@@ -826,7 +830,10 @@ mod tests {
     use crate::{
         catalog,
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
-        provider::{ChatRequest, PROVIDERS, Provider as _, ProviderError, ProviderEvent, replay},
+        provider::{
+            ChatRequest, PROVIDERS, Provider as _, ProviderError, ProviderEvent, replay,
+            splice_variant,
+        },
         tool::ToolDefinition,
     };
 
@@ -1082,6 +1089,7 @@ mod tests {
         empty.parts.push(Part::text(""));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "claude-test".to_owned(),
             system: Some("be brief".to_owned()),
             tools: Vec::new(),
@@ -1115,6 +1123,7 @@ mod tests {
     #[test]
     fn a_request_without_a_system_prompt_omits_the_field() {
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "claude-test".to_owned(),
             system: None,
             messages: vec![Message::user("hi")],
@@ -1124,6 +1133,43 @@ mod tests {
 
         assert!(!body.contains("system"), "got {body}");
         assert!(body.contains(r#""max_tokens":16"#), "got {body}");
+    }
+
+    /// The splice order at this wire's send site: a variant adds what the body
+    /// does not carry — `thinking` is the catalog's use of it — and loses every
+    /// key the wire itself writes, because the wire's fields are what make the
+    /// request one the Messages API accepts.
+    #[test]
+    fn a_variant_adds_thinking_but_cannot_claim_max_tokens() {
+        let request = ChatRequest {
+            variant_options: serde_json::json!({
+                "thinking": {"type": "enabled", "budget_tokens": 16000},
+                "max_tokens": 1,
+            })
+            .as_object()
+            .cloned()
+            .expect("the fixture options are an object"),
+            model: "claude-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("hi")],
+            tools: Vec::new(),
+        };
+
+        let own = Body::new(&request, DEFAULT_MAX_TOKENS);
+        let body = serde_json::to_value(splice_variant(&request.variant_options, &own))
+            .expect("a spliced body serializes");
+
+        assert_eq!(
+            body["thinking"],
+            serde_json::json!({"type": "enabled", "budget_tokens": 16000}),
+            "a key the wire does not write arrives verbatim"
+        );
+        assert_eq!(
+            body["max_tokens"],
+            serde_json::json!(DEFAULT_MAX_TOKENS),
+            "a key the wire writes resolves to the wire"
+        );
+        assert_eq!(body["model"], serde_json::json!("claude-test"));
     }
 
     /// The exact source-block shapes the Messages API documents, pinned so a
@@ -1157,6 +1203,7 @@ mod tests {
         user.parts.push(Part::file("notes.md", "text/plain"));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "claude-test".to_owned(),
             system: None,
             messages: vec![user],
@@ -1283,6 +1330,7 @@ mod tests {
     #[test]
     fn a_request_advertises_the_tools_it_was_given() {
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "claude-test".to_owned(),
             system: None,
             messages: vec![Message::user("read src/main.rs")],
@@ -1314,6 +1362,7 @@ mod tests {
     #[test]
     fn a_finished_call_is_sent_back_as_a_use_and_a_result() {
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "claude-test".to_owned(),
             system: Some("be brief".to_owned()),
             messages: vec![
@@ -1427,6 +1476,7 @@ mod tests {
     #[test]
     fn a_two_step_turn_is_sent_back_one_message_pair_per_step() {
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "claude-test".to_owned(),
             system: None,
             messages: vec![Message::user("fix the bug"), a_turn_of_two_steps()],
@@ -1510,6 +1560,7 @@ mod tests {
         ));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "claude-test".to_owned(),
             system: None,
             messages: vec![Message::user("read it"), assistant],
@@ -1560,6 +1611,7 @@ mod tests {
         }
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "claude-test".to_owned(),
             system: None,
             messages: vec![Message::user("hi"), assistant, Message::user("thanks")],
@@ -1606,6 +1658,7 @@ mod tests {
                 .push(tool_part("toolu_01Read", "read", state));
 
             let request = ChatRequest {
+                variant_options: Default::default(),
                 model: "claude-test".to_owned(),
                 system: None,
                 messages: vec![Message::user("read src/main.rs"), assistant],
@@ -1658,6 +1711,7 @@ mod tests {
         });
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "claude-test".to_owned(),
             system: None,
             messages: vec![Message::user("hi"), assistant],
@@ -1789,6 +1843,7 @@ mod tests {
         let opened = provider
             .stream(
                 ChatRequest {
+                    variant_options: Default::default(),
                     model: "claude-sonnet-5".to_owned(),
                     system: None,
                     messages: vec![Message::user("hi")],

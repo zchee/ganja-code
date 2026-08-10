@@ -86,7 +86,7 @@ use crate::{
         ChatRequest, CredentialSource, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
         check_base_url, client, open,
         openai::{self, arguments, result},
-        require_key, setting, shown_base_url,
+        require_key, setting, shown_base_url, splice_variant,
         sse::Frame,
         steps,
     },
@@ -514,7 +514,11 @@ impl ResponsesProvider {
             }
         }
 
-        built.json(&Body::new(request)).build().map_err(|error| {
+        // The variant's options go under the wire's own fields, so a catalog
+        // row can add `reasoning` but can never unmake `model` or `stream`.
+        let own = Body::new(request);
+        let body = splice_variant(&request.variant_options, &own);
+        built.json(&body).build().map_err(|error| {
             ProviderError::Transport(
                 resolved
                     .presented
@@ -1320,7 +1324,7 @@ mod tests {
             ChatRequest, CredentialSource, PROVIDERS, Presented, Provider as _, ProviderError,
             ProviderEvent, Resolved,
             openai::{self, NO_RESULT},
-            replay,
+            replay, splice_variant,
         },
         tool::ToolDefinition,
     };
@@ -1415,6 +1419,7 @@ mod tests {
     /// else is refused before a request is built at all.
     fn ask() -> ChatRequest {
         ChatRequest {
+            variant_options: Default::default(),
             model: SERVED.to_owned(),
             system: None,
             messages: vec![Message::user("hello")],
@@ -1536,6 +1541,39 @@ mod tests {
             json!(false),
             "one encoder, so `store: false` is not a subscription special case"
         );
+    }
+
+    /// The splice order at this wire's send site: a variant adds what the body
+    /// does not carry — `reasoning` is the catalog's use of it — and loses
+    /// every key the wire itself writes; `store: false` in particular is what
+    /// the ChatGPT backend requires, so no catalog row may unmake it.
+    #[test]
+    fn a_variant_adds_reasoning_but_cannot_claim_store() {
+        let mut request = ask();
+        request.variant_options = json!({
+            "reasoning": {"effort": "high"},
+            "store": true,
+            "model": "someone-elses",
+        })
+        .as_object()
+        .cloned()
+        .expect("the fixture options are an object");
+
+        let own = Body::new(&request);
+        let body = serde_json::to_value(splice_variant(&request.variant_options, &own))
+            .expect("a spliced body serializes");
+
+        assert_eq!(
+            body["reasoning"],
+            json!({"effort": "high"}),
+            "a key the wire does not write arrives verbatim"
+        );
+        assert_eq!(
+            body["store"],
+            json!(false),
+            "a key the wire writes resolves to the wire"
+        );
+        assert_eq!(body["model"], json!(SERVED));
     }
 
     /// The allow-list is a ChatGPT seat's product decision, and applying it to
@@ -1770,6 +1808,7 @@ mod tests {
         ));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: SERVED.to_owned(),
             system: None,
             messages: vec![Message::user("read src/main.rs"), assistant],
@@ -1830,6 +1869,7 @@ mod tests {
         user.parts.push(Part::file("notes.md", "text/plain"));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: SERVED.to_owned(),
             system: None,
             messages: vec![user],
@@ -1884,6 +1924,7 @@ mod tests {
             .push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: SERVED.to_owned(),
             system: None,
             messages: vec![Message::user("hello"), assistant],
@@ -2139,6 +2180,7 @@ mod tests {
         empty.parts.push(Part::text(""));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: Some("be brief".to_owned()),
             messages: vec![Message::user("hello"), empty, Message::user("again")],
@@ -2165,6 +2207,7 @@ mod tests {
     #[test]
     fn a_request_advertises_the_tools_it_was_given() {
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("read src/main.rs")],
@@ -2258,6 +2301,7 @@ mod tests {
         ));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![
@@ -2342,6 +2386,7 @@ mod tests {
         }
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("fix the bug"), assistant],
@@ -2371,6 +2416,7 @@ mod tests {
             .push(tool_part("call_read", "read", ToolState::Pending));
 
         let request = ChatRequest {
+            variant_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
             messages: vec![Message::user("read src/main.rs"), assistant],

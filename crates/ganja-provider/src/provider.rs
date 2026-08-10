@@ -154,6 +154,56 @@ pub struct ChatRequest {
     /// Tools the model may call, advertised on every request. Empty means the
     /// model is not offered any.
     pub tools: Vec<ToolDefinition>,
+    /// The option map of the catalog variant this turn runs under, spliced
+    /// into the wire's request body by [`splice_variant`]. Empty — the shape
+    /// every request had before variants existed — means no variant, and the
+    /// body is exactly the wire's own.
+    pub variant_options: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The request body a wire sends, with the variant's options under it.
+///
+/// The variant map goes into the merged object **first** and the wire's own
+/// fields land after it, so a key both claim resolves to the wire: its required
+/// fields — the model, the stream flag, `max_tokens` — are what make the
+/// request one its API accepts, and a catalog row must not be able to unmake
+/// that. A body that is not a JSON object (no wire here has one) is passed
+/// through, because there is nothing to merge into.
+///
+/// A serialize-time wrapper rather than an eager [`serde_json::Value`]: with
+/// no variant selected — every request before variants existed — the typed
+/// body serializes exactly as it always did, field order included, which is
+/// what the wires' pinned request bytes hold. Only a request actually
+/// carrying options pays the round trip through a map, whose key order no API
+/// here reads.
+pub(crate) fn splice_variant<'a, B: serde::Serialize>(
+    options: &'a serde_json::Map<String, serde_json::Value>,
+    body: &'a B,
+) -> impl serde::Serialize + 'a {
+    struct Spliced<'a, B> {
+        options: &'a serde_json::Map<String, serde_json::Value>,
+        body: &'a B,
+    }
+
+    impl<B: serde::Serialize> serde::Serialize for Spliced<'_, B> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            if self.options.is_empty() {
+                return self.body.serialize(serializer);
+            }
+            let own = serde_json::to_value(self.body).map_err(serde::ser::Error::custom)?;
+            let serde_json::Value::Object(own) = own else {
+                return own.serialize(serializer);
+            };
+
+            let mut merged = self.options.clone();
+            // `Map::extend` replaces on a duplicate key: the collision rule.
+            merged.extend(own);
+
+            merged.serialize(serializer)
+        }
+    }
+
+    Spliced { options, body }
 }
 
 /// Splits one message's parts into a slice per model request.
@@ -1284,5 +1334,29 @@ mod tests {
             None,
             "a cancelled stream ends, and never with a failure the engine would report"
         );
+    }
+
+    /// The merge rule every wire's send site leans on, stated once at the
+    /// helper: the variant map goes in first, so on a shared key the wire's
+    /// own field is what survives.
+    #[test]
+    fn a_spliced_body_keeps_the_wires_fields_over_the_variants() {
+        let options = serde_json::json!({"model": "theirs", "extra": 1})
+            .as_object()
+            .cloned()
+            .expect("the fixture options are an object");
+        let body = serde_json::json!({"model": "ours", "stream": true});
+
+        let merged = serde_json::to_value(super::splice_variant(&options, &body))
+            .expect("a spliced body serializes");
+
+        assert_eq!(
+            merged,
+            serde_json::json!({"model": "ours", "stream": true, "extra": 1})
+        );
+
+        let untouched = serde_json::to_value(super::splice_variant(&serde_json::Map::new(), &body))
+            .expect("a spliced body serializes");
+        assert_eq!(untouched, body, "no variant means the wire's body exactly");
     }
 }

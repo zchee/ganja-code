@@ -50,6 +50,7 @@ use crate::{
         sessions::{self, Sessions},
         status::{Activity, Status, Totals},
         themes::ThemeList,
+        variants,
     },
     event::AppEvent,
     external,
@@ -112,6 +113,10 @@ const NOTHING_TO_COPY: &str = "there is no session to copy yet";
 /// image-notice-covers-any-non-text-clipboard).
 const IMAGE_PASTE: &str = "image paste is not supported yet";
 
+/// What `/variants` says when the active model's catalog row offers none —
+/// upstream's toast message, verbatim (`app.tsx:717`).
+const NO_VARIANTS: &str = "The current model does not support any variants.";
+
 /// The one-line notice a failed MCP server earns in the status bar, or [`None`]
 /// while every configured server is either connected, disabled, or still being
 /// dialled.
@@ -163,6 +168,8 @@ enum Cleared {
 enum Chooser {
     /// The provider's catalog models.
     Models,
+    /// The active model's catalog variants, "Default" first.
+    Variants,
     /// The agents this session may run as.
     Agents,
 }
@@ -220,6 +227,10 @@ pub struct App {
     /// Model the engine asks for, kept here because pricing a turn needs it and
     /// the engine's copy is not the frontend's business.
     model: String,
+    /// Catalog variant the next turn runs under, [`None`] for Default. Kept
+    /// beside [`App::model`] because the picker's active mark and the status
+    /// segment both read the pair together.
+    variant: Option<String>,
     /// Agent the next turn runs as, [`None`] on a session built without a
     /// registry. Tracked here rather than read back per frame because this is
     /// the side that issues the switches.
@@ -231,7 +242,7 @@ pub struct App {
     keys: Keybinds,
     /// The tool call currently waiting on the user's decision, if any.
     permission: Option<Permission>,
-    /// The options-only question currently waiting on the user's answer.
+    /// The question currently waiting on the user's answer.
     question: Option<Question>,
     /// The stored sessions the user is choosing between, while the picker is
     /// open.
@@ -345,6 +356,9 @@ impl App {
             engine,
             provider: String::new(),
             model,
+            // A fresh engine runs no variant, and a resumed one announces its
+            // restoration through the same accessor the resume path re-reads.
+            variant: None,
             agent,
             chat: Chat::default(),
             editor: Editor::new(&theme),
@@ -845,45 +859,45 @@ impl App {
             return Ok(());
         }
 
-        if self.question.is_some() {
+        if let Some(question) = &mut self.question {
             // Like permission, every key belongs to the open request until its
             // terminal event arrives; the editor beneath is not the target.
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if let Some(question) = &mut self.question {
-                        question.move_selection(-1);
+            if key.code == KeyCode::Enter {
+                let id = question.id().clone();
+                let answer = question.submit();
+                if let Some(answer) = answer {
+                    self.engine
+                        .send(Command::ReplyQuestion {
+                            id,
+                            answers: vec![vec![answer]],
+                        })
+                        .await?;
+                }
+
+                return Ok(());
+            }
+
+            if question.is_editing() {
+                match key.code {
+                    KeyCode::Esc => question.cancel_edit(),
+                    KeyCode::Backspace => question.backspace(),
+                    // The answer editor owns printable j and k too; navigation
+                    // resumes only after the edit has closed.
+                    KeyCode::Char(character) if !key.modifiers.intersects(SHORTCUT_MODIFIERS) => {
+                        question.push(character);
                     }
+                    _ => {}
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if let Some(question) = &mut self.question {
-                        question.move_selection(1);
+            } else {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => question.move_selection(-1),
+                    KeyCode::Down | KeyCode::Char('j') => question.move_selection(1),
+                    KeyCode::Esc => {
+                        let id = question.id().clone();
+                        self.engine.send(Command::RejectQuestion { id }).await?;
                     }
+                    _ => {}
                 }
-                KeyCode::Enter => {
-                    let answer = self.question.as_ref().and_then(|question| {
-                        question
-                            .selected_label()
-                            .map(|label| (question.id().clone(), label.to_owned()))
-                    });
-                    if let Some((id, label)) = answer {
-                        self.engine
-                            .send(Command::ReplyQuestion {
-                                id,
-                                answers: vec![vec![label]],
-                            })
-                            .await?;
-                    }
-                }
-                KeyCode::Esc => {
-                    let id = self
-                        .question
-                        .as_ref()
-                        .expect("the open dialog still exists")
-                        .id()
-                        .clone();
-                    self.engine.send(Command::RejectQuestion { id }).await?;
-                }
-                _ => {}
             }
 
             return Ok(());
@@ -1124,6 +1138,7 @@ impl App {
             command::Action::Compact => self.compact().await,
             command::Action::Editor => self.compose_externally(),
             command::Action::Models => self.open_models(),
+            command::Action::Variants => self.open_variants(),
             command::Action::Agents => self.open_agents(),
             command::Action::Themes => self.open_themes(),
             command::Action::Help => self.help = Some(Help::new(self.keys.clone())),
@@ -1188,17 +1203,18 @@ impl App {
 
     /// Hands `text` to the clipboard and says which way it went.
     ///
-    /// Both channels upstream writes go out together: the system clipboard
-    /// through the trait, and the terminal's OSC 52 escape queued for the next
-    /// frame ([`App::draw`] flushes it). The escape is queued only once the
-    /// system write succeeded — a copy the desktop refused is not one to claim
-    /// over the wire either.
+    /// Both channels upstream writes go out together, and independently: the
+    /// terminal's OSC 52 escape is queued first and unconditionally (upstream
+    /// writes it before it tries a system method, and a headless or SSH
+    /// session — where arboard has no display to reach — is exactly where the
+    /// escape is the one channel that still delivers), then the system
+    /// clipboard through the trait. [`App::draw`] flushes the queue with the
+    /// next frame. The notice reports only the system half, which is the only
+    /// half that can say it failed.
     fn copy(&mut self, text: &str, done: &str, failed: &str) {
+        self.pending_osc.push(clipboard::osc52::sequence(text));
         let notice = match self.clipboard.write(text) {
-            Ok(()) => {
-                self.pending_osc.push(clipboard::osc52::sequence(text));
-                done.to_owned()
-            }
+            Ok(()) => done.to_owned(),
             Err(error) => format!("{failed}: {error}"),
         };
 
@@ -1333,6 +1349,7 @@ impl App {
 
         match kind {
             Chooser::Models => self.switch_model(value).await,
+            Chooser::Variants => self.switch_variant(value).await,
             Chooser::Agents => self.switch_agent(value).await,
         }
     }
@@ -1615,6 +1632,25 @@ impl App {
             .set_notice(Some(format!("fetching {} models…", self.provider)));
     }
 
+    /// Opens the flat variant picker over the active model's catalog names.
+    ///
+    /// A model the catalog gives no variants — every uncataloged provider's,
+    /// and most cataloged rows — gets upstream's refusal sentence in the
+    /// status bar instead of an empty dialog (`app.tsx:717`, the `variant.list`
+    /// command's toast).
+    fn open_variants(&mut self) {
+        let names: Vec<String> = catalog::model(&self.model)
+            .map(|info| info.variants.keys().cloned().collect())
+            .unwrap_or_default();
+        if names.is_empty() {
+            self.status.set_notice(Some(NO_VARIANTS.to_owned()));
+            return;
+        }
+
+        let rows = variants::rows(names.iter().map(String::as_str), self.variant.as_deref());
+        self.chooser = Some((Chooser::Variants, ListDialog::new(" variants ", rows)));
+    }
+
     /// Opens the agent list over the agents a user may switch to.
     ///
     /// Subagents and hidden agents are left out: the first are the task tool's
@@ -1712,11 +1748,49 @@ impl App {
         {
             Ok(()) => {
                 self.model = model;
+                // A model that kept the variant keeps the segment, naming the
+                // new model; one that lost it is announced by the engine's
+                // `VariantChanged`, whose handler clears the segment then.
+                self.sync_variant_status();
                 self.chooser = None;
                 self.status.set_notice(None);
             }
             Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
         }
+    }
+
+    /// Runs the rest of the session under the picker's choice — a catalog
+    /// name, or [`variants::DEFAULT`] for none.
+    ///
+    /// A refusal — a switch mid-turn, a name the row does not carry — lands in
+    /// the status bar and leaves the list open, exactly as the model list's
+    /// does.
+    async fn switch_variant(&mut self, value: String) {
+        let variant = (value != variants::DEFAULT).then_some(value);
+        match self.engine.send(Command::SwitchVariant { variant }).await {
+            Ok(()) => {
+                // Redundant but harmless, the way `switch_agent`'s eager
+                // update is: `VariantChanged` is the source of truth for
+                // every adoption, this manual one included.
+                self.variant = self.engine.variant();
+                self.sync_variant_status();
+                self.chooser = None;
+                self.status.set_notice(None);
+            }
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
+    }
+
+    /// Re-renders the status bar's `model (variant)` segment from what this
+    /// frontend currently believes, which is the one place the pair is put
+    /// together — a variant shown against the wrong model would name a
+    /// selection that does not exist.
+    fn sync_variant_status(&mut self) {
+        self.status.set_variant(
+            self.variant
+                .as_ref()
+                .map(|variant| (self.model.clone(), variant.clone())),
+        );
     }
 
     /// Opens the theme picker with the cursor on the theme already in use.
@@ -1858,6 +1932,10 @@ impl App {
                 self.agent = self.engine.agent();
                 self.status.set_agent(self.agent.clone());
                 self.model = self.engine.model();
+                // The variant rides the same stored row the agent and the
+                // model do, filtered by the engine against the resumed model.
+                self.variant = self.engine.variant();
+                self.sync_variant_status();
                 self.status.set_notice(None);
             }
             Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
@@ -2141,6 +2219,15 @@ impl App {
                 self.agent = Some(agent);
                 self.status.set_agent(self.agent.clone());
                 self.model = model;
+                // The segment names the model, so a switch that kept the
+                // variant re-renders it against the model now active; a
+                // switch that cleared it is followed by its own
+                // `VariantChanged { variant: None }`.
+                self.sync_variant_status();
+            }
+            CoreEvent::VariantChanged { variant, .. } => {
+                self.variant = variant;
+                self.sync_variant_status();
             }
             CoreEvent::MessageFinished {
                 reason,
@@ -2302,8 +2389,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        App, Chooser, Cleared, Dropdown, FRAME, Help, Mode, Palette, Permission, WireListing,
-        permission_reply,
+        App, Chooser, Cleared, Dropdown, FRAME, Help, ListDialog, Mode, NO_VARIANTS, Palette,
+        Permission, WireListing, permission_reply,
     };
 
     /// The session every hand-built fixture event happens in. One pinned id,
@@ -2314,7 +2401,7 @@ mod tests {
     }
     use crate::{
         clipboard, command,
-        component::sessions,
+        component::{sessions, variants},
         event::AppEvent,
         theme::{DEFAULT_THEME, Themes},
     };
@@ -2373,6 +2460,7 @@ mod tests {
         let storage = Storage::open(directory.path().join("storage"));
         let updated = now.saturating_sub(ago);
         let info = SessionInfo {
+            variant: None,
             id: SessionId::from(id.to_owned()),
             version: VERSION,
             title: title.map(str::to_owned),
@@ -2406,6 +2494,7 @@ mod tests {
     fn store_child(directory: &TempDir, id: &str, parent: &str) {
         let storage = Storage::open(directory.path().join("storage"));
         let info = SessionInfo {
+            variant: None,
             id: SessionId::from(id.to_owned()),
             version: VERSION,
             title: Some("find the parser (@explore subagent)".to_owned()),
@@ -4663,6 +4752,83 @@ mod tests {
         );
     }
 
+    /// The fake model has no catalog row, so `/variants` has nothing to list
+    /// — and says upstream's sentence instead of opening an empty dialog.
+    #[tokio::test]
+    async fn the_variant_picker_refuses_a_model_with_nothing_to_offer() {
+        let mut app = app();
+        app.run_command(command::Action::Variants).await;
+
+        assert!(app.chooser.is_none(), "there is nothing to choose from");
+        assert!(
+            status_line(&mut app).contains(NO_VARIANTS),
+            "got {:?}",
+            status_line(&mut app)
+        );
+    }
+
+    /// Enter on the picker routes through [`Command::SwitchVariant`]; the
+    /// engine's refusal — the fake provider has no catalog rows — lands in
+    /// the status bar and leaves the list open, exactly as a refused model
+    /// switch does.
+    #[tokio::test]
+    async fn choosing_a_variant_sends_the_switch_and_surfaces_the_refusal() {
+        let mut app = app();
+        app.chooser = Some((
+            Chooser::Variants,
+            ListDialog::new(" variants ", variants::rows(["max"], None)),
+        ));
+        app.move_chooser(1);
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(
+            status_line(&mut app).contains("not in the catalog"),
+            "the engine's refusal should be readable: {:?}",
+            status_line(&mut app)
+        );
+        assert!(
+            app.chooser.is_some(),
+            "a refused switch keeps the list the user was choosing from"
+        );
+    }
+
+    /// The announcement is what moves the status line — whichever frontend
+    /// issued the switch — and clearing takes the segment away whole, so a
+    /// session back on Default renders the bar it always had.
+    #[tokio::test]
+    async fn a_variant_change_event_moves_the_status_line_and_a_clear_empties_it() {
+        let mut app = app();
+        assert!(!status_line(&mut app).contains("(max)"));
+
+        app.handle(AppEvent::core(CoreEvent::VariantChanged {
+            session_id: session(),
+            variant: Some("max".to_owned()),
+        }))
+        .await
+        .expect("the announcement is handled");
+        assert_eq!(app.variant.as_deref(), Some("max"));
+        assert!(
+            status_line(&mut app).contains("canned (max)"),
+            "the model and its variant belong together: {:?}",
+            status_line(&mut app)
+        );
+
+        app.handle(AppEvent::core(CoreEvent::VariantChanged {
+            session_id: session(),
+            variant: None,
+        }))
+        .await
+        .expect("the clear is handled");
+        assert!(
+            !status_line(&mut app).contains("canned (max)"),
+            "Default has no segment: {:?}",
+            status_line(&mut app)
+        );
+    }
+
     /// A wire-listed model row, in the shape the seam hands back.
     fn listed(id: &str, name: &str) -> ganja_core::provider::ListedModel {
         ganja_core::provider::ListedModel {
@@ -6684,6 +6850,30 @@ mod tests {
         );
         assert!(
             status_line(&mut app).contains("Message copied to clipboard!"),
+            "got: {}",
+            status_line(&mut app)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_queues_the_osc52_escape_even_when_the_system_clipboard_fails() {
+        // Upstream writes the terminal escape before it tries a system
+        // method: on a headless or SSH box the escape is the only channel
+        // that still delivers, so a desktop refusal must not suppress it.
+        let mut app = app().with_clipboard(Box::new(clipboard::Recording::refusing_writes(
+            clipboard::Error::Unavailable("no display".to_owned()),
+        )));
+        app.seed(vec![Message::user("and then?"), replied(&["the answer"])]);
+
+        app.run_command(command::Action::CopyMessage).await;
+
+        assert_eq!(
+            app.pending_osc,
+            vec![clipboard::osc52::sequence("the answer")],
+            "one escape, queued regardless of the system half"
+        );
+        assert!(
+            status_line(&mut app).contains("Failed to copy to clipboard"),
             "got: {}",
             status_line(&mut app)
         );

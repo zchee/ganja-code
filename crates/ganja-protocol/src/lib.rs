@@ -806,6 +806,23 @@ pub enum Command {
         /// The model's id, as the provider spells it.
         model: String,
     },
+    /// Runs the rest of the session under one of the active model's catalog
+    /// variants — a named bundle of provider options its wire splices into
+    /// every request — or back under none. Takes effect at the next turn, and
+    /// is refused while one is streaming.
+    ///
+    /// The names are the catalog's (upstream `provider.ts:1049`), so an engine
+    /// refuses a name the active model's row does not carry, and refuses any
+    /// name at all on a provider the catalog has no rows for — the same
+    /// no-catalog posture that already denies such a session sizing and
+    /// pricing.
+    SwitchVariant {
+        /// The variant's name, or [`None`] for upstream's "Default" — no
+        /// variant at all. Absent from the wire when [`None`], so the clearing
+        /// command's bytes carry nothing but its type.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<String>,
+    },
     /// Runs `command` in the shell on the user's behalf and puts both the
     /// command and its output in the transcript, where the next model request
     /// will read them. Upstream's `!` passthrough.
@@ -1129,6 +1146,20 @@ pub enum Event {
         /// The model now active for this session.
         model: String,
     },
+    /// The engine adopted a model variant — or cleared one, which a switch to
+    /// a model that lacks the current variant's name also does (upstream
+    /// `prompt.ts:654`). Announced from every path that moves the selection,
+    /// so a frontend's indicator does not depend on having issued
+    /// [`Command::SwitchVariant`] itself.
+    VariantChanged {
+        /// Session this happened in.
+        session_id: SessionId,
+        /// The variant now active, or [`None`] for upstream's "Default".
+        /// Absent from the wire when [`None`], matching the command that asks
+        /// for it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<String>,
+    },
     /// The turn ended and the engine is idle again. It is the last event of a
     /// turn, whatever went wrong during it, save for the one
     /// [`Event::AgentChanged`] a plan approval may announce immediately after
@@ -1174,6 +1205,7 @@ impl Event {
             | Event::QuestionRejected { session_id, .. }
             | Event::RevertChanged { session_id, .. }
             | Event::AgentChanged { session_id, .. }
+            | Event::VariantChanged { session_id, .. }
             | Event::MessageFinished { session_id, .. } => session_id,
         }
     }
@@ -1334,6 +1366,10 @@ mod tests {
             Command::SwitchModel {
                 model: "claude-haiku-4.5".to_owned(),
             },
+            Command::SwitchVariant {
+                variant: Some("max".to_owned()),
+            },
+            Command::SwitchVariant { variant: None },
             Command::RunShell {
                 command: "git status".to_owned(),
             },
@@ -1426,6 +1462,14 @@ mod tests {
                 agent: "build".to_owned(),
                 model: "claude-sonnet-4-5".to_owned(),
             },
+            Event::VariantChanged {
+                session_id: pinned_session(),
+                variant: Some("max".to_owned()),
+            },
+            Event::VariantChanged {
+                session_id: pinned_session(),
+                variant: None,
+            },
         ];
 
         for event in cases {
@@ -1456,6 +1500,22 @@ mod tests {
                 assert_eq!(model, "claude-sonnet-4-5");
             }
             other => panic!("expected an agent change, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn variant_changed_carries_the_session_and_the_variant() {
+        let event = Event::VariantChanged {
+            session_id: pinned_session(),
+            variant: Some("max".to_owned()),
+        };
+
+        assert_eq!(event.session_id(), &pinned_session());
+        match event {
+            Event::VariantChanged { variant, .. } => {
+                assert_eq!(variant.as_deref(), Some("max"));
+            }
+            other => panic!("expected a variant change, got {other:?}"),
         }
     }
 
@@ -1928,6 +1988,33 @@ mod tests {
                     model: "claude-haiku-4.5".to_owned(),
                 }),
                 r#"{"type":"switch_model","model":"claude-haiku-4.5"}"#,
+            ),
+            // The variant travels only when there is one: `None` is upstream's
+            // "Default", and both the command that asks for it and the event
+            // that announces it spell that as the field's absence.
+            (
+                serde_json::to_string(&Command::SwitchVariant {
+                    variant: Some("max".to_owned()),
+                }),
+                r#"{"type":"switch_variant","variant":"max"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::SwitchVariant { variant: None }),
+                r#"{"type":"switch_variant"}"#,
+            ),
+            (
+                serde_json::to_string(&Event::VariantChanged {
+                    session_id: pinned_session(),
+                    variant: Some("max".to_owned()),
+                }),
+                r#"{"type":"variant_changed","session_id":"ses_1","variant":"max"}"#,
+            ),
+            (
+                serde_json::to_string(&Event::VariantChanged {
+                    session_id: pinned_session(),
+                    variant: None,
+                }),
+                r#"{"type":"variant_changed","session_id":"ses_1"}"#,
             ),
         ];
 
