@@ -10,6 +10,7 @@ pub mod command;
 pub mod component;
 pub mod event;
 pub mod external;
+pub mod history;
 pub mod keybind;
 pub(crate) mod markdown;
 pub mod mention;
@@ -38,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::App,
+    history::History,
     keybind::Keybinds,
     theme::{Mode, Themes},
 };
@@ -229,8 +231,10 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
             )
             .with_provider(provider_id)
             .with_keybinds(keys)
-            // What a submitted `@path` is checked against, because it is
-            // what the engine resolves the attachment against.
+            // The one place the prompt history reaches the disk: the default
+            // store is inert, so a test that does not opt in never touches the
+            // machine's own history.
+            .with_history(History::load())
             .with_root(project.root())
             // The `@` file menu walks from here, so a mention resolves against
             // the directory the user opened rather than the project root: what
