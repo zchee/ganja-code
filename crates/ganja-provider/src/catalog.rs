@@ -153,18 +153,62 @@ pub struct ModelInfo {
     pub tool_call: bool,
     /// How far along its life the catalog says it is.
     pub status: ModelStatus,
+    /// Whether the model reasons at all — the gate the capability table in
+    /// `effort.rs` synthesizes under. Absent from a published row means it
+    /// does not, which is also what every row of the compiled-in snapshot
+    /// says.
+    pub reasoning: bool,
+    /// How its provider lets a request ask for that reasoning, as models.dev
+    /// publishes it. [`None`] — the catalog said nothing — is what lets the
+    /// hardcoded table answer instead; the empty list is a published answer
+    /// ("no efforts") that the table may not override.
+    pub reasoning_options: Option<Vec<ReasoningOption>>,
     /// The named variants a session may run this model under, each carrying
     /// the provider options its wire splices into the request body — upstream's
     /// `variants: Record<string, Record<string, any>>` (`provider.ts:1049`).
     /// Ganja's own surface calls these "effort"; this field keeps the catalog
     /// schema's name (`effort-not-variants`).
     ///
-    /// Empty for every model the fetched catalog publishes none for, for every
-    /// row of the compiled-in snapshot — the snapshot is a pruning of the
-    /// published catalog and is not regenerated here; a fresh fetch picks
-    /// variants up naturally — and therefore for every uncataloged provider,
-    /// which is what makes "no catalog, no variants" one rule rather than two.
+    /// Assembled at parse the way upstream assembles it (`provider.ts:1257`):
+    /// synthesized from the row's capability data — [`Self::reasoning_options`]
+    /// first, the table in `effort.rs` behind it — with whatever the catalog
+    /// *declares* merged deep on top, declarations winning. Empty for every
+    /// row of the compiled-in snapshot — its rows carry no capability data to
+    /// synthesize from, and a fresh fetch fills the roster naturally — and
+    /// for every uncataloged provider, which is what keeps "no catalog, no
+    /// efforts" one rule rather than two.
     pub variants: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+}
+
+/// One way a model's provider lets a request ask for reasoning, as models.dev
+/// publishes it (upstream `packages/core/src/models-dev.ts`,
+/// `ReasoningOption`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReasoningOption {
+    /// Named effort tiers, weakest to strongest.
+    Effort {
+        /// The tier names; `null` is upstream's spelling of `none`.
+        values: Vec<Option<String>>,
+    },
+    /// Thinking switches on and off, with no dial between.
+    Toggle,
+    /// A thinking budget in tokens, bounded where the provider says so.
+    ///
+    /// Floats because the catalog publishes JSON numbers (`Schema.Finite`),
+    /// the same reason the limit fields are read as [`f64`].
+    BudgetTokens {
+        /// The smallest budget the provider accepts.
+        #[serde(default)]
+        min: Option<f64>,
+        /// The largest, absent when only the model's own output cap bounds it.
+        #[serde(default)]
+        max: Option<f64>,
+    },
+    /// A kind this build has not heard of — carried as nothing rather than
+    /// failing the row, so a catalog that grows a word keeps its prices.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What one turn cost, in US dollars.
@@ -558,6 +602,12 @@ fn snapshot() -> Catalog {
                     release_date: None,
                     tool_call: true,
                     status: ModelStatus::Active,
+                    // The snapshot is sizes and prices, not capabilities: a
+                    // row here says nothing about reasoning, so nothing is
+                    // synthesized from it and the roster stays empty until a
+                    // fetched catalog replaces the table.
+                    reasoning: false,
+                    reasoning_options: None,
                     variants: BTreeMap::new(),
                 })
             })
@@ -578,6 +628,30 @@ pub fn model(id: &str) -> Option<Arc<ModelInfo>> {
         .models
         .iter()
         .find(|model| model.id == id)
+        .cloned()
+}
+
+/// Looks up the row `provider_id` serves under `id`.
+///
+/// [`model`]'s first-row answer stopped being enough the day rosters were
+/// synthesized per wire: openai and github-copilot both publish `gpt-5.4`,
+/// and the copilot row's efforts splice as a chat-completions body where the
+/// openai row's splice as Responses. Every effort consumer knows its
+/// provider, so the roster is read through this — sizing and pricing, where
+/// any provider's numbers are close enough, keep the id-only lookup.
+#[must_use]
+pub fn model_for(provider_id: &str, id: &str) -> Option<Arc<ModelInfo>> {
+    scoped(&current(), provider_id, id)
+}
+
+/// [`model_for`] against a named table — the seam that lets the lookup be
+/// tested on a parsed catalog without installing it over the process-global
+/// one every other test reads.
+fn scoped(catalog: &Catalog, provider_id: &str, id: &str) -> Option<Arc<ModelInfo>> {
+    catalog
+        .models
+        .iter()
+        .find(|model| model.provider_id == provider_id && model.id == id)
         .cloned()
 }
 
@@ -967,6 +1041,10 @@ struct Wire {
     cost: Option<WireCost>,
     /// Sizes, in tokens.
     limit: Option<WireLimit>,
+    /// Whether the model reasons, the capability table's gate.
+    reasoning: Option<bool>,
+    /// How its provider lets a request ask for that reasoning.
+    reasoning_options: Option<Vec<ReasoningOption>>,
     /// Named variants, each a map of provider options. The struct-level
     /// default is what lets a cache written before variants existed — and
     /// every row that publishes none — parse unchanged.
@@ -1008,7 +1086,7 @@ impl Wire {
         let max_output = tokens(limit.output)?;
         let cost = self.cost.unwrap_or_default();
 
-        Some(ModelInfo {
+        let mut info = ModelInfo {
             id: model_id.to_owned(),
             provider_id: provider_id.to_owned(),
             name: self.name.unwrap_or_else(|| model_id.to_owned()),
@@ -1025,8 +1103,16 @@ impl Wire {
             release_date: self.release_date,
             tool_call: self.tool_call.unwrap_or(true),
             status: status(self.status.as_deref()),
+            reasoning: self.reasoning.unwrap_or_default(),
+            reasoning_options: self.reasoning_options,
+            // Held as what the catalog declared just long enough for the
+            // synthesis to read the whole row, then replaced with the merged
+            // roster — capability data first, the declaration winning on top.
             variants: self.variants.unwrap_or_default(),
-        })
+        };
+        info.variants = crate::effort::roster(&info);
+
+        Some(info)
     }
 }
 
@@ -1605,6 +1691,123 @@ mod tests {
         assert!(
             small.variants.is_empty(),
             "a row publishing no variants has none, not a parse failure"
+        );
+    }
+
+    /// The synthesis end to end: a payload shaped exactly like the published
+    /// api.json — capability flags, `reasoning_options`, no declared
+    /// `variants` — comes out of `parse` with a roster already assembled, in
+    /// the splice shape of the wire that provider's rows ride.
+    #[test]
+    fn a_reasoning_row_synthesizes_its_roster_at_parse() {
+        let body = r#"{
+          "anthropic": {
+            "models": {
+              "claude-opus-4-8": {
+                "reasoning": true,
+                "reasoning_options": [
+                  { "type": "effort", "values": ["low", "medium", "high", "xhigh", "max"] }
+                ],
+                "limit": { "context": 1000000, "output": 128000 }
+              },
+              "claude-haiku-4-5": {
+                "reasoning": true,
+                "reasoning_options": [{ "type": "budget_tokens", "min": 1024 }],
+                "limit": { "context": 200000, "output": 64000 }
+              }
+            }
+          },
+          "openai": {
+            "models": {
+              "gpt-5.2": {
+                "reasoning": true,
+                "reasoning_options": [
+                  { "type": "effort", "values": ["none", "low", "medium", "high", "xhigh"] }
+                ],
+                "release_date": "2025-12-11",
+                "limit": { "context": 400000, "output": 128000 }
+              }
+            }
+          }
+        }"#;
+        let catalog = parse(body).expect("the fixture is a catalog");
+        let row = |id: &str| {
+            catalog
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .unwrap_or_else(|| panic!("{id} parses into the table"))
+        };
+
+        assert_eq!(
+            serde_json::to_value(&row("claude-opus-4-8").variants["high"])
+                .expect("an entry serializes"),
+            serde_json::json!({
+                "thinking": {"type": "adaptive", "display": "summarized"},
+                "effort": "high",
+            }),
+            "an anthropic effort splices as the Messages wire's adaptive shape"
+        );
+        assert_eq!(
+            serde_json::to_value(&row("claude-haiku-4-5").variants["max"])
+                .expect("an entry serializes"),
+            serde_json::json!({"thinking": {"type": "enabled", "budget_tokens": 31999}}),
+            "a budget option splices as a Messages thinking budget"
+        );
+        assert_eq!(
+            serde_json::to_value(&row("gpt-5.2").variants["xhigh"]).expect("an entry serializes"),
+            serde_json::json!({
+                "reasoning": {"effort": "xhigh", "summary": "auto"},
+                "include": ["reasoning.encrypted_content"],
+            }),
+            "an openai effort splices as the Responses wire's reasoning shape"
+        );
+    }
+
+    /// Two providers publishing the same id must answer separately: the
+    /// copilot row's efforts splice as chat completions where the openai
+    /// row's splice as Responses, and handing a session the wrong one is a
+    /// body its wire cannot carry.
+    #[test]
+    fn model_for_answers_the_named_providers_row_where_ids_collide() {
+        let body = r#"{
+          "github-copilot": {
+            "models": {
+              "gpt-5.4": {
+                "reasoning": true,
+                "limit": { "context": 128000, "output": 64000 }
+              }
+            }
+          },
+          "openai": {
+            "models": {
+              "gpt-5.4": {
+                "reasoning": true,
+                "limit": { "context": 400000, "output": 128000 }
+              }
+            }
+          }
+        }"#;
+        // Probed through `scoped` rather than installed: the process-global
+        // table is what every sibling test reads, and these assertions need a
+        // fixture, not the snapshot.
+        let catalog = parse(body).expect("the fixture is a catalog");
+
+        let copilot = super::scoped(&catalog, "github-copilot", "gpt-5.4")
+            .expect("the copilot row is in the table");
+        assert!(
+            copilot.variants["high"].contains_key("reasoning_effort"),
+            "the copilot row speaks chat completions"
+        );
+        let openai =
+            super::scoped(&catalog, "openai", "gpt-5.4").expect("the openai row is in the table");
+        assert!(
+            openai.variants["high"].contains_key("reasoning"),
+            "the openai row speaks Responses"
+        );
+        assert!(
+            super::scoped(&catalog, "anthropic", "gpt-5.4").is_none(),
+            "a provider that does not serve the id has no row to answer with"
         );
     }
 

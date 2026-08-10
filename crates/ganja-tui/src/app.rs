@@ -1639,7 +1639,9 @@ impl App {
     /// status bar instead of an empty dialog (`app.tsx:717`, the `variant.list`
     /// command's toast).
     fn open_effort(&mut self) {
-        let names: Vec<String> = catalog::model(&self.model)
+        // Provider-scoped for the engine's reason (`catalog::model_for`): the
+        // names offered here must be the names the engine will accept.
+        let names: Vec<String> = catalog::model_for(&self.provider, &self.model)
             .map(|info| info.variants.keys().cloned().collect())
             .unwrap_or_default();
         if names.is_empty() {

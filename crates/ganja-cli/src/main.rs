@@ -1419,6 +1419,8 @@ mod tests {
             release_date: None,
             tool_call: true,
             status: ModelStatus::Active,
+            reasoning: false,
+            reasoning_options: None,
             variants: Default::default(),
         })
     }
