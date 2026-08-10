@@ -230,6 +230,18 @@ impl Provider for AnthropicProvider {
         ID
     }
 
+    /// The media types the Messages API documents for `image` source blocks,
+    /// plus the PDF its `document` block carries. Everything else — including
+    /// `image/avif`, which the attachment allowlist names but no block here
+    /// accepts — degrades to text at the engine rather than being sent as a
+    /// block the API would refuse.
+    fn accepts_attachment(&self, mime: &str) -> bool {
+        matches!(
+            mime,
+            "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf"
+        )
+    }
+
     async fn stream(
         &self,
         request: ChatRequest,
@@ -322,6 +334,16 @@ enum Block<'a> {
         /// The text itself.
         text: &'a str,
     },
+    /// An image the user attached, base64 the engine encoded at send time.
+    Image {
+        /// The payload, always base64 here.
+        source: Source<'a>,
+    },
+    /// A PDF the user attached — this API's name for a file block.
+    Document {
+        /// The payload, always base64 here.
+        source: Source<'a>,
+    },
     /// A call the model made.
     ToolUse {
         /// The provider's identifier for the call, which its result names.
@@ -347,6 +369,32 @@ enum Block<'a> {
 /// Whether a result block describes a call that worked.
 fn succeeded(is_error: &bool) -> bool {
     !*is_error
+}
+
+/// The payload of an [`Block::Image`] or [`Block::Document`], in the one form
+/// this build sends: base64 the engine encoded when it built the request.
+///
+/// The shape is the API's `{"type":"base64","media_type":…,"data":…}` source
+/// object verbatim; the URL form the API also accepts stays unused because a
+/// mention names a local file, and the whole point of the send-time read is
+/// that its bytes travel rather than a path nobody else can follow.
+#[derive(Debug, Serialize)]
+struct Source<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    media_type: &'a str,
+    data: &'a str,
+}
+
+impl<'a> Source<'a> {
+    /// A base64 source carrying `data` as `media_type`.
+    fn base64(media_type: &'a str, data: &'a str) -> Self {
+        Self {
+            kind: "base64",
+            media_type,
+            data,
+        }
+    }
 }
 
 impl<'a> Body<'a> {
@@ -487,11 +535,27 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
                     is_error,
                 });
             }
-            // A mentioned file is a *reference*, and the reference is resolved
-            // into a text block before a request is built
-            // (`session::resolve_mentions`). One arriving here would be a
-            // request built past that resolution, and sending a path the model
-            // cannot follow would read as content it could.
+            // A binary attachment the engine read at send time: its base64
+            // rides the request's own copy of the file part, and only for a
+            // mime `accepts_attachment` said yes to, so the match below is by
+            // payload shape rather than by allowlist.
+            PartBody::File {
+                mime,
+                content: Some(content),
+                ..
+            } => {
+                let source = Source::base64(mime, content);
+                blocks.push(if mime == "application/pdf" {
+                    Block::Document { source }
+                } else {
+                    Block::Image { source }
+                });
+            }
+            // A mentioned *text* file is a reference, and the reference is
+            // resolved into a text block before a request is built
+            // (`session::resolve_mentions`). One arriving here with no content
+            // would be a request built past that resolution, and sending a
+            // path the model cannot follow would read as content it could.
             //
             // `StepFinish` carries a step's bill rather than content, and
             // `StepStart` was consumed as the boundary this step was cut at.
@@ -500,7 +564,7 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
             // own equivalent is a `thinking` block with a signature, which
             // this build does not port — and handing an opaque blob to the
             // provider that did not seal it is not a thing to attempt.
-            PartBody::File { .. }
+            PartBody::File { content: None, .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
@@ -1060,6 +1124,91 @@ mod tests {
 
         assert!(!body.contains("system"), "got {body}");
         assert!(body.contains(r#""max_tokens":16"#), "got {body}");
+    }
+
+    /// The exact source-block shapes the Messages API documents, pinned so a
+    /// drift in the encoder is a red test rather than a 400 from the vendor.
+    /// An image rides an `image` block and a PDF a `document` block, both with
+    /// the base64 the engine encoded at send time; a file part that carries no
+    /// content is a reference the engine already resolved, and encodes nothing.
+    #[test]
+    fn an_attachment_becomes_the_source_block_its_mime_names() {
+        let mut user = Message::user("what are these");
+        user.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::File {
+                path: "shot.png".to_owned(),
+                mime: "image/png".to_owned(),
+                start: None,
+                end: None,
+                content: Some("aW1n".to_owned()),
+            },
+        });
+        user.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::File {
+                path: "paper.pdf".to_owned(),
+                mime: "application/pdf".to_owned(),
+                start: None,
+                end: None,
+                content: Some("cGRm".to_owned()),
+            },
+        });
+        user.parts.push(Part::file("notes.md", "text/plain"));
+
+        let request = ChatRequest {
+            model: "claude-test".to_owned(),
+            system: None,
+            messages: vec![user],
+            tools: Vec::new(),
+        };
+        let body = serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS))
+            .expect("the body serializes");
+
+        assert_eq!(
+            body["messages"],
+            serde_json::json!([{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what are these"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "aW1n"},
+                    },
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": "cGRm",
+                        },
+                    },
+                ],
+            }]),
+            "got {body}"
+        );
+    }
+
+    /// What the engine consults before it fills a file part in: the mimes the
+    /// Messages API documents, and nothing else — `image/avif` is on the
+    /// attachment allowlist and still degrades, because sending a block the
+    /// vendor does not document is guessing.
+    #[test]
+    fn the_wire_accepts_the_mimes_the_api_documents_and_no_others() {
+        let provider = AnthropicProvider::new("sk-test-canary-XYZ").expect("a client builds");
+
+        for mime in [
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "application/pdf",
+        ] {
+            assert!(provider.accepts_attachment(mime), "{mime} is documented");
+        }
+        for mime in ["image/avif", "image/svg+xml", "text/plain", "video/mp4"] {
+            assert!(!provider.accepts_attachment(mime), "{mime} degrades");
+        }
     }
 
     /// A tool part carrying `state`, as an assistant message holds one.

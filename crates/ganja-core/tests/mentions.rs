@@ -58,6 +58,7 @@ async fn a_mention_becomes_a_file_part_on_the_message_and_content_in_the_request
             text: "what does this say".to_owned(),
             mentions: vec![Mention {
                 path: path.to_string_lossy().into_owned(),
+                ..Default::default()
             }],
         })
         .await
@@ -95,6 +96,7 @@ async fn the_users_message_carries_the_mention_as_a_reference() {
             text: "look".to_owned(),
             mentions: vec![Mention {
                 path: path.to_string_lossy().into_owned(),
+                ..Default::default()
             }],
         })
         .await
@@ -115,7 +117,10 @@ async fn the_users_message_carries_the_mention_as_a_reference() {
         "the text, then the file: {:?}",
         user.parts
     );
-    let PartBody::File { path: named, mime } = &user.parts[1].body else {
+    let PartBody::File {
+        path: named, mime, ..
+    } = &user.parts[1].body
+    else {
         panic!("the second part is the mention, got {:?}", user.parts[1]);
     };
     assert_eq!(named, &path.to_string_lossy());
@@ -149,6 +154,7 @@ async fn a_mentioned_file_is_read_when_the_request_is_built_not_when_it_was_atta
             text: "read it".to_owned(),
             mentions: vec![Mention {
                 path: path.to_string_lossy().into_owned(),
+                ..Default::default()
             }],
         })
         .await
@@ -209,6 +215,7 @@ async fn a_mention_does_not_let_the_model_edit_a_file_it_never_read() {
             text: "change it".to_owned(),
             mentions: vec![Mention {
                 path: path.to_string_lossy().into_owned(),
+                ..Default::default()
             }],
         })
         .await
@@ -256,6 +263,7 @@ async fn a_mention_naming_something_unreadable_says_so_rather_than_vanishing() {
             mentions: vec![
                 Mention {
                     path: directory.to_string_lossy().into_owned(),
+                    ..Default::default()
                 },
                 Mention {
                     path: workspace
@@ -263,6 +271,7 @@ async fn a_mention_naming_something_unreadable_says_so_rather_than_vanishing() {
                         .join("absent.md")
                         .to_string_lossy()
                         .into_owned(),
+                    ..Default::default()
                 },
             ],
         })
@@ -280,4 +289,135 @@ async fn a_mention_naming_something_unreadable_says_so_rather_than_vanishing() {
         sent.contains("(could not be read"),
         "and a file that is not there says that: {sent}"
     );
+}
+
+/// The attachment promise end to end: the stored message keeps the reference,
+/// and the request the provider saw carries the bytes as base64 beside the
+/// mime the wire will encode.
+#[tokio::test]
+async fn a_png_mention_reaches_the_wire_as_base64_with_its_mime() {
+    let workspace = ganja_testkit::temp_dir();
+    let path = workspace.path().join("shot.png");
+    std::fs::write(&path, b"not-really-a-png").expect("the fixture writes");
+
+    let (provider, requests) = ScriptedProvider::new(vec![says("seen")]);
+    let engine = engine(provider, Registry::new(Vec::new()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "what is in this".to_owned(),
+            mentions: vec![Mention {
+                path: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            }],
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain_allowing(&engine, &mut events).await;
+
+    let requests = requests.lock().expect("the request log is never poisoned");
+    let (mime, content) = requests[0]
+        .messages
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .find_map(|part| match &part.body {
+            PartBody::File { mime, content, .. } => Some((mime.clone(), content.clone())),
+            _ => None,
+        })
+        .expect("the request still carries a file part");
+    assert_eq!(mime, "image/png");
+    let content = content.expect("a carried binary attachment holds its base64");
+    {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        assert_eq!(
+            STANDARD.decode(&content).expect("the payload decodes"),
+            b"not-really-a-png",
+            "the bytes are the file's, encoded at send time"
+        );
+    }
+}
+
+/// The same mention on a wire that carries no images: the model is told what
+/// was attached and why the bytes are not there — never a dropped part and
+/// never a failed turn.
+#[tokio::test]
+async fn a_png_mention_on_a_text_only_wire_reaches_the_model_as_its_name() {
+    let workspace = ganja_testkit::temp_dir();
+    let path = workspace.path().join("shot.png");
+    std::fs::write(&path, b"not-really-a-png").expect("the fixture writes");
+
+    let (provider, requests) = ScriptedProvider::text_only(vec![says("noted")]);
+    let engine = engine(provider, Registry::new(Vec::new()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "what is in this".to_owned(),
+            mentions: vec![Mention {
+                path: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            }],
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain_allowing(&engine, &mut events).await;
+
+    let requests = requests.lock().expect("the request log is never poisoned");
+    let sent = user_text(&requests[0]);
+    assert!(
+        sent.contains("shot.png"),
+        "the model learns the name: {sent}"
+    );
+    assert!(
+        sent.contains("image/png") && sent.contains("does not carry"),
+        "and why the bytes are missing: {sent}"
+    );
+    assert!(
+        !requests[0]
+            .messages
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .any(|part| matches!(&part.body, PartBody::File { .. })),
+        "nothing rides the wire as a block it cannot encode"
+    );
+}
+
+/// `@path#2-4` inlines exactly the lines it names, 1-indexed and inclusive,
+/// with the range on the block's tag so two slices of one file stay
+/// distinguishable.
+#[tokio::test]
+async fn a_ranged_mention_inlines_exactly_the_named_lines() {
+    let workspace = ganja_testkit::temp_dir();
+    let path = workspace.path().join("notes.md");
+    std::fs::write(&path, "one\ntwo\nthree\nfour\nfive").expect("the fixture writes");
+
+    let (provider, requests) = ScriptedProvider::new(vec![says("read")]);
+    let engine = engine(provider, Registry::new(Vec::new()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "read the middle".to_owned(),
+            mentions: vec![Mention {
+                path: path.to_string_lossy().into_owned(),
+                start: Some(2),
+                end: Some(4),
+            }],
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain_allowing(&engine, &mut events).await;
+
+    let requests = requests.lock().expect("the request log is never poisoned");
+    let sent = user_text(&requests[0]);
+    assert!(
+        sent.contains(&format!(
+            "<attached-file path=\"{}\" lines=\"2-4\">\ntwo\nthree\nfour\n</attached-file>",
+            path.display()
+        )),
+        "exactly the named lines, tagged with the range: {sent}"
+    );
+    assert!(!sent.contains("one\ntwo"), "line one stayed home: {sent}");
+    assert!(!sent.contains("five"), "line five stayed home: {sent}");
 }

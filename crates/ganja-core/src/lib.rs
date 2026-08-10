@@ -31,6 +31,7 @@
 //! engine's vocabulary invites the opposite.
 
 pub mod agent;
+pub mod attachment;
 pub mod command;
 pub mod config;
 pub mod engine;

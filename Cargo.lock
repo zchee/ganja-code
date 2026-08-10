@@ -1350,6 +1350,7 @@ dependencies = [
  "ganja-core",
  "ganja-permission",
  "ganja-protocol",
+ "ganja-testkit",
  "ganja-tool",
  "insta",
  "nucleo-matcher",

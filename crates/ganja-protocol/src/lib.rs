@@ -307,20 +307,51 @@ pub enum PartBody {
     },
     /// A file the user attached to their message with an `@` mention.
     ///
-    /// The part carries a **reference and nothing else**: the content is read
-    /// when a request is built, never when the mention is made, so a file the
-    /// user edits between attaching it and sending reaches the model as it is
-    /// now rather than as it was. That is upstream's shape — its file part
-    /// carries a `file://` URL the server resolves at send time — and it is
-    /// also why a mention is not a read: nothing here records the file in
+    /// The **stored** part carries a **reference and nothing else**: the
+    /// content is read when a request is built, never when the mention is made,
+    /// so a file the user edits between attaching it and sending reaches the
+    /// model as it is now rather than as it was. That is upstream's shape — its
+    /// file part carries a `file://` URL the server resolves at send time — and
+    /// it is also why a mention is not a read: nothing here records the file in
     /// `ganja-tool`'s `FileTimes`, so `edit` still refuses a file the model
     /// itself has not opened.
+    ///
+    /// [`start`](Self::File::start) and [`end`](Self::File::end) carry an
+    /// `@path#12-40` line range, upstream's `?start=&end=` URL params
+    /// (`autocomplete.tsx:254`). They are lines, 1-indexed and inclusive, and
+    /// the send-time read slices to them; absent, the whole file is read. `end`
+    /// is kept only when `start < end`, upstream's rule (`autocomplete.tsx:47`),
+    /// so a `#20-10` becomes `start: Some(20), end: None`.
+    ///
+    /// [`content`](Self::File::content) is the one field the **stored** part
+    /// never carries and the request's own copy sometimes does: an image or a
+    /// PDF the send-time read turned into base64, so the wire that carries
+    /// binary content has bytes to encode rather than a path it cannot follow.
+    /// It stays out of every transcript — `skip_serializing_if` keeps a stored
+    /// or resumed part byte-identical to the reference it was — because a
+    /// mention is a reference and inlining the payload at attach time is the
+    /// staleness the read-at-send ruling exists to avoid.
     File {
         /// Where the file is, relative to the project root.
         path: String,
-        /// What kind of file it is, upstream's `mime`. `text/plain` for
-        /// everything this build attaches.
+        /// What kind of file it is, upstream's `mime`, derived from the path's
+        /// extension: `image/png`, `application/pdf`, `image/svg+xml`, or
+        /// `text/plain` for everything the attachment allowlist does not name.
         mime: String,
+        /// First line of an attached range, 1-indexed and inclusive. Absent
+        /// reads the whole file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<u32>,
+        /// Last line of an attached range, 1-indexed and inclusive. Absent —
+        /// even with `start` set — reads from `start` to the end, and is what a
+        /// reversed `#20-10` collapses to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<u32>,
+        /// The base64 payload of a binary attachment, present only on a
+        /// request's own copy after the send-time read and never on the wire or
+        /// on disk. See the variant's own documentation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
     },
     /// The turn began another model request. Tool results make a turn span
     /// several requests, and each one opens with this marker.
@@ -494,14 +525,31 @@ impl Part {
         }
     }
 
-    /// Builds a file part with a fresh id, for a file the user mentioned.
+    /// Builds a file part with a fresh id, for a file the user mentioned with
+    /// no line range: the whole file, read at send time.
     #[must_use]
     pub fn file(path: impl Into<String>, mime: impl Into<String>) -> Self {
+        Self::file_range(path, mime, None, None)
+    }
+
+    /// Builds a file part with a fresh id, carrying the line range the mention
+    /// named. `start`/`end` are lines, 1-indexed and inclusive; the send-time
+    /// read slices to them.
+    #[must_use]
+    pub fn file_range(
+        path: impl Into<String>,
+        mime: impl Into<String>,
+        start: Option<u32>,
+        end: Option<u32>,
+    ) -> Self {
         Self {
             id: PartId::ascending(),
             body: PartBody::File {
                 path: path.into(),
                 mime: mime.into(),
+                start,
+                end,
+                content: None,
             },
         }
     }
@@ -658,12 +706,23 @@ impl Message {
 
 /// One file the user attached to a prompt, by `@`-mentioning it.
 ///
-/// A path and nothing more: what the file *says* is read when the request is
-/// built, not when the mention is made. See [`PartBody::File`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A path, and — when the mention named an `@path#12-40` line range — the
+/// lines it named: what the file *says* is read when the request is built, not
+/// when the mention is made. See [`PartBody::File`], whose `start`/`end` these
+/// become.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mention {
     /// Where the file is, relative to the project root.
     pub path: String,
+    /// First line of an attached range, 1-indexed and inclusive. Absent — and
+    /// absent from the wire — for a whole-file mention, which keeps a mention
+    /// written before ranges existed byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u32>,
+    /// Last line of an attached range, 1-indexed and inclusive. Absent reads
+    /// from `start` to the end of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<u32>,
 }
 
 /// How much of a session is currently reverted, as a frontend sees it.
@@ -1253,6 +1312,15 @@ mod tests {
                 text: "what does this do".to_owned(),
                 mentions: vec![Mention {
                     path: "src/main.rs".to_owned(),
+                    ..Default::default()
+                }],
+            },
+            Command::SendPrompt {
+                text: "explain these lines".to_owned(),
+                mentions: vec![Mention {
+                    path: "src/main.rs".to_owned(),
+                    start: Some(10),
+                    end: Some(20),
                 }],
             },
             Command::CancelTurn,
@@ -1413,13 +1481,28 @@ mod tests {
                     mentions: vec![
                         Mention {
                             path: "src/main.rs".to_owned(),
+                            ..Default::default()
                         },
                         Mention {
                             path: "README.md".to_owned(),
+                            ..Default::default()
                         },
                     ],
                 }),
                 r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs"},{"path":"README.md"}]}"#,
+            ),
+            // An `@path#12-40` mention carries the lines it named; the range
+            // rides beside the path exactly as the file part's does.
+            (
+                serde_json::to_string(&Command::SendPrompt {
+                    text: "hi".to_owned(),
+                    mentions: vec![Mention {
+                        path: "src/main.rs".to_owned(),
+                        start: Some(12),
+                        end: Some(40),
+                    }],
+                }),
+                r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs","start":12,"end":40}]}"#,
             ),
             (
                 serde_json::to_string(&Command::CancelTurn),
@@ -1477,15 +1560,51 @@ mod tests {
                 }),
                 r#"{"type":"revert_changed","session_id":"ses_1"}"#,
             ),
+            // A whole-file part's bytes are exactly what they were before
+            // ranges existed: the pin is the None-direction half of the
+            // compatibility promise.
             (
                 serde_json::to_string(&Part {
                     id: PartId::from("prt_1".to_owned()),
                     body: PartBody::File {
                         path: "src/main.rs".to_owned(),
                         mime: "text/plain".to_owned(),
+                        start: None,
+                        end: None,
+                        content: None,
                     },
                 }),
                 r#"{"id":"prt_1","type":"file","path":"src/main.rs","mime":"text/plain"}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::File {
+                        path: "src/main.rs".to_owned(),
+                        mime: "text/plain".to_owned(),
+                        start: Some(12),
+                        end: Some(40),
+                        content: None,
+                    },
+                }),
+                r#"{"id":"prt_1","type":"file","path":"src/main.rs","mime":"text/plain","start":12,"end":40}"#,
+            ),
+            // The request's own copy of a binary attachment, after the
+            // send-time read filled `content` in. A stored part never carries
+            // it, but the shape is on this table so growing one is a
+            // deliberate edit like every other.
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::File {
+                        path: "shot.png".to_owned(),
+                        mime: "image/png".to_owned(),
+                        start: None,
+                        end: None,
+                        content: Some("aGk=".to_owned()),
+                    },
+                }),
+                r#"{"id":"prt_1","type":"file","path":"shot.png","mime":"image/png","content":"aGk="}"#,
             ),
             (
                 serde_json::to_string(&Part {
@@ -1842,8 +1961,44 @@ mod tests {
             Command::SendPrompt {
                 text: "hi".to_owned(),
                 mentions: vec![Mention {
-                    path: "a.rs".to_owned()
+                    path: "a.rs".to_owned(),
+                    start: None,
+                    end: None,
                 }],
+            }
+        );
+    }
+
+    /// The other direction of the range extension's promise: a file part
+    /// stored before ranges existed reads back as a whole-file reference, and
+    /// a mention written by an older frontend reads back range-free — neither
+    /// fails on fields that are not there.
+    #[test]
+    fn a_file_part_written_before_ranges_existed_still_parses() {
+        let decoded: Part = serde_json::from_str(
+            r#"{"id":"prt_1","type":"file","path":"src/main.rs","mime":"text/plain"}"#,
+        )
+        .expect("the original shape parses");
+
+        assert_eq!(
+            decoded.body,
+            PartBody::File {
+                path: "src/main.rs".to_owned(),
+                mime: "text/plain".to_owned(),
+                start: None,
+                end: None,
+                content: None,
+            }
+        );
+
+        let decoded: Mention =
+            serde_json::from_str(r#"{"path":"a.rs"}"#).expect("a range-free mention parses");
+        assert_eq!(
+            decoded,
+            Mention {
+                path: "a.rs".to_owned(),
+                start: None,
+                end: None,
             }
         );
     }

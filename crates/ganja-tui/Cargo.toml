@@ -74,4 +74,8 @@ tracing.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+# The submit-time degradation warning needs a provider whose wire refuses
+# binary attachments, and the scripted recorder's `text_only` double is that
+# provider — the fake accepts everything by design.
+ganja-testkit.workspace = true
 insta.workspace = true

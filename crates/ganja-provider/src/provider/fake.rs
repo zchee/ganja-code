@@ -236,6 +236,13 @@ impl Provider for FakeProvider {
         ID
     }
 
+    /// Everything: this provider reads no request, so refusing a mime would
+    /// only put a degradation notice in front of a demo that was proving the
+    /// attachment path works.
+    fn accepts_attachment(&self, _mime: &str) -> bool {
+        true
+    }
+
     async fn stream(
         &self,
         request: ChatRequest,

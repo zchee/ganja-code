@@ -427,8 +427,10 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
                 results.push(Turn::answered(call_id, result(state)));
             }
             // A mentioned file is a *reference*, resolved into a text block
-            // before a request is built (`session::resolve_mentions`); see the
-            // same arm in `anthropic.rs`.
+            // before a request is built (`session::resolve_mentions`). This
+            // wire declines every binary mime (`accepts_attachment`'s
+            // default), so a file part here never carries content — the
+            // engine degraded it to text before the request was built.
             //
             // `StepFinish` carries a step's bill rather than content, and
             // `StepStart` was consumed as the boundary this step was cut at.
