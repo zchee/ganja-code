@@ -5,9 +5,8 @@
 //! exactly that one message. What it carries is the minimal set the message
 //! definitions in `cursor.proto` model: the model asked for (named twice,
 //! because the server still reads the deprecated description beside the
-//! forward-looking one), the system prompt on the one inline channel the
-//! set has, an empty conversation state marked present, and the newest user
-//! message inline.
+//! forward-looking one), an empty conversation state marked present, and
+//! the newest user message inline.
 //!
 //! **The newest user message, deliberately.** Everything a conversation
 //! already holds — earlier turns, tool calls and their results — travels on
@@ -17,12 +16,26 @@
 //! so the request carries what it can carry truthfully and the rest arrives
 //! with the state machinery. The advertised tools are unsent for the same
 //! reason: cursor's native tool protocol is a channel of its own.
+//!
+//! **The system prompt rides the answer, not the request.** The
+//! descriptor's one inline member for it, `custom_system_prompt = 8`, is an
+//! allowlist-gated override ("Allowlisted for specific teams only", the
+//! reference plugin's `src/proto/agent_pb.ts:2782`) that the plugin never
+//! sets — and sending it LIVE-FAILED an ordinary seat's turn with 400
+//! invalid_argument: "unknown option '--system-prompt'". Where the plugin's
+//! system text really travels is `RequestContext.cloudRule`, its answer to
+//! the server's mid-stream `requestContextArgs` exec (`src/proxy.ts:1132`;
+//! its comment records that plain system messages are ignored server-side).
+//! [`context_answer`] is that reply, spoken on the same open request body
+//! the run request went out on — so `ChatRequest.system` reaches the model
+//! on the one channel the server honors, and never through the member it
+//! demonstrably refuses.
 
 use std::fmt::Write as _;
 
 use buffa::Message as _;
 
-use super::proto;
+use super::{decode, proto};
 use crate::{
     auth::pkce,
     protocol::{Message, PartBody, Role},
@@ -82,7 +95,6 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
         conversation_state: buffa::MessageField::some(proto::ConversationState::default()),
         action: buffa::MessageField::some(action),
         model_details: buffa::MessageField::some(model),
-        custom_system_prompt: request.system.clone().filter(|text| !text.is_empty()),
         requested_model: buffa::MessageField::some(
             proto::RequestedModel::default().with_model_id(&request.model),
         ),
@@ -94,6 +106,39 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
         ..Default::default()
     }
     .encode_to_vec())
+}
+
+/// The bytes answering the server's context ask: the ids echoed the way the
+/// plugin echoes them (`src/proxy.ts:1307-1310`), and the system prompt on
+/// `RequestContext.cloud_rule`, the channel cursor's agent honors
+/// (`src/proxy.ts:1133`).
+///
+/// An absent or empty prompt mirrors the plugin's no-prompt answer — its
+/// `cloudRule` is `undefined` then, so the member is absent while the
+/// context message itself is still present and still a success.
+pub(super) fn context_answer(ask: decode::ContextAsk, system: Option<&str>) -> Vec<u8> {
+    let context = proto::RequestContext {
+        cloud_rule: system.map(str::to_owned).filter(|text| !text.is_empty()),
+        ..Default::default()
+    };
+    let answer = proto::ExecResponse {
+        id: ask.id,
+        request_context_result: buffa::MessageField::some(proto::ContextResult {
+            success: buffa::MessageField::some(proto::ContextSuccess {
+                request_context: buffa::MessageField::some(context),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        exec_id: ask.exec_id,
+        ..Default::default()
+    };
+
+    proto::ClientMessage {
+        exec_response: buffa::MessageField::some(answer),
+        ..Default::default()
+    }
+    .encode_to_vec()
 }
 
 /// The text of the conversation's newest user message: its text parts in
@@ -125,7 +170,10 @@ fn newest_user_text(messages: &[Message]) -> String {
 mod tests {
     use buffa::Message as _;
 
-    use super::{super::proto, ChatRequest, Message, fresh_id, newest_user_text, run_message};
+    use super::{
+        super::proto, ChatRequest, Message, context_answer, decode, fresh_id, newest_user_text,
+        run_message,
+    };
     use crate::protocol::Part;
 
     /// A two-message conversation whose newest user message has two text
@@ -156,7 +204,6 @@ mod tests {
             run.conversation_state.is_set(),
             "the state is present even when it holds nothing"
         );
-        assert_eq!(run.custom_system_prompt.as_deref(), Some("You are terse."));
 
         let model = run
             .model_details
@@ -191,20 +238,77 @@ mod tests {
     }
 
     #[test]
-    fn a_conversation_without_a_system_prompt_sends_none() {
-        let mut asked = request();
-        asked.system = None;
-        let bytes = run_message(&asked).expect("the assembly encodes");
-        let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
+    fn the_system_prompt_never_rides_the_run_request() {
+        let bytes = run_message(&request()).expect("the assembly encodes");
 
-        assert_eq!(
-            decoded
-                .run_request
-                .as_option()
-                .and_then(|run| run.custom_system_prompt.as_deref()),
-            None,
-            "an absent prompt is absent, not empty"
+        let prompt = b"You are terse.";
+        assert!(
+            !bytes.windows(prompt.len()).any(|window| window == prompt),
+            "the prompt must not ride the allowlist-gated member the server refuses; \
+             its channel is the context answer"
         );
+    }
+
+    #[test]
+    fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
+        let bytes = context_answer(
+            decode::ContextAsk {
+                id: Some(7),
+                exec_id: Some("exec-abc".to_owned()),
+            },
+            Some("You are terse."),
+        );
+        let decoded =
+            proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
+
+        assert!(
+            decoded.run_request.as_option().is_none(),
+            "an answer is not a second run request"
+        );
+        let answer = decoded.exec_response.as_option().expect("the exec answer");
+        assert_eq!(answer.id, Some(7), "the id the server minted comes back");
+        assert_eq!(answer.exec_id.as_deref(), Some("exec-abc"));
+
+        let context = answer
+            .request_context_result
+            .as_option()
+            .and_then(|result| result.success.as_option())
+            .and_then(|success| success.request_context.as_option())
+            .expect("a success carrying the context");
+        assert_eq!(context.cloud_rule.as_deref(), Some("You are terse."));
+    }
+
+    /// The plugin's no-prompt answer sends the context message with
+    /// `cloudRule` unset, and so does this one — present context, absent
+    /// member, never an empty string pretending to be a prompt.
+    #[test]
+    fn a_promptless_turn_answers_with_a_present_but_empty_context() {
+        for system in [None, Some("")] {
+            let bytes = context_answer(
+                decode::ContextAsk {
+                    id: None,
+                    exec_id: None,
+                },
+                system,
+            );
+            let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
+            let answer = decoded.exec_response.as_option().expect("the exec answer");
+            assert_eq!(
+                answer.id, None,
+                "an id the server never sent is not invented"
+            );
+
+            let context = answer
+                .request_context_result
+                .as_option()
+                .and_then(|result| result.success.as_option())
+                .and_then(|success| success.request_context.as_option())
+                .expect("the context is present even without a prompt");
+            assert_eq!(
+                context.cloud_rule, None,
+                "an absent prompt is absent, not empty"
+            );
+        }
     }
 
     #[test]

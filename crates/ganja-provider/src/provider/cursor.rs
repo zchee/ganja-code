@@ -22,12 +22,24 @@
 //! **Streamed as it arrives.** The Run body is cut into Connect frames the
 //! moment the transport hands bytes over ([`connect::Splitter`]), each frame
 //! mapped onto events ([`decode::Mapping`]) and handed to the session while
-//! the server is still talking. The request that opens the exchange rides
-//! the shared retry driver every other wire does — before the first byte
-//! only — and a cancel mid-stream ends the stream without a verdict, which
-//! is the engine's cue to call the turn cancelled rather than failed. What
-//! is still deliberately not here is the conversation-state machinery that
-//! carries history and tool calls on cursor's content-addressed channel;
+//! the server is still talking. The request that opens the exchange retries
+//! before the first byte only — a fresh body per attempt around the shared
+//! driver, because a streamed body cannot be replayed — and a cancel
+//! mid-stream ends the stream without a verdict and closes the request
+//! body, which is the engine's cue to call the turn cancelled rather than
+//! failed.
+//!
+//! **The Run RPC is a duplex.** The request body is a held-open stream, not
+//! a sent-and-done message: the run request goes out first, then the body
+//! waits, because the server answers a bare turn by *asking* — a mid-stream
+//! `requestContextArgs` exec it will not generate past until the client
+//! replies (the 2026-08-10 live turn hung in silence on exactly that,
+//! skipped). The reply ([`request::context_answer`]) echoes the exec ids
+//! and carries `ChatRequest.system` on `RequestContext.cloud_rule`, the one
+//! prompt channel cursor's agent honors; an exec kind this build cannot
+//! answer fails the turn naming the kind, never hangs it. What is still
+//! deliberately not here is the conversation-state machinery that carries
+//! history and tool calls on cursor's content-addressed blob channel;
 //! [`request`]'s module docs say why.
 //!
 //! The provider rides the uncataloged tier, so a session must be told which
@@ -36,10 +48,10 @@
 //! the stored login is read per request, so a login that happens after a
 //! session starts is picked up by its next request.
 
-use std::{collections::VecDeque, fmt, sync::Arc};
+use std::{collections::VecDeque, convert::Infallible, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt as _, stream, stream::BoxStream};
+use futures::{Stream, StreamExt as _, channel::mpsc, stream, stream::BoxStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -214,8 +226,14 @@ impl CursorWire {
         let presented = self.credential.presented().await?;
         // The request message has no fields, and an empty message encodes to
         // no bytes at all — the zero-byte body the live probe was answered
-        // on.
-        let built = self.build(MODELS_PATH, false, Vec::new(), &presented)?;
+        // on. A `Vec` body stays replayable, so the shared driver may retry.
+        let built = self.build(
+            MODELS_PATH,
+            false,
+            Vec::new().into(),
+            &presented,
+            &request::fresh_id()?,
+        )?;
         // A listing has no cancel channel of its own, so the retry driver
         // rides under a token nothing fires.
         let never = CancellationToken::new();
@@ -225,34 +243,84 @@ impl CursorWire {
         decode::model_list(&body)
     }
 
-    /// One turn: the run request out, events in as the server produces them.
+    /// One turn: the run request out on a body held open for the exec
+    /// answers the server asks for mid-stream, events in as it produces
+    /// them.
     ///
     /// # Errors
     ///
     /// Returns [`ProviderError`] when the turn cannot start — no credential,
     /// an endpoint that refused or never answered, every retry spent.
     /// Everything after the first byte arrives inside the stream instead: an
-    /// in-body EndStream verdict, a dead connection and a frame this build
-    /// cannot read all end it with [`ProviderEvent::Failed`], because by
-    /// then text may already be on somebody's screen.
+    /// in-body EndStream verdict, a dead connection, a frame this build
+    /// cannot read and an exec ask it cannot answer all end it with
+    /// [`ProviderEvent::Failed`], because by then text may already be on
+    /// somebody's screen.
     pub async fn stream(
         &self,
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let message = request::run_message(&request)?;
+        let opening = connect::envelope(&request::run_message(&request)?);
         let presented = self.credential.presented().await?;
-        let built = self.build(RUN_PATH, true, connect::envelope(&message), &presented)?;
+        // Minted once for the whole turn: every attempt below is the same
+        // request under the same stamp, the shape the shared driver's
+        // replays have always had.
+        let request_id = request::fresh_id()?;
 
-        let response = match retry::send(&self.client, built, &presented, &cancel).await {
-            Ok(response) => response,
-            // A turn the user already left is not a failed one: the engine
-            // reads a stream that ends after a cancel as `Cancelled`.
-            Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
-            Err(error) => return Err(error),
+        // A streamed body cannot be replayed, so the shared driver sends
+        // each attempt exactly once and this loop owns the schedule — the
+        // driver's own, minus its jitter and the retry-after refinement,
+        // whose headers the driver consumed with the refusal. The boundary
+        // it holds is the one that matters: retries happen before the first
+        // byte of a response body only.
+        let mut attempt = 1;
+        let (response, answers) = loop {
+            // A fresh channel per attempt: the previous attempt's body
+            // belongs to the request that failed.
+            let (answers, body) = mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+            answers
+                .unbounded_send(Ok(opening.clone()))
+                .expect("the receiver is alive in this scope");
+            let built = self.build(
+                RUN_PATH,
+                true,
+                reqwest::Body::wrap_stream(body),
+                &presented,
+                &request_id,
+            )?;
+
+            match retry::send(&self.client, built, &presented, &cancel).await {
+                Ok(response) => break (response, answers),
+                // A turn the user already left is not a failed one: the
+                // engine reads a stream that ends after a cancel as
+                // `Cancelled`.
+                Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
+                Err(error) if attempt < retry::MAX_ATTEMPTS && error.is_retryable() => {
+                    tracing::debug!(
+                        provider = ID,
+                        attempt,
+                        "retrying the run request that opens the turn"
+                    );
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return Ok(stream::empty().boxed()),
+                        () = tokio::time::sleep(retry::delay(attempt, None)) => {}
+                    }
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
         };
 
-        Ok(events(response.bytes_stream().boxed(), cancel))
+        Ok(events(
+            response.bytes_stream().boxed(),
+            cancel,
+            Duplex {
+                answers,
+                system: request.system.clone(),
+            },
+        ))
     }
 
     /// Builds one RPC's request: the recorded header set, verbatim, over
@@ -260,22 +328,23 @@ impl CursorWire {
     ///
     /// The split between the two content types — and
     /// `connect-protocol-version` on the streaming RPC only — is exactly
-    /// what the live probe measured the server enforcing. The
-    /// `x-request-id` stamp is minted here, once per turn: the retry
-    /// driver's replay is a clone of this request, so a retried request is
-    /// the same request under the same id rather than a new one wearing a
-    /// fresh stamp.
+    /// what the live probe measured the server enforcing. The caller mints
+    /// `request_id` once per turn and hands it to every build, so a retried
+    /// request — the driver's clone of a replayable body, or this wire's
+    /// rebuild around a streamed one — is the same request under the same
+    /// id rather than a new one wearing a fresh stamp.
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderError::Transport`] when no request id can be
-    /// minted or the request cannot be assembled; nothing was sent.
+    /// Returns [`ProviderError::Transport`] when the request cannot be
+    /// assembled; nothing was sent.
     fn build(
         &self,
         path: &str,
         streaming: bool,
-        body: Vec<u8>,
+        body: reqwest::Body,
         presented: &Presented,
+        request_id: &str,
     ) -> Result<reqwest::Request, ProviderError> {
         let mut built = self
             .client
@@ -287,7 +356,7 @@ impl CursorWire {
             .header("x-cursor-client-version", CLIENT_VERSION)
             .header("x-cursor-client-type", "cli")
             .header("x-ghost-mode", "true")
-            .header("x-request-id", request::fresh_id()?)
+            .header("x-request-id", request_id)
             // Meaningful only to a server that would send trailers — this
             // one does not — but the recorded client sends it and this build
             // identifies as that client.
@@ -310,16 +379,40 @@ impl CursorWire {
     }
 }
 
+/// The client half of the Run duplex: the sender feeding the held-open
+/// request body, and the system prompt the context answer carries on it.
+///
+/// The fold owns it, so its lifetime is the event stream's: when the stream
+/// is dropped — after a clean finish, a failure, or a cancel alike — the
+/// sender goes with it, the channel closes, and the request body ends.
+/// That is the body's only close, which is what "a cancel mid-duplex ends
+/// the stream without a verdict and closes the request body" cashes out to.
+struct Duplex {
+    answers: mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
+    system: Option<String>,
+}
+
 /// Drives the body's chunks through the Connect splitter and the mapping,
 /// handing out each frame's events the moment the frame completes.
+///
+/// The duplex's answer path rides here too: a frame that decodes to the
+/// server's context ask is answered on the held-open request body before
+/// the next frame is read, because the server holds generation until the
+/// answer lands. An ask the body can no longer carry an answer to fails the
+/// turn readably — an unanswered exec is the silent hang the 2026-08-10
+/// live turn died of, and never again an outcome.
 ///
 /// The cancellation posture is the SSE fold's, verbatim: the token is
 /// checked before handing out a buffered event as well as before pulling a
 /// new chunk, so a cancel cannot be outrun by frames that were already
 /// parsed, and a terminal event drops whatever decoded behind it. Split
 /// from [`CursorWire::stream`] so a fixture drives exactly the pipeline a
-/// live turn runs, minus the socket.
-fn events<S, C, E>(chunks: S, cancel: CancellationToken) -> BoxStream<'static, ProviderEvent>
+/// live turn runs — both directions of it — minus the socket.
+fn events<S, C, E>(
+    chunks: S,
+    cancel: CancellationToken,
+    duplex: Duplex,
+) -> BoxStream<'static, ProviderEvent>
 where
     S: Stream<Item = Result<C, E>> + Send + Unpin + 'static,
     C: AsRef<[u8]> + Send + 'static,
@@ -331,6 +424,7 @@ where
         splitter: connect::Splitter,
         mapping: decode::Mapping,
         cancel: CancellationToken,
+        duplex: Duplex,
         /// Events already decoded, not yet handed out.
         ready: VecDeque<ProviderEvent>,
         /// Reused so that mapping a frame does not allocate.
@@ -344,6 +438,7 @@ where
             splitter: connect::Splitter::default(),
             mapping: decode::Mapping::default(),
             cancel,
+            duplex,
             ready: VecDeque::new(),
             scratch: Vec::new(),
             done: false,
@@ -383,7 +478,33 @@ where
                         loop {
                             match state.splitter.frame() {
                                 Ok(Some(frame)) => {
-                                    state.mapping.frame(&frame, &mut state.scratch);
+                                    let Some(ask) = state.mapping.frame(&frame, &mut state.scratch)
+                                    else {
+                                        continue;
+                                    };
+                                    // Answered the moment it decodes: the
+                                    // server holds generation until the
+                                    // reply lands on the body the run
+                                    // request opened.
+                                    let answer = connect::envelope(&request::context_answer(
+                                        ask,
+                                        state.duplex.system.as_deref(),
+                                    ));
+                                    if state.duplex.answers.unbounded_send(Ok(answer)).is_err() {
+                                        // A body nothing holds open cannot
+                                        // carry the answer, and an
+                                        // unanswered exec is a hang — so
+                                        // the turn fails, readably.
+                                        state.done = true;
+                                        state.scratch.push(ProviderEvent::Failed(
+                                            ProviderError::Transport(
+                                                "the request body closed before the server's \
+                                                 context ask could be answered"
+                                                    .to_owned(),
+                                            ),
+                                        ));
+                                        break;
+                                    }
                                 }
                                 Ok(None) => break,
                                 Err(error) => {
@@ -442,9 +563,17 @@ fn transport(error: reqwest::Error) -> ProviderError {
 /// what the cancel test wants to prove is still stoppable.
 #[cfg(test)]
 fn replay(body: Vec<u8>, cancel: CancellationToken) -> BoxStream<'static, ProviderEvent> {
+    // The answer receiver is dropped on purpose: replayed bodies carry no
+    // exec ask, and one that did would fail the turn visibly rather than
+    // hang the test.
+    let (answers, _) = mpsc::unbounded();
     events(
         stream::iter([Ok::<Vec<u8>, std::convert::Infallible>(body)]),
         cancel,
+        Duplex {
+            answers,
+            system: None,
+        },
     )
 }
 
@@ -503,6 +632,33 @@ mod tests {
         proto::Update {
             turn_ended: buffa::MessageField::some(proto::TurnEnded::default()),
             ..Default::default()
+        }
+    }
+
+    /// A data frame holding the server's context ask, ids and all — the
+    /// exchange the 2026-08-10 live turn hung on.
+    fn exec_framed(id: u32, exec_id: &str) -> Vec<u8> {
+        let message = proto::ServerMessage {
+            exec_request: buffa::MessageField::some(
+                proto::ExecRequest {
+                    request_context_args: buffa::MessageField::some(proto::ContextArgs::default()),
+                    ..Default::default()
+                }
+                .with_id(id)
+                .with_exec_id(exec_id),
+            ),
+            ..Default::default()
+        };
+
+        connect::envelope(&message.encode_to_vec())
+    }
+
+    /// A duplex whose answers nobody reads, for fixtures without an ask.
+    fn promptless_duplex() -> super::Duplex {
+        let (answers, _) = futures::channel::mpsc::unbounded();
+        super::Duplex {
+            answers,
+            system: None,
         }
     }
 
@@ -582,7 +738,7 @@ mod tests {
     async fn a_delta_is_handed_over_while_the_body_is_still_open() {
         let (sender, receiver) =
             futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
-        let mut stream = super::events(receiver, CancellationToken::new());
+        let mut stream = super::events(receiver, CancellationToken::new(), promptless_duplex());
 
         sender
             .unbounded_send(Ok(framed(text("Hello"))))
@@ -609,6 +765,110 @@ mod tests {
                 ProviderEvent::TextDelta(" world".to_owned()),
                 ProviderEvent::Finish(FinishReason::Completed),
             ]
+        );
+    }
+
+    /// The exchange the 2026-08-10 live turn hung on, both directions at
+    /// the fold: the server asks for context mid-stream, the answer rides
+    /// out on the held-open request body — ids echoed, the prompt on
+    /// `cloud_rule` — before any event, and only then does the turn's text
+    /// flow.
+    #[tokio::test]
+    async fn the_context_ask_is_answered_on_the_open_body_before_the_turn_flows() {
+        let (sender, receiver) =
+            futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+        let (answers, mut answered) = futures::channel::mpsc::unbounded();
+        let mut stream = super::events(
+            receiver,
+            CancellationToken::new(),
+            super::Duplex {
+                answers,
+                system: Some("You are terse.".to_owned()),
+            },
+        );
+
+        sender
+            .unbounded_send(Ok(exec_framed(7, "exec-abc")))
+            .expect("the body is open");
+
+        // Polling the stream is what answers the ask, so the answer must
+        // land while `next()` is still pending — an event arriving first
+        // would mean generation was read past an unanswered question.
+        let drive = stream.next();
+        let raced = tokio::time::timeout(
+            Duration::from_secs(10),
+            futures::future::select(drive, answered.next()),
+        )
+        .await
+        .expect("the answer must go out while the body is still open");
+        let answer = match raced {
+            futures::future::Either::Right((answer, _)) => answer
+                .expect("the fold holds the sender")
+                .expect("the channel's error type is infallible"),
+            futures::future::Either::Left((event, _)) => {
+                panic!("an ask is a question, not an event: {event:?}")
+            }
+        };
+
+        assert_eq!(answer[0], 0, "an ordinary data frame");
+        let sent = proto::ClientMessage::decode_from_slice(&answer[5..])
+            .expect("the answered bytes are the client message");
+        assert!(
+            sent.run_request.as_option().is_none(),
+            "an answer is not a second run request"
+        );
+        let exec = sent.exec_response.as_option().expect("the exec answer");
+        assert_eq!(exec.id, Some(7), "the id the server minted comes back");
+        assert_eq!(exec.exec_id.as_deref(), Some("exec-abc"));
+        assert_eq!(
+            exec.request_context_result
+                .as_option()
+                .and_then(|result| result.success.as_option())
+                .and_then(|success| success.request_context.as_option())
+                .and_then(|context| context.cloud_rule.as_deref()),
+            Some("You are terse."),
+            "the prompt travels the channel cursor honors"
+        );
+
+        let mut rest = framed(text("Hello"));
+        rest.extend(framed(turn_ended()));
+        rest.extend(end_stream("{}"));
+        sender.unbounded_send(Ok(rest)).expect("the body is open");
+        drop(sender);
+
+        let tail: Vec<ProviderEvent> = stream.collect().await;
+        assert_eq!(
+            tail,
+            vec![
+                ProviderEvent::TextDelta("Hello".to_owned()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ]
+        );
+    }
+
+    /// An ask arriving after nothing holds the request body open cannot be
+    /// answered, and an unanswered exec is a hang — so the turn fails with
+    /// the reason on it instead of reproducing the silence.
+    #[tokio::test]
+    async fn a_context_ask_nobody_can_answer_fails_the_turn_instead_of_hanging() {
+        let events: Vec<ProviderEvent> = super::events(
+            futures::stream::iter([Ok::<Vec<u8>, std::convert::Infallible>(exec_framed(
+                1,
+                "exec-dead",
+            ))]),
+            CancellationToken::new(),
+            promptless_duplex(),
+        )
+        .collect()
+        .await;
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::Failed(ProviderError::Transport(message))]
+                    if message.contains("context ask")
+            ),
+            "{events:?}"
         );
     }
 

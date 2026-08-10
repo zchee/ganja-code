@@ -13,7 +13,13 @@
 //! proves delivery is incremental: the first delta has to reach the session
 //! while the rest of the body is deliberately unwritten. HTTP/1.1 on
 //! loopback is deliberate — the framing is transport-agnostic, and h2
-//! against the real endpoint is the `#[ignore]`d live test's job.
+//! against the real endpoint is the `#[ignore]`d live test's job. What
+//! HTTP/1.1 cannot honestly host is the Run RPC's full duplex: its request
+//! body is a held-open chunked stream, so the fixture de-chunks exactly one
+//! Connect envelope — the run request — and never waits for a body EOF a
+//! live turn deliberately never sends; the exec-answer path is unit-driven
+//! through in-memory channels in `cursor.rs`, where both directions run
+//! without a transport to lie about.
 //!
 //! One test, one binary, on purpose: it mutates `XDG_DATA_HOME`, and a plain
 //! `cargo test` runs the tests inside a binary on parallel threads.
@@ -257,12 +263,63 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
                 .then(|| value.trim().parse().ok())?
         })
         .unwrap_or(0);
-    let mut body = vec![0_u8; length];
-    if length > 0 && socket.read_exact(&mut body).await.is_err() {
-        return None;
-    }
+    let chunked = head.lines().any(|line| {
+        line.trim()
+            .eq_ignore_ascii_case("transfer-encoding: chunked")
+    });
+
+    let body = if chunked {
+        read_enveloped_chunks(socket).await?
+    } else {
+        let mut body = vec![0_u8; length];
+        if length > 0 && socket.read_exact(&mut body).await.is_err() {
+            return None;
+        }
+        body
+    };
 
     Some(Recorded { head, body })
+}
+
+/// De-chunks a streamed request body until one whole Connect envelope — the
+/// run request — is buffered, then stops reading: the duplex body is held
+/// open for exec answers and deliberately never ends while the turn is
+/// open, so a fixture that read to EOF would hang on the wire's defining
+/// feature.
+async fn read_enveloped_chunks(socket: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+
+    loop {
+        if body.len() >= 5 {
+            let declared = u32::from_be_bytes(body[1..5].try_into().ok()?) as usize;
+            if body.len() >= 5 + declared {
+                return Some(body);
+            }
+        }
+
+        let mut line = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !line.ends_with(b"\r\n") {
+            match socket.read(&mut byte).await {
+                Ok(0) | Err(_) => return None,
+                Ok(_) => line.push(byte[0]),
+            }
+        }
+        let size = usize::from_str_radix(String::from_utf8_lossy(&line).trim(), 16).ok()?;
+        if size == 0 {
+            // The client closed the body early; whatever arrived is the
+            // record.
+            return Some(body);
+        }
+
+        // The chunk's data and its trailing CRLF.
+        let mut chunk = vec![0_u8; size + 2];
+        if socket.read_exact(&mut chunk).await.is_err() {
+            return None;
+        }
+        chunk.truncate(size);
+        body.extend_from_slice(&chunk);
+    }
 }
 
 async fn serve() -> Endpoint {
@@ -413,6 +470,11 @@ fn assert_recorded_headers(recorded: &Recorded, streaming: bool) {
     if streaming {
         assert!(recorded.has_header("content-type", "application/connect+proto"));
         assert!(recorded.has_header("connect-protocol-version", "1"));
+        assert!(
+            recorded.has_header("transfer-encoding", "chunked"),
+            "a duplex body has no length to declare: the run request opens it and \
+             the exec answers keep it open"
+        );
     } else {
         assert!(recorded.has_header("content-type", "application/proto"));
         assert_eq!(
@@ -523,8 +585,9 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     assert_recorded_headers(&recorded, true);
 
     // The body is one enveloped run request whose bytes decode back to what
-    // the turn asked: the framing, the model, the prompt and the message all
-    // survive the wire intact.
+    // the turn asked: the framing, the model and the message all survive the
+    // wire intact — and the system prompt never does, because its one inline
+    // member is the allowlist-gated override the live server refused.
     assert_eq!(recorded.body[0], 0, "an ordinary data frame");
     let declared =
         u32::from_be_bytes(recorded.body[1..5].try_into().expect("a whole prefix")) as usize;
@@ -537,7 +600,14 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         .expect("the sent bytes are the client message");
     let run = sent.run_request.as_option().expect("a run request first");
     assert!(run.conversation_state.is_set());
-    assert_eq!(run.custom_system_prompt.as_deref(), Some("You are terse."));
+    let prompt = b"You are terse.";
+    assert!(
+        !recorded
+            .body
+            .windows(prompt.len())
+            .any(|window| window == prompt),
+        "the system prompt the turn carried must not reach cursor's wire"
+    );
     assert_eq!(
         run.requested_model
             .as_option()

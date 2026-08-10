@@ -10,7 +10,7 @@
 //! Run it with:
 //!
 //! ```sh
-//! cargo nextest run -p ganja-provider --run-ignored only cursor_live
+//! cargo nextest run -p ganja-provider --run-ignored only -E 'binary(cursor_live)'
 //! # or: cargo test -p ganja-provider --test cursor_live -- --ignored
 //! ```
 //!
