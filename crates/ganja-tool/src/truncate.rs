@@ -129,7 +129,7 @@ pub struct Truncated {
 /// pathless notice rather than fail it.
 #[must_use]
 pub fn clamp(text: &str) -> Truncated {
-    clamp_in(text, candidate_dirs())
+    clamp_in(text, MAX_CHARS, candidate_dirs())
 }
 
 /// Same as [`clamp`], but spills to exactly `dir` — no XDG resolution, no
@@ -138,13 +138,30 @@ pub fn clamp(text: &str) -> Truncated {
 /// degraded path by pointing `dir` somewhere writing will fail.
 #[must_use]
 pub fn clamp_with(text: &str, dir: &Path) -> Truncated {
-    clamp_in(text, [dir.to_owned()])
+    clamp_in(text, MAX_CHARS, [dir.to_owned()])
 }
 
-/// Shared implementation behind [`clamp`] and [`clamp_with`]: clamps `text`,
-/// then writes it to the first of `dirs` that accepts it.
-fn clamp_in(text: &str, dirs: impl IntoIterator<Item = PathBuf>) -> Truncated {
-    let Some(body) = clamp_body(text) else {
+/// Same as [`clamp`], but against `max_bytes` rather than [`MAX_CHARS`] — the
+/// budget a caller with its own configured byte cap names, an MCP server's
+/// `output_limit` among them. The line budget ([`MAX_LINES`]) is unchanged: no
+/// caller of this so far has needed to move it, and moving one budget without
+/// the other is what a per-caller byte cap actually asked for.
+#[must_use]
+pub fn clamp_bytes(text: &str, max_bytes: usize) -> Truncated {
+    clamp_in(text, max_bytes, candidate_dirs())
+}
+
+/// [`clamp_bytes`] over exactly `dir`, for the reason [`clamp_with`] exists.
+#[must_use]
+pub fn clamp_bytes_with(text: &str, max_bytes: usize, dir: &Path) -> Truncated {
+    clamp_in(text, max_bytes, [dir.to_owned()])
+}
+
+/// Shared implementation behind [`clamp`], [`clamp_with`], [`clamp_bytes`] and
+/// [`clamp_bytes_with`]: clamps `text` to `max_bytes`, then writes it to the
+/// first of `dirs` that accepts it.
+fn clamp_in(text: &str, max_bytes: usize, dirs: impl IntoIterator<Item = PathBuf>) -> Truncated {
+    let Some(body) = clamp_body(text, max_bytes) else {
         return Truncated {
             text: text.to_owned(),
             truncated: false,
@@ -170,12 +187,14 @@ fn clamp_in(text: &str, dirs: impl IntoIterator<Item = PathBuf>) -> Truncated {
 ///
 /// Splitting on `\n` first and only ever rejoining whole lines is what keeps
 /// a clamp from splitting a UTF-8 code point: every piece rejoined here was
-/// already a valid `&str` before the split.
-fn clamp_body(text: &str) -> Option<String> {
+/// already a valid `&str` before the split. `max_bytes` is the byte half of
+/// the budget; the line half stays [`MAX_LINES`] for every caller — see
+/// [`clamp_bytes`].
+fn clamp_body(text: &str, max_bytes: usize) -> Option<String> {
     let lines: Vec<&str> = text.split('\n').collect();
     let total_bytes = text.len();
 
-    if lines.len() <= MAX_LINES && total_bytes <= MAX_CHARS {
+    if lines.len() <= MAX_LINES && total_bytes <= max_bytes {
         return None;
     }
 
@@ -187,7 +206,7 @@ fn clamp_body(text: &str) -> Option<String> {
             break;
         }
         let size = line.len() + usize::from(index > 0);
-        if bytes + size > MAX_CHARS {
+        if bytes + size > max_bytes {
             hit_bytes = true;
             break;
         }
@@ -1414,6 +1433,56 @@ mod tests {
                 .take_while(|line| *line == "line")
                 .count(),
             MAX_LINES
+        );
+    }
+
+    /// A caller with its own byte budget — smaller than [`MAX_CHARS`] — is
+    /// clamped at exactly that budget, not at the module's own default: at
+    /// the budget, nothing is cut; one byte over it, the whole single line is
+    /// removed rather than partially kept, same as
+    /// `a_huge_single_line_keeps_no_preview_but_still_reports_the_full_size`
+    /// (no newline means the line-count budget never applies, so the byte
+    /// budget alone decides, and it decides on the very first line).
+    #[test]
+    fn clamp_bytes_honors_a_budget_smaller_than_the_default() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let text = "x".repeat(200);
+
+        assert!(
+            !super::clamp_bytes_with(&text, 200, dir.path()).truncated,
+            "exactly at the budget is not truncated"
+        );
+
+        let over = super::clamp_bytes_with(&text, 199, dir.path());
+        assert!(over.truncated);
+        assert!(
+            over.text.contains("200 bytes truncated"),
+            "got {:?}",
+            over.text
+        );
+    }
+
+    /// [`clamp_bytes_with`] spills the full original text, exactly as
+    /// [`clamp_with`] does at its own budget — proven with a small budget so
+    /// the assertion cannot pass by accident against [`MAX_CHARS`].
+    #[test]
+    fn clamp_bytes_spills_the_full_original_at_its_own_budget() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let text = "y".repeat(500);
+
+        let clamped = super::clamp_bytes_with(&text, 50, dir.path());
+
+        assert!(clamped.truncated);
+        assert!(
+            clamped.text.contains("500 bytes truncated"),
+            "got {:?}",
+            clamped.text
+        );
+        let file = only_entry(dir.path());
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the overflow file was written"),
+            text,
+            "the spill must hold the full original, not the clamped preview"
         );
     }
 

@@ -298,6 +298,29 @@ impl McpServer {
 
         asked.map_or(fallback, NonZeroU64::get)
     }
+
+    /// Bytes one tool call to this server may return before the result is
+    /// clamped, which the entry may set with `output_limit`.
+    ///
+    /// `fallback` is [`ganja_tool::truncate::MAX_CHARS`], the budget every
+    /// other tool in the registry answers to — an entry that says nothing
+    /// gets exactly that, so an MCP server is no more or less generous with
+    /// the model's context than a builtin tool is by default.
+    ///
+    /// Plain [`u64`] rather than [`NonZeroU64`] like [`McpServer::timeout`]:
+    /// `output_limit: 0` is refused by name in [`check_mcp`], naming the
+    /// server it describes, rather than by a generic "expected a nonzero"
+    /// message from serde — a byte budget of nothing is a server whose every
+    /// result would be entirely cut, which is worth saying plainly.
+    #[must_use]
+    pub fn output_limit(&self, fallback: u64) -> u64 {
+        let asked = match self {
+            Self::Local(local) => local.output_limit,
+            Self::Remote(remote) => remote.output_limit,
+        };
+
+        asked.unwrap_or(fallback)
+    }
 }
 
 /// A local MCP server: a command this session runs and talks to over pipes.
@@ -319,6 +342,8 @@ pub struct McpLocal {
     pub enabled: bool,
     /// Request budget in milliseconds; see [`McpServer::timeout`].
     pub timeout: Option<NonZeroU64>,
+    /// Byte budget on one tool result; see [`McpServer::output_limit`].
+    pub output_limit: Option<u64>,
 }
 
 /// A remote MCP server: an endpoint this session posts to.
@@ -337,6 +362,8 @@ pub struct McpRemote {
     pub enabled: bool,
     /// Request budget in milliseconds; see [`McpServer::timeout`].
     pub timeout: Option<NonZeroU64>,
+    /// Byte budget on one tool result; see [`McpServer::output_limit`].
+    pub output_limit: Option<u64>,
 }
 
 /// What `enabled` means when an entry does not say: upstream connects unless
@@ -1322,27 +1349,30 @@ fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), S
     Ok(())
 }
 
-/// Refuses an MCP entry that describes a server nothing could connect to.
+/// Refuses an MCP entry that describes a server nothing could connect to, or
+/// one nothing could ever return a result from.
 ///
-/// Two things are decided here rather than at connect time. A `command` with
-/// nothing in it is a server with no program, and finding that out one turn
-/// later hides it behind a status line. A remote URL that is neither `https`
-/// nor loopback is the same refusal [`crate::provider`] makes about a base URL
+/// Three things are decided here rather than later. A `command` with nothing
+/// in it is a server with no program, and finding that out one turn later
+/// hides it behind a status line. A remote URL that is neither `https` nor
+/// loopback is the same refusal [`crate::provider`] makes about a base URL
 /// and for the same reason — `headers` is where a token goes, and plain HTTP
 /// to somewhere else puts it on the wire in the clear. Literally the same:
 /// the predicate is [`crate::provider::reachable_in_the_clear`], and only the
-/// message below is this module's.
+/// message below is this module's. And an `output_limit` of zero is a byte
+/// budget nothing could ever fit, discovered otherwise only the first time a
+/// tool call comes back empty for no reason anybody wrote down.
 ///
-/// Neither message quotes the URL. A remote entry is configuration, and
+/// Neither URL message quotes the URL. A remote entry is configuration, and
 /// configuration is allowed to carry a credential in its userinfo, so echoing
 /// one back is how it reaches a log.
 fn check_mcp(servers: &BTreeMap<String, McpServer>) -> Result<(), String> {
     for (name, server) in servers {
-        match server {
+        let output_limit = match server {
             McpServer::Local(local) if local.command.is_empty() => {
                 return Err(format!("mcp server \"{name}\" has an empty command"));
             }
-            McpServer::Local(_) => {}
+            McpServer::Local(local) => local.output_limit,
             McpServer::Remote(remote) => {
                 let parsed = Url::parse(&remote.url)
                     .map_err(|error| format!("mcp server \"{name}\" has no valid url: {error}"))?;
@@ -1352,7 +1382,16 @@ fn check_mcp(servers: &BTreeMap<String, McpServer>) -> Result<(), String> {
                          loopback; anything else puts its headers on the wire in the clear"
                     ));
                 }
+                remote.output_limit
             }
+        };
+        // A budget of nothing is not a budget: every result from this server
+        // would be entirely cut, which is not a thing anybody means to write.
+        if output_limit == Some(0) {
+            return Err(format!(
+                "mcp server \"{name}\" has an output_limit of 0; a byte budget of nothing \
+                 refuses every result"
+            ));
         }
     }
 
@@ -1862,7 +1901,8 @@ mod tests {
                     "command": ["bun", "x", "server"],
                     "cwd": "tools",
                     "environment": {"TOKEN": "x"},
-                    "timeout": 1234
+                    "timeout": 1234,
+                    "output_limit": 4096
                 },
                 "hub": {
                     "type": "remote",
@@ -1882,6 +1922,7 @@ mod tests {
         assert_eq!(local.environment["TOKEN"], "x");
         assert!(local.enabled, "an entry that says nothing connects");
         assert_eq!(local.timeout.map(NonZeroU64::get), Some(1234));
+        assert_eq!(local.output_limit, Some(4096));
 
         let McpServer::Remote(remote) = &config.mcp["hub"] else {
             panic!("the second entry is remote");
@@ -1890,6 +1931,10 @@ mod tests {
         assert_eq!(remote.headers["Authorization"], "Bearer x");
         assert!(!remote.enabled);
         assert_eq!(remote.timeout, None);
+        assert_eq!(
+            remote.output_limit, None,
+            "an entry that says nothing about its budget gets the global default"
+        );
     }
 
     /// Every one of these is a config that would otherwise have described a
@@ -1919,6 +1964,13 @@ mod tests {
             (
                 r#"{"mcp": {"x": {"type": "local", "command": ["a"], "timeout": 0}}}"#,
                 "0",
+            ),
+            // A zero-byte output budget refuses every result, named by
+            // `check_mcp` rather than by serde's generic NonZeroU64 message —
+            // `output_limit` is a plain `u64` for exactly this reason.
+            (
+                r#"{"mcp": {"x": {"type": "local", "command": ["a"], "output_limit": 0}}}"#,
+                "output_limit",
             ),
         ];
 
@@ -2357,7 +2409,7 @@ mod tests {
               "keybinds": {"agent_cycle": "tab"},
               "shell": "/bin/zsh",
               "command": {"ship": {"template": "release $ARGUMENTS", "agent": "build"}},
-              "mcp": {"fs": {"type": "local", "command": ["bun", "x", "mcp-fs"]}},
+              "mcp": {"fs": {"type": "local", "command": ["bun", "x", "mcp-fs"], "output_limit": 8192}},
               "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify"}]}]},
               "provider": {"local-llama": {
                 "dialect": "openai-chat-completions",

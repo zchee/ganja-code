@@ -10,12 +10,52 @@
 //!   broken makes its own status say so and costs nobody else a turn. The
 //!   engine starts, the first prompt runs, and the tools appear when they
 //!   appear.
-//! - **Once.** There is no reconnect and no restart, which is upstream's
-//!   posture (`index.ts:443-455`): a transport that closes marks the server
-//!   [`Status::Failed`] and its tools leave the registry at the next rebuild.
 //! - **As information.** Nothing here fails a turn. A dead server is a tool
 //!   the model is not offered; a tool that errors is error text the model
 //!   reads.
+//!
+//! # Reconnect (**D463**)
+//!
+//! Upstream never reconnects (`index.ts:443-455`): a transport that closes
+//! marks the server [`Status::Failed`] for good, and that was this port's own
+//! posture through P13's first four waves too. It retires here. Claude Code
+//! does reconnect — a `/mcp` dialog offers it by name
+//! (`docs/references/claude.ja.md:168`) — and a person watching a long
+//! session is in a better position to say "try that one again" than a
+//! transport that only ever closes once is to say it for them. Three doors,
+//! all riding the same [`Servers::connect`] a startup uses:
+//!
+//! - [`Servers::reconnect`] — the `/mcp` dialog's Reconnect action and
+//!   [`crate::engine::Engine::reconnect_mcp`], for a server the dialog shows
+//!   as [`Status::Failed`]. Refused, naming why, for a server reconnect does
+//!   not mean anything about: not configured, disabled, already connected, or
+//!   still on its very first dial.
+//! - [`Servers::retry_once`] — a server whose first-ever dial never succeeded
+//!   gets exactly one automatic re-dial, spawned at the [`Servers::reap`] seam
+//!   [`crate::engine::Engine`] already calls once per turn start
+//!   (`refresh_mcp`) and never awaited there, so a dead server costs at most
+//!   one background connect timeout across a whole session rather than one
+//!   every turn.
+//! - A connection that later closes — [`Servers::reap`] notices it, same as
+//!   always — still only leaves through the two doors above; nothing reconnects
+//!   it on its own.
+//!
+//! Either door bumps [`Servers::generation`] on success, exactly as a first
+//! connect does, so the *next* turn — never the one already streaming — is
+//! the one that sees the revived tools ([`crate::engine::Engine`]'s
+//! once-per-turn `refresh_mcp` contract, unmoved).
+//!
+//! # Output caps (**D464**)
+//!
+//! Claude's `MAX_MCP_OUTPUT_TOKENS` names the same worry a server's own result
+//! can raise that any other tool's can — flooding the context window — and
+//! this build spells the budget in bytes rather than tokens, matching every
+//! other clamp in the tree ([`ganja_tool::truncate`]). [`render`] clamps
+//! through [`ganja_tool::truncate::clamp_bytes`], the spill-file posture every
+//! one-shot tool here already uses (`clamp_with`'s: the full result is
+//! written to a file and the model is told where), at the budget
+//! [`crate::config::McpServer::output_limit`] names for that server —
+//! [`ganja_tool::truncate::MAX_CHARS`] for one that names none.
 //!
 //! # What a server's tools are called
 //!
@@ -39,7 +79,7 @@
 //! quietly ignored, so a config asking for it says so at load.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, Weak,
@@ -120,6 +160,12 @@ struct Server {
     /// The stdio child's process group, so shutdown can end the whole of it
     /// and not just the process that was spawned.
     group: Option<u32>,
+    /// Whether [`Servers::connect`] has ever landed [`Status::Connected`] for
+    /// this server. What [`Servers::retry_once`] reads to tell "the first
+    /// dial never succeeded" apart from "it succeeded once and later closed"
+    /// — only the former gets an automatic retry; the latter waits for a
+    /// person to ask, through [`Servers::reconnect`].
+    ever_connected: bool,
 }
 
 /// Every MCP server this session was configured with.
@@ -148,6 +194,12 @@ pub struct Servers {
     /// engine compares it against what it last installed; nothing else about
     /// the rebuild needs a signal.
     generation: AtomicU64,
+    /// Servers [`Servers::retry_once`] has already spent its one automatic
+    /// re-dial on, so a server that keeps failing costs at most one extra
+    /// connect timeout across the whole session rather than one at every turn
+    /// start. Manual [`Servers::reconnect`] is a different door and does not
+    /// consult or update this.
+    retried: Mutex<HashSet<String>>,
 }
 
 impl Servers {
@@ -175,6 +227,7 @@ impl Servers {
             state: Mutex::new(state),
             closed: std::sync::atomic::AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            retried: Mutex::new(HashSet::new()),
         })
     }
 
@@ -182,6 +235,16 @@ impl Servers {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.config.is_empty()
+    }
+
+    /// Every server this session was configured with, by name, sorted —
+    /// including one still on its very first dial, which [`Servers::status`]'s
+    /// map does not carry until that resolves. What a `/mcp` row list needs to
+    /// show every configured server rather than only the ones with an opinion
+    /// so far.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        self.config.keys().cloned().collect()
     }
 
     /// Connects every enabled server, all at once.
@@ -268,6 +331,7 @@ impl Servers {
                 defs,
                 instructions,
                 group,
+                ever_connected: true,
             },
         );
         drop(state);
@@ -472,8 +536,9 @@ impl Servers {
     /// Marks every connected server whose transport has gone away as failed,
     /// dropping its tools.
     ///
-    /// There is no reconnect, so this is the whole of what a closed connection
-    /// does: the next registry rebuild simply does not carry those tools.
+    /// Nothing here reconnects it — the next registry rebuild simply does not
+    /// carry those tools until [`Servers::reconnect`] or [`Servers::retry_once`]
+    /// revives the connection (**D463**).
     pub fn reap(&self) {
         let mut lost = Vec::new();
         {
@@ -506,6 +571,89 @@ impl Servers {
         self.generation.fetch_add(1, Ordering::Release);
     }
 
+    /// Re-dials `name` through the same [`Servers::connect`] a startup uses,
+    /// naming why when reconnect does not mean anything for this server
+    /// (**D463**): not configured at all, `enabled: false`, already
+    /// [`Status::Connected`], or still on its very first dial (absent from
+    /// [`Servers::status`]'s map). The one status this proceeds for is
+    /// [`Status::Failed`] — reached by a dial that never succeeded, or by
+    /// [`Servers::reap`] noticing a transport that closed.
+    ///
+    /// `Ok(())` means the attempt ran, not that it succeeded: [`connect`]
+    /// itself never fails outward, so the outcome — connected again, or
+    /// failed again with a fresh reason — is read back through
+    /// [`Servers::status`], exactly as a first connect is.
+    ///
+    /// [`connect`]: Servers::connect
+    pub async fn reconnect(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        let Some(server) = self.config.get(name) else {
+            return Err(format!("mcp server \"{name}\" is not configured"));
+        };
+
+        let status = self.state().get(name).and_then(|held| held.status.clone());
+        match status {
+            Some(Status::Failed { .. }) => {}
+            Some(Status::Connected) => {
+                return Err(format!("mcp server \"{name}\" is already connected"));
+            }
+            Some(Status::Disabled) => {
+                return Err(format!("mcp server \"{name}\" is disabled"));
+            }
+            None => {
+                return Err(format!(
+                    "mcp server \"{name}\" has not finished its first connection attempt yet"
+                ));
+            }
+        }
+
+        self.connect(name, server).await;
+
+        Ok(())
+    }
+
+    /// Spends each still-[`Status::Failed`] server's one automatic re-dial, for
+    /// a server whose first-ever dial never succeeded (**D463**). Spawned and
+    /// never awaited, so a call from the synchronous `refresh_mcp` turn-start
+    /// seam returns immediately regardless of how the retry goes — the whole
+    /// point being that a dead server cannot add a connect timeout to every
+    /// turn.
+    ///
+    /// A server that *did* connect once and later closed is not "the first
+    /// dial" any more ([`Server::ever_connected`]) and is left for
+    /// [`Servers::reconnect`] to revive on request. Bookkept per server, not
+    /// per call: once spent, a server's one automatic retry never fires again
+    /// this session, however many more times its status reads
+    /// [`Status::Failed`].
+    pub fn retry_once(self: &Arc<Self>) {
+        let candidates: Vec<String> = {
+            let state = self.state();
+            let mut retried = self
+                .retried
+                .lock()
+                .expect("the MCP retry set is never poisoned");
+
+            state
+                .iter()
+                .filter(|(name, server)| {
+                    matches!(server.status, Some(Status::Failed { .. }))
+                        && !server.ever_connected
+                        && retried.insert((*name).clone())
+                })
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+
+        for name in candidates {
+            let Some(server) = self.config.get(&name).cloned() else {
+                continue;
+            };
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                this.connect(&name, &server).await;
+            });
+        }
+    }
+
     /// The tools every connected server contributes, in the one order they are
     /// ever built in.
     ///
@@ -518,11 +666,7 @@ impl Servers {
     #[must_use]
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         let state = self.state();
-        let listings: Vec<(&String, &[rmcp::model::Tool])> = state
-            .iter()
-            .filter(|(_, held)| held.client.is_some())
-            .map(|(name, held)| (name, held.defs.as_slice()))
-            .collect();
+        let listings = connected_listings(&state);
 
         catalog(&listings)
             .into_iter()
@@ -536,9 +680,29 @@ impl Servers {
                     schema: force_object(&def.input_schema),
                     client,
                     timeout: self.call_timeout(server),
+                    output_limit: self.output_limit(server),
                 }) as Arc<dyn Tool>)
             })
             .collect()
+    }
+
+    /// How many tools each connected server lends, by name — after the same
+    /// sanitizing and collision resolution [`Servers::tools`] applies, so a
+    /// `/mcp` row or `ganja mcp`'s listing never disagrees with what the
+    /// model is actually offered. A server that is not connected — disabled,
+    /// failed, still dialling — has no entry, which is what zero looks like
+    /// without every caller having to spell out the default.
+    #[must_use]
+    pub fn tool_counts(&self) -> BTreeMap<String, usize> {
+        let state = self.state();
+        let listings = connected_listings(&state);
+
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for (_, server, _) in catalog(&listings) {
+            *counts.entry(server.clone()).or_insert(0) += 1;
+        }
+
+        counts
     }
 
     /// How long one call to `server`'s tools may take.
@@ -549,6 +713,19 @@ impl Servers {
             .map_or(MCP_CALL_TIMEOUT, |entry| entry.timeout(MCP_CALL_TIMEOUT));
 
         Duration::from_millis(millis)
+    }
+
+    /// Bytes one call to `server`'s tools may return before the result is
+    /// clamped; see [`crate::config::McpServer::output_limit`].
+    fn output_limit(&self, server: &str) -> usize {
+        let bytes = self
+            .config
+            .get(server)
+            .map_or(crate::tool::truncate::MAX_CHARS as u64, |entry| {
+                entry.output_limit(crate::tool::truncate::MAX_CHARS as u64)
+            });
+
+        usize::try_from(bytes).unwrap_or(crate::tool::truncate::MAX_CHARS)
     }
 
     /// The `<mcp_instructions>` block for the system prompt, or [`None`] when
@@ -758,6 +935,9 @@ struct McpTool {
     schema: rmcp::model::JsonObject,
     client: Arc<Client>,
     timeout: Duration,
+    /// Bytes a result from this tool may carry before [`render`] clamps it;
+    /// see [`crate::config::McpServer::output_limit`].
+    output_limit: usize,
 }
 
 #[async_trait]
@@ -800,7 +980,7 @@ impl Tool for McpTool {
             }
         };
 
-        render(&self.id, result)
+        render(&self.id, result, self.output_limit)
     }
 }
 
@@ -808,8 +988,9 @@ impl Tool for McpTool {
 ///
 /// `isError` becomes a [`ToolError::Failed`] carrying the server's own text,
 /// which the agent loop hands the model as the call's result: an error here is
-/// something to read, never something that ends a turn.
-fn render(id: &str, result: CallToolResult) -> Result<ToolOutput, ToolError> {
+/// something to read, never something that ends a turn. `output_limit` clamps
+/// only the successful case — see this module's "Output caps" doc section.
+fn render(id: &str, result: CallToolResult, output_limit: usize) -> Result<ToolOutput, ToolError> {
     let text = result
         .content
         .iter()
@@ -833,11 +1014,12 @@ fn render(id: &str, result: CallToolResult) -> Result<ToolOutput, ToolError> {
         (true, Some(structured)) => structured.to_string(),
         _ => text,
     };
+    let clamped = crate::tool::truncate::clamp_bytes(&output, output_limit);
 
     Ok(ToolOutput {
         title: id.to_owned(),
-        output,
-        metadata: serde_json::json!({}),
+        output: clamped.text,
+        metadata: serde_json::json!({ "truncated": clamped.truncated }),
     })
 }
 
@@ -904,6 +1086,17 @@ fn decoded_len(base64: &str) -> usize {
     };
 
     (length / 4 * 3 + extra).saturating_sub(padding)
+}
+
+/// The connected servers' tool listings, in `state`'s own sorted order — the
+/// shared first step behind [`Servers::tools`] and [`Servers::tool_counts`],
+/// so the two can never disagree about which servers are even in the running.
+fn connected_listings(state: &BTreeMap<String, Server>) -> Vec<(&String, &[rmcp::model::Tool])> {
+    state
+        .iter()
+        .filter(|(_, held)| held.client.is_some())
+        .map(|(name, held)| (name, held.defs.as_slice()))
+        .collect()
 }
 
 /// Which tools a set of listings contributes, and under which names.
@@ -1158,7 +1351,12 @@ mod tests {
         ]);
         result.is_error = Some(true);
 
-        let error = render("mcp__github__create_issue", result).expect_err("isError is an error");
+        let error = render(
+            "mcp__github__create_issue",
+            result,
+            crate::tool::truncate::MAX_CHARS,
+        )
+        .expect_err("isError is an error");
         assert!(
             matches!(&error, ToolError::Failed(text) if text == "the repository is archived"),
             "{error}"
@@ -1170,7 +1368,8 @@ mod tests {
         let mut result = rmcp::model::CallToolResult::success(Vec::new());
         result.is_error = Some(true);
 
-        let error = render("mcp__x__y", result).expect_err("isError is an error");
+        let error = render("mcp__x__y", result, crate::tool::truncate::MAX_CHARS)
+            .expect_err("isError is an error");
         assert!(
             matches!(&error, ToolError::Failed(text) if text == super::UNSPOKEN_ERROR),
             "{error}"
@@ -1182,7 +1381,8 @@ mod tests {
         let mut result = rmcp::model::CallToolResult::success(Vec::new());
         result.structured_content = Some(json!({ "count": 2 }));
 
-        let output = render("mcp__x__y", result).expect("a structured answer is an answer");
+        let output = render("mcp__x__y", result, crate::tool::truncate::MAX_CHARS)
+            .expect("a structured answer is an answer");
         assert_eq!(output.output, r#"{"count":2}"#);
     }
 
@@ -1194,7 +1394,8 @@ mod tests {
             rmcp::model::ContentBlock::image("MTIzNDU2Nzg5", "image/png"),
         ]);
 
-        let output = render("mcp__x__y", result).expect("an image answer is an answer");
+        let output = render("mcp__x__y", result, crate::tool::truncate::MAX_CHARS)
+            .expect("an image answer is an answer");
         assert_eq!(
             output.output,
             "here it is\n[binary MCP content omitted: image/png, 9 bytes]"
@@ -1264,6 +1465,7 @@ mod tests {
                     defs: Vec::new(),
                     instructions: Some("ignored".to_owned()),
                     group: None,
+                    ever_connected: true,
                 },
             );
         }

@@ -48,6 +48,7 @@ use crate::{
         help::Help,
         inspector::{Feed, Inspector, TurnUsage},
         list::{self, ListDialog},
+        mcp,
         palette::Palette,
         permission::Permission,
         question::Question,
@@ -297,6 +298,8 @@ pub struct App {
     history_search: Option<HistorySearch>,
     /// The rewind picker, while it is open (**F7**).
     rewind: Option<Rewind>,
+    /// The `/mcp` dialog, while it is open (**F5**).
+    mcp_dialog: Option<mcp::Mcp>,
     /// The models or agents the user is choosing between, and which of the two
     /// the list is.
     chooser: Option<(Chooser, ListDialog)>,
@@ -476,6 +479,7 @@ impl App {
             theme_list: None,
             history_search: None,
             rewind: None,
+            mcp_dialog: None,
             chooser: None,
             palette: None,
             palette_filter: String::new(),
@@ -723,6 +727,7 @@ impl App {
             AppEvent::Tick => {
                 self.poll_mcp();
                 self.poll_jobs();
+                self.poll_mcp_dialog();
                 self.poll_wire_models().await;
                 // The other door into the same lane: a replay that lost a race
                 // to a turn starting under it keeps its place and is retried
@@ -922,6 +927,9 @@ impl App {
                 }
                 if let Some(rewind) = &self.rewind {
                     rewind.render(transcript, buffer, &self.theme);
+                }
+                if let Some(mcp_dialog) = &self.mcp_dialog {
+                    mcp_dialog.render(transcript, buffer, &self.theme);
                 }
                 if let Some((_, chooser)) = &self.chooser {
                     chooser.render(transcript, buffer, &self.theme);
@@ -1308,6 +1316,12 @@ impl App {
             return Ok(());
         }
 
+        if self.mcp_dialog.is_some() {
+            self.handle_mcp_key(key.code).await;
+
+            return Ok(());
+        }
+
         if self.chooser.is_some() {
             self.handle_chooser_key(key.code).await;
 
@@ -1551,6 +1565,7 @@ impl App {
             || self.theme_list.is_some()
             || self.history_search.is_some()
             || self.rewind.is_some()
+            || self.mcp_dialog.is_some()
             || self.chooser.is_some()
             || self.palette.is_some()
             || self.help.is_some()
@@ -1568,6 +1583,7 @@ impl App {
             command::Action::Effort => self.open_effort(),
             command::Action::Agents => self.open_agents(),
             command::Action::Themes => self.open_themes(),
+            command::Action::Mcp => self.open_mcp(),
             command::Action::Help => self.help = Some(Help::new(self.keys.clone())),
             command::Action::Exit => self.quit = true,
             command::Action::Copy => self.copy_transcript(),
@@ -2561,6 +2577,136 @@ impl App {
         }
     }
 
+    /// Opens the `/mcp` dialog over every configured server's current status
+    /// and tool count (**F5**).
+    fn open_mcp(&mut self) {
+        self.mcp_dialog = Some(mcp::Mcp::new(self.mcp_dialog_rows()));
+    }
+
+    /// The `/mcp` dialog's rows, fresh off the engine.
+    ///
+    /// Driven by [`Engine::mcp_names`] rather than by [`Engine::mcp_status`]'s
+    /// map alone, so a server still on its first dial gets a "dialling" row
+    /// instead of not existing yet — the same distinction
+    /// [`ganja_core::mcp::Status`]'s own doc draws.
+    fn mcp_dialog_rows(&self) -> Vec<mcp::Row> {
+        let status = self.engine.mcp_status();
+        let counts = self.engine.mcp_tool_counts();
+
+        self.engine
+            .mcp_names()
+            .into_iter()
+            .map(|name| {
+                let (label, detail, actions) = match status.get(&name) {
+                    Some(ganja_core::McpStatus::Connected) => {
+                        ("Connected".to_owned(), None, Vec::new())
+                    }
+                    Some(ganja_core::McpStatus::Disabled) => {
+                        ("Disabled".to_owned(), None, Vec::new())
+                    }
+                    Some(ganja_core::McpStatus::Failed { error }) => (
+                        "Failed".to_owned(),
+                        Some(error.lines().next().unwrap_or(error).trim().to_owned()),
+                        vec![mcp::Action::Reconnect],
+                    ),
+                    // Absent is what "still dialling" looks like without a
+                    // fourth `Status` variant to mean it.
+                    None => ("dialling".to_owned(), None, Vec::new()),
+                };
+                let tools = counts.get(&name).copied();
+
+                mcp::Row {
+                    name,
+                    status: label,
+                    tools,
+                    detail,
+                    actions,
+                }
+            })
+            .collect()
+    }
+
+    /// Looks at where the MCP servers stand and refreshes the `/mcp` dialog's
+    /// rows, while it is open. Status stays poll-driven — the same tick
+    /// [`App::poll_mcp`] already rides, no new protocol event involved.
+    fn poll_mcp_dialog(&mut self) {
+        if self.mcp_dialog.is_none() {
+            return;
+        }
+
+        let rows = self.mcp_dialog_rows();
+        if let Some(dialog) = &mut self.mcp_dialog {
+            dialog.refresh(rows);
+        }
+        self.dirty = true;
+    }
+
+    /// One keypress while the `/mcp` dialog is open, which owns every key —
+    /// the same shape [`App::handle_rewind_key`] answers to, Esc closing from
+    /// either of the dialog's two steps rather than stepping back to the
+    /// first.
+    async fn handle_mcp_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.mcp_dialog = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(dialog) = &mut self.mcp_dialog {
+                    dialog.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(dialog) = &mut self.mcp_dialog {
+                    dialog.move_selection(1);
+                }
+            }
+            KeyCode::Enter => self.advance_mcp().await,
+            _ => {}
+        }
+    }
+
+    /// Enter in the `/mcp` dialog: on the server step, opens the row's
+    /// actions where it has any; on the action step, runs the chosen one and
+    /// returns to the server list — the dialog stays open so the outcome
+    /// shows up on the row the next poll refreshes.
+    async fn advance_mcp(&mut self) {
+        let Some(dialog) = &mut self.mcp_dialog else {
+            return;
+        };
+
+        if !dialog.is_choosing_action() {
+            // A row with nothing to choose leaves the dialog exactly as it
+            // was — see `Mcp::advance`'s own doc for why this differs from
+            // the rewind picker's "(Current)" close.
+            dialog.advance();
+
+            return;
+        }
+
+        let Some((name, action)) = dialog.chosen() else {
+            return;
+        };
+        let name = name.to_owned();
+        match action {
+            mcp::Action::Reconnect => self.reconnect_mcp(name).await,
+        }
+    }
+
+    /// Asks the engine to re-dial `name`, and reflects the outcome on the
+    /// dialog immediately rather than waiting for the next tick's poll.
+    async fn reconnect_mcp(&mut self, name: String) {
+        if let Some(dialog) = &mut self.mcp_dialog {
+            dialog.back_to_servers();
+        }
+
+        if let Err(refusal) = self.engine.reconnect_mcp(&name).await {
+            self.status.set_notice(Some(refusal));
+        }
+
+        let rows = self.mcp_dialog_rows();
+        if let Some(dialog) = &mut self.mcp_dialog {
+            dialog.refresh(rows);
+        }
+    }
+
     /// Hands the editor's contents to the engine.
     ///
     /// The prompt reaches the transcript as an engine event rather than being
@@ -3192,6 +3338,9 @@ impl App {
         self.dirty
             || self.status.is_streaming()
             || self.pending_mcp()
+            // The dialog polls status/tool-counts on every tick while it is
+            // open, exactly as the status bar's own MCP notice does.
+            || self.mcp_dialog.is_some()
             || self.wire_fetch.is_some()
             // The fifth is the fallback lane: a queued message whose replay
             // lost a race has nothing else to wake the loop and try again.
@@ -3305,7 +3454,7 @@ mod tests {
     }
     use crate::{
         clipboard, command,
-        component::{self, effort, sessions},
+        component::{self, effort, mcp, sessions},
         event::AppEvent,
         history,
         theme::{DEFAULT_THEME, Themes},
@@ -8937,6 +9086,172 @@ mod tests {
 
         assert!(!app.dirty, "the frame above cleared it");
         assert!(app.wants_wakeup(), "the dial is what keeps it awake");
+    }
+
+    // ---- F5: the `/mcp` dialog ----
+
+    /// Runs `app` a few ticks, until at least one MCP server has answered.
+    async fn wait_for_mcp_to_settle(app: &mut App) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && app.engine.mcp_status().is_empty() {
+            app.handle(AppEvent::Tick).await.expect("a tick is handled");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// `/mcp` lists every configured server with its status; a failed one
+    /// offers Reconnect, and one that never lent a tool names no count.
+    #[tokio::test]
+    async fn slash_mcp_lists_every_configured_server_with_its_status_and_actions() {
+        let root = temporary();
+        let engine = engine_dialling_a_missing_server(&root);
+        engine.connect_mcp();
+        let mut app = App::new(engine, None, Themes::builtin()).watching_mcp(1);
+        wait_for_mcp_to_settle(&mut app).await;
+
+        app.run_command(command::Action::Mcp).await;
+
+        let dialog = app.mcp_dialog.as_ref().expect("/mcp opens the dialog");
+        let row = dialog
+            .selected()
+            .expect("the one configured server has a row");
+        assert_eq!(row.name, "broken");
+        assert_eq!(row.status, "Failed");
+        assert_eq!(row.tools, None, "a failed server lends nothing to count");
+        assert!(row.detail.is_some(), "a failed row names why");
+        assert_eq!(row.actions, vec![mcp::Action::Reconnect]);
+    }
+
+    /// Esc closes the dialog from either of its two steps rather than
+    /// stepping back to the first — [`App::handle_rewind_key`]'s own rule,
+    /// answered the same way here.
+    #[tokio::test]
+    async fn esc_closes_the_mcp_dialog_from_either_step() {
+        let root = temporary();
+        let engine = engine_dialling_a_missing_server(&root);
+        engine.connect_mcp();
+        let mut app = App::new(engine, None, Themes::builtin()).watching_mcp(1);
+        wait_for_mcp_to_settle(&mut app).await;
+
+        app.run_command(command::Action::Mcp).await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter opens the failed row's actions");
+        assert!(
+            app.mcp_dialog
+                .as_ref()
+                .is_some_and(mcp::Mcp::is_choosing_action),
+            "the one configured server is failed, so enter must open its actions"
+        );
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.mcp_dialog.is_none(), "escape closes the whole dialog");
+    }
+
+    /// A row with nothing to choose leaves the dialog exactly as it was: no
+    /// close, no action step, unlike the rewind picker's `(Current)` row.
+    #[tokio::test]
+    async fn enter_on_a_row_with_no_actions_leaves_the_dialog_open() {
+        let root = temporary();
+        let config: std::collections::BTreeMap<String, ganja_core::config::McpServer> =
+            serde_json::from_value(serde_json::json!({
+                "off": { "type": "local", "command": ["never-run"], "enabled": false }
+            }))
+            .expect("the fixture is a config");
+        let engine = engine().with_mcp(ganja_core::McpServers::new(config, root.path()));
+        let mut app = App::new(engine, None, Themes::builtin());
+
+        app.run_command(command::Action::Mcp).await;
+        let dialog = app.mcp_dialog.as_ref().expect("/mcp opens the dialog");
+        assert_eq!(
+            dialog.selected().map(|row| row.status.as_str()),
+            Some("Disabled")
+        );
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert!(app.mcp_dialog.is_some(), "a disabled row does not close it");
+        assert!(
+            !app.mcp_dialog
+                .as_ref()
+                .is_some_and(mcp::Mcp::is_choosing_action),
+            "and it has nothing to choose, so no action step opens"
+        );
+    }
+
+    /// Reconnect run from the dialog is not a UI-only gesture: it drives the
+    /// engine's own `reconnect_mcp`, which spawns a fresh dial — proven by
+    /// counting real invocations of the fixture command rather than trusting
+    /// a status string.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconnect_from_the_dialog_spawns_a_fresh_dial() {
+        let root = temporary();
+        let counter = root.path().join("attempts");
+        let config: std::collections::BTreeMap<String, ganja_core::config::McpServer> =
+            serde_json::from_value(serde_json::json!({
+                "flaky": {
+                    "type": "local",
+                    "command": ["sh", "-c", format!("echo x >> {} ; exit 1", counter.display())],
+                }
+            }))
+            .expect("the fixture is a config");
+        let engine = engine().with_mcp(ganja_core::McpServers::new(config, root.path()));
+        engine.connect_mcp();
+        let mut app = App::new(engine, None, Themes::builtin()).watching_mcp(1);
+        wait_for_mcp_to_settle(&mut app).await;
+        let attempts = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        assert_eq!(
+            attempts(&counter),
+            1,
+            "the startup dial is the first attempt"
+        );
+
+        app.run_command(command::Action::Mcp).await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter opens the failed row's actions");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter on Reconnect runs it");
+
+        assert!(
+            app.mcp_dialog
+                .as_ref()
+                .is_some_and(|dialog| !dialog.is_choosing_action()),
+            "running the action returns to the server list"
+        );
+        assert_eq!(
+            attempts(&counter),
+            2,
+            "reconnect must have spawned a real second dial"
+        );
+    }
+
+    /// The dialog, over one connected and one failed server (screenshot: no
+    /// reference available, house `ListDialog`/`Rewind` chrome).
+    #[tokio::test]
+    async fn snapshot_mcp_dialog_open() {
+        let root = temporary();
+        let engine = engine_dialling_a_missing_server(&root);
+        engine.connect_mcp();
+        let mut app = App::new(engine, None, Themes::builtin()).watching_mcp(1);
+        wait_for_mcp_to_settle(&mut app).await;
+
+        app.run_command(command::Action::Mcp).await;
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
     }
 
     #[test]

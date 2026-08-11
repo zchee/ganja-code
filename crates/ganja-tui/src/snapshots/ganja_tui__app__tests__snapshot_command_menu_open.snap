@@ -15,10 +15,10 @@ One edit applied, one command refused.
 │  /copy          Put the whole conversation on the clipboard, as markdown     │
 │  /effort        Run the model under one of its catalog efforts               │
 │  /init          guided AGENTS.md setup                                       │
+│  /mcp           See what every configured server lends, and reconnect a faile│
 │  /models        Ask the rest of this session of a different model            │
 │  /new           Leave this conversation and start an empty one               │
 │  /themes        Repaint the screen in another palette                        │
-│  /copy-message  Put the model's last reply on the clipboard                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ message ─────────────────────────────────────────────────────────────────────┐
 │/s                                                                            │
