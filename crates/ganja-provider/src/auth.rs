@@ -94,6 +94,19 @@ pub mod loopback;
 pub mod openai;
 pub mod pkce;
 
+/// The HTTP client every login flow speaks through.
+///
+/// Redirects are refused for the reason every credential-carrying request in
+/// this build refuses them: these requests hold a code, a verifier or a
+/// token, and a client that followed a 3xx would replay it at whatever the
+/// redirect named. Each flow keeps its own timeout and its own error shape.
+pub(crate) fn login_client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+}
+
 /// Directory ganja keeps its state in, under the XDG data home.
 const DIRECTORY: &str = "ganja";
 

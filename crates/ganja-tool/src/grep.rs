@@ -28,7 +28,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Tool, ToolCtx, ToolError, ToolOutput, is_same_file, native_path};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, is_same_file, resolve_or_cwd};
 
 /// Most matches a call returns. Upstream's `limit` in `tool/grep.ts`.
 const LIMIT: usize = 100;
@@ -95,7 +95,7 @@ impl Tool for GrepTool {
         }
         let title = args.pattern.clone();
 
-        let requested = resolve(&ctx.cwd, args.path.as_deref());
+        let requested = resolve_or_cwd(&ctx.cwd, args.path.as_deref());
         // Upstream searches the requested directory itself, or — the quirk
         // documented at the top of this file — the parent directory of a
         // requested *file*.
@@ -190,25 +190,6 @@ impl Tool for GrepTool {
             }),
         })
     }
-}
-
-/// Resolves `path` against `cwd` — absolute as given, relative joined to it,
-/// or `cwd` itself when the call named no `path` at all.
-fn resolve(cwd: &Path, path: Option<&str>) -> PathBuf {
-    let Some(path) = path else {
-        return cwd.to_owned();
-    };
-    let path = Path::new(path);
-    let joined = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        cwd.join(path)
-    };
-
-    // Spelled the way this platform spells a path: every result below is built
-    // by joining onto this one, and all of them are printed. See
-    // [`native_path`].
-    native_path(joined)
 }
 
 /// Searches every file under `base_dir` for `pattern`, honoring `include`

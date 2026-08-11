@@ -52,8 +52,8 @@ use crate::{
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
     session::{
-        Answered, LiveSession, PendingReply, Persist, RootParts, SessionState, Turn, TurnHandle,
-        TurnKind, run_turn,
+        Answered, LiveSession, PendingReply, Persist, SessionState, Turn, TurnHandle, TurnKind,
+        run_turn,
     },
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
@@ -505,8 +505,8 @@ enum Owed {
 /// reach the slot without naming its [`PendingPolicy`], which turns the
 /// per-entry misfire table from a prose convention — one that had already
 /// lost two rows to drift — into structure. The one thing threaded past the
-/// methods is a clone of the raw `slot` Arc into each root turn's
-/// [`RootParts`], and that is a *release* handle, not an acquisition path:
+/// methods is a clone of the raw `slot` Arc into each root [`Turn`]'s
+/// literal, and that is a *release* handle, not an acquisition path:
 /// the boundary in `run_turn` only ever writes [`None`] into it.
 ///
 /// **Race-freedom proof.** The cell is only ever
@@ -2680,7 +2680,7 @@ impl Engine {
         // engine has to kill from outside. Aborting the task instead would
         // skip the cleanup that releases the busy slot and guarantees a
         // terminal event.
-        let turn = Turn::root(RootParts {
+        let turn = Turn {
             provider: Arc::clone(&self.provider),
             spawn: self.spawn_host(model.clone()),
             session_id: self.session_id(),
@@ -2707,7 +2707,7 @@ impl Engine {
             history: Arc::clone(&self.history),
             pending_switch: self.pending_for_turn(),
             persist,
-        });
+        };
         tokio::spawn(run_turn(turn));
 
         Ok(())

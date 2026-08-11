@@ -579,6 +579,13 @@ pub(crate) enum TurnKind {
 }
 
 /// Everything one turn needs, gathered so the spawned task takes one argument.
+///
+/// A root turn — what a person's prompt, `!` command or compaction starts —
+/// is built as a plain literal by the engine: it is the session's turn, holds
+/// the busy slot a frontend reads as idle, carries the read log and the
+/// snapshots the whole session shares, and is the only kind that may spawn a
+/// subagent at all. All of that is the engine's to vary; the fixed points of
+/// a child's turn are [`Turn::child`]'s.
 pub(crate) struct Turn {
     pub(crate) provider: Arc<dyn Provider>,
     /// The session every event this turn emits names: the engine's current
@@ -656,40 +663,6 @@ pub(crate) struct Turn {
     pub(crate) persist: Option<Persist>,
 }
 
-/// What the engine varies from one root turn to the next.
-///
-/// Every field is [`Turn`]'s own, and what each carries is documented there
-/// rather than said twice here. It travels as a struct because a positional
-/// list of twenty would name none of them: `cwd` and `root` are both paths,
-/// and `model`, `system` and `prompt` are all text, so a swapped pair would
-/// compile.
-pub(crate) struct RootParts {
-    pub(crate) provider: Arc<dyn Provider>,
-    pub(crate) session_id: SessionId,
-    pub(crate) model: String,
-    pub(crate) effort_options: serde_json::Map<String, serde_json::Value>,
-    pub(crate) system: Option<String>,
-    pub(crate) reminders: Vec<String>,
-    pub(crate) kind: TurnKind,
-    pub(crate) tools: Arc<Registry>,
-    pub(crate) permissions: Arc<std::sync::Mutex<Permissions>>,
-    pub(crate) cwd: PathBuf,
-    pub(crate) root: PathBuf,
-    pub(crate) files: Arc<FileTimes>,
-    pub(crate) credentials: Credentials,
-    pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
-    pub(crate) snapshots: Option<Arc<crate::snapshot::Snapshots>>,
-    pub(crate) prompt: String,
-    pub(crate) cancel: CancellationToken,
-    pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
-    pub(crate) events: Arc<Fanout>,
-    pub(crate) slot: Arc<Mutex<Option<TurnHandle>>>,
-    pub(crate) history: Arc<Mutex<Vec<Message>>>,
-    pub(crate) spawn: Option<Arc<crate::subagent::Host>>,
-    pub(crate) pending_switch: Option<Arc<std::sync::Mutex<PendingSwitch>>>,
-    pub(crate) persist: Option<Persist>,
-}
-
 /// What a subagent's turn varies, which is everything [`Turn::child`] does not
 /// fix.
 pub(crate) struct ChildParts {
@@ -715,43 +688,6 @@ pub(crate) struct ChildParts {
 }
 
 impl Turn {
-    /// The engine's own turn: what a person's prompt, `!` command or
-    /// compaction starts.
-    ///
-    /// A root turn is the session's turn. It holds the busy slot a frontend
-    /// reads as idle, carries the read log and the snapshots the whole session
-    /// shares, and is the only kind that may spawn a subagent at all. All of
-    /// that is the engine's to vary, which is why nothing is fixed here — the
-    /// fixed points are [`Turn::child`]'s.
-    pub(crate) fn root(parts: RootParts) -> Self {
-        Self {
-            provider: parts.provider,
-            session_id: parts.session_id,
-            model: parts.model,
-            effort_options: parts.effort_options,
-            system: parts.system,
-            reminders: parts.reminders,
-            kind: parts.kind,
-            tools: parts.tools,
-            permissions: parts.permissions,
-            cwd: parts.cwd,
-            root: parts.root,
-            files: parts.files,
-            credentials: parts.credentials,
-            lsp: parts.lsp,
-            snapshots: parts.snapshots,
-            prompt: parts.prompt,
-            cancel: parts.cancel,
-            pending: parts.pending,
-            events: parts.events,
-            slot: parts.slot,
-            history: parts.history,
-            spawn: parts.spawn,
-            pending_switch: parts.pending_switch,
-            persist: parts.persist,
-        }
-    }
-
     /// The turn a subagent runs, spawned by a `task` call rather than by
     /// anything a person did.
     ///
@@ -2723,7 +2659,8 @@ async fn resolve(
                     .push_str(&lsp.annotate(&call.name, &args, &turn.cwd).await);
             }
 
-            if let Some(part) = set_tool_state(
+            emit_tool_state(
+                turn,
                 assistant,
                 &call.part_id,
                 ToolState::Completed {
@@ -2734,18 +2671,8 @@ async fn resolve(
                     started,
                     completed: now(),
                 },
-            ) {
-                turn.persist_part(assistant, &part);
-                deliver(
-                    turn,
-                    Event::PartUpdated {
-                        session_id: turn.session_id.clone(),
-                        message_id: assistant.id.clone(),
-                        part,
-                    },
-                )
-                .await?;
-            }
+            )
+            .await?;
 
             ControlFlow::Continue(())
         }
@@ -2780,7 +2707,8 @@ async fn resolve(
         // words — `ToolError` promises they say what went wrong in terms the
         // model can act on.
         Err(error) => {
-            if let Some(part) = set_tool_state(
+            emit_tool_state(
+                turn,
                 assistant,
                 &call.part_id,
                 ToolState::Error {
@@ -2789,18 +2717,8 @@ async fn resolve(
                     started,
                     completed: now(),
                 },
-            ) {
-                turn.persist_part(assistant, &part);
-                deliver(
-                    turn,
-                    Event::PartUpdated {
-                        session_id: turn.session_id.clone(),
-                        message_id: assistant.id.clone(),
-                        part,
-                    },
-                )
-                .await?;
-            }
+            )
+            .await?;
 
             ControlFlow::Continue(())
         }
@@ -3316,6 +3234,32 @@ async fn flush_after(deadline: Option<Instant>) {
 /// flight — and by nothing else, because the terminal events that follow
 /// travel plain sends that are never raced. A completed turn is delivered
 /// whole to everyone.
+/// Records a call's terminal state and delivers the part update — the shape
+/// the completed and failed arms share. The cancelled arm stays written out
+/// at its match site: its update travels the terminal path as a plain send,
+/// because racing it against the cancel that caused it would drop it.
+async fn emit_tool_state(
+    turn: &Turn,
+    assistant: &mut Message,
+    part_id: &PartId,
+    state: ToolState,
+) -> ControlFlow<Option<Outcome>> {
+    if let Some(part) = set_tool_state(assistant, part_id, state) {
+        turn.persist_part(assistant, &part);
+        deliver(
+            turn,
+            Event::PartUpdated {
+                session_id: turn.session_id.clone(),
+                message_id: assistant.id.clone(),
+                part,
+            },
+        )
+        .await?;
+    }
+
+    ControlFlow::Continue(())
+}
+
 async fn deliver(turn: &Turn, event: Event) -> ControlFlow<Option<Outcome>> {
     tokio::select! {
         biased;
@@ -3335,8 +3279,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        BufferedCall, ChildParts, RootParts, Turn, TurnKind, add_usage, attached, parse_args,
-        resolve, resolve_mentions, sliced,
+        BufferedCall, ChildParts, Turn, TurnKind, add_usage, attached, parse_args, resolve,
+        resolve_mentions, sliced,
     };
     use crate::{
         engine::Fanout,
@@ -3396,7 +3340,7 @@ mod tests {
         tool: Arc<dyn Tool>,
     ) -> (Turn, mpsc::Receiver<crate::protocol::Event>) {
         let (events, received) = mpsc::channel(64);
-        let turn = Turn::root(RootParts {
+        let turn = Turn {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
             session_id: SessionId::from("ses_fixture".to_owned()),
             model: fake::MODEL.to_owned(),
@@ -3423,7 +3367,7 @@ mod tests {
             spawn: None,
             pending_switch: None,
             persist: None,
-        });
+        };
 
         (turn, received)
     }

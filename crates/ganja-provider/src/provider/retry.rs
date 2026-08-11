@@ -162,7 +162,7 @@ fn summarize(body: &str) -> String {
 /// The URL is dropped first: it is the one part of the rendering that echoes
 /// configuration back, and a base URL is allowed to carry credentials in its
 /// userinfo. What went wrong is in the causes either way.
-fn transport(error: reqwest::Error) -> ProviderError {
+pub(super) fn transport(error: reqwest::Error) -> ProviderError {
     let error = error.without_url();
     let mut message = error.to_string();
     let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&error);

@@ -1321,10 +1321,8 @@ mod tests {
         catalog,
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
         provider::{
-            ChatRequest, CredentialSource, PROVIDERS, Presented, Provider as _, ProviderError,
-            ProviderEvent, Resolved,
-            openai::{self, NO_RESULT},
-            replay, splice_effort,
+            ChatRequest, CredentialSource, NO_RESULT, PROVIDERS, Presented, Provider as _,
+            ProviderError, ProviderEvent, Resolved, openai, replay, splice_effort,
         },
         tool::ToolDefinition,
     };

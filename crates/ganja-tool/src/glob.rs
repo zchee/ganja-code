@@ -17,14 +17,14 @@
 //! deliberate improvement for determinism (and testability), not a literal
 //! port of a sort key that does not exist upstream.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Tool, ToolCtx, ToolError, ToolOutput, native_path};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, display, resolve_or_cwd};
 
 /// Most paths a call returns. Upstream's `limit` in `tool/glob.ts`.
 const LIMIT: usize = 100;
@@ -71,7 +71,7 @@ impl Tool for GlobTool {
     async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
         let args: Args = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArgs(error.to_string()))?;
-        let search = resolve(&ctx.cwd, args.path.as_deref());
+        let search = resolve_or_cwd(&ctx.cwd, args.path.as_deref());
         let title = display(&ctx.cwd, &search);
 
         if search.is_file() {
@@ -121,33 +121,6 @@ impl Tool for GlobTool {
             }),
         })
     }
-}
-
-/// Resolves `path` against `cwd` — absolute as given, relative joined to it,
-/// or `cwd` itself when the call named no `path` at all.
-fn resolve(cwd: &Path, path: Option<&str>) -> PathBuf {
-    let Some(path) = path else {
-        return cwd.to_owned();
-    };
-    let path = Path::new(path);
-    let joined = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        cwd.join(path)
-    };
-
-    // Spelled the way this platform spells a path: every result below is built
-    // by joining onto this one, and all of them are printed. See
-    // [`native_path`].
-    native_path(joined)
-}
-
-/// `path` relative to `cwd` when it is under it, absolute otherwise.
-fn display(cwd: &Path, path: &Path) -> String {
-    path.strip_prefix(cwd).map_or_else(
-        |_| path.display().to_string(),
-        |rel| rel.display().to_string(),
-    )
 }
 
 /// Walks `search` for files matching `pattern`, sorted by relative path and

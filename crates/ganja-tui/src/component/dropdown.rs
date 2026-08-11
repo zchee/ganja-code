@@ -26,7 +26,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
     command::{self, Choice, EngineCommand},
-    component::chat::split_at_width,
+    component::{chat::clip, clamped, first_visible},
     theme::Theme,
 };
 
@@ -124,14 +124,7 @@ impl Dropdown {
 
     /// Moves the cursor by `delta` rows, clamped at both ends.
     pub fn move_selection(&mut self, delta: isize) {
-        let last = self.matched.len().saturating_sub(1);
-        let moved = if delta < 0 {
-            self.selected.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.selected.saturating_add(delta.unsigned_abs())
-        };
-
-        self.selected = moved.min(last);
+        self.selected = clamped(self.selected, delta, self.matched.len());
     }
 
     /// Draws the menu directly above `anchor`, which is the editor's area.
@@ -214,7 +207,7 @@ pub(crate) fn menu_lines(
     // Names padded to the widest, so the details beside them sit in one
     // column instead of stepping in and out per row.
     let name_width = names.iter().map(|name| name.width()).max().unwrap_or(0);
-    let first = selected.saturating_sub(rows.saturating_sub(1));
+    let first = first_visible(selected, rows);
 
     names
         .iter()
@@ -244,15 +237,6 @@ pub(crate) fn menu_lines(
             )
         })
         .collect()
-}
-
-/// `text` cut to `width` display columns.
-pub(crate) fn clip(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-
-    split_at_width(text, width).0.to_owned()
 }
 
 #[cfg(test)]

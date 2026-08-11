@@ -27,7 +27,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
     command::{self, Action, Entry, Surface},
-    component::chat::split_at_width,
+    component::{chat::clip, first_visible},
     keybind::Keybinds,
     theme::Theme,
 };
@@ -281,7 +281,7 @@ impl Palette {
             return vec![Line::styled(clip(EMPTY, width), theme.dim)];
         }
 
-        let first = self.first_visible(rows);
+        let first = first_visible(self.selected, rows);
         // Names padded to the widest, so the titles beside them sit in one
         // column instead of stepping in and out per row.
         let name_width = self
@@ -344,21 +344,6 @@ impl Palette {
             },
         )
     }
-
-    /// The first row on screen: far enough down to keep the selected command
-    /// visible, and no further.
-    fn first_visible(&self, rows: usize) -> usize {
-        self.selected.saturating_sub(rows.saturating_sub(1))
-    }
-}
-
-/// `text` cut to `width` display columns.
-fn clip(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-
-    split_at_width(text, width).0.to_owned()
 }
 
 #[cfg(test)]

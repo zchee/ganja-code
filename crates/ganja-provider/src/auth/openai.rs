@@ -392,11 +392,8 @@ impl Login {
             return Err(LoginError::Issuer);
         }
 
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|source| LoginError::Client { source })?;
+        let client =
+            super::login_client(REQUEST_TIMEOUT).map_err(|source| LoginError::Client { source })?;
 
         Ok(Self { issuer, client })
     }
@@ -562,19 +559,13 @@ impl Login {
     /// A form-encoded `POST`, the way upstream builds one.
     ///
     /// `URLSearchParams(…).toString()` upstream (`openai.ts:199-205`);
-    /// `form_urlencoded` here, which is the same encoder `Url` uses. `reqwest`'s
-    /// own `.form()` is behind a feature this workspace does not carry, and the
-    /// body is three pairs.
+    /// [`super::device::form`] here — one encoder for every login body this
+    /// build posts.
     fn form_post(&self, url: &str, pairs: &[(&str, &str)]) -> reqwest::RequestBuilder {
-        let mut body = form_urlencoded::Serializer::new(String::new());
-        for (key, value) in pairs {
-            body.append_pair(key, value);
-        }
-
         self.client
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, FORM)
-            .body(body.finish())
+            .body(super::device::form(pairs))
     }
 
     /// Sends one request and reads its answer.

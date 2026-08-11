@@ -179,14 +179,7 @@ impl CursorWire {
     /// the store's own message describes. Returns
     /// [`ProviderError::Transport`] when no HTTP client can be built.
     pub fn from_stored() -> Result<Self, ProviderError> {
-        let stored = auth::storage_key(ID);
-        let listed =
-            auth::list_providers().map_err(|error| ProviderError::Auth(error.to_string()))?;
-        if !listed.iter().any(|entry| entry.provider_id == stored) {
-            return Err(ProviderError::Auth(format!(
-                "no {ID} credential is stored; run `ganja auth login {ID}`"
-            )));
-        }
+        super::require_stored_login(ID)?;
 
         let refresh = auth::cursor::Refresh::new()
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
@@ -243,7 +236,9 @@ impl CursorWire {
         // rides under a token nothing fires.
         let never = CancellationToken::new();
         let response = retry::send(&self.client, built, &presented, &never).await?;
-        let body = response.bytes().await.map_err(transport)?;
+        // The retry driver owns every failure up to the first byte; this read
+        // after it is the one the unary RPC still makes whole.
+        let body = response.bytes().await.map_err(retry::transport)?;
 
         decode::model_list(&body)
     }
@@ -562,26 +557,6 @@ where
         },
     )
     .boxed()
-}
-
-/// Describes a failed read of the unary body, following the cause chain the
-/// way the retry driver does for the request itself — `reqwest::Error`
-/// alone says only that something failed, never why — and dropping the URL
-/// first because a base URL may carry credentials. The driver owns every
-/// failure up to the first byte; this covers the one read after it that the
-/// unary RPC still makes whole.
-fn transport(error: reqwest::Error) -> ProviderError {
-    use std::fmt::Write as _;
-
-    let error = error.without_url();
-    let mut message = error.to_string();
-    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&error);
-    while let Some(cause) = source {
-        let _ = write!(message, ": {cause}");
-        source = cause.source();
-    }
-
-    ProviderError::Transport(message)
 }
 
 /// Feeds a recorded body through the pipeline a live turn runs.

@@ -14,7 +14,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{component::chat::split_at_width, theme::Theme};
+use crate::{
+    component::{chat::clip, clamped},
+    theme::Theme,
+};
 
 /// What marks the answer row the cursor is on, and what pads every other row.
 const MARKER: &str = "> ";
@@ -119,14 +122,7 @@ impl Question {
     /// Moves the cursor by `delta` answer rows, clamped at both ends.
     pub fn move_selection(&mut self, delta: isize) {
         let rows = self.options.len() + usize::from(self.custom);
-        let last = rows.saturating_sub(1);
-        let moved = if delta < 0 {
-            self.selected.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.selected.saturating_add(delta.unsigned_abs())
-        };
-
-        self.selected = moved.min(last);
+        self.selected = clamped(self.selected, delta, rows);
     }
 
     /// Adds `character` while the free-text row owns the keyboard.
@@ -252,15 +248,6 @@ impl Question {
             })
             .collect()
     }
-}
-
-/// `text` cut to `width` display columns.
-fn clip(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-
-    split_at_width(text, width).0.to_owned()
 }
 
 #[cfg(test)]

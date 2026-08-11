@@ -15,10 +15,7 @@
 //! back to without those services, `"Wrote file successfully."`, is exactly
 //! what this port always returns.
 
-use std::{
-    io::Write as _,
-    path::{Path, PathBuf},
-};
+use std::io::Write as _;
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -27,7 +24,7 @@ use serde::Deserialize;
 use crate::{
     Tool, ToolCtx, ToolError, ToolOutput,
     anchor::{self, Anchor},
-    native_path,
+    display, resolve,
 };
 
 /// What the model passes to `write`.
@@ -124,31 +121,6 @@ impl Tool for WriteTool {
             }),
         })
     }
-}
-
-/// Resolves `file_path` against `cwd` — never against the process cwd, so a
-/// relative argument means what the call site meant, not what the engine's
-/// own working directory happens to be.
-fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
-    let path = Path::new(file_path);
-    let joined = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        cwd.join(path)
-    };
-
-    // Spelled the way this platform spells a path, because this one is echoed
-    // back to the model. See [`native_path`].
-    native_path(joined)
-}
-
-/// `path` relative to `cwd` when it is under it, absolute otherwise — for a
-/// title or one-line description a person can actually read.
-fn display(cwd: &Path, path: &Path) -> String {
-    path.strip_prefix(cwd).map_or_else(
-        |_| path.display().to_string(),
-        |rel| rel.display().to_string(),
-    )
 }
 
 #[cfg(test)]

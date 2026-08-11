@@ -286,15 +286,8 @@ pub fn browser_flow_at(
     authorize_url: impl Into<String>,
     token_url: impl Into<String>,
 ) -> Result<BrowserFlow, BrowserError> {
-    let client = reqwest::Client::builder()
-        // Refused for the reason every credential-carrying request in this
-        // build refuses them: the body holds the authorization code and the
-        // verifier that spends it, and a client that followed a 3xx would
-        // replay both at whatever the redirect named.
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(EXCHANGE_TIMEOUT)
-        .build()
-        .map_err(|source| BrowserError::Client { source })?;
+    let client =
+        super::login_client(EXCHANGE_TIMEOUT).map_err(|source| BrowserError::Client { source })?;
 
     Ok(BrowserFlow {
         client,
@@ -625,18 +618,12 @@ impl Refresh {
     /// Returns [`AuthError::RefreshUnavailable`] when no HTTP client can be
     /// built.
     pub fn at(token_url: impl Into<String>) -> Result<Self, AuthError> {
-        let client = reqwest::Client::builder()
-            // Refused for the reason every credential-carrying request in this
-            // build refuses them: the body holds a refresh token, and a client
-            // that followed a 3xx would replay it at whatever the redirect
-            // named.
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|error| AuthError::RefreshUnavailable {
+        let client = super::login_client(std::time::Duration::from_secs(30)).map_err(|error| {
+            AuthError::RefreshUnavailable {
                 provider_id: PROVIDER_ID.to_owned(),
                 reason: error.without_url().to_string(),
-            })?;
+            }
+        })?;
 
         Ok(Self {
             client,

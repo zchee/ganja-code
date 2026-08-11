@@ -28,9 +28,9 @@ use crate::{
     catalog,
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
-        ChatRequest, CredentialSource, Mapper, Presented, Provider, ProviderError, ProviderEvent,
-        check_base_url, client, open, require_key, setting, shown_base_url, splice_effort,
-        sse::Frame, steps,
+        ChatRequest, CredentialSource, Mapper, NO_RESULT, Presented, Provider, ProviderError,
+        ProviderEvent, check_base_url, client, open, require_key, setting, shown_base_url,
+        splice_effort, sse::Frame, steps,
     },
 };
 
@@ -63,20 +63,6 @@ pub const API_VERSION: &str = "2023-06-01";
 /// [`AnthropicProvider::max_tokens`] lowers it further for any model whose own
 /// limit is smaller.
 pub const DEFAULT_MAX_TOKENS: u32 = 32_000;
-
-/// What a call that never produced one reports as its result.
-///
-/// A tool part still [`ToolState::Pending`] or [`ToolState::Running`] when it
-/// reaches a later request belongs to a turn that died — cancelled, or failed —
-/// before the tool answered. Neither obvious move is available: dropping the
-/// `tool_use` block leaves the assistant text claiming a call that is not
-/// there, and keeping it unanswered is a request the API refuses outright,
-/// because every `tool_use` must be resolved by a `tool_result` in the message
-/// that follows. So the pair is emitted with this in place of the output, and
-/// marked as an error, which is both true and something the model can act on.
-/// Upstream resolves the same dangling call with the wording
-/// "[Tool execution was interrupted]".
-const NO_RESULT: &str = "[no result recorded]";
 
 /// Arguments for a call the model never finished streaming.
 ///
