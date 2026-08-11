@@ -383,6 +383,86 @@ async fn a_png_mention_on_a_text_only_wire_reaches_the_model_as_its_name() {
     );
 }
 
+/// A `width`×`height` RGBA image, encoded as real PNG bytes — standing in for
+/// what `ganja-tui`'s clipboard paste (F3) would have written to disk, since
+/// this crate cannot link the TUI to drive that path itself.
+fn png_fixture(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("a valid png header encodes");
+    writer.write_image_data(rgba).expect("the pixels encode");
+    drop(writer);
+
+    bytes
+}
+
+/// `bytes` decoded as a PNG, answering its declared dimensions and raw RGBA8
+/// pixels.
+fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info().expect("a valid png header");
+    let mut buffer = vec![0; reader.output_buffer_size().expect("a sized frame")];
+    let info = reader.next_frame(&mut buffer).expect("a valid png frame");
+    buffer.truncate(info.buffer_size());
+
+    (info.width, info.height, buffer)
+}
+
+/// The clipboard-paste promise end to end (**F3**, lifting D111's image
+/// half): a real PNG at a mentioned path reaches the wire as base64 beside
+/// its mime, and decoding it back proves the bytes that travelled are a
+/// valid PNG of exactly the scripted dimensions — not merely "some bytes."
+#[tokio::test]
+async fn a_clipboard_pasted_png_reaches_the_wire_as_a_decodable_image_of_its_dimensions() {
+    let workspace = ganja_testkit::temp_dir();
+    let path = workspace.path().join("clipboard-1.png");
+    let rgba: Vec<u8> = (0..(5 * 3 * 4)).map(|byte| byte as u8).collect();
+    std::fs::write(&path, png_fixture(5, 3, &rgba)).expect("the fixture writes");
+
+    let (provider, requests) = ScriptedProvider::new(vec![says("seen")]);
+    let engine = engine(provider, Registry::new(Vec::new()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "what is this a picture of".to_owned(),
+            mentions: vec![Mention {
+                path: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            }],
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain_allowing(&engine, &mut events).await;
+
+    let requests = requests.lock().expect("the request log is never poisoned");
+    let (mime, content) = requests[0]
+        .messages
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .find_map(|part| match &part.body {
+            PartBody::File { mime, content, .. } => Some((mime.clone(), content.clone())),
+            _ => None,
+        })
+        .expect("the request carries a file part");
+    assert_eq!(mime, "image/png");
+
+    let content = content.expect("a carried binary attachment holds its base64");
+    let carried = {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        STANDARD.decode(&content).expect("the payload decodes")
+    };
+    let (width, height, pixels) = decode_png(&carried);
+    assert_eq!(
+        (width, height),
+        (5, 3),
+        "the wire carries the scripted dimensions"
+    );
+    assert_eq!(pixels, rgba, "and the scripted pixels, byte for byte");
+}
+
 /// `@path#2-4` inlines exactly the lines it names, 1-indexed and inclusive,
 /// with the range on the block's tag so two slices of one file stay
 /// distinguishable.

@@ -16,6 +16,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use etcetera::{BaseStrategy as _, base_strategy::Xdg};
 use futures::StreamExt as _;
 use ganja_core::{Engine, attachment, catalog, provider};
 use ganja_protocol::{
@@ -105,14 +106,9 @@ const TRANSCRIPT_COPY_FAILED: &str = "Failed to copy session transcript";
 /// silently here (deviation: copy-with-no-session-says-so).
 const NOTHING_TO_COPY: &str = "there is no session to copy yet";
 
-/// What a clipboard holding anything but text is answered with (**D111**).
-///
-/// The interesting half of that class is an image, which is what the message
-/// names. It is not the only half: `arboard` without its `image-data` feature
-/// — the workspace pins it that way deliberately — reports an empty clipboard
-/// and an image-only one identically, so this covers both (deviation:
-/// image-notice-covers-any-non-text-clipboard).
-const IMAGE_PASTE: &str = "image paste is not supported yet";
+/// What a paste says when the clipboard holds neither text nor an image
+/// (F3): an empty selection, or a format `arboard` cannot decode either way.
+const CLIPBOARD_EMPTY: &str = "the clipboard holds neither text nor an image";
 
 /// What `/effort` says when the active model's catalog row offers none —
 /// upstream's toast message, reworded for ganja (`app.tsx:717`).
@@ -283,6 +279,16 @@ pub struct App {
     /// Where a copy goes. Behind a trait so a test asserts what ganja decided
     /// to copy rather than what the machine running it has for a desktop.
     clipboard: Box<dyn clipboard::Clipboard>,
+    /// How many clipboard images this session has already saved, so each new
+    /// one earns a fresh `clipboard-<n>.png` name (**F3**) instead of
+    /// colliding with the last.
+    clipboard_pastes: u32,
+    /// Where a pasted clipboard image is saved, or [`None`] to resolve the
+    /// real `<XDG data>/ganja/clipboard` at paste time. Overridden in tests
+    /// (`App::with_clipboard_scratch_dir`) for the same reason
+    /// [`App::cwd`]/[`App::root`] are builder-set: a paste in a test must
+    /// never reach a real person's data directory.
+    clipboard_scratch: Option<PathBuf>,
     /// What the composer remembers across submissions; an Up-arrow on an empty
     /// prompt walks back through it. Inert until [`App::with_history`] hands it
     /// a real store — the default touches no disk, so a test never reads or
@@ -389,6 +395,8 @@ impl App {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             clipboard: Box::new(clipboard::System::default()),
+            clipboard_pastes: 0,
+            clipboard_scratch: None,
             // Inert until the startup lane hands over the loaded store: reading
             // the disk here would mean every test touched the real history.
             history: History::default(),
@@ -440,6 +448,16 @@ impl App {
     #[must_use]
     pub fn with_clipboard(mut self, clipboard: Box<dyn clipboard::Clipboard>) -> Self {
         self.clipboard = clipboard;
+
+        self
+    }
+
+    /// Saves a pasted clipboard image under `dir` instead of the real
+    /// `<XDG data>/ganja/clipboard` — a test seam, so a paste never reaches a
+    /// real person's data directory.
+    #[must_use]
+    pub fn with_clipboard_scratch_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.clipboard_scratch = Some(dir.into());
 
         self
     }
@@ -826,8 +844,8 @@ impl App {
     /// made of — goes in raw, exactly as before.
     ///
     /// Raw text goes in **unfolded**: upstream would collapse a long paste
-    /// behind a `[Pasted ~N lines]` placeholder, which is deferred with the
-    /// image half of the same ruling (**D111**).
+    /// behind a `[Pasted ~N lines]` placeholder, which stays deferred now
+    /// that the image half of the same ruling has landed (**D111**).
     async fn paste(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
 
@@ -848,18 +866,100 @@ impl App {
     /// the paste itself.
     ///
     /// Upstream binds `ctrl+v` to the same fallback; there it is the only
-    /// path for the image case, which this build has no parts to carry
-    /// (**D111**).
+    /// path for the image case too, since an image has no bracketed-paste
+    /// channel to arrive through on any terminal (**F3**, lifting D111's
+    /// image half). Text is tried first — upstream's own order
+    /// (`clipboard.ts:70-79` falls through platform image grabs before
+    /// text) reaches the same place here, because [`clipboard::Clipboard`]
+    /// already answers the two as independent questions.
     async fn paste_from_clipboard(&mut self) {
         match self.clipboard.read() {
             Ok(text) => self.paste(&text).await,
-            Err(clipboard::Error::NotText) => {
-                self.status.set_notice(Some(IMAGE_PASTE.to_owned()));
-            }
+            Err(clipboard::Error::NotText) => self.paste_clipboard_image().await,
             // A machine with no clipboard costs a notice and never the
             // keystroke: nothing here may eat what was being typed.
             Err(error) => self.status.set_notice(Some(error.to_string())),
         }
+    }
+
+    /// The image half of [`App::paste_from_clipboard`]: saves what the
+    /// clipboard holds as PNG and attaches it through the same mention
+    /// pipeline an `@file` reaches, so it renders the same chip and earns the
+    /// same submit-time wire-degradation warning (`App::degraded`) — no
+    /// second attachment channel (**F3**).
+    async fn paste_clipboard_image(&mut self) {
+        match self.clipboard.read_image() {
+            Ok(image) => match self.save_clipboard_image(&image) {
+                Ok(path) => {
+                    self.editor
+                        .insert(&format!("{} ", mention::token(&path, None, None)));
+                    self.sync_menus().await;
+                }
+                Err(reason) => self.status.set_notice(Some(reason)),
+            },
+            Err(clipboard::Error::NoImage) => {
+                self.status.set_notice(Some(CLIPBOARD_EMPTY.to_owned()));
+            }
+            Err(error) => self.status.set_notice(Some(error.to_string())),
+        }
+    }
+
+    /// Encodes `image` to PNG and writes it under [`App::clipboard_scratch`]
+    /// — or, absent a test override, [`App::default_clipboard_scratch_dir`]
+    /// — as `clipboard-<n>.png`: upstream's own `filename: "clipboard"`
+    /// (`index.tsx:384`), numbered because one session may paste more than
+    /// one image. Answers the absolute path on success, or the reason
+    /// nothing was saved: there is nowhere to resolve a scratch directory, it
+    /// could not be created, the encode failed, or the write did.
+    ///
+    /// The counter advances even on a write failure, never reusing a name a
+    /// failed attempt may have partly written.
+    fn save_clipboard_image(&mut self, image: &clipboard::Image) -> Result<String, String> {
+        let dir = match &self.clipboard_scratch {
+            Some(dir) => dir.clone(),
+            None => Self::default_clipboard_scratch_dir()
+                .ok_or_else(|| "no home directory to save the pasted image under".to_owned())?,
+        };
+        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let bytes = Self::encode_clipboard_png(image)?;
+
+        self.clipboard_pastes += 1;
+        let path = dir.join(format!("clipboard-{}.png", self.clipboard_pastes));
+        std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+
+        Ok(path.display().to_string())
+    }
+
+    /// `<XDG data>/ganja/clipboard`, or [`None`] when there is no home to
+    /// resolve it against — the same `<XDG data>/ganja` the prompt history
+    /// and the theme pick already agree on (`history.rs::default_path`).
+    fn default_clipboard_scratch_dir() -> Option<PathBuf> {
+        let base = Xdg::new().ok()?;
+
+        Some(base.data_dir().join("ganja").join("clipboard"))
+    }
+
+    /// `image`'s RGBA pixels as PNG bytes, encoded in-process — the ganja-
+    /// shaped equivalent of upstream's per-OS shell-out to grab the same
+    /// bytes (`clipboard.ts:31-72`): the same observable output through a
+    /// different mechanism (deviation: **D449**, clipboard-png-in-process).
+    fn encode_clipboard_png(image: &clipboard::Image) -> Result<Vec<u8>, String> {
+        let width = u32::try_from(image.width)
+            .map_err(|_| "the pasted image is too wide to encode".to_owned())?;
+        let height = u32::try_from(image.height)
+            .map_err(|_| "the pasted image is too tall to encode".to_owned())?;
+
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+        writer
+            .write_image_data(&image.rgba)
+            .map_err(|error| error.to_string())?;
+        drop(writer);
+
+        Ok(bytes)
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -7311,10 +7411,10 @@ mod tests {
         assert_eq!(app.editor.text(), "pasted\nfrom the clipboard");
     }
 
-    /// **D111**. There are no image parts to carry one, so the paste says so
-    /// rather than doing nothing.
+    /// A clipboard holding neither text nor an image (**F3**, D111's image
+    /// half) says so and eats no keystroke.
     #[tokio::test]
-    async fn a_clipboard_holding_no_text_says_images_are_not_supported_yet() {
+    async fn a_clipboard_holding_neither_text_nor_an_image_says_so() {
         let mut app = app().with_clipboard(Box::new(clipboard::Recording::default()));
 
         app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
@@ -7322,11 +7422,201 @@ mod tests {
             .expect("control-v is handled");
 
         assert!(
-            status_line(&mut app).contains("image paste is not supported yet"),
+            status_line(&mut app).contains("the clipboard holds neither text nor an image"),
             "got: {}",
             status_line(&mut app)
         );
         assert!(app.editor.is_empty(), "and nothing was inserted");
+    }
+
+    /// **F3**, lifting D111's image half: a scripted clipboard image pastes
+    /// as an `@`-mention chip, named the same way `@file` insertion renders
+    /// one, and the bytes on disk are a real, decodable PNG of the scripted
+    /// dimensions.
+    #[tokio::test]
+    async fn pasting_a_clipboard_image_attaches_it_as_a_numbered_png_chip() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255];
+        let mut app = app()
+            .with_clipboard(Box::new(clipboard::Recording::holding_image(
+                3,
+                1,
+                rgba.clone(),
+            )))
+            .with_clipboard_scratch_dir(scratch.path());
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+
+        let expected_path = scratch.path().join("clipboard-1.png");
+        assert_eq!(
+            app.editor.text(),
+            format!("@{} ", expected_path.display()),
+            "the chip names the file the way an @file mention does"
+        );
+
+        let bytes = fs::read(&expected_path).expect("the image was saved");
+        let (width, height, decoded) = decode_png(&bytes);
+        assert_eq!((width, height), (3, 1), "the scripted dimensions survive");
+        assert_eq!(decoded, rgba, "and so do the pixels");
+    }
+
+    /// A second paste in the same session earns its own name rather than
+    /// overwriting the first.
+    #[tokio::test]
+    async fn a_second_clipboard_image_paste_gets_its_own_number() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let mut app = app()
+            .with_clipboard(Box::new(clipboard::Recording::holding_image(
+                1,
+                1,
+                vec![1, 2, 3, 4],
+            )))
+            .with_clipboard_scratch_dir(scratch.path());
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("the first control-v is handled");
+        app.editor.clear();
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("the second control-v is handled");
+
+        assert_eq!(
+            app.editor.text(),
+            format!("@{} ", scratch.path().join("clipboard-2.png").display())
+        );
+        assert!(scratch.path().join("clipboard-1.png").exists());
+        assert!(scratch.path().join("clipboard-2.png").exists());
+    }
+
+    /// The submit-time degradation warning (`App::degraded`) fires for a
+    /// pasted image exactly as it does for an `@file` mention: the pasted
+    /// image reaches the same pipeline, and a wire without image support is
+    /// told so before the turn.
+    #[tokio::test]
+    async fn a_clipboard_image_on_a_wire_without_image_support_warns_at_submit() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let (provider, _requests) = ganja_testkit::ScriptedProvider::text_only(Vec::new());
+        let engine = Engine::new(
+            provider,
+            "recorder-model",
+            Arc::new(ganja_tool::Registry::new(Vec::new())),
+            ganja_permission::Permissions::default(),
+        );
+        let mut app = App::new(engine, None, Themes::builtin())
+            .with_clipboard(Box::new(clipboard::Recording::holding_image(
+                1,
+                1,
+                vec![9, 8, 7, 6],
+            )))
+            .with_clipboard_scratch_dir(scratch.path());
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+
+        // Asserted at the data level, not through the rendered status line:
+        // a real `<XDG data>/ganja/clipboard` path is long enough that the
+        // rendered bar can truncate it before the mime reaches the visible
+        // width — a pre-existing, unrelated property of a one-line status
+        // bar, not something this test should depend on.
+        let pasted = app.editor.text();
+        let mentions = crate::mention::attachable(&pasted, &app.root);
+        assert_eq!(mentions.len(), 1, "the pasted image resolved as a mention");
+        assert_eq!(
+            app.degraded(&mentions),
+            vec![format!(
+                "@{} (image/png)",
+                scratch.path().join("clipboard-1.png").display()
+            )],
+            "the pasted image is exactly what the degradation warning names"
+        );
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let bar = status_line(&mut app);
+        assert!(
+            bar.contains("attached by name only") && bar.contains("does not carry"),
+            "the degradation warning fires at submit: {bar}"
+        );
+    }
+
+    /// A scratch directory that cannot be created — a plain file sitting
+    /// where the directory would need to be — degrades to a notice naming
+    /// why, the same posture `ganja-tool`'s own spill directory takes on a
+    /// write it cannot make.
+    #[tokio::test]
+    async fn a_clipboard_image_that_cannot_be_saved_reports_why() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let blocked = scratch.path().join("blocked");
+        fs::write(&blocked, "not a directory").expect("the fixture writes");
+        let mut app = app()
+            .with_clipboard(Box::new(clipboard::Recording::holding_image(
+                1,
+                1,
+                vec![1, 2, 3, 4],
+            )))
+            .with_clipboard_scratch_dir(&blocked);
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+
+        assert!(app.editor.is_empty(), "nothing was inserted");
+        assert!(
+            !status_line(&mut app).is_empty(),
+            "the failure is reported rather than swallowed"
+        );
+    }
+
+    /// Decodes `bytes` as a PNG, answering its declared width, height and raw
+    /// RGBA8 pixels.
+    fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("a valid png header");
+        let mut buffer = vec![0; reader.output_buffer_size().expect("a sized frame")];
+        let info = reader.next_frame(&mut buffer).expect("a valid png frame");
+        buffer.truncate(info.buffer_size());
+
+        (info.width, info.height, buffer)
+    }
+
+    /// [`App::encode_clipboard_png`] round-trips through [`decode_png`] for
+    /// the two edge shapes real screenshots stress: a single pixel, and
+    /// dimensions with no shared factor to hide a stride bug behind.
+    #[test]
+    fn encoding_a_clipboard_image_round_trips_at_1x1() {
+        let image = clipboard::Image {
+            width: 1,
+            height: 1,
+            rgba: vec![10, 20, 30, 40],
+        };
+
+        let bytes = App::encode_clipboard_png(&image).expect("the encode succeeds");
+        let (width, height, decoded) = decode_png(&bytes);
+
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(decoded, image.rgba);
+    }
+
+    #[test]
+    fn encoding_a_clipboard_image_round_trips_at_odd_dimensions() {
+        let rgba: Vec<u8> = (0..(3 * 5 * 4)).map(|byte| byte as u8).collect();
+        let image = clipboard::Image {
+            width: 3,
+            height: 5,
+            rgba: rgba.clone(),
+        };
+
+        let bytes = App::encode_clipboard_png(&image).expect("the encode succeeds");
+        let (width, height, decoded) = decode_png(&bytes);
+
+        assert_eq!((width, height), (3, 5));
+        assert_eq!(decoded, rgba);
     }
 
     /// A machine with no clipboard costs a notice, never the keystroke.

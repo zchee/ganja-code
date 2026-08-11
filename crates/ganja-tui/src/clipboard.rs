@@ -12,14 +12,23 @@
 //! what carries a copy from a tmux pane or an SSH session back to the machine
 //! the terminal is attached to rather than the one the process runs on.
 //!
+//! **Images are read now (F3).** The workspace turns on `arboard`'s
+//! `image-data` feature, which is what lets this trait tell an image-holding
+//! clipboard from an empty one at all — without it, `arboard` answers
+//! `ContentNotAvailable` for both, indistinguishably. [`Clipboard::read`] and
+//! [`Clipboard::read_image`] are independent questions with independent
+//! answers: a text clipboard has no image, an image clipboard has no text,
+//! and a paste that finds neither tries the other before giving up. Encoding
+//! the pixels to PNG is the app's job (`app.rs`), not this seam's — this
+//! module hands back raw RGBA and nothing else.
+//!
 //! One deliberate narrowing from upstream remains:
 //!
-//! - **Images are not read.** The workspace pins `arboard` without its
-//!   `image-data` feature, so this build has no way to ask for an image —
-//!   and no way to tell an image-only clipboard from an empty one, since
-//!   `arboard` answers `ContentNotAvailable` for both. Everything that is not
-//!   text arrives here as [`Error::NotText`] and the app says the one thing
-//!   that is true of the interesting half of that class (**D111**).
+//! - **A long paste is not folded.** Upstream's composer collapses a paste of
+//!   three or more lines (or over 150 characters) to a `[Pasted ~N lines]`
+//!   placeholder that expands on demand (`component/prompt/index.tsx:1205-
+//!   1211`); this build still inserts the whole thing. **D111** is narrowed to
+//!   exactly this half now that the image half above is ported.
 //!
 //! Construction is **lazy**: the handle is built on the first copy or paste
 //! and kept, so a session that never touches the clipboard never asks the
@@ -34,16 +43,35 @@ pub enum Error {
     /// There is no clipboard to talk to, or it refused.
     #[error("the clipboard is not available: {0}")]
     Unavailable(String),
-    /// The clipboard holds something, but not text this build can insert —
-    /// or it holds nothing at all. See the module docs: `arboard` without
-    /// `image-data` cannot tell those two apart.
-    #[error("the clipboard holds nothing this build can paste")]
+    /// The clipboard does not hold text. It may hold an image instead — see
+    /// [`Clipboard::read_image`] — or nothing this build can read at all.
+    #[error("the clipboard does not hold text")]
     NotText,
+    /// The clipboard does not hold an image. It may hold text instead — see
+    /// [`Clipboard::read`] — or nothing this build can read at all.
+    #[error("the clipboard does not hold an image")]
+    NoImage,
+}
+
+/// RGBA8 pixels read from the clipboard, row-major with no padding: exactly
+/// `width * height * 4` bytes.
+///
+/// [`arboard::ImageData`]'s own shape, copied rather than reused in this
+/// trait's signature — a [`Recording`] double has no `arboard` handle to
+/// borrow pixels from, so the seam needs a type independent of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Image {
+    /// Pixel width.
+    pub width: usize,
+    /// Pixel height.
+    pub height: usize,
+    /// Four bytes per pixel — red, green, blue, alpha — in row-major order.
+    pub rgba: Vec<u8>,
 }
 
 /// Reading and writing the system clipboard.
 ///
-/// `&mut self` on both halves because the platform handles behind them are
+/// `&mut self` on every method because the platform handles behind them are
 /// not shareable, and because it keeps the lazy construction honest: the one
 /// place that may build a handle is the one place that is already exclusive.
 pub trait Clipboard: Send {
@@ -59,9 +87,17 @@ pub trait Clipboard: Send {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NotText`] when it holds something else — see the
-    /// module docs — and [`Error::Unavailable`] when there is nothing to ask.
+    /// Returns [`Error::NotText`] when it holds something else — an image, or
+    /// nothing — and [`Error::Unavailable`] when there is nothing to ask.
     fn read(&mut self) -> Result<String, Error>;
+
+    /// What the clipboard holds, as an image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoImage`] when it holds something else — text, or
+    /// nothing — and [`Error::Unavailable`] when there is nothing to ask.
+    fn read_image(&mut self) -> Result<Image, Error>;
 }
 
 /// The clipboard the desktop this process runs on provides.
@@ -103,10 +139,23 @@ impl Clipboard for System {
         self.handle()?.get_text().map_err(|error| match error {
             // The one error that is about the *contents* rather than about
             // the clipboard: `arboard` documents it as "empty, or holding a
-            // different format", which is exactly the class this build
-            // cannot insert.
+            // different format", which now specifically means "not text" —
+            // an image clipboard answers `read_image` instead.
             arboard::Error::ContentNotAvailable => Error::NotText,
             other => Error::Unavailable(other.to_string()),
+        })
+    }
+
+    fn read_image(&mut self) -> Result<Image, Error> {
+        let image = self.handle()?.get_image().map_err(|error| match error {
+            arboard::Error::ContentNotAvailable => Error::NoImage,
+            other => Error::Unavailable(other.to_string()),
+        })?;
+
+        Ok(Image {
+            width: image.width,
+            height: image.height,
+            rgba: image.bytes.into_owned(),
         })
     }
 }
@@ -194,8 +243,10 @@ fn base64(bytes: &[u8]) -> String {
 pub struct Recording {
     /// Everything written, in order.
     pub written: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    /// What the next read answers with.
+    /// What the next text read answers with.
     pub holds: Result<String, Error>,
+    /// What the next image read answers with.
+    pub holds_image: Result<Image, Error>,
     /// What every write answers with; [`Ok`] by default.
     pub accepts: Result<(), Error>,
 }
@@ -203,11 +254,12 @@ pub struct Recording {
 #[cfg(test)]
 impl Default for Recording {
     /// A clipboard nothing has been put on, which is the answer a real one
-    /// gives for an empty desktop selection.
+    /// gives for an empty desktop selection: neither text nor an image.
     fn default() -> Self {
         Self {
             written: std::sync::Arc::default(),
             holds: Err(Error::NotText),
+            holds_image: Err(Error::NoImage),
             accepts: Ok(()),
         }
     }
@@ -223,10 +275,28 @@ impl Recording {
         }
     }
 
-    /// A clipboard whose reads fail with `error`.
+    /// A clipboard holding a `width`×`height` image, its pixels `rgba`.
+    pub fn holding_image(width: usize, height: usize, rgba: Vec<u8>) -> Self {
+        Self {
+            holds_image: Ok(Image {
+                width,
+                height,
+                rgba,
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// A clipboard whose reads — text and image alike — fail with `error`.
+    ///
+    /// The real [`System`] cannot fail one and not the other for the same
+    /// reason: both go through the one lazily built [`arboard::Clipboard`]
+    /// handle, so a machine with no clipboard at all refuses both questions
+    /// identically.
     pub fn refusing_reads(error: Error) -> Self {
         Self {
-            holds: Err(error),
+            holds: Err(error.clone()),
+            holds_image: Err(error),
             ..Self::default()
         }
     }
@@ -261,11 +331,15 @@ impl Clipboard for Recording {
     fn read(&mut self) -> Result<String, Error> {
         self.holds.clone()
     }
+
+    fn read_image(&mut self) -> Result<Image, Error> {
+        self.holds_image.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Clipboard as _, Error, Recording, base64, osc52};
+    use super::{Clipboard as _, Error, Image, Recording, base64, osc52};
 
     /// The RFC 4648 test vectors, plus the padding boundaries: a hand-rolled
     /// encoder earns its keep only if it matches the standard byte for byte.
@@ -343,12 +417,48 @@ mod tests {
         assert!(log.lock().expect("the lock holds").is_empty());
     }
 
-    /// The default is the interesting failure: an empty clipboard and one
-    /// holding only an image are the same answer under this feature set.
+    /// An empty clipboard holds neither — `image-data` is exactly what makes
+    /// that distinguishable from holding one or the other (**F3**, D111's
+    /// image half).
     #[test]
-    fn a_clipboard_nothing_was_put_on_reads_as_not_text() {
+    fn a_clipboard_nothing_was_put_on_holds_neither_text_nor_image() {
         assert_eq!(Recording::default().read(), Err(Error::NotText));
-        assert_eq!(Recording::holding("typed").read(), Ok("typed".to_owned()));
+        assert_eq!(Recording::default().read_image(), Err(Error::NoImage));
+    }
+
+    #[test]
+    fn a_clipboard_holding_text_reads_it_and_has_no_image() {
+        let mut clipboard = Recording::holding("typed");
+
+        assert_eq!(clipboard.read(), Ok("typed".to_owned()));
+        assert_eq!(clipboard.read_image(), Err(Error::NoImage));
+    }
+
+    #[test]
+    fn a_clipboard_holding_an_image_reads_it_and_has_no_text() {
+        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let mut clipboard = Recording::holding_image(2, 1, rgba.clone());
+
+        assert_eq!(
+            clipboard.read_image(),
+            Ok(Image {
+                width: 2,
+                height: 1,
+                rgba,
+            })
+        );
+        assert_eq!(clipboard.read(), Err(Error::NotText));
+    }
+
+    /// The real [`System`] fails both questions the same way when there is no
+    /// clipboard to ask at all, so the double must too.
+    #[test]
+    fn an_unreachable_clipboard_refuses_both_text_and_image_reads() {
+        let error = Error::Unavailable("no display".to_owned());
+        let mut clipboard = Recording::refusing_reads(error.clone());
+
+        assert_eq!(clipboard.read(), Err(error.clone()));
+        assert_eq!(clipboard.read_image(), Err(error));
     }
 
     /// The one thing the seam above cannot prove: that [`System`] is wired to
