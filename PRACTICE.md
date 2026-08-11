@@ -1,6 +1,6 @@
 # Learning Guide: Porting opencode to Rust with ratatui
 
-This file maps the ganja-code build phases (P0–P7) to hands-on learning exercises in Rust and ratatui. It complements the implementation plan (`/.omc/plans/2026-08-03-opencode-rust-port.md`), which is the authoritative specification for phase goals, acceptance criteria, and architectural decisions.
+This file maps the ganja-code build phases (P0–P12) to hands-on learning exercises in Rust and ratatui. It complements three plan documents, each authoritative for its own span: `.omc/plans/2026-08-03-opencode-rust-port.md` (P0–P7 phase goals, acceptance criteria, and the crate-partitioning ADR), `.omc/plans/2026-08-11-tui-ux-port.md` (P8, eight composer behaviors), and `.omc/plans/2026-08-11-claude-composer-port.md` (P12, seven more composer behaviors — five ports, two named Claude Code divergences). P9–P11 shipped against frozen `.omc/handoffs/team-exec-p*.md` contracts rather than standalone plans; see the short interstitial before P12 below.
 
 **Audience**: Solo developer, Go expert, Rust beginner. Each phase ends with a working demo; exercises range from guided implementation to reading and annotating team code.
 
@@ -216,38 +216,120 @@ This file maps the ganja-code build phases (P0–P7) to hands-on learning exerci
 
 ---
 
-## P7: Parity Stretch (Optional; L effort; each item independently approvable)
+## P7: Parity Stretch (L effort — mostly landed; unchecked items name what's still open)
 
-**Goal**: Achieve feature parity with opencode v1.18.13 where feasible; support server mode and additional providers.
+**Goal**: Achieve feature parity with opencode v1.18.13 where feasible; support server mode and additional providers. **Status, 2026-08-11**: six of seven items landed in full or in part; the remaining gaps are named per item below rather than the whole phase staying "optional."
 
 ### Rust Concepts
 
 | Rust Concept | Go Anchor |
 |---|---|
 | Trait extraction (the `Transport` abstraction) | Go's `io.Writer` interface (late binding over single impl) |
+| `rusqlite` + hand-rolled migrations | Go's `database/sql` + `golang-migrate`/`goose` |
+| OAuth device-code and PKCE loopback flows | `golang.org/x/oauth2` device flow + a local `net/http` callback listener |
 
-### Exercises (pick any)
+### Exercises (pick any — most have landed; unchecked items name what's still open)
 
-- [ ] **`ganja serve` (HTTP + SSE transport)**: Implement `ganja-core/src/server/` and `ganja-cli/serve` subcommand (spec: `src/server/`, `packages/protocol`). Extract a `Transport` trait that abstracts over direct `Engine` calls (TUI's transport) and HTTP/SSE (server's transport). The serialized `Command`/`Event` protocol is the spec. Test with a `curl`-driven client that sends commands and reads SSE events.
+- [x] **`ganja serve` (HTTP + SSE transport)**: Implement `ganja-core/src/server/` and `ganja-cli/serve` subcommand (spec: `src/server/`, `packages/protocol`). Extract a `Transport` trait that abstracts over direct `Engine` calls (TUI's transport) and HTTP/SSE (server's transport). The serialized `Command`/`Event` protocol is the spec. Test with a `curl`-driven client that sends commands and reads SSE events.
+  **Landed**: as its own `ganja-serve` crate (not a `ganja-core` submodule — the engine stays terminal- and HTTP-free by a CI-enforced boundary), with `ganja-client` as the typed consumer `run --attach` drives (commits `f620fee`, `cef7736`; the crate split hardened further in P10, `.omc/plans/2026-08-06-crate-topology-and-ledger-execution.md` stage S5).
 
-- [ ] **`ganja run` (non-interactive mode)**: Implement `ganja run -m "prompt" --format json` (spec: `src/cli/`). Run a single turn in headless mode, outputting the final message as JSON. Test that `ganja run -m "read README.md" --format json` returns JSON with the file contents.
+- [x] **`ganja run` (non-interactive mode)**: Implement `ganja run -m "prompt" --format json` (spec: `src/cli/`). Run a single turn in headless mode, outputting the final message as JSON. Test that `ganja run -m "read README.md" --format json` returns JSON with the file contents.
+  **Landed**: `ganja run "prompt" --format json`, plus `--continue`, `--auto`, and `--attach` beyond the original scope (`CLAUDE.md` Commands section).
 
-- [ ] **OAuth providers**: Implement Anthropic subscription OAuth + GitHub Copilot device flow (spec: `packages/core/src/oauth/`, `github-copilot/`). Gate high-end models (Claude Pro, Max) behind authentication. Test with a fixture token.
+- [x] **OAuth providers**: Implement Anthropic subscription OAuth + GitHub Copilot device flow (spec: `packages/core/src/oauth/`, `github-copilot/`). Gate high-end models (Claude Pro, Max) behind authentication. Test with a fixture token.
+  **Landed**: both, plus grok (device *and* loopback-browser methods) and cursor's browser-and-long-poll pairing — beyond the original two-provider scope (`.omc/handoffs/team-exec-p8.md` A-4/A-5; hygiene fixes for piped-stdin misrouting and non-interactive Copilot logins followed in P9, `.omc/handoffs/team-exec-p9.md` D348–D350).
 
-- [ ] **SQLite storage migration**: Replace JSON storage with rusqlite (spec: `packages/core/src/database/`). Implement a schema with tables for sessions, messages, parts, usage. Write a migration tool that converts existing JSON sessions to SQLite. Test that old and new storage formats can coexist and are queryable.
+- [x] **SQLite storage migration**: Replace JSON storage with rusqlite (spec: `packages/core/src/database/`). Implement a schema with tables for sessions, messages, parts, usage. Write a migration tool that converts existing JSON sessions to SQLite. Test that old and new storage formats can coexist and are queryable.
+  **Landed**: `storage.rs`/`snapshot.rs` — one SQLite database per project, converted from the old file tree on first open (`CLAUDE.md` `ganja-core` section; P10 stage S1).
 
 - [ ] **Advanced tools** (websearch, skills, question, plan-mode): Port `tool/websearch.ts`, `tool/skill.ts`, `tool/question.ts`, and a `/plan` mode that spawns multiple agent turns. Each is independently valuable; pick one or more based on interest.
+  **Partially landed**: `websearch` (Exa or Parallel, keyed from the environment), `skill`, and `question` are all in `Registry::with_builtins()` (`CLAUDE.md` `ganja-tool` section) — check these off individually as you read/rebuild them. The `/plan` half is incomplete: `plan_exit` registers once the agent roster holds a build agent, but **`plan_enter` remains unported, with nothing behind that name** (`CLAUDE.md`, phase-discipline paragraph) — leave this sub-item open until that lands.
 
-- [ ] **Windows terminal support**: Verify the TUI works on Windows (spec: `packages/tui/src/terminal-win32.ts`). Test alt-screen mode, color rendering, and input handling. Debug and fix platform-specific issues.
+- [x] **Windows terminal support**: Verify the TUI works on Windows (spec: `packages/tui/src/terminal-win32.ts`). Test alt-screen mode, color rendering, and input handling. Debug and fix platform-specific issues.
+  **Landed**: a dedicated CI lane (`.omc/plans/2026-08-07-windows-support.md`; commits including `f13a102`, `d3f4dea`, `24488bc`, `3a12621`, `8235943`, `2516968`, `18cd9cf`, `4d652c6`, `5cc1c09`).
 
 - [ ] **Packaging**: Use `cargo-dist` to publish releases to GitHub and homebrew. Test that `brew install zchee/tap/ganja` works.
+  **Partially landed, and partially a standing decision, not a gap**: `dist-workspace.toml` builds a self-contained local archive (`dist build` → `target/distrib/`) — check that half off once you've run it. Publishing (a CI backend, a homebrew tap) is **deliberately deferred**: "No CI backend on purpose — publishing is deferred, so nothing may generate a workflow file" (`CLAUDE.md` Key Files table). Don't chase the `brew install` half as an exercise; it's a decision, not an omission.
+
+---
+
+## P8: The Composer Catches Up — Eight Upstream UI Behaviors (M effort)
+
+**Goal**: Port eight composer-facing behaviors the TUI gap analysis surfaced — prompt history, `@file#line-range` mentions, local file/image attachments, `question` custom text input, model variant switching, OSC 52 clipboard, template `` !`cmd` `` + `@file` expansion, and Ctrl+J newlines — retiring three pre-declared deviations (D5, D12, D109) in the process. Plan: `.omc/plans/2026-08-11-tui-ux-port.md`.
+
+### Rust Concepts
+
+| Rust Concept | Go Anchor |
+|---|---|
+| `#[serde(skip_serializing_if = "Option::is_none", default)]` field growth | Go struct-tag `omitempty` + additive JSON fields for backward compat |
+| Keybind tables as `const` data (`(Action, name, chord)` rows) | Go `map[string]func()` dispatch tables |
+| `BTreeMap<String, serde_json::Map<String, Value>>` for opaque provider options | Go `map[string]any` passthrough at a JSON boundary, no static shape |
+| A per-turn `Arc<Mutex<T>>` cell (the permission `pending` cell, reused as the pattern for later state) | a goroutine-scoped `chan` guarded by a mutex, shared by reference into a spawned worker |
+
+### Exercises
+
+- [ ] **Prompt history JSONL**: Read `crates/ganja-tui/src/history.rs` (`MAX_HISTORY_ENTRIES = 50` at line 25, `load_from` at line 148, `append` at line 193). Annotate the parse-what-parses-and-self-heal load path and the consecutive-duplicate suppression on append. Write a unit test that appends 51 entries and asserts exactly 50 remain on disk.
+
+- [ ] **`#line-range` grammar**: Read `mention.rs::parse_range` (`crates/ganja-tui/src/mention.rs:159`) — the suffix grammar `#(\d+)(?:-(\d*))?`, end kept only when `start < end`. Trace how a parsed range becomes `PartBody::File { start: Option<u32>, end: Option<u32>, .. }` in `ganja-protocol/src/lib.rs`. Write a round-trip test: parse → render → parse for `@src/lib.rs#10-20`, and confirm the reversed `#20-10` keeps only `start`.
+
+- [ ] **Serde-pinned protocol growth**: Find the both-directions pin test for `PartBody::File`'s `start`/`end` fields (old JSON deserializes into the new struct unchanged; a `None`-valued new struct serializes back byte-identical to the old JSON). Explain in your own words why `#[serde(default)]` is load-bearing here, and what you'd reach for on Go's `encoding/json` side to get the same backward-compat guarantee.
+
+- [ ] **Model variants, catalog to wire**: Read `ModelInfo::variants` in `crates/ganja-provider/src/catalog.rs:183` (`BTreeMap<String, serde_json::Map<String, Value>>`), then follow one variant selection through `Command::SwitchVariant` → `Event::VariantChanged` (protocol) → the active-slot storage column (`engine.rs`) → a wire's request-body splice (Anthropic `thinking`, OpenAI `reasoning_effort`). Explain the splice-order rule that keeps a wire's own required fields from being overwritten by a variant's option map.
+
+- [ ] **OSC 52, the second clipboard channel**: Read the copy path in `crates/ganja-tui/src/clipboard.rs` and `app.rs`'s writer-serialized emission of `\x1b]52;c;<base64>\x07`. Explain why the escape is written unconditionally rather than only when the `arboard` write succeeds — read `.omc/handoffs/p8-resume.md` deviation #11 for the reasoning (headless/SSH is exactly the case where OSC 52 is the *only* delivering channel).
+
+- [ ] **`question` custom text**: Read `component/question.rs`'s `custom` field (line 55), `offers_custom` (line 96), and `on_custom_row` (line 102). Trace what happens when a tool's `custom` flag is unset vs. `Some(false)` from the tool call through to the rendered free-text row. Write a component test asserting an empty typed answer exits editing **without replying** (not "falls back to the highlighted option" — the plan's own acceptance criterion 4 misstated this; see deviation #12 in `.omc/handoffs/p8-resume.md`, recorded specifically so nobody "fixes" the code toward the wrong wording).
+
+---
+
+## P9–P11: Interstitial (no dedicated exercises)
+
+P9, P10, and P11 shipped against frozen `.omc/handoffs/team-exec-p*.md` contracts rather than standalone `.omc/plans/` documents. They're noted here for continuity, not as learning units — P11 in particular was pure housekeeping.
+
+- **P9 — live-parity fallout** (`.omc/handoffs/team-exec-p9.md`): closed three defects the P8 live-provider pass measured — piped-stdin logins misrouting a Copilot token as a stored key, the Copilot deployment prompt blocking non-interactive logins, and `auth list` hiding a credential the environment shadowed — and moved `openai`'s wire selection from credential-picks-the-wire to vendor-picks-the-wire: every `openai`-id request now speaks the Responses API regardless of credential kind.
+- **P10 — crate topology + filesystem-discovery policy** (`.omc/plans/2026-08-06-crate-topology-and-ledger-execution.md`, stages S0–S7): split the engine's HTTP surface into the `ganja-serve`/`ganja-client` crates, landed encrypted-reasoning round-tripping (`PartBody::Reasoning`, the opaque provider state a `store: false` turn hands back), added compat providers, and set the standing policy that skills/agents/MCP/hooks are all config-opt-in — no `~/.claude` or `~/.agents` directory walk-ups, ever. Worth a look if you want it: read `instruction::skill_roots` (cited from `CLAUDE.md`'s `ganja-tool` section) and compare it to how you'd gate a Go CLI's plugin discovery behind an explicit config list instead of a filesystem walk. No formal exercise checkbox — this phase is architecture reading, not a build.
+- **P11 — ledger sweep** (`.omc/handoffs/team-exec-p11.md`): closed three outstanding deviations (D388 — wiring the `skill` tool's roots at the three frontend assembly sites; D389 — a permission-guard mutation that no test observed; D422 — a doc-comment split). Pure technical-debt closure, no new user-facing surface. No exercises.
+
+---
+
+## P12: The Composer Catches Up II — Seven Behaviors, Five Ports and Two Divergences (L effort)
+
+**Goal**: file-path Tab completion (both the `@` menu and the slash dropdown), Ctrl+R history search, clipboard image paste, mid-turn message steering, drop→mention, Ctrl+L redraw, and a rewind/checkpoint picker. Five of the seven have upstream opencode sources; two — Ctrl+R search and Ctrl+L redraw — are named Claude Code divergences with no upstream counterpart at all. Plan: `.omc/plans/2026-08-11-claude-composer-port.md`.
+
+**Status at time of writing**: W1 (`0fab540`), W2 (`f3cafad`), W3 (`2a9b32d`) and W4a steering (`9144851`) are landed and pushed. W4b (rewind picker) and the final verification/docs wave are in flight. The exercises below are written against the real landed code for W1–W4a; the rewind exercise reads the plan first and the code once W4b lands.
+
+### Rust Concepts
+
+| Rust Concept | Go Anchor |
+|---|---|
+| `Arc<Mutex<Vec<T>>>` per-turn mailbox (`Steering { waiting, consumed }` in `session.rs`) | a buffered `chan T` one goroutine sends into and another drains, guarded explicitly instead of channel-native |
+| Per-turn cells cloned into a handle (`TurnHandle::steer`) | Go closures capturing a shared pointer into a spawned goroutine, with no compiler-enforced ownership transfer |
+| A `Vec`-backed fallback lane (`component/queue.rs::Queue.entries`) beside a primary delivery path | a Go slice used as an append/drain worklist for what a fast path (here, mid-turn steering) couldn't take |
+| Protocol enum growth under serde pins (`Command::Steer`, `Event::SteerConsumed`, `RevertScope`) | Go's `encoding/json` additive fields + a hand-rolled round-trip test, minus a compile-time exhaustiveness check |
+| Exhaustive `match` forcing every call site to acknowledge a new variant (the `Event::SteerConsumed { .. }` ignore arm added to `engine.rs`'s replay helper) | Go's `switch` with no `default`, caught only by `go vet` (or a linter), never by the compiler |
+
+### Exercises
+
+- [ ] **Tab completion, two menus, two behaviors**: Read `app.rs`'s `handle_files_key` (Tab widened to match Enter's arm) and `handle_dropdown_key` (Tab completes the buffer and closes the menu but **runs nothing** — deviation D446). Read the W1→W2 handoff's "Rejected" note in `.omc/handoffs/team-exec-p12.md` and explain why ganja's dropdown Tab is a deliberate divergence rather than a port: what does upstream's Tab actually do in `autocomplete.tsx`, and why does the Claude Code screenshot spec win here instead?
+
+- [ ] **Drop → mention classifier**: Read `mention.rs::classify_drop` (`crates/ganja-tui/src/mention.rs:239`) — a pure function over pasted text and the project root, where every token in a paste must resolve to a path or the whole paste stays raw text. Write three adversarial test cases of your own (a pasted shell one-liner naming `./src`, a `file://` URL with a percent-escaped space, a quoted path with an escaped space) and check whether the existing table tests already cover them.
+
+- [ ] **Ctrl+R search — the age-approximation tradeoff**: Read `component/search.rs::HistorySearch` (struct at line 80) and `history.rs`'s `Recalled`/`times` field (deviation D448: `PromptInfo`'s on-disk JSONL carries no timestamp, so entries loaded from disk share one file mtime while an entry appended this run gets a real instant). Explain the tradeoff the W2→W3 handoff flags as a judgment call made without a reviewer present, and what it would have cost to add a real per-entry timestamp instead, given P8 already pinned the JSONL wire format.
+
+- [ ] **Clipboard image paste — why the error type split**: Read `clipboard.rs`'s `Error::NoImage` (line 53), `struct Image` (line 63), and `read_image` (line 100), and how both `System` and `Recording` implement it. Explain why `Error::NotText` needed a twin (`NoImage`) rather than being reused for "no image either," and trace a clipboard-holds-neither-text-nor-image test through `read` and `read_image` failing independently.
+
+- [ ] **Steering mailbox — plan, handoff, then the landed code**: Read plan section "4s-2. Engine: the steer mailbox" in `.omc/plans/2026-08-11-claude-composer-port.md`, then the W4a→W4b handoff's drain-point section in `.omc/handoffs/team-exec-p12.md`, then the landed code (`9144851`): `struct Steering`/`struct SteerInput` in `crates/ganja-core/src/session.rs` (around lines 252/273), `drain_steers` (line 918), and the private `steer` method on `Engine` in `engine.rs` (around line 2757, refusing `EngineError::NotStreaming` when the turn slot is empty). Answer: why does a drained steer sort *after* the assistant message in both the live request and the stored history, rather than interleaved with the assistant's own parts — and what would a resumed session look like if it sorted differently?
+
+- [ ] **Rewind picker — read the plan first; it isn't built yet**: Read plan section "4b. Engine" and "4c. TUI picker" for `Command::RevertTo { message_id, scope: RevertScope }`. Once W4b lands, read the real `Engine::revert_to_message` in `engine.rs` and confirm: does a `Files`-only scope really record no `RevertState` (nothing to redo, by design), while `Both`/`Conversation` reuse the existing `Command::Undo` machinery unchanged? Write one sentence explaining why that asymmetry is correct rather than a bug — the plan's own ADR calls it out as "the one genuinely new state."
 
 ---
 
 ## Success Criteria
 
 - [ ] All exercises completed (or deliberately skipped with rationale)
-- [ ] `cargo test --workspace` passes
-- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings` passes
+- [ ] `cargo nextest run --workspace` passes (each test in its own process); `cargo test --workspace --doc` passes separately — nextest skips doctests, so it needs its own run
+- [ ] `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings` passes
+- [ ] The crate-boundary gates in `CLAUDE.md`'s Commands section are green: `ganja-core` reaches neither `ratatui` nor `axum`, `ganja-provider` reaches neither `ratatui` nor the engine, and `ganja-permission`/`ganja-protocol` name nothing else of ours
 - [ ] Each phase has a working `cargo run` demo (with `GANJA_PROVIDER=fake` for non-auth phases)
 - [ ] You can explain the Go↔Rust mapping for each phase's concepts without notes
+- [ ] **Local-machine note**: if your shell's ambient environment exports `RUSTFLAGS` with `panic=abort`, prefix every gate above with `env -u RUSTFLAGS` — this is a workaround for your own shell profile, not a project requirement; CI does not carry it
