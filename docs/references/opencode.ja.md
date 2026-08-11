@@ -3,13 +3,16 @@
 > [!IMPORTANT]
 > **本書は参照用インベントリであり、ロードマップではない。ここに記載した全ての
 > 機能をポートするわけではない。** ganja の憲章は opencode **v1.18.13**(ピン)
-> との挙動パリティであって、動き続ける最新版とのパリティではない。表中の ❌ は
-> 観察であって約束ではなく、末尾のピン外テーブルは意図的な re-pin まで完全に
-> 憲章外である。
+> との挙動パリティであって、動き続ける最新版とのパリティではない。本改訂は
+> スナップショット時点の最新リリース **v1.18.16** を調査対象とし、ピン以降に
+> 動いた分は §16 に隔離した — ピン外は意図的な re-pin まで完全に憲章外である。
+> 表中の ❌ は観察であって約束ではない。
 
-スナップショット: 2026-08-11。ソースレベルの行はピン済みタグ
-(`anomalyco/opencode@v1.18.13`)へ、ドキュメント化済みの機能は opencode.ai へ
-リンクする。凡例: ✅ ganja に存在(パリティまたは近い等価物) · ⚠️ 部分的 · ❌ 不在。
+スナップショット: 2026-08-11、v1.18.16 に対して調査。ソースレベルの行は
+ganja が仕様として読むピン済みタグ(`anomalyco/opencode@v1.18.13`)へリンクする
+— v1.18.14–16 の差分はバグフィックスと Desktop のみ(§16)。ドキュメント化
+済みの機能は opencode.ai へリンクする。
+凡例: ✅ ganja に存在(パリティまたは近い等価物) · ⚠️ 部分的 · ❌ 不在。
 
 ## 1. ツール
 
@@ -21,6 +24,7 @@
 | [`apply_patch`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/apply_patch.ts) | OpenAI 系モデル限定のパッチ編集 | ❌ 権限表に名前のみ |
 | [`execute`(code-mode)](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/codemode) | MCP ツールをスクリプトで束ねる | ❌ パッケージごと対象外 |
 | [`doom_loop`](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/tool) | 実験的 | ❌ |
+| [スピル/切り詰め規律](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/truncate.ts) | 巨大なツール出力を stale 掃除つきスピルディレクトリへ切り詰め | ✅ ganja 自前のスピルファイル・テスト時はリダイレクト |
 | [read / edit / write / glob / grep / bash / todowrite / webfetch / websearch / skill / question / task](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/tool) | 実働セット | ✅ anchored write・read-before-write・権限ゲート含む |
 
 ## 2. CLI サブコマンド
@@ -34,16 +38,138 @@
 | [`pr <number>`](https://opencode.ai/docs/cli) | PR を checkout して起動 | ❌ |
 | [`acp`](https://opencode.ai/docs/cli) | IDE 向け Agent Client Protocol サーバー | ❌ |
 | [`agent create`](https://opencode.ai/docs/agents) | 対話的エージェント生成 | ❌ |
-| [`upgrade`](https://opencode.ai/docs/cli) | 自己更新 | ❌ |
+| [`upgrade` / `uninstall`](https://opencode.ai/docs/cli) | 自己更新・自己削除 | ❌ |
 | [`attach <url>`](https://opencode.ai/docs/cli) | 実行中サーバーへ TUI をアタッチ | ⚠️ headless `run --attach` のみ |
 | [`web`](https://opencode.ai/docs/cli) | Web UI | ❌ |
-| [`account` / `db` / `debug/*`](https://opencode.ai/docs/cli) | アカウント・DB・デバッグ | ❌ |
+| [`account` / `db` / `plug` / `generate` / `debug/*`](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/cli/cmd) | アカウント・DB・プラグイン・デバッグ | ❌ |
 | [`run --fork`](https://opencode.ai/docs/cli) | 継続時のセッション分岐 | ❌ |
 | [`run -f <file>`](https://opencode.ai/docs/cli) | CLI からのファイル・画像添付 | ❌(プロンプト内 `@` は✅) |
+| [`run --command <name>`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/cli/cmd/run.ts) | slash コマンドを headless 実行 | ❌ |
+| [`run --share` / `--title`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/cli/cmd/run.ts) | セッション共有・命名 | ❌ |
+| [`run --variant <v>`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/cli/cmd/run.ts) | CLI からの reasoning-effort variant 指定 | ❌(TUI の `/effort` は✅) |
 | [`serve --cors` / `--mdns`](https://opencode.ai/docs/server) | CORS 許可・mDNS 発見 | ❌(serve 自体は✅) |
 | [`run` / `serve` / `auth` / `models` / `sessions` / `mcp`](https://opencode.ai/docs/cli) | 実働セット | ✅ nd-JSON 出力・`--continue`/`--session`・Basic 認証 serve 含む |
 
-## 3. サーバー表面
+## 3. 設定サーフェス
+
+まず機構、次に `opencode.json(c)` のトップレベルキー。
+
+| 機構 | 補足 | ganja |
+|---|---|---|
+| [配置と優先順位](https://opencode.ai/docs/config) | remote `.well-known/opencode` < グローバル `~/.config/opencode/opencode.json(c)` < `OPENCODE_CONFIG` < プロジェクトルートと `.opencode/`(git ルートまで遡上)< `OPENCODE_CONFIG_CONTENT` < managed/enterprise | ⚠️ 3 層のみ: グローバルホーム < `GANJA_CONFIG` < プロジェクトファイル — remote・inline・managed 層なし |
+| [`$schema`](https://opencode.ai/docs/config) | エディタ補完 | ✅ 受理(して無視) |
+| [`{env:VAR}` / `{file:path}` 置換](https://opencode.ai/docs/config) | 任意の文字列値で動的展開 | ❌ 意図的 divergence として `config.rs` に明記 — 代わりに `key_env` が変数名を持つ |
+| JSONC 方言 | コメント・末尾カンマ | ✅ 文書順を保って解読 |
+| 未知のトップレベルキー | ピンは設定パースを**失敗**させる。**v1.18.16 は無視する**([release](https://github.com/anomalyco/opencode/releases/tag/v1.18.16)) | ✅ ganja はピンの姿勢を維持: 意図的に名指しで拒否 |
+| [`tui.json`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/config/index.tsx)(`OPENCODE_TUI_CONFIG`) | 独立した TUI 設定: `theme`・`keybinds`・`leader_timeout`・`scroll_speed`・`scroll_acceleration`・`diff_style`・`mouse`・`attention` | ❌ 第二のファイルなし — ganja の `theme`/`keybinds` は `ganja.jsonc` 内、scroll/diff/mouse 系ノブは不在 |
+
+| トップレベルキー | 補足 | ganja |
+|---|---|---|
+| [`model`](https://opencode.ai/docs/config) | `provider/model` 既定 | ✅ |
+| [`small_model`](https://opencode.ai/docs/config) | タイトル・要約用の安価なモデル | ✅ |
+| [`username`](https://opencode.ai/docs/config) | 表示名 | ❌ |
+| [`autoupdate`](https://opencode.ai/docs/config) | `true` / `false` / `"notify"` | ❌ 自己更新機構ごと不在 |
+| [`share`](https://opencode.ai/docs/share) | `manual` / `auto` / `disabled` | ❌ share サブシステムなし |
+| [`disabled_providers`](https://opencode.ai/docs/config) | プロバイダの全体無効化 | ❌ |
+| [`instructions`](https://opencode.ai/docs/rules) | 追加ルールファイル・glob 可 | ✅(置換の行のとおり `{file:}` は不可) |
+| [`permission`](https://opencode.ai/docs/permissions) | §7 | ✅ |
+| [`provider`](https://opencode.ai/docs/providers) | §8 | ✅ npm ベースでなく dialect ベース |
+| [`agent`](https://opencode.ai/docs/agents) | §5 | ✅ config テーブルのみ |
+| [`command`](https://opencode.ai/docs/commands) | §6 | ✅ config テーブルのみ |
+| [`mcp`](https://opencode.ai/docs/mcp-servers) | §9 | ✅ |
+| [`formatter`](https://opencode.ai/docs/formatters) | §12 | ❌ |
+| [`lsp`](https://opencode.ai/docs/lsp) | §9 | ✅ |
+| [`plugin`](https://opencode.ai/docs/plugins) | npm 指定 + ローカル `{plugin,plugins}/*.{ts,js}` | ❌ 対象外 |
+| [`snapshot`](https://opencode.ai/docs/config) | undo/redo スナップショットの切替 | ✅ |
+| [`watcher.ignore`](https://opencode.ai/docs/config) | ファイルウォッチャの除外 | ❌ ウォッチャは設定不可 |
+| `layout` | ピン時点で deprecated | n/a |
+| `enterprise` / `experimental` | 管理ポリシー・フィーチャーフラグ | ❌ |
+
+## 4. ルールとインストラクション
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [グローバル `AGENTS.md`](https://opencode.ai/docs/rules) | 設定ディレクトリ直下 | ✅ ganja の config home |
+| [`~/.claude/CLAUDE.md` フォールバック](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/session/instruction.ts) | Claude Code 互換。`OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` で停止 | ✅ グローバルのフォールバックとして読む。停止ノブは ❌ |
+| [プロジェクト遡上](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/session/instruction.ts) | `AGENTS.md` → `CLAUDE.md` → `CONTEXT.md`(deprecated)、各階層で先勝ち・祖先を積み上げない | ✅ |
+| [`instructions` 設定](https://opencode.ai/docs/rules) | 追加ファイル・glob を追記 | ✅ |
+
+## 5. エージェント
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [ビルトイン](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/agent/agent.ts) | `build`・`plan`・`general`・`explore` | ✅ 4 つ全て、explore のプロンプトは逐語 |
+| [隠し内部エージェント](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/agent/agent.ts) | `compaction`・`title`・`summary` をエージェントとしてモデル化 | ❌ ganja は同じ仕事をエージェント名簿の外でやる |
+| [Markdown エージェントファイル](https://opencode.ai/docs/agents) | `~/.config/opencode/agent/*.md` + `.opencode/agent/*.md`、frontmatter+本文がプロンプト | ❌ config 宣言のみ |
+| [config フィールド](https://opencode.ai/docs/agents) | `description`・`mode`(`primary`/`subagent`/`all`)・`hidden`・`disable`・`model`・`prompt`・`permission` | ✅ 7 つ全て |
+| [サンプリング系フィールド](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/agent/agent.ts) | `temperature`・`top_p`・`color`・`steps` | ❌ |
+| エージェント内の未知フィールド | 拒否せず運ぶ(upstream が許容) | ✅ 同じ姿勢 |
+| Tab 巡回 / `<leader>a` 一覧 | | ⚠️ Tab ✅、一覧は `/agents` |
+
+## 6. コマンドとスキル
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [`/init` ビルトイン](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/command/index.ts) | `AGENTS.md` のガイド付きセットアップ | ✅ テンプレート逐語 |
+| [`/review` ビルトイン](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/command/index.ts) | `[commit\|branch\|pr]`、サブタスクとして実行 | ❌ |
+| [Markdown コマンドファイル](https://opencode.ai/docs/commands) | 両スコープの `command/` または `commands/`、ファイル名がコマンド名 | ❌ config 宣言のみ |
+| [frontmatter](https://opencode.ai/docs/commands) | `description`・`agent`・`model` | ✅ config の等価物 |
+| [`subtask: true`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/command/index.ts) | コマンドを子セッションで実行 | ❌ |
+| [`$ARGUMENTS` / `$1..$N`](https://opencode.ai/docs/commands) | 全文、または位置トークン(最大番号のプレースホルダが残り全部を取る) | ✅ クォート付きトークン含む |
+| [`` !`cmd` `` 置換](https://opencode.ai/docs/commands) | シェル出力をテンプレートへ挿入 | ✅ プロジェクトルートで spawn。stderr 合流と失敗自己報告は命名済み deviation |
+| [`@file` 参照](https://opencode.ai/docs/commands) | composer メンション同様に添付 | ✅ |
+| [MCP prompts のコマンド化](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/command/index.ts) | サーバーの prompts が slash コマンドとして現れる | ❌ MCP はツールのみ |
+| [スキル(SKILL.md)](https://opencode.ai/docs/skills) | config home + プロジェクト + `skills.paths`、`skill` ツールが要求時に読込 | ✅ |
+| [外部スキル探索](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/skill/index.ts) | `.claude/` と `.agents/` も走査(`OPENCODE_DISABLE_EXTERNAL_SKILLS` で停止) | ❌ standing ruling: 外部由来は一切探索しない。`skills.paths` 一行で届く |
+
+## 7. パーミッション文法
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [3 アクション](https://opencode.ai/docs/permissions) | ツール毎、またはツール配下のパターン毎に `allow` / `ask` / `deny` | ✅ |
+| [末尾一致優先](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/permission/index.ts) | ルールセットを `findLast`。呼び出しの全パターンが allow でなければ確認 | ✅ エンジンの中核規則 |
+| [レイヤリング](https://opencode.ai/docs/permissions) | ビルトイン既定 < エージェントのルール < config ルール < 保存済み回答 | ✅ |
+| [bash パターン](https://opencode.ai/docs/permissions) | コマンド文字列へのワイルドカード。"always" 回答は arity 表でコマンドの*種類*を記憶 | ✅ |
+| [edit グループ](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/permission/index.ts) | `edit` が `edit`・`write` **かつ** `apply_patch` を統べる | ✅ 権限表に記名 |
+| [`~/` と `$HOME` の展開](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/permission/index.ts) | パスパターン内 | ✅ |
+| [エージェント毎の上書き](https://opencode.ai/docs/permissions) | エージェントのルールがグローバルの後ろへ付く | ✅ |
+| サブエージェントの継承 | | ✅ ただし文書化済み divergence: 拒否のみ継承し、許可は決して継承しない |
+| [`OPENCODE_PERMISSION`](https://opencode.ai/docs/permissions) | 環境変数からのインライン JSON ルールセット | ❌ |
+
+## 8. 認証とプロバイダ
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [models.dev プロバイダカタログ](https://opencode.ai/docs/providers) | 75+ プロバイダを id 解決 | ❌ ビルトイン 6 + compat 2 dialect |
+| [OpenCode Zen](https://opencode.ai/docs/zen) | ホスト型ゲートウェイ。`opencode/` プレフィクス・単一キー・無料モデルのローテーション | ❌ 対象外 |
+| [npm `@ai-sdk/*` プロバイダローダ](https://opencode.ai/docs/providers) | 任意の Vercel AI SDK パッケージをプロバイダ化 | ❌ ganja の `compat` は固定 2 dialect を話す |
+| [プロバイダ options](https://opencode.ai/docs/providers) | `baseURL`・`apiKey`・`headers` | ✅ `base_url`・`key_env`・`headers` として |
+| [モデル毎のカタログ上書き](https://opencode.ai/docs/providers) | `models.<id>.name` / `limit.context` / `limit.output` | ❌ config プロバイダは uncataloged のまま |
+| [モデル毎の options](https://opencode.ai/docs/models) | `reasoningEffort`・`textVerbosity`・`thinking.budgetTokens` の素通し | ⚠️ effort roster が reasoning options を合成(budget 演算含む)。`textVerbosity` と素通しは ❌ |
+| [Variants](https://opencode.ai/docs/models) | カタログ宣言 + プロバイダ毎のハードコード。`--variant`・`variant_cycle` ctrl+t | ⚠️ 同じ合成 roster を `/effort` として提供。CLI フラグと巡回キーはなし |
+| [`small_model`](https://opencode.ai/docs/config) | タイトルと要約 | ✅ |
+| Anthropic subscription OAuth(Pro/Max) | upstream は Anthropic の規約遵守のため削除。コミュニティプラグインは自己責任で存在 | n/a — ganja は最初から持たず、ピン時点に仕様もなかった |
+| xAI device-code ログイン | [v1.18.14](https://github.com/anomalyco/opencode/releases/tag/v1.18.14) から単一フロー | ✅ ganja の grok ログインは元から device flow — 両者が収斂 |
+| MCP OAuth | リモート MCP 認証 | ❌ config キーを明示拒否 |
+| [`providers login/list/logout`](https://opencode.ai/docs/providers) | 統一資格情報 UI | ⚠️ `auth` は ganja のプロバイダのみ |
+| anthropic / openai(両資格情報)/ grok / copilot / cursor / fake + compat | ganja の名簿。cursor は ganja 独自で upstream に対応物なし | ✅ OAuth ログインと credential-travel 境界含む |
+
+## 9. MCP と LSP
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [ローカル MCP サーバー](https://opencode.ai/docs/mcp-servers) | `command[]`・`environment`・`enabled` | ✅ |
+| [リモート MCP サーバー](https://opencode.ai/docs/mcp-servers) | `url`・`headers`・`enabled` | ✅ |
+| `<mcp_instructions>`・tools/list_changed | | ✅ |
+| [MCP prompts / resources](https://opencode.ai/docs/mcp-servers) | prompts はコマンド化、resources は列挙可能 | ❌ |
+| MCP 再接続 / 動的有効・無効 | | ❌ 起動時に一度 dial したきり |
+| [LSP ビルトインの広さ](https://opencode.ai/docs/lsp) | typescript・pyright・gopls・rust-analyzer・clangd・zls・elixir-ls 等 | ⚠️ `rust` と `gopls` の 2 つのみ |
+| [LSP 自動インストール](https://opencode.ai/docs/lsp) | サーバーをダウンロード(`OPENCODE_DISABLE_LSP_DOWNLOAD` で停止) | ❌ 決してインストールしない |
+| [カスタム LSP サーバー](https://opencode.ai/docs/lsp) | `command`・`extensions`・`env`・`initialization`・エントリ毎 `disabled` | ✅ |
+| edit/write 時の診断 | push + pull、エラーのみ、単一の継ぎ目で追記 | ✅ |
+| 残りの診断 pull・[`lsp` ツール](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/lsp.ts) | | ❌ |
+
+## 10. サーバー表面
 
 | ルート/挙動 | 補足 | ganja |
 |---|---|---|
@@ -52,52 +178,63 @@
 | [`/api/provider`・`/api/integration`・`/api/credential`](https://opencode.ai/docs/server) | プロバイダ・統合・資格情報 API | ❌ |
 | [`/api/mcp` 系](https://opencode.ai/docs/server) | サーバー側 MCP 管理+resources | ❌ |
 | [`/tui` ブリッジ](https://opencode.ai/docs/server) | TUI 制御チャネル | ❌ |
-| [OpenAPI スペック(`/doc`)](https://opencode.ai/docs/server) | ライブ Swagger | ❌ |
+| [OpenAPI 3.1 スペック(`/doc`)](https://opencode.ai/docs/server) | ライブ Swagger。`@opencode-ai/sdk` はここから生成される | ❌ |
 | [`/api/generate`](https://opencode.ai/docs/server) | one-shot 生成 | ❌ |
 | WebSocket / mDNS / マルチディレクトリ | | ❌ 単一起動ディレクトリはピン済み divergence |
 | [share 系ルート](https://opencode.ai/docs/share) | 公開・撤回 | ❌ |
 | legacy `/session` REST + `/event` SSE + `/permission` | | ✅ 非 loopback 無パスワード拒否の姿勢つき |
 
-## 4. サブシステム(ピン内)
+## 11. 環境変数
+
+ピンは約 70 の `OPENCODE_*` 変数を持つ。挙動を左右する主要なもの:
+
+| 変数 | 意味 | ganja |
+|---|---|---|
+| `OPENCODE_CONFIG` | 追加の設定ファイル | ✅ `GANJA_CONFIG` |
+| `OPENCODE_CONFIG_DIR` | config home | ✅ `GANJA_CONFIG_HOME`(マージでなく単一ホーム) |
+| `OPENCODE_CONFIG_CONTENT` | インライン JSON 設定 | ❌ |
+| `OPENCODE_TUI_CONFIG` | 別の `tui.json` | ❌ 第二の設定ファイルなし |
+| `OPENCODE_PERMISSION` | インライン権限ルールセット | ❌ |
+| `OPENCODE_DISABLE_AUTOUPDATE` / `OPENCODE_ALWAYS_NOTIFY_UPDATE` | 更新機構のノブ | n/a — 自己更新機構なし |
+| `OPENCODE_DISABLE_AUTOCOMPACT` | 自動コンパクションの停止 | ❌ |
+| `OPENCODE_DISABLE_PROJECT_CONFIG` | プロジェクト設定の無視 | ❌ |
+| `OPENCODE_DISABLE_CLAUDE_CODE(_PROMPT/_SKILLS)` | Claude Code のファイルを読まない | ⚠️ ganja は `~/.claude/CLAUDE.md` フォールバックを無条件に読む。スキルはそもそも外部由来を読まない |
+| `OPENCODE_DISABLE_EXTERNAL_SKILLS` | `.claude`/`.agents` スキル走査の停止 | n/a — 最初から探索しない |
+| `OPENCODE_SERVER_PASSWORD` / `_USERNAME` | serve の Basic 認証 | ✅ `GANJA_SERVER_PASSWORD` / `_USERNAME` |
+| `OPENCODE_WEBSEARCH_PROVIDER` | Exa / Parallel の選択 | ✅ `GANJA_WEBSEARCH_PROVIDER` |
+| `OPENCODE_ENABLE_EXA` / `_PARALLEL` | 検索バックエンドの有効化 | ⚠️ ganja は `EXA_API_KEY`/`PARALLEL_API_KEY` の有無で決める |
+| `OPENCODE_AUTO_SHARE` / `OPENCODE_DISABLE_SHARE` | share の挙動 | ❌ share なし |
+| `OPENCODE_LOG_LEVEL` / `OPENCODE_PRINT_LOGS` | ロギング | ❌ |
+| `OPENCODE_AUTH_CONTENT` | インライン資格情報 | ❌ |
+| `OPENCODE_DISABLE_LSP_DOWNLOAD` | LSP サーバーを入れない | n/a — ganja は決して入れない |
+| `OPENCODE_DISABLE_PRUNE` | stale スピル/切り詰めファイルの保持 | ❌ |
+| `OPENCODE_GIT_BASH_PATH` | windows のシェル | ❌ |
+| `OPENCODE_EXPERIMENTAL_*`(約 15 フラグ) | background subagents・code mode・plan mode・websockets・workspaces・lsp tool 等 | ❌ 一括で |
+
+ganja 独自の変数(`GANJA_MODEL`・`GANJA_FAKE_SCRIPT`・`GANJA_MODELS_URL`/`_PATH`・
+`GANJA_DISABLE_MODELS_FETCH`・`GANJA_AUTH_ISSUER`・`GANJA_OPENCODE_DIR`・
+`GANJA_LIVE_TEST`)には upstream の対応物がなく、リポジトリルートの
+`AGENTS.md` に記載がある。
+
+## 12. サブシステムと兄弟プロダクト
 
 | サブシステム | 補足 | ganja |
 |---|---|---|
-| [プラグイン](https://opencode.ai/docs/plugins) | JS ランタイム・npm+ローカル・ライフサイクルフック | ❌ 対象外 |
-| [share](https://opencode.ai/docs/share) | `opencode.ai/s/<id>` 公開・`/unshare` | ❌ 対象外 |
-| [フォーマッタ](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/format) | 編集後の言語別自動整形 | ❌ |
+| [プラグイン](https://opencode.ai/docs/plugins) | JS ランタイム。npm 指定 + ローカル `{plugin,plugins}/*.{ts,js}`。フック(`tool.execute.before/after`・`permission.ask`・`chat.message`・イベントバス)。`@opencode-ai/plugin` の型。ctx は SDK クライアントと Bun の `$` を運ぶ | ❌ 対象外 |
+| [share](https://opencode.ai/docs/share) | `opencode.ai/s/<id>` 公開・`/share` `/unshare`・`manual`/`auto`/`disabled` | ❌ 対象外 |
+| [フォーマッタ](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/format/formatter.ts) | 26+ のビルトイン(gofmt・prettier・biome・ruff・rustfmt・shfmt・terraform・clang-format 等)が編集後に走る。フォーマッタ毎の無効化またはカスタム `command`+`extensions`+`environment` | ❌ |
 | [バックグラウンドエージェント](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/background) | 非同期派遣・要約・通知 | ❌ |
 | [worktree](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/worktree) | エージェント毎の git worktree 分離 | ❌ |
 | [画像パイプライン](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/image) | 画像添付 | ⚠️ `@` 添付✅・クリップボード取込❌ |
+| ストレージ配置 | XDG data ディレクトリ: `auth.json`・`bin/`(管理バイナリ)・プロジェクト毎のセッションストレージ | ⚠️ `auth.json` + プロジェクト毎の SQLite 1 つ。`bin/` なし・何も自己インストールしない |
 | account / sync / control-plane | クラウドアカウント機構 | ❌ 対象外 |
 | installation(自己更新) | | ❌ |
 | [IDE / ACP](https://opencode.ai/docs/ide) | エディタ拡張・サイドバーチャット | ❌ 対象外 |
 | codemode | `execute` 実行基盤 | ❌ |
-| desktop / web / console / slack / enterprise / identity / containers / session-ui | 兄弟プロダクト | ❌ 対象外 |
+| [`@opencode-ai/sdk`](https://opencode.ai/docs/sdk) | サーバーの OpenAPI スペックから生成されるクライアント SDK | ❌(`ganja-client` は ganja-serve 相手の手書き) |
+| desktop / web / console / slack / enterprise / identity / containers / session-ui | 兄弟プロダクト — 1.18.15/16 のリリース作業の大半は Desktop に着地 | ❌ 対象外 |
 
-## 5. 認証・プロバイダ
-
-| 機能 | 補足 | ganja |
-|---|---|---|
-| Anthropic subscription OAuth(Pro/Max) | | ❌ **dropped** — ピン時点に仕様なし |
-| [models.dev プロバイダカタログ](https://opencode.ai/docs/providers) | 75+ プロバイダ | ❌ ビルトイン6+compat 2 dialect |
-| MCP OAuth | リモート MCP 認証 | ❌ config キーを明示拒否 |
-| [`providers login/list/logout`](https://opencode.ai/docs/providers) | 統一資格情報 UI | ⚠️ `auth` は ganja のプロバイダのみ |
-| anthropic / openai(両資格情報)/ grok / copilot / cursor / fake + compat | | ✅ OAuth ログインと credential-travel 境界含む |
-
-## 6. MCP・LSP の部分
-
-| 機能 | ganja |
-|---|---|
-| [MCP prompts / resources](https://opencode.ai/docs/mcp-servers) | ❌ |
-| MCP 再接続 | ❌ 一度 dial したきり |
-| MCP の動的有効/無効 | ❌ |
-| [モデル向け `lsp` ツール](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/lsp.ts) | ❌ |
-| [LSP サーバー自動インストール](https://opencode.ai/docs/lsp) | ❌ 決してインストールしない |
-| ビルトイン LSP の広さ(pyright・tsserver 等) | ⚠️ `rust`・`gopls` の2つのみ |
-| 残りの診断 pull | ❌ |
-| MCP stdio+remote HTTP・`<mcp_instructions>`・tools/list_changed / LSP push+pull 診断 | ✅ |
-
-## 7. TUI — 大型サーフェス
+## 13. TUI — 大型サーフェス
 
 | サーフェス | 補足 | ganja |
 |---|---|---|
@@ -116,7 +253,7 @@
 | TUI プラグイン機構 | | ❌ |
 | チャット+ストリーミング・permission ダイアログ(`a`/`A`/`d`)・question(自由入力含む)・palette+メニュー・テーマ・markdown・`/undo` マーカー | | ✅ |
 
-## 8. TUI — keybind 全レジストリ
+## 14. TUI — keybind 全レジストリ
 
 ポート済み・rebind 可能(6): [`app_exit`・`command_list`・`session_list`・`theme_list`・`agent_cycle`・`input_newline`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/config/keybind.ts)。
 以下は同レジストリの残り。*upstream の composer に Tab 補完は存在しない —
@@ -157,7 +294,7 @@ Tab は `agent_cycle`(ポート済み)、補完メニューはフィルタ+Enter
 | `input_delete_line` / `input_delete_to_line_end` / `input_delete_to_line_start` | ctrl+shift+d・ctrl+k・ctrl+u | ⚠️ k/u は内蔵・rebind 不可 |
 | `input_undo` / `input_redo` / `input_word_*` | ctrl+-・ctrl+.・alt+f/b 等 | ⚠️ 内蔵のみ |
 
-## 9. prompt モジュール
+## 15. prompt モジュール
 
 | モジュール | 補足 | ganja |
 |---|---|---|
@@ -168,13 +305,26 @@ Tab は `agent_cycle`(ポート済み)、補完メニューはフィルタ+Enter
 | [`history.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/prompt/history.tsx) | プロンプト履歴 | ✅ |
 | [`autocomplete.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/prompt/autocomplete.tsx) | `@`/`/` 補完+`#行レンジ` | ✅ |
 
-## 10. ピン外(v1.18.13 以降 — 意図的な re-pin まで憲章外)
+## 16. ピン以降に動いたもの — v1.18.14 → v1.18.16
 
-| 機能 | 補足 |
-|---|---|
-| [Queue vs Steer](https://opencode.ai/docs) | プロンプトキュー+実行中ターンへの mid-run 進路修正注入 |
-| FFF 検索エンジン | rg spawn を frecency 付き in-process 検索へ置換 |
-| [OpenCode Desktop](https://opencode.ai/download) | ネイティブ GUI・worktree ドロワー・通知 |
-| OpenCode v2 beta | アーキテクチャ世代交代 |
-| worktree ドロワー UI / agent manager | 並列エージェントの worktree 管理 |
-| `opencode.jsonc` v1.0.210+ カタログ形式 | variant 宣言の統合形式 |
+リリースノートに基づく差分の全量。ピンは不変で、以下のいずれも憲章の
+作業ではない。
+
+| 変更 | リリース | ganja |
+|---|---|---|
+| xAI ログインを単一の device-code フローへ統合 | [v1.18.14](https://github.com/anomalyco/opencode/releases/tag/v1.18.14) | ✅ 元から ganja の形 — 両者が収斂 |
+| 構造化された mid-stream プロバイダエラーを保持し、対応プロバイダがリトライ | v1.18.14 | ❌ 時間が生んだ divergence: ganja は最初のバイト前のみリトライ(ピンの規則) |
+| 一時的なプロバイダ/ネットワークエラーのリトライ範囲拡大 | v1.18.14 | ⚠️ 同じく first-byte 前のみの姿勢 |
+| ACP 使用量にキャッシュ書込を計上・キュー済み ACP 更新をターン終了前に待機 | v1.18.14 | n/a — ACP なし |
+| リモート workspace 修正(host `directory` 不転送・5xx 本文のログ) | v1.18.14 | n/a — 対象外 |
+| import 済み/レガシー id でも時系列順を維持。revert/fork を実時系列で | [v1.18.15](https://github.com/anomalyco/opencode/releases/tag/v1.18.15) | ✅ 構造的に無縁 — ganja の id は生成順に整列する |
+| 切り詰めの掃除がファイルのタイムスタンプで stale を除去 | v1.18.15 | ⚠️ ganja のスピル規律は独自 |
+| 反復コンパクションが過去のツール呼び出し履歴を要約に保持 | v1.18.15 | ❌ ganja のコンパクションはピンの挙動 |
+| tmux `set-clipboard on` 下の ssh コピー | v1.18.15 | ✅ 既にカバー — OSC 52 をシステムクリップボードより先に無条件でキュー |
+| カーソルスタイル設定(`tui.json`) | v1.18.15 | ❌ |
+| 未知のトップレベル設定キーを失敗でなく無視 | [v1.18.16](https://github.com/anomalyco/opencode/releases/tag/v1.18.16) | ❌ **意図的に** — ganja はピンの名指し拒否を維持 |
+| Home からのプロジェクト登録。Desktop のロケール/メニュー/macOS ライフサイクル | v1.18.15–16 | n/a — 兄弟プロダクト |
+
+本書の旧版はピン外の推測テーブル(v2 beta・FFF・queue-vs-steer)を
+持っていた。それらは 1.18 系より先の話か既にピン内の機能であり、退役
+させた。Desktop は §12 に載っている。
