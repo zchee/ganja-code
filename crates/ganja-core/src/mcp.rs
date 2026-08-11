@@ -45,6 +45,11 @@
 //! the one that sees the revived tools ([`crate::engine::Engine`]'s
 //! once-per-turn `refresh_mcp` contract, unmoved).
 //!
+//! A `ganja mcp reconnect <name>` CLI subcommand was deliberately not built
+//! alongside these: W5a kept the CLI's own scope to the read-only listing,
+//! so the `/mcp` dialog and [`crate::engine::Engine::reconnect_mcp`] remain
+//! the only two doors above. A named follow-up, not an oversight.
+//!
 //! # Output caps (**D464**)
 //!
 //! Claude's `MAX_MCP_OUTPUT_TOKENS` names the same worry a server's own result
@@ -1011,6 +1016,15 @@ impl Servers {
     /// [`Servers::status`] together with it is how a caller learns the
     /// outcome, the way [`Servers::retry_once`]'s spawned re-dial is read
     /// back.
+    ///
+    /// An in-flight login is not cancelled by [`Servers::shutdown`], which
+    /// only ever drains connected clients — the spawned wait above is bounded
+    /// by its own five-minute
+    /// [`ganja_provider::auth::mcp_oauth::CALLBACK_DEADLINE`] regardless, and
+    /// holds nothing more than a loopback socket and a spawned task, the same
+    /// spawned-never-joined shape [`Servers::retry_once`]'s re-dial already
+    /// has. A real gap only if `shutdown` is ever expected to mean "nothing
+    /// of mine still runs".
     ///
     /// # Errors
     ///
