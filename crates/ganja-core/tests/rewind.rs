@@ -43,9 +43,16 @@ use ganja_core::{
 };
 
 /// What the tracked file holds before the turn edits it.
+///
+/// Only the unix-gated achieved-files drill reads these two (and
+/// [`editing_turns`], which scripts them) — on Windows the drill is compiled
+/// out, so its helpers are gated with it or clippy's dead-code lint reds the
+/// lint lane there.
+#[cfg(unix)]
 const BEFORE: &str = "the original line\n";
 
 /// What the turn edits it to.
+#[cfg(unix)]
 const AFTER: &str = "the edited line\n";
 
 /// What a scripted turn writes into a file that did not exist, and which a
@@ -564,6 +571,7 @@ fn writing_turns(first: &Path, second: &Path) -> String {
 
 /// One prompt's worth: read the tracked file, edit it, and write a new one —
 /// so the turn's patch names both a path its tree holds and one it does not.
+#[cfg(unix)]
 fn editing_turns(tracked: &Path, fresh: &Path) -> String {
     serde_json::json!({
         "cadence_ms": 0,
