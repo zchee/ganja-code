@@ -17,13 +17,13 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 
 | Feature | Keys | ganja |
 |---|---|---|
-| [File path tab completion](https://code.claude.com/docs/en/interactive-mode) | `@path` + Tab | ⚠️ `@` menu exists; no Tab-accept (Enter only) |
+| [File path tab completion](https://code.claude.com/docs/en/interactive-mode) | `@path` + Tab | ✅ Tab accepts in both menus — `@` inserts exactly as Enter does, `/` completes the buffer without running it; directory-descent (`@dir` → `@dir/`) not built, the walker is files-only |
 | [Slash command autocomplete](https://code.claude.com/docs/en/slash-commands) | `/` | ✅ dropdown + palette |
 | [File mentions](https://code.claude.com/docs/en/common-workflows) | `@` | ✅ incl. `#line-range` and image/PDF attachments |
 | [Vim mode](https://code.claude.com/docs/en/interactive-mode) | `/vim` | ❌ |
 | [Prompt history](https://code.claude.com/docs/en/interactive-mode) | Up / Down | ✅ fifty entries, dedupe, self-healing store |
-| [Reverse history search](https://code.claude.com/docs/en/interactive-mode) | Ctrl+R | ❌ |
-| [Clipboard image paste](https://code.claude.com/docs/en/interactive-mode) | Ctrl+V | ❌ (`@`-mention attachments only) |
+| [Reverse history search](https://code.claude.com/docs/en/interactive-mode) | Ctrl+R | ✅ fuzzy-filtered, newest-first search modal with a preview pane; upstream's own Ctrl+R is unrelated (`session_rename`, never bound in ganja) |
+| [Clipboard image paste](https://code.claude.com/docs/en/interactive-mode) | Ctrl+V | ✅ PNG-encoded in-process (no OS shell-out) and attached through the existing `@`-mention pipeline |
 | [Long-paste collapsing](https://code.claude.com/docs/en/interactive-mode) | automatic | ❌ |
 | [External editor](https://code.claude.com/docs/en/interactive-mode) | Ctrl+G | ⚠️ `/editor` command; no key binding |
 | [Multiline input](https://code.claude.com/docs/en/interactive-mode) | Shift+Enter / Ctrl+J | ✅ upstream's four-chord default |
@@ -36,10 +36,10 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | [Input undo/redo](https://code.claude.com/docs/en/interactive-mode) | Ctrl+- / Ctrl+. | ⚠️ textarea built-ins only; not rebindable |
 | [Kill and word operations, rebindable](https://code.claude.com/docs/en/interactive-mode) | Ctrl+K/U, Alt+F/B, … | ⚠️ built-ins work; outside the keybind table |
 | [Submit key rebinding](https://code.claude.com/docs/en/settings) | config | ❌ Enter is fixed |
-| [Message queueing](https://code.claude.com/docs/en/interactive-mode) | type while working | ❌ busy turns refuse input |
+| [Message queueing](https://code.claude.com/docs/en/interactive-mode) | type while working | ✅ steers into the running turn at its next step boundary (`Command::Steer`); what cannot steer (refused, unconsumed, slash commands) falls back to a replayed FIFO |
 | [Agent mentions](https://code.claude.com/docs/en/sub-agents) | `@agent-…` | ❌ `@` is files only |
-| [Dropped-path mentions](https://code.claude.com/docs/en/interactive-mode) | drag & drop | ❌ |
-| [Screen redraw](https://code.claude.com/docs/en/interactive-mode) | Ctrl+L | ❌ |
+| [Dropped-path mentions](https://code.claude.com/docs/en/interactive-mode) | drag & drop | ✅ a drop or paste of one or more existing/`file://` paths becomes `@`-mentions; any token that fails to resolve leaves the whole paste literal |
+| [Screen redraw](https://code.claude.com/docs/en/interactive-mode) | Ctrl+L | ✅ forces the next frame through a full redraw (Claude Code binding; no upstream counterpart) |
 | [Staged interrupt](https://code.claude.com/docs/en/interactive-mode) | Ctrl+C once/twice | ⚠️ single-stage |
 
 ## 2. Modes and session keys
@@ -48,7 +48,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 |---|---|---|
 | [Permission mode cycling](https://code.claude.com/docs/en/iam) | Shift+Tab | ❌ no mode concept; the plan agent approximates plan mode |
 | [Extended thinking toggle](https://code.claude.com/docs/en/interactive-mode) | Tab / Cmd+T | ❌ (`/effort` selects a level instead) |
-| [Rewind / checkpoints](https://code.claude.com/docs/en/checkpointing) | Esc Esc, `/rewind` | ⚠️ `/undo`·`/redo` restore files only; no conversation rewind |
+| [Rewind / checkpoints](https://code.claude.com/docs/en/checkpointing) | Esc Esc, `/rewind` | ✅ `/rewind` + idle Esc Esc open a two-step checkpoint picker (Both/Conversation/Files scopes, `Command::RevertTo`); upstream's part-level anchor (`partID`) not ported — checkpoints are whole user messages |
 | [Background a running task](https://code.claude.com/docs/en/interactive-mode) | Ctrl+B | ❌ no background execution |
 | [Transcript / verbose toggle](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O | ❌ one rendering |
 | [Agent switching](https://code.claude.com/docs/en/sub-agents) | — | ✅ Tab cycles agents (ganja's own default); reverse cycle ❌ |

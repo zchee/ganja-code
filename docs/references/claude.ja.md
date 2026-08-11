@@ -16,13 +16,13 @@
 
 | 機能 | キー | ganja |
 |---|---|---|
-| [ファイルパスの Tab 補完](https://code.claude.com/docs/en/interactive-mode) | `@path` + Tab | ⚠️ `@` メニューはあるが Tab 確定なし(Enter のみ) |
+| [ファイルパスの Tab 補完](https://code.claude.com/docs/en/interactive-mode) | `@path` + Tab | ✅ `@`・`/` 両メニューで Tab 確定(`@` は Enter と同じ挿入、`/` は実行せず補完のみ);ディレクトリ降下(`@dir`→`@dir/`)は未実装 — ウォーカーがファイルのみを返すため |
 | [スラッシュコマンド補完](https://code.claude.com/docs/en/slash-commands) | `/` | ✅ ドロップダウン+パレット |
 | [ファイル mention](https://code.claude.com/docs/en/common-workflows) | `@` | ✅ `#行レンジ`・画像/PDF 添付を含む |
 | [Vim モード](https://code.claude.com/docs/en/interactive-mode) | `/vim` | ❌ |
 | [プロンプト履歴](https://code.claude.com/docs/en/interactive-mode) | ↑ / ↓ | ✅ 50件・重複抑止・自己修復ストア |
-| [履歴の逆方向検索](https://code.claude.com/docs/en/interactive-mode) | Ctrl+R | ❌ |
-| [クリップボード画像ペースト](https://code.claude.com/docs/en/interactive-mode) | Ctrl+V | ❌(添付は `@` mention 経由のみ) |
+| [履歴の逆方向検索](https://code.claude.com/docs/en/interactive-mode) | Ctrl+R | ✅ ファジー絞込・新しい順・プレビュー付きの検索モーダル(upstream の Ctrl+R は無関係な `session_rename` で ganja では未割当) |
+| [クリップボード画像ペースト](https://code.claude.com/docs/en/interactive-mode) | Ctrl+V | ✅ PNG をプロセス内エンコード(OS ツール呼出しなし)し、既存の `@` mention パイプライン経由で添付 |
 | [長文ペーストの折畳み](https://code.claude.com/docs/en/interactive-mode) | 自動 | ❌ |
 | [外部エディタ](https://code.claude.com/docs/en/interactive-mode) | Ctrl+G | ⚠️ `/editor` コマンドのみ・キー直結なし |
 | [複数行入力](https://code.claude.com/docs/en/interactive-mode) | Shift+Enter / Ctrl+J | ✅ upstream の4コード既定 |
@@ -35,10 +35,10 @@
 | [入力のアンドゥ・リドゥ](https://code.claude.com/docs/en/interactive-mode) | Ctrl+- / Ctrl+. | ⚠️ textarea 内蔵のみ・rebind 不可 |
 | [kill・word 操作の rebind](https://code.claude.com/docs/en/interactive-mode) | Ctrl+K/U、Alt+F/B 等 | ⚠️ 内蔵動作のみ・keybind 表の外 |
 | [送信キーの付替え](https://code.claude.com/docs/en/settings) | 設定 | ❌ Enter 固定 |
-| [メッセージキュー](https://code.claude.com/docs/en/interactive-mode) | 実行中に入力 | ❌ Busy 中は拒否 |
+| [メッセージキュー](https://code.claude.com/docs/en/interactive-mode) | 実行中に入力 | ✅ 実行中のターンへ次のステップ境界で steer(`Command::Steer`);steer できないもの(拒否・未消費・スラッシュコマンド)は再生 FIFO にフォールバック |
 | [エージェント mention](https://code.claude.com/docs/en/sub-agents) | `@agent-…` | ❌ `@` はファイルのみ |
-| [ドロップしたパスの mention 化](https://code.claude.com/docs/en/interactive-mode) | drag & drop | ❌ |
-| [画面再描画](https://code.claude.com/docs/en/interactive-mode) | Ctrl+L | ❌ |
+| [ドロップしたパスの mention 化](https://code.claude.com/docs/en/interactive-mode) | drag & drop | ✅ 既存パス・`file://` のドロップ/ペーストは `@` mention 化;一部でも解決できなければペーストはそのまま |
+| [画面再描画](https://code.claude.com/docs/en/interactive-mode) | Ctrl+L | ✅ 次フレームを強制フル redraw(Claude Code 由来のバインド、upstream に対応なし) |
 | [段階的な中断](https://code.claude.com/docs/en/interactive-mode) | Ctrl+C 1回/2回 | ⚠️ 一段のみ |
 
 ## 2. モード・セッション操作
@@ -47,7 +47,7 @@
 |---|---|---|
 | [permission mode 切替](https://code.claude.com/docs/en/iam) | Shift+Tab | ❌ モード概念なし。plan agent が plan mode の近似 |
 | [Extended Thinking 切替](https://code.claude.com/docs/en/interactive-mode) | Tab / Cmd+T | ❌(代わりに `/effort` がレベルを選ぶ) |
-| [リワインド / チェックポイント](https://code.claude.com/docs/en/checkpointing) | Esc Esc・`/rewind` | ⚠️ `/undo`・`/redo` はファイル復元のみ・会話巻戻しなし |
+| [リワインド / チェックポイント](https://code.claude.com/docs/en/checkpointing) | Esc Esc・`/rewind` | ✅ `/rewind` + アイドル時の Esc Esc で二段階チェックポイントピッカー(Both/Conversation/Files スコープ、`Command::RevertTo`);upstream の part 単位アンカー(`partID`)は未移植 — チェックポイントはユーザーメッセージ単位 |
 | [実行中タスクのバックグラウンド化](https://code.claude.com/docs/en/interactive-mode) | Ctrl+B | ❌ バックグラウンド実行自体なし |
 | [トランスクリプト/verbose 切替](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O | ❌ 表示は一種類 |
 | [エージェント切替](https://code.claude.com/docs/en/sub-agents) | — | ✅ Tab で順繰り(ganja 独自既定)・逆順は ❌ |
