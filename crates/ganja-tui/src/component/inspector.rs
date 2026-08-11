@@ -8,6 +8,18 @@
 //! at all, and it reaches the overlay only because `themes_open` gave the
 //! chord up (deviation **D453**, at `keybind.rs`'s own table row).
 //!
+//! The presentation is a synthesis of two screenshots supplied 2026-08-11,
+//! still filed under **D453** since it reshapes the same overlay rather than
+//! opening a second one: the OpenAI Codex CLI's own Ctrl+T overlay supplies
+//! the full-terminal takeover (no border, no centering — [`Inspector::render`]
+//! is handed the whole frame, not the transcript pane, and `App::draw` skips
+//! the editor and status bar while it is open) and the slash-art banner
+//! naming the active tab (`banner_line`); Claude Code's Ctrl+O
+//! detailed-transcript mode supplies the one-line footer's wording and its
+//! trailing mode-word marker (`footer`), replacing Codex's own two-line hint
+//! pair and separate `4% —` counter. Ganja keeps its three tabs rather than
+//! Codex's single view — the divergence the paragraph above already named.
+//!
 //! A view, not a mode: nothing here pauses a running turn, and every
 //! [`Inspector::render`] call re-reads what `App` hands it rather than a
 //! snapshot taken when the overlay opened — the state itself (the raw-log
@@ -20,9 +32,9 @@ use ganja_core::{SessionInfo, catalog};
 use ganja_protocol::{Event as CoreEvent, MessageId, Usage};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Rect},
+    layout::Rect,
     text::{Line, Span, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
+    widgets::{Clear, Paragraph, Widget as _},
 };
 use unicode_width::UnicodeWidthStr as _;
 
@@ -32,19 +44,21 @@ use crate::{
     transcript,
 };
 
-/// Widest the popup grows, whatever the terminal offers. Wider than
-/// [`crate::component::help::MAX_WIDTH`]'s 72: the token table alone needs
-/// eight columns, and the transcript tab is full input JSON plus output.
-const MAX_WIDTH: u16 = 110;
+/// Rows spent on the header (the banner and the tab strip) and the one-line
+/// footer, none of which scroll. No border and no centering margin to budget
+/// for anymore — full-terminal takeover, screenshot-sourced (see the module
+/// doc) — so unlike [`crate::component::help`]'s own `CHROME` this is the
+/// whole non-content cost, not just the half a `Block::bordered` left open.
+const CHROME: usize = 3;
 
-/// Rows spent on the tab strip and the footer, neither of which scrolls.
-/// Mirrors [`crate::component::help`]'s own `CHROME`, widened by the two rows
-/// the tab strip and the blank line under it cost that the help card, with
-/// no header of its own, never had to budget for.
-const CHROME: usize = 4;
-
-/// The keys the overlay answers to, shown along its bottom edge.
-const HINTS: &str = "[Left/Right] tab   [up/down] scroll   [Esc] close";
+/// The keys the overlay answers to, shown along the footer's left half in
+/// Claude Code's unbracketed `key action` wording — not Codex's own two-line,
+/// bracketed hint pair. Names neither Ctrl+T nor the tab-cycle keys, the same
+/// restraint the popup-era `HINTS` already used: the header's own tab strip
+/// already spells out the digit shortcuts, and a footer trying to fit both
+/// halves of Claude Code's pattern on an 80-column terminal has no room left
+/// for a chord the toggle that opened the overlay already taught.
+const HINTS: &str = "q/esc close \u{b7} up/down/pgup/pgdn scroll";
 
 /// Everything [`Inspector::render`] reads fresh every frame, bundled so the
 /// method takes a handful of parameters rather than one per field — `App`
@@ -100,6 +114,17 @@ impl Tab {
             Self::Transcript => "[1] transcript",
             Self::Log => "[2] log",
             Self::Tokens => "[3] tokens",
+        }
+    }
+
+    /// The lowercase word this tab goes by outside the strip's
+    /// digit-prefixed label — the banner's spaced-out letters, and the
+    /// footer's "Showing …" and trailing mode-word marker.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Transcript => "transcript",
+            Self::Log => "log",
+            Self::Tokens => "tokens",
         }
     }
 
@@ -186,9 +211,14 @@ impl Inspector {
         self.offset = 0;
     }
 
-    /// Draws the overlay centered over `area`.
+    /// Draws the overlay over the whole of `area`.
     ///
-    /// Sized to most of `area` rather than to its content, unlike
+    /// Full-terminal takeover, not a popup (screenshot-sourced, see the
+    /// module doc): no border, no centering, and `area` is the caller's
+    /// whole frame — `App::draw` hands it the same `Rect` `frame.area()`
+    /// returns, and skips the editor and status bar while this is open
+    /// rather than drawing them over the bottom of it. Content is still
+    /// sized to most of `area` rather than to itself, unlike
     /// [`crate::component::help::Help`]: a reference card is short enough to
     /// size itself to what it holds, where a raw event log or a full
     /// transcript is routinely longer than any terminal, and a popup that
@@ -200,12 +230,9 @@ impl Inspector {
             return;
         }
 
-        let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
-        let height = area.height.saturating_sub(2).max(1);
-        let inner_width = usize::from(width).saturating_sub(2);
-        let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
+        Clear.render(area, buffer);
 
-        Clear.render(popup, buffer);
+        let width = usize::from(area.width);
 
         let content = match self.tab {
             Tab::Transcript => transcript_lines(feed.session, feed.messages, theme),
@@ -214,34 +241,31 @@ impl Inspector {
         };
         let total = content.len();
 
-        let rows = usize::from(height)
-            .saturating_sub(2)
-            .saturating_sub(CHROME)
-            .max(1);
+        let rows = usize::from(area.height).saturating_sub(CHROME).max(1);
         // Written back so a scroll up starts from the last row actually
         // shown, the same discipline `Help::render` follows.
         self.offset = self.offset.min(total.saturating_sub(rows));
         let offset = self.offset;
 
-        let mut lines: Vec<Line<'static>> =
-            vec![tab_strip(self.tab, theme), Line::raw(String::new())];
+        let mut lines: Vec<Line<'static>> = vec![
+            banner_line(self.tab, theme, width),
+            tab_strip(self.tab, theme),
+        ];
         lines.extend(
             content
                 .into_iter()
                 .skip(offset)
                 .take(rows)
-                .map(|line| Line::styled(clip(&text_of(&line), inner_width), style_of(&line))),
+                .map(|line| Line::styled(clip(&text_of(&line), width), style_of(&line))),
         );
-        lines.push(Line::raw(String::new()));
         lines.push(Line::styled(
-            clip(&footer(offset, rows, total, inner_width), inner_width),
+            clip(&footer(self.tab, offset, rows, total, width), width),
             theme.dim,
         ));
 
         Paragraph::new(Text::from(lines))
-            .block(Block::bordered().title(" inspector "))
             .style(theme.fg.patch(theme.background_panel))
-            .render(popup, buffer);
+            .render(area, buffer);
     }
 }
 
@@ -265,6 +289,27 @@ fn style_of(line: &Line<'static>) -> ratatui::style::Style {
     line.spans
         .first()
         .map_or_else(Default::default, |span| span.style)
+}
+
+/// The header's first line: Codex's `/`-and-space-filled banner, spelling out
+/// the active tab's name letter by letter (Screenshot A's
+/// `/ T R A N S C R I P T / / / …`) rather than a fixed "TRANSCRIPT" — this
+/// build keeps three tabs, so the banner is the one place naming which of
+/// them is active besides the strip underneath it.
+fn banner_line(active: Tab, theme: &Theme, width: usize) -> Line<'static> {
+    let spaced = active
+        .name()
+        .to_uppercase()
+        .chars()
+        .map(|letter| letter.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut banner = format!("/ {spaced} /");
+    while banner.width() < width {
+        banner.push_str(" /");
+    }
+
+    Line::styled(clip(&banner, width), theme.accent)
 }
 
 /// The strip naming all three tabs, the active one picked out.
@@ -397,24 +442,44 @@ fn short_id(id: &MessageId) -> String {
         .to_owned()
 }
 
-/// The bottom edge: which keys work, and — when the tab does not fit —
-/// which of its rows are on screen. Mirrors
-/// [`crate::component::help`]'s own `footer`.
-fn footer(offset: usize, rows: usize, total: usize, width: usize) -> String {
+/// The footer's right-edge marker: the active tab's mode word beside how far
+/// the viewport sits in its content — Claude Code's `verbose` mode-word
+/// presentation, combined with a scroll percentage rather than left bare, and
+/// Codex's own `4% —` pairing turned around so the word comes first. An em
+/// dash when everything already fits and there is nowhere to scroll to,
+/// which is the one case a percentage would claim a position that does not
+/// exist.
+fn position(offset: usize, rows: usize, total: usize) -> String {
     if total <= rows {
-        return HINTS.to_owned();
+        return "\u{2014}".to_owned();
     }
 
-    let last = (offset + rows).min(total);
-    let counter = format!("{first}-{last} of {total}", first = offset + 1);
+    let span = total.saturating_sub(rows).max(1);
+    let percent = (offset.min(span) * 100 / span).min(100);
+
+    format!("{percent}%")
+}
+
+/// The bottom edge, one line: Claude Code's `Showing … · … · …` wording on
+/// the left, the active tab's [`position`] marker at the right edge — Codex's
+/// own two-line hint pair plus separate `4% —` counter, collapsed into the
+/// one line Screenshot B's footer used. When both cannot fit, the marker
+/// stays and the static hints go, the same priority
+/// [`crate::component::help`]'s own `footer` gives its row counter over its
+/// hints.
+fn footer(tab: Tab, offset: usize, rows: usize, total: usize, width: usize) -> String {
+    let mode = tab.name();
+    let left = format!("Showing {mode} \u{b7} {HINTS}");
+    let right = format!("{mode} \u{b7} {}", position(offset, rows, total));
+
     let room = width
-        .saturating_sub(HINTS.width())
-        .saturating_sub(counter.width());
+        .saturating_sub(left.width())
+        .saturating_sub(right.width());
     if room == 0 {
-        return counter;
+        return right;
     }
 
-    format!("{HINTS}{gap}{counter}", gap = " ".repeat(room))
+    format!("{left}{gap}{right}", gap = " ".repeat(room))
 }
 
 #[cfg(test)]

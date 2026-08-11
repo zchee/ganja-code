@@ -909,11 +909,15 @@ impl App {
                 }
                 // A view, not a mode (**F2**): everything it reads is handed
                 // in fresh from `App`'s own state, so a turn streaming
-                // beneath it is never behind what this shows.
+                // beneath it is never behind what this shows. Full-terminal
+                // takeover (screenshot-sourced, see the module doc): `area`,
+                // not `transcript`, so it covers the composer and status bar
+                // too — which is why those two are skipped below rather than
+                // drawn over the bottom of it.
                 if let Some(inspector) = &mut self.inspector {
                     let session = self.engine.current_session();
                     inspector.render(
-                        transcript,
+                        area,
                         buffer,
                         &self.theme,
                         &Feed {
@@ -931,8 +935,10 @@ impl App {
                 if let Some(permission) = &self.permission {
                     permission.render(transcript, buffer, &self.theme);
                 }
-                self.editor.render(prompt, buffer);
-                self.status.render(status, buffer, &self.theme);
+                if self.inspector.is_none() {
+                    self.editor.render(prompt, buffer);
+                    self.status.render(status, buffer, &self.theme);
+                }
             })
             .context("failed to draw a frame")?;
 
@@ -1224,8 +1230,14 @@ impl App {
         if let Some(inspector) = &mut self.inspector {
             // The toggle's other half: Ctrl+T opened it, and closes it again
             // from anywhere inside — the same "from anywhere idle-or-
-            // streaming" reach the chord opens it from (**F2**).
-            if key.code == KeyCode::Esc || self.keys.binds(keybind::Action::TranscriptOpen, key) {
+            // streaming" reach the chord opens it from (**F2**). `q` closes
+            // it too, Codex's own binding for its transcript overlay
+            // (screenshot-sourced, see `component/inspector.rs`'s module
+            // doc) — nothing else in this block claims the letter.
+            if key.code == KeyCode::Esc
+                || key.code == KeyCode::Char('q')
+                || self.keys.binds(keybind::Action::TranscriptOpen, key)
+            {
                 self.inspector = None;
                 return Ok(());
             }
@@ -6670,6 +6682,24 @@ mod tests {
         assert!(app.inspector.is_none(), "ctrl+t itself should close it too");
     }
 
+    /// `q` closes the overlay too — Codex's own binding for its transcript
+    /// overlay, screenshot-sourced (see `component/inspector.rs`'s module
+    /// doc) — beside Esc and Ctrl+T rather than instead of them.
+    #[tokio::test]
+    async fn q_closes_the_inspector_too() {
+        let mut app = app();
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+t is handled");
+        assert!(app.inspector.is_some());
+
+        app.handle(key(KeyCode::Char('q'), KeyModifiers::NONE))
+            .await
+            .expect("q is handled");
+        assert!(app.inspector.is_none(), "q should close it");
+    }
+
     /// Left/Right cycle the tabs and the digit keys jump straight to one, all
     /// reflected in what actually renders rather than just in which key was
     /// pressed.
@@ -6761,8 +6791,9 @@ mod tests {
     }
 
     /// Opened the way a user opens it, over a real transcript — this is what
-    /// pins the overlay's border, its tab strip and its footer inside the
-    /// full three-pane frame.
+    /// pins the overlay's banner, its tab strip and its footer, full-terminal
+    /// (screenshot-sourced, see `component/inspector.rs`'s module doc) rather
+    /// than boxed inside the three-pane frame the way it used to be.
     #[tokio::test]
     async fn snapshot_inspector_dialog_open() {
         let mut app = app();
@@ -6776,6 +6807,45 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
 
         insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// Full-terminal takeover means what it says: the composer and the
+    /// status bar — both still drawn beneath every other dialog — disappear
+    /// under the inspector while it is open, and come back the moment it
+    /// closes (screenshot-sourced, see `component/inspector.rs`'s module
+    /// doc).
+    #[tokio::test]
+    async fn the_inspector_covers_the_composer_and_the_status_bar() {
+        let mut app = app();
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let closed = screen(&terminal);
+        assert!(closed.contains("Ask ganja something"), "{closed}");
+        assert!(closed.contains("Ctrl-C quit"), "{closed}");
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+t opens the overlay");
+        app.draw(&mut terminal).expect("a frame draws");
+        let open = screen(&terminal);
+        assert!(
+            !open.contains("Ask ganja something"),
+            "the composer should be covered while the overlay is open:\n{open}"
+        );
+        assert!(
+            !open.contains("Ctrl-C quit"),
+            "the status bar should be covered too:\n{open}"
+        );
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape closes the overlay");
+        app.draw(&mut terminal).expect("a frame draws");
+        let reclosed = screen(&terminal);
+        assert!(
+            reclosed.contains("Ask ganja something"),
+            "closing the overlay should bring the composer back:\n{reclosed}"
+        );
     }
 
     #[tokio::test]
