@@ -108,6 +108,12 @@ pub(crate) struct Host {
     /// The store, when the engine persists. A child session is an ordinary
     /// stored session that names its parent.
     pub(crate) persistence: Option<Arc<SessionState>>,
+    /// The parent engine's own background-job registry, shared rather than
+    /// withheld: a job outlives whichever turn started it, and the depth
+    /// guard `tools` already draws (no `task` tool in the child's set) is
+    /// about delegating *more* work, not about a subagent's own `bash` calls
+    /// losing a capability its parent has.
+    pub(crate) jobs: Option<Arc<dyn crate::tool::job::Jobs>>,
 }
 
 impl std::fmt::Debug for Host {

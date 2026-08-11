@@ -274,6 +274,7 @@ mod tests {
             spawn: None,
             ask: asker,
             switch: None,
+            jobs: None,
         }
     }
 

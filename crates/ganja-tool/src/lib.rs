@@ -16,9 +16,12 @@
 /// how `write` and `edit` reach the disk, not something a frontend or a
 /// third-party tool has any business addressing files through.
 mod anchor;
+pub mod bash_output;
 pub mod edit;
 pub mod glob;
 pub mod grep;
+pub mod job;
+pub mod kill_shell;
 pub mod plan;
 pub mod question;
 pub mod read;
@@ -121,6 +124,16 @@ pub struct ToolCtx {
     /// passthrough — the same depth guard as [`ToolCtx::spawn`]. [`Some`] only
     /// when the engine's registry holds a build agent: presence is ability.
     pub switch: Option<Arc<dyn plan::Switcher>>,
+    /// What a call tracks a background job through, which
+    /// [`shell::ShellTool`]'s `run_in_background` path, [`bash_output`] and
+    /// [`kill_shell`] all reach through this one seam.
+    ///
+    /// [`None`] on every fixture and every context nobody built a registry
+    /// for — the `!` shell passthrough, the `@` file menu's glob walk, a
+    /// command template's expansion — where the two new tools refuse
+    /// politely and `bash`'s `run_in_background` does the same, rather than
+    /// running a background job nothing will ever be able to poll or kill.
+    pub jobs: Option<Arc<dyn job::Jobs>>,
 }
 
 impl ToolCtx {
@@ -247,6 +260,8 @@ impl Registry {
             // MCP server's tools are, over the top of this one.
             Arc::new(skill::SkillTool::new()),
             Arc::new(question::QuestionTool),
+            Arc::new(bash_output::BashOutputTool),
+            Arc::new(kill_shell::KillShellTool),
         ])
     }
 
@@ -663,6 +678,7 @@ mod tests {
             spawn: None,
             ask: None,
             switch: None,
+            jobs: None,
         }
     }
 

@@ -36,6 +36,11 @@ use crate::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
 /// timeout. Upstream's `2 * 60 * 1000`.
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(2 * 60 * 1000);
 
+/// What a call reads when it asked to run in the background but this build
+/// offered the tool without anywhere to track one. Not reachable through the
+/// engine, which wires a jobs handle into every [`ToolCtx`] it builds.
+const NO_BACKGROUND: &str = "background shells are not available in this context";
+
 /// How long the tree is given to wind itself up after `SIGTERM` before it is
 /// killed outright. Upstream's `SIGKILL_TIMEOUT_MS`. Only a process group can
 /// be asked to wind itself up, so only the unix path has a use for it.
@@ -83,6 +88,12 @@ struct Args {
     /// The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.
     #[serde(default)]
     workdir: Option<String>,
+    /// Set to true to run this command in the background. Returns immediately
+    /// with a shell id instead of waiting for the command to finish; poll
+    /// bash_output with that id for new output. timeout is ignored when this
+    /// is true — see [`ShellTool::run_reporting`]'s background branch.
+    #[serde(default)]
+    run_in_background: Option<bool>,
 }
 
 /// How a command stopped running.
@@ -259,6 +270,16 @@ impl ShellTool {
             None => ctx.cwd.clone(),
         };
 
+        // Background execution branches before any of the foreground
+        // machinery below runs — the same spawn this tool has always used
+        // (**D454**), handed to whoever tracks it from here. Nothing past
+        // this block is reachable on this path, and nothing in it is
+        // touched by this path: the foreground body stays exactly what it
+        // was.
+        if args.run_in_background == Some(true) {
+            return self.spawn_background(args.command, &cwd, ctx).await;
+        }
+
         let mut child = self.spawn(&args.command, &cwd)?;
 
         // Both pipes are drained the whole time the command runs: a command
@@ -345,6 +366,47 @@ impl ShellTool {
             title: args.command,
             output,
             metadata,
+        })
+    }
+
+    /// Runs `command` in `cwd` as a background job: the same spawn
+    /// [`ShellTool::spawn`] gives the foreground path, handed to
+    /// [`ToolCtx::jobs`] instead of waited on inline. Returns as soon as
+    /// registration completes, naming the id `bash_output` and `kill_shell`
+    /// read (**D454**).
+    ///
+    /// `timeout` is never consulted here — **D455**: the foreground default
+    /// exists so a hung command cannot wedge a turn waiting on it, and a
+    /// background job blocks nothing, so applying the same clock would kill
+    /// the long-running work backgrounding exists for the moment it passed
+    /// two minutes with no override. `kill_shell` is the one way a
+    /// background job ends before it exits on its own.
+    async fn spawn_background(
+        &self,
+        command: String,
+        cwd: &Path,
+        ctx: &ToolCtx,
+    ) -> Result<ToolOutput, ToolError> {
+        let Some(jobs) = ctx.jobs.as_ref() else {
+            return Err(ToolError::Failed(NO_BACKGROUND.to_owned()));
+        };
+
+        let child = self.spawn(&command, cwd)?;
+        let status = jobs.start(command.clone(), child).await;
+
+        Ok(ToolOutput {
+            title: command,
+            output: format!(
+                "Command is running in the background with id \"{}\". Nothing \
+                 here notifies you of new output or completion — call \
+                 bash_output with this id to poll for it, and kill_shell to \
+                 end it early.",
+                status.id
+            ),
+            metadata: serde_json::json!({
+                "bash_id": status.id,
+                "status": "running",
+            }),
         })
     }
 }
@@ -693,8 +755,15 @@ impl ShellTool {
 /// Upstream's `killTree` sequence: `SIGTERM` to the group, a short grace, then
 /// `SIGKILL` to whatever ignored it. The standard library only ever kills one
 /// process, so ending the group takes `killpg`.
+///
+/// Public — not private to this module — because `ganja-core`'s
+/// background-job registry ends a killed or shut-down job's tree the exact
+/// same way a foreground command's cancel or timeout does; re-deriving the
+/// `SIGTERM`/grace/`SIGKILL` sequence a second time would be the sequence a
+/// security review has to read twice instead of once, for no behavioral
+/// difference between the two callers.
 #[cfg(unix)]
-async fn kill_tree(child: &mut Child) {
+pub async fn kill_tree(child: &mut Child) {
     let Some(pid) = child.id() else {
         // Already reaped; there is no group left to name.
         return;
@@ -756,8 +825,11 @@ fn signal_group(pid: u32, signal: libc::c_int) {
 /// for a tree that has already exited, which is the outcome being asked for —
 /// and the direct child is killed regardless, so a machine whose `taskkill` is
 /// missing or refused is no worse off than before.
+///
+/// Public for the same reason the unix twin above is: `ganja-core`'s
+/// background-job registry reuses this sequence rather than re-deriving it.
 #[cfg(not(unix))]
-async fn kill_tree(child: &mut Child) {
+pub async fn kill_tree(child: &mut Child) {
     if let Some(pid) = child.id() {
         let _ = Command::new("taskkill")
             .args(["/pid", &pid.to_string(), "/T", "/F"])
@@ -1032,7 +1104,7 @@ fn describe_tool(shell: &str) -> String {
         ],
     );
 
-    render(
+    let mut description = render(
         include_str!("shell.txt"),
         &[
             ("intro", INTRO),
@@ -1042,8 +1114,29 @@ fn describe_tool(shell: &str) -> String {
             ("tmp", &std::env::temp_dir().display().to_string()),
             ("commandSection", &command_section),
         ],
-    )
+    );
+    // Ganja's own addition, with no upstream counterpart to port (**D454**):
+    // appended after the ported prompt above, which stays a byte-exact copy
+    // of upstream opencode's.
+    description.push_str("\n\n");
+    description.push_str(BACKGROUND_SECTION);
+
+    description
 }
+
+/// Documents `run_in_background`, `bash_output` and `kill_shell` — Claude
+/// Code's contract, which this prompt states plainly rather than promising
+/// something this build does not do: there is no push notification when a
+/// background shell produces output or finishes, only `bash_output` to poll.
+const BACKGROUND_SECTION: &str = "\
+# Running in the background
+Set run_in_background to true to start a long-running command without \
+waiting for it to finish; the call returns immediately, naming the shell's \
+id. Use the bash_output tool with that id to check on it — output arrives \
+only when you ask for it, never automatically, so poll when you need to \
+know — and kill_shell to end it early. A timeout given alongside \
+run_in_background is ignored: a backgrounded command is not waited on, so \
+nothing here would apply it.";
 
 /// Upstream's `profile()` for a posix shell, whose fields are short enough to
 /// live here rather than in a prompt file of their own.
@@ -1109,7 +1202,11 @@ mod tests {
     // than sit dead on windows.
     #[cfg(unix)]
     use super::{SPILL_THRESHOLD, Spill, assemble};
-    use crate::{FileTimes, Tool, ToolCtx, ToolError, truncate};
+    use crate::{
+        FileTimes, Tool, ToolCtx, ToolError,
+        job::{JobRead, JobStatus, Jobs, JobsError, State},
+        truncate,
+    };
 
     /// `text`, which a shell printed, as this platform spells a path.
     ///
@@ -1169,7 +1266,137 @@ mod tests {
             spawn: None,
             ask: None,
             switch: None,
+            jobs: None,
         }
+    }
+
+    /// A [`Jobs`] that records the one call it expects and hands back a
+    /// scripted status — enough to prove `run_in_background` really reaches
+    /// [`ToolCtx::jobs`] with a live child, without a whole job registry.
+    #[derive(Debug)]
+    struct Recording {
+        started: std::sync::Mutex<Option<(String, tokio::process::Child)>>,
+    }
+
+    impl Recording {
+        fn new() -> Self {
+            Self {
+                started: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Jobs for Recording {
+        async fn start(&self, command: String, child: tokio::process::Child) -> JobStatus {
+            let status = JobStatus {
+                id: "bash_1".to_owned(),
+                command: command.clone(),
+                state: State::Running,
+            };
+            *self.started.lock().expect("never poisoned") = Some((command, child));
+
+            status
+        }
+
+        async fn output(&self, bash_id: &str) -> Result<JobRead, JobsError> {
+            Err(JobsError::NotFound(bash_id.to_owned()))
+        }
+
+        async fn kill(&self, bash_id: &str) -> Result<JobStatus, JobsError> {
+            Err(JobsError::NotFound(bash_id.to_owned()))
+        }
+
+        fn list(&self) -> Vec<JobStatus> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn run_in_background_returns_immediately_naming_the_job_id() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let jobs: Arc<dyn Jobs> = Arc::new(Recording::new());
+
+        let out = ShellTool::new()
+            .run(
+                serde_json::json!({ "command": "sleep 30", "run_in_background": true }),
+                &ToolCtx {
+                    jobs: Some(Arc::clone(&jobs)),
+                    ..ctx(dir.path().to_owned())
+                },
+            )
+            .await
+            .expect("a background call still completes");
+
+        assert!(
+            out.output.contains("bash_1"),
+            "the reply should name the job id: {:?}",
+            out.output
+        );
+        assert_eq!(out.metadata["bash_id"], "bash_1");
+        assert_eq!(out.metadata["status"], "running");
+    }
+
+    /// Proves the child handed to [`Jobs::start`] is a real, independently
+    /// running process — not a description of one — by reading a file it
+    /// writes after `spawn_background` has already returned.
+    #[tokio::test]
+    async fn run_in_background_hands_over_a_real_running_child() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let marker = dir.path().join("marker");
+        let jobs = Arc::new(Recording::new());
+        let command = format!("sleep 0.2; echo yes > {}", posix(&marker));
+
+        ShellTool::new()
+            .run(
+                serde_json::json!({ "command": command, "run_in_background": true }),
+                &ToolCtx {
+                    jobs: Some(Arc::clone(&jobs) as Arc<dyn Jobs>),
+                    ..ctx(dir.path().to_owned())
+                },
+            )
+            .await
+            .expect("a background call still completes");
+
+        assert!(
+            !marker.exists(),
+            "the call returned before the delayed write, or nothing was backgrounded"
+        );
+
+        let mut child = jobs
+            .started
+            .lock()
+            .expect("never poisoned")
+            .take()
+            .expect("the tool registered exactly one job")
+            .1;
+        child
+            .wait()
+            .await
+            .expect("the backgrounded shell can still be waited on directly");
+
+        assert!(
+            marker.exists(),
+            "the process kept running after the tool call returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_in_background_without_a_jobs_handle_is_refused_politely() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+
+        let refused = ShellTool::new()
+            .run(
+                serde_json::json!({ "command": "true", "run_in_background": true }),
+                &ctx(dir.path().to_owned()),
+            )
+            .await
+            .expect_err("nothing here can track a background job");
+
+        assert!(
+            matches!(&refused, ToolError::Failed(message) if message.contains("not available")),
+            "got {refused:?}"
+        );
     }
 
     #[tokio::test]
@@ -1193,6 +1420,12 @@ mod tests {
         assert!(
             description.contains("Be aware: OS:"),
             "the ported prompt should survive rendering intact: {description}"
+        );
+        assert!(
+            description.contains("run_in_background")
+                && description.contains("bash_output")
+                && description.contains("kill_shell"),
+            "the background-execution addition should be appended: {description}"
         );
     }
 

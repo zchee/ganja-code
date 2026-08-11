@@ -24,7 +24,7 @@ use ganja_protocol::{
     Command, Event as CoreEvent, FinishReason, Mention, Message, MessageId, PartBody,
     PermissionReply, RevertScope, Role, ToolState, Usage,
 };
-use ganja_tool::{Credentials, FileTimes, ToolCtx};
+use ganja_tool::{Credentials, FileTimes, ToolCtx, job::Jobs as _};
 use ratatui::{
     DefaultTerminal, Terminal,
     backend::Backend,
@@ -391,6 +391,9 @@ pub struct App {
     mcp_notice: Option<String>,
     /// How many of them have answered.
     mcp_resolved: usize,
+    /// How many background jobs the status bar last reported running, so a
+    /// tick that finds the same count touches nothing (**F1**).
+    running_jobs: usize,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
     /// stored mid-session is picked up by a restart, not by a later fetch.
@@ -497,6 +500,7 @@ impl App {
             mcp_servers: 0,
             mcp_notice: None,
             mcp_resolved: 0,
+            running_jobs: 0,
             wire_models: None,
             wire_fetch: None,
             tools: ganja_tool::Registry::with_builtins(),
@@ -693,6 +697,7 @@ impl App {
             }
             AppEvent::Tick => {
                 self.poll_mcp();
+                self.poll_jobs();
                 self.poll_wire_models().await;
                 // The other door into the same lane: a replay that lost a race
                 // to a turn starting under it keeps its place and is retried
@@ -740,6 +745,29 @@ impl App {
 
         self.mcp_notice.clone_from(&notice);
         self.status.set_notice(notice);
+        self.dirty = true;
+    }
+
+    /// Counts the background jobs currently running, and updates the status
+    /// bar's segment when that count changed (**F1**).
+    ///
+    /// Polled on the same tick the MCP dial is, for the same reason: the
+    /// engine's job registry has no event of its own, and a count that has
+    /// not changed costs a lock and a small clone.
+    fn poll_jobs(&mut self) {
+        let running = self
+            .engine
+            .jobs()
+            .list()
+            .iter()
+            .filter(|status| status.state == ganja_tool::job::State::Running)
+            .count();
+        if running == self.running_jobs {
+            return;
+        }
+
+        self.running_jobs = running;
+        self.status.set_running_jobs(running);
         self.dirty = true;
     }
 
@@ -1960,6 +1988,7 @@ impl App {
             spawn: None,
             ask: None,
             switch: None,
+            jobs: None,
         };
 
         // A fragment is typed, not written: half of one is a pattern that does

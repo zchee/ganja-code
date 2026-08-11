@@ -124,6 +124,11 @@ pub struct Status {
     /// while there are any, so a session that never queues one renders the bar
     /// it always did.
     queued: usize,
+    /// How many background jobs — `bash` calls run with `run_in_background:
+    /// true` — are currently running. Shown only while there are any, the
+    /// same posture as `queued`, since a session that never backgrounds one
+    /// renders the bar it always did.
+    running_jobs: usize,
 }
 
 impl Status {
@@ -139,6 +144,7 @@ impl Status {
             effort: None,
             shell: false,
             queued: 0,
+            running_jobs: 0,
         }
     }
 
@@ -161,6 +167,11 @@ impl Status {
     /// Records how many messages are waiting for the running turn.
     pub fn set_queued(&mut self, queued: usize) {
         self.queued = queued;
+    }
+
+    /// Records how many background jobs are currently running.
+    pub fn set_running_jobs(&mut self, running_jobs: usize) {
+        self.running_jobs = running_jobs;
     }
 
     /// Records what the engine is doing now.
@@ -223,6 +234,12 @@ impl Status {
         if self.queued > 0 {
             left.push_str(SEPARATOR);
             left.push_str(&format!("{} queued", self.queued));
+        }
+        // Same reasoning, same place: a running background job is otherwise
+        // invisible until its own `bash_output` poll names it.
+        if self.running_jobs > 0 {
+            left.push_str(SEPARATOR);
+            left.push_str(&format!("{} bash running", self.running_jobs));
         }
         // Spend sits beside the state, where its width is predictable; the
         // notice is last because it is the one part with no length limit.
@@ -328,6 +345,21 @@ mod tests {
 
         status.set_queued(0);
         assert!(!rendered(&status, 100).contains("queued"));
+    }
+
+    /// A running background job appears only while one is running, the same
+    /// posture as the queue depth beside it (**F1**).
+    #[test]
+    fn the_bar_names_running_background_jobs_only_while_there_are_any() {
+        let mut status = Status::new(None);
+        assert!(!rendered(&status, 100).contains("bash running"));
+
+        status.set_running_jobs(1);
+        let line = rendered(&status, 100);
+        assert!(line.contains("1 bash running"), "got {line:?}");
+
+        status.set_running_jobs(0);
+        assert!(!rendered(&status, 100).contains("bash running"));
     }
 
     /// The segment appears only while an effort is selected, so every bar

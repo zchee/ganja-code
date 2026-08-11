@@ -224,11 +224,18 @@ fn hint(file: &Path) -> String {
 /// so the rest can be appended to it as it arrives.
 ///
 /// This is what keeps a command that writes more than it is allowed to keep
-/// from having to hold the overflow in memory (`tool/shell.rs`, `Collector`).
-/// [`None`] means there is nowhere writable to spill to, which the caller has
-/// to survive rather than report: the tool call itself is fine, and only the
+/// from having to hold the overflow in memory (`tool/shell.rs`, `Collector`,
+/// and `ganja-core`'s `job::Buffer` for a background job's own pump). [`None`]
+/// means there is nowhere writable to spill to, which the caller has to
+/// survive rather than report: the tool call itself is fine, and only the
 /// overflow is lost.
-pub(crate) fn open_spill(head: &[u8]) -> Option<(PathBuf, fs::File)> {
+///
+/// Public — not `pub(crate)` — because `ganja-core`'s background-job registry
+/// spills a running job's output the same owner-only way a foreground
+/// command's collector does, and duplicating the symlink-safe,
+/// permission-hardened file creation this wraps would be duplicating the
+/// exact code a security review has to read twice instead of once.
+pub fn open_spill(head: &[u8]) -> Option<(PathBuf, fs::File)> {
     candidate_dirs()
         .into_iter()
         .find_map(|dir| write_overflow(&dir, head))
@@ -238,7 +245,7 @@ pub(crate) fn open_spill(head: &[u8]) -> Option<(PathBuf, fs::File)> {
 /// temp-dir fallback — so a test can assert on what was spilled without
 /// filling a real person's data directory with fixtures. Mirrors
 /// [`clamp_with`], which exists for the same reason.
-pub(crate) fn open_spill_in(dir: &Path, head: &[u8]) -> Option<(PathBuf, fs::File)> {
+pub fn open_spill_in(dir: &Path, head: &[u8]) -> Option<(PathBuf, fs::File)> {
     write_overflow(dir, head)
 }
 

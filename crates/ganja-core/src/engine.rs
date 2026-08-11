@@ -47,7 +47,7 @@ use crate::{
     agent::{self, Agent},
     catalog, command,
     config::AgentMode,
-    lsp, mcp,
+    job, lsp, mcp,
     permission::{Permissions, Rule},
     protocol::{
         Command, Event, Message, MessageId, PartBody, RevertInfo, RevertScope, Role, ToolState,
@@ -772,6 +772,10 @@ pub struct Engine {
     /// is [`Engine::new`]'s in-memory engine, and with it every P4 behaviour
     /// is absent: no write-through, no auto-title, no compaction.
     persistence: Option<Arc<SessionState>>,
+    /// Background jobs this session has started — `bash` calls run with
+    /// `run_in_background: true`. Always present, unlike `mcp`/`lsp`: there
+    /// is no engine a background job cannot outlive.
+    jobs: Arc<job::JobRegistry>,
 }
 
 impl Engine {
@@ -875,6 +879,7 @@ impl Engine {
             turn: TurnSlot::new(),
             history: Arc::default(),
             persistence,
+            jobs: Arc::new(job::JobRegistry::new()),
         }
     }
 
@@ -1104,6 +1109,20 @@ impl Engine {
         if let Some(servers) = &self.mcp {
             servers.shutdown().await;
         }
+    }
+
+    /// The background jobs this session has started — `bash` calls run with
+    /// `run_in_background: true` — for a status display to poll.
+    #[must_use]
+    pub fn jobs(&self) -> &Arc<job::JobRegistry> {
+        &self.jobs
+    }
+
+    /// Ends every background job's whole process group. Mirrors
+    /// [`Engine::shutdown_mcp`]/[`Engine::shutdown_lsp`]: idempotent, and
+    /// safe to call on an engine that started none.
+    pub async fn shutdown_jobs(&self) {
+        self.jobs.shutdown().await;
     }
 
     /// Sets the language servers this session may run.
@@ -1730,6 +1749,7 @@ impl Engine {
             spawn: None,
             ask: None,
             switch: None,
+            jobs: None,
         };
         let expanded = definition.expand(args, &ctx).await;
 
@@ -2366,6 +2386,7 @@ impl Engine {
             credentials: self.credentials.clone(),
             lsp: self.lsp.clone(),
             persistence: self.persistence.clone(),
+            jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
         }))
     }
 
@@ -2877,6 +2898,7 @@ impl Engine {
             slot: Arc::clone(&self.turn.slot),
             history: Arc::clone(&self.history),
             pending_switch: self.pending_for_turn(),
+            jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             persist,
         };
         tokio::spawn(run_turn(turn));

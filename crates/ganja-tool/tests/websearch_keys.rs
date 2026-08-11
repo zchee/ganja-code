@@ -24,6 +24,7 @@ fn ctx() -> ToolCtx {
         spawn: None,
         ask: None,
         switch: None,
+        jobs: None,
     }
 }
 
