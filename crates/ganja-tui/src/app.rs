@@ -20,8 +20,8 @@ use etcetera::{BaseStrategy as _, base_strategy::Xdg};
 use futures::StreamExt as _;
 use ganja_core::{Engine, EngineError, attachment, catalog, provider};
 use ganja_protocol::{
-    Command, Event as CoreEvent, FinishReason, Mention, Message, PartBody, PermissionReply, Role,
-    ToolState, Usage,
+    Command, Event as CoreEvent, FinishReason, Mention, Message, MessageId, PartBody,
+    PermissionReply, RevertScope, Role, ToolState, Usage,
 };
 use ganja_tool::{Credentials, FileTimes, ToolCtx};
 use ratatui::{
@@ -50,6 +50,7 @@ use crate::{
         permission::Permission,
         question::Question,
         queue::Queue,
+        rewind::Rewind,
         search::HistorySearch,
         sessions::{self, Sessions},
         status::{Activity, Status, Totals},
@@ -81,6 +82,13 @@ const SHORTCUT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL.union(KeyModifier
 /// card's own height: the card sizes itself inside the render and nothing out
 /// here has seen the result.
 const HELP_PAGE: isize = 8;
+
+/// How long a first Esc stays armed for the rewind gesture (**F7**).
+///
+/// Short enough that two deliberate presses are the only thing that reaches
+/// it, and that an Esc a person meant as "never mind" is over long before
+/// their next one.
+const ESC_CHORD: Duration = Duration::from_millis(500);
 
 /// Most files the `@` menu offers at once. Upstream's server default
 /// (`server/routes/instance/httpapi/handlers/file.ts:43-60`).
@@ -192,6 +200,22 @@ fn wire_rows(models: &[provider::ListedModel], current: &str) -> Vec<list::Row> 
         .collect()
 }
 
+/// What the status bar says after a code-only rewind: the files that really
+/// came back, which is not always the ones the checkpoint's patches named (see
+/// `snapshot::Snapshots::revert`).
+fn restored(files: &[String]) -> String {
+    if files.is_empty() {
+        return "the rewind restored no files".to_owned();
+    }
+
+    format!(
+        "restored {count} file{plural}: {named}",
+        count = files.len(),
+        plural = if files.len() == 1 { "" } else { "s" },
+        named = files.join(", "),
+    )
+}
+
 /// Whether the editor itself would do something with `key`.
 ///
 /// The one exit binding that is also an editing key. Upstream gates its whole
@@ -249,6 +273,8 @@ pub struct App {
     theme_list: Option<ThemeList>,
     /// The Ctrl+R fuzzy search over remembered prompts, while it is open.
     history_search: Option<HistorySearch>,
+    /// The rewind picker, while it is open (**F7**).
+    rewind: Option<Rewind>,
     /// The models or agents the user is choosing between, and which of the two
     /// the list is.
     chooser: Option<(Chooser, ListDialog)>,
@@ -290,6 +316,18 @@ pub struct App {
     /// a message queued before the user undid anything must not be what
     /// decides it for them.
     revert_pending: bool,
+    /// Whether the next `RevertChanged` answers a code-only rewind (**F7**).
+    ///
+    /// The engine records no revert for one — the files move and the
+    /// transcript does not — so the event it sends looks like every other
+    /// revert and means something else. Which one it is was decided by the
+    /// command this side sent, exactly as [`Cleared`] decides what a cleared
+    /// revert means: the engine draws no distinction because the frontend's
+    /// own command already did (**R10**).
+    code_only_rewind: bool,
+    /// When Esc was last pressed with nothing streaming and no modal open, for
+    /// the Esc Esc gesture. See the Esc arm in [`App::handle_key`].
+    last_esc: Option<Instant>,
     /// Where a mention resolves from, and where the walk that offers files
     /// starts.
     cwd: PathBuf,
@@ -399,6 +437,7 @@ impl App {
             sessions: None,
             theme_list: None,
             history_search: None,
+            rewind: None,
             chooser: None,
             palette: None,
             palette_filter: String::new(),
@@ -417,6 +456,8 @@ impl App {
             turn_running: false,
             steers: 0,
             revert_pending: false,
+            code_only_rewind: false,
+            last_esc: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             clipboard: Box::new(clipboard::System::default()),
@@ -787,6 +828,9 @@ impl App {
                 if let Some(search) = &self.history_search {
                     search.render(transcript, buffer, &self.theme);
                 }
+                if let Some(rewind) = &self.rewind {
+                    rewind.render(transcript, buffer, &self.theme);
+                }
                 if let Some((_, chooser)) = &self.chooser {
                     chooser.render(transcript, buffer, &self.theme);
                 }
@@ -1006,6 +1050,13 @@ impl App {
             return Ok(());
         }
 
+        // Esc Esc is a *sequence*, so anything at all in between ends it —
+        // including the key that opens a modal, which is why this sits above
+        // every dialog's own handler rather than beside the Esc arm below.
+        if key.code != KeyCode::Esc {
+            self.last_esc = None;
+        }
+
         if let Some(permission) = &self.permission {
             // Every other key is swallowed while the modal is open: the
             // editor and the transcript beneath it are not what the user is
@@ -1099,6 +1150,12 @@ impl App {
 
         if self.history_search.is_some() {
             self.handle_history_search_key(key).await;
+
+            return Ok(());
+        }
+
+        if self.rewind.is_some() {
+            self.handle_rewind_key(key.code).await;
 
             return Ok(());
         }
@@ -1199,8 +1256,36 @@ impl App {
             // turn to stop while the user is typing a command at their own
             // prompt.
             KeyCode::Esc if self.editor.mode() == Mode::Shell => self.set_shell(false),
-            // A no-op while idle, which is exactly what Esc should do there.
-            KeyCode::Esc => self.engine.send(Command::CancelTurn).await?,
+            // Esc alone cancels — a no-op while idle, which is exactly what it
+            // should do there — and **Esc Esc at an idle composer** opens the
+            // rewind picker (**D452**, `esc-esc-gesture`; Claude Code's,
+            // `claude.ja.md:50`, with no upstream counterpart).
+            //
+            // Hardcoded here rather than bound: [`keybind`]'s table maps one
+            // chord to one action and cannot express a sequence, and teaching
+            // it to would be a rewrite in service of a single gesture. The
+            // guard is deliberately "idle at *both* presses": while a turn
+            // streams Esc stays the cancel and forgets any first press, so a
+            // double-press racing a turn's end cancels and then does nothing,
+            // rather than opening a picker over a conversation the user was
+            // still watching. A modal's Esc never reaches here at all — every
+            // dialog returns above.
+            KeyCode::Esc if self.turn_running => {
+                self.last_esc = None;
+                self.engine.send(Command::CancelTurn).await?;
+            }
+            KeyCode::Esc
+                if self
+                    .last_esc
+                    .is_some_and(|pressed| pressed.elapsed() <= ESC_CHORD) =>
+            {
+                self.last_esc = None;
+                self.open_rewind();
+            }
+            KeyCode::Esc => {
+                self.last_esc = Some(Instant::now());
+                self.engine.send(Command::CancelTurn).await?;
+            }
             // Backspacing off the front of a shell command is the other way
             // out, and it deletes nothing on the way (`:850-859`).
             KeyCode::Backspace
@@ -1313,6 +1398,7 @@ impl App {
             || self.sessions.is_some()
             || self.theme_list.is_some()
             || self.history_search.is_some()
+            || self.rewind.is_some()
             || self.chooser.is_some()
             || self.palette.is_some()
             || self.help.is_some()
@@ -1335,6 +1421,7 @@ impl App {
             command::Action::CopyMessage => self.copy_last_reply(),
             command::Action::Undo => self.undo().await,
             command::Action::Redo => self.redo().await,
+            command::Action::Rewind => self.open_rewind(),
         }
     }
 
@@ -2229,6 +2316,92 @@ impl App {
         self.sync_menus().await;
     }
 
+    /// Opens the rewind picker over the checkpoints the transcript holds
+    /// (**F7**).
+    ///
+    /// Reached two ways, both Claude Code's: `/rewind` — from the palette or
+    /// the `/` menu, like `/undo` and for the same reason (**D4**: there is no
+    /// leader key here) — and the Esc Esc gesture at an idle composer.
+    fn open_rewind(&mut self) {
+        self.rewind = Some(Rewind::new(self.chat.checkpoints()));
+    }
+
+    /// One keypress while the rewind picker is open, which owns every key: its
+    /// list is what the keyboard is pointed at.
+    ///
+    /// Esc closes from either step rather than stepping back to the first: the
+    /// picker is two views of one question, and a person who wants out of the
+    /// scope choice wants out of the picker.
+    async fn handle_rewind_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.rewind = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(rewind) = &mut self.rewind {
+                    rewind.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(rewind) = &mut self.rewind {
+                    rewind.move_selection(1);
+                }
+            }
+            KeyCode::Enter => self.advance_rewind().await,
+            _ => {}
+        }
+    }
+
+    /// Enter in the rewind picker: the first one opens the scope choice, the
+    /// second sends the rewind.
+    async fn advance_rewind(&mut self) {
+        let Some(rewind) = &mut self.rewind else {
+            return;
+        };
+
+        if !rewind.is_choosing_scope() {
+            // `(Current)` is where the session already is, so choosing it is a
+            // person deciding not to rewind at all.
+            if !rewind.advance() {
+                self.rewind = None;
+            }
+
+            return;
+        }
+
+        let chosen = rewind.chosen();
+        self.rewind = None;
+        if let Some((message_id, scope)) = chosen {
+            self.rewind_to(message_id, scope).await;
+        }
+    }
+
+    /// Asks the engine to take the session back to `message_id`.
+    ///
+    /// Nothing is hidden or restored here: the engine answers with
+    /// `RevertChanged`, and that event is the only thing that moves the
+    /// transcript — the same rule `/undo` follows. What a refusal costs is a
+    /// line of the status bar: a turn still streaming (**D119**), a session
+    /// that takes no snapshots, or a checkpoint that is not one.
+    async fn rewind_to(&mut self, message_id: MessageId, scope: RevertScope) {
+        // The same reading an undo leaves behind: what this hid can be stepped
+        // back through, so the next cleared revert means "show them again".
+        // A code-only rewind hides nothing and clears nothing, so it must not
+        // touch the reading a standing undo left.
+        if scope.touches_conversation() {
+            self.cleared = Cleared::Unhide;
+        }
+        self.code_only_rewind = !scope.touches_conversation();
+
+        if let Err(refusal) = self
+            .engine
+            .send(Command::RevertTo { message_id, scope })
+            .await
+        {
+            // Nothing was reverted, so no event is coming to consume the flag.
+            self.code_only_rewind = false;
+            self.status.set_notice(Some(refusal.to_string()));
+        }
+    }
+
     /// Hands the editor's contents to the engine.
     ///
     /// The prompt reaches the transcript as an engine event rather than being
@@ -2653,12 +2826,25 @@ impl App {
                 revert,
                 prompt,
             } => {
+                // A code-only rewind announces a revert the engine does not
+                // hold: the files moved and nothing was hidden, so there is
+                // nothing outstanding for the fallback lane to wait on — and
+                // whatever revert *was* standing before it still is, which is
+                // why this leaves the flag alone rather than clearing it.
+                let code_only = std::mem::take(&mut self.code_only_rewind);
                 // While one stands, the fallback lane holds: a replayed prompt
                 // would commit the undo the user just made, and doing that on
                 // their behalf with a message they queued beforehand is not a
                 // decision this frontend gets to take.
-                self.revert_pending = revert.is_some();
+                if !code_only {
+                    self.revert_pending = revert.is_some();
+                }
                 match revert {
+                    // Nothing to hide, and the files that came back are worth
+                    // saying: the transcript is whole, so the marker row the
+                    // other reverts draw would be a claim about a hidden range
+                    // that does not exist.
+                    Some(info) if code_only => self.status.set_notice(Some(restored(&info.files))),
                     Some(info) => self.chat.revert(info.message_id, info.files),
                     None => match self.cleared {
                         Cleared::Unhide => self.chat.unrevert(),
@@ -2887,8 +3073,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        App, Chooser, Cleared, Dropdown, FRAME, Help, ListDialog, Mode, NO_EFFORTS, Palette,
-        Permission, WireListing, permission_reply,
+        App, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, ListDialog, MessageId, Mode,
+        NO_EFFORTS, Palette, Permission, RevertScope, Rewind, WireListing, permission_reply,
     };
 
     /// The session every hand-built fixture event happens in. One pinned id,
@@ -9024,5 +9210,356 @@ mod tests {
         insta::assert_snapshot!(screen(&terminal));
 
         finish(&mut app, &mut events).await;
+    }
+
+    // ---- F7: the rewind picker --------------------------------------------
+
+    /// An app whose transcript holds two exchanges, which is two checkpoints
+    /// as far as the picker is concerned.
+    fn with_checkpoints() -> App {
+        let mut app = app();
+        two_exchanges(&mut app);
+
+        app
+    }
+
+    /// Presses Esc `times` in a row, fast enough that the gesture's window
+    /// never closes between them.
+    async fn escapes(app: &mut App, times: usize) {
+        for _ in 0..times {
+            app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+                .await
+                .expect("escape is handled");
+        }
+    }
+
+    /// **Acceptance 7, the list.** `/rewind` lists exactly the session's user
+    /// messages plus the row for where it already stands.
+    #[tokio::test]
+    async fn slash_rewind_lists_the_prompts_the_transcript_holds_and_current() {
+        let mut app = with_checkpoints();
+        app.run_command(command::Action::Rewind).await;
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+
+        assert!(screen.contains("(Current)"), "got:\n{screen}");
+        assert!(
+            screen.contains("the question that stands"),
+            "got:\n{screen}"
+        );
+        assert!(
+            screen.contains("the question that is taken back"),
+            "got:\n{screen}"
+        );
+        assert!(
+            !screen.contains("the answer that stands"),
+            "a reply is not a checkpoint:\n{screen}"
+        );
+    }
+
+    /// A prompt whose turn recorded patches says how many files it moved; one
+    /// whose turn recorded none says there is no code to put back.
+    #[tokio::test]
+    async fn a_checkpoint_says_whether_its_turn_changed_any_code() {
+        let mut app = app();
+        app.chat.start_message(Message::user("touch two files"));
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: ganja_protocol::PartId::from("prt_patch".to_owned()),
+            body: PartBody::Patch {
+                hash: "4b825dc".to_owned(),
+                files: vec!["src/lib.rs".to_owned(), "src/app.rs".to_owned()],
+            },
+        });
+        app.chat.start_message(reply);
+        app.chat
+            .start_message(Message::user("just tell me about it"));
+        app.chat.start_message(Message::assistant("canned"));
+
+        app.run_command(command::Action::Rewind).await;
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+
+        assert!(screen.contains("2 files changed"), "got:\n{screen}");
+        assert!(
+            screen.contains("\u{26a0} No code restore"),
+            "a span with no patches says so:\n{screen}"
+        );
+    }
+
+    /// **The gesture (D452).** Two Escs at an idle composer open the picker.
+    #[tokio::test]
+    async fn esc_esc_at_an_idle_composer_opens_the_picker() {
+        let mut app = with_checkpoints();
+
+        escapes(&mut app, 1).await;
+        assert!(app.rewind.is_none(), "one Esc is still just a cancel");
+
+        escapes(&mut app, 1).await;
+        assert!(app.rewind.is_some(), "the second one opens the picker");
+    }
+
+    /// **The gesture's guard.** While a turn streams Esc is the cancel and
+    /// nothing else — and it forgets any first press, so a double-press racing
+    /// a turn's end cancels and then does nothing.
+    #[tokio::test]
+    async fn esc_esc_while_a_turn_streams_cancels_and_opens_nothing() {
+        let (mut app, mut events) = streaming().await;
+
+        escapes(&mut app, 2).await;
+        assert!(
+            app.rewind.is_none(),
+            "no picker opens over a turn the user is watching"
+        );
+
+        finish(&mut app, &mut events).await;
+        assert!(!app.turn_running, "and the Esc really did cancel it");
+
+        // The turn is over, so the gesture is armed again — and the press that
+        // happened while it was streaming does not count towards it.
+        escapes(&mut app, 1).await;
+        assert!(app.rewind.is_none(), "the streaming press was forgotten");
+        escapes(&mut app, 1).await;
+        assert!(app.rewind.is_some());
+    }
+
+    /// Two Escs far enough apart are two cancels, not a gesture.
+    #[tokio::test]
+    async fn a_second_esc_after_the_window_has_closed_opens_nothing() {
+        let mut app = with_checkpoints();
+
+        escapes(&mut app, 1).await;
+        app.last_esc = Instant::now().checked_sub(ESC_CHORD * 2);
+        assert!(app.last_esc.is_some(), "the fixture needs a stale press");
+
+        escapes(&mut app, 1).await;
+        assert!(app.rewind.is_none(), "the window had closed");
+    }
+
+    /// The gesture is a sequence: anything typed between the two presses ends
+    /// it, however fast the second one follows.
+    #[tokio::test]
+    async fn a_keystroke_between_the_two_escs_ends_the_gesture() {
+        let mut app = with_checkpoints();
+
+        escapes(&mut app, 1).await;
+        typed(&mut app, "n").await;
+        escapes(&mut app, 1).await;
+
+        assert!(
+            app.rewind.is_none(),
+            "that was a cancel, a letter, a cancel"
+        );
+    }
+
+    /// **Acceptance 7, Esc.** Esc at either step changes nothing: no command
+    /// reaches the engine and the transcript is where it was.
+    #[tokio::test]
+    async fn esc_closes_the_picker_from_either_step_and_changes_nothing() {
+        let mut app = with_checkpoints();
+
+        app.run_command(command::Action::Rewind).await;
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.rewind.is_none());
+        assert!(!app.chat.is_reverted());
+
+        app.run_command(command::Action::Rewind).await;
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE))
+            .await
+            .expect("down is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert!(
+            app.rewind.as_ref().is_some_and(Rewind::is_choosing_scope),
+            "the scope step should be showing"
+        );
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.rewind.is_none(), "Esc leaves the scope step too");
+        assert!(!app.chat.is_reverted(), "and nothing was reverted");
+    }
+
+    /// Enter on `(Current)` is a person deciding not to rewind: the picker
+    /// closes and nothing is sent.
+    #[tokio::test]
+    async fn enter_on_current_closes_the_picker_and_reverts_nothing() {
+        let mut app = with_checkpoints();
+        app.run_command(command::Action::Rewind).await;
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(app.rewind.is_none());
+        assert!(!app.chat.is_reverted());
+    }
+
+    /// **Acceptance 7, the whole path.** A real turn, then the picker taken to
+    /// *Conversation only*: the engine hides the message and hands the prompt
+    /// back for editing, with the working tree never mentioned.
+    #[tokio::test]
+    async fn choosing_conversation_only_takes_the_prompt_back_through_the_engine() {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "the prompt to rewind past").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        finish(&mut app, &mut events).await;
+
+        app.run_command(command::Action::Rewind).await;
+        // Off `(Current)`, onto the one checkpoint, into the scope step, then
+        // down one row to "Conversation only".
+        for code in [KeyCode::Down, KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
+            app.handle(key(code, KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        pump(&mut app, &mut events, 1).await;
+
+        assert!(app.rewind.is_none(), "choosing closes the picker");
+        assert!(app.chat.is_reverted(), "the engine hid the checkpoint");
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("the prompt to rewind past"),
+            "rewinding and retyping a prompt is editing it"
+        );
+        assert_eq!(
+            app.cleared,
+            Cleared::Unhide,
+            "what this hid can still be stepped back through"
+        );
+    }
+
+    /// **Acceptance 7, code only.** The engine announces the files it put back
+    /// while recording no revert, so this side names them and hides nothing —
+    /// and the fallback lane is not paused by a revert nobody is holding.
+    #[tokio::test]
+    async fn a_code_only_rewind_names_the_files_and_hides_nothing() {
+        let mut app = with_checkpoints();
+        let anchor = two_exchanges(&mut app);
+        // What `App::rewind_to` sets when it sends `RevertScope::Files`; the
+        // engine's answer is indistinguishable from any other revert's, and
+        // this is the flag that tells them apart (**R10**).
+        app.code_only_rewind = true;
+
+        app.handle(reverted(&anchor, None))
+            .await
+            .expect("a revert is handled");
+
+        assert!(
+            !app.chat.is_reverted(),
+            "a code-only rewind hides no message"
+        );
+        assert!(
+            !app.revert_pending,
+            "and holds nothing the fallback lane has to wait on"
+        );
+        assert!(
+            app.editor.is_empty(),
+            "nothing was taken back, so nothing is offered again"
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(screen.contains("restored 1 file"), "got:\n{screen}");
+        assert!(screen.contains("src/lib.rs"), "got:\n{screen}");
+    }
+
+    /// The flag is consumed by the one event it answers: a code-only rewind
+    /// followed by an ordinary undo must not leave the undo unrendered.
+    #[tokio::test]
+    async fn the_code_only_reading_lasts_exactly_one_event() {
+        let mut app = with_checkpoints();
+        let anchor = two_exchanges(&mut app);
+        app.code_only_rewind = true;
+        app.handle(reverted(&anchor, None))
+            .await
+            .expect("the code-only answer is handled");
+
+        app.handle(reverted(&anchor, None))
+            .await
+            .expect("an ordinary revert is handled");
+
+        assert!(app.chat.is_reverted(), "the second one is an ordinary undo");
+        assert!(app.revert_pending, "and the lane pauses for it");
+    }
+
+    /// A session that takes no snapshots cannot put files back, and says so
+    /// rather than half-rewinding.
+    #[tokio::test]
+    async fn a_rewind_a_session_cannot_serve_says_so_in_the_status_bar() {
+        let mut app = with_checkpoints();
+        let anchor = two_exchanges(&mut app);
+
+        app.rewind_to(anchor, RevertScope::Files).await;
+
+        assert!(
+            !app.code_only_rewind,
+            "a refused rewind leaves no reading behind for an event that will not come"
+        );
+
+        let mut terminal = terminal(100, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(screen.contains("takes no snapshots"), "got:\n{screen}");
+    }
+
+    /// **Acceptance 7, the refusal.** An id that is not a checkpoint is named
+    /// back rather than resolved to the nearest thing that is.
+    #[tokio::test]
+    async fn a_rewind_to_something_that_is_not_a_checkpoint_is_refused_by_name() {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "the only prompt there is").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        finish(&mut app, &mut events).await;
+
+        app.rewind_to(
+            MessageId::from("msg_nobody".to_owned()),
+            RevertScope::Conversation,
+        )
+        .await;
+
+        let mut terminal = terminal(100, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(screen.contains("no checkpoint named"), "got:\n{screen}");
+        assert!(screen.contains("msg_nobody"), "got:\n{screen}");
+        assert!(!app.chat.is_reverted(), "and nothing moved");
+    }
+
+    #[tokio::test]
+    async fn snapshot_rewind_picker_open() {
+        let mut app = with_checkpoints();
+        app.run_command(command::Action::Rewind).await;
+
+        let mut terminal = terminal(80, 20);
+        app.draw(&mut terminal).expect("a frame draws");
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn snapshot_rewind_scope_choice() {
+        let mut app = with_checkpoints();
+        app.run_command(command::Action::Rewind).await;
+        for code in [KeyCode::Down, KeyCode::Enter] {
+            app.handle(key(code, KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+
+        let mut terminal = terminal(80, 20);
+        app.draw(&mut terminal).expect("a frame draws");
+        insta::assert_snapshot!(screen(&terminal));
     }
 }

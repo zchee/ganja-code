@@ -49,7 +49,10 @@ use crate::{
     config::AgentMode,
     lsp, mcp,
     permission::{Permissions, Rule},
-    protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
+    protocol::{
+        Command, Event, Message, MessageId, PartBody, RevertInfo, RevertScope, Role, ToolState,
+        Usage, now,
+    },
     provider::Provider,
     session::{
         Answered, LiveSession, PendingReply, Persist, SessionState, SteerInput, Steering, Turn,
@@ -179,6 +182,19 @@ pub enum EngineError {
     /// [`Command::Redo`] reached a session that is not reverted.
     #[error("nothing to redo")]
     NothingToRedo,
+    /// [`Command::RevertTo`] named something that is not a checkpoint: a
+    /// message id nothing in the live window answers to, or one that answers to
+    /// an assistant message rather than to a prompt. Reverting to the nearest
+    /// thing that *is* one would be moving a conversation somewhere nobody
+    /// asked for, so the id is named back instead.
+    #[error(
+        "no checkpoint named {}; a rewind stops at a prompt this session still holds",
+        id.as_str()
+    )]
+    NoSuchCheckpoint {
+        /// The id nothing answers to.
+        id: crate::protocol::MessageId,
+    },
 }
 
 /// The half of [`EngineError::UnknownEffort`]'s sentence that names what
@@ -1649,6 +1665,9 @@ impl Engine {
             Command::NewSession => self.new_session().await,
             Command::Undo => self.undo().await,
             Command::Redo => self.redo().await,
+            Command::RevertTo { message_id, scope } => {
+                self.revert_to_message(message_id, scope).await
+            }
         }
     }
 
@@ -1879,8 +1898,144 @@ impl Engine {
         Ok(())
     }
 
+    /// Takes the session back to the checkpoint `anchor` names, restoring
+    /// whatever `scope` asks for.
+    ///
+    /// A superset of [`Engine::undo`] and not a replacement for it: the anchor
+    /// comes from the user instead of from a walk, and the scope decides which
+    /// halves of the checkpoint move. Everything underneath is the machinery
+    /// `undo` already uses — the same `patches_from`, the same
+    /// `Snapshots::revert`, the same `RevertState` — so hidden-not-deleted,
+    /// redo and next-prompt-commits fall out unchanged for the scopes that hide
+    /// anything.
+    ///
+    /// Refused while a turn is streaming, for `undo`'s reason (**D119**), and
+    /// with the same [`PendingPolicy::Revoke`]: a rewind that hides the turn a
+    /// plan approval was announced in must not leave the approval standing.
+    async fn revert_to_message(
+        &self,
+        anchor: MessageId,
+        scope: RevertScope,
+    ) -> Result<(), EngineError> {
+        let turn = self.lock_entry(PendingPolicy::Revoke).await?;
+
+        // Files have to come from somewhere, so a scope that moves them is
+        // refused on a session that takes no snapshots — exactly as an undo is.
+        // A conversation-only rewind restores nothing from disk and is
+        // therefore not that session's to refuse.
+        let snapshots = match scope.touches_files() {
+            true => Some(self.snapshotting()?),
+            false => self
+                .snapshots
+                .as_deref()
+                .filter(|snapshots| snapshots.enabled()),
+        };
+
+        let current = self.reverted();
+        let (prompt, patches) = {
+            let history = self.history.lock().await;
+            // A checkpoint is a prompt. An assistant message, a part id, or an
+            // id from another session all land here, and all get their own name
+            // back rather than the nearest prompt this could have meant.
+            if !history
+                .iter()
+                .any(|message| message.id == anchor && message.role == Role::User)
+            {
+                return Err(EngineError::NoSuchCheckpoint { id: anchor });
+            }
+
+            (
+                snapshot::prompt_at(&history, &anchor),
+                snapshot::patches_from(&history, &anchor),
+            )
+        };
+
+        // Captured once per chain and reused by every revert after it, for
+        // `revert_to`'s reason: a second capture would be taken from a tree an
+        // earlier revert had already rewritten. A files-only rewind records no
+        // state at all, so nothing will ever ask it for one.
+        let taken_from = current.as_ref().and_then(|state| state.snapshot.clone());
+        let redo = match (&taken_from, scope) {
+            (_, RevertScope::Files) => None,
+            (Some(existing), _) => Some(existing.clone()),
+            (None, _) => match snapshots {
+                Some(snapshots) => snapshots.track().await,
+                None => None,
+            },
+        };
+
+        // What really came back, which is not always what the patches named —
+        // see [`snapshot::Snapshots::revert`]. A conversation-only rewind moves
+        // no file and so reports none, which is the empty list a frontend
+        // already reads as "the conversation and not the checkout"
+        // (`RevertInfo::files`).
+        let restored = match scope.touches_files() {
+            false => Vec::new(),
+            true => {
+                let snapshots = snapshots
+                    .expect("a scope that touches files went through `snapshotting` above");
+                // Back to the un-reverted tree first, so this revert applies to
+                // the whole conversation rather than to what an earlier one
+                // left behind — including when the picker steps *forward*, to a
+                // checkpoint newer than where the session already stands.
+                if let Some(existing) = &taken_from {
+                    snapshots.restore(existing).await;
+                }
+
+                snapshots.revert(&patches).await
+            }
+        };
+
+        if scope.touches_conversation() {
+            let state = snapshot::RevertState {
+                message_id: anchor,
+                snapshot: redo,
+                files: restored,
+            };
+            let info = state.info();
+            self.remember_revert(Some(state));
+            let _ = self
+                .fanout
+                .send(Event::RevertChanged {
+                    session_id: self.session_id(),
+                    revert: Some(info),
+                    prompt,
+                })
+                .await;
+        } else {
+            // The one genuinely new state: the checkout moved and the
+            // transcript did not. Nothing is hidden, so nothing is remembered
+            // and a `/redo` after this finds nothing to step through — and any
+            // revert that was already standing is still standing, because this
+            // rewind said nothing about the conversation. The event still names
+            // the checkpoint, so a frontend can say which one the files came
+            // back to, and carries no prompt: nothing was taken back to retype.
+            let _ = self
+                .fanout
+                .send(Event::RevertChanged {
+                    session_id: self.session_id(),
+                    revert: Some(RevertInfo {
+                        message_id: anchor,
+                        files: restored,
+                    }),
+                    prompt: None,
+                })
+                .await;
+        }
+        drop(turn);
+
+        Ok(())
+    }
+
     /// Reverts the working tree to the state `anchor`'s turn started from, and
     /// records that the session is now reverted that far.
+    ///
+    /// The files this reports are the ones the patches **named**, where
+    /// [`Engine::revert_to_message`] reports the ones that really came back.
+    /// The difference only shows when a checkout fails, and undo's wording is
+    /// left exactly as it was on purpose: this path is `Command::Undo`'s and
+    /// `Command::Redo`'s, and moving it was out of the rewind wave's scope.
+    /// Aligning the two is a recorded follow-up.
     async fn revert_to(
         &self,
         snapshots: &snapshot::Snapshots,
@@ -1903,7 +2058,7 @@ impl Engine {
             }
             None => snapshots.track().await,
         };
-        snapshots.revert(patches).await;
+        let _ = snapshots.revert(patches).await;
 
         // In the order the patches named them, which is the order the turn
         // touched them in — what a marker row reads best in.

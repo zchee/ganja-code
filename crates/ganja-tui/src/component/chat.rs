@@ -24,7 +24,7 @@ use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Line};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
-use crate::{markdown, mention, theme::Theme};
+use crate::{component::rewind, markdown, mention, theme::Theme};
 
 /// Lines one wheel notch moves the viewport.
 pub const WHEEL_LINES: isize = 3;
@@ -44,6 +44,20 @@ const INTERRUPTED: &str = "[interrupted] the session ended before this reply fin
 /// so leading whitespace is collapsed and an indent would be a claim the screen
 /// never honors — the same reason the task row's detail line carries an arrow.
 const REVERTED_FILE: &str = "\u{21b3} ";
+
+/// What a checkpoint row calls a prompt: its first non-empty line.
+///
+/// The id stands in for a message with no text at all — an attachment-only
+/// prompt — because a blank row is one a person cannot pick with any
+/// confidence, and the id is at least the thing the engine knows it by.
+fn title(entry: &Entry) -> String {
+    entry
+        .parts
+        .iter()
+        .find_map(Part::as_text)
+        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+        .map_or_else(|| entry.id.as_str().to_owned(), ToOwned::to_owned)
+}
 
 /// How an entry names who wrote it.
 fn label(role: Role) -> &'static str {
@@ -169,6 +183,56 @@ impl Chat {
             .iter()
             .map(|entry| (entry.role, entry.parts.as_slice()))
             .collect()
+    }
+
+    /// Every checkpoint the rewind picker offers, **newest first**: one per
+    /// user message on screen, carrying its first line and how many distinct
+    /// files the turns between it and the next checkpoint changed.
+    ///
+    /// Read off the rendered transcript for [`Chat::messages`]'s reason — what
+    /// a person means by "take me back to there" is a message they can see —
+    /// which also means a session already showing a revert offers only what is
+    /// still visible.
+    ///
+    /// The file count comes from the `Patch` parts the engine already sends
+    /// (`PartBody::Patch`), so no new state and no engine round trip is needed
+    /// to annotate a row. Line-level `+adds -dels` would need a diff between
+    /// two tree hashes and is deliberately not built here; see
+    /// [`crate::component::rewind`].
+    pub fn checkpoints(&self) -> Vec<rewind::Checkpoint> {
+        let shown = self.shown();
+        let mut checkpoints: Vec<rewind::Checkpoint> = shown
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.role == Role::User)
+            .map(|(index, entry)| {
+                let mut files: Vec<&str> = Vec::new();
+                for later in shown
+                    .iter()
+                    .skip(index + 1)
+                    .take_while(|later| later.role != Role::User)
+                {
+                    for part in &later.parts {
+                        if let PartBody::Patch { files: changed, .. } = &part.body {
+                            for file in changed {
+                                if !files.contains(&file.as_str()) {
+                                    files.push(file);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                rewind::Checkpoint {
+                    message_id: entry.id.clone(),
+                    title: title(entry),
+                    files: files.len(),
+                }
+            })
+            .collect();
+        checkpoints.reverse();
+
+        checkpoints
     }
 
     /// Hides everything from `anchor` on, and says so in one row naming
@@ -1915,5 +1979,76 @@ mod tests {
 
         assert!(!chat.is_reverted());
         assert_eq!(chat.line_count(), 0);
+    }
+
+    /// A reply carrying one patch part naming `files`.
+    fn patched(files: &[&str]) -> Message {
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_patch".to_owned()),
+            body: PartBody::Patch {
+                hash: "4b825dc".to_owned(),
+                files: files.iter().map(|file| (*file).to_owned()).collect(),
+            },
+        });
+
+        reply
+    }
+
+    /// **F7.** One checkpoint per prompt, newest first, each counting the
+    /// distinct files its own span changed — a file two steps of one turn both
+    /// touched is one file, and a span with no patches counts none.
+    #[test]
+    fn checkpoints_are_the_prompts_newest_first_with_their_spans_file_counts() {
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("change two files"));
+        chat.start_message(patched(&["src/lib.rs", "src/app.rs"]));
+        // A second step of the same turn, touching one of them again.
+        chat.start_message(patched(&["src/lib.rs"]));
+        chat.start_message(Message::user("now just explain it"));
+        chat.start_message(Message::assistant("canned"));
+
+        let checkpoints = chat.checkpoints();
+
+        assert_eq!(checkpoints.len(), 2);
+        assert_eq!(checkpoints[0].title, "now just explain it");
+        assert_eq!(checkpoints[0].files, 0, "that turn changed nothing");
+        assert_eq!(checkpoints[1].title, "change two files");
+        assert_eq!(
+            checkpoints[1].files, 2,
+            "two distinct files, however many patches named them"
+        );
+        assert_eq!(checkpoints[1].message_id, chat.entries[0].id);
+    }
+
+    /// The picker offers what the screen offers: a reverted tail is not on
+    /// screen, so it is not something to rewind to either.
+    #[test]
+    fn checkpoints_leave_out_what_a_revert_is_already_hiding() {
+        let (mut chat, anchor) = reverted_transcript();
+        assert_eq!(chat.checkpoints().len(), 2);
+
+        chat.revert(anchor, Vec::new());
+
+        let checkpoints = chat.checkpoints();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].title, "the first question");
+    }
+
+    /// A prompt is one line on a checkpoint row however many it was typed
+    /// over, and a prompt with no text at all is still identifiable.
+    #[test]
+    fn a_checkpoint_is_titled_by_the_prompts_first_line() {
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("\n\n  the first real line  \nand more"));
+        let mut wordless = Message::user("");
+        wordless.parts.clear();
+        let id = wordless.id.clone();
+        chat.start_message(wordless);
+
+        let checkpoints = chat.checkpoints();
+
+        assert_eq!(checkpoints[1].title, "the first real line");
+        assert_eq!(checkpoints[0].title, id.as_str());
     }
 }

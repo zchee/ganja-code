@@ -1,0 +1,24 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+you                                                                             
+th┌ rewind ──────────────────────────────────────────────────────────────────┐  
+  │the question that is taken back                                           │  
+ga│Restore the code and/or conversation to the point before this message     │  
+th│> Code and conversation                                                   │  
+  │    Put the files back and take the messages back with them               │  
+yo│  Conversation only                                                       │  
+th│    Take the messages back and leave the working tree exactly as it is    │  
+  │  Code only                                                               │  
+ga│    Put the files back and keep every message                             │  
+th│                                                                          │  
+  │[j/k] [up/down] move   [Enter] continue   [Esc] cancel                    │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready                  Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit

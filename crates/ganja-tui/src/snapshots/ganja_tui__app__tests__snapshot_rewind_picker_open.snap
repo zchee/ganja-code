@@ -1,0 +1,24 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+you                                                                             
+th┌ rewind ──────────────────────────────────────────────────────────────────┐  
+  │> (Current)                                                               │  
+ga│  the question that is taken back                        ⚠ No code restore│  
+th│  the question that stands                               ⚠ No code restore│  
+  │                                                                          │  
+yo│[j/k] [up/down] move   [Enter] continue   [Esc] cancel                    │  
+th│                                                                          │  
+  │                                                                          │  
+ga│                                                                          │  
+th│                                                                          │  
+  │                                                                          │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready                  Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit

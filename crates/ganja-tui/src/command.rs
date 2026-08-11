@@ -65,6 +65,8 @@ pub enum Action {
     Undo,
     /// Put back what an undo took, one prompt at a time.
     Redo,
+    /// Open the picker that takes the session back to a checkpoint.
+    Rewind,
 }
 
 impl Action {
@@ -81,7 +83,10 @@ impl Action {
             Self::Exit => Some(keybind::Action::AppExit),
             // `/undo` and `/redo` are upstream's `<leader>u` and `<leader>r`,
             // and ganja has no leader (**D4**) — so both are reached by name,
-            // from the palette or the `/` menu, and by nothing else.
+            // from the palette or the `/` menu, and by nothing else. `/rewind`
+            // has no chord of its own either: its second door is the Esc Esc
+            // gesture, which the binding table cannot express (**D452**, at the
+            // Esc arm in `app.rs`).
             Self::New
             | Self::Compact
             | Self::Editor
@@ -92,7 +97,8 @@ impl Action {
             | Self::Copy
             | Self::CopyMessage
             | Self::Undo
-            | Self::Redo => None,
+            | Self::Redo
+            | Self::Rewind => None,
         }
     }
 }
@@ -296,6 +302,20 @@ pub const COMMANDS: &[Entry] = &[
         aliases: &[],
         title: "Redo",
         description: "Put back what an undo took, one prompt at a time",
+        category: Category::Session,
+        suggested: false,
+    },
+    // Upstream reaches its message-revert dialog from the transcript rather
+    // than by name, so the slash name is Claude Code's (**D451**, at
+    // `RevertScope`). It sits with `/undo` and `/redo` because it is the same
+    // thing done to the conversation, with the checkpoint and the scope chosen
+    // rather than assumed.
+    Entry {
+        action: Action::Rewind,
+        name: "rewind",
+        aliases: &[],
+        title: "Rewind to a checkpoint",
+        description: "Restore the code and/or conversation to an earlier prompt",
         category: Category::Session,
         suggested: false,
     },
@@ -581,6 +601,7 @@ mod tests {
             ("copy-message", &[][..], Action::CopyMessage),
             ("undo", &[][..], Action::Undo),
             ("redo", &[][..], Action::Redo),
+            ("rewind", &[][..], Action::Rewind),
         ];
 
         for (name, aliases, action) in cases {
