@@ -10,9 +10,10 @@
 //!
 //! The mapping is a table, not a judgment call per route:
 //! [`EngineError::SessionNotFound`] is `404`, [`EngineError::Busy`] is `409`,
-//! a payload that does not parse is `400`, and everything else the engine can
-//! refuse with is `500` — the engine's own message as the body, because the
-//! engine already says what went wrong better than a translation would.
+//! a payload that does not parse is `400`, a prompt somebody's own hook refused
+//! is `400` too, and everything else the engine can refuse with is `500` — the
+//! engine's own message as the body, because the engine already says what went
+//! wrong better than a translation would.
 
 use axum::{
     Json,
@@ -70,6 +71,10 @@ impl From<EngineError> for ApiError {
         match error {
             EngineError::SessionNotFound { .. } => Self::NotFound(error.to_string()),
             EngineError::Busy => Self::Conflict(error.to_string()),
+            // Nothing went wrong here: a hook this server's own config asked
+            // for looked at the prompt and refused it. `500` would report the
+            // operator's policy as a fault of the server carrying it out.
+            EngineError::HookRefused { .. } => Self::Invalid(error.to_string()),
             _ => Self::Internal(error.to_string()),
         }
     }
@@ -102,6 +107,12 @@ mod tests {
             id: SessionId::from("ses_missing".to_owned()),
         });
         assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+
+        let refused = ApiError::from(EngineError::HookRefused {
+            event: "UserPromptSubmit",
+            reason: "not while the release is out".to_owned(),
+        });
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
 
         let busy = ApiError::from(EngineError::Busy);
         assert_eq!(busy.status(), StatusCode::CONFLICT);

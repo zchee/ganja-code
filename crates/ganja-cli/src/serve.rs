@@ -58,6 +58,8 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     // Dialled in the background, exactly as the UI dials them: a server that
     // never answers costs its tools rather than the listener.
     assembled.engine.connect_mcp();
+    // A listener is a session too, and its hooks open it the same way.
+    assembled.engine.session_start().await;
 
     let credentials = ganja_serve::Credentials::from_env();
     if credentials.is_none() {
@@ -107,6 +109,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .shutdown()
         .await
         .context("the server did not stop cleanly")?;
+    engine.session_end(ganja_core::hook::EXIT_REASON).await;
     assembled.servers.shutdown().await;
     engine.shutdown_lsp();
     engine.shutdown_jobs().await;

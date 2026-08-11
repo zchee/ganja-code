@@ -114,6 +114,11 @@ pub(crate) struct Host {
     /// about delegating *more* work, not about a subagent's own `bash` calls
     /// losing a capability its parent has.
     pub(crate) jobs: Option<Arc<dyn crate::tool::job::Jobs>>,
+    /// The session's hooks, shared with every child: a `PreToolUse` hook that
+    /// stopped applying inside a delegated turn would be a gate with a hole in
+    /// it. Which of the two stop hooks a child's end fires is decided by
+    /// `Turn::delegated`, not here.
+    pub(crate) hooks: Option<Arc<crate::hook::Hooks>>,
 }
 
 impl std::fmt::Debug for Host {
@@ -367,6 +372,37 @@ impl Child {
             stop: ChildStop::Failed("the subagent task did not finish".to_owned()),
             ..Outcome::default()
         });
+
+        // **D461**, both halves. The plan's seam was between `run_turn` and the
+        // watcher above; it is after instead, because how the child ended is
+        // what the watcher resolves to and a hook told only that *a* subagent
+        // stopped learns less than one told which and how. The wait is the
+        // child's own channel closing, which happens as `run_turn` returns, so
+        // nothing is delayed by moving it. `agent` and `outcome` are ganja's
+        // own additions to Claude's envelope for the same reason: this build
+        // has named agents, and a hook that cannot tell which one ran cannot
+        // act on it.
+        if let Some(hooks) = &host.hooks {
+            let stopped = hooks
+                .fire(
+                    // The **parent's** session, which is the conversation a
+                    // person is having and the only one a hook has any other
+                    // way of hearing about; the child's private session id
+                    // would name a row nothing else in the envelope refers to.
+                    spawn.session_id.as_str(),
+                    &crate::hook::Payload::SubagentStop {
+                        stop_hook_active: false,
+                        agent: agent.name.clone(),
+                        outcome: match &outcome.stop {
+                            ChildStop::Completed => "completed".to_owned(),
+                            ChildStop::Cancelled => "cancelled".to_owned(),
+                            ChildStop::Failed(_) => "failed".to_owned(),
+                        },
+                    },
+                )
+                .await;
+            stopped.report(crate::hook::HookEvent::SubagentStop);
+        }
 
         if let Some(state) = &host.persistence {
             settle(state, &self.session, outcome.usage);

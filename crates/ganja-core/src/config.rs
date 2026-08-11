@@ -484,6 +484,56 @@ impl CommandConfig {
     }
 }
 
+/// One group of hooks for one event: which subjects it applies to, and what to
+/// run for them.
+///
+/// Spec: Claude Code's `hooks` block (2.1.x), whose shape this keeps verbatim
+/// so a `.claude/settings.json` block can be pasted into a `ganja.jsonc` and
+/// still mean what it meant (**D456**). The array-of-groups shape is that
+/// spelling: one event maps to a list of `{ matcher, hooks }` objects rather
+/// than to a flat list of commands, because the matcher is a property of the
+/// group and several groups may match one call.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HookMatcher {
+    /// A regular expression the event's subject must match — the tool name for
+    /// `PreToolUse`/`PostToolUse`, the trigger for `PreCompact`, the source for
+    /// `SessionStart`. Absent, or empty, matches everything; so does any value
+    /// at all on an event with no subject to match against.
+    pub matcher: Option<String>,
+    /// What to run when it matches, all of them concurrently.
+    #[serde(default)]
+    pub hooks: Vec<HookHandler>,
+}
+
+/// One handler in a [`HookMatcher`], tagged by `type` — the same internally
+/// tagged shape [`McpServer`] uses, and for the same reason: an unknown `type`
+/// is then refused by serde naming the value and listing what would have
+/// worked, rather than surfacing as a missing field belonging to a kind of
+/// handler this build cannot run at all.
+///
+/// One variant today. Claude's `http`, `prompt` and `agent` handlers are
+/// recorded follow-ups rather than silently accepted keys.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum HookHandler {
+    /// A command line handed to a shell, with the event's JSON envelope on its
+    /// standard input.
+    Command(HookCommand),
+}
+
+/// A `type: "command"` handler.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HookCommand {
+    /// The command line, run by the same POSIX shell the `bash` tool uses.
+    /// Refused empty at load: a handler with nothing to run is not one.
+    pub command: String,
+    /// How long it may take, in **seconds**. Absent is
+    /// [`crate::hook::DEFAULT_TIMEOUT`].
+    pub timeout: Option<u64>,
+}
+
 /// What a caller decided before any config file was read.
 ///
 /// These are the flags a command line carries, and they outrank everything —
@@ -559,6 +609,19 @@ pub struct Config {
     /// written against.
     #[serde(default)]
     pub mcp: BTreeMap<String, McpServer>,
+    /// Commands this session runs at the nine moments [`crate::hook`] names,
+    /// keyed by the event's own spelling (`"PreToolUse"`, `"SessionStart"`, …).
+    ///
+    /// A key nothing answers to is refused by name at load, like every other
+    /// curated name here: a hook that never fires is indistinguishable from a
+    /// hook that fires and does nothing, and only one of those is worth telling
+    /// somebody about.
+    ///
+    /// These run with the **user's own authority** and pass no permission
+    /// gate — see [`crate::hook`] for whose decision that is and why the
+    /// authorship of this file is the trust boundary.
+    #[serde(default)]
+    pub hooks: BTreeMap<String, Vec<HookMatcher>>,
     /// Language servers this session may run. **Absent is none of them**; see
     /// [`LspConfig`].
     pub lsp: Option<LspConfig>,
@@ -795,6 +858,13 @@ impl Config {
         // moved a provider to another host without repeating its `key_env`
         // would otherwise present the old credential to the new endpoint.
         self.provider.extend(other.provider);
+        // Per event, and wholesale: a project that lists what to run before a
+        // tool call has said what to run before a tool call, and appending the
+        // global tier's list underneath would run commands the closest file
+        // deliberately left out. Concatenating would also make a global hook
+        // unremovable from a checkout, which is the direction that matters —
+        // these are commands, not settings.
+        self.hooks.extend(other.hooks);
         merge_lsp(&mut self.lsp, other.lsp);
         self.permission.merge(&other.permission);
 
@@ -1097,6 +1167,10 @@ fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
         path: path.to_owned(),
         message,
     })?;
+    check_hooks(&config.hooks).map_err(|message| ConfigError::Parse {
+        path: path.to_owned(),
+        message,
+    })?;
 
     Ok(Some(config))
 }
@@ -1231,6 +1305,53 @@ fn check_mcp(servers: &BTreeMap<String, McpServer>) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses a `hooks` block that names an event nothing fires, a handler with
+/// nothing to run, or a matcher no engine could compile.
+///
+/// All three are decided here for [`check_mcp`]'s reason and one of its own:
+/// the complaint names the file that said it, and every one of these failures
+/// is otherwise **silent**. A misspelled event name is a hook that never fires;
+/// an empty command is a shell invocation with nothing in it; a matcher that is
+/// not a regular expression is a group that matches nothing forever. None of
+/// the three announces itself at the moment it fails to happen, which is the
+/// whole argument for refusing them at the moment somebody could still fix
+/// them.
+fn check_hooks(hooks: &BTreeMap<String, Vec<HookMatcher>>) -> Result<(), String> {
+    for (event, groups) in hooks {
+        if crate::hook::HookEvent::from_name(event).is_none() {
+            return Err(format!(
+                "hooks names no event \"{event}\"; this build fires {}",
+                crate::hook::EVENTS
+                    .iter()
+                    .map(|known| known.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        for group in groups {
+            if let Some(matcher) = &group.matcher
+                && !matcher.is_empty()
+                && let Err(error) = regex::Regex::new(matcher)
+            {
+                return Err(format!(
+                    "hooks.{event} has a matcher that is not a regular expression: {error}"
+                ));
+            }
+            for handler in &group.hooks {
+                let HookHandler::Command(command) = handler;
+                if command.command.trim().is_empty() {
+                    return Err(format!(
+                        "hooks.{event} has a command handler with no command"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -1238,8 +1359,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        AgentMode, Config, ConfigError, Dialect, LspConfig, McpServer, NonZeroU64, Overrides,
-        ThemeMode, existing, merge_files, project_files, read, split_model,
+        AgentMode, Config, ConfigError, Dialect, HookCommand, HookHandler, HookMatcher, LspConfig,
+        McpServer, NonZeroU64, Overrides, ThemeMode, existing, merge_files, project_files, read,
+        split_model,
     };
     use crate::permission::{Action, RuleSet};
 
@@ -1351,6 +1473,157 @@ mod tests {
         merged.merge(parse(r#"{"snapshot": false}"#).expect("it parses"));
         assert_eq!(merged.snapshot, Some(false));
         assert!(!merged.snapshots_enabled());
+    }
+
+    /// Claude's own block, pasted whole: the shape is kept so that it can be.
+    #[test]
+    fn a_hooks_block_parses_into_its_groups_and_handlers() {
+        let config = parse(
+            r#"{
+              "hooks": {
+                "PreToolUse": [
+                  {
+                    "matcher": "Edit|Write",
+                    "hooks": [
+                      { "type": "command", "command": "./check.sh", "timeout": 5 },
+                      { "type": "command", "command": "./log.sh" }
+                    ]
+                  }
+                ],
+                "SessionStart": [
+                  { "hooks": [{ "type": "command", "command": "git status" }] }
+                ]
+              }
+            }"#,
+        )
+        .expect("the documented shape parses");
+
+        let pre = &config.hooks["PreToolUse"];
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].matcher.as_deref(), Some("Edit|Write"));
+        assert_eq!(
+            pre[0].hooks,
+            vec![
+                HookHandler::Command(HookCommand {
+                    command: "./check.sh".to_owned(),
+                    timeout: Some(5),
+                }),
+                HookHandler::Command(HookCommand {
+                    command: "./log.sh".to_owned(),
+                    timeout: None,
+                }),
+            ]
+        );
+        // An absent matcher is the common case and stays absent rather than
+        // becoming an empty string that means the same thing in one more way.
+        assert_eq!(config.hooks["SessionStart"][0].matcher, None);
+    }
+
+    #[test]
+    fn an_unknown_hook_event_is_refused_by_name() {
+        let error = parse(
+            r#"{"hooks": {"PreToolUsage": [{"hooks": [{"type": "command", "command": "x"}]}]}}"#,
+        )
+        .expect_err("a hook that never fires is worse than one that fails");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("PreToolUsage"), "{message}");
+        assert!(
+            message.contains("PreToolUse") && message.contains("PreCompact"),
+            "the useful half of \"no such event\" is which ones there are: {message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_hook_handler_type_is_refused_by_name() {
+        let error = parse(r#"{"hooks": {"Stop": [{"hooks": [{"type": "webhook", "url": "x"}]}]}}"#)
+            .expect_err("this build runs command handlers and says so");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(
+            message.contains("webhook") && message.contains("command"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_hook_handler_with_no_command_is_refused() {
+        for text in [
+            r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": ""}]}]}}"#,
+            r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "   "}]}]}}"#,
+        ] {
+            let error = parse(text).expect_err("a handler with nothing to run is not one");
+            let ConfigError::Parse { message, .. } = &error else {
+                panic!("expected a parse failure, got {error:?}");
+            };
+            assert!(message.contains("no command"), "{message}");
+        }
+    }
+
+    /// A matcher that is not a regular expression would match nothing, forever,
+    /// without saying so — which is the one failure mode a config check exists
+    /// for.
+    #[test]
+    fn a_matcher_that_is_not_a_regular_expression_is_refused() {
+        let error = parse(
+            r#"{"hooks": {"PreToolUse": [{"matcher": "(unclosed", "hooks": [{"type": "command", "command": "x"}]}]}}"#,
+        )
+        .expect_err("a matcher nothing can compile is a group that never fires");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("PreToolUse"), "{message}");
+    }
+
+    /// Per event, wholesale — the `mcp` arm's semantics, applied for the reason
+    /// stated at the merge: these are commands, and a global one a project
+    /// deliberately left out must not keep running underneath it.
+    #[test]
+    fn a_closer_tier_replaces_one_hook_event_and_leaves_the_others() {
+        let mut merged = parse(
+            r#"{
+              "hooks": {
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "global-pre"}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": "global-stop"}]}]
+              }
+            }"#,
+        )
+        .expect("it parses");
+        merged.merge(
+            parse(
+                r#"{
+                  "hooks": {
+                    "PreToolUse": [{"hooks": [{"type": "command", "command": "project-pre"}]}]
+                  }
+                }"#,
+            )
+            .expect("it parses"),
+        );
+
+        assert_eq!(
+            merged.hooks["PreToolUse"],
+            vec![HookMatcher {
+                matcher: None,
+                hooks: vec![HookHandler::Command(HookCommand {
+                    command: "project-pre".to_owned(),
+                    timeout: None,
+                })],
+            }],
+            "the project's list is the list, not an addition to the global one"
+        );
+        assert_eq!(
+            merged.hooks["Stop"][0].hooks,
+            vec![HookHandler::Command(HookCommand {
+                command: "global-stop".to_owned(),
+                timeout: None,
+            })],
+            "an event the closer tier said nothing about is untouched"
+        );
     }
 
     #[test]
@@ -1975,6 +2248,7 @@ mod tests {
               "shell": "/bin/zsh",
               "command": {"ship": {"template": "release $ARGUMENTS", "agent": "build"}},
               "mcp": {"fs": {"type": "local", "command": ["bun", "x", "mcp-fs"]}},
+              "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify"}]}]},
               "provider": {"local-llama": {
                 "dialect": "openai-chat-completions",
                 "base_url": "http://127.0.0.1:11434/v1"
@@ -1994,6 +2268,7 @@ mod tests {
         assert_eq!(config.command["ship"].agent.as_deref(), Some("build"));
         assert!(config.command["ship"].description.is_none());
         assert!(matches!(config.mcp["fs"], McpServer::Local(_)));
+        assert_eq!(config.hooks["Stop"].len(), 1);
         assert_eq!(
             config.provider["local-llama"].dialect,
             Dialect::OpenaiChatCompletions

@@ -128,6 +128,16 @@ impl Kind {
 /// the ones no answer from a script can mean anything for.
 const REFUSED: [&str; 3] = ["question", "plan_enter", "plan_exit"];
 
+/// How long a finished run waits for the turn's own tail before it ends the
+/// session and exits.
+///
+/// Comfortably past the default hook budget, because what is being waited for
+/// is at most one `Stop` hook of somebody's own, and each of those is already
+/// bounded by [`ganja_core::hook::DEFAULT_TIMEOUT`] or by whatever its entry
+/// asked for. A run that waits this long and still finds a turn in flight
+/// leaves it: an exit code is what a script is here for.
+const SETTLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// What a completed tool call is marked with in the default format, matching
 /// upstream's fallback glyph (`run.ts:103`).
 const RAN: char = '\u{2699}';
@@ -296,6 +306,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // top of a *later* turn, and a one-shot run has no later turn (deviation:
     // run-does-not-watch-files).
     engine.connect_mcp();
+    // The same opening a screen gives a session, because the engine owns hooks
+    // and a headless run is a session too. Before `select_session`, so a
+    // `--continue` fires `startup` here and `resume` from inside the resume
+    // itself, in that order.
+    engine.session_start().await;
 
     let session = select_session(&engine, args.r#continue, args.session.as_deref()).await?;
     // After the session, so the flag outranks whatever effort a resumed row
@@ -318,6 +333,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // Every local MCP server's process group ends here, whichever way the turn
     // went, and before the refusal below leaves the function.
+    // The turn's own tail — the `Stop` hook above all — runs *after* the finish
+    // event this loop stopped reading at, so a run that ended the session here
+    // would end it while the turn it just watched was still finishing. Bounded:
+    // a hook has its own timeout, and a script must be able to exit.
+    engine.settle(SETTLE_LIMIT).await;
+    engine.session_end(ganja_core::hook::EXIT_REASON).await;
     servers.shutdown().await;
     engine.shutdown_lsp();
     engine.shutdown_jobs().await;

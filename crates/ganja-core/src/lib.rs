@@ -35,6 +35,11 @@ pub mod attachment;
 pub mod command;
 pub mod config;
 pub mod engine;
+/// Commands a config asks this build to run at nine named moments of a
+/// session. Engine-side by necessity rather than by taste: a headless `run`
+/// fires the same hooks a screen does, and a `PreToolUse` that can refuse a
+/// call has to sit where the call is executed.
+pub mod hook;
 pub mod instruction;
 /// Background shell jobs — `bash` calls run with `run_in_background: true` —
 /// outliving the turns that start them. The trait every caller reaches this
@@ -58,8 +63,9 @@ pub use agent::{Agent, AgentError, Registry as AgentRegistry};
 pub use auth::{AuthError, Credential};
 pub use catalog::{Cost, ModelInfo};
 pub use config::{
-    AgentConfig, AgentMode, CommandConfig, Config, ConfigError, LspConfig, LspEntry, McpLocal,
-    McpRemote, McpServer, Overrides, ThemeMode, WebfetchConfig,
+    AgentConfig, AgentMode, CommandConfig, Config, ConfigError, HookCommand, HookHandler,
+    HookMatcher, LspConfig, LspEntry, McpLocal, McpRemote, McpServer, Overrides, ThemeMode,
+    WebfetchConfig,
 };
 pub use engine::{Engine, EngineError, Evicted};
 pub use ganja_permission::{permission, project};

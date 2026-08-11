@@ -47,7 +47,7 @@ use crate::{
     agent::{self, Agent},
     catalog, command,
     config::AgentMode,
-    job, lsp, mcp,
+    hook, job, lsp, mcp,
     permission::{Permissions, Rule},
     protocol::{
         Command, Event, Message, MessageId, PartBody, RevertInfo, RevertScope, Role, ToolState,
@@ -194,6 +194,21 @@ pub enum EngineError {
     NoSuchCheckpoint {
         /// The id nothing answers to.
         id: crate::protocol::MessageId,
+    },
+    /// A hook of the user's own refused what they just asked for — today, a
+    /// `UserPromptSubmit` hook that exited 2 or denied the prompt.
+    ///
+    /// Typed rather than folded into an existing variant because a frontend has
+    /// to be able to say *whose* refusal this was: the words are a program's,
+    /// written by the person now reading them, and nothing about the model or
+    /// the session went wrong. The prompt never reached the model and the
+    /// engine stayed idle, so the text is still the frontend's to keep.
+    #[error("a {event} hook refused this prompt: {reason}")]
+    HookRefused {
+        /// The event whose hook refused, by its config-file name.
+        event: &'static str,
+        /// What the hook said — its stderr, or the reason it denied with.
+        reason: String,
     },
 }
 
@@ -776,6 +791,19 @@ pub struct Engine {
     /// `run_in_background: true`. Always present, unlike `mcp`/`lsp`: there
     /// is no engine a background job cannot outlive.
     jobs: Arc<job::JobRegistry>,
+    /// What a config asked to be run at the nine moments [`crate::hook`]
+    /// names. [`None`] is an engine whose config asked for none, which does no
+    /// hook work at all rather than inert hook work at nine seams.
+    hooks: Option<Arc<hook::Hooks>>,
+    /// What a `SessionStart` hook asked to put in front of the model, waiting
+    /// for a turn that can deliver it.
+    ///
+    /// Queued rather than standing (**D460**): the reminders channel appends to
+    /// the last user message of *every* request, so a standing entry would
+    /// repeat a session's opening context on each one. Delivered by the next
+    /// turn that asks the model and then gone — the same discipline the stale-
+    /// file notice already keeps, at the same seam.
+    hook_context: std::sync::Mutex<Vec<String>>,
 }
 
 impl Engine {
@@ -880,6 +908,8 @@ impl Engine {
             history: Arc::default(),
             persistence,
             jobs: Arc::new(job::JobRegistry::new()),
+            hooks: None,
+            hook_context: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1123,6 +1153,100 @@ impl Engine {
     /// safe to call on an engine that started none.
     pub async fn shutdown_jobs(&self) {
         self.jobs.shutdown().await;
+    }
+
+    /// Sets what this session runs at the nine moments [`crate::hook`] names.
+    ///
+    /// Consuming, like every other installer here: what a session runs around
+    /// its own turns is decided once, before anything can be streaming.
+    ///
+    /// Installing them fires nothing. [`Engine::session_start`] is what opens
+    /// the session, and it is a separate call for [`Engine::connect_mcp`]'s
+    /// reason — the engine is assembled before anything of its own runs, and a
+    /// constructor that spawned somebody's shell command would be a constructor
+    /// that can hang.
+    #[must_use]
+    pub fn with_hooks(mut self, hooks: Arc<hook::Hooks>) -> Self {
+        self.hooks = Some(hooks);
+
+        self
+    }
+
+    /// Fires `SessionStart` with the source a fresh session has, and keeps
+    /// whatever context it asked for until a turn can deliver it.
+    ///
+    /// Called by a frontend once it has assembled the engine, rather than from
+    /// the constructor: the constructor is synchronous, and it runs before
+    /// [`Engine::with_hooks`] has installed anything for it to fire (a
+    /// divergence from the plan's stated seam, which named `assemble`). The
+    /// resume half lives in [`Engine::resume`], where a resumed session is
+    /// installed.
+    pub async fn session_start(&self) {
+        self.fire_session_hook(hook::Payload::SessionStart {
+            source: hook::Source::Startup,
+        })
+        .await;
+    }
+
+    /// Waits until no turn is in flight, or until `limit` runs out.
+    ///
+    /// A turn's finish event reaches its subscribers **before** the turn has
+    /// finished: `MessageFinished` is queued first on purpose, and the tail
+    /// after it — the plan-approval announcement, the `Stop` hook, the slot
+    /// release — runs once it is out the door. A caller that stops reading at
+    /// that event and then tears the process down therefore cuts the tail off
+    /// mid-sentence, which is how a headless run came to fire every hook of a
+    /// turn except the one defined to run at its end.
+    ///
+    /// Bounded, and by an argument rather than by a constant of its own: a hook
+    /// somebody wrote already has a timeout, and a wait with no ceiling here
+    /// would let a wedged one stop a script from ever exiting. Returns whether
+    /// the engine really went idle, so a caller that cares can say so.
+    pub async fn settle(&self, limit: std::time::Duration) -> bool {
+        /// Between looks. Short enough that the common case — the tail is
+        /// already done — costs one poll, and long enough that a slow hook is
+        /// not paid for in wakeups.
+        const BETWEEN: std::time::Duration = std::time::Duration::from_millis(10);
+
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if self.turn.observe(|turn| turn.is_none()).await {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(BETWEEN).await;
+        }
+    }
+
+    /// Fires `SessionEnd` as a frontend shuts down.
+    ///
+    /// `reason` is one word, and this build's vocabulary for it is small on
+    /// purpose: every route out of every frontend is somebody ending the
+    /// process, so `"exit"` is what all three pass.
+    pub async fn session_end(&self, reason: &str) {
+        self.fire_session_hook(hook::Payload::SessionEnd {
+            reason: reason.to_owned(),
+        })
+        .await;
+    }
+
+    /// Runs one session-level hook and files what it said: notices to the log,
+    /// context to the queue the next turn drains.
+    async fn fire_session_hook(&self, payload: hook::Payload) {
+        let Some(hooks) = &self.hooks else {
+            return;
+        };
+        let event = payload.event();
+        let outcome = hooks.fire(self.session_id().as_str(), &payload).await;
+        outcome.report(event);
+        if !outcome.context.is_empty() {
+            self.hook_context
+                .lock()
+                .expect("the hook context is never poisoned")
+                .extend(outcome.context);
+        }
     }
 
     /// Sets the language servers this session may run.
@@ -1473,6 +1597,17 @@ impl Engine {
                 .await;
         }
         drop(slot);
+
+        // After the install and after the slot is released: the envelope names
+        // the session that was resumed, so it has to be fired once this engine
+        // *is* on that session — and a hook holding the slot would make a
+        // resume Busy for its own duration. `startup` never fires here and
+        // `resume` never fires anywhere else, which is the whole of what a
+        // `SessionStart` matcher selects between.
+        self.fire_session_hook(hook::Payload::SessionStart {
+            source: hook::Source::Resume,
+        })
+        .await;
 
         Ok(transcript)
     }
@@ -2387,6 +2522,7 @@ impl Engine {
             lsp: self.lsp.clone(),
             persistence: self.persistence.clone(),
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
+            hooks: self.hooks.clone(),
         }))
     }
 
@@ -2710,6 +2846,35 @@ impl Engine {
         // `previous == plan && agent == build` reminder gate does too.
         let mut turn = self.lock_entry(PendingPolicy::Apply).await?;
 
+        // Before the model hears a word of it, and inside the slot guard so
+        // that nothing starts a turn while the hook is deciding. Only a turn
+        // that *asks* the model: a `!` passthrough runs a command the person
+        // typed themselves and a compaction says nothing new, so neither is a
+        // prompt anybody submitted. A refusal returns here with the guard
+        // dropped and the slot empty — the engine is idle, the prompt never
+        // happened, and the frontend keeps the text.
+        let mut hook_context = Vec::new();
+        if matches!(kind, TurnKind::Prompt { .. })
+            && let Some(hooks) = &self.hooks
+        {
+            let outcome = hooks
+                .fire(
+                    self.session_id().as_str(),
+                    &hook::Payload::UserPromptSubmit {
+                        prompt: prompt.clone(),
+                    },
+                )
+                .await;
+            outcome.report(hook::HookEvent::UserPromptSubmit);
+            if let Some(reason) = outcome.blocked {
+                return Err(EngineError::HookRefused {
+                    event: hook::HookEvent::UserPromptSubmit.name(),
+                    reason,
+                });
+            }
+            hook_context = outcome.context;
+        }
+
         // Between turns and never during one: a server that connected while
         // the last turn was streaming is offered to the model here, and a
         // connection that died is withdrawn here.
@@ -2816,6 +2981,18 @@ impl Engine {
         if asks_the_model && let Some(notice) = stale_notice(&self.files.take_stale(), &self.root) {
             reminders.push(notice);
         }
+        // What the session's own hooks asked to say, in the order they said it:
+        // whatever a `SessionStart` queued (drained here, once — D460), then
+        // what this prompt's own `UserPromptSubmit` hooks just added.
+        if asks_the_model {
+            reminders.extend(
+                self.hook_context
+                    .lock()
+                    .expect("the hook context is never poisoned")
+                    .drain(..),
+            );
+        }
+        reminders.extend(hook_context);
 
         // The first prompt on a persistent engine creates the session record,
         // and it reaches the disk before the first byte streams: a crash
@@ -2899,6 +3076,8 @@ impl Engine {
             history: Arc::clone(&self.history),
             pending_switch: self.pending_for_turn(),
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
+            hooks: self.hooks.clone(),
+            delegated: false,
             persist,
         };
         tokio::spawn(run_turn(turn));

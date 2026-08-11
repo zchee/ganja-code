@@ -163,6 +163,13 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     if let Some(lsp) = lsp {
         engine = engine.with_lsp(lsp);
     }
+    // The **project root** for the same reason the language server takes one: a
+    // hook that runs `git status` means the checkout, not whichever
+    // subdirectory the terminal was opened in. `None` when the config asked for
+    // no hooks, which leaves the engine doing no hook work at all.
+    if let Some(hooks) = ganja_core::hook::Hooks::new(&config.hooks, project.root()) {
+        engine = engine.with_hooks(hooks);
+    }
     // Composed from the engine and not from the selection, and only once the
     // agents are on it: the default agent may have named a model of another
     // family, and the prompt has to be that model's.
@@ -189,6 +196,11 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     // that never answers costs its tools and a line of the status bar rather
     // than the startup this call returns straight out of (**R3**).
     engine.connect_mcp();
+    // The session is open, so whatever a `SessionStart` hook has to say is
+    // collected now and delivered to the first turn that asks the model. Before
+    // the resume below, so a `--continue` fires `startup` and then `resume`, in
+    // the order they happened.
+    engine.session_start().await;
     // Filesystem events for the files this session reads, so a file edited in
     // another window is refused before the model acts on what it read and is
     // named to it at the top of the next turn. A watcher that will not start
@@ -246,6 +258,9 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
             .with_cwd(cwd)
             .watching_mcp(config.mcp.len());
             app.seed(seed);
+            // `SessionEnd` fires at the tail of this call rather than beside
+            // `jobs.shutdown()` below: `run` consumes the app, and the engine
+            // it consumed is the only thing that knows which session to name.
             app.run(&mut terminal).await
         }
         Err(error) => Err(error),
