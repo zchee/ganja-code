@@ -1,4 +1,5 @@
-//! `ganja-config.schema.json`, checked against the loader it describes.
+//! `schema/ganja-config.schema.json`, checked against the loader it
+//! describes.
 //!
 //! Spec: none upstream — opencode publishes its own config schema, and this
 //! is parity rather than a divergence. What is ported is the *idea* that a
@@ -35,10 +36,10 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 /// The schema, parsed once per test. `include_str!` ties this file to the
-/// repo-root schema at compile time — moving one without the other is a
-/// build error, not a silent drift.
+/// schema under `schema/` at compile time — moving one without the other is
+/// a build error, not a silent drift.
 fn schema() -> Value {
-    serde_json::from_str(include_str!("../../../ganja-config.schema.json"))
+    serde_json::from_str(include_str!("../../../schema/ganja-config.schema.json"))
         .expect("the schema is valid JSON")
 }
 
@@ -95,7 +96,7 @@ fn bogus_key_error(project: &Path, text: &str) -> String {
 /// own suite, reused here so the schema is checked against a document that
 /// actually exercises it rather than an empty one.
 const KITCHEN_SINK: &str = r#"{
-  "$schema": "./ganja-config.schema.json",
+  "$schema": "./schema/ganja-config.schema.json",
   "model": "anthropic/claude-sonnet-5",
   "small_model": "anthropic/claude-haiku-4.5",
   "default_provider": "anthropic",
