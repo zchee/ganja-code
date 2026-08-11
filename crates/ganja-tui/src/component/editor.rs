@@ -91,6 +91,10 @@ impl Editor {
         self.area
             .set_block(Block::bordered().title(self.mode.title()).style(theme.dim));
         self.area.set_style(theme.fg);
+        // The widget's default underlines the whole line the cursor is on,
+        // which reads as decoration on every character being typed — nothing
+        // upstream or Claude Code draws. The cursor itself marks the line.
+        self.area.set_cursor_line_style(theme.fg);
         // Otherwise the widget's own default gray is the one color on screen a
         // theme cannot reach.
         self.area.set_placeholder_style(theme.dim);
@@ -350,6 +354,38 @@ mod tests {
         typing(&mut editor, "second");
 
         assert_eq!(editor.prompt().as_deref(), Some("first\nsecond"));
+    }
+
+    /// The widget's own default underlines the cursor's whole line, which
+    /// would decorate every character as it is typed — nothing upstream or
+    /// Claude Code draws, so no cell here may carry it.
+    #[test]
+    fn the_line_being_typed_is_not_underlined() {
+        use ratatui::style::Modifier;
+
+        const AREA: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 5,
+        };
+
+        let mut editor = Editor::new(&Theme::default());
+        typing(&mut editor, "no decoration");
+
+        let mut buffer = Buffer::empty(AREA);
+        editor.render(AREA, &mut buffer);
+
+        for row in 0..AREA.height {
+            for column in 0..AREA.width {
+                assert!(
+                    !buffer[(column, row)]
+                        .modifier
+                        .contains(Modifier::UNDERLINED),
+                    "cell ({column}, {row}) is underlined"
+                );
+            }
+        }
     }
 
     /// The one component whose styles are set once rather than read per frame,
