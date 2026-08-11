@@ -2770,6 +2770,19 @@ impl App {
             return;
         }
 
+        // A buffer naming a UI command by itself runs it, exactly as choosing
+        // it from the dropdown would have. The menu is not the only door: it
+        // closes the moment a space follows the name, and Tab completion
+        // leaves `/exit ` behind on purpose (**D446**) — so submit reads the
+        // text itself, as Claude Code and Codex both do. Ahead of the steer
+        // branch because a UI action is the frontend's, not the model's: the
+        // palette already dispatches any of these mid-turn.
+        if let Some(entry) = command::submitted(&prompt) {
+            self.clear_composer();
+            self.run_command(entry.action).await;
+            return;
+        }
+
         // A turn already holds the engine, so what was typed is not a prompt:
         // it is a message for the turn that is running (**F4**). See
         // [`App::enqueue`].
@@ -7976,6 +7989,95 @@ mod tests {
             .collect();
 
         assert_eq!(text, "/nonesuch please ");
+    }
+
+    /// The dropdown is not the only door to a built-in: the menu closes the
+    /// moment a space follows the name, so the Enter that follows must read
+    /// the text itself — Claude Code and Codex both dispatch on the submitted
+    /// line, not on the menu's state.
+    #[tokio::test]
+    async fn a_ui_command_with_a_trailing_space_still_runs_on_enter() {
+        let (mut app, _events) = wired().await;
+
+        typed(&mut app, "/exit ").await;
+        assert!(app.dropdown.is_none(), "the space closed the menu");
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(app.quit, "the command should have run, not been sent");
+        assert!(
+            app.editor.is_empty(),
+            "a command that ran clears the composer"
+        );
+    }
+
+    /// The sharpest spelling of the same edge: Tab fills `/exit ` without
+    /// running it (**D446**), so the Enter that follows has to mean the
+    /// command that was just completed.
+    #[tokio::test]
+    async fn tab_completion_then_enter_runs_the_command_it_completed() {
+        let (mut app, _events) = wired().await;
+        typed(&mut app, "/exi").await;
+
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .expect("tab is handled");
+        assert_eq!(app.editor.text(), "/exit ");
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(app.quit, "tab completed the command and enter ran it");
+    }
+
+    /// A built-in takes no arguments, so a name followed by more words is
+    /// prose — the same ruling that sends an unknown slash command to the
+    /// model rather than intercepting it.
+    #[tokio::test]
+    async fn a_ui_command_followed_by_arguments_is_sent_as_the_text_it_is() {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, None, Themes::builtin());
+
+        typed(&mut app, "/exit now ").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(!app.quit, "words after the name make it prose");
+        let CoreEvent::MessageStarted {
+            session_id: _,
+            message,
+        } = events.next().await.expect("the engine reports the prompt")
+        else {
+            panic!("the first event of a turn is the user's message");
+        };
+        let text: String = message
+            .parts
+            .iter()
+            .filter_map(ganja_protocol::Part::as_text)
+            .collect();
+
+        assert_eq!(text, "/exit now ");
+    }
+
+    /// A UI command acts on the frontend, not on the running turn, so it runs
+    /// now rather than steering its own name into the conversation — the
+    /// palette already dispatches any of these mid-turn.
+    #[tokio::test]
+    async fn a_ui_command_submitted_mid_turn_runs_instead_of_steering() {
+        let (mut app, _events) = wired().await;
+        app.turn_running = true;
+
+        typed(&mut app, "/exit ").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(app.quit, "the command should have run instead of queueing");
     }
 
     #[tokio::test]
