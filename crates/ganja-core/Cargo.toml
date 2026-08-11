@@ -88,6 +88,11 @@ libc.workspace = true
 # The scripted-provider/recorder-tool/storage-seeding scaffolding
 # `tests/*.rs` shares across binaries — see `crates/ganja-testkit`.
 ganja-testkit.workspace = true
+# Only for `tests/mentions.rs`'s image-attachment check: encodes a pixel
+# fixture and decodes the request's base64 payload back, so the assertion is
+# "a real PNG of the right dimensions reached the wire" rather than "some
+# bytes did."
+png.workspace = true
 # Only the credential tests: they build the `SecretString`s a store is seeded
 # with and read back what a redaction left. The engine itself holds no key
 # material any more — that went to `ganja-provider` with the wires.

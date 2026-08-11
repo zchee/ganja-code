@@ -60,10 +60,14 @@ ganja-tool = { path = "crates/ganja-tool" }
 ganja-tui = { path = "crates/ganja-tui" }
 
 anyhow = "1.0.104"
-# Clipboard read and write through each platform's native surface. Text only
-# on purpose: `image-data` (the one default feature) would pull the `image`
-# stack for content the protocol cannot carry yet.
+# Clipboard read and write through each platform's native surface.
+# `image-data` decodes a clipboard image to raw RGBA pixels: the protocol has
+# carried binary attachments since P8, so a paste that finds no text can now
+# ask for a picture instead of answering the same notice an empty clipboard
+# gets (F3, lifting D111's image half). `arboard` does not itself encode PNG —
+# see `png` below for that half.
 arboard = { version = "3.6.1", default-features = false, features = [
+    "image-data",
     # Wayland sessions have no X11 selection to fall back on; this opts the
     # Linux build into speaking wl-clipboard directly.
     "wayland-data-control",
@@ -115,6 +119,14 @@ nucleo-matcher = "0.3.1"
 # Filesystem events behind the stale-read watcher: a file read this session
 # and then changed outside it is flagged before the next turn trusts it.
 notify = "8.2.0"
+# Encodes a clipboard-pasted image to PNG bytes before it enters the mention
+# pipeline as a `File` part (F3). Small and pure-Rust: `arboard`'s own
+# `image-data` feature above already pulls in the `image` crate for its own
+# platform pixel-format conversions, but that dependency is not part of
+# `arboard`'s public surface — `ImageData` hands back raw RGBA only — so
+# encoding still needs a crate of its own, and this one is the encoder alone
+# rather than the whole `image` stack a second time.
+png = "0.18.1"
 # Markdown parsed into block events the chat renderer styles; the default
 # `html` renderer and the example binary's `getopts` stay off — parsing is
 # the only piece the TUI consumes.
