@@ -35,6 +35,8 @@ pub enum Action {
     AgentCycle,
     /// Break the line in the composer instead of submitting it.
     InputNewline,
+    /// Force the next frame through a full repaint.
+    Redraw,
 }
 
 /// The action a config key names, its default binding, in the order a
@@ -57,6 +59,9 @@ const ACTIONS: &[(Action, &str, &str)] = &[
         "input_newline",
         "shift+enter,ctrl+enter,alt+enter,ctrl+j",
     ),
+    // Claude Code's binding, not upstream's — opencode's `keybind.ts` has no
+    // redraw action at all (deviation **D445**, ctrl-l-redraw-no-upstream).
+    (Action::Redraw, "redraw", "ctrl+l"),
 ];
 
 impl Action {
@@ -458,6 +463,7 @@ mod tests {
                 KeyModifiers::CONTROL,
             ),
             (Action::InputNewline, KeyCode::Enter, KeyModifiers::SHIFT),
+            (Action::Redraw, KeyCode::Char('l'), KeyModifiers::CONTROL),
         ];
 
         for (action, code, modifiers) in cases {
@@ -519,6 +525,27 @@ mod tests {
             !binds.binds(
                 Action::InputNewline,
                 pressed(KeyCode::Char('j'), KeyModifiers::CONTROL)
+            ),
+            "and the default is replaced, not kept alongside"
+        );
+    }
+
+    /// Ctrl+L has no upstream counterpart (**D445**); it is still an
+    /// ordinary row in the table, rebindable exactly like every other.
+    #[test]
+    fn the_redraw_chord_is_rebindable_from_config() {
+        let binds = Keybinds::from_config(&configured(&[("redraw", "ctrl+r")]))
+            .expect("a legible binding loads");
+
+        assert_eq!(
+            binds.action(pressed(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            Some(Action::Redraw),
+            "the rebind reaches the action"
+        );
+        assert!(
+            !binds.binds(
+                Action::Redraw,
+                pressed(KeyCode::Char('l'), KeyModifiers::CONTROL)
             ),
             "and the default is replaced, not kept alongside"
         );

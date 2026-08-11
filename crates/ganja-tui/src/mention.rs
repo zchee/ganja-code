@@ -22,9 +22,10 @@
 //! [`split_range`] and carried on the [`Mention`] so the send-time read can
 //! slice to exactly the lines it names.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ganja_protocol::Mention;
+use url::Url;
 
 /// A mention being typed, located in the buffer it was found in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -222,11 +223,157 @@ pub fn attachable(text: &str, root: &Path) -> Vec<Mention> {
         .collect()
 }
 
+/// The paths `text` is a *drop* of, resolved against `root`; [`None`] when it
+/// is not one.
+///
+/// Spec: upstream `pastedFilepath` (`component/prompt/index.tsx:78-80`),
+/// generalized from upstream's single candidate to as many as the paste
+/// carries — a terminal that drags in several files sends their paths
+/// whitespace-separated (each quoted, if it needs to be) in one paste event,
+/// and each is its own mention (**F5**). The rule stays upstream's otherwise:
+/// **every** token [`tokenize`] finds must resolve, one miss and the whole
+/// paste is ordinary text — a pasted shell one-liner naming a real path
+/// (`cat file.txt | grep x`) must not have `file.txt` alone turned into a
+/// mention while `cat`, `|` and `grep` stay text around it.
+#[must_use]
+pub fn classify_drop(text: &str, root: &Path) -> Option<Vec<String>> {
+    let tokens = tokenize(text);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    tokens
+        .into_iter()
+        .map(|token| {
+            let candidate = resolve_dropped(&token)?;
+            let absolute = if candidate.is_absolute() {
+                candidate
+            } else {
+                root.join(candidate)
+            };
+
+            absolute.exists().then(|| display(root, &absolute))
+        })
+        .collect()
+}
+
+/// Splits a drop candidate into tokens the way a shell would, generalizing
+/// upstream's single-candidate check to a whole paste: whitespace separates
+/// tokens except inside a `'…'`/`"…"` run — the quoting a terminal reaches
+/// for when a dropped path has a space in it — and, off Windows, right after
+/// a backslash, which escapes whatever follows rather than ending the token
+/// there. Quote characters are consumed rather than kept, matching upstream's
+/// own edge-quote strip (`raw.replace(/^['"]+|['"]+$/g, "")`) generalized the
+/// same way; a `\`-escape is left in the token for [`resolve_dropped`] to
+/// undo, because whether it means anything depends on whether the token
+/// turns out to be a `file://` URL.
+fn tokenize(text: &str) -> Vec<String> {
+    let escapes = !cfg!(windows);
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_token = false;
+    let mut characters = text.chars();
+
+    while let Some(character) = characters.next() {
+        if let Some(open) = quote {
+            if character == open {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            continue;
+        }
+
+        match character {
+            '\'' | '"' => {
+                quote = Some(character);
+                has_token = true;
+            }
+            '\\' if escapes => {
+                current.push(character);
+                has_token = true;
+                if let Some(escaped) = characters.next() {
+                    current.push(escaped);
+                }
+            }
+            character if character.is_whitespace() => {
+                if has_token {
+                    tokens.push(std::mem::take(&mut current));
+                    has_token = false;
+                }
+            }
+            character => {
+                current.push(character);
+                has_token = true;
+            }
+        }
+    }
+    if has_token {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+/// One dropped token's own path, or [`None`] when it is neither a `file://`
+/// URL nor a plain (possibly escaped) path.
+///
+/// A `file://` URL decodes through [`Url::to_file_path`], which carries the
+/// percent-decoding and the empty-or-`localhost`-host rule upstream's
+/// `fileURLToPath` applies; anything else is unescaped a backslash at a time.
+fn resolve_dropped(token: &str) -> Option<PathBuf> {
+    if token.starts_with("file://") {
+        return Url::parse(token).ok()?.to_file_path().ok();
+    }
+
+    Some(PathBuf::from(unescape(token)))
+}
+
+/// Undoes a shell's backslash escaping — `\ ` back to a space, and so on —
+/// everywhere except Windows, whose backslash *is* the path separator and
+/// where unescaping one would corrupt the path instead of decoding it
+/// (upstream's own carve-out: `if (platform === "win32") return raw`).
+fn unescape(token: &str) -> String {
+    if cfg!(windows) {
+        return token.to_owned();
+    }
+
+    let mut unescaped = String::with_capacity(token.len());
+    let mut characters = token.chars();
+    while let Some(character) = characters.next() {
+        // Only a backslash ever consumes a second character here — anything
+        // else is pushed on its own, so a backslash that lands right after a
+        // plain character is still seen as its own escape on the next turn
+        // rather than swallowed as that character's pair.
+        if character == '\\'
+            && let Some(escaped) = characters.next()
+        {
+            unescaped.push(escaped);
+        } else {
+            unescaped.push(character);
+        }
+    }
+
+    unescaped
+}
+
+/// `path`, relative to `root` when it is under it, absolute otherwise — the
+/// same convention `ganja-tool`'s own `display()` follows for the same
+/// reason: a project-relative path is what a mention normally reads as, and
+/// a path a drop can name outside the project has nothing to be relative to.
+fn display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{Fragment, attachable, scan, split_range, token, trigger};
+    use super::{Fragment, attachable, classify_drop, scan, split_range, token, trigger};
 
     /// `crates/ganja-core/src/command.rs::mentions` is this scan spelled again
     /// across the core/TUI dependency boundary. If they drift, a token the
@@ -577,5 +724,125 @@ mod tests {
     #[test]
     fn a_range_with_no_path_mentions_nothing() {
         assert!(scan("look at @#5-9").is_empty());
+    }
+
+    /// **F5**, the baseline: one real path pasted alone is a drop.
+    #[test]
+    fn a_dropped_path_resolves_to_a_project_relative_mention() {
+        let root = project(&["src/lib.rs"]);
+
+        assert_eq!(
+            classify_drop("src/lib.rs", root.path()),
+            Some(vec!["src/lib.rs".to_owned()])
+        );
+    }
+
+    /// Several files dragged in at once arrive whitespace-separated in one
+    /// paste; each becomes its own mention, in the order they were pasted.
+    #[test]
+    fn several_dropped_paths_resolve_in_the_order_they_were_pasted() {
+        let root = project(&["b.rs", "a.rs"]);
+
+        assert_eq!(
+            classify_drop("b.rs a.rs", root.path()),
+            Some(vec!["b.rs".to_owned(), "a.rs".to_owned()])
+        );
+    }
+
+    /// A pasted shell one-liner that happens to name a real path must not
+    /// have that one path pulled out into a mention while `cat`, `|` and
+    /// `grep` are left behind as text: every token has to qualify, or none do.
+    #[test]
+    fn one_token_that_is_not_a_path_fails_the_whole_paste() {
+        let root = project(&["file.txt"]);
+
+        assert_eq!(classify_drop("cat file.txt | grep x", root.path()), None);
+    }
+
+    /// `file://` URLs percent-decode, and a `%20` is exactly the reason one
+    /// would appear in a dropped path's URL.
+    #[test]
+    fn a_file_url_percent_decodes_and_resolves() {
+        let root = project(&["a b.png"]);
+        let url = format!("file://{}/a%20b.png", root.path().display());
+
+        assert_eq!(
+            classify_drop(&url, root.path()),
+            Some(vec!["a b.png".to_owned()])
+        );
+    }
+
+    /// A terminal that quotes a dropped path because it has a space in it —
+    /// the space must not split the quoted run into two tokens.
+    #[test]
+    fn a_quoted_path_with_a_space_resolves_as_one_token() {
+        let root = project(&["my file.txt"]);
+
+        assert_eq!(
+            classify_drop("'my file.txt'", root.path()),
+            Some(vec!["my file.txt".to_owned()])
+        );
+    }
+
+    /// The shell-escaped equivalent of the quoted case above, off Windows
+    /// only: there, a backslash is the path separator, not an escape.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backslash_escaped_space_resolves_as_one_token() {
+        let root = project(&["my file.txt"]);
+
+        assert_eq!(
+            classify_drop(r"my\ file.txt", root.path()),
+            Some(vec!["my file.txt".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_relative_dot_path_resolves() {
+        let root = project(&["src/lib.rs"]);
+
+        assert_eq!(
+            classify_drop("./src/lib.rs", root.path()),
+            Some(vec!["src/lib.rs".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_unicode_named_file_resolves() {
+        let root = project(&["日本語.txt"]);
+
+        assert_eq!(
+            classify_drop("日本語.txt", root.path()),
+            Some(vec!["日本語.txt".to_owned()])
+        );
+    }
+
+    /// A path outside the project keeps its absolute form — the display
+    /// convention every other mention insertion already follows.
+    #[test]
+    fn an_absolute_path_outside_root_stays_absolute() {
+        let root = project(&["a.rs"]);
+        let outside = project(&["b.rs"]);
+        let absolute = outside.path().join("b.rs").display().to_string();
+
+        assert_eq!(
+            classify_drop(&absolute, root.path()),
+            Some(vec![absolute.clone()])
+        );
+    }
+
+    #[test]
+    fn empty_or_whitespace_only_text_is_not_a_drop() {
+        let root = project(&[]);
+
+        assert_eq!(classify_drop("", root.path()), None);
+        assert_eq!(classify_drop("   \n\t  ", root.path()), None);
+    }
+
+    #[test]
+    fn a_token_naming_nothing_on_disk_is_not_a_drop() {
+        let root = project(&[]);
+
+        assert_eq!(classify_drop("nope.rs", root.path()), None);
     }
 }
