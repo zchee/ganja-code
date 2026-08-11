@@ -276,6 +276,16 @@ pub struct App {
     keys: Keybinds,
     /// The tool call currently waiting on the user's decision, if any.
     permission: Option<Permission>,
+    /// Dialogs that arrived while another was already on screen, in arrival
+    /// order (**D462**).
+    ///
+    /// One at a time is still what a person is shown — two modals over each
+    /// other is not a design, and the answer keys are the same three either
+    /// way — so a second request queues rather than replacing the first, and
+    /// the bar counts what is behind it. Only concurrent children can produce
+    /// one: a single call is a turn blocked inside it, which is what made the
+    /// engine's own registry a single cell until this wave.
+    queued_permissions: VecDeque<Permission>,
     /// The question currently waiting on the user's answer.
     question: Option<Question>,
     /// The stored sessions the user is choosing between, while the picker is
@@ -460,6 +470,7 @@ impl App {
             status,
             keys: Keybinds::defaults(),
             permission: None,
+            queued_permissions: VecDeque::new(),
             question: None,
             sessions: None,
             theme_list: None,
@@ -2799,6 +2810,24 @@ impl App {
         self.status.set_queued(self.queue.depth());
     }
 
+    /// Tells the bar how many dialogs are waiting behind the one on screen.
+    fn sync_dialog_status(&mut self) {
+        self.status
+            .set_queued_dialogs(self.queued_permissions.len());
+    }
+
+    /// Tells the bar how many delegated children the running turn has in
+    /// flight.
+    ///
+    /// Counted off the transcript rather than tracked as a number of its own:
+    /// the parts already carry the answer — a `task` part is `Running` from the
+    /// moment its call starts until its child comes home — and a counter kept
+    /// beside them would be a second source of truth to keep in step with
+    /// resume, revert and every other path that rewrites the chat.
+    fn sync_task_status(&mut self) {
+        self.status.set_running_tasks(self.chat.running_tasks());
+    }
+
     /// Empties the composer and the two menus that were about what was in it.
     fn clear_composer(&mut self) {
         self.editor.clear();
@@ -2933,6 +2962,7 @@ impl App {
                     });
                 }
                 self.chat.update_part(&message_id, part);
+                self.sync_task_status();
             }
             CoreEvent::PermissionRequested {
                 id,
@@ -2942,8 +2972,18 @@ impl App {
                 directories,
                 ..
             } => {
-                self.permission = Some(Permission::new(id, tool, title, args, directories));
+                let asked = Permission::new(id, tool, title, args, directories);
+                match &self.permission {
+                    // A dialog is already up. Queueing rather than replacing is
+                    // the whole of the frontend's half of D462: the engine now
+                    // holds both requests open and routes each reply by id, so
+                    // the one on screen is still answerable and this one is
+                    // asked as soon as it is.
+                    Some(_) => self.queued_permissions.push_back(asked),
+                    None => self.permission = Some(asked),
+                }
                 self.status.set_activity(Activity::Permission);
+                self.sync_dialog_status();
             }
             // The engine took a queued message into the running turn, so the
             // strip entry has done its job: what it stood for is about to
@@ -2960,9 +3000,22 @@ impl App {
                     .as_ref()
                     .is_some_and(|permission| *permission.id() == id);
                 if names_open_request {
-                    self.permission = None;
-                    self.status.set_activity(Activity::Streaming);
+                    // The next question, if this turn's children raised one
+                    // while this dialog was up. The activity only goes back to
+                    // streaming once nobody is waiting on anybody.
+                    self.permission = self.queued_permissions.pop_front();
+                    if self.permission.is_none() {
+                        self.status.set_activity(Activity::Streaming);
+                    }
+                } else {
+                    // A queued request that was answered without being shown —
+                    // a cancel refusing every open dialog is the way that
+                    // happens — retires from the queue rather than being asked
+                    // about after the fact.
+                    self.queued_permissions
+                        .retain(|waiting| *waiting.id() != id);
                 }
+                self.sync_dialog_status();
             }
             // The one event that moves the transcript backwards. What it does
             // not say — and does not have to — is whether a cleared revert
@@ -3063,6 +3116,10 @@ impl App {
                 self.turn_running = false;
                 self.queue.strand();
                 self.sync_queue_status();
+                // A finished turn has no children left, however its parts
+                // ended: cancelled and failed calls reach a terminal state too,
+                // and the count follows the transcript rather than guessing.
+                self.sync_task_status();
                 if let Some(usage) = usage {
                     self.record(&message_id, &usage);
                 }
@@ -4822,6 +4879,94 @@ mod tests {
         .await
         .expect("the matching reply is handled");
         assert!(app.permission.is_none());
+    }
+
+    /// Two children asking at once are two dialogs, shown one at a time
+    /// (**D462**).
+    ///
+    /// The engine holds both open and routes each reply by id, so the frontend
+    /// may not drop the first when the second arrives — nor stack them, which
+    /// is not a design. It queues, says how many are behind, and asks the next
+    /// one the moment this one is answered.
+    #[tokio::test]
+    async fn a_second_request_queues_behind_the_open_dialog_and_is_asked_next() {
+        let mut app = app();
+        app.handle(AppEvent::core(permission_event("perm_1")))
+            .await
+            .expect("the first request is handled");
+        app.handle(AppEvent::core(permission_event("perm_2")))
+            .await
+            .expect("the second request is handled");
+
+        assert_eq!(
+            app.permission.as_ref().map(|open| open.id().as_str()),
+            Some("perm_1"),
+            "the dialog on screen is still the one that was asked first"
+        );
+        assert_eq!(app.queued_permissions.len(), 1);
+
+        let mut terminal = terminal(100, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(
+            screen.contains("1 dialog queued"),
+            "the bar says how many are behind it:\n{screen}"
+        );
+
+        app.handle(AppEvent::core(CoreEvent::PermissionReplied {
+            session_id: session(),
+            id: PermissionId::from("perm_1".to_owned()),
+            reply: PermissionReply::Once,
+        }))
+        .await
+        .expect("the first reply is handled");
+
+        assert_eq!(
+            app.permission.as_ref().map(|open| open.id().as_str()),
+            Some("perm_2"),
+            "answering one asks the next rather than leaving the queue stranded"
+        );
+        assert!(app.queued_permissions.is_empty());
+
+        app.handle(AppEvent::core(CoreEvent::PermissionReplied {
+            session_id: session(),
+            id: PermissionId::from("perm_2".to_owned()),
+            reply: PermissionReply::Once,
+        }))
+        .await
+        .expect("the second reply is handled");
+        assert!(app.permission.is_none(), "and then nobody is being asked");
+    }
+
+    /// A cancel answers every open request, including the ones nobody was
+    /// shown. Those retire from the queue rather than being put in front of
+    /// somebody after the turn they belonged to has ended.
+    #[tokio::test]
+    async fn a_reply_to_a_queued_request_retires_it_without_ever_showing_it() {
+        let mut app = app();
+        for id in ["perm_1", "perm_2"] {
+            app.handle(AppEvent::core(permission_event(id)))
+                .await
+                .expect("a request is handled");
+        }
+
+        app.handle(AppEvent::core(CoreEvent::PermissionReplied {
+            session_id: session(),
+            id: PermissionId::from("perm_2".to_owned()),
+            reply: PermissionReply::Reject,
+        }))
+        .await
+        .expect("the queued request's own refusal is handled");
+
+        assert!(
+            app.queued_permissions.is_empty(),
+            "the refused request left the queue"
+        );
+        assert_eq!(
+            app.permission.as_ref().map(|open| open.id().as_str()),
+            Some("perm_1"),
+            "and the one on screen is untouched by it"
+        );
     }
 
     #[tokio::test]

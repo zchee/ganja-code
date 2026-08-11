@@ -32,7 +32,7 @@
 //! deterministic. A persistence failure is a warning, never a dead turn:
 //! losing the disk must not kill the conversation.
 
-use std::{ops::ControlFlow, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, ops::ControlFlow, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::StreamExt as _;
 use tokio::{
@@ -52,7 +52,9 @@ use crate::{
     },
     provider::{ChatRequest, Provider, ProviderEvent},
     storage::{SessionId, SessionInfo, Storage, StorageError},
-    tool::{Credentials, FileTimes, Registry, ToolCtx, ToolError, question, shell},
+    tool::{
+        Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput, question, shell,
+    },
 };
 
 /// What the model reads when the user refuses a call, ported verbatim from
@@ -244,9 +246,10 @@ Rules:
 pub(crate) struct TurnHandle {
     /// Stops the turn: the provider stream, a running tool, a permission wait.
     pub(crate) cancel: CancellationToken,
-    /// The wait a reply command answers, when one is open. Shared with the
-    /// turn task, which sets and clears it.
-    pub(crate) permission: Arc<std::sync::Mutex<Option<PendingReply>>>,
+    /// The waits a reply command answers, by request id. Shared with the turn
+    /// task, which opens and closes them; several can be open at once, because
+    /// a step's batched `task` calls each run a child that may ask.
+    pub(crate) permission: Arc<std::sync::Mutex<PendingReplies>>,
     /// Messages a [`Command::Steer`] left for this turn to take on, and the
     /// ones it already took. Shared with the turn task, which is the only
     /// thing that drains it — the same per-turn-cell shape as the permission
@@ -317,36 +320,83 @@ impl Steering {
     }
 }
 
-/// One open request the person owes an answer to: the id a reply must name,
-/// and the channel the turn task is blocked on.
+/// Every open request the person owes an answer to, by the id a reply names.
 ///
-/// **One cell, not two.** A turn is blocked *inside* whichever request is
-/// open — the tool call that raised it has not returned — so there is never
-/// more than one, and a second slot would only make it possible for a reply
-/// to be routed to a request that is not being waited on. The kinds are
-/// discriminated here instead, which is what makes a `ReplyQuestion` naming a
-/// permission id (or the reverse) a miss rather than a mis-delivery.
-pub(crate) enum PendingReply {
-    /// A permission dialog, answered by [`Command::ReplyPermission`].
+/// **A registry, where there used to be one cell.** The single slot was correct
+/// for exactly as long as a turn could only ever be blocked inside one call:
+/// the tool that raised the request had not returned, so nothing else could
+/// have raised another. A step that fans several `task` calls out at once
+/// retires that premise — two children can be sitting in two dialogs, and a
+/// second request must not evict the first's channel (**D462**).
+///
+/// Two maps rather than one keyed by a discriminated id, which keeps the
+/// property the single cell got from its enum: a `ReplyQuestion` naming a
+/// permission id finds nothing, rather than finding a permission wait that
+/// expected a decision. Nothing here is ever iterated to answer a reply —
+/// every route is a lookup by the exact id the wire carried.
+///
+/// Entries are removed by **their own id**, never by taking whatever is there.
+/// That distinction is the whole migration: with one cell "clear the slot" and
+/// "clear my request" were the same sentence, and with several they are not.
+#[derive(Default)]
+pub(crate) struct PendingReplies {
+    /// Open permission dialogs, answered by [`Command::ReplyPermission`].
     ///
     /// [`Command::ReplyPermission`]: crate::protocol::Command::ReplyPermission
-    Permission {
-        /// The id a reply must name.
-        id: PermissionId,
-        /// Where the answer is delivered.
-        sender: oneshot::Sender<PermissionReply>,
-    },
-    /// A question, answered by [`Command::ReplyQuestion`] or dismissed by
+    permissions: HashMap<PermissionId, oneshot::Sender<PermissionReply>>,
+    /// Open questions, answered by [`Command::ReplyQuestion`] or dismissed by
     /// [`Command::RejectQuestion`].
     ///
     /// [`Command::ReplyQuestion`]: crate::protocol::Command::ReplyQuestion
     /// [`Command::RejectQuestion`]: crate::protocol::Command::RejectQuestion
-    Question {
-        /// The id a reply or a rejection must name.
-        id: QuestionId,
-        /// Where the answer — or the dismissal — is delivered.
-        sender: oneshot::Sender<Answered>,
-    },
+    questions: HashMap<QuestionId, oneshot::Sender<Answered>>,
+}
+
+impl PendingReplies {
+    /// Registers a permission dialog nobody has answered yet.
+    fn open_permission(&mut self, id: PermissionId, sender: oneshot::Sender<PermissionReply>) {
+        self.permissions.insert(id, sender);
+    }
+
+    /// Registers a question nobody has answered yet.
+    fn open_question(&mut self, id: QuestionId, sender: oneshot::Sender<Answered>) {
+        self.questions.insert(id, sender);
+    }
+
+    /// Forgets one request, by its own id. Called by the wait that opened it,
+    /// on every path that leaves without an answer.
+    fn close_permission(&mut self, id: &PermissionId) {
+        self.permissions.remove(id);
+    }
+
+    /// The same for a question.
+    fn close_question(&mut self, id: &QuestionId) {
+        self.questions.remove(id);
+    }
+
+    /// Hands `reply` to the permission wait that named `id`, and reports
+    /// whether one was there to take it.
+    pub(crate) fn answer_permission(&mut self, id: &PermissionId, reply: PermissionReply) -> bool {
+        // A closed receiver means the turn is already tearing down, which is
+        // the same race as replying after the turn ended.
+        self.permissions
+            .remove(id)
+            .is_some_and(|sender| sender.send(reply).is_ok())
+    }
+
+    /// The same for a question, which one command answers and another
+    /// dismisses.
+    pub(crate) fn answer_question(&mut self, id: &QuestionId, answered: Answered) -> bool {
+        self.questions
+            .remove(id)
+            .is_some_and(|sender| sender.send(answered).is_ok())
+    }
+
+    /// How many requests are open right now — what a status line counts.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.permissions.len() + self.questions.len()
+    }
 }
 
 /// What answered a question.
@@ -716,9 +766,9 @@ pub(crate) struct Turn {
     pub(crate) snapshots: Option<Arc<crate::snapshot::Snapshots>>,
     pub(crate) prompt: String,
     pub(crate) cancel: CancellationToken,
-    /// Where an open permission request waits for its reply; the same cell the
-    /// engine's [`TurnHandle`] routes replies into.
-    pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
+    /// Where open permission requests and questions wait for their replies; the
+    /// same registry the engine's [`TurnHandle`] routes replies into.
+    pub(crate) pending: Arc<std::sync::Mutex<PendingReplies>>,
     /// Where a [`Command::Steer`] leaves a message for this turn; the same
     /// cell the engine's [`TurnHandle`] pushes into. A child turn gets one of
     /// its own that nothing can reach — no handle of a child's is ever put in
@@ -736,6 +786,12 @@ pub(crate) struct Turn {
     /// turn with no agents to spawn, and on every turn a subagent runs — which
     /// is the depth limit, stated where the loop can see it.
     pub(crate) spawn: Option<Arc<crate::subagent::Host>>,
+    /// How many of one step's `task` calls may run at the same time.
+    ///
+    /// Carried by every turn, including a subagent's, where it is simply never
+    /// read: a child's registry has no `task` tool, so it never assembles a
+    /// batch to cap.
+    pub(crate) concurrency: usize,
     /// The engine's plan-approval cell, when this turn could write or
     /// announce it: a `plan_exit` Yes records `Requested` here through
     /// [`ToolCtx::switch`], and this turn's boundary moves it to `Announced`.
@@ -860,6 +916,10 @@ impl Turn {
             // The child's task tool is absent from its registry, so nothing
             // below it can spawn anything.
             spawn: None,
+            // Carried forward and never read, for the reason `spawn: None`
+            // states: a child assembles no batch, because it is offered no
+            // tool that would make one.
+            concurrency: host.concurrency,
             // The approval cell is the parent engine's, and a child never
             // holds it — same discipline as `spawn: None`. A child that did
             // would run phase one at its own tail, announcing on a private
@@ -1068,7 +1128,13 @@ impl Outcome {
     }
 }
 
+/// Whether `call` delegates — the one call kind a step batches.
+fn delegates(call: &BufferedCall) -> bool {
+    call.name == crate::tool::task::ID
+}
+
 /// A tool call as the provider streamed it, waiting for the step to end.
+#[derive(Clone)]
 struct BufferedCall {
     /// The provider's id for the call, echoed back beside its result.
     id: String,
@@ -1563,7 +1629,7 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
                 record_patch(turn, &mut assistant, before.take()).await;
                 return (assistant, stop);
             }
-            StepEnd::Finished { reason, mut calls } => {
+            StepEnd::Finished { reason, calls } => {
                 if calls.is_empty() {
                     // A request that ended without calling anything is the
                     // model done talking — unless somebody typed while it was.
@@ -1597,16 +1663,41 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
                 // Calls resolve sequentially in arrival order: a later call
                 // is allowed to depend on an earlier one's effect, and
                 // interleaved permission dialogs would be unreadable anyway.
-                calls.reverse();
-                while let Some(call) = calls.pop() {
-                    if let ControlFlow::Break(stop) = resolve(turn, &mut assistant, &call).await {
+                //
+                // **With one exception, and it is the whole of D462**: a run of
+                // consecutive `task` calls is one batch, run at the same time.
+                // Delegation is the one call whose effect nothing in the same
+                // step can depend on — a child works in a conversation of its
+                // own and hands back a summary — and it is also the one whose
+                // sequential cost is measured in whole agent loops rather than
+                // in a file read. Everything else, including a `task` call with
+                // an ordinary call between it and the next one, keeps the
+                // promise above word for word.
+                let mut queued: std::collections::VecDeque<BufferedCall> = calls.into();
+                while let Some(first) = queued.pop_front() {
+                    let mut batch = vec![first];
+                    if delegates(&batch[0]) {
+                        while queued.front().is_some_and(delegates) {
+                            batch.push(queued.pop_front().expect("the front was just seen"));
+                        }
+                    }
+
+                    let flow = if batch.len() == 1 {
+                        resolve(turn, &mut assistant, &batch[0]).await
+                    } else {
+                        resolve_batch(turn, &mut assistant, &batch).await
+                    };
+
+                    if let ControlFlow::Break(stop) = flow {
                         let error = ToolError::Cancelled.to_string();
-                        // The interrupted call itself first — a no-op when
-                        // `resolve` already closed it — then everything
-                        // queued behind it.
-                        close_unresolved(turn, &mut assistant, &call, &error).await;
-                        calls.reverse();
-                        fail_buffered(turn, &mut assistant, &mut calls, &error).await;
+                        // The interrupted calls themselves first — a no-op for
+                        // each one already closed — then everything queued
+                        // behind them.
+                        for call in &batch {
+                            close_unresolved(turn, &mut assistant, call, &error).await;
+                        }
+                        let mut rest: Vec<BufferedCall> = queued.into();
+                        fail_buffered(turn, &mut assistant, &mut rest, &error).await;
                         record_patch(turn, &mut assistant, before.take()).await;
                         return (assistant, stop);
                     }
@@ -2756,22 +2847,180 @@ fn sliced(text: &str, start: u32, end: Option<u32>) -> String {
     }
 }
 
+/// A call that has been parsed, admitted by its hooks and let through the
+/// permission gate, and has not run yet.
+///
+/// Owns its call rather than borrowing it, because a batched one is handed to
+/// a task of its own and a borrow of the step's buffer could not travel.
+struct Prepared {
+    call: BufferedCall,
+    tool: Arc<dyn Tool>,
+    args: serde_json::Value,
+    /// What this call's `PreToolUse` hook asked to add to the result the model
+    /// reads, kept until [`finish`] appends it. **Per call, not per turn**:
+    /// several calls can be in flight, and each one's hook conversation is
+    /// its own.
+    hook: crate::hook::Outcome,
+}
+
+/// A prepared call whose part already says `Running`, with everything its body
+/// needs and nothing of the turn.
+///
+/// The split point of the whole executor: everything above this is the turn's
+/// own thread holding `&mut Message`, and everything in [`body`] is work a
+/// batch may put on a task of its own.
+struct Started {
+    prepared: Prepared,
+    /// When the part started running, which its terminal state repeats.
+    at: u64,
+    ctx: ToolCtx,
+    /// The turn's token, cloned: what ends the wait for a result, and what the
+    /// grace below is measured against.
+    cancel: CancellationToken,
+}
+
+/// A call that has run, and whatever it produced.
+struct Finished {
+    prepared: Prepared,
+    at: u64,
+    result: Result<ToolOutput, ToolError>,
+}
+
 /// Resolves one buffered call: parse, gate, run, and put the result — or the
 /// reason there is none — where the model reads it next.
 ///
 /// Breaks only when the turn itself is over: the user cancelled, or the
 /// subscriber is gone. Everything else, including a refusal and a tool that
 /// failed, continues the loop.
+///
+/// Four phases, and only one of them is separable: [`prepare`], [`start`] and
+/// [`finish`] hold the assistant message and run on the turn's own thread,
+/// while [`body`] holds nothing of the turn at all. A single call runs all four
+/// end to end here; [`resolve_batch`] runs the same four for several calls,
+/// which is what makes "a batched call behaves like an unbatched one" a
+/// property of the code rather than of anyone's discipline.
 async fn resolve(
     turn: &Turn,
     assistant: &mut Message,
     call: &BufferedCall,
 ) -> ControlFlow<Option<Outcome>> {
+    let Some(prepared) = prepare(turn, assistant, call).await? else {
+        // The call was refused, unknown or unparseable, and `prepare` already
+        // put the reason where the model reads it.
+        return ControlFlow::Continue(());
+    };
+    let started = start(turn, assistant, prepared).await?;
+
+    finish(turn, assistant, body(started).await).await
+}
+
+/// Runs a step's consecutive `task` calls at the same time, applying each
+/// child's result the moment it comes home (**D462**).
+///
+/// Three orders live here and only two of them are the same:
+///
+/// - **Call order** decides who is prepared, who is asked about, and who
+///   starts — so a dialog the batch's own calls raise is still one dialog at a
+///   time, in the order the model made them, and the parts were opened in that
+///   order while the step streamed.
+/// - **Completion order** decides who is applied. A child that finishes first
+///   is written into the transcript first, whichever call it was.
+/// - **Part order** is call order and stays that way: each result rewrites the
+///   part its own call opened, in place. That is what makes a resumed session
+///   read back the turn the model itself would have built.
+///
+/// The cap is [`Turn::concurrency`]: at most that many bodies are ever polled,
+/// and the rest wait their turn to *start* rather than being started and
+/// throttled — a call that has not begun has an honest `Pending` part, where
+/// one marked `Running` for a minute before it ran would not.
+async fn resolve_batch(
+    turn: &Turn,
+    assistant: &mut Message,
+    calls: &[BufferedCall],
+) -> ControlFlow<Option<Outcome>> {
+    let mut waiting: std::collections::VecDeque<Prepared> =
+        std::collections::VecDeque::with_capacity(calls.len());
+    // The first reason the turn ended, kept rather than returned on the spot:
+    // whatever is already running has to be drained before this function may
+    // hand the assistant message back.
+    let mut stop: Option<Option<Outcome>> = None;
+
+    for call in calls {
+        match prepare(turn, assistant, call).await {
+            ControlFlow::Continue(Some(prepared)) => waiting.push_back(prepared),
+            // Refused, unknown or unparseable: already closed, and the batch
+            // carries on without it exactly as a sequential step would.
+            ControlFlow::Continue(None) => {}
+            ControlFlow::Break(reason) => {
+                stop = Some(reason);
+                break;
+            }
+        }
+    }
+
+    let mut running = tokio::task::JoinSet::new();
+    loop {
+        while stop.is_none()
+            && running.len() < turn.concurrency.max(1)
+            && let Some(prepared) = waiting.pop_front()
+        {
+            match start(turn, assistant, prepared).await {
+                ControlFlow::Continue(started) => {
+                    running.spawn(body(started));
+                }
+                ControlFlow::Break(reason) => stop = Some(reason),
+            }
+        }
+
+        let Some(joined) = running.join_next().await else {
+            break;
+        };
+        match joined {
+            // Applied even when the turn is already over: the tool really did
+            // run, and what it produced belongs in the transcript whether or
+            // not anybody is still listening. `finish` refuses to publish on a
+            // cancelled turn by itself.
+            Ok(finished) => {
+                if let ControlFlow::Break(reason) = finish(turn, assistant, finished).await {
+                    stop = stop.or(Some(reason));
+                }
+            }
+            // A tool that panicked kills the turn task, which is exactly what
+            // it did before any of this ran on a task of its own. Reporting it
+            // as a failed call instead would be a nicer build and a different
+            // one, and this wave is not where that gets decided.
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            // Only `abort` produces this and nothing here aborts; if it ever
+            // happens the batch is over, and the loop's caller closes every
+            // call it left unresolved.
+            Err(error) => {
+                tracing::error!(%error, "a batched tool call ended without a result");
+                stop = stop.or(Some(Some(Outcome::cancelled())));
+            }
+        }
+    }
+
+    match stop {
+        Some(reason) => ControlFlow::Break(reason),
+        None => ControlFlow::Continue(()),
+    }
+}
+
+/// Parses, hooks and gates one call, and reports what is left to run.
+///
+/// [`None`] is a call that is already over — unparseable, naming a tool that
+/// is not there, refused by a rule, blocked by a hook, or turned down at the
+/// dialog — with the reason already where the model reads it.
+async fn prepare(
+    turn: &Turn,
+    assistant: &mut Message,
+    call: &BufferedCall,
+) -> ControlFlow<Option<Outcome>, Option<Prepared>> {
     let args = match parse_args(&call.json) {
         Ok(args) => args,
         Err(error) => {
             let message = invalid_call(&error);
-            return fail_call(turn, assistant, call, serde_json::json!({}), &message).await;
+            return closed(fail_call(turn, assistant, call, serde_json::json!({}), &message).await);
         }
     };
 
@@ -2794,7 +3043,7 @@ async fn resolve(
             call.name
         ));
 
-        return fail_call(turn, assistant, call, args, &message).await;
+        return closed(fail_call(turn, assistant, call, args, &message).await);
     };
 
     // Before the gate, because a `PreToolUse` hook is defined to run before the
@@ -2811,7 +3060,7 @@ async fn resolve(
         })
         .await;
     if let Some(reason) = &hook.blocked {
-        return fail_call(turn, assistant, call, args, &blocked_by_hook(reason)).await;
+        return closed(fail_call(turn, assistant, call, args, &blocked_by_hook(reason)).await);
     }
 
     // The one consultation this call gets. What a refusal quotes, what the
@@ -2833,7 +3082,7 @@ async fn resolve(
         Decision::Deny => {
             let message = denied(&decision.rules);
 
-            return fail_call(turn, assistant, call, args, &message).await;
+            return closed(fail_call(turn, assistant, call, args, &message).await);
         }
         // A hook already approved it, so nobody is asked. The rules are not
         // rewritten and nothing is remembered: this is one call's answer, given
@@ -2858,22 +3107,50 @@ async fn resolve(
                 // A refusal is information, not a turn abort: the model reads
                 // it as the call's result and decides what to do next.
                 PermissionReply::Reject => {
-                    return fail_call(turn, assistant, call, args, REJECTED).await;
+                    return closed(fail_call(turn, assistant, call, args, REJECTED).await);
                 }
             }
         }
     }
 
-    let started = now();
+    ControlFlow::Continue(Some(Prepared {
+        call: call.clone(),
+        tool: Arc::clone(tool),
+        args,
+        hook,
+    }))
+}
+
+/// A call that ended inside [`prepare`], as that phase's own answer.
+fn closed(flow: ControlFlow<Option<Outcome>>) -> ControlFlow<Option<Outcome>, Option<Prepared>> {
+    match flow {
+        ControlFlow::Continue(()) => ControlFlow::Continue(None),
+        ControlFlow::Break(stop) => ControlFlow::Break(stop),
+    }
+}
+
+/// Moves a prepared call's part to `Running`, announces it, and builds the
+/// context its body runs under.
+///
+/// The last phase that touches the assistant message before the tool runs, and
+/// the reason the batch starts its calls one at a time on this thread rather
+/// than all at once: `Running` is announced when the work actually begins, so a
+/// call waiting for a slot under the cap still reads as `Pending`.
+async fn start(
+    turn: &Turn,
+    assistant: &mut Message,
+    prepared: Prepared,
+) -> ControlFlow<Option<Outcome>, Started> {
+    let at = now();
     if let Some(part) = set_tool_state(
         assistant,
-        &call.part_id,
+        &prepared.call.part_id,
         ToolState::Running {
-            input: args.clone(),
+            input: prepared.args.clone(),
             // Nothing to report yet. A tool that reports progress — the task
             // tool is the one that does — rewrites this as it goes.
             metadata: serde_json::Value::Null,
-            started,
+            started: at,
         },
     ) {
         turn.persist_part(assistant, &part);
@@ -2887,6 +3164,87 @@ async fn resolve(
         )
         .await?;
     }
+
+    let ctx = ToolCtx {
+        cwd: turn.cwd.clone(),
+        cancel: turn.cancel.child_token(),
+        call_id: prepared.call.id.clone(),
+        files: Arc::clone(&turn.files),
+        credentials: turn.credentials.clone(),
+        // Built per call because a subagent reports its progress on *this*
+        // part, and the part is what a frontend renders the child's one
+        // inline row from. With several calls batched, that is also what keeps
+        // one child's progress off another child's row.
+        spawn: turn.spawn.as_ref().map(|host| {
+            Arc::new(crate::subagent::Spawn {
+                host: Arc::clone(host),
+                events: Arc::clone(&turn.events),
+                session_id: turn.session_id.clone(),
+                // Shared with this turn: the parent is inside the call for as
+                // long as the child runs, so the registry is the child's to ask
+                // through and a reply addressed to the parent reaches it. Keyed
+                // by request id, so a sibling child asking at the same moment
+                // is a second entry rather than an eviction (**D462**).
+                pending: Arc::clone(&turn.pending),
+                message_id: assistant.id.clone(),
+                part_id: prepared.call.part_id.clone(),
+            }) as Arc<dyn crate::tool::task::Subagents>
+        }),
+        // Built per call for the same reason, and out of the same three
+        // pieces the permission wait uses: a dialog names the call it came
+        // from, and a reply has to reach the turn that is blocked in it.
+        // Present on every turn — including a subagent's, whose questions
+        // cross to the parent exactly as its permission dialogs do. What
+        // keeps a headless run from being asked is a standing rule
+        // refusing `question`, not the absence of this.
+        ask: Some(Arc::new(Ask {
+            events: Arc::clone(&turn.events),
+            session_id: turn.session_id.clone(),
+            pending: Arc::clone(&turn.pending),
+            cancel: turn.cancel.clone(),
+            source: QuestionSource {
+                message_id: assistant.id.clone(),
+                call_id: prepared.call.id.clone(),
+            },
+            hooks: turn.hooks.clone(),
+        }) as Arc<dyn question::Asker>),
+        // Present exactly where the approval cell was threaded: a parent
+        // turn of an engine whose registry holds build. A child turn
+        // carries no cell, so a subagent's call reads the no-build
+        // refusal even before its rules refuse it.
+        switch: turn.pending_switch.as_ref().map(|cell| {
+            Arc::new(SwitchToBuild {
+                pending: Arc::clone(cell),
+            }) as Arc<dyn crate::tool::plan::Switcher>
+        }),
+        // Shared with every call in this session, root or subagent alike
+        // (`Turn::child` carries it forward too): a background job
+        // outlives the turn that started it, so which turn started it is
+        // not a reason to track it differently.
+        jobs: turn.jobs.clone(),
+    };
+
+    ControlFlow::Continue(Started {
+        prepared,
+        at,
+        ctx,
+        cancel: turn.cancel.clone(),
+    })
+}
+
+/// Runs one started call's tool and reports what it produced.
+///
+/// **Holds nothing of the turn**, which is the whole point: everything it
+/// needs was cloned into [`Started`], so a batch can put several of these on
+/// tasks of their own while the turn's thread keeps sole ownership of the
+/// assistant message.
+async fn body(started: Started) -> Finished {
+    let Started {
+        prepared,
+        at,
+        ctx,
+        cancel,
+    } = started;
 
     // The tool gets a child of the turn's token so a cancel reaches it, and
     // the race below is what stops waiting for the tool's *result*. What it
@@ -2903,70 +3261,14 @@ async fn resolve(
     // so one first polled there would run to completion: the file changed, the
     // transcript saying the call was cancelled. Checking here rather than
     // trusting the race below is what keeps those two facts the same fact.
-    let result = if turn.cancel.is_cancelled() {
+    let result = if cancel.is_cancelled() {
         Err(ToolError::Cancelled)
     } else {
-        let ctx = ToolCtx {
-            cwd: turn.cwd.clone(),
-            cancel: turn.cancel.child_token(),
-            call_id: call.id.clone(),
-            files: Arc::clone(&turn.files),
-            credentials: turn.credentials.clone(),
-            // Built per call because a subagent reports its progress on *this*
-            // part, and the part is what a frontend renders the child's one
-            // inline row from.
-            spawn: turn.spawn.as_ref().map(|host| {
-                Arc::new(crate::subagent::Spawn {
-                    host: Arc::clone(host),
-                    events: Arc::clone(&turn.events),
-                    session_id: turn.session_id.clone(),
-                    // Shared with this turn: the parent is blocked inside the
-                    // call for as long as the child runs, so the slot is the
-                    // child's to ask through and a reply addressed to the
-                    // parent reaches it.
-                    pending: Arc::clone(&turn.pending),
-                    message_id: assistant.id.clone(),
-                    part_id: call.part_id.clone(),
-                }) as Arc<dyn crate::tool::task::Subagents>
-            }),
-            // Built per call for the same reason, and out of the same three
-            // pieces the permission wait uses: a dialog names the call it came
-            // from, and a reply has to reach the turn that is blocked in it.
-            // Present on every turn — including a subagent's, whose questions
-            // cross to the parent exactly as its permission dialogs do. What
-            // keeps a headless run from being asked is a standing rule
-            // refusing `question`, not the absence of this.
-            ask: Some(Arc::new(Ask {
-                events: Arc::clone(&turn.events),
-                session_id: turn.session_id.clone(),
-                pending: Arc::clone(&turn.pending),
-                cancel: turn.cancel.clone(),
-                source: QuestionSource {
-                    message_id: assistant.id.clone(),
-                    call_id: call.id.clone(),
-                },
-                hooks: turn.hooks.clone(),
-            }) as Arc<dyn question::Asker>),
-            // Present exactly where the approval cell was threaded: a parent
-            // turn of an engine whose registry holds build. A child turn
-            // carries no cell, so a subagent's call reads the no-build
-            // refusal even before its rules refuse it.
-            switch: turn.pending_switch.as_ref().map(|cell| {
-                Arc::new(SwitchToBuild {
-                    pending: Arc::clone(cell),
-                }) as Arc<dyn crate::tool::plan::Switcher>
-            }),
-            // Shared with every call in this session, root or subagent alike
-            // (`Turn::child` carries it forward too): a background job
-            // outlives the turn that started it, so which turn started it is
-            // not a reason to track it differently.
-            jobs: turn.jobs.clone(),
-        };
-        let running = tool.run(args.clone(), &ctx);
+        let running = prepared.tool.run(prepared.args.clone(), &ctx);
         tokio::pin!(running);
         let finished = tokio::select! {
             biased;
-            () = turn.cancel.cancelled() => None,
+            () = cancel.cancelled() => None,
             result = &mut running => Some(result),
         };
         match finished {
@@ -2981,7 +3283,7 @@ async fn resolve(
                     .is_err()
                 {
                     tracing::warn!(
-                        tool = call.name.as_str(),
+                        tool = prepared.call.name.as_str(),
                         grace = ?TOOL_CANCEL_GRACE,
                         "the tool did not finish cancelling in time; abandoning it, \
                          which may leave what it started running"
@@ -2996,6 +3298,34 @@ async fn resolve(
             }
         }
     };
+
+    Finished {
+        prepared,
+        at,
+        result,
+    }
+}
+
+/// Applies one finished call to the assistant message: the language server's
+/// opinion, the `PostToolUse` hook's, and the terminal state the model reads.
+///
+/// Back on the turn's own thread, which is what makes the `&mut Message` here
+/// safe however many bodies were in flight. A batch calls this in **completion**
+/// order; the part it rewrites is the one its own call opened, so the message
+/// itself stays in call order.
+async fn finish(
+    turn: &Turn,
+    assistant: &mut Message,
+    finished: Finished,
+) -> ControlFlow<Option<Outcome>> {
+    let Finished {
+        prepared,
+        at: started,
+        result,
+    } = finished;
+    let Prepared {
+        call, args, hook, ..
+    } = prepared;
 
     match result {
         Ok(mut output) => {
@@ -3127,13 +3457,10 @@ async fn wait_permission(
 
     let (sender, receiver) = oneshot::channel();
     let id = PermissionId::ascending();
-    *turn
-        .pending
+    turn.pending
         .lock()
-        .expect("the pending permission is never poisoned") = Some(PendingReply::Permission {
-        id: id.clone(),
-        sender,
-    });
+        .expect("the pending replies are never poisoned")
+        .open_permission(id.clone(), sender);
 
     // The directories outside the project this call would work in, disclosed
     // with the request so the dialog can say what it is really asking about.
@@ -3160,7 +3487,7 @@ async fn wait_permission(
     .await
     {
         // The request never reached the subscriber, so no reply is owed.
-        retract_pending(turn);
+        retract_permission(turn, &id);
         return ControlFlow::Break(stop);
     }
 
@@ -3173,7 +3500,7 @@ async fn wait_permission(
     let Some(reply) = received else {
         // Cancelled while waiting. The reply below travels the terminal path
         // unconditionally: it is the answer this request was promised.
-        retract_pending(turn);
+        retract_permission(turn, &id);
         let _ = turn
             .events
             .send(Event::PermissionReplied {
@@ -3312,8 +3639,9 @@ pub(crate) struct Ask {
     pub(crate) session_id: SessionId,
     /// Where the reply lands, shared with the turn handle the engine routes
     /// commands into. A subagent shares the **parent's**, because the parent
-    /// is blocked inside the call the child is running.
-    pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
+    /// is blocked inside the call the child is running — and several of those
+    /// calls can be in flight at once, which is why the registry is keyed.
+    pub(crate) pending: Arc<std::sync::Mutex<PendingReplies>>,
     /// Ends the wait, and the turn with it.
     pub(crate) cancel: CancellationToken,
     /// Where in the transcript the question was asked from.
@@ -3379,13 +3707,10 @@ impl question::Asker for Ask {
 
         let (sender, receiver) = oneshot::channel();
         let id = QuestionId::ascending();
-        *self
-            .pending
+        self.pending
             .lock()
-            .expect("the pending permission is never poisoned") = Some(PendingReply::Question {
-            id: id.clone(),
-            sender,
-        });
+            .expect("the pending replies are never poisoned")
+            .open_question(id.clone(), sender);
 
         let asked = Event::QuestionAsked {
             session_id: self.session_id.clone(),
@@ -3396,7 +3721,7 @@ impl question::Asker for Ask {
         if self.publish(asked).await.is_break() {
             // The request never reached the subscriber, so no reply is owed
             // and no terminal event is either.
-            retract(&self.pending);
+            self.retract(&id);
             return Err(question::Unanswered::Cancelled);
         }
 
@@ -3410,7 +3735,7 @@ impl question::Asker for Ask {
             // Cancelled while waiting. The rejection below travels the
             // terminal path unconditionally: it is the answer this request was
             // promised.
-            retract(&self.pending);
+            self.retract(&id);
             self.terminate(&id).await;
             return Err(question::Unanswered::Cancelled);
         };
@@ -3460,6 +3785,15 @@ impl Ask {
         }
     }
 
+    /// Forgets this question, by its own id — [`retract_permission`]'s twin for
+    /// the seam that carries the registry without carrying the turn.
+    fn retract(&self, id: &QuestionId) {
+        self.pending
+            .lock()
+            .expect("the pending replies are never poisoned")
+            .close_question(id);
+    }
+
     /// Sends the terminal event a published request is owed, on the plain path
     /// that is never raced against the cancel that caused it.
     async fn terminate(&self, id: &QuestionId) {
@@ -3491,22 +3825,18 @@ fn notify_hook(turn: &Turn, message: String) {
     });
 }
 
-/// Clears the reply slot for a request that will never be answered.
-fn retract_pending(turn: &Turn) {
-    retract(&turn.pending);
-}
-
-/// Clears a reply slot held by something other than a whole [`Turn`] — the
-/// question seam, which carries the cell without carrying the turn.
+/// Forgets one permission request that will never be answered.
 ///
-/// Takes whatever is there rather than only this request's entry, which is
-/// safe for the reason the cell is one cell: the turn is blocked inside the
-/// request being retracted, so nothing else can have installed anything.
-fn retract(pending: &std::sync::Mutex<Option<PendingReply>>) {
-    pending
+/// **By its id, never "whatever is open".** When the registry was a single cell
+/// the two were the same sentence, because the turn was blocked inside the one
+/// request being retracted. A step whose batched `task` calls each run a child
+/// that can ask makes them different sentences, and clearing the registry here
+/// would abandon a sibling's dialog — the deadlock the pre-mortem named.
+fn retract_permission(turn: &Turn, id: &PermissionId) {
+    turn.pending
         .lock()
-        .expect("the pending permission is never poisoned")
-        .take();
+        .expect("the pending replies are never poisoned")
+        .close_permission(id);
 }
 
 /// Moves the call's part to [`ToolState::Error`] carrying `error`, which is
@@ -3706,17 +4036,107 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        BufferedCall, ChildParts, Turn, TurnKind, add_usage, attached, parse_args, resolve,
-        resolve_mentions, sliced,
+        Answered, BufferedCall, ChildParts, PendingReplies, Turn, TurnKind, add_usage, attached,
+        parse_args, resolve, resolve_mentions, sliced,
     };
     use crate::{
         engine::Fanout,
         permission::Permissions,
-        protocol::{FinishReason, Message, Part, PartBody, SessionId, ToolState, Usage},
+        protocol::{
+            FinishReason, Message, Part, PartBody, PermissionId, PermissionReply, QuestionId,
+            SessionId, ToolState, Usage,
+        },
         provider::{FakeProvider, fake},
         subagent::{Host, Spawn},
         tool::{Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput},
     };
+
+    /// Two dialogs stand open together, and each reply reaches the one it
+    /// names.
+    ///
+    /// The single cell this replaced could not hold the second without dropping
+    /// the first's channel — the deadlock the pre-mortem named, in its smallest
+    /// form.
+    #[test]
+    fn two_open_permission_requests_are_each_answered_by_their_own_id() {
+        let mut pending = PendingReplies::default();
+        let (first, mut first_reply) = tokio::sync::oneshot::channel();
+        let (second, mut second_reply) = tokio::sync::oneshot::channel();
+        let alpha = PermissionId::ascending();
+        let beta = PermissionId::ascending();
+
+        pending.open_permission(alpha.clone(), first);
+        pending.open_permission(beta.clone(), second);
+        assert_eq!(pending.len(), 2, "both are open at the same time");
+
+        // Newest first: routing is by id, not by arrival.
+        assert!(pending.answer_permission(&beta, PermissionReply::Reject));
+        assert!(pending.answer_permission(&alpha, PermissionReply::Once));
+        assert_eq!(
+            first_reply.try_recv().expect("alpha was answered"),
+            PermissionReply::Once
+        );
+        assert_eq!(
+            second_reply.try_recv().expect("beta was answered"),
+            PermissionReply::Reject
+        );
+        assert_eq!(pending.len(), 0, "an answered request is closed");
+    }
+
+    /// Closing one request is closing *that* request. When the registry was one
+    /// cell the two sentences were the same one, and a sibling's dialog was
+    /// what got thrown away.
+    #[test]
+    fn closing_one_request_leaves_its_sibling_open() {
+        let mut pending = PendingReplies::default();
+        let (first, _first_reply) = tokio::sync::oneshot::channel();
+        let (second, mut second_reply) = tokio::sync::oneshot::channel();
+        let alpha = PermissionId::ascending();
+        let beta = PermissionId::ascending();
+        pending.open_permission(alpha.clone(), first);
+        pending.open_permission(beta.clone(), second);
+
+        pending.close_permission(&alpha);
+
+        assert!(
+            !pending.answer_permission(&alpha, PermissionReply::Once),
+            "the retracted one is gone"
+        );
+        assert!(
+            pending.answer_permission(&beta, PermissionReply::Once),
+            "and the one beside it is not"
+        );
+        assert_eq!(
+            second_reply.try_recv().expect("beta was answered"),
+            PermissionReply::Once
+        );
+    }
+
+    /// The property the discriminated single cell had, kept by holding the two
+    /// kinds in two maps: an id of one kind never finds a wait of the other.
+    #[test]
+    fn a_reply_of_one_kind_never_reaches_a_wait_of_the_other() {
+        let mut pending = PendingReplies::default();
+        let (permission, _permission_reply) = tokio::sync::oneshot::channel();
+        let (question, _question_reply) = tokio::sync::oneshot::channel();
+        let asked = PermissionId::ascending();
+        let question_id = QuestionId::ascending();
+        pending.open_permission(asked.clone(), permission);
+        pending.open_question(question_id.clone(), question);
+
+        assert!(
+            !pending.answer_question(&QuestionId::ascending(), Answered::Rejected),
+            "an id nothing answers to delivers nothing"
+        );
+        assert_eq!(
+            pending.len(),
+            2,
+            "and takes neither open request with it: {}",
+            pending.len()
+        );
+        assert!(pending.answer_question(&question_id, Answered::Rejected));
+        assert!(pending.answer_permission(&asked, PermissionReply::Once));
+    }
 
     /// A tool that marks the filesystem the moment its body runs.
     ///
@@ -3769,6 +4189,7 @@ mod tests {
         let (events, received) = mpsc::channel(64);
         let turn = Turn {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
+            concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
             session_id: SessionId::from("ses_fixture".to_owned()),
             model: fake::MODEL.to_owned(),
             effort_options: serde_json::Map::new(),
@@ -3787,7 +4208,7 @@ mod tests {
             snapshots: None,
             prompt: "run it".to_owned(),
             cancel,
-            pending: Arc::new(std::sync::Mutex::new(None)),
+            pending: Arc::default(),
             steer: Arc::default(),
             events: Arc::new(Fanout::new(events)),
             slot: Arc::new(Mutex::new(None)),
@@ -4180,6 +4601,7 @@ mod tests {
         let (events, received) = mpsc::channel(64);
         let host = Host {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
+            concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
             model: fake::MODEL.to_owned(),
             agents: Arc::new(
                 crate::agent::Registry::build(&crate::config::Config::default())
@@ -4202,7 +4624,7 @@ mod tests {
             host: Arc::new(host),
             events: Arc::new(Fanout::new(events)),
             session_id: SessionId::from("ses_parent".to_owned()),
-            pending: Arc::new(std::sync::Mutex::new(None)),
+            pending: Arc::default(),
             message_id: crate::protocol::MessageId::ascending(),
             part_id: crate::protocol::PartId::ascending(),
         };

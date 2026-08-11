@@ -63,9 +63,9 @@ pub use agent::{Agent, AgentError, Registry as AgentRegistry};
 pub use auth::{AuthError, Credential};
 pub use catalog::{Cost, ModelInfo};
 pub use config::{
-    AgentConfig, AgentMode, CommandConfig, Config, ConfigError, HookCommand, HookHandler,
-    HookMatcher, LspConfig, LspEntry, McpLocal, McpRemote, McpServer, Overrides, ThemeMode,
-    WebfetchConfig,
+    AgentConfig, AgentMode, AgentsConfig, CommandConfig, Config, ConfigError, HookCommand,
+    HookHandler, HookMatcher, LspConfig, LspEntry, McpLocal, McpRemote, McpServer, Overrides,
+    ThemeMode, WebfetchConfig,
 };
 pub use engine::{Engine, EngineError, Evicted};
 pub use ganja_permission::{permission, project};

@@ -185,6 +185,28 @@ impl Chat {
             .collect()
     }
 
+    /// How many `task` calls on screen are still running — the delegated
+    /// children the status bar counts (**D462**).
+    ///
+    /// Read off the transcript rather than kept as a tally beside it: the parts
+    /// already say it, and a number maintained in parallel would have to be
+    /// corrected on every path that rewrites the chat — a resume, a revert, a
+    /// redo — instead of simply following it.
+    #[must_use]
+    pub fn running_tasks(&self) -> usize {
+        self.shown()
+            .iter()
+            .flat_map(|entry| entry.parts.iter())
+            .filter(|part| {
+                matches!(
+                    &part.body,
+                    PartBody::Tool { tool, state: ToolState::Running { .. }, .. }
+                        if tool == ganja_tool::task::ID
+                )
+            })
+            .count()
+    }
+
     /// Every checkpoint the rewind picker offers, **newest first**: one per
     /// user message on screen, carrying its first line and how many distinct
     /// files the turns between it and the next checkpoint changed.

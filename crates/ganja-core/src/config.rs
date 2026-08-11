@@ -584,6 +584,10 @@ pub struct Config {
     /// Agent definitions, by name.
     #[serde(default)]
     pub agent: BTreeMap<String, AgentConfig>,
+    /// How this session *runs* agents, as opposed to what they are; see
+    /// [`AgentsConfig`].
+    #[serde(default)]
+    pub agents: AgentsConfig,
     /// Permission rules layered over the built-in ones.
     #[serde(default)]
     pub permission: PermissionConfig,
@@ -655,6 +659,51 @@ pub struct Config {
     /// `deny_unknown_fields` would reject one — and above every tier here.
     #[serde(skip)]
     pub overrides: Overrides,
+}
+
+/// How this session runs the agents it has, rather than what those agents are.
+///
+/// **`agents` and [`Config::agent`] are two different keys and that is
+/// deliberate**, not a typo either way. `agent` is a *map* keyed by agent name,
+/// so a setting written into it would collide with an agent called
+/// `concurrency`; this is the settings object beside it. The plural reads as
+/// "about the agents", the singular as "this agent, by name" — which is also
+/// how a reader tells at a glance which one a config line meant.
+///
+/// Not a key upstream has: upstream runs one subagent at a time, so it has
+/// nothing to size (**D462**).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsConfig {
+    /// How many `task` calls from one assistant step may run at the same time.
+    ///
+    /// **Absent is [`AgentsConfig::DEFAULT_CONCURRENCY`]**, and an
+    /// [`Option`] rather than a bare number for the reason
+    /// [`Config::snapshot`] is one: a tier that says nothing has to leave the
+    /// tier below it alone. Refused at load when it is zero — a cap of nothing
+    /// is a session where every delegation hangs, which is not a thing anybody
+    /// means to write.
+    pub concurrency: Option<usize>,
+}
+
+impl AgentsConfig {
+    /// How many children run at once when nothing says otherwise.
+    ///
+    /// Small on purpose. Each child is a whole agent loop — its own provider
+    /// requests, its own tool calls, its own permission dialogs crossing to the
+    /// one person watching — so the ceiling that matters is not this machine's
+    /// cores but the vendor's rate limit and the reader's attention. Four is
+    /// enough that the common "look at these three files" fan-out never queues,
+    /// and low enough that a model asking for a dozen at once still spends the
+    /// session's token budget in batches somebody can follow. Whoever wants
+    /// more can say so; whoever wants one gets upstream's behavior back.
+    pub const DEFAULT_CONCURRENCY: usize = 4;
+
+    /// The cap this config asks for, or the default when it asks for nothing.
+    #[must_use]
+    pub fn concurrency(&self) -> usize {
+        self.concurrency.unwrap_or(Self::DEFAULT_CONCURRENCY)
+    }
 }
 
 /// What the `webfetch` tool may reach.
@@ -821,6 +870,7 @@ impl Config {
         overlay(&mut self.theme_mode, other.theme_mode);
         overlay(&mut self.shell, other.shell);
         overlay(&mut self.snapshot, other.snapshot);
+        overlay(&mut self.agents.concurrency, other.agents.concurrency);
         overlay(
             &mut self.webfetch.allow_private,
             other.webfetch.allow_private,
@@ -1171,6 +1221,10 @@ fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
         path: path.to_owned(),
         message,
     })?;
+    check_agents(&config.agents).map_err(|message| ConfigError::Parse {
+        path: path.to_owned(),
+        message,
+    })?;
 
     Ok(Some(config))
 }
@@ -1352,6 +1406,24 @@ fn check_hooks(hooks: &BTreeMap<String, Vec<HookMatcher>>) -> Result<(), String>
     Ok(())
 }
 
+/// Refuses an `agents` block asking for a concurrency of nothing.
+///
+/// Checked here for [`check_mcp`]'s reason and this key's own: zero is the one
+/// value whose consequence is invisible until a turn delegates, and then it is
+/// a batch that never starts. One is a perfectly good answer — it is upstream's
+/// behavior — so the refusal is only about the value that means "never".
+fn check_agents(agents: &AgentsConfig) -> Result<(), String> {
+    if agents.concurrency == Some(0) {
+        return Err(
+            "agents.concurrency must be at least 1; a cap of 0 is a session where every \
+             delegation waits forever"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -1359,9 +1431,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        AgentMode, Config, ConfigError, Dialect, HookCommand, HookHandler, HookMatcher, LspConfig,
-        McpServer, NonZeroU64, Overrides, ThemeMode, existing, merge_files, project_files, read,
-        split_model,
+        AgentMode, AgentsConfig, Config, ConfigError, Dialect, HookCommand, HookHandler,
+        HookMatcher, LspConfig, McpServer, NonZeroU64, Overrides, ThemeMode, existing, merge_files,
+        project_files, read, split_model,
     };
     use crate::permission::{Action, RuleSet};
 
@@ -1578,6 +1650,43 @@ mod tests {
             panic!("expected a parse failure, got {error:?}");
         };
         assert!(message.contains("PreToolUse"), "{message}");
+    }
+
+    /// The singular key is a map of definitions and the plural one is a
+    /// settings object; a config may write either without the other, and a
+    /// concurrency nobody named is the documented default.
+    #[test]
+    fn agents_is_the_settings_object_beside_the_agent_map() {
+        let config = parse(r#"{"agent": {"plan": {"description": "plans"}}}"#).expect("it parses");
+        assert_eq!(
+            config.agents.concurrency(),
+            AgentsConfig::DEFAULT_CONCURRENCY,
+            "absent is the default, not zero"
+        );
+
+        let config = parse(r#"{"agents": {"concurrency": 1}}"#).expect("it parses");
+        assert_eq!(
+            config.agents.concurrency(),
+            1,
+            "one is upstream's behavior, asked for on purpose"
+        );
+        assert!(
+            config.agent.is_empty(),
+            "and it defined no agents while doing it"
+        );
+    }
+
+    /// Zero is the one value whose consequence is a batch that never starts,
+    /// and it is invisible until a turn delegates.
+    #[test]
+    fn a_concurrency_of_zero_is_refused_by_name() {
+        let error =
+            parse(r#"{"agents": {"concurrency": 0}}"#).expect_err("a cap of nothing is not a cap");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("agents.concurrency"), "{message}");
     }
 
     /// Per event, wholesale — the `mcp` arm's semantics, applied for the reason
@@ -2240,6 +2349,7 @@ mod tests {
               "default_provider": "openai",
               "default_agent": "plan",
               "agent": {"plan": {"mode": "primary", "disable": false}},
+              "agents": {"concurrency": 3},
               "permission": {"bash": "ask"},
               "instructions": ["AGENTS.md"],
               "theme": "tokyonight",
@@ -2262,6 +2372,7 @@ mod tests {
         assert_eq!(config.default_agent.as_deref(), Some("plan"));
         assert_eq!(config.agent["plan"].mode, Some(AgentMode::Primary));
         assert_eq!(config.agent["plan"].disable, Some(false));
+        assert_eq!(config.agents.concurrency(), 3);
         assert_eq!(config.theme_mode, Some(ThemeMode::Dark));
         assert_eq!(config.shell.as_deref(), Some("/bin/zsh"));
         assert_eq!(config.command["ship"].template, "release $ARGUMENTS");
