@@ -55,7 +55,7 @@ use crate::{
     },
     provider::Provider,
     session::{
-        Answered, LiveSession, PendingReply, Persist, SessionState, SteerInput, Steering, Turn,
+        Answered, LiveSession, PendingReplies, Persist, SessionState, SteerInput, Steering, Turn,
         TurnHandle, TurnKind, run_turn,
     },
     snapshot,
@@ -250,8 +250,24 @@ pub(crate) struct NoSubscribers;
 /// engine is idle. Each queue is FIFO, so under that invariant every
 /// subscriber sees the events of a turn in emission order — two lossless
 /// subscribers of one turn hold the same transcript frame for frame.
+///
+/// **That invariant is now enforced here rather than assumed.** It used to hold
+/// by construction: a turn task blocked inside a `task` call published nothing,
+/// so the one child's watcher was the only publisher for as long as it ran. A
+/// step that fans several children out has several watchers crossing dialogs and
+/// progress at once (**D462**), and two of them delivering concurrently could
+/// otherwise reach two subscribers in two different orders — each queue FIFO,
+/// and the queues disagreeing. [`Fanout::publish`] is what stops that: one
+/// delivery reaches every outlet before the next begins.
 pub(crate) struct Fanout {
     outlets: std::sync::Mutex<Outlets>,
+    /// Held for the whole of one delivery, so concurrent publishers interleave
+    /// between events and never inside one.
+    ///
+    /// Async because a lossless outlet's send waits on its subscriber, and the
+    /// waiting is the point: backpressure has always landed on whoever is
+    /// publishing.
+    publish: tokio::sync::Mutex<()>,
 }
 
 /// The registry half of [`Fanout`]: the queues, and the counter that names
@@ -294,6 +310,7 @@ impl Fanout {
                 }],
                 minted: 1,
             }),
+            publish: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -328,6 +345,10 @@ impl Fanout {
     /// [`NoSubscribers`] when no outlet remains after this delivery, which is
     /// the caller's cue that the turn has nobody left to tell.
     pub(crate) async fn send(&self, event: Event) -> Result<(), NoSubscribers> {
+        // One delivery at a time, across every publisher this fanout has —
+        // see the type's own docs for whose orders would otherwise disagree.
+        let _publishing = self.publish.lock().await;
+
         let lossless: Vec<(u64, mpsc::Sender<Event>)> = {
             let mut outlets = self.lock();
             let mut index = 0;
@@ -804,6 +825,13 @@ pub struct Engine {
     /// turn that asks the model and then gone — the same discipline the stale-
     /// file notice already keeps, at the same seam.
     hook_context: std::sync::Mutex<Vec<String>>,
+    /// How many `task` calls from one assistant step may run at the same time.
+    ///
+    /// A plain number rather than an [`Option`], because the config's own
+    /// default is resolved before it gets here
+    /// ([`crate::config::AgentsConfig::concurrency`]) and an engine nobody
+    /// configured still has to have an answer.
+    concurrency: usize,
 }
 
 impl Engine {
@@ -910,6 +938,7 @@ impl Engine {
             jobs: Arc::new(job::JobRegistry::new()),
             hooks: None,
             hook_context: std::sync::Mutex::new(Vec::new()),
+            concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
         }
     }
 
@@ -1079,6 +1108,19 @@ impl Engine {
             self.recompose_environment();
             self.recompose_base();
         }
+
+        self
+    }
+
+    /// Sets how many `task` calls from one assistant step may run at once.
+    ///
+    /// Clamped to at least one rather than refused: the config path already
+    /// refuses a zero by name ([`crate::config`]'s `check_agents`), and a
+    /// caller reaching this builder with one anyway means a batch that never
+    /// starts — which is the one outcome nobody can have wanted.
+    #[must_use]
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
 
         self
     }
@@ -2523,6 +2565,7 @@ impl Engine {
             persistence: self.persistence.clone(),
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks.clone(),
+            concurrency: self.concurrency,
         }))
     }
 
@@ -3030,7 +3073,7 @@ impl Engine {
         });
 
         let cancel = CancellationToken::new();
-        let pending = Arc::new(std::sync::Mutex::new(None));
+        let pending: Arc<std::sync::Mutex<PendingReplies>> = Arc::default();
         // Born with the slot, so a `Steer` racing the very first byte of the
         // turn finds a mailbox rather than a window in which the slot is
         // occupied and there is nowhere to post.
@@ -3051,6 +3094,7 @@ impl Engine {
         let turn = Turn {
             provider: Arc::clone(&self.provider),
             spawn: self.spawn_host(model.clone()),
+            concurrency: self.concurrency,
             session_id: self.session_id(),
             model,
             effort_options,
@@ -3149,25 +3193,22 @@ impl Engine {
         id: &crate::protocol::PermissionId,
         reply: crate::protocol::PermissionReply,
     ) {
-        let delivered = self.turn.observe(|turn| turn.is_some_and(|turn| {
-            let mut pending = turn
-                .permission
-                .lock()
-                .expect("the pending permission is never poisoned");
-
-            // Discriminated on the kind as well as the id: the slot holds one
-            // open request of either kind, and a reply that named a question's
-            // id would otherwise be handed to a permission wait expecting a
-            // decision.
-            match pending.take_if(
-                |waiting| matches!(waiting, PendingReply::Permission { id: open, .. } if open == id),
-            ) {
-                // A closed receiver means the turn is already tearing down,
-                // which is the same race as replying after the turn ended.
-                Some(PendingReply::Permission { sender, .. }) => sender.send(reply).is_ok(),
-                Some(PendingReply::Question { .. }) | None => false,
-            }
-        })).await;
+        let delivered = self
+            .turn
+            .observe(|turn| {
+                turn.is_some_and(|turn| {
+                    // By the exact id, out of the map of permission waits — so
+                    // a reply naming a question's id finds nothing rather than
+                    // reaching a permission wait expecting a decision, and a
+                    // reply naming one of several open dialogs reaches that
+                    // one.
+                    turn.permission
+                        .lock()
+                        .expect("the pending replies are never poisoned")
+                        .answer_permission(id, reply)
+                })
+            })
+            .await;
 
         if !delivered {
             tracing::debug!(id = id.as_str(), "no permission is waiting for this reply");
@@ -3186,17 +3227,10 @@ impl Engine {
             .turn
             .observe(|turn| {
                 turn.is_some_and(|turn| {
-                    let mut pending = turn
-                        .permission
+                    turn.permission
                         .lock()
-                        .expect("the pending permission is never poisoned");
-
-                    match pending.take_if(
-                |waiting| matches!(waiting, PendingReply::Question { id: open, .. } if open == id),
-            ) {
-                Some(PendingReply::Question { sender, .. }) => sender.send(answered).is_ok(),
-                Some(PendingReply::Permission { .. }) | None => false,
-            }
+                        .expect("the pending replies are never poisoned")
+                        .answer_question(id, answered)
                 })
             })
             .await;

@@ -40,6 +40,25 @@
 //!
 //! One level, fixed (**D9**). A child's registry is this registry without the
 //! task tool, so a subagent is not refused the call — it is never offered it.
+//!
+//! # Fan-out (**D462**, `parallel-subagents-are-a-claude-port`)
+//!
+//! *Width*, on the other hand, is not one. A run of consecutive `task` calls in
+//! one assistant step is a **batch**: the children run at the same time, capped
+//! by `agents.concurrency`, and each result is applied to the parent's message
+//! as it comes home rather than in the order the model asked. Upstream opencode
+//! runs subagents one at a time and has no counterpart to any of it, so nothing
+//! in this family ports a TypeScript file; Claude Code's observed contract —
+//! fan out within a turn, fan the summaries back in — is the spec.
+//!
+//! Three pieces carry it, and each is documented where it lives rather than
+//! here: the batch executor and the reply registry in [`crate::session`]
+//! (`resolve_batch` and `PendingReplies`), and the delivery lock that keeps two
+//! children's watchers from publishing into one subscriber's queue while
+//! another is half-served (`Fanout::publish`). What did **not** change is
+//! anything above the batch: root turns are still one at a time, a child's
+//! events still stay off the subscribed stream, the depth limit above still
+//! holds, and a subagent still inherits refusals and never allows.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -53,7 +72,7 @@ use crate::{
     permission::{Action, Permissions, Rule, TASK},
     protocol::{Event, FinishReason, MessageId, Part, PartBody, PartId, Role, ToolState, Usage},
     provider::Provider,
-    session::{ChildParts, PendingReply, Persist, SessionState, Turn, TurnKind, run_turn},
+    session::{ChildParts, Persist, SessionState, Turn, TurnKind, run_turn},
     storage::{self, SessionId, SessionInfo},
     tool::{
         Credentials, Registry,
@@ -119,6 +138,9 @@ pub(crate) struct Host {
     /// it. Which of the two stop hooks a child's end fires is decided by
     /// `Turn::delegated`, not here.
     pub(crate) hooks: Option<Arc<crate::hook::Hooks>>,
+    /// The session's fan-out cap, carried so a child turn can be built from
+    /// this alone. Never read there — a child has no `task` tool to batch.
+    pub(crate) concurrency: usize,
 }
 
 impl std::fmt::Debug for Host {
@@ -145,10 +167,14 @@ pub(crate) struct Spawn {
     /// the progress part is the parent's own, and a crossing dialog is
     /// re-addressed to the conversation whose turn is waiting on it.
     pub(crate) session_id: SessionId,
-    /// Where an open permission request waits, shared with the parent turn: the
-    /// parent is blocked inside this call, so the slot is the child's to use and
-    /// a reply routed to the parent reaches the child.
-    pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
+    /// Where open permission requests wait, shared with the parent turn: the
+    /// parent is blocked inside this call, so the registry is the child's to use
+    /// and a reply routed to the parent reaches the child.
+    ///
+    /// A registry rather than a slot since **D462**: several `task` calls from
+    /// one step share this, so two children can hold two dialogs at once and
+    /// each reply is routed by the id it names.
+    pub(crate) pending: Arc<std::sync::Mutex<crate::session::PendingReplies>>,
     /// The parent message holding this call's part.
     pub(crate) message_id: MessageId,
     /// The part this call's progress is reported on.

@@ -129,6 +129,16 @@ pub struct Status {
     /// same posture as `queued`, since a session that never backgrounds one
     /// renders the bar it always did.
     running_jobs: usize,
+    /// How many `task` calls of the running turn are in flight (**D462**).
+    /// Beside the background-job count and for the same reason: a step that
+    /// fanned three children out is otherwise one inline row that says nothing
+    /// about how many loops are behind it.
+    running_tasks: usize,
+    /// How many permission dialogs are waiting behind the one on screen. Only
+    /// concurrent children can produce more than none, and a person answering
+    /// one dialog with a second already queued has to be told there is a
+    /// second.
+    queued_dialogs: usize,
 }
 
 impl Status {
@@ -145,6 +155,8 @@ impl Status {
             shell: false,
             queued: 0,
             running_jobs: 0,
+            running_tasks: 0,
+            queued_dialogs: 0,
         }
     }
 
@@ -172,6 +184,16 @@ impl Status {
     /// Records how many background jobs are currently running.
     pub fn set_running_jobs(&mut self, running_jobs: usize) {
         self.running_jobs = running_jobs;
+    }
+
+    /// Records how many delegated children the running turn has in flight.
+    pub fn set_running_tasks(&mut self, running_tasks: usize) {
+        self.running_tasks = running_tasks;
+    }
+
+    /// Records how many permission dialogs are waiting behind the open one.
+    pub fn set_queued_dialogs(&mut self, queued_dialogs: usize) {
+        self.queued_dialogs = queued_dialogs;
     }
 
     /// Records what the engine is doing now.
@@ -240,6 +262,35 @@ impl Status {
         if self.running_jobs > 0 {
             left.push_str(SEPARATOR);
             left.push_str(&format!("{} bash running", self.running_jobs));
+        }
+        // Beside the background jobs, because both answer the same question —
+        // what else is happening besides the sentence being streamed.
+        //
+        // **More than one, not more than none.** A lone delegation is already
+        // named by the activity segment (`tool: task`) and by its own inline
+        // row; a segment counting it to one would add width to every bar a
+        // single `task` call has ever drawn, and say nothing the bar was not
+        // already saying. What is new — and what nothing else on screen
+        // accounts for — is a *fan-out*.
+        if self.running_tasks > 1 {
+            left.push_str(SEPARATOR);
+            left.push_str(&format!("{} tasks running", self.running_tasks));
+        }
+        // Last of the three, and the only one that is about the person rather
+        // than the machine: it says how many more questions there are once this
+        // dialog is answered. From none, because one waiting question is
+        // already something the dialog on screen does not mention.
+        if self.queued_dialogs > 0 {
+            left.push_str(SEPARATOR);
+            left.push_str(&format!(
+                "{} {} queued",
+                self.queued_dialogs,
+                if self.queued_dialogs == 1 {
+                    "dialog"
+                } else {
+                    "dialogs"
+                }
+            ));
         }
         // Spend sits beside the state, where its width is predictable; the
         // notice is last because it is the one part with no length limit.
@@ -360,6 +411,37 @@ mod tests {
 
         status.set_running_jobs(0);
         assert!(!rendered(&status, 100).contains("bash running"));
+    }
+
+    /// The two segments concurrent children brought with them, under the same
+    /// appear-only-while-nonzero posture as everything beside them (**D462**).
+    #[test]
+    fn the_bar_names_running_children_and_queued_dialogs_only_while_there_are_any() {
+        let mut status = Status::new(None);
+        let quiet = rendered(&status, 120);
+        assert!(!quiet.contains("tasks running"));
+        assert!(!quiet.contains("dialogs queued"));
+
+        status.set_running_tasks(1);
+        assert!(
+            !rendered(&status, 120).contains("tasks running"),
+            "one delegation is not a fan-out, and the activity segment names it"
+        );
+
+        status.set_running_tasks(3);
+        status.set_queued_dialogs(1);
+        let line = rendered(&status, 120);
+        assert!(line.contains("3 tasks running"), "got {line:?}");
+        assert!(line.contains("1 dialog queued"), "got {line:?}");
+
+        status.set_queued_dialogs(2);
+        assert!(rendered(&status, 120).contains("2 dialogs queued"));
+
+        status.set_running_tasks(0);
+        status.set_queued_dialogs(0);
+        let quiet = rendered(&status, 120);
+        assert!(!quiet.contains("tasks running"));
+        assert!(!quiet.contains("dialogs queued"));
     }
 
     /// The segment appears only while an effort is selected, so every bar
