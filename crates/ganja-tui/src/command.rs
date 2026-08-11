@@ -351,7 +351,6 @@ pub fn is_bare_exit(text: &str) -> bool {
 ///
 /// The leading slash is optional so that the same lookup serves the dropdown's
 /// `/models` and a bare `models`.
-#[cfg(test)]
 #[must_use]
 pub fn lookup(name: &str) -> Option<&'static Entry> {
     let wanted = name.strip_prefix('/').unwrap_or(name);
@@ -359,6 +358,27 @@ pub fn lookup(name: &str) -> Option<&'static Entry> {
     COMMANDS
         .iter()
         .find(|entry| entry.name == wanted || entry.aliases.contains(&wanted))
+}
+
+/// The UI command a submitted buffer names on its own, or nothing when the
+/// buffer is prose.
+///
+/// The dropdown cannot be the only door to these: its menu closes the moment
+/// a space follows the name (`dropdown::triggered`), and Tab completion
+/// deliberately leaves `/exit ` in the buffer (**D446**) — so the Enter that
+/// follows has to read the text itself, which is how Claude Code and Codex
+/// both dispatch a slash command. Only a leading `/name` (or alias) with
+/// nothing but whitespace after it qualifies: these commands take no
+/// arguments, so `/models gpt` stays text, under the same ruling that keeps
+/// an unknown slash command out of the UI's hands.
+#[must_use]
+pub fn submitted(text: &str) -> Option<&'static Entry> {
+    let name = text.strip_prefix('/')?.trim_end();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+
+    lookup(name)
 }
 
 /// One command the **engine** offers, as the dropdown lists it.
@@ -583,7 +603,7 @@ fn score(atom: &Atom, matcher: &mut Matcher, entry: &Entry, surface: Surface) ->
 mod tests {
     use super::{
         Action, COMMANDS, Category, Choice, EngineCommand, Surface, dropdown_matches, is_bare_exit,
-        lookup, matches,
+        lookup, matches, submitted,
     };
 
     /// The commands the engine offers a session that loaded no config: one,
@@ -868,6 +888,39 @@ mod tests {
     #[test]
     fn a_fragment_nothing_carries_narrows_to_nothing() {
         assert!(matches("zzzz", Surface::Dropdown).is_empty());
+    }
+
+    /// What submit itself recognizes, with the dropdown long closed: the
+    /// name stands alone, trailing whitespace tolerated because a Tab
+    /// completion or a stray space leaves some behind.
+    #[test]
+    fn a_submitted_buffer_names_a_command_only_when_the_name_stands_alone() {
+        assert_eq!(
+            submitted("/models ").map(|entry| entry.action),
+            Some(Action::Models)
+        );
+        assert_eq!(
+            submitted("/mo ").map(|entry| entry.action),
+            Some(Action::Models),
+            "an alias reaches the same command"
+        );
+        assert_eq!(
+            submitted("/exit").map(|entry| entry.action),
+            Some(Action::Exit),
+            "no whitespace at all is the plain spelling"
+        );
+
+        for text in [
+            "models",
+            " /models",
+            "/models gpt",
+            "/",
+            "/ models",
+            "/nonesuch ",
+            "what about /models",
+        ] {
+            assert!(submitted(text).is_none(), "{text:?} should be prose");
+        }
     }
 
     #[test]
