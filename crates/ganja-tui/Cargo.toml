@@ -72,6 +72,11 @@ tokio-util.workspace = true
 # defensible if the run says which file it dropped and why.
 tracing.workspace = true
 unicode-width.workspace = true
+# A dropped `file://` path decodes through `Url::to_file_path`, which already
+# carries the percent-decoding and the localhost-host rule upstream's own
+# `fileURLToPath` applies (`mention.rs`'s classifier) — reusing it here is the
+# alternative to reimplementing URL parsing badly.
+url.workspace = true
 
 [dev-dependencies]
 # The submit-time degradation warning needs a provider whose wire refuses

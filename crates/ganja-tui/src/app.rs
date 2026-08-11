@@ -811,12 +811,28 @@ impl App {
     /// `component/prompt/index.tsx:1395-1420`). Left alone they would reach the
     /// buffer as stray characters rather than as the line breaks they are.
     ///
-    /// The text goes in **raw**: upstream would collapse a long paste behind a
-    /// `[Pasted ~N lines]` placeholder, which is deferred with the image half
-    /// of the same ruling (**D111**).
+    /// Before anything reaches the buffer, [`mention::classify_drop`] checks
+    /// whether this is a *drop* rather than ordinary text — one or more paths
+    /// a terminal handed over as a paste (**F5**). Every qualifying token
+    /// becomes its own `@mention `, in order; a paste that fails the
+    /// classifier — including one that is not text a file path could ever be
+    /// made of — goes in raw, exactly as before.
+    ///
+    /// Raw text goes in **unfolded**: upstream would collapse a long paste
+    /// behind a `[Pasted ~N lines]` placeholder, which is deferred with the
+    /// image half of the same ruling (**D111**).
     async fn paste(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.editor.insert(&normalized);
+
+        match mention::classify_drop(&normalized, &self.cwd) {
+            Some(paths) => {
+                for path in paths {
+                    self.editor
+                        .insert(&format!("{} ", mention::token(&path, None, None)));
+                }
+            }
+            None => self.editor.insert(&normalized),
+        }
         // The cursor moved, and both inline menus are about where it is.
         self.sync_menus().await;
     }
@@ -982,6 +998,14 @@ impl App {
             }
             Some(keybind::Action::ThemesOpen) => {
                 self.open_themes();
+                return Ok(());
+            }
+            // Something else may have drawn over the screen without this
+            // process knowing — the same situation the external-editor
+            // return path already repairs (`compose_externally`) — so the
+            // next frame forces a full `terminal.clear()` rather than a diff.
+            Some(keybind::Action::Redraw) => {
+                self.stale = true;
                 return Ok(());
             }
             // Tab means "next agent" on an empty buffer only; with something
@@ -1403,6 +1427,25 @@ impl App {
 
                 true
             }
+            // Completes without running, for *both* populations — Claude Code
+            // screenshots: `/ex` + Tab fills `/exit ` and sends nothing.
+            // Upstream's own Tab binding (`prompt.autocomplete.complete`) runs
+            // a UI command exactly as Enter does (`keymap.tsx:286`
+            // `onSelect: () => keymap.dispatchCommand(...)`); ganja's Tab
+            // instead always just fills the buffer, which is a genuine
+            // divergence for the UI half of the roster (deviation **D446**,
+            // tab-dropdown-completes-without-running). The engine half already
+            // types-and-waits on Enter, so Tab changes nothing there.
+            KeyCode::Tab => {
+                let choice = self.dropdown.as_ref().and_then(Dropdown::selected);
+                self.dropdown = None;
+
+                if let Some(choice) = choice {
+                    self.editor.set_text(&format!("{} ", choice.slash()));
+                }
+
+                true
+            }
             _ => false,
         }
     }
@@ -1431,7 +1474,13 @@ impl App {
 
                 true
             }
-            KeyCode::Enter if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
+            // Tab completes exactly as Enter does — upstream's own binding
+            // for this menu (`prompt.autocomplete.complete`) falls through to
+            // the same `select()` Enter uses whenever the row is not a
+            // directory (`autocomplete.tsx:624-631`), and ganja's walker
+            // never yields one (`glob.rs` filters to `is_file()`), so the two
+            // keys are simply two names for the one outcome here.
+            KeyCode::Enter | KeyCode::Tab if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
                 let chosen = self
                     .files
                     .as_ref()
@@ -2381,7 +2430,7 @@ mod tests {
     };
     use ratatui::{
         Terminal,
-        backend::TestBackend,
+        backend::{Backend, ClearType, TestBackend},
         crossterm::event::{
             Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
             MouseEvent, MouseEventKind,
@@ -4714,6 +4763,52 @@ mod tests {
         );
     }
 
+    /// **F1**, **D446**: Tab completes the buffer and closes the menu without
+    /// running anything, for a UI command — the one place Tab and Enter part
+    /// ways, since upstream's own Tab binding dispatches a UI command exactly
+    /// as Enter does.
+    #[tokio::test]
+    async fn tab_on_the_command_menu_completes_the_buffer_without_running_it() {
+        let mut app = app();
+        for event in typing("/the") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .expect("tab is handled");
+
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("/themes "),
+            "the selected row's name, not the fragment that narrowed to it"
+        );
+        assert!(app.dropdown.is_none(), "choosing closes the menu");
+        assert!(
+            app.theme_list.is_none(),
+            "Tab must not run the command the way Enter does"
+        );
+    }
+
+    /// The same claim from the engine's side of the wire: nothing reaches it.
+    #[tokio::test]
+    async fn tab_on_a_ui_command_never_reaches_the_engine() {
+        let (mut app, mut events) = wired().await;
+        for event in typing("/new") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .expect("tab is handled");
+
+        assert_eq!(app.editor.prompt().as_deref(), Some("/new "));
+        assert!(
+            events.next().now_or_never().is_none(),
+            "nothing should have been sent to the engine"
+        );
+    }
+
     #[tokio::test]
     async fn the_arrow_keys_steer_the_command_menu_instead_of_the_transcript() {
         let mut app = app();
@@ -4734,6 +4829,69 @@ mod tests {
             app.dropdown.as_ref().and_then(Dropdown::selected),
             Some(first),
             "down should have moved the cursor"
+        );
+    }
+
+    /// **F6**, **D445**. The flag is the whole feature: `App::draw` already
+    /// turns it into a `terminal.clear()` for the external-editor return
+    /// path, so pinning that Ctrl+L sets it is what pins the key to the
+    /// behavior without re-testing `draw` itself.
+    #[tokio::test]
+    async fn ctrl_l_marks_the_next_frame_stale() {
+        let mut app = app();
+        assert!(!app.stale, "nothing has asked for a repaint yet");
+
+        app.handle(key(KeyCode::Char('l'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl-l is handled");
+
+        assert!(app.stale, "the next draw should force a full repaint");
+
+        let mut terminal = terminal(40, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(!app.stale, "the flag is consumed by the draw it triggered");
+    }
+
+    /// The exact bug `stale` exists to prevent: something else — not this
+    /// `Terminal` — wrote over the screen, and an ordinary draw diffs against
+    /// what it still thinks is there, so it writes nothing and the
+    /// corruption survives. Ctrl+L is the hint that forces the real
+    /// `terminal.clear()` a plain `draw` has no reason to call on its own.
+    #[tokio::test]
+    async fn ctrl_l_forces_a_full_repaint_instead_of_a_diff_against_a_stale_screen() {
+        let mut app = app();
+        let mut terminal = terminal(40, 12);
+        app.draw(&mut terminal).expect("the first frame draws");
+        assert!(
+            !screen(&terminal).trim().is_empty(),
+            "the fixture app should have drawn something to corrupt"
+        );
+
+        // Something else wrote over the screen without this `Terminal`
+        // knowing, the way an external editor does.
+        terminal
+            .backend_mut()
+            .clear_region(ClearType::All)
+            .expect("the backend clears");
+        assert!(screen(&terminal).trim().is_empty(), "the corruption landed");
+
+        // Nothing changed from this `Terminal`'s point of view, so an
+        // ordinary draw trusts its own cache and never touches the
+        // corrupted backend.
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).trim().is_empty(),
+            "an undirected draw should not have repainted over the corruption"
+        );
+
+        app.handle(key(KeyCode::Char('l'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl-l is handled");
+        app.draw(&mut terminal).expect("the redraw repaints");
+
+        assert!(
+            !screen(&terminal).trim().is_empty(),
+            "ctrl+l should have forced a real repaint over the corruption"
         );
     }
 
@@ -5667,6 +5825,24 @@ mod tests {
         );
     }
 
+    /// **F1**: Tab reaches the identical outcome as Enter in the file menu —
+    /// upstream's own binding falls through to the same selection unless the
+    /// row is a directory, and this build's `@` walker never yields one
+    /// (`glob.rs` filters to `is_file()`).
+    #[tokio::test]
+    async fn tab_on_the_file_menu_completes_the_mention_the_same_as_enter() {
+        let directory = project();
+        let mut app = app_in(&directory);
+        typed(&mut app, "compare @lib").await;
+
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .expect("tab is handled");
+
+        assert_eq!(app.editor.prompt().as_deref(), Some("compare @src/lib.rs "),);
+        assert!(app.files.is_none(), "choosing closes the menu");
+    }
+
     /// A mention in the middle of a sentence is replaced in place, and the
     /// cursor stays where the user was writing rather than jumping to the end.
     #[tokio::test]
@@ -6070,6 +6246,22 @@ mod tests {
             "/init ",
             "the name is typed, with room for the arguments it takes"
         );
+        assert!(app.dropdown.is_none());
+    }
+
+    /// Tab reaches the identical outcome as Enter for an engine command:
+    /// Tab's own "complete without running" only changes anything for the UI
+    /// half of the roster, which already types-and-waits on Enter.
+    #[tokio::test]
+    async fn tab_on_an_engine_command_types_its_name_the_same_as_enter() {
+        let (mut app, _events) = wired().await;
+        typed(&mut app, "/init").await;
+
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .expect("tab is handled");
+
+        assert_eq!(app.editor.text(), "/init ");
         assert!(app.dropdown.is_none());
     }
 
@@ -6725,6 +6917,53 @@ mod tests {
             events.next().now_or_never().is_none(),
             "nothing should have been sent to the engine"
         );
+    }
+
+    /// **F5**: a dropped path becomes a mention instead of landing as raw
+    /// text — the same insertion the `@` menu's own Enter uses.
+    #[tokio::test]
+    async fn a_dropped_path_pastes_as_a_mention() {
+        let directory = project();
+        let mut app = app_in(&directory);
+
+        app.handle(AppEvent::Term(TermEvent::Paste("src/lib.rs".to_owned())))
+            .await
+            .expect("a paste is handled");
+
+        assert_eq!(app.editor.text(), "@src/lib.rs ");
+    }
+
+    /// Several paths pasted at once — the way a terminal hands over a
+    /// multi-file drag — become several mentions, in the order they arrived.
+    #[tokio::test]
+    async fn a_multi_file_drop_pastes_as_mentions_in_order() {
+        let directory = project();
+        let mut app = app_in(&directory);
+
+        app.handle(AppEvent::Term(TermEvent::Paste(
+            "README.md src/lib.rs".to_owned(),
+        )))
+        .await
+        .expect("a paste is handled");
+
+        assert_eq!(app.editor.text(), "@README.md @src/lib.rs ");
+    }
+
+    /// A pasted shell one-liner that happens to name a real path stays
+    /// ordinary text: not every token in it is a path, and the classifier
+    /// refuses to half-transform the line.
+    #[tokio::test]
+    async fn a_pasted_shell_one_liner_stays_raw_text() {
+        let directory = project();
+        let mut app = app_in(&directory);
+
+        app.handle(AppEvent::Term(TermEvent::Paste(
+            "cat src/lib.rs | grep x".to_owned(),
+        )))
+        .await
+        .expect("a paste is handled");
+
+        assert_eq!(app.editor.text(), "cat src/lib.rs | grep x");
     }
 
     #[tokio::test]
