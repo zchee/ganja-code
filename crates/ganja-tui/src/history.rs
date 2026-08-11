@@ -85,6 +85,25 @@ pub enum Direction {
     Newer,
 }
 
+/// One remembered submission, dated to the moment it can honestly be shown
+/// by.
+///
+/// The JSONL format carries no per-entry timestamp and stays exactly that
+/// shape — the store is P8-pinned and this wave does not reopen it
+/// (deviation **D448**, history-search-age-approximated). A submission
+/// appended this run is dated to the instant [`History::append`] ran; every
+/// entry this run only *loaded* shares the file's own last-write time, which
+/// is the newest honest instant available for it — not the moment it was
+/// originally typed, if that predates this run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recalled {
+    /// What was submitted.
+    pub prompt: PromptInfo,
+    /// Milliseconds since the Unix epoch it is dated to, [`now_ms`]'s
+    /// convention.
+    pub at: u64,
+}
+
 /// The remembered prompts and where a walk through them currently sits.
 ///
 /// `index` counts backward from zero: `0` is the live buffer (nothing
@@ -98,6 +117,9 @@ pub struct History {
     path: Option<PathBuf>,
     /// Oldest first, so the newest is last: upstream pushes and reads `at(-1)`.
     entries: Vec<PromptInfo>,
+    /// [`Recalled::at`] for each of [`History::entries`], same index — kept
+    /// in memory only, never written to the JSONL (see [`Recalled`]).
+    times: Vec<u64>,
     /// How far back the current walk has gone; `0` is the live buffer.
     index: isize,
 }
@@ -133,9 +155,24 @@ impl History {
             }
         };
 
+        // Every entry this call loaded shares one instant: the file's own
+        // last-write time when that is readable, else the moment of this
+        // load. Neither is when any individual line was actually typed — the
+        // format never recorded that — but both are honest about what they
+        // are (**D448**), unlike inventing a spread of fake per-line times.
+        let loaded_at = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or_else(now_ms, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            });
+        let times = vec![loaded_at; entries.len()];
+
         let history = Self {
             path: Some(path),
             entries,
+            times,
             index: 0,
         };
 
@@ -160,16 +197,33 @@ impl History {
         }
 
         self.entries.push(entry.clone());
+        self.times.push(now_ms());
         self.index = 0;
 
         if self.entries.len() > MAX_HISTORY_ENTRIES {
             let excess = self.entries.len() - MAX_HISTORY_ENTRIES;
             self.entries.drain(..excess);
+            self.times.drain(..excess);
             self.rewrite();
             return;
         }
 
         self.append_line(&entry);
+    }
+
+    /// Every remembered submission, newest first and dated per [`Recalled`].
+    ///
+    /// Read-only, as the name promises: nothing here moves [`History::step`]'s
+    /// walk or touches what [`History::append`] writes to disk.
+    #[must_use]
+    pub fn entries(&self) -> Vec<Recalled> {
+        self.entries
+            .iter()
+            .cloned()
+            .zip(self.times.iter().copied())
+            .rev()
+            .map(|(prompt, at)| Recalled { prompt, at })
+            .collect()
     }
 
     /// Walks one step and returns the buffer that step should show, or [`None`]
@@ -295,6 +349,19 @@ impl History {
             }
         }
     }
+}
+
+/// Milliseconds since the Unix epoch "now", saturating rather than failing
+/// when the machine's clock predates 1970 — [`crate::component::sessions::now`]'s
+/// convention, kept as its own copy here rather than imported: a data model
+/// reaching into a UI component for six lines would be the wrong direction
+/// for this crate's module tree to lean.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// `<XDG data>/ganja/prompt-history.jsonl`, or [`None`] when there is no home
@@ -520,5 +587,74 @@ mod tests {
             recalled.first().and_then(|e| e.mode),
             Some(super::Mode::Shell)
         );
+    }
+
+    /// The search modal reads the whole store newest first — the opposite
+    /// order [`History`] keeps internally for the walk, so `entries` is
+    /// where that reversal happens rather than in every caller.
+    #[test]
+    fn entries_reads_back_newest_first() {
+        let directory = temporary();
+        let mut history = history_in(&directory);
+        history.append(PromptInfo::text("first"));
+        history.append(PromptInfo::text("second"));
+        history.append(PromptInfo::text("third"));
+
+        let inputs: Vec<String> = history
+            .entries()
+            .into_iter()
+            .map(|recalled| recalled.prompt.input)
+            .collect();
+        assert_eq!(inputs, ["third", "second", "first"]);
+    }
+
+    /// Every line a load finds on disk is dated to the same instant — the
+    /// file's own last-write time, since the JSONL format never recorded a
+    /// per-line one (**D448**).
+    #[test]
+    fn entries_loaded_from_disk_share_one_dated_instant() {
+        let directory = temporary();
+        let path = directory.path().join("prompt-history.jsonl");
+        std::fs::write(&path, "{\"input\":\"older\"}\n{\"input\":\"newer\"}\n")
+            .expect("the fixture writes");
+
+        let history = History::load_from(path);
+        let ats: Vec<u64> = history
+            .entries()
+            .into_iter()
+            .map(|recalled| recalled.at)
+            .collect();
+
+        assert_eq!(ats.len(), 2);
+        assert_eq!(ats[0], ats[1], "a load has one instant, not a spread");
+        assert!(ats[0] > 0, "the file's last-write time reads as nonzero");
+    }
+
+    /// An entry appended this run is dated no earlier than what was already
+    /// on disk when the run started, unlike a loaded entry which is dated to
+    /// the file's last write rather than to when it was actually typed.
+    #[test]
+    fn an_appended_entry_is_never_dated_before_what_was_loaded() {
+        let directory = temporary();
+        let path = directory.path().join("prompt-history.jsonl");
+        std::fs::write(&path, "{\"input\":\"loaded\"}\n").expect("the fixture writes");
+
+        let mut history = History::load_from(path);
+        let loaded_at = history.entries()[0].at;
+
+        history.append(PromptInfo::text("appended"));
+        let entries = history.entries();
+
+        assert_eq!(entries[0].prompt.input, "appended", "newest first");
+        assert!(entries[0].at >= loaded_at);
+    }
+
+    /// An empty store has nothing to date and nothing to crash over.
+    #[test]
+    fn an_empty_store_has_no_entries() {
+        let directory = temporary();
+        let history = history_in(&directory);
+
+        assert!(history.entries().is_empty());
     }
 }
