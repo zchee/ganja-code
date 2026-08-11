@@ -150,7 +150,7 @@ Mechanics first, then the top-level keys of `opencode.json(c)`.
 | [`small_model`](https://opencode.ai/docs/config) | titles and summaries | ✅ |
 | Anthropic subscription OAuth (Pro/Max) | upstream removed it to comply with Anthropic's terms; community plugins exist at users' own risk | n/a — ganja never carried it, and no spec existed at the pin |
 | xAI device-code login | single-flow since [v1.18.14](https://github.com/anomalyco/opencode/releases/tag/v1.18.14) | ✅ ganja's grok login is already a device flow |
-| MCP OAuth | remote MCP auth | ❌ config key refused loudly |
+| MCP OAuth | remote MCP auth | ✅ P13 addition, no upstream counterpart — the v1.18.13 checkout still refuses the `oauth` key by name: RFC 8414 discovery + RFC 7591 registration + PKCE/loopback + refresh-then-redial on 401, stored under a reserved `mcp:<server>` key (D466) |
 | [`providers login/list/logout`](https://opencode.ai/docs/providers) | unified credential UI | ⚠️ `auth` covers ganja's providers only |
 | anthropic / openai (both credentials) / grok / copilot / cursor / fake + compat | ganja's roster; cursor is ganja-original, no upstream counterpart | ✅ incl. OAuth logins and credential-travel bounds |
 
@@ -162,7 +162,7 @@ Mechanics first, then the top-level keys of `opencode.json(c)`.
 | [Remote MCP servers](https://opencode.ai/docs/mcp-servers) | `url`, `headers`, `enabled` | ✅ |
 | `<mcp_instructions>`, tools/list_changed | | ✅ |
 | [MCP prompts / resources](https://opencode.ai/docs/mcp-servers) | prompts become commands, resources listable | ❌ |
-| MCP reconnection / dynamic enable-disable | | ❌ dialled once at startup |
+| MCP reconnection / dynamic enable-disable | | ⚠️ reconnection ✅ (P13, no upstream counterpart — manual `/mcp` Reconnect for a `Failed` server + a bounded once-per-session automatic retry, D463); dynamic enable/disable at runtime still ❌, `enabled` is config-file only |
 | [LSP builtin breadth](https://opencode.ai/docs/lsp) | typescript, pyright, gopls, rust-analyzer, clangd, zls, elixir-ls, … | ⚠️ `rust` and `gopls` only |
 | [LSP auto-install](https://opencode.ai/docs/lsp) | downloads servers (`OPENCODE_DISABLE_LSP_DOWNLOAD` opts out) | ❌ never installs |
 | [Custom LSP servers](https://opencode.ai/docs/lsp) | `command`, `extensions`, `env`, `initialization`, per-entry `disabled` | ✅ |
@@ -220,7 +220,7 @@ repository root's `AGENTS.md`.
 
 | Subsystem | Notes | ganja |
 |---|---|---|
-| [Plugins](https://opencode.ai/docs/plugins) | JS runtime; npm specs + local `{plugin,plugins}/*.{ts,js}`; hooks (`tool.execute.before/after`, `permission.ask`, `chat.message`, event bus); `@opencode-ai/plugin` types, ctx carries an SDK client and Bun's `$` | ❌ out of scope |
+| [Plugins](https://opencode.ai/docs/plugins) | JS runtime; npm specs + local `{plugin,plugins}/*.{ts,js}`; hooks (`tool.execute.before/after`, `permission.ask`, `chat.message`, event bus); `@opencode-ai/plugin` types, ctx carries an SDK client and Bun's `$` | ❌ the JS plugin runtime itself is out of scope; ganja's own `hooks` config key (P13) is a **different, Claude-shaped mechanism** — nine named moments, `sh -c` command handlers, no JS runtime, no event bus — not a port of this row (D456) |
 | [Share](https://opencode.ai/docs/share) | `opencode.ai/s/<id>` publishing, `/share` `/unshare`, `manual`/`auto`/`disabled` | ❌ out of scope |
 | [Formatters](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/format/formatter.ts) | 26+ built-ins (gofmt, prettier, biome, ruff, rustfmt, shfmt, terraform, clang-format, …) run after edits; per-formatter disable or custom `command`+`extensions`+`environment` | ❌ |
 | [Background agents](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/background) | async dispatch, summaries, notifications | ❌ |
@@ -286,7 +286,7 @@ as `agent_cycle` (ported) whenever neither menu is open.*
 | `session_pin_toggle` / `session_quick_switch_1..9` | ctrl+f / `<leader>1-9` | ❌ |
 | `stash_delete` | ctrl+d | ❌ |
 | `model_provider_list` / `model_favorite_toggle` / `model_cycle_recent(_reverse)` / `model_cycle_favorite(_reverse)` | ctrl+a, ctrl+f, f2 | ❌ (`/models` list ✅) |
-| `mcp_list` / `provider_connect` / `console_org_switch` | none | ❌ |
+| `mcp_list` / `provider_connect` / `console_org_switch` | none | ⚠️ `mcp_list`'s server-status browsing is ported as the `/mcp` command (P13, no dedicated key either) / ❌ / ❌ |
 | `agent_list` / `agent_cycle_reverse` | `<leader>a` / shift+tab | ⚠️ `/agents` ✅ / ❌ |
 | `variant_cycle` / `variant_list` | ctrl+t / none | ❌ cycle (`/effort` list ✅, catalog-synthesized roster) |
 | `messages_page_up/…/half_page_down` (6) | pageup, … | ⚠️ scrolling ✅, not rebindable |

@@ -18,7 +18,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 |---|---|---|
 | [`@` fuzzy file search with Tab-accept](https://developers.openai.com/codex/cli) | `@` + Tab | ✅ Tab accepts, byte-identical to Enter; directory-descent (`@dir`→`@dir/`) not built — ganja's walker is files-only |
 | [Esc-Esc backtrack](https://developers.openai.com/codex/cli) | Esc Esc | ⚠️ idle Esc Esc now opens ganja's own rewind picker — pick a past user-message checkpoint, then Both/Conversation/Files scope; unlike Codex it doesn't re-populate the composer with the old prompt for editing, and it's gated to an idle composer (mid-turn Esc still cancels) |
-| [Transcript overlay](https://developers.openai.com/codex/cli) | Ctrl+T | ❌ raw logs, per-turn tokens, tool/MCP expansion |
+| [Transcript overlay](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ same chord, three tabs (expanded transcript incl. full tool/MCP input+output, raw event log, per-turn token table); full-terminal takeover and the banner are this overlay's own presentation, Claude Code's Ctrl+O supplies the one-line footer wording |
 | [Queued messages](https://developers.openai.com/codex/cli) | Enter while running | ✅ steers into the running turn at its next step boundary (`Command::Steer`) — the same shape as Codex's own `input_queue`/`inject`; what can't steer (refused, unconsumed, slash commands) falls back to a replayed queue, Codex's `queued_user_messages` half |
 | [Clipboard image paste](https://developers.openai.com/codex/cli) | Ctrl+V | ✅ PNG-encoded in-process (no OS shell-out) and attached through the `@`-mention pipeline |
 | [Slash-command autocomplete](https://developers.openai.com/codex/cli) | `/` | ✅ |
@@ -42,7 +42,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | [`/resume`](https://developers.openai.com/codex/cli) | in-TUI session picker | ✅ `/sessions` |
 | [`/feedback`](https://developers.openai.com/codex/cli) | sanitized diagnostics report to OpenAI | ❌ (no telemetry channel at all) |
 | `/new` / `/quit` | session control | ✅ equivalents |
-| [`/mcp`](https://github.com/openai/codex/blob/main/docs/config.md) | MCP connection status | ⚠️ `ganja mcp` CLI listing only |
+| [`/mcp`](https://github.com/openai/codex/blob/main/docs/config.md) | MCP connection status | ✅ `/mcp` dialog (status, tool counts, Reconnect/Login actions) + `ganja mcp` CLI listing |
 | `/login` / `/logout` | credential switching in-TUI | ⚠️ `auth` CLI only |
 
 ## 3. Security and execution modes
@@ -92,7 +92,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | [`view_image` tool](https://github.com/openai/codex/blob/main/docs/config.md) | the model reads local images by path, self-directed | ❌ image context is user-attached only |
 | Shell execution | | ✅ `bash` |
 | Best-of-N *(low confidence)* | parallel candidate generation | ❌ |
-| [MCP client](https://github.com/openai/codex/blob/main/docs/config.md) | stdio (`command`/`args`/`env`) + streamable HTTP (`url`/`bearer_token_env_var`), per-server enable + timeouts, OAuth credential store (keyring/file) | ⚠️ stdio + HTTP ✅; per-server timeouts, bearer-env, enable flags, OAuth ❌ |
+| [MCP client](https://github.com/openai/codex/blob/main/docs/config.md) | stdio (`command`/`args`/`env`) + streamable HTTP (`url`/`bearer_token_env_var`), per-server enable + timeouts, OAuth credential store (keyring/file) | ✅ stdio + HTTP, per-server `enabled`/`timeout`/`output_limit`, static `headers` (a bearer goes there); OAuth now too (RFC 8414 discovery + RFC 7591 registration + PKCE, stored under a reserved `mcp:<server>` key, D466) |
 | [Codex as an MCP server](https://developers.openai.com/codex/cli) | expose the engine over MCP | ❌ |
 
 ## 7. Sessions, storage, diagnostics

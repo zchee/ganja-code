@@ -16,7 +16,7 @@ The engine over a socket: REST routes and an SSE event stream over `ganja-core`,
 | `src/routes.rs` | Every route and the guard in front of them: request log (method and path, **never** the query), auth, the served-directory check, and the session-routing policy — a route naming a session that is not current resumes it first, `404`/`409` when it cannot. |
 | `src/sse.rs` | `GET /event`: `event: connected` first, engine events as `event: message`, ten-second `event: heartbeat`, and a terminal `event: evicted` frame when the subscriber fell behind. Registration happens before the response body exists. |
 | `src/auth.rs` | `GANJA_SERVER_PASSWORD`/`GANJA_SERVER_USERNAME` (upstream's `OPENCODE_`-spelled pair), the `Basic realm="Secure Area"` challenge, the `?auth_token=` escape hatch an `EventSource` needs, and the whole-fold credential compare. |
-| `src/error.rs` | The refusal table: `SessionNotFound`→404, `Busy`→409, unparseable payload→400, everything else→500, each as `{"type": …, "message": …}`. |
+| `src/error.rs` | The refusal table: `SessionNotFound`→404, `Busy`→409, `HookRefused`→400 (**P13** — nothing went wrong on the server when the operator's own hook refused a prompt; was falling into the `_ => 500` arm), unparseable payload→400, everything else→500, each as `{"type": …, "message": …}`. |
 | `src/state.rs` | What handlers share: the engine, the served directory (given and canonical), the read-only storage handle, the config projection, the pending-permission map. |
 
 ## Subdirectories
