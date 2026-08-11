@@ -16,11 +16,11 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 
 | Feature | Keys | ganja |
 |---|---|---|
-| [`@` fuzzy file search with Tab-accept](https://developers.openai.com/codex/cli) | `@` + Tab | ⚠️ `@` menu ✅; no Tab-accept (Enter only) |
-| [Esc-Esc backtrack](https://developers.openai.com/codex/cli) | Esc Esc | ❌ pick a past prompt, edit it, rewind the turns after it |
+| [`@` fuzzy file search with Tab-accept](https://developers.openai.com/codex/cli) | `@` + Tab | ✅ Tab accepts, byte-identical to Enter; directory-descent (`@dir`→`@dir/`) not built — ganja's walker is files-only |
+| [Esc-Esc backtrack](https://developers.openai.com/codex/cli) | Esc Esc | ⚠️ idle Esc Esc now opens ganja's own rewind picker — pick a past user-message checkpoint, then Both/Conversation/Files scope; unlike Codex it doesn't re-populate the composer with the old prompt for editing, and it's gated to an idle composer (mid-turn Esc still cancels) |
 | [Transcript overlay](https://developers.openai.com/codex/cli) | Ctrl+T | ❌ raw logs, per-turn tokens, tool/MCP expansion |
-| [Queued messages](https://developers.openai.com/codex/cli) | Enter while running | ❌ busy turns refuse input |
-| [Clipboard image paste](https://developers.openai.com/codex/cli) | Ctrl+V | ❌ (`@`-mention attachments ✅) |
+| [Queued messages](https://developers.openai.com/codex/cli) | Enter while running | ✅ steers into the running turn at its next step boundary (`Command::Steer`) — the same shape as Codex's own `input_queue`/`inject`; what can't steer (refused, unconsumed, slash commands) falls back to a replayed queue, Codex's `queued_user_messages` half |
+| [Clipboard image paste](https://developers.openai.com/codex/cli) | Ctrl+V | ✅ PNG-encoded in-process (no OS shell-out) and attached through the `@`-mention pipeline |
 | [Slash-command autocomplete](https://developers.openai.com/codex/cli) | `/` | ✅ |
 | [Reasoning-effort hotkeys](https://github.com/openai/codex/blob/main/docs/config.md) | Alt+, / Alt+. | ❌ (`/effort` list picker ✅) |
 | [Status-line composition](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ❌ fixed status bar (themes ✅) |
