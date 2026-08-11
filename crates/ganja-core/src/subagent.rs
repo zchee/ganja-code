@@ -615,9 +615,12 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             // whole event stream and must not be surprised by one of them.
             // The same holds for an agent change — a child is never handed the
             // approval cell — and for an effort change, which only the
-            // engine's command paths announce.
+            // engine's command paths announce. A steer cannot reach a child
+            // either: no handle of a child's ever enters the engine's slot, so
+            // its mailbox has no route in.
             Event::RevertChanged { .. }
             | Event::AgentChanged { .. }
+            | Event::SteerConsumed { .. }
             | Event::EffortChanged { .. } => {}
         }
     }

@@ -775,6 +775,12 @@ impl<'a> Reporter<'a> {
             Event::PermissionRequested { .. }
             | Event::PermissionReplied { .. }
             | Event::RevertChanged { .. }
+            // Nothing steers a headless run: the one prompt is handed over
+            // before the turn opens and there is no composer to type a second
+            // one into, so the event exists here only to keep the match
+            // honest. The steered message itself would render anyway — it
+            // arrives as an ordinary `MessageStarted` above.
+            | Event::SteerConsumed { .. }
             // An effort switch is session state, not an account of the turn,
             // and this run announced its own `--effort` before the turn
             // began — the same reasoning that leaves `AgentChanged` above

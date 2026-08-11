@@ -1,0 +1,20 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+you                                                                             
+the turn to steer                                                               
+                                                                                
+ganja                                                                           
+                                                                                
+                                                                                
+                                                                                
+│ run the tests too                                                             
+│ and then commit                                                               
+press up to edit queued messages                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+⠋ streaming · 2 queued Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit

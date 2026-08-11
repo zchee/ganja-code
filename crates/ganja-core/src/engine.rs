@@ -52,8 +52,8 @@ use crate::{
     protocol::{Command, Event, Message, PartBody, Role, ToolState, Usage, now},
     provider::Provider,
     session::{
-        Answered, LiveSession, PendingReply, Persist, SessionState, Turn, TurnHandle, TurnKind,
-        run_turn,
+        Answered, LiveSession, PendingReply, Persist, SessionState, SteerInput, Steering, Turn,
+        TurnHandle, TurnKind, run_turn,
     },
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
@@ -75,6 +75,13 @@ pub enum EngineError {
     /// turn in flight is writing into the session it started on.
     #[error("a turn is already streaming; cancel it before sending another prompt")]
     Busy,
+    /// A [`Command::Steer`] arrived with the slot empty. The mirror image of
+    /// [`EngineError::Busy`]: steering is the one command whose precondition
+    /// is an *occupied* slot, and a frontend racing the turn boundary in that
+    /// direction gets a typed answer rather than a message quietly promoted to
+    /// a turn of its own.
+    #[error("no turn is streaming; there is nothing to steer")]
+    NotStreaming,
     /// A session operation reached an engine built with [`Engine::new`],
     /// which keeps no sessions: its transcript lives and dies with the
     /// process.
@@ -577,8 +584,10 @@ impl TurnSlot {
         Ok((guard, owed))
     }
 
-    /// A read-only look at the turn in flight, for the cancel and reply
-    /// observers — the paths that mutate nothing and therefore owe no policy.
+    /// A read-only look at the turn in flight, for the cancel, reply and steer
+    /// observers — the paths that change no engine state and therefore owe no
+    /// policy. What they reach through the handle is the running turn's own
+    /// cells; the slot itself and the approval beside it are untouched.
     async fn observe<R>(&self, look: impl FnOnce(Option<&TurnHandle>) -> R) -> R {
         look(self.slot.lock().await.as_ref())
     }
@@ -1608,6 +1617,7 @@ impl Engine {
                 self.start_turn(text, TurnKind::Prompt { mentions }, None)
                     .await
             }
+            Command::Steer { id, text, mentions } => self.steer(id, text, mentions).await,
             Command::CancelTurn => {
                 self.cancel_turn().await;
                 Ok(())
@@ -2668,9 +2678,14 @@ impl Engine {
 
         let cancel = CancellationToken::new();
         let pending = Arc::new(std::sync::Mutex::new(None));
+        // Born with the slot, so a `Steer` racing the very first byte of the
+        // turn finds a mailbox rather than a window in which the slot is
+        // occupied and there is nowhere to post.
+        let steer: Arc<std::sync::Mutex<Steering>> = Arc::default();
         *turn = Some(TurnHandle {
             cancel: cancel.clone(),
             permission: Arc::clone(&pending),
+            steer: Arc::clone(&steer),
         });
         drop(turn);
 
@@ -2700,6 +2715,7 @@ impl Engine {
             prompt,
             cancel,
             pending,
+            steer,
             events: Arc::clone(&self.fanout),
             // The turn's release handle for its own boundary — not an
             // acquisition path; those stay behind `entry` and `observe`.
@@ -2721,6 +2737,49 @@ impl Engine {
                 }
             })
             .await;
+    }
+
+    /// Hands a message to the turn in flight, which takes it on at its next
+    /// step boundary.
+    ///
+    /// **No [`Engine::lock_entry`], deliberately.** Every other state-changing
+    /// entry Busy-checks an empty slot and names what it does to a pending
+    /// plan approval; this one's precondition is the opposite — it needs an
+    /// *occupied* slot — and it changes no engine state at all, only a cell
+    /// the running turn owns. So it goes through the same read-only
+    /// [`TurnSlot::observe`] the cancel and the reply routes do, and an empty
+    /// slot is [`EngineError::NotStreaming`] rather than a policy question.
+    ///
+    /// Whether the turn actually drains it is the turn's business: a cancel
+    /// reaching the loop first leaves the message unconsumed and unannounced,
+    /// which is the frontend's cue to keep it (see
+    /// [`Event::SteerConsumed`]).
+    async fn steer(
+        &self,
+        id: String,
+        text: String,
+        mentions: Vec<crate::protocol::Mention>,
+    ) -> Result<(), EngineError> {
+        let queued = self
+            .turn
+            .observe(move |turn| {
+                let Some(turn) = turn else {
+                    return false;
+                };
+                turn.steer
+                    .lock()
+                    .expect("the steer mailbox is never poisoned")
+                    .push(SteerInput { id, text, mentions });
+
+                true
+            })
+            .await;
+
+        if queued {
+            Ok(())
+        } else {
+            Err(EngineError::NotStreaming)
+        }
     }
 
     /// Routes a reply to the permission wait that asked for it.
@@ -3118,6 +3177,7 @@ mod tests {
                 Event::MessageFinished { .. }
                 | Event::PartUpdated { .. }
                 | Event::PermissionRequested { .. }
+                | Event::SteerConsumed { .. }
                 | Event::PermissionReplied { .. }
                 | Event::QuestionAsked { .. }
                 | Event::QuestionReplied { .. }
