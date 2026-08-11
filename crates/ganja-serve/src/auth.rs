@@ -22,7 +22,7 @@ pub const PASSWORD_ENV: &str = "GANJA_SERVER_PASSWORD";
 
 /// Where the username comes from; upstream reads `OPENCODE_SERVER_USERNAME`
 /// (`server/auth.ts:19`).
-pub const USERNAME_ENV: &str = "GANJA_SERVER_USERNAME";
+pub(crate) const USERNAME_ENV: &str = "GANJA_SERVER_USERNAME";
 
 /// The username when [`USERNAME_ENV`] says nothing, as upstream defaults to
 /// `"opencode"`.
@@ -30,7 +30,7 @@ pub const DEFAULT_USERNAME: &str = "ganja";
 
 /// The query parameter that may carry the credential instead of the
 /// `Authorization` header (`middleware/authorization.ts:12`).
-pub const AUTH_TOKEN_QUERY: &str = "auth_token";
+pub(crate) const AUTH_TOKEN_QUERY: &str = "auth_token";
 
 /// The challenge a `401` carries (`middleware/authorization.ts:14`).
 pub(crate) const WWW_AUTHENTICATE: &str = "Basic realm=\"Secure Area\"";

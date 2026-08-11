@@ -6,11 +6,9 @@
 //! the list in the session so a frontend can render it; the `todoread` name
 //! survives there only as a permission alias, so nothing here registers it.
 //!
-//! The list lives in the process, which is right for as long as a process
-//! serves one session. It moves into session storage with the persistence
-//! work.
-
-use std::sync::Mutex;
+//! The list travels in each call's `metadata`, which is the copy a frontend
+//! renders; upstream's session-stored copy has no consumer here, so none is
+//! kept in the process.
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -21,7 +19,7 @@ use crate::{Tool, ToolCtx, ToolError, ToolOutput};
 /// Where a task has got to.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TodoStatus {
+enum TodoStatus {
     /// Not started.
     Pending,
     /// Actively being worked on. Upstream's prompt allows exactly one.
@@ -35,7 +33,7 @@ pub enum TodoStatus {
 /// How much a task matters relative to the others.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TodoPriority {
+enum TodoPriority {
     /// Do this before the rest.
     High,
     /// The default weight.
@@ -46,13 +44,13 @@ pub enum TodoPriority {
 
 /// One task on the list.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-pub struct TodoItem {
+struct TodoItem {
     /// Brief description of the task
-    pub content: String,
+    content: String,
     /// Current status of the task: pending, in_progress, completed, cancelled
-    pub status: TodoStatus,
+    status: TodoStatus,
     /// Priority level of the task: high, medium, low
-    pub priority: TodoPriority,
+    priority: TodoPriority,
 }
 
 /// What the model passes to `todowrite`.
@@ -62,27 +60,15 @@ struct Args {
     todos: Vec<TodoItem>,
 }
 
-/// Keeps the task list for the session.
+/// Validates and echoes the task list; the state is the transcript's.
 #[derive(Debug, Default)]
-pub struct TodoWriteTool {
-    /// The list as the last call left it.
-    todos: Mutex<Vec<TodoItem>>,
-}
+pub struct TodoWriteTool;
 
 impl TodoWriteTool {
-    /// Builds a tool holding an empty list.
+    /// Builds the tool.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The list as it stands, for a frontend that renders it.
-    #[must_use]
-    pub fn todos(&self) -> Vec<TodoItem> {
-        self.todos
-            .lock()
-            .expect("the todo list is never poisoned")
-            .clone()
+        Self
     }
 }
 
@@ -129,10 +115,9 @@ impl Tool for TodoWriteTool {
             .filter(|todo| todo.status != TodoStatus::Completed)
             .count();
 
-        // The stored list is what a frontend renders between calls; the
-        // metadata is what it renders this call with.
+        // The metadata carries the whole list, which is what a frontend
+        // renders the call with.
         let metadata = serde_json::json!({ "todos": args.todos });
-        *self.todos.lock().expect("the todo list is never poisoned") = args.todos;
 
         Ok(ToolOutput {
             title: title(remaining),
@@ -153,7 +138,7 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::{TodoItem, TodoPriority, TodoStatus, TodoWriteTool};
+    use super::TodoWriteTool;
     use crate::{FileTimes, Tool, ToolCtx, ToolError};
 
     /// A context no todo call looks at, since the list is not on disk.
@@ -206,30 +191,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_list_survives_between_calls_and_the_last_write_wins() {
+    async fn a_second_write_carries_only_its_own_list() {
         let tool = TodoWriteTool::new();
 
         tool.run(todos(), &ctx()).await.expect("a list is written");
-        assert_eq!(tool.todos().len(), 4);
 
-        tool.run(
-            serde_json::json!({
-                "todos": [
-                    { "content": "port webfetch", "status": "completed", "priority": "medium" },
-                ]
-            }),
-            &ctx(),
-        )
-        .await
-        .expect("a shorter list replaces the longer one");
+        let out = tool
+            .run(
+                serde_json::json!({
+                    "todos": [
+                        { "content": "port webfetch", "status": "completed", "priority": "medium" },
+                    ]
+                }),
+                &ctx(),
+            )
+            .await
+            .expect("a shorter list replaces the longer one");
 
         assert_eq!(
-            tool.todos(),
-            vec![TodoItem {
-                content: "port webfetch".to_owned(),
-                status: TodoStatus::Completed,
-                priority: TodoPriority::Medium,
-            }],
+            out.metadata["todos"],
+            serde_json::json!([
+                { "content": "port webfetch", "status": "completed", "priority": "medium" },
+            ]),
             "a write replaces the list rather than appending to it"
         );
     }
@@ -245,11 +228,15 @@ mod tests {
             .expect("clearing the list is allowed");
 
         assert_eq!(out.title, "0 todos");
-        assert!(tool.todos().is_empty());
+        assert_eq!(
+            out.metadata["todos"],
+            serde_json::json!([]),
+            "the metadata hands a frontend the emptied list"
+        );
     }
 
     #[tokio::test]
-    async fn a_status_outside_the_schema_is_refused_rather_than_stored() {
+    async fn a_status_outside_the_schema_is_refused() {
         let tool = TodoWriteTool::new();
 
         let refused = tool
@@ -265,10 +252,6 @@ mod tests {
         assert!(
             matches!(refused, ToolError::InvalidArgs(_)),
             "got {refused:?}"
-        );
-        assert!(
-            tool.todos().is_empty(),
-            "a refused call must not have written anything"
         );
     }
 

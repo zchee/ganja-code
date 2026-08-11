@@ -73,10 +73,6 @@ tokio.workspace = true
 # only crate that can catch the keystroke which fires one. The token lives
 # behind `rt`, which is why the workspace declaration carries no features.
 tokio-util = { workspace = true, features = ["rt"] }
-# The binary is where the log sink is chosen, because it is the only crate that
-# knows whether a terminal is about to be taken over. The library crates trace;
-# none of them decides where it lands.
-tracing.workspace = true
 # Rolling files, so a long-lived session cannot grow one without bound, and a
 # worker thread, so a trace never blocks the render loop on a disk write.
 tracing-appender.workspace = true

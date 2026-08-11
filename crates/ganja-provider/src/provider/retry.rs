@@ -24,10 +24,10 @@ use tokio_util::sync::CancellationToken;
 use crate::provider::{Presented, ProviderError};
 
 /// Delay before the first retry. Upstream `RETRY_INITIAL_DELAY`.
-pub const INITIAL_DELAY: Duration = Duration::from_millis(2_000);
+const INITIAL_DELAY: Duration = Duration::from_millis(2_000);
 
 /// Multiplier applied per attempt. Upstream `RETRY_BACKOFF_FACTOR`.
-pub const BACKOFF_FACTOR: u32 = 2;
+const BACKOFF_FACTOR: u32 = 2;
 
 /// Ceiling on a scheduled delay. Upstream `RETRY_MAX_DELAY_NO_HEADERS`.
 pub const MAX_DELAY: Duration = Duration::from_secs(30);

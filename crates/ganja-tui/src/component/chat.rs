@@ -203,6 +203,7 @@ impl Chat {
     }
 
     /// Whether some tail of the transcript is currently hidden.
+    #[cfg(test)]
     #[must_use]
     pub fn is_reverted(&self) -> bool {
         self.revert.is_some()

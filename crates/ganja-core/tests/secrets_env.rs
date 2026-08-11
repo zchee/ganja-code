@@ -137,7 +137,8 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         env::remove_var("OPENAI_BASE_URL");
     }
 
-    let selection = provider::from_env().expect("the planted key selects anthropic");
+    let selection = provider::select(&ganja_core::Config::default())
+        .expect("the planted key selects anthropic");
     assert_eq!(selection.provider.id(), "anthropic");
     assert!(
         selection.notice.is_none(),

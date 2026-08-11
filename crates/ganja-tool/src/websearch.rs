@@ -93,7 +93,7 @@ const DAY: u64 = 86_400;
 
 /// Which service a search is asked of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Service {
+enum Service {
     /// Exa, which takes the query and the tool's own search knobs.
     Exa,
     /// Parallel, which takes an objective and a list of queries.

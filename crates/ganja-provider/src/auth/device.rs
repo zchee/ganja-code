@@ -93,7 +93,7 @@ pub const MIN_INTERVAL_MS: u64 = 1_000;
 
 /// How much a `slow_down` adds to the interval, per RFC 8628 §3.5
 /// (`xai.ts:29`).
-pub const SLOW_DOWN_INCREMENT_MS: u64 = 5_000;
+const SLOW_DOWN_INCREMENT_MS: u64 = 5_000;
 
 /// How long a device code is assumed to live when the server did not say
 /// (`xai.ts:30`).

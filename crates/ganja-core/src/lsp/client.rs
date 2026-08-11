@@ -365,6 +365,7 @@ impl Store {
     }
 
     /// What this server currently believes about one path.
+    #[cfg(test)]
     #[must_use]
     pub fn for_path(&self, path: &Path) -> Vec<Diagnostic> {
         self.locked().merged(path)
@@ -602,12 +603,6 @@ impl Client {
     #[must_use]
     pub fn store(&self) -> &Arc<Store> {
         &self.store
-    }
-
-    /// Where this client was started.
-    #[must_use]
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     /// Shows `path` to the server, reading it fresh from disk, and returns the

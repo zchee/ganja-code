@@ -293,8 +293,9 @@ impl Client {
     }
 
     /// The address this client drives, as it will appear in every error.
+    #[cfg(test)]
     #[must_use]
-    pub fn address(&self) -> &str {
+    fn address(&self) -> &str {
         &self.address
     }
 

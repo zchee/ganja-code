@@ -51,12 +51,13 @@ fn a_refused_credential_store_reports_why_and_how_to_repair_it() {
 
     // The stored key answers while the file is private, which is what makes
     // the refusal below a refusal rather than an absence.
-    provider::from_env().expect("a private store is readable");
+    provider::select(&ganja_core::Config::default()).expect("a private store is readable");
 
     fs::set_permissions(&path, fs::Permissions::from_mode(WORLD_READABLE))
         .expect("the fixture can be exposed");
 
-    let refusal = provider::from_env().expect_err("an exposed store is refused");
+    let refusal =
+        provider::select(&ganja_core::Config::default()).expect_err("an exposed store is refused");
     let rendered = format!("{refusal} / {refusal:?}");
 
     assert!(
@@ -86,6 +87,7 @@ fn a_refused_credential_store_reports_why_and_how_to_repair_it() {
     // And repairing it is enough: the reason was advice, not a dead end.
     fs::set_permissions(&path, fs::Permissions::from_mode(OWNER_ONLY))
         .expect("the fixture can be repaired");
-    let selection = provider::from_env().expect("a repaired store is readable again");
+    let selection = provider::select(&ganja_core::Config::default())
+        .expect("a repaired store is readable again");
     assert_eq!(selection.provider.id(), "anthropic");
 }

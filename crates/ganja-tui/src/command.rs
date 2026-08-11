@@ -318,6 +318,7 @@ pub fn is_bare_exit(text: &str) -> bool {
 ///
 /// The leading slash is optional so that the same lookup serves the dropdown's
 /// `/models` and a bare `models`.
+#[cfg(test)]
 #[must_use]
 pub fn lookup(name: &str) -> Option<&'static Entry> {
     let wanted = name.strip_prefix('/').unwrap_or(name);

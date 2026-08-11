@@ -756,8 +756,9 @@ impl Mapping {
     fn finish(&mut self, events: &mut Vec<ProviderEvent>) {
         // Anthropic closes every block before it stops, so this normally finds
         // nothing. It matters when the body was cut off after the stop reason:
-        // P3 executes a call when its arguments end, and a call that never ends
-        // is a tool that never runs. Ordered so a replay is deterministic.
+        // the engine executes a call when its arguments end, and a call that
+        // never ends is a tool that never runs. Ordered so a replay is
+        // deterministic.
         let mut open: Vec<(u64, String)> = self.tools.drain().collect();
         open.sort_unstable();
         events.extend(

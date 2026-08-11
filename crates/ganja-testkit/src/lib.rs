@@ -29,7 +29,7 @@ mod tool;
 pub use agent::agent_registry;
 pub use drain::{drain, drain_allowing, drain_answering};
 pub use fs::{redirect_xdg_data_home, temp_dir};
-pub use provider::{OnExhausted, ScriptedProvider, says, tool_call};
+pub use provider::{ScriptedProvider, says, tool_call};
 pub use session::{seed_message, seed_session, seeded_session_info};
 pub use subagent::ScriptedSubagents;
 pub use tool::{BlockingTool, RecorderTool, placeholder_schema};

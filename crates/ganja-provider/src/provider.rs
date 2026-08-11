@@ -232,9 +232,8 @@ fn steps(parts: &[Part]) -> impl Iterator<Item = &[Part]> {
 
 /// Something a provider reported while answering.
 ///
-/// The tool variants exist so that P3 can execute tool calls without reshaping
-/// the trait; the engine currently ignores them, because no protocol part
-/// renders them yet.
+/// The tool variants let a wire report calls without reshaping the trait; the
+/// engine folds them into tool parts and executes them when the request ends.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderEvent {
     /// The next fragment of the reply.

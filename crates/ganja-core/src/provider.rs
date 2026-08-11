@@ -293,28 +293,6 @@ fn configured_provider(id: &str, entry: &ProviderConfig) -> Result<CompatProvide
     )
 }
 
-/// Resolves the provider named by [`PROVIDER_ENV`] and the model named by
-/// [`MODEL_ENV`].
-///
-/// An unset [`PROVIDER_ENV`] selects the oldest stored login, when there is
-/// one this build can run as; only a machine with no logins at all falls back
-/// to the fake provider, with a notice, so that a bare `cargo run` still
-/// demonstrates a streamed reply while making clear that nothing real is being
-/// asked.
-///
-/// Equivalent to [`select`] with a config that asks for nothing, which is what
-/// it is: the environment is one tier of a chain, and this is the chain with
-/// every other tier empty.
-///
-/// # Errors
-///
-/// Returns [`SelectionError`] when the variable names a provider this build
-/// does not have, or names one whose credentials are missing. Both fail here,
-/// before the terminal is put into raw mode, so that the message is readable.
-pub fn from_env() -> Result<Selection, SelectionError> {
-    select(&Config::default())
-}
-
 /// Resolves the provider and model a session runs on.
 ///
 /// Six tiers, and the first one that says something wins each half of the

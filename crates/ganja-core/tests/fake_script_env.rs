@@ -80,7 +80,8 @@ async fn an_exported_script_is_what_the_fake_provider_plays() {
 
     // The route a demo takes: the variables pick the provider, and the provider
     // picks up the script without anyone naming it in code.
-    let selection = provider::from_env().expect("the fake provider needs no credentials");
+    let selection = provider::select(&ganja_core::Config::default())
+        .expect("the fake provider needs no credentials");
     assert_eq!(selection.provider.id(), fake::ID);
 
     let events = turn(selection.provider.as_ref()).await;
@@ -106,7 +107,7 @@ async fn an_exported_script_is_what_the_fake_provider_plays() {
     );
 
     // The same for a provider built directly, which is what a frontend that
-    // skips `from_env` does.
+    // skips `select` does.
     assert_eq!(text(&turn(&FakeProvider::default()).await), "Scripted.");
 
     // And the carve-out that makes the rest of the suite safe: a provider given
