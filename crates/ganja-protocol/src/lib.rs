@@ -742,6 +742,50 @@ pub struct RevertInfo {
     pub files: Vec<String>,
 }
 
+/// How much of a checkpoint a [`Command::RevertTo`] puts back.
+///
+/// **D451** (`rewind-scope-choice`). Upstream reverts one thing: its
+/// `RevertInput` (`session/revert.ts:13-17`) names a session and a message and
+/// takes the checkout *and* the conversation back together, which is what
+/// [`Command::Undo`] already is here. The split is Claude Code's — its rewind
+/// picker asks "Restore the code and/or conversation" before it does anything
+/// — and it is a divergence rather than a port because upstream has no such
+/// question and no wire field to answer it with. What is *not* ported from
+/// upstream is the other half of its input: `partID`, which reverts to a point
+/// inside a turn. Ganja's checkpoints are whole user messages (recorded as a
+/// follow-up, not as a deviation: nothing here contradicts upstream, it is
+/// simply narrower).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevertScope {
+    /// The checkout and the conversation, which is what [`Command::Undo`]
+    /// does to the prompt before it.
+    Both,
+    /// The conversation alone: the messages from the checkpoint on are hidden
+    /// and the working tree is left exactly as it is.
+    Conversation,
+    /// The checkout alone: the files those turns changed come back and the
+    /// transcript is untouched, so nothing is hidden and there is nothing to
+    /// redo.
+    Files,
+}
+
+impl RevertScope {
+    /// Whether this scope puts files back, which is what decides whether the
+    /// session needs snapshots to serve it at all.
+    #[must_use]
+    pub fn touches_files(self) -> bool {
+        matches!(self, Self::Both | Self::Files)
+    }
+
+    /// Whether this scope hides messages, which is what decides whether the
+    /// engine remembers the revert and a redo has anything to step through.
+    #[must_use]
+    pub fn touches_conversation(self) -> bool {
+        matches!(self, Self::Both | Self::Conversation)
+    }
+}
+
 /// A request from a frontend to the engine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -913,6 +957,32 @@ pub enum Command {
     /// the files that prompt's turn changed. Past the newest one, the whole
     /// working tree goes back to what it was before the first undo.
     Redo,
+    /// Takes the session back to a checkpoint the user picked, restoring
+    /// whatever [`scope`](Self::RevertTo::scope) names.
+    ///
+    /// A **superset** of [`Command::Undo`], never a replacement for it: `/undo`
+    /// still means "one prompt back, files and conversation together", and this
+    /// is the same machinery reached with an anchor and a scope of the user's
+    /// own choosing. Upstream's `session.revert({sessionID, messageID})`
+    /// (`session/revert.ts:13-23`, called from `dialog-message.tsx:22-52`) is
+    /// the spec for the semantics; the scope is Claude Code's — see
+    /// [`RevertScope`].
+    ///
+    /// Refused while a turn is streaming, for [`Command::Undo`]'s reason
+    /// (**D119**), and refused by name when `message_id` is not a user message
+    /// still in the live window: a rewind names a checkpoint, and the engine
+    /// says so rather than reverting to the nearest thing it can find.
+    ///
+    /// Announced by [`Event::RevertChanged`], which already carries every
+    /// shape this can produce — including the files-only one, where the event
+    /// names the files that came back while nothing is hidden.
+    RevertTo {
+        /// The user message to stop at. It, and everything after it, is what
+        /// the revert takes back.
+        message_id: MessageId,
+        /// How much of that checkpoint to put back.
+        scope: RevertScope,
+    },
 }
 
 /// What the user decided about one permission request.
@@ -1164,10 +1234,16 @@ pub enum Event {
     /// How much of the transcript is currently reverted, and what the editor
     /// should hold.
     ///
-    /// Sent when [`Command::Undo`] or [`Command::Redo`] moves the anchor, when
-    /// a revert is cleared, and when a resumed session turns out to have been
-    /// left in one — a frontend that starts fresh learns the hidden range from
-    /// this event and from nowhere else.
+    /// Sent when [`Command::Undo`], [`Command::Redo`] or [`Command::RevertTo`]
+    /// moves the anchor, when a revert is cleared, and when a resumed session
+    /// turns out to have been left in one — a frontend that starts fresh
+    /// learns the hidden range from this event and from nowhere else.
+    ///
+    /// One shape needs a word: a [`RevertScope::Files`] rewind announces
+    /// `revert: Some(_)` naming the checkpoint and the files that came back,
+    /// while the engine records no revert at all — nothing is hidden and there
+    /// is nothing to redo. A frontend tells that one apart the same way it
+    /// tells the two `None`s apart: by the command it sent.
     ///
     /// A `revert` of [`None`] means the hidden range is over. It arrives in
     /// exactly two situations, and a frontend tells them apart by what it
@@ -1287,7 +1363,7 @@ mod tests {
     use super::{
         Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody,
         PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption,
-        QuestionSource, REASONING_TAG, RevertInfo, Role, SessionId, ToolState, Usage,
+        QuestionSource, REASONING_TAG, RevertInfo, RevertScope, Role, SessionId, ToolState, Usage,
     };
 
     /// The session every pinned event happens in.
@@ -1454,6 +1530,18 @@ mod tests {
             Command::NewSession,
             Command::Undo,
             Command::Redo,
+            Command::RevertTo {
+                message_id: MessageId::from("msg_1".to_owned()),
+                scope: RevertScope::Both,
+            },
+            Command::RevertTo {
+                message_id: MessageId::from("msg_2".to_owned()),
+                scope: RevertScope::Conversation,
+            },
+            Command::RevertTo {
+                message_id: MessageId::from("msg_3".to_owned()),
+                scope: RevertScope::Files,
+            },
         ];
 
         for command in cases {
@@ -1698,6 +1786,30 @@ mod tests {
             ),
             (serde_json::to_string(&Command::Undo), r#"{"type":"undo"}"#),
             (serde_json::to_string(&Command::Redo), r#"{"type":"redo"}"#),
+            // The rewind picker's command: an anchor and a scope, both
+            // required — a rewind that had to guess which half of the
+            // checkpoint the user meant would be a worse `/undo`.
+            (
+                serde_json::to_string(&Command::RevertTo {
+                    message_id: MessageId::from("msg_1".to_owned()),
+                    scope: RevertScope::Both,
+                }),
+                r#"{"type":"revert_to","message_id":"msg_1","scope":"both"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::RevertTo {
+                    message_id: MessageId::from("msg_1".to_owned()),
+                    scope: RevertScope::Conversation,
+                }),
+                r#"{"type":"revert_to","message_id":"msg_1","scope":"conversation"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::RevertTo {
+                    message_id: MessageId::from("msg_1".to_owned()),
+                    scope: RevertScope::Files,
+                }),
+                r#"{"type":"revert_to","message_id":"msg_1","scope":"files"}"#,
+            ),
             (
                 serde_json::to_string(&Part {
                     id: PartId::from("prt_1".to_owned()),
@@ -2198,6 +2310,72 @@ mod tests {
                 }],
             }
         );
+    }
+
+    /// The rewind command's other direction: every scope reads back off the
+    /// wire as the one that was written, and no scope is optional — a
+    /// `revert_to` without one is a rewind that never said what to restore, and
+    /// failing is the only honest answer to it.
+    #[test]
+    fn a_rewind_reads_back_the_scope_it_was_written_with() {
+        let cases = [
+            (
+                r#"{"type":"revert_to","message_id":"msg_1","scope":"both"}"#,
+                RevertScope::Both,
+            ),
+            (
+                r#"{"type":"revert_to","message_id":"msg_1","scope":"conversation"}"#,
+                RevertScope::Conversation,
+            ),
+            (
+                r#"{"type":"revert_to","message_id":"msg_1","scope":"files"}"#,
+                RevertScope::Files,
+            ),
+        ];
+
+        for (encoded, scope) in cases {
+            let decoded: Command = serde_json::from_str(encoded).expect("the shape parses");
+            assert_eq!(
+                decoded,
+                Command::RevertTo {
+                    message_id: MessageId::from("msg_1".to_owned()),
+                    scope,
+                }
+            );
+        }
+
+        assert!(
+            serde_json::from_str::<Command>(r#"{"type":"revert_to","message_id":"msg_1"}"#)
+                .is_err(),
+            "a rewind with no scope names nothing to restore"
+        );
+        assert!(
+            serde_json::from_str::<Command>(
+                r#"{"type":"revert_to","message_id":"msg_1","scope":"code"}"#
+            )
+            .is_err(),
+            "a scope this build does not have is refused rather than guessed at"
+        );
+    }
+
+    /// The two questions the engine asks a scope, answered here so that a
+    /// fourth variant cannot be added without deciding both.
+    #[test]
+    fn a_scope_says_which_halves_of_a_checkpoint_it_puts_back() {
+        for scope in [
+            RevertScope::Both,
+            RevertScope::Conversation,
+            RevertScope::Files,
+        ] {
+            let (files, conversation) = match scope {
+                RevertScope::Both => (true, true),
+                RevertScope::Conversation => (false, true),
+                RevertScope::Files => (true, false),
+            };
+
+            assert_eq!(scope.touches_files(), files, "{scope:?}");
+            assert_eq!(scope.touches_conversation(), conversation, "{scope:?}");
+        }
     }
 
     /// The event a queue entry is retired by, read back off the wire: its id

@@ -396,11 +396,19 @@ impl Snapshots {
     /// the step, so undoing the step deletes it. A checkout that fails for a
     /// file that *was* there keeps what is on disk — refusing to restore is
     /// never a reason to destroy.
-    pub async fn revert(&self, patches: &[Patch]) {
+    ///
+    /// Answers the files that really came back, in the order the patches named
+    /// them: the ones whose checkout succeeded, and the ones the revert wanted
+    /// gone and that are gone. A file this could not move — a checkout that
+    /// failed on a path something else now occupies, a removal the filesystem
+    /// refused — is left out, so a caller reporting this list is reporting what
+    /// happened rather than what was intended.
+    pub async fn revert(&self, patches: &[Patch]) -> Vec<String> {
         if !self.enabled() {
-            return;
+            return Vec::new();
         }
 
+        let mut achieved = Vec::new();
         let guard = self.lock.lock().await;
         for (hash, file) in dedupe(patches) {
             let restored = self
@@ -410,6 +418,7 @@ impl Snapshots {
                 ))
                 .await;
             if restored.code == 0 {
+                achieved.push(file);
                 continue;
             }
 
@@ -433,17 +442,22 @@ impl Snapshots {
             }
 
             let absolute = self.worktree.join(&file);
-            if let Err(error) = std::fs::remove_file(&absolute)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::info!(
+            match std::fs::remove_file(&absolute) {
+                // Absent is the state a file the step invented is meant to end
+                // in, so one that is already gone came back as much as it ever
+                // will.
+                Ok(()) => achieved.push(file),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => achieved.push(file),
+                Err(error) => tracing::info!(
                     file,
                     %error,
                     "the file was created by the step being undone but could not be removed"
-                );
+                ),
             }
         }
         drop(guard);
+
+        achieved
     }
 
     /// Creates the repository when it is not there yet, with the settings a
