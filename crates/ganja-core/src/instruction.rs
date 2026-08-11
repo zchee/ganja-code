@@ -370,16 +370,11 @@ fn environment(cwd: &Path, model_id: &str) -> String {
     block
 }
 
-/// Every instruction file that applies, in the order it should be sent.
+/// Every instruction file that applies, in the order it should be sent, with
+/// the global candidates handed in so a test can plant its own.
 ///
 /// Deduplicated by resolved path — the same file reached twice appears once, at
 /// the position the first route put it.
-#[must_use]
-pub fn paths(config: &Config, cwd: &Path) -> Vec<PathBuf> {
-    discover(&global_files(), config, cwd)
-}
-
-/// [`paths`], with the global instruction candidates handed in.
 fn discover(global: &[PathBuf], config: &Config, cwd: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut seen = BTreeSet::new();

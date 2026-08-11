@@ -35,9 +35,9 @@
 //! ported either; see [`client`] for which half of that machinery is here and
 //! why.
 
-pub mod client;
-pub mod diagnostic;
-pub mod language;
+pub(crate) mod client;
+pub(crate) mod diagnostic;
+pub(crate) mod language;
 pub mod server;
 
 // [`Lsp::diagnostics`] hands back `lsp_types::Diagnostic`, so anything outside
@@ -238,6 +238,7 @@ impl Lsp {
     ///
     /// Exists for the tests that pin the never-retried rule; nothing in the
     /// engine asks.
+    #[cfg(test)]
     #[must_use]
     pub fn is_broken(&self, root: &Path, id: &str) -> bool {
         self.clients

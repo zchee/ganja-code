@@ -44,7 +44,7 @@ use std::{
     time::Duration,
 };
 
-pub use auth::{AUTH_TOKEN_QUERY, Credentials, PASSWORD_ENV, USERNAME_ENV};
+pub use auth::{Credentials, PASSWORD_ENV};
 use futures::StreamExt as _;
 use ganja_core::{Config, Engine, EngineError, Storage};
 use ganja_protocol::Event;

@@ -84,7 +84,7 @@ impl Frame {
     /// [`ClientError::Skew`] for a name outside [`FRAMES`], and for a payload
     /// that does not parse — including an [`Event`] whose `type` this build
     /// has no variant for, which is exactly what a newer server sends.
-    pub fn parse(name: &str, data: &str) -> Result<Self, ClientError> {
+    fn parse(name: &str, data: &str) -> Result<Self, ClientError> {
         match name {
             CONNECTED => Ok(Self::Connected),
             HEARTBEAT => Ok(Self::Heartbeat),

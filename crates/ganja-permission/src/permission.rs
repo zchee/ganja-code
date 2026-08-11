@@ -1746,7 +1746,7 @@ fn names_files(verb: &str) -> bool {
 /// +x` drops the mode while `chmod 755` does not, so a bare numeric mode is
 /// scanned as though it named a file. Both spellings are relative text that
 /// resolves inside the project and falls out at the next step, so neither is
-/// observable through [`Permissions::check`] — matching upstream costs nothing
+/// observable through [`Permissions::gate`] — matching upstream costs nothing
 /// here, and diverging would cost the reason to trust the rest of the port.
 fn path_args(tokens: &[String]) -> Vec<&str> {
     let verb = tokens.first().map_or("", String::as_str);
@@ -3221,7 +3221,7 @@ mod tests {
     /// A `~` names a directory the project does not reach, and the answer covers
     /// the directory holding the file rather than the file itself.
     ///
-    /// Ganja raises **one** dialog per call — [`Permissions::check`] returns a
+    /// Ganja raises **one** dialog per call — [`Permissions::gate`] returns a
     /// single [`Decision`] and `Event::PermissionRequested` is one event — where
     /// upstream asks twice in a row. The two halves of the answer still both
     /// land, which is what the user consented to either way.

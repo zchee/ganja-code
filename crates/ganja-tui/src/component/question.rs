@@ -88,6 +88,7 @@ impl Question {
     }
 
     /// Whether the protocol permits drawing the free-text row at all.
+    #[cfg(test)]
     #[must_use]
     pub fn offers_custom(&self) -> bool {
         self.custom

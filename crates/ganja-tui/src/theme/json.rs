@@ -115,12 +115,15 @@ impl Palette {
     /// How many keys resolved, which is how a test tells that a theme carrying
     /// markdown and syntax keys kept them rather than dropping them at the
     /// dozen the UI reads.
+    #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.colors.len()
     }
 
-    /// Whether nothing resolved.
+    /// Whether nothing resolved; beside [`Palette::len`] because clippy wants
+    /// the pair whole.
+    #[cfg(test)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.colors.is_empty()

@@ -382,14 +382,9 @@ async fn abort(
 ) -> Result<Json<bool>, ApiError> {
     // Only the streaming session can be aborted: a mismatched id would need a
     // resume, and a resume is refused mid-turn — which is this policy saying
-    // an abort names the turn it stops.
-    let wanted = SessionId::from(id);
-    if state.engine.session_id() == wanted {
-        state.engine.send(Command::CancelTurn).await?;
-        return Ok(Json(true));
-    }
-
-    ensure_session(&state, wanted.as_str()).await?;
+    // an abort names the turn it stops. `ensure_session` starts with exactly
+    // that same-session check, so the busy case falls through it untouched.
+    ensure_session(&state, SessionId::from(id).as_str()).await?;
     state.engine.send(Command::CancelTurn).await?;
 
     Ok(Json(true))

@@ -146,6 +146,9 @@ pub struct ModelInfo {
     /// What it charges.
     pub pricing: Pricing,
     /// Generation the provider groups it under, where the catalog names one.
+    ///
+    /// Carried rather than acted on, like [`ModelStatus`]: decoded and
+    /// re-served, while prompt families are picked off the model id.
     pub family: Option<String>,
     /// The day it was published, as the catalog spells it.
     pub release_date: Option<String>,
