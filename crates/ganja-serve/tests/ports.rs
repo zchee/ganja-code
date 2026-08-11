@@ -4,18 +4,8 @@
 
 mod support;
 
-use ganja_core::{permission::Permissions, tool::Registry};
 use ganja_serve::{DEFAULT_PORT, ServeError};
-use ganja_testkit::says;
-use support::{base_url, loopback_config, scripted_engine};
-
-fn engine() -> std::sync::Arc<ganja_core::Engine> {
-    scripted_engine(
-        vec![says("hi")],
-        Registry::new(Vec::new()),
-        Permissions::default(),
-    )
-}
+use support::{base_url, engine, loopback_config};
 
 async fn healthy(handle: &ganja_serve::Handle) {
     let health = reqwest::get(format!("{}/global/health", base_url(handle)))

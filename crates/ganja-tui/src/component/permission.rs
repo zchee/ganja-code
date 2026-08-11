@@ -310,7 +310,12 @@ mod tests {
 
     #[test]
     fn a_zero_area_draws_nothing_and_does_not_panic() {
-        rendered(&permission(), Rect::new(0, 0, 0, 0));
+        let screen = rendered(&permission(), Rect::new(0, 0, 0, 0));
+
+        assert!(
+            screen.is_empty(),
+            "a zero area has no cell to hold: {screen}"
+        );
     }
 
     /// The marker is a claim about what the user is not being shown, so it must

@@ -280,7 +280,12 @@ mod tests {
 
     #[test]
     fn a_zero_area_draws_nothing_and_does_not_panic() {
-        rendered(&list(), Rect::new(0, 0, 0, 0), &Theme::default());
+        let screen = rendered(&list(), Rect::new(0, 0, 0, 0), &Theme::default());
+
+        assert!(
+            screen.is_empty(),
+            "a zero area has no cell to hold: {screen}"
+        );
     }
 
     /// The dialog is drawn with the theme it is previewing, so the same list

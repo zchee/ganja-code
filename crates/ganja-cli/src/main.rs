@@ -19,6 +19,7 @@ use ganja_protocol::Usage;
 use secrecy::{SecretString, zeroize::Zeroize as _};
 use tracing_appender::non_blocking::WorkerGuard;
 
+mod assemble;
 mod import;
 mod login;
 mod run;
