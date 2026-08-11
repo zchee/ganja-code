@@ -1211,6 +1211,33 @@ impl Engine {
         servers.reconnect(name).await
     }
 
+    /// Whether `name` is a remote MCP server configured with `oauth` — what
+    /// gates a Login action on it; see [`mcp::Servers::has_oauth`].
+    #[must_use]
+    pub fn mcp_has_oauth(&self, name: &str) -> bool {
+        self.mcp
+            .as_ref()
+            .is_some_and(|servers| servers.has_oauth(name))
+    }
+
+    /// The URL a login for `name` wants opened, while one is in flight; see
+    /// [`mcp::Servers::login_url`].
+    #[must_use]
+    pub fn mcp_login_url(&self, name: &str) -> Option<String> {
+        self.mcp
+            .as_ref()
+            .and_then(|servers| servers.login_url(name))
+    }
+
+    /// Starts an OAuth login for one MCP server; see [`mcp::Servers::start_login`].
+    pub async fn login_mcp(&self, name: &str) -> Result<(), String> {
+        let Some(servers) = &self.mcp else {
+            return Err(format!("mcp server \"{name}\" is not configured"));
+        };
+
+        servers.start_login(name).await
+    }
+
     /// Closes every MCP connection and ends every local server's process
     /// group.
     pub async fn shutdown_mcp(&self) {

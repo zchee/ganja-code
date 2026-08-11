@@ -71,12 +71,46 @@
 //! known before a server has been asked, [`crate::tool::Tool::id`] borrows
 //! from `&self` rather than returning a `'static` literal.
 //!
+//! # OAuth (**D466**)
+//!
+//! A remote entry's `oauth: {}` ([`crate::config::McpRemote::oauth`]) turns on
+//! [`ganja_provider::auth::mcp_oauth`]: RFC 8414 discovery, RFC 7591 dynamic
+//! registration, then the crate's own PKCE and loopback machinery, reused
+//! wholesale rather than forked. What lands here is the two seams that
+//! module's own doc names as somebody else's job:
+//!
+//! - **Dial-time bearer.** [`Servers::dial`]'s Remote branch, for an entry
+//!   with `oauth` set, asks [`ganja_provider::auth::Refresher::shared`] for a
+//!   usable access token — refreshed first if the stored deadline says it is
+//!   due — and sends it as `Authorization: Bearer …`, layered onto whatever
+//!   static `headers` the entry also names.
+//! - **Refresh-then-redial on a 401.** A connect attempt that still fails
+//!   with an authorization challenge (`rmcp`'s own
+//!   `ClientInitializeError::is_authorization_required`) forces one more
+//!   refresh — bypassing the stored deadline's own due-check, because the
+//!   server's answer is what said the token was bad — and retries the dial
+//!   exactly once. Static-headers-at-dial is the transport's shape
+//!   ([`rmcp::transport::StreamableHttpClientTransportConfig`] carries no
+//!   per-request hook), so this is the honest v1; per-request reactive
+//!   re-authorization is a named follow-up, not an oversight. **`rmcp` itself
+//!   only recognizes the challenge on a `401` that also carries a
+//!   `WWW-Authenticate` header** (RFC 6750 §3's own requirement on a
+//!   bearer-auth refusal); a server answering `401` without one is an
+//!   ordinary connect failure and never earns the retry — a real,
+//!   spec-compliant resource server sends the header, and the fixture in
+//!   `tests/mcp_oauth.rs` is built to prove exactly that path.
+//! - **Login, two doors.** [`Servers::start_login`] runs discovery and
+//!   registration inline and returns once the browser URL is ready —
+//!   [`Servers::login_url`] is how a caller shows it — then finishes the wait
+//!   for the callback in the background; a successful login stores under
+//!   `mcp:<name>` and re-dials through [`Servers::connect`]. The `/mcp`
+//!   dialog's Login action and `ganja mcp login <server>` are both this one
+//!   function.
+//!
 //! # What is not here
 //!
 //! Prompts and resources are not ported: neither the `mcp.prompts()` surface
-//! nor upstream's three built-in resource tools. OAuth for remote servers is
-//! not ported either — the `oauth` config key is refused by name rather than
-//! quietly ignored, so a config asking for it says so at load.
+//! nor upstream's three built-in resource tools.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -90,6 +124,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures::future;
+use ganja_provider::auth::RefreshOauth as _;
 use rmcp::{
     ClientHandler, RoleClient, ServiceExt as _,
     model::{
@@ -99,6 +134,7 @@ use rmcp::{
     service::{NotificationContext, RunningService},
     transport::{StreamableHttpClientTransport, TokioChildProcess},
 };
+use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt as _;
 
@@ -200,6 +236,11 @@ pub struct Servers {
     /// start. Manual [`Servers::reconnect`] is a different door and does not
     /// consult or update this.
     retried: Mutex<HashSet<String>>,
+    /// Server names currently mid-[`Servers::start_login`], and the URL a
+    /// caller should show for each — ephemeral UI state, cleared the moment
+    /// the login ends, success or failure. Nothing here is a credential; see
+    /// this module's "OAuth" doc section.
+    logins: Mutex<BTreeMap<String, String>>,
 }
 
 impl Servers {
@@ -228,6 +269,7 @@ impl Servers {
             closed: std::sync::atomic::AtomicBool::new(false),
             generation: AtomicU64::new(0),
             retried: Mutex::new(HashSet::new()),
+            logins: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -368,35 +410,116 @@ impl Servers {
                 Ok((client, group))
             }
             McpServer::Remote(remote) => {
-                let mut headers = HashMap::new();
-                for (key, value) in &remote.headers {
-                    let key =
-                        reqwest::header::HeaderName::try_from(key.as_str()).map_err(|error| {
-                            format!("header \"{key}\" is not a header name: {error}")
-                        })?;
-                    // The *value* never reaches the message: a header is where
-                    // a token goes, and this string is one somebody wrote down
-                    // next to their API key.
-                    let value = reqwest::header::HeaderValue::try_from(value.as_str())
-                        .map_err(|_| format!("the value of header \"{key}\" is not sendable"))?;
-                    headers.insert(key, value);
+                let mut headers = Self::static_headers(remote)?;
+                if remote.oauth.is_some() {
+                    headers.insert(
+                        reqwest::header::AUTHORIZATION,
+                        self.bearer_header(name).await?,
+                    );
                 }
 
-                let transport = StreamableHttpClientTransport::with_client(
-                    reqwest::Client::new(),
-                    rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
-                        remote.url.clone(),
+                let url = remote.url.clone();
+                let transport = |headers: HashMap<_, _>| {
+                    StreamableHttpClientTransport::with_client(
+                        reqwest::Client::new(),
+                        rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+                            url.clone(),
+                        )
+                        .custom_headers(headers),
                     )
-                    .custom_headers(headers),
-                );
-                let client = handler
-                    .serve(transport)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                };
 
-                Ok((client, None))
+                match handler.clone().serve(transport(headers.clone())).await {
+                    Ok(client) => Ok((client, None)),
+                    // The connect attempt itself just proved the token bad,
+                    // which the store's own recorded `expires` may not know
+                    // yet — a forced refresh, not the due-check
+                    // `bearer_header`'s proactive one already ran, and one
+                    // retry: see this module's "OAuth" doc section.
+                    Err(error) if remote.oauth.is_some() && error.is_authorization_required() => {
+                        headers.insert(
+                            reqwest::header::AUTHORIZATION,
+                            self.forced_refresh_header(name).await?,
+                        );
+                        let client = handler
+                            .serve(transport(headers))
+                            .await
+                            .map_err(|error| error.to_string())?;
+
+                        Ok((client, None))
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
             }
         }
+    }
+
+    /// The static headers a remote entry's own `headers` config asks for —
+    /// everything [`Servers::dial`]'s Remote branch sent before **D466**, now
+    /// a helper so the OAuth bearer above can be layered onto the same map.
+    fn static_headers(
+        remote: &crate::config::McpRemote,
+    ) -> Result<HashMap<reqwest::header::HeaderName, reqwest::header::HeaderValue>, String> {
+        let mut headers = HashMap::new();
+        for (key, value) in &remote.headers {
+            let key = reqwest::header::HeaderName::try_from(key.as_str())
+                .map_err(|error| format!("header \"{key}\" is not a header name: {error}"))?;
+            // The *value* never reaches the message: a header is where a
+            // token goes, and this string is one somebody wrote down next to
+            // their API key.
+            let value = reqwest::header::HeaderValue::try_from(value.as_str())
+                .map_err(|_| format!("the value of header \"{key}\" is not sendable"))?;
+            headers.insert(key, value);
+        }
+
+        Ok(headers)
+    }
+
+    /// `name`'s bearer, refreshed first if the stored credential is due —
+    /// [`ganja_provider::auth::Refresher::usable`] over
+    /// [`ganja_provider::auth::mcp_oauth::Refresher`], keyed by the reserved
+    /// `mcp:<name>` storage prefix.
+    async fn bearer_header(&self, name: &str) -> Result<reqwest::header::HeaderValue, String> {
+        let key = format!("mcp:{name}");
+        let refresher: std::sync::Arc<dyn ganja_provider::auth::RefreshOauth> =
+            std::sync::Arc::new(ganja_provider::auth::mcp_oauth::Refresher);
+
+        match ganja_provider::auth::Refresher::shared()
+            .usable(&key, refresher)
+            .await
+        {
+            Ok(credential) => bearer_value(&credential),
+            Err(error) if error.kind() == ganja_provider::auth::AuthErrorKind::NotOauth => Err(
+                format!("mcp server \"{name}\" needs a login: run `ganja mcp login {name}`"),
+            ),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// `name`'s bearer, forced through a fresh refresh regardless of the
+    /// stored deadline — what a 401 at connect time asks for, because the
+    /// server, not [`ganja_provider::auth::OauthCredential::needs_refresh_for`],
+    /// is what said the token in hand was already bad.
+    async fn forced_refresh_header(
+        &self,
+        name: &str,
+    ) -> Result<reqwest::header::HeaderValue, String> {
+        let key = format!("mcp:{name}");
+        let Some(current) =
+            ganja_provider::auth::oauth_for(&key).map_err(|error| error.to_string())?
+        else {
+            return Err(format!(
+                "mcp server \"{name}\" needs a login: run `ganja mcp login {name}`"
+            ));
+        };
+
+        let renewed = ganja_provider::auth::mcp_oauth::Refresher
+            .refresh(&key, &current)
+            .await
+            .map_err(|error| error.to_string())?;
+        ganja_provider::auth::renew_oauth(&key, &renewed).map_err(|error| error.to_string())?;
+
+        bearer_value(&renewed)
     }
 
     /// Spawns a local server's command with its stderr piped and its own
@@ -857,6 +980,151 @@ impl Servers {
     fn mark(&self, name: &str, status: Status) {
         self.state().entry(name.to_owned()).or_default().status = Some(status);
     }
+
+    /// Whether `name` is a remote server configured with `oauth` — what gates
+    /// the `/mcp` dialog's Login action and `ganja mcp login`, whatever the
+    /// server's current [`Status`], unlike [`Servers::reconnect`]'s
+    /// `Failed`-only gate.
+    #[must_use]
+    pub fn has_oauth(&self, name: &str) -> bool {
+        matches!(
+            self.config.get(name),
+            Some(McpServer::Remote(remote)) if remote.oauth.is_some()
+        )
+    }
+
+    /// The URL a login for `name` wants opened, while one is in flight —
+    /// cleared the moment [`Servers::start_login`]'s background wait ends,
+    /// success or failure.
+    #[must_use]
+    pub fn login_url(&self, name: &str) -> Option<String> {
+        self.logins
+            .lock()
+            .expect("the MCP login map is never poisoned")
+            .get(name)
+            .cloned()
+    }
+
+    /// Starts a login for `name`: discovery and registration run here, so
+    /// this returns once the URL is ready rather than once the login
+    /// finishes — [`Servers::login_url`] is how a caller shows it, and
+    /// [`Servers::status`] together with it is how a caller learns the
+    /// outcome, the way [`Servers::retry_once`]'s spawned re-dial is read
+    /// back.
+    ///
+    /// # Errors
+    ///
+    /// Named refusals: not configured, not a remote server, `oauth` not
+    /// configured, a login for this server already in flight, or discovery
+    /// and registration's own failures.
+    pub async fn start_login(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        let Some(McpServer::Remote(remote)) = self.config.get(name) else {
+            return Err(format!("mcp server \"{name}\" is not a remote server"));
+        };
+        if remote.oauth.is_none() {
+            return Err(format!("mcp server \"{name}\" has no oauth configured"));
+        }
+        {
+            let mut logins = self
+                .logins
+                .lock()
+                .expect("the MCP login map is never poisoned");
+            if logins.contains_key(name) {
+                return Err(format!("a login for \"{name}\" is already in progress"));
+            }
+            // A placeholder until the URL below is ready — the window is
+            // exactly the discovery-and-registration round trip this
+            // function itself awaits before returning, the same shape
+            // `announce()`-before-a-long-wait already has in `ganja-cli`.
+            logins.insert(name.to_owned(), String::new());
+        }
+        let forget = |servers: &Self| {
+            servers
+                .logins
+                .lock()
+                .expect("the MCP login map is never poisoned")
+                .remove(name);
+        };
+
+        let browser = match ganja_provider::auth::mcp_oauth::Login::new(&remote.url)
+            .map_err(|error| error.to_string())
+        {
+            Ok(login) => match login.browser().await {
+                Ok(browser) => browser,
+                Err(error) => {
+                    forget(self);
+                    return Err(error.to_string());
+                }
+            },
+            Err(error) => {
+                forget(self);
+                return Err(error);
+            }
+        };
+        self.logins
+            .lock()
+            .expect("the MCP login map is never poisoned")
+            .insert(name.to_owned(), browser.url().to_owned());
+
+        let this = Arc::clone(self);
+        let name = name.to_owned();
+        tokio::spawn(async move {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let result = browser
+                .wait(ganja_provider::auth::mcp_oauth::CALLBACK_DEADLINE, &cancel)
+                .await;
+            this.logins
+                .lock()
+                .expect("the MCP login map is never poisoned")
+                .remove(&name);
+
+            match result {
+                Ok(credential) => {
+                    let key = format!("mcp:{name}");
+                    if let Err(error) = ganja_provider::auth::set_oauth(&key, &credential) {
+                        tracing::warn!(server = %name, %error, "an MCP login could not be stored");
+                        this.mark(
+                            &name,
+                            Status::Failed {
+                                error: error.to_string(),
+                            },
+                        );
+                        return;
+                    }
+                    if let Some(server) = this.config.get(&name).cloned() {
+                        this.connect(&name, &server).await;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(server = %name, %error, "an MCP login did not complete");
+                    this.mark(
+                        &name,
+                        Status::Failed {
+                            error: error.to_string(),
+                        },
+                    );
+                }
+            }
+        });
+
+        Ok(())
+    }
+}
+
+/// `credential`'s access token as the `Authorization` header value a request
+/// carries — the one place either helper above turns a token into bytes on
+/// the wire.
+fn bearer_value(
+    credential: &ganja_provider::auth::OauthCredential,
+) -> Result<reqwest::header::HeaderValue, String> {
+    let mut value = reqwest::header::HeaderValue::try_from(format!(
+        "Bearer {}",
+        credential.access.expose_secret()
+    ))
+    .map_err(|_| "the stored mcp bearer token is not a sendable header value".to_owned())?;
+    value.set_sensitive(true);
+
+    Ok(value)
 }
 
 /// Sends `signal` to the process group `group` leads.

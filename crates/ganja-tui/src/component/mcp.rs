@@ -1,7 +1,9 @@
 //! The `/mcp` dialog: one row per configured server — status, tool count, and
 //! the first line of an error — with a second step for the actions a row
-//! offers, Reconnect the only one so far (**D463**; a Login action follows
-//! when W5b's OAuth lands, on the same [`Action`] enum).
+//! offers: Reconnect for a server the dialog shows as failed (**D463**), and
+//! Login for a remote server configured with `oauth`, whatever its status
+//! (**D466**) — a server with nothing stored yet dials to a "needs a login"
+//! failure the same way a login that later expires would.
 //!
 //! **D465** (`mcp-dialog-is-a-claude-port`): upstream opencode has no TUI
 //! surface for its MCP servers at all — only the `opencode mcp` CLI listing
@@ -60,6 +62,9 @@ const EMPTY: &str = "no MCP servers configured";
 pub enum Action {
     /// Re-dial a server the dialog shows as failed.
     Reconnect,
+    /// Start (or restart) an OAuth login for a remote server configured with
+    /// `oauth`.
+    Login,
 }
 
 impl Action {
@@ -68,6 +73,7 @@ impl Action {
     pub fn label(self) -> &'static str {
         match self {
             Self::Reconnect => "Reconnect",
+            Self::Login => "Login",
         }
     }
 }
@@ -357,6 +363,18 @@ mod tests {
         }
     }
 
+    /// A remote server configured with `oauth` — Login belongs on it whatever
+    /// its status, unlike Reconnect's `Failed`-only gate.
+    fn oauth_configured(name: &str, status: &str, tools: Option<usize>) -> Row {
+        Row {
+            name: name.to_owned(),
+            status: status.to_owned(),
+            tools,
+            detail: None,
+            actions: vec![Action::Login],
+        }
+    }
+
     fn dialog() -> Mcp {
         Mcp::new(vec![
             connected("github", 3),
@@ -445,6 +463,21 @@ mod tests {
         let screen = rendered(&dialog, AREA);
         assert!(screen.contains("flaky"), "got:\n{screen}");
         assert!(screen.contains("Reconnect"), "got:\n{screen}");
+    }
+
+    /// Login belongs on an `oauth`-configured server whatever its status —
+    /// unlike Reconnect, gated on `Failed` alone — so even a row this dialog
+    /// shows as `Connected` still offers it.
+    #[test]
+    fn enter_on_a_connected_oauth_row_still_opens_login() {
+        let mut dialog = Mcp::new(vec![oauth_configured("hub", "Connected", Some(3))]);
+
+        assert!(dialog.advance());
+        assert!(dialog.is_choosing_action());
+        assert_eq!(dialog.chosen(), Some(("hub", Action::Login)));
+
+        let screen = rendered(&dialog, AREA);
+        assert!(screen.contains("Login"), "got:\n{screen}");
     }
 
     /// Running an action returns to the server list without closing the

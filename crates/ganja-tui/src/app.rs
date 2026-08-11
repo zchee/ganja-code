@@ -2597,7 +2597,7 @@ impl App {
             .mcp_names()
             .into_iter()
             .map(|name| {
-                let (label, detail, actions) = match status.get(&name) {
+                let (label, detail, mut actions) = match status.get(&name) {
                     Some(ganja_core::McpStatus::Connected) => {
                         ("Connected".to_owned(), None, Vec::new())
                     }
@@ -2613,6 +2613,21 @@ impl App {
                     // fourth `Status` variant to mean it.
                     None => ("dialling".to_owned(), None, Vec::new()),
                 };
+                // Login belongs on an `oauth`-configured server whatever its
+                // status — unlike Reconnect above, gated on `Failed` alone —
+                // and a login already in flight overrides the row entirely
+                // with the URL a person has to open, poll-refreshed the same
+                // way the status itself is.
+                let (label, detail) = match self.engine.mcp_login_url(&name) {
+                    Some(url) if !url.is_empty() => {
+                        ("Logging in".to_owned(), Some(format!("go to: {url}")))
+                    }
+                    Some(_) => ("Logging in".to_owned(), None),
+                    None => (label, detail),
+                };
+                if self.engine.mcp_has_oauth(&name) {
+                    actions.push(mcp::Action::Login);
+                }
                 let tools = counts.get(&name).copied();
 
                 mcp::Row {
@@ -2687,6 +2702,7 @@ impl App {
         let name = name.to_owned();
         match action {
             mcp::Action::Reconnect => self.reconnect_mcp(name).await,
+            mcp::Action::Login => self.login_mcp(name).await,
         }
     }
 
@@ -2698,6 +2714,28 @@ impl App {
         }
 
         if let Err(refusal) = self.engine.reconnect_mcp(&name).await {
+            self.status.set_notice(Some(refusal));
+        }
+
+        let rows = self.mcp_dialog_rows();
+        if let Some(dialog) = &mut self.mcp_dialog {
+            dialog.refresh(rows);
+        }
+    }
+
+    /// Starts an OAuth login for `name`. A different call shape from
+    /// [`App::reconnect_mcp`]: [`ganja_core::Engine::login_mcp`] returns as
+    /// soon as the browser URL is ready rather than once the login finishes,
+    /// so what this awaits is bounded by one discovery-and-registration round
+    /// trip and not by somebody completing a login in a browser — the wait
+    /// for that runs in the background, and [`App::poll_mcp_dialog`]'s next
+    /// tick is what shows the URL and, later, the outcome.
+    async fn login_mcp(&mut self, name: String) {
+        if let Some(dialog) = &mut self.mcp_dialog {
+            dialog.back_to_servers();
+        }
+
+        if let Err(refusal) = self.engine.login_mcp(&name).await {
             self.status.set_notice(Some(refusal));
         }
 
@@ -9120,6 +9158,111 @@ mod tests {
         assert_eq!(row.tools, None, "a failed server lends nothing to count");
         assert!(row.detail.is_some(), "a failed row names why");
         assert_eq!(row.actions, vec![mcp::Action::Reconnect]);
+    }
+
+    /// Login belongs on a remote server configured with `oauth` whatever its
+    /// status — unlike Reconnect above, gated on `Failed` alone — and running
+    /// it shows the URL to open in the row until the browser finishes it.
+    ///
+    /// Deliberately never connects the server (no `connect_mcp()`,
+    /// `wait_for_mcp_to_settle` unused): a real connect attempt would read
+    /// this machine's own credential store, which is exactly what this test
+    /// must not touch — see `crates/ganja-core/tests/mcp_oauth.rs` for the
+    /// isolated-process test that does exercise storage. `mcp_has_oauth` and
+    /// `mcp_login_url`, which this test is about, read the config and the
+    /// in-memory login map only.
+    #[tokio::test]
+    async fn login_appears_for_an_oauth_server_and_shows_the_url_while_it_runs() {
+        let address = oauth_discovery_fixture().await;
+        let root = temporary();
+        let config: std::collections::BTreeMap<String, ganja_core::config::McpServer> =
+            serde_json::from_value(serde_json::json!({
+                "hub": {
+                    "type": "remote",
+                    "url": format!("http://{address}/mcp"),
+                    "oauth": {},
+                }
+            }))
+            .expect("the fixture is a config");
+        let engine = engine().with_mcp(ganja_core::McpServers::new(config, root.path()));
+        let mut app = App::new(engine, None, Themes::builtin());
+
+        app.run_command(command::Action::Mcp).await;
+        let dialog = app.mcp_dialog.as_ref().expect("/mcp opens the dialog");
+        let row = dialog
+            .selected()
+            .expect("the one configured server has a row");
+        assert_eq!(
+            row.status, "dialling",
+            "nothing has attempted a connect yet"
+        );
+        assert_eq!(
+            row.actions,
+            vec![mcp::Action::Login],
+            "an oauth-configured server offers Login whatever its status"
+        );
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter opens the row's one action");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter runs the chosen action");
+
+        let dialog = app.mcp_dialog.as_ref().expect("the dialog stays open");
+        let row = dialog.selected().expect("still the one row");
+        assert_eq!(row.status, "Logging in", "{row:?}");
+        assert!(
+            row.detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("go to: http")),
+            "the URL a person has to open should be shown: {row:?}"
+        );
+    }
+
+    /// A loopback RFC 8414 authorization-server endpoint, answering only
+    /// `/.well-known/oauth-authorization-server` — enough for
+    /// `Servers::start_login`'s discovery step, which is as far as the test
+    /// above runs it (no `/register`, since a server naming no registration
+    /// endpoint is itself a real, exercised path — the fixed fallback client
+    /// id — and one this test does not need to distinguish).
+    async fn oauth_discovery_fixture() -> std::net::SocketAddr {
+        use tokio::{
+            io::{AsyncReadExt as _, AsyncWriteExt as _},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port is available");
+        let address = listener.local_addr().expect("the socket has an address");
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 4096];
+                    if stream.read(&mut buffer).await.is_err() {
+                        return;
+                    }
+                    let body = serde_json::json!({
+                        "authorization_endpoint": format!("http://{address}/authorize"),
+                        "token_endpoint": format!("http://{address}/token"),
+                    })
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        address
     }
 
     /// Esc closes the dialog from either of its two steps rather than

@@ -91,6 +91,7 @@ pub mod cursor;
 pub mod device;
 pub mod grok;
 pub mod loopback;
+pub mod mcp_oauth;
 pub mod openai;
 pub mod pkce;
 
@@ -2294,6 +2295,24 @@ pub fn oauth_for(provider_id: &str) -> Result<Option<OauthCredential>, AuthError
 /// cannot be written.
 pub fn set_oauth(provider_id: &str, credential: &OauthCredential) -> Result<(), AuthError> {
     Store::open()?.set_oauth(provider_id, credential)
+}
+
+/// Stores `credential` as `provider_id`'s renewal, without stamping it as a
+/// fresh login the way [`set_oauth`] does.
+///
+/// [`Refresher`] already writes through this path for the refresh it drives
+/// itself; this is the same write exposed for a caller that renews *outside*
+/// [`Refresher::usable`]'s own due-check — [`mcp_oauth`]'s 401-triggered
+/// re-dial, which forces a refresh because a server's answer said the stored
+/// token was bad, not because [`OauthCredential::needs_refresh_for`] agreed
+/// yet.
+///
+/// # Errors
+///
+/// Returns [`AuthError`] when the existing file cannot be read or the new one
+/// cannot be written.
+pub fn renew_oauth(provider_id: &str, credential: &OauthCredential) -> Result<(), AuthError> {
+    Store::open()?.renew_oauth(provider_id, credential)
 }
 
 /// Forgets `provider_id`'s stored credential, reporting whether there was one.
