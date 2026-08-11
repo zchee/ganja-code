@@ -213,7 +213,13 @@ fn scripted(project: &TempDir, data: &TempDir) -> Ganja {
     command
         .current_dir(project.path())
         .env("GANJA_FAKE_SCRIPT", &path)
-        .env("XDG_DATA_HOME", data.path());
+        .env("XDG_DATA_HOME", data.path())
+        // The global config home moves with the data home: a developer's real
+        // `ganja.jsonc` can pick a provider or rebind Esc, either of which
+        // would change what this drill's keystrokes mean.
+        .env("HOME", data.path())
+        .env("XDG_CONFIG_HOME", data.path().join("config"))
+        .env_remove("GANJA_CONFIG_HOME");
 
     Ganja::spawn(command)
 }

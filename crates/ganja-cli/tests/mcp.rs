@@ -51,6 +51,12 @@ fn listing(project: &TempDir, data: &TempDir, config: Option<&std::path::Path>) 
     command
         .current_dir(project.path())
         .env("XDG_DATA_HOME", data.path())
+        // The global config home is pinned with the data home — a developer's
+        // real `ganja.jsonc` can declare MCP servers of its own, which is
+        // exactly what "reading `config` and nothing else" must exclude.
+        .env("HOME", data.path())
+        .env("XDG_CONFIG_HOME", data.path().join("config"))
+        .env_remove("GANJA_CONFIG_HOME")
         .arg("mcp");
     for variable in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
         command.env_remove(variable);

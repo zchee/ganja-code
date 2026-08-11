@@ -227,6 +227,12 @@ fn ganja(data: &TempDir, issuer: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command
         .env("XDG_DATA_HOME", data.path())
+        // `auth login`/`logout` validate a non-builtin name against the loaded
+        // config, so the global config home is pinned beside the data home —
+        // a developer's real `ganja.jsonc` must not decide what exists here.
+        .env("HOME", data.path())
+        .env("XDG_CONFIG_HOME", data.path().join("config"))
+        .env_remove("GANJA_CONFIG_HOME")
         .env("GANJA_AUTH_ISSUER", issuer)
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")

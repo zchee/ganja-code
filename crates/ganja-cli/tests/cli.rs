@@ -34,6 +34,11 @@ fn ganja(data: &TempDir) -> Command {
     // decide whether a provider exists here. The data home does for a config
     // home too: what matters is that it is not theirs.
     command.env("XDG_CONFIG_HOME", data.path());
+    // The other two doors to a global home, closed with it: an exported
+    // `GANJA_CONFIG_HOME` outranks the pinned XDG dir, and an empty pinned
+    // XDG dir falls through to `~/.ganja` via `HOME`.
+    command.env("HOME", data.path());
+    command.env_remove("GANJA_CONFIG_HOME");
     command.env_remove("GANJA_CONFIG");
     for variable in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
         command.env_remove(variable);

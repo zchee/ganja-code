@@ -117,6 +117,11 @@ fn sealed(command: &mut Command, project: &Path, data: &Path, config: &Path) {
         .current_dir(project)
         .env("XDG_DATA_HOME", data)
         .env("XDG_CONFIG_HOME", config)
+        // The other two doors to a global home, closed with it: an exported
+        // `GANJA_CONFIG_HOME` outranks the pinned XDG dir, and an empty
+        // pinned XDG dir falls through to `~/.ganja` via `HOME`.
+        .env("HOME", data)
+        .env_remove("GANJA_CONFIG_HOME")
         .env_remove("GANJA_PROVIDER")
         .env_remove("GANJA_MODEL")
         .env_remove("GANJA_CONFIG")
@@ -208,6 +213,9 @@ impl Server {
             .current_dir(project.path())
             .env("XDG_DATA_HOME", data.path())
             .env("XDG_CONFIG_HOME", config.path())
+            // See the client builder above: all three doors move together.
+            .env("HOME", data.path())
+            .env_remove("GANJA_CONFIG_HOME")
             .env("GANJA_FAKE_SCRIPT", project.path().join("script.json"))
             .env_remove("GANJA_PROVIDER")
             .env_remove("GANJA_MODEL")

@@ -65,13 +65,26 @@ impl Run {
     }
 
     /// An invocation of the binary in this run's project, with nothing
-    /// inherited that could decide the answer.
+    /// inherited that could decide the answer — the global config home
+    /// included. This suite once left the home variables inherited on the
+    /// claim that nothing it asserts could tell a developer's global config
+    /// apart from none; a `default_provider` in a real `~/.config/ganja`
+    /// falsified that by deciding provider selection itself, so every
+    /// invocation now runs in its own homes.
     fn ganja(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
         command
             .current_dir(self.project.path())
             .env("XDG_DATA_HOME", self.data.path())
             .env("GANJA_FAKE_SCRIPT", self.script())
+            // The three variables that decide where ganja's **global** home
+            // lands, pinned to this run's own directories: `GANJA_CONFIG_HOME`
+            // outranks everything, and an empty pinned `XDG_CONFIG_HOME`
+            // falls through to `~/.ganja` via `HOME`, so all three must move
+            // together or none has moved.
+            .env("HOME", self.data.path())
+            .env("XDG_CONFIG_HOME", self.data.path().join("config"))
+            .env_remove("GANJA_CONFIG_HOME")
             // Unset, so the fake provider is what answers and says so.
             .env_remove("GANJA_PROVIDER")
             .env_remove("GANJA_MODEL")
@@ -85,23 +98,14 @@ impl Run {
         command
     }
 
-    /// [`Run::ganja`] with the three variables that decide where ganja's
-    /// **global** home lands pinned to this run's own directories.
+    /// [`Run::ganja`], under the name the skills tests reach it by.
     ///
-    /// The rest of the suite leaves them inherited, and nothing it asserts can
-    /// tell a developer's global config apart from none. A skills assertion
-    /// can: the global tier is a second place a skill may be found, so a
-    /// machine holding one would answer the call for a reason this test is not
-    /// about, and the project tier it exists to prove would go untested on
-    /// exactly the machine that has skills of its own.
+    /// The base builder pins the home variables itself now; this alias
+    /// survives because the skills tests cite the pinning as the thing that
+    /// keeps a machine's own global skills from answering a call the project
+    /// tier exists to prove.
     fn ganja_in_its_own_homes(&self) -> Command {
-        let mut command = self.ganja();
-        command
-            .env("HOME", self.data.path())
-            .env("XDG_CONFIG_HOME", self.data.path().join("config"))
-            .env_remove("GANJA_CONFIG_HOME");
-
-        command
+        self.ganja()
     }
 
     /// The session ids `ganja sessions` lists for this project, newest first.
