@@ -6,13 +6,16 @@
 > 挙動パリティであり、Claude Code は別プロダクトとして比較のために目録化した
 > だけである。表中の ❌ は観察であって、約束ではない。
 
-スナップショット: 2026-08-11、Claude Code 2.1.x 世代を対象。Claude Code の
+スナップショット: 2026-08-12、Claude Code 2.1.x 世代を対象。Claude Code の
 更新は速いので、古くなった行は「古い行」であって ganja の退行ではない。
 *(低確度)* を付した行は公式ドキュメントではなくコミュニティ情報に依る。
 
+セクション構成は 3 つのリファレンス(claude・codex・opencode)共通の
+アウトラインに従う。同じトピックはどの文書でも同じセクション番号にある。
+
 凡例: ✅ ganja に存在(パリティまたは近い等価物) · ⚠️ 部分的 · ❌ 不在。
 
-## 1. Composer 入力
+## 1. TUI — Composer・入力
 
 | 機能 | キー | ganja |
 |---|---|---|
@@ -41,7 +44,22 @@
 | [画面再描画](https://code.claude.com/docs/en/interactive-mode) | Ctrl+L | ✅ 次フレームを強制フル redraw(Claude Code 由来のバインド、upstream に対応なし) |
 | [段階的な中断](https://code.claude.com/docs/en/interactive-mode) | Ctrl+C 1回/2回 | ⚠️ 一段のみ |
 
-## 2. モード・セッション操作
+## 2. TUI — 大型サーフェス・keybind
+
+*本改訂(2026-08-12)で新設。断りのない行は公式ドキュメントに依る。*
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [verbose トランスクリプトビューア](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O オーバーレイ: 全履歴・ツールペイロード・thinking ブロック | ✅ Ctrl+T インスペクタ — フルターミナル占有・3タブ(展開トランスクリプト・生イベントログ・ターン毎トークン表);表現は Codex CLI 自身のオーバーレイと Claude Code の Ctrl+O フッター文言を合成 |
+| [Todo チェックリストパネル](https://code.claude.com/docs/en/interactive-mode) | Ctrl+T でタスクのサイドパネルを開閉 | ⚠️ todo はチャット内描画のみ;ganja の Ctrl+T はインスペクタに割当済み |
+| [permission ダイアログ](https://code.claude.com/docs/en/iam) | ツール呼出しのプレビュー・承認/拒否・ダイアログ内モード切替 | ✅ upstream 由来のダイアログセマンティクス(`a`/`A`/`d`)、複数の子が同時に尋ねるとキュー化;ダイアログ内モード切替はなし(モード概念自体がない) |
+| [trust ダイアログ](https://code.claude.com/docs/en/iam) | 初回起動時のディレクトリ信頼確認 | ❌ trust 層なし;すべて permission ルールが門番 |
+| [ステータスラインのスクリプト化](https://code.claude.com/docs/en/statusline) | `/statusline`、セッション JSON を stdin で受ける `statusLine` コマンド | ❌ 固定ステータスバー(テーマは✅) |
+| [ターミナル設定](https://code.claude.com/docs/en/terminal-config) | `/terminal-setup`: キーバインド・ターミナルプロファイル調整 | ❌ 調整対象なし;bracketed paste と OSC 52 は無条件 |
+| [スピナー tips](https://code.claude.com/docs/en/settings) | `spinnerTipsEnabled` | ❌ |
+| [カスタム keybindings](https://code.claude.com/docs/en/interactive-mode) *(ファイルスキーマは低確度)* | `~/.claude/keybindings.json`: コンテキスト対応バインドとコード列 | ⚠️ ganja は `keybinds` config マップ — アクション毎にカンマ区切りの代替、空値で解除;コンテキストもコード列もなし |
+
+## 3. モード・セッション操作
 
 | 機能 | キー | ganja |
 |---|---|---|
@@ -49,10 +67,9 @@
 | [Extended Thinking 切替](https://code.claude.com/docs/en/interactive-mode) | Tab / Cmd+T | ❌(代わりに `/effort` がレベルを選ぶ) |
 | [リワインド / チェックポイント](https://code.claude.com/docs/en/checkpointing) | Esc Esc・`/rewind` | ✅ `/rewind` + アイドル時の Esc Esc で二段階チェックポイントピッカー(Both/Conversation/Files スコープ、`Command::RevertTo`);upstream の part 単位アンカー(`partID`)は未移植 — チェックポイントはユーザーメッセージ単位 |
 | [実行中タスクのバックグラウンド化](https://code.claude.com/docs/en/interactive-mode) | Ctrl+B | ⚠️ バックグラウンド実行自体は存在(`bash` の `run_in_background`、`bash_output`/`kill_shell`);実行中のフォアグラウンド呼出しを後からバックグラウンド化するジェスチャーはなし |
-| [トランスクリプト/verbose 切替](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O | ✅ Ctrl+T インスペクタ — フルターミナル占有・3タブ(展開トランスクリプト・生イベントログ・ターン毎トークン表);表現は Codex CLI 自身のオーバーレイと Claude Code の Ctrl+O フッター文言を合成 |
 | [エージェント切替](https://code.claude.com/docs/en/sub-agents) | — | ✅ Tab で順繰り(ganja 独自既定)・逆順は ❌ |
 
-## 3. スラッシュコマンド
+## 4. スラッシュコマンド
 
 | コマンド | 用途 | ganja |
 |---|---|---|
@@ -82,7 +99,7 @@
 | [`/plugin`](https://code.claude.com/docs/en/plugins) | marketplace 追加・install・reload | ❌ |
 | [`/vim`](https://code.claude.com/docs/en/interactive-mode) | vim 編集 | ❌ |
 
-## 4. 内蔵ツール一覧
+## 5. 内蔵ツール
 
 | ツール | 補足 | ganja |
 |---|---|---|
@@ -102,7 +119,7 @@
 | skill ツール | スキルの明示ロード | ✅ `skill` |
 | question ツール | 構造化された質問 | ✅ `question`(自由入力含む) |
 
-## 5. 権限システム詳細
+## 6. 権限
 
 | 機能 | 補足 | ganja |
 |---|---|---|
@@ -113,11 +130,10 @@
 | [ドメイン限定 web ルール](https://code.claude.com/docs/en/iam) | `WebFetch(domain:github.com)` | ❌ |
 | [deny → ask → allow(最厳優先)](https://code.claude.com/docs/en/iam) | | ⚠️ ganja は層状 tier の後勝ち — 別のピン済みセマンティクス |
 | [設定スコープ](https://code.claude.com/docs/en/settings) | user / project / project-local / CLI フラグ / managed | ⚠️ builtin < agent < config < 保存回答。local 重ね・フラグ・managed なし |
-| [settings の `env` ブロック](https://code.claude.com/docs/en/settings) | スコープ毎の環境変数注入 | ❌ |
 | [保存される "always" 回答](https://code.claude.com/docs/en/iam) | 承認の永続化 | ✅ プロジェクト毎ストア・シェルは arity 対応 |
 | [sandbox 実行](https://code.claude.com/docs/en/sandboxing) | OS/コンテナ隔離 | ❌ 権限ゲートのみ |
 
-## 6. hooks・自動化
+## 7. hooks・自動化
 
 | 機能 | 補足 | ganja |
 |---|---|---|
@@ -125,7 +141,7 @@
 | [フックプロトコル](https://code.claude.com/docs/en/hooks) | stdin に JSON・exit 2 でツール呼出をブロック・stdout で文脈注入 | ⚠️ 同じ envelope・exit code セマンティクス;ブロックは v1 では PreToolUse/UserPromptSubmit のみ(ブロックが意味を持つ2イベント)に限定;`transcript_path` なし(SQLite 保存のため、D457);`updatedInput` 書換えと Stop フックの強制継続は未実装 |
 | [matcher](https://code.claude.com/docs/en/hooks) | ツール別正規表現(`Edit\|Write`) | ✅ 正規表現 matcher に加え、PreCompact/SessionStart 用の列挙語彙 |
 
-## 7. カスタムコマンド・メモリー内部
+## 8. ルール・カスタムコマンド・メモリー
 
 | 機能 | 補足 | ganja |
 |---|---|---|
@@ -139,7 +155,7 @@
 | [メモリー内 `@path` import](https://code.claude.com/docs/en/memory) | インポート元相対で解決するモジュール分割 | ❌ |
 | [自動メモリー](https://code.claude.com/docs/en/memory) | `~/.claude/projects/<hash>/memory/`(MEMORY.md 索引+トピックファイル)を自己保守 | ❌ |
 
-## 8. subagents・skills・plugins
+## 9. エージェント・スキル
 
 | 機能 | 補足 | ganja |
 |---|---|---|
@@ -155,7 +171,7 @@
 | [プラグイン: 5 コンポーネント](https://code.claude.com/docs/en/plugins) | skills・agents・hooks・MCP・LSP | ❌ |
 | [marketplace](https://code.claude.com/docs/en/plugins) | `marketplace.json`・`/plugin install`・`/reload-plugins` | ❌ |
 
-## 9. MCP 詳細
+## 10. MCP・LSP
 
 | 機能 | 補足 | ganja |
 |---|---|---|
@@ -166,8 +182,9 @@
 | [project スコープの初回承認](https://code.claude.com/docs/en/mcp) | repo 注入サーバー対策 | ✅ より強い: 全 MCP ツールが既定で ask |
 | [タイムアウト・出力上限](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`・`MCP_TOOL_TIMEOUT`・`MAX_MCP_OUTPUT_TOKENS` | ⚠️ サーバー毎 `timeout`/`output_limit` config キー(バイト単位・トークンではない);グローバルな env var ノブはなし |
 | 再接続 | 死んだサーバーの復帰 | ✅ `/mcp` ダイアログの手動 Reconnect(`Failed` な任意サーバー)+初回 dial が失敗したサーバー限定のセッション1回だけの自動リトライ(D463) |
+| [plugin 経由の LSP サーバー](https://code.claude.com/docs/en/plugins) | プラグインが LSP サーバーを同梱できる | ⚠️ ganja の LSP はファーストパーティ config(`lsp` キー: rust/gopls 内蔵+カスタムエントリ)でプラグイン面ではない |
 
-## 10. モデル・コンテキスト設定
+## 11. モデル・プロバイダ・認証
 
 | 機能 | 補足 | ganja |
 |---|---|---|
@@ -177,9 +194,31 @@
 | [`MAX_THINKING_TOKENS`](https://code.claude.com/docs/en/settings) | thinking 予算上書き | ⚠️ カタログ由来の effort variant が予算を運ぶ |
 | [自動圧縮しきい値の上書き](https://code.claude.com/docs/en/settings) *(低確度)* | 発火率の env 調整 | ❌ 固定しきい値 |
 | [小型高速モデルへのルーティング](https://code.claude.com/docs/en/settings) | 背景処理を安価モデルへ | ⚠️ ganja のタイトル要求はセッションモデルに乗る |
-| [環境変数面](https://code.claude.com/docs/en/settings) | `ANTHROPIC_MODEL`・`DISABLE_TELEMETRY`・proxy 等 | ⚠️ ganja は独自のより小さい `GANJA_*` 面 |
+| [サブスクリプション OAuth / Console API キー](https://code.claude.com/docs/en/iam) | `/login` が claude.ai OAuth(PKCE)か従量 API キーを選ばせる | ⚠️ ganja の `anthropic` は API キーのみ(env または保存);サブスクリプション OAuth は upstream 仕様に存在しなかった(規約対応で撤去済み) |
+| [`apiKeyHelper`](https://code.claude.com/docs/en/settings) | 要求時にキーを出力する settings 宣言コマンド | ❌ 最も近いのは config プロバイダの `key_env` |
+| [`ANTHROPIC_AUTH_TOKEN`](https://code.claude.com/docs/en/settings) | ゲートウェイ・プロキシ用カスタム bearer | ❌ |
+| [OS キーチェーンへの資格情報保存](https://code.claude.com/docs/en/iam) *(OS 毎の詳細は低確度)* | macOS Keychain / Credential Manager / libsecret | ⚠️ ganja は所有者限定パーミッションの `auth.json`;OS キーチェーン統合なし |
+| 資格情報の優先順位 | env トークン > 保存ログイン、文書化された順で解決 | ✅ 同型: `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` が保存資格情報に優先 |
 
-## 11. ワークスペース・セッション保存
+## 12. 設定面
+
+*本改訂(2026-08-12)で新設。*
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [settings のスコープと優先順位](https://code.claude.com/docs/en/settings) | managed > CLI フラグ > `.claude/settings.local.json` > `.claude/settings.json` > `~/.claude/settings.json` | ⚠️ JSONC 3層(グローバルホーム < `GANJA_CONFIG` < プロジェクトファイル)で後勝ち;local 重ね・フラグ・managed 層なし |
+| [`$schema` 参照](https://code.claude.com/docs/en/settings) | エディタ補完用 JSON Schema | ✅ ganja は `schema/ganja-config.schema.json` を同梱し、ローダーとのドリフトをテストで検出 |
+| [`permissions` ブロック](https://code.claude.com/docs/en/iam) | `allow`/`ask`/`deny` 配列+`defaultMode` | ⚠️ ganja の `permission` ブロックは upstream opencode の文法(§6) |
+| [`env` ブロック](https://code.claude.com/docs/en/settings) | スコープ毎の環境変数注入 | ❌ |
+| [`hooks` キー](https://code.claude.com/docs/en/hooks) | イベント名キーの matcher/handler 群 | ✅ Claude の形をそのまま採用(§7) |
+| [`model` / `effortLevel` キー](https://code.claude.com/docs/en/model-config) | 既定モデルと推論深度 | ⚠️ `model` ✅;effort はセッション内選択(`/effort`)で config キーではない |
+| [`statusLine`・`outputStyle`・`spinnerTipsEnabled`](https://code.claude.com/docs/en/statusline) | 表示スクリプトとスタイル | ❌(ganja の表示ノブはテーマのみ) |
+| [`attribution`](https://code.claude.com/docs/en/settings) *(低確度)* | コミット/PR トレーラー文言 | ❌ ganja は自分でコミットを書かない |
+| [`claude config` CLI](https://code.claude.com/docs/en/settings) | `get`/`set`/`list`・`--global` | ❌ 設定ファイルのみ |
+| [`--setting-sources`](https://code.claude.com/docs/en/settings) | 読み込む層の選択 | ❌ |
+| ハウスキーピングキー | `cleanupPeriodDays`・`language`・`autoUpdatesChannel`・`companyAnnouncements` | ❌ まとめて不在 |
+
+## 13. セッション・保存
 
 | 機能 | 補足 | ganja |
 |---|---|---|
@@ -189,7 +228,7 @@
 | [checkpoint ファイル履歴](https://code.claude.com/docs/en/checkpointing) | 編集前の内容ハッシュバックアップ | ⚠️ worktree スナップショット(`/undo`) |
 | [shell スナップショット](https://code.claude.com/docs/en/settings) *(低確度)* | シェル環境の再現用キャプチャ | ❌ |
 
-## 12. CLI・headless・SDK
+## 14. CLI・headless
 
 | 機能 | 補足 | ganja |
 |---|---|---|
@@ -202,10 +241,41 @@
 | [system prompt フラグ](https://code.claude.com/docs/en/cli-reference) | append/replace × inline/file | ❌ |
 | [hermetic 実行](https://code.claude.com/docs/en/cli-reference) *(低確度)* | `--bare` | ❌ |
 | [スキーマ制約出力](https://code.claude.com/docs/en/cli-reference) | `--json-schema` | ❌ |
-| [Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview) | TS/Python でのエンジン組込み | ❌ 最近縁は `ganja-serve` + `ganja-client`(HTTP/SSE) |
-| [MCP サーバーモード](https://code.claude.com/docs/en/mcp) | `claude mcp serve` | ❌ |
 
-## 13. エンタープライズ・プラットフォーム
+## 15. サーバー面・SDK
+
+| 機能 | 補足 | ganja |
+|---|---|---|
+| [Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview) | TS/Python でのエンジン組込み | ❌ 最も近いのは `ganja-serve` + `ganja-client`(HTTP/SSE) |
+| [MCP サーバーモード](https://code.claude.com/docs/en/mcp) | `claude mcp serve` — エンジンを MCP サーバーとして公開 | ❌ |
+| HTTP サーバー面 | なし — Claude Code は自前の REST/SSE API を提供しない | n/a — ganja 側の優位: `ganja serve`(REST + SSE・Basic 認証)と型付き `ganja-client` |
+
+## 16. 環境変数
+
+*本改訂(2026-08-12)で新設。文書化された面は広いので、挙動を左右する行に
+絞る。*
+
+| 変数 | 意味 | ganja |
+|---|---|---|
+| [`ANTHROPIC_API_KEY`](https://code.claude.com/docs/en/settings) | API キー資格情報 | ✅ 同じ変数・保存キーに優先 |
+| [`ANTHROPIC_BASE_URL`](https://code.claude.com/docs/en/settings) | エンドポイント上書き | ✅ 同じ変数・https か loopback 以外は拒否 |
+| [`ANTHROPIC_AUTH_TOKEN`](https://code.claude.com/docs/en/settings) | ゲートウェイ用カスタム bearer | ❌ |
+| [`ANTHROPIC_MODEL`](https://code.claude.com/docs/en/model-config) | 既定モデル上書き | ⚠️ `GANJA_MODEL`(カタログ済みプロバイダはカタログ検証付き) |
+| [`ANTHROPIC_DEFAULT_*_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL`](https://code.claude.com/docs/en/settings) | エイリアス固定・安価モデルルーティング | ⚠️ 最も近いのは `small_model` config キー |
+| [`CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY`](https://code.claude.com/docs/en/amazon-bedrock) | クラウド基盤ルーティング | ❌ |
+| [`MAX_THINKING_TOKENS`](https://code.claude.com/docs/en/settings) | thinking 予算 | ⚠️ effort variant がカタログ予算を運ぶ |
+| [`CLAUDE_CODE_MAX_OUTPUT_TOKENS`](https://code.claude.com/docs/en/settings) | 応答上限 | ❌ |
+| [`BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` / `BASH_MAX_OUTPUT_LENGTH`](https://code.claude.com/docs/en/settings) | シェルツール予算 | ⚠️ ganja のシェルは固定既定+呼出し毎 `timeout` 引数;env ノブなし |
+| [`MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` / `MAX_MCP_OUTPUT_TOKENS`](https://code.claude.com/docs/en/settings) | MCP 予算 | ⚠️ 代わりにサーバー毎 `timeout`/`output_limit` config キー |
+| [`DISABLE_TELEMETRY` / `DISABLE_ERROR_REPORTING` / `DISABLE_AUTOUPDATER` / `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`](https://code.claude.com/docs/en/settings) | 外部送信スイッチ | n/a — ganja には無効化すべきテレメトリ・エラー報告・自己更新がない |
+| [`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`](https://code.claude.com/docs/en/network-config) | プロキシ経路 | ⚠️ reqwest は標準プロキシ変数を尊重;未検証面で ganja 側ドキュメントなし |
+| [`CLAUDE_CODE_OAUTH_TOKEN`](https://code.claude.com/docs/en/cli-reference) *(低確度)* | headless 用 OAuth トークン | ❌ |
+
+ganja 自身の `GANJA_*` 面(config ホーム・fake プロバイダスクリプト・
+カタログノブ・serve 資格情報・websearch キー・テスト opt-in)はリポジトリ
+ルートの `AGENTS.md` に文書化されており、Claude Code に対応物はない。
+
+## 17. エンタープライズ・プラットフォーム
 
 | 機能 | 補足 | ganja |
 |---|---|---|
