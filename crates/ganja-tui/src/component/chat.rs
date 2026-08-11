@@ -916,6 +916,15 @@ pub(crate) fn split_at_width(text: &str, width: usize) -> (&str, &str) {
     (text, "")
 }
 
+/// `text` cut to `width` display columns.
+pub(crate) fn clip(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_owned();
+    }
+
+    split_at_width(text, width).0.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, ToolState};

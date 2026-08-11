@@ -24,7 +24,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{component::chat::split_at_width, theme::Theme};
+use crate::{
+    component::{chat::clip, clamped, first_visible},
+    theme::Theme,
+};
 
 /// Milliseconds in each unit an age is rounded to.
 const SECOND: u64 = 1_000;
@@ -103,14 +106,7 @@ impl Sessions {
     /// off the newest end and landing on the oldest session is never what the
     /// keypress meant.
     pub fn move_selection(&mut self, delta: isize) {
-        let last = self.entries.len().saturating_sub(1);
-        let moved = if delta < 0 {
-            self.selected.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.selected.saturating_add(delta.unsigned_abs())
-        };
-
-        self.selected = moved.min(last);
+        self.selected = clamped(self.selected, delta, self.entries.len());
     }
 
     /// Draws the modal centered over `area`.
@@ -144,7 +140,7 @@ impl Sessions {
 
     /// One line per visible session, aligned into three columns.
     fn rows(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let first = self.first_visible(rows);
+        let first = first_visible(self.selected, rows);
         let visible = self
             .entries
             .iter()
@@ -191,12 +187,6 @@ impl Sessions {
                 )
             })
             .collect()
-    }
-
-    /// The first session on screen: far enough down to keep the selected one
-    /// visible, and no further.
-    fn first_visible(&self, rows: usize) -> usize {
-        self.selected.saturating_sub(rows.saturating_sub(1))
     }
 }
 
@@ -246,15 +236,6 @@ fn age(now: u64, updated: u64) -> String {
     }
 
     format!("{}d ago", elapsed / DAY)
-}
-
-/// `text` cut to `width` display columns.
-fn clip(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-
-    split_at_width(text, width).0.to_owned()
 }
 
 #[cfg(test)]

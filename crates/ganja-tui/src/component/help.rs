@@ -30,7 +30,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
     command::COMMANDS,
-    component::chat::split_at_width,
+    component::chat::clip,
     keybind::{self, Keybinds},
     theme::Theme,
 };
@@ -239,15 +239,6 @@ fn footer(offset: usize, rows: usize, total: usize, width: usize) -> String {
     }
 
     format!("{SCROLL_HINTS}{gap}{counter}", gap = " ".repeat(room))
-}
-
-/// `text` cut to `width` display columns.
-fn clip(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-
-    split_at_width(text, width).0.to_owned()
 }
 
 #[cfg(test)]

@@ -185,15 +185,8 @@ fn login_flow_at_urls(
     login_url: impl Into<String>,
     poll_url: impl Into<String>,
 ) -> Result<Flow, LoginError> {
-    let client = reqwest::Client::builder()
-        // Refused for the reason every credential-carrying request in this
-        // build refuses them: the poll's query holds the verifier and the
-        // pairing id, and a client that followed a 3xx would replay both at
-        // whatever the redirect named.
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|source| LoginError::Client { source })?;
+    let client =
+        super::login_client(REQUEST_TIMEOUT).map_err(|source| LoginError::Client { source })?;
 
     Ok(Flow {
         client,
@@ -535,18 +528,12 @@ impl Refresh {
     /// Returns [`AuthError::RefreshUnavailable`] when no HTTP client can be
     /// built.
     pub fn at(refresh_url: impl Into<String>) -> Result<Self, AuthError> {
-        let client = reqwest::Client::builder()
-            // Refused for the reason every credential-carrying request in
-            // this build refuses them: the header holds a refresh token, and
-            // a client that followed a 3xx would replay it at whatever the
-            // redirect named.
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|error| AuthError::RefreshUnavailable {
+        let client = super::login_client(REQUEST_TIMEOUT).map_err(|error| {
+            AuthError::RefreshUnavailable {
                 provider_id: PROVIDER_ID.to_owned(),
                 reason: error.without_url().to_string(),
-            })?;
+            }
+        })?;
 
         Ok(Self {
             client,

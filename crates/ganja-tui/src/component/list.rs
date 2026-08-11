@@ -20,7 +20,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{component::chat::split_at_width, theme::Theme};
+use crate::{
+    component::{chat::clip, clamped, first_visible},
+    theme::Theme,
+};
 
 /// What marks the row the cursor is on, and what pads every other row.
 const MARKER: &str = "> ";
@@ -100,14 +103,7 @@ impl ListDialog {
 
     /// Moves the cursor by `delta` rows, clamped at both ends.
     pub fn move_selection(&mut self, delta: isize) {
-        let last = self.rows.len().saturating_sub(1);
-        let moved = if delta < 0 {
-            self.selected.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.selected.saturating_add(delta.unsigned_abs())
-        };
-
-        self.selected = moved.min(last);
+        self.selected = clamped(self.selected, delta, self.rows.len());
     }
 
     /// Draws the modal centered over `area`.
@@ -145,7 +141,7 @@ impl ListDialog {
             return vec![Line::styled(clip(EMPTY, width), theme.dim)];
         }
 
-        let first = self.first_visible(rows);
+        let first = first_visible(self.selected, rows);
         // Labels padded to the widest, so the details beside them sit in one
         // column instead of stepping in and out per row.
         let label_width = self
@@ -191,21 +187,6 @@ impl ListDialog {
             })
             .collect()
     }
-
-    /// The first row on screen: far enough down to keep the selected one
-    /// visible, and no further.
-    fn first_visible(&self, rows: usize) -> usize {
-        self.selected.saturating_sub(rows.saturating_sub(1))
-    }
-}
-
-/// `text` cut to `width` display columns.
-fn clip(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-
-    split_at_width(text, width).0.to_owned()
 }
 
 #[cfg(test)]

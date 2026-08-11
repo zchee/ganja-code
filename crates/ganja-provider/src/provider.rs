@@ -100,6 +100,42 @@ pub mod responses;
 pub mod retry;
 pub mod sse;
 
+/// What a call that never produced one reports as its result.
+///
+/// A tool part still pending or running when it reaches a later request
+/// belongs to a turn that died — cancelled, or failed — before the tool
+/// answered. Dropping the call would leave the assistant text claiming a call
+/// that is not there; leaving it unanswered is a request every vendor refuses,
+/// because each opened call must be resolved before the next assistant turn.
+/// So every wire fills the hole with this one spelling — or the wires tell
+/// the model different stories about the same dead turn. Upstream resolves it
+/// with the wording "[Tool execution was interrupted]".
+pub(crate) const NO_RESULT: &str = "[no result recorded]";
+
+/// Refuses to build a provider whose login is not in the store.
+///
+/// `storage_key` rather than a second spelling: what the file calls a
+/// provider is `auth`'s to know, and asking is not writing it down.
+///
+/// # Errors
+///
+/// Returns [`ProviderError::Auth`] when nothing is stored for `id` — naming
+/// the login that repairs it — or when the credential store exists and could
+/// not be read, which a login does not fix and the store's own message
+/// describes.
+pub(super) fn require_stored_login(id: &str) -> Result<(), ProviderError> {
+    let stored = crate::auth::storage_key(id);
+    let listed =
+        crate::auth::list_providers().map_err(|error| ProviderError::Auth(error.to_string()))?;
+    if !listed.iter().any(|entry| entry.provider_id == stored) {
+        return Err(ProviderError::Auth(format!(
+            "no {id} credential is stored; run `ganja auth login {id}`"
+        )));
+    }
+
+    Ok(())
+}
+
 pub use anthropic::AnthropicProvider;
 pub use compat::{CompatProvider, Dialect};
 pub use copilot::CopilotProvider;

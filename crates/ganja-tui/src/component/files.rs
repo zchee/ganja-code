@@ -19,7 +19,11 @@ use ratatui::{
 };
 
 use crate::{
-    component::dropdown::{clip, menu_area, menu_lines},
+    component::{
+        chat::clip,
+        clamped,
+        dropdown::{menu_area, menu_lines},
+    },
     mention::Fragment,
     theme::Theme,
 };
@@ -81,14 +85,7 @@ impl Files {
 
     /// Moves the cursor by `delta` rows, clamped at both ends.
     pub fn move_selection(&mut self, delta: isize) {
-        let last = self.paths.len().saturating_sub(1);
-        let moved = if delta < 0 {
-            self.selected.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.selected.saturating_add(delta.unsigned_abs())
-        };
-
-        self.selected = moved.min(last);
+        self.selected = clamped(self.selected, delta, self.paths.len());
     }
 
     /// Draws the menu directly above `anchor`, which is the editor's area.

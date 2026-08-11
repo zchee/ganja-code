@@ -30,9 +30,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
     provider::{
-        ChatRequest, CredentialSource, Mapper, Presented, Provider, ProviderError, ProviderEvent,
-        check_base_url, client, open, require_key, setting, shown_base_url, splice_effort,
-        sse::Frame, steps,
+        ChatRequest, CredentialSource, Mapper, NO_RESULT, Presented, Provider, ProviderError,
+        ProviderEvent, check_base_url, client, open, require_key, setting, shown_base_url,
+        splice_effort, sse::Frame, steps,
     },
 };
 
@@ -51,22 +51,6 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// The frame that ends a chat-completions stream.
 const DONE: &str = "[DONE]";
-
-/// What a call that never produced one reports as its result.
-///
-/// A tool part still [`ToolState::Pending`] or [`ToolState::Running`] when it
-/// reaches a later request belongs to a turn that died — cancelled, or failed —
-/// before the tool answered. Dropping the entry from `tool_calls` would leave
-/// the assistant text claiming a call that is not there; leaving it unanswered
-/// is a request the API refuses, because every id in `tool_calls` must be
-/// answered by a `tool` message before the next assistant turn. So the pair is
-/// emitted with this in place of the output. Upstream resolves the same
-/// dangling call with the wording "[Tool execution was interrupted]".
-///
-/// Shared with [`super::responses`], which pairs a call with its output by id
-/// rather than by position but has the same hole to fill: one spelling, or two
-/// wires tell the model two different stories about the same dead turn.
-pub(super) const NO_RESULT: &str = "[no result recorded]";
 
 /// Streams replies from an OpenAI-compatible chat completions endpoint.
 pub struct OpenAiProvider {

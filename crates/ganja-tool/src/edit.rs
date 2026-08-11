@@ -34,7 +34,7 @@ use similar::{ChangeTag, TextDiff};
 use crate::{
     Tool, ToolCtx, ToolError, ToolOutput,
     anchor::{self, Anchor},
-    native_path,
+    display, resolve,
 };
 
 /// What the model is told about the tool: upstream's prompt file, verbatim.
@@ -209,7 +209,7 @@ impl Tool for EditTool {
         let (additions, deletions) = line_counts(&before, &after);
 
         Ok(ToolOutput {
-            title: relative(&ctx.cwd, &path),
+            title: display(&ctx.cwd, &path),
             output: APPLIED.to_owned(),
             metadata: serde_json::json!({
                 "diff": diff,
@@ -402,27 +402,6 @@ async fn prepare(
         content_new.to_owned(),
         bom || next_bom,
     ))
-}
-
-/// `file_path` as an absolute path, resolved against the session's directory
-/// when the model passed a relative one.
-fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
-    let path = Path::new(file_path);
-    let joined = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        cwd.join(path)
-    };
-
-    // Spelled the way this platform spells a path, because this one is echoed
-    // back to the model. See [`native_path`].
-    native_path(joined)
-}
-
-/// `path` as the transcript should show it: relative to the session's
-/// directory, or whole when it lies outside.
-fn relative(cwd: &Path, path: &Path) -> String {
-    path.strip_prefix(cwd).unwrap_or(path).display().to_string()
 }
 
 // ---------------------------------------------------------------------------

@@ -1,18 +1,21 @@
 //! Replacing a file by writing a sibling and renaming it into place.
 //!
 //! **A recorded duplication, and the house pattern for it.** These two
-//! functions exist a third time in `ganja_permission::permission` and a fourth
-//! in `ganja_tui::theme::selection`, because a crate that writes exactly one
+//! functions exist again in `ganja_permission::permission` and in
+//! `ganja_tui::theme::selection`, because a crate that writes exactly one
 //! kind of file keeps its own thirty lines rather than reaching sideways for
 //! them. They arrived here from `ganja_core::storage`, whose copy went away
 //! with its only caller: the catalog was the last thing in the engine that
-//! wrote a file through them, and it moved.
+//! wrote a file through them, and it moved. `auth` in this same crate keeps a
+//! hardened sibling on purpose: its open must carry the credential mode on
+//! the descriptor, and its tests plant files at the predictable temp name to
+//! prove the exclusive create refuses them.
 //!
 //! A `ganja-provider` → `ganja-core` edge would invert the boundary this crate
 //! exists to draw, for thirty lines. A crate holding only these would earn less
-//! than it costs at four callers; `tempfile` was considered and rejected on the
+//! than it costs at three copies; `tempfile` was considered and rejected on the
 //! same arithmetic — admitting a dependency to replace two trivial functions is
-//! the larger of the two prices. If a fifth copy is ever wanted, that is the
+//! the larger of the two prices. If another copy is ever wanted, that is the
 //! moment the shared home starts paying, and all of them should collapse into
 //! it at once.
 //!

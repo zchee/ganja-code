@@ -586,6 +586,35 @@ fn native_path(path: PathBuf) -> PathBuf {
     path.components().collect()
 }
 
+/// Resolves `file_path` against `cwd` — never against the process cwd, so a
+/// relative argument means what the call site meant, not what the engine's
+/// own working directory happens to be.
+///
+/// Spelled the way this platform spells a path, because every caller echoes
+/// it back to the model one way or another. See [`native_path`].
+fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
+    let path = Path::new(file_path);
+    let joined = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.join(path)
+    };
+
+    native_path(joined)
+}
+
+/// [`resolve`], with `cwd` itself standing in when the call named no path at
+/// all — the shape `glob` and `grep` take their optional search base through.
+fn resolve_or_cwd(cwd: &Path, path: Option<&str>) -> PathBuf {
+    path.map_or_else(|| cwd.to_owned(), |path| resolve(cwd, path))
+}
+
+/// `path` relative to `cwd` when it is under it, absolute otherwise — for a
+/// title or one-line description a person can actually read.
+fn display(cwd: &Path, path: &Path) -> String {
+    path.strip_prefix(cwd).unwrap_or(path).display().to_string()
+}
+
 /// The filesystem's modification stamp for `path`, or [`None`] where the
 /// filesystem does not offer one — in which case recording and checking
 /// compare as equal, failing open rather than refusing every edit.

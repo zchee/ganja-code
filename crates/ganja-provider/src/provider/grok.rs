@@ -96,16 +96,7 @@ impl GrokProvider {
     /// client can be built, which in practice means the TLS backend failed to
     /// initialize.
     pub fn from_stored() -> Result<Self, ProviderError> {
-        // `storage_key` rather than a second spelling: what the file calls this
-        // provider is `auth`'s to know, and asking is not writing it down.
-        let stored = auth::storage_key(ID);
-        let listed =
-            auth::list_providers().map_err(|error| ProviderError::Auth(error.to_string()))?;
-        if !listed.iter().any(|entry| entry.provider_id == stored) {
-            return Err(ProviderError::Auth(format!(
-                "no {ID} credential is stored; run `ganja auth login {ID}`"
-            )));
-        }
+        super::require_stored_login(ID)?;
 
         let refresh = auth::grok::Refresh::new().map_err(|error| {
             // `Refresh::new` fails only where `client()` does, and for the same

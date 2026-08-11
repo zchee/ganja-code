@@ -348,11 +348,8 @@ impl DeviceFlow {
         scope: &'static str,
         encoding: BodyEncoding,
     ) -> Result<Self, DeviceError> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|error| DeviceError::Unreachable {
+        let client =
+            super::login_client(REQUEST_TIMEOUT).map_err(|error| DeviceError::Unreachable {
                 context: "device authorization",
                 reason: error.without_url().to_string(),
             })?;
