@@ -101,6 +101,12 @@ pub mod pkce;
 /// this build refuses them: these requests hold a code, a verifier or a
 /// token, and a client that followed a 3xx would replay it at whatever the
 /// redirect named. Each flow keeps its own timeout and its own error shape.
+///
+/// No response-body size cap is set here, a pre-existing gap every login
+/// flow through this client shares — newly relevant since [`mcp_oauth`] is
+/// the first login whose counterparty is a config-named,
+/// attacker-influenceable origin rather than a fixed vendor endpoint; a
+/// follow-up, not a fix made here.
 pub(crate) fn login_client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())

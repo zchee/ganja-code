@@ -27,6 +27,27 @@
 //! (a `WWW-Authenticate` challenge mid-call) and resource-metadata discovery
 //! both stay out.
 //!
+//! `rmcp` 3.1.2 — already in the workspace, for `ganja-core`'s MCP client
+//! transport — ships its own OAuth client (`transport::auth`'s
+//! `AuthorizationManager`: RFC 8414 discovery, RFC 7591 registration, PKCE,
+//! and a `CredentialStore` trait of its own), found and deliberately not
+//! used here: wiring it in would mean a second credential and state store
+//! standing beside `auth.json` rather than inside it. It stays the named
+//! path if either follow-up above is ever built — its own
+//! `AuthorizationManager` already carries the protected-resource discovery
+//! and `WWW-Authenticate`-seeded re-auth this module does not.
+//!
+//! **Every endpoint discovery names is validated too, not just the origin.**
+//! [`Login::new`] restricts the origin discovery is asked at to `https` or
+//! loopback `http`; [`Login::discover`] holds every endpoint it reads back —
+//! `authorization_endpoint`, `token_endpoint`, `registration_endpoint` — to
+//! that same rule before any of them is used, and [`renew`] re-checks a
+//! stored credential's remembered `token_endpoint` on every renewal, because
+//! a server naming an endpoint of its own choosing is exactly the server this
+//! validation has to distrust. The check deliberately does not require an
+//! endpoint share a host with the origin — a legitimate authorization server
+//! may delegate to a separate host — only that https-or-loopback still holds.
+//!
 //! **Storage rides the existing store, at a reserved key.** A login here is
 //! stamped under `mcp:<server>` — [`super::storage_key`] passes that prefix
 //! through unchanged, it names nothing in [`super::STORAGE_ALIASES`] — and
@@ -112,6 +133,22 @@ pub enum LoginError {
          anything else puts the login's tokens on the wire in the clear"
     )]
     Origin,
+    /// One of the endpoints a server's own metadata named — or a stored
+    /// credential's remembered `token_endpoint`, re-checked on every renewal
+    /// — is not somewhere tokens may travel to. [`Origin`] holds this same
+    /// rule for the origin discovery is asked at; this is that rule applied
+    /// to what discovery (or a prior login) named instead, so a hostile or
+    /// compromised server cannot walk a code, a verifier or a refresh token
+    /// off through cleartext or an arbitrary host by simply naming it in its
+    /// own answer.
+    ///
+    /// [`Origin`]: Self::Origin
+    #[error("the mcp server named a {field} that is not somewhere tokens may travel to")]
+    UnsafeEndpoint {
+        /// Which field named it: `authorization_endpoint`, `token_endpoint`,
+        /// or `registration_endpoint`.
+        field: &'static str,
+    },
     /// No HTTP client could be built.
     #[error("no HTTP client for the mcp server login: {source}")]
     Client {
@@ -221,6 +258,9 @@ impl LoginError {
                 "the server's answer was not the shape a renewal has".to_owned()
             }
             Self::Origin => "the server's origin is not somewhere tokens may be sent".to_owned(),
+            Self::UnsafeEndpoint { field } => {
+                format!("the server named a {field} that is not somewhere tokens may be sent")
+            }
             Self::Client { source } => format!("no HTTP client: {source}"),
             Self::Entropy { source } => source.to_string(),
             Self::Callback { source } => source.to_string(),
@@ -325,6 +365,20 @@ fn form_post(
         .body(super::device::form(pairs))
 }
 
+/// Refuses `endpoint` unless [`crate::provider::reachable_in_the_clear`] calls
+/// it safe — [`Login::new`]'s own rule for the configured origin, applied
+/// here to a URL a server's own metadata named instead. Called before
+/// `endpoint` is ever handed to a request builder, so a refusal here means
+/// nothing was sent there at all.
+fn validate_endpoint(endpoint: &str, field: &'static str) -> Result<(), LoginError> {
+    let parsed = Url::parse(endpoint).map_err(|_| LoginError::UnsafeEndpoint { field })?;
+    if crate::provider::reachable_in_the_clear(&parsed) {
+        Ok(())
+    } else {
+        Err(LoginError::UnsafeEndpoint { field })
+    }
+}
+
 /// A login against one MCP server's own authorization server.
 #[derive(Clone, Debug)]
 pub struct Login {
@@ -405,11 +459,27 @@ impl Login {
     }
 
     /// RFC 8414 discovery at this login's origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoginError::UnsafeEndpoint`] when the discovered
+    /// `authorization_endpoint`, `token_endpoint` or `registration_endpoint`
+    /// (when present) is not `https` or loopback `http` — checked here,
+    /// before any of them is registered against, authorized at or exchanged
+    /// with, so every later step in this login only ever holds endpoints
+    /// this call already cleared.
     async fn discover(&self) -> Result<ServerMetadata, LoginError> {
         let url = format!("{}{DISCOVERY_PATH}", self.origin);
         let answer = send(self.client.get(&url), step::DISCOVERING).await?;
+        let metadata: ServerMetadata = answer.into_json(step::DISCOVERING)?;
 
-        answer.into_json(step::DISCOVERING)
+        validate_endpoint(&metadata.authorization_endpoint, "authorization_endpoint")?;
+        validate_endpoint(&metadata.token_endpoint, "token_endpoint")?;
+        if let Some(registration_endpoint) = &metadata.registration_endpoint {
+            validate_endpoint(registration_endpoint, "registration_endpoint")?;
+        }
+
+        Ok(metadata)
     }
 
     /// RFC 7591 dynamic client registration, minimal — or the fixed fallback
@@ -670,6 +740,10 @@ impl RefreshOauth for Refresher {
 async fn renew(previous: &OauthCredential) -> Result<OauthCredential, LoginError> {
     let token_endpoint =
         extra_str(previous, extra::TOKEN_ENDPOINT).ok_or(LoginError::NoTokenEndpoint)?;
+    // Re-checked here, not just at discovery: this credential may have been
+    // written before this validation existed, and this is the one path that
+    // would otherwise post a refresh token to it silently, forever.
+    validate_endpoint(&token_endpoint, "token_endpoint")?;
     let client_id =
         extra_str(previous, extra::CLIENT_ID).unwrap_or_else(|| CLIENT_ID_FALLBACK.to_owned());
     let client =
@@ -734,23 +808,34 @@ mod tests {
     ///
     /// `with_registration` toggles whether `/register` is advertised — the
     /// registration-endpoint-absent path falls back to the fixed client id,
-    /// and a test proves that by turning this off.
+    /// and a test proves that by turning this off. `poison`, when set,
+    /// overwrites one field of the discovery response with a value of the
+    /// caller's choosing — how the endpoint-validation tests build a metadata
+    /// answer a login has to refuse to trust. The third return value is every
+    /// path this server actually received a request for, in arrival order —
+    /// the poisoned-endpoint tests read it to confirm a refused discovery
+    /// stops a login before registration or a token request ever runs.
     async fn authorization_server(
         with_registration: bool,
-    ) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+        poison: Option<(&'static str, String)>,
+    ) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port is available");
         let address = listener.local_addr().expect("the socket has an address");
         let seen_client_ids: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen_paths: Arc<Mutex<Vec<String>>> = Arc::default();
 
         let recorded = Arc::clone(&seen_client_ids);
+        let all_paths = Arc::clone(&seen_paths);
         tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
                 let recorded = Arc::clone(&recorded);
+                let all_paths = Arc::clone(&all_paths);
+                let poison = poison.clone();
                 tokio::spawn(async move {
                     let mut buffer = Vec::new();
                     let mut chunk = [0_u8; 4096];
@@ -771,6 +856,10 @@ mod tests {
                         .split(' ')
                         .nth(1)
                         .unwrap_or("");
+                    all_paths
+                        .lock()
+                        .expect("never poisoned")
+                        .push(path.to_owned());
                     let response = if path == "/.well-known/oauth-authorization-server" {
                         let mut metadata = json!({
                             "issuer": format!("http://{address}"),
@@ -780,6 +869,9 @@ mod tests {
                         if with_registration {
                             metadata["registration_endpoint"] =
                                 json!(format!("http://{address}/register"));
+                        }
+                        if let Some((field, value)) = poison {
+                            metadata[field] = json!(value);
                         }
                         json_response(200, &metadata)
                     } else if path == "/register" {
@@ -811,7 +903,7 @@ mod tests {
             }
         });
 
-        (address, seen_client_ids)
+        (address, seen_client_ids, seen_paths)
     }
 
     fn json_response(status: u16, body: &Value) -> String {
@@ -891,7 +983,7 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_registration_and_the_exchange_complete_end_to_end() {
-        let (address, seen_client_ids) = authorization_server(true).await;
+        let (address, seen_client_ids, _seen_paths) = authorization_server(true, None).await;
         let login =
             Login::new(&format!("http://{address}/mcp")).expect("a loopback origin logs in");
         let browser = login
@@ -936,7 +1028,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_server_with_no_registration_endpoint_gets_the_fixed_fallback_id() {
-        let (address, seen_client_ids) = authorization_server(false).await;
+        let (address, seen_client_ids, _seen_paths) = authorization_server(false, None).await;
         let login =
             Login::new(&format!("http://{address}/mcp")).expect("a loopback origin logs in");
         let browser = login
@@ -963,7 +1055,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refresh_reads_the_endpoint_and_client_id_the_login_stored() {
-        let (address, seen_client_ids) = authorization_server(true).await;
+        let (address, seen_client_ids, _seen_paths) = authorization_server(true, None).await;
         let mut stored = OauthCredential::new(
             secrecy::SecretString::from(format!("{CANARY}-old-refresh")),
             secrecy::SecretString::from(format!("{CANARY}-old-access")),
@@ -1008,6 +1100,106 @@ mod tests {
             .await
             .expect_err("no token endpoint was ever recorded");
         assert_eq!(error.kind(), AuthErrorKind::RefreshUnavailable);
+    }
+
+    #[tokio::test]
+    async fn discovery_naming_an_unsafe_token_endpoint_is_refused_before_any_request_reaches_it() {
+        let (address, seen_client_ids, seen_paths) = authorization_server(
+            true,
+            Some((
+                "token_endpoint",
+                "http://mcp-attacker.example/token".to_owned(),
+            )),
+        )
+        .await;
+        let login =
+            Login::new(&format!("http://{address}/mcp")).expect("a loopback origin logs in");
+
+        let result = login.browser().await;
+
+        assert!(
+            matches!(
+                result,
+                Err(LoginError::UnsafeEndpoint {
+                    field: "token_endpoint"
+                })
+            ),
+            "{result:?}"
+        );
+        assert!(
+            seen_client_ids.lock().expect("never poisoned").is_empty(),
+            "nothing was ever posted to the poisoned token endpoint"
+        );
+        assert_eq!(
+            seen_paths.lock().expect("never poisoned").as_slice(),
+            ["/.well-known/oauth-authorization-server"],
+            "a refused discovery must stop the login before registration ever runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_naming_an_unsafe_authorization_or_registration_endpoint_is_refused_too() {
+        for field in ["authorization_endpoint", "registration_endpoint"] {
+            let (address, _seen_client_ids, seen_paths) = authorization_server(
+                true,
+                Some((field, "http://mcp-attacker.example/evil".to_owned())),
+            )
+            .await;
+            let login =
+                Login::new(&format!("http://{address}/mcp")).expect("a loopback origin logs in");
+
+            let result = login.browser().await;
+
+            assert!(
+                matches!(result, Err(LoginError::UnsafeEndpoint { field: got }) if got == field),
+                "{field}: {result:?}"
+            );
+            assert_eq!(
+                seen_paths.lock().expect("never poisoned").as_slice(),
+                ["/.well-known/oauth-authorization-server"],
+                "{field}: a refused discovery must stop the login before registration ever runs"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stored_unsafe_token_endpoint_refuses_a_renewal_without_sending_the_refresh_token() {
+        let mut stored = OauthCredential::new(
+            secrecy::SecretString::from(format!("{CANARY}-old-refresh")),
+            secrecy::SecretString::from(format!("{CANARY}-old-access")),
+            0,
+        );
+        stored.extra.insert(
+            "token_endpoint".to_owned(),
+            Value::from("http://mcp-attacker.example/token"),
+        );
+        stored
+            .extra
+            .insert("client_id".to_owned(), Value::from("dcr-registered-client"));
+
+        // The refusal happens before any HTTP client is even built for the
+        // renewal — a real attempt at "mcp-attacker.example" would need at
+        // least a DNS lookup and a connect, neither of which finishes in
+        // milliseconds; this bounds the call tightly enough that only the
+        // synchronous validation path could possibly answer in time.
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(500),
+            Refresher.refresh("mcp:fixture", &stored),
+        )
+        .await;
+
+        let error = outcome
+            .expect("a refused endpoint is caught well before any network attempt")
+            .expect_err("the poisoned token endpoint must be refused");
+        assert_eq!(error.kind(), AuthErrorKind::RefreshUnavailable);
+        assert!(
+            error.to_string().contains("token_endpoint"),
+            "the refusal must name the field: {error}"
+        );
+        assert!(
+            !error.to_string().contains(CANARY),
+            "a secret reached a message: {error}"
+        );
     }
 
     #[test]
