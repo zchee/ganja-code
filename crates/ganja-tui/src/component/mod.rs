@@ -12,6 +12,7 @@ pub mod editor;
 pub mod effort;
 pub mod files;
 pub mod help;
+pub mod inspector;
 pub mod list;
 pub mod palette;
 pub mod permission;

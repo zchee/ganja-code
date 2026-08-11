@@ -39,6 +39,8 @@ pub enum Action {
     Redraw,
     /// Open the fuzzy search over remembered prompts.
     HistorySearch,
+    /// Open the Ctrl+T inspector overlay (**F2**).
+    TranscriptOpen,
 }
 
 /// The action a config key names, its default binding, in the order a
@@ -50,7 +52,14 @@ const ACTIONS: &[(Action, &str, &str)] = &[
     (Action::AppExit, "app_exit", "ctrl+c,ctrl+q,ctrl+d"),
     (Action::PaletteOpen, "palette_open", "ctrl+p"),
     (Action::SessionsOpen, "sessions_open", "ctrl+s"),
-    (Action::ThemesOpen, "themes_open", "ctrl+t"),
+    // `themes_open` gives up its only default so Ctrl+T can open the
+    // inspector overlay below instead — a user-decided default change,
+    // recorded as deviation **D453** (ctrl-t-inspector-takes-themes-chord).
+    // `parse` already treats an empty value as zero alternatives rather than
+    // an error (`parse`, below), so the action loads reachable by nothing;
+    // `/themes` and the palette are its doors now, and a config
+    // `keybinds: {"themes_open": "..."}` restores a chord.
+    (Action::ThemesOpen, "themes_open", ""),
     (Action::AgentCycle, "agent_cycle", "tab"),
     // Upstream's exact default (`keybind.ts:164`). A terminal without the kitty
     // keyboard protocol cannot report `shift+enter` at all — it delivers a bare
@@ -68,6 +77,12 @@ const ACTIONS: &[(Action, &str, &str)] = &[
     // `session_rename` (`keybind.ts:93`), a command ganja has never had, so
     // the chord was free (deviation **D447**, ctrl-r-search-no-upstream).
     (Action::HistorySearch, "history_search", "ctrl+r"),
+    // The OpenAI Codex CLI transcript overlay's binding
+    // (`docs/references/codex.ja.md:21`), not upstream's — opencode's
+    // `keybind.ts` has no such action at all. The chord is free because
+    // `themes_open` gives it up above (deviation **D453**,
+    // ctrl-t-inspector-takes-themes-chord).
+    (Action::TranscriptOpen, "transcript", "ctrl+t"),
 ];
 
 impl Action {
@@ -436,7 +451,38 @@ mod tests {
     fn every_default_binding_parses() {
         for (action, name, default) in ACTIONS {
             let keys = parse(default).unwrap_or_else(|bad| panic!("{name}: {bad} did not parse"));
-            assert!(!keys.is_empty(), "{action:?} should bind something");
+            // `themes_open` is the one deliberate exception (**D453**): its
+            // default is the empty chord, so it loads reachable by nothing.
+            if *action == Action::ThemesOpen {
+                assert!(keys.is_empty(), "{action:?} should bind nothing by default");
+            } else {
+                assert!(!keys.is_empty(), "{action:?} should bind something");
+            }
+        }
+    }
+
+    /// The untested branch **D453** relies on: `parse` treats an empty value
+    /// as zero alternatives rather than a parse error, so `themes_open`'s
+    /// empty default loads cleanly into an action nothing reaches — rather
+    /// than failing the run the way a genuinely unparseable chord would.
+    #[test]
+    fn an_empty_binding_parses_to_no_keys_rather_than_an_error() {
+        assert_eq!(parse(""), Ok(Vec::new()));
+
+        let binds = Keybinds::defaults();
+        assert_eq!(
+            binds.hint(Action::ThemesOpen),
+            None,
+            "no keys means no hint to show"
+        );
+        for key in [
+            pressed(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            pressed(KeyCode::Char('t'), KeyModifiers::NONE),
+        ] {
+            assert!(
+                !binds.binds(Action::ThemesOpen, key),
+                "an action with no keys should reach nothing"
+            );
         }
     }
 
@@ -457,8 +503,11 @@ mod tests {
                 KeyCode::Char('s'),
                 KeyModifiers::CONTROL,
             ),
+            // Not `Action::ThemesOpen`: `ctrl+t` moved to the inspector
+            // overlay (**D453**), and the picker ships with no chord at all —
+            // see `an_empty_binding_parses_to_no_keys_rather_than_an_error`.
             (
-                Action::ThemesOpen,
+                Action::TranscriptOpen,
                 KeyCode::Char('t'),
                 KeyModifiers::CONTROL,
             ),
@@ -584,8 +633,8 @@ mod tests {
     }
 
     /// A rebind is accepted and takes for its own action even when the chord
-    /// collides with another action's default — `ctrl+t` is `themes_open`'s
-    /// own binding, and [`Keybinds::binds`] still answers `true` for
+    /// collides with another action's default — `ctrl+t` is `transcript`'s
+    /// own binding (**D453**), and [`Keybinds::binds`] still answers `true` for
     /// `history_search` too. Which of the two [`Keybinds::action`] resolves a
     /// bare press to is the separate, first-match-wins rule the reference
     /// order decides; a config that creates a collision is the person's own

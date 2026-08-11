@@ -76,7 +76,11 @@ pub struct Totals {
 
 impl Totals {
     /// The compact rendering the bar has room for beside everything else.
-    fn segment(&self) -> String {
+    ///
+    /// `pub(crate)` so the Ctrl+T inspector's per-turn token tab (**F2**) can
+    /// print the exact same string as its totals footer, rather than a second
+    /// formatter that could drift from what the status bar actually shows.
+    pub(crate) fn segment(&self) -> String {
         let tokens = format!(
             "{} in{SEPARATOR}{} out",
             compact_tokens(self.input_tokens),
