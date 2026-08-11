@@ -48,6 +48,7 @@ use crate::{
         palette::Palette,
         permission::Permission,
         question::Question,
+        search::HistorySearch,
         sessions::{self, Sessions},
         status::{Activity, Status, Totals},
         themes::ThemeList,
@@ -249,6 +250,8 @@ pub struct App {
     sessions: Option<Sessions>,
     /// The themes the user is choosing between, while that picker is open.
     theme_list: Option<ThemeList>,
+    /// The Ctrl+R fuzzy search over remembered prompts, while it is open.
+    history_search: Option<HistorySearch>,
     /// The models or agents the user is choosing between, and which of the two
     /// the list is.
     chooser: Option<(Chooser, ListDialog)>,
@@ -368,6 +371,7 @@ impl App {
             question: None,
             sessions: None,
             theme_list: None,
+            history_search: None,
             chooser: None,
             palette: None,
             palette_filter: String::new(),
@@ -724,6 +728,9 @@ impl App {
                 if let Some(themes) = &self.theme_list {
                     themes.render(transcript, buffer, &self.theme);
                 }
+                if let Some(search) = &self.history_search {
+                    search.render(transcript, buffer, &self.theme);
+                }
                 if let Some((_, chooser)) = &self.chooser {
                     chooser.render(transcript, buffer, &self.theme);
                 }
@@ -952,6 +959,12 @@ impl App {
             return Ok(());
         }
 
+        if self.history_search.is_some() {
+            self.handle_history_search_key(key).await;
+
+            return Ok(());
+        }
+
         if self.chooser.is_some() {
             self.handle_chooser_key(key.code).await;
 
@@ -998,6 +1011,10 @@ impl App {
             }
             Some(keybind::Action::ThemesOpen) => {
                 self.open_themes();
+                return Ok(());
+            }
+            Some(keybind::Action::HistorySearch) => {
+                self.open_history_search();
                 return Ok(());
             }
             // Something else may have drawn over the screen without this
@@ -1149,6 +1166,7 @@ impl App {
             || self.question.is_some()
             || self.sessions.is_some()
             || self.theme_list.is_some()
+            || self.history_search.is_some()
             || self.chooser.is_some()
             || self.palette.is_some()
             || self.help.is_some()
@@ -1993,6 +2011,78 @@ impl App {
         }
     }
 
+    /// Opens the Ctrl+R search over remembered prompts, capturing the
+    /// composer's exact buffer for an Esc to restore untouched.
+    fn open_history_search(&mut self) {
+        self.history_search = Some(HistorySearch::new(
+            self.history.entries(),
+            sessions::now(),
+            self.editor.text(),
+            self.editor.cursor(),
+        ));
+    }
+
+    /// One keypress while the history search is open, which owns every key:
+    /// its query line is what the keyboard is pointed at.
+    async fn handle_history_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_history_search(),
+            KeyCode::Up => self.move_history_search(-1),
+            KeyCode::Down => self.move_history_search(1),
+            KeyCode::Backspace => {
+                if let Some(search) = &mut self.history_search {
+                    search.backspace();
+                }
+            }
+            KeyCode::Enter => self.fill_from_history_search().await,
+            // Everything printable narrows the query — j and k included, the
+            // same reading the palette's own filter line gives them.
+            KeyCode::Char(character) if !key.modifiers.intersects(SHORTCUT_MODIFIERS) => {
+                if let Some(search) = &mut self.history_search {
+                    search.push(character);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Moves the search's cursor by `delta` rows.
+    fn move_history_search(&mut self, delta: isize) {
+        if let Some(search) = &mut self.history_search {
+            search.move_selection(delta);
+        }
+    }
+
+    /// Closes the search, putting back exactly the buffer it opened over —
+    /// text and cursor both, byte for byte.
+    fn close_history_search(&mut self) {
+        let Some(search) = self.history_search.take() else {
+            return;
+        };
+        let (row, column) = search.origin_cursor();
+        self.editor.set_text_at(search.origin_text(), row, column);
+    }
+
+    /// Puts the entry under the cursor into the composer and closes the
+    /// search — an Enter here fills the buffer, it never submits it.
+    async fn fill_from_history_search(&mut self) {
+        let Some(input) = self
+            .history_search
+            .as_ref()
+            .and_then(HistorySearch::selected)
+            .map(|prompt| prompt.input.clone())
+        else {
+            // An empty list has nothing under the cursor; Enter means nothing.
+            return;
+        };
+
+        self.history_search = None;
+        self.editor.set_text(&input);
+        // The recalled entry may itself hold a `/command` or an `@mention`,
+        // just as an Up-arrow recall's can — see `App::recall`.
+        self.sync_menus().await;
+    }
+
     /// Hands the editor's contents to the engine.
     ///
     /// The prompt reaches the transcript as an engine event rather than being
@@ -2452,8 +2542,9 @@ mod tests {
     }
     use crate::{
         clipboard, command,
-        component::{effort, sessions},
+        component::{self, effort, sessions},
         event::AppEvent,
+        history,
         theme::{DEFAULT_THEME, Themes},
     };
 
@@ -4380,6 +4471,232 @@ mod tests {
             app.chat.is_following_tail(),
             "the wheel should be swallowed"
         );
+    }
+
+    /// An app whose prompt history already holds `entries`, submitted in the
+    /// order given — the last one named is the newest.
+    fn app_with_history(directory: &TempDir, entries: &[&str]) -> App {
+        let mut history =
+            history::History::load_from(directory.path().join("prompt-history.jsonl"));
+        for entry in entries {
+            history.append(history::PromptInfo::text(*entry));
+        }
+
+        app().with_history(history)
+    }
+
+    /// Ctrl+R opens the search over whatever the store holds.
+    #[tokio::test]
+    async fn control_r_opens_the_history_search() {
+        let directory = temporary();
+        let mut app = app_with_history(&directory, &["first prompt", "second prompt"]);
+
+        app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-r is handled");
+
+        assert!(app.history_search.is_some(), "the search should be open");
+    }
+
+    /// Fuzzy narrowing survives the whole way from a keystroke down to what
+    /// is under the cursor.
+    #[tokio::test]
+    async fn typing_into_the_history_search_narrows_to_a_fuzzy_match() {
+        let directory = temporary();
+        let mut app = app_with_history(&directory, &["commit the fix", "git status"]);
+
+        app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-r is handled");
+        for event in typing("ommi") {
+            app.handle(event).await.expect("typing narrows the query");
+        }
+
+        assert_eq!(
+            app.history_search
+                .as_ref()
+                .and_then(component::search::HistorySearch::selected)
+                .map(|prompt| prompt.input.as_str()),
+            Some("commit the fix")
+        );
+    }
+
+    /// Enter fills the composer with the entry under the cursor and closes
+    /// the search — an Enter here is a fill, never a submit, so no engine
+    /// event should ever arrive.
+    #[tokio::test]
+    async fn enter_in_history_search_fills_the_composer_and_sends_nothing() {
+        let (mut app, mut events) = wired().await;
+        let directory = temporary();
+        let mut history =
+            history::History::load_from(directory.path().join("prompt-history.jsonl"));
+        history.append(history::PromptInfo::text("what does this crate do"));
+        app.history = history;
+
+        app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-r is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(app.history_search.is_none(), "enter closes the search");
+        assert_eq!(app.editor.text(), "what does this crate do");
+
+        let arrived = tokio::time::timeout(Duration::from_millis(50), events.next()).await;
+        assert!(
+            arrived.is_err(),
+            "no engine event should have fired — a fill is not a submit"
+        );
+    }
+
+    /// Esc restores exactly the buffer the search opened over — text and
+    /// cursor both — even after the query narrowed the list and the
+    /// selection moved.
+    #[tokio::test]
+    async fn esc_restores_the_pre_search_buffer_byte_for_byte() {
+        let directory = temporary();
+        let mut app = app_with_history(&directory, &["remembered prompt"]);
+        for event in typing("draft in progress") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        let text_before = app.editor.text();
+        let cursor_before = app.editor.cursor();
+
+        app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-r is handled");
+        for event in typing("remem") {
+            app.handle(event).await.expect("typing narrows the query");
+        }
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE))
+            .await
+            .expect("down is handled");
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+
+        assert!(app.history_search.is_none(), "escape closes the search");
+        assert_eq!(
+            app.editor.text(),
+            text_before,
+            "the buffer is restored byte for byte"
+        );
+        assert_eq!(app.editor.cursor(), cursor_before, "and the cursor too");
+    }
+
+    /// The chord is data like the six existing ones: rebinding it opens the
+    /// search from its new key, and the old default stops working.
+    #[tokio::test]
+    async fn a_rebound_history_search_reaches_its_new_key_and_the_default_stops_working() {
+        let directory = temporary();
+        let mut history =
+            history::History::load_from(directory.path().join("prompt-history.jsonl"));
+        history.append(history::PromptInfo::text("remembered"));
+
+        let configured: std::collections::BTreeMap<String, String> =
+            [("history_search".to_owned(), "f7".to_owned())].into();
+        let keys = crate::keybind::Keybinds::from_config(&configured).expect("a legible binding");
+        let mut app = App::new(engine(), None, Themes::builtin())
+            .with_history(history)
+            .with_keybinds(keys);
+
+        app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-r is handled");
+        assert!(
+            app.history_search.is_none(),
+            "the replaced default should be inert"
+        );
+
+        app.handle(key(KeyCode::F(7), KeyModifiers::NONE))
+            .await
+            .expect("f7 is handled");
+        assert!(app.history_search.is_some(), "and f7 should open it");
+    }
+
+    /// The picker owns every key while it is open, exactly as the sessions
+    /// and theme pickers do — otherwise `j` would be typed into the query
+    /// and nowhere else, or worse, leak past it into the editor.
+    #[tokio::test]
+    async fn keys_while_the_history_search_is_open_do_not_reach_the_editor() {
+        let directory = temporary();
+        let mut app = app_with_history(&directory, &["remembered prompt"]);
+
+        app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-r is handled");
+        for event in typing("jkx") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        assert!(app.editor.prompt().is_none());
+        assert!(app.history_search.is_some());
+    }
+
+    /// The wheel belongs to the search modal too, like every other one.
+    #[tokio::test]
+    async fn the_wheel_does_not_reach_the_transcript_while_the_history_search_is_open() {
+        let directory = temporary();
+        let mut app = app_with_history(&directory, &["remembered prompt"]);
+        for index in 0..60 {
+            app.chat
+                .start_message(Message::user(format!("entry {index}")));
+        }
+        app.draw(&mut terminal(40, 12)).expect("a frame draws");
+
+        app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-r is handled");
+        app.handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })))
+        .await
+        .expect("a wheel event is handled");
+
+        assert!(
+            app.chat.is_following_tail(),
+            "the wheel should be swallowed"
+        );
+    }
+
+    /// An empty store still opens — the modal says so honestly rather than
+    /// refusing to open at all.
+    #[tokio::test]
+    async fn control_r_over_an_empty_store_still_opens() {
+        let mut app = app();
+
+        app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-r is handled");
+
+        assert!(app.history_search.is_some());
+    }
+
+    #[tokio::test]
+    async fn snapshot_history_search_open() {
+        let directory = temporary();
+        let mut app = app_with_history(
+            &directory,
+            &["what does this crate do", "commit the fix", "git status"],
+        );
+
+        app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-r is handled");
+
+        assert!(
+            app.history_search.is_some(),
+            "the search must be open, or the snapshot is of a bare screen"
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
     }
 
     /// A pick has to outlive the run that made it, and the theme it names has

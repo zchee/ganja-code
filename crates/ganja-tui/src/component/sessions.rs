@@ -222,7 +222,11 @@ fn size(info: &SessionInfo) -> String {
 ///
 /// A stored session whose timestamp is in the future — a clock that moved
 /// backwards between runs — reads as current rather than as negative.
-fn age(now: u64, updated: u64) -> String {
+///
+/// `pub(crate)`: the history search modal ages its rows by the same idiom
+/// (`component::search`), and a second copy of four bucket comparisons would
+/// be the kind of duplication worth a one-line visibility change instead.
+pub(crate) fn age(now: u64, updated: u64) -> String {
     let elapsed = now.saturating_sub(updated);
 
     if elapsed < MINUTE {

@@ -37,6 +37,8 @@ pub enum Action {
     InputNewline,
     /// Force the next frame through a full repaint.
     Redraw,
+    /// Open the fuzzy search over remembered prompts.
+    HistorySearch,
 }
 
 /// The action a config key names, its default binding, in the order a
@@ -62,6 +64,10 @@ const ACTIONS: &[(Action, &str, &str)] = &[
     // Claude Code's binding, not upstream's — opencode's `keybind.ts` has no
     // redraw action at all (deviation **D445**, ctrl-l-redraw-no-upstream).
     (Action::Redraw, "redraw", "ctrl+l"),
+    // Claude Code's binding, not upstream's — upstream's own ctrl+r is
+    // `session_rename` (`keybind.ts:93`), a command ganja has never had, so
+    // the chord was free (deviation **D447**, ctrl-r-search-no-upstream).
+    (Action::HistorySearch, "history_search", "ctrl+r"),
 ];
 
 impl Action {
@@ -464,6 +470,11 @@ mod tests {
             ),
             (Action::InputNewline, KeyCode::Enter, KeyModifiers::SHIFT),
             (Action::Redraw, KeyCode::Char('l'), KeyModifiers::CONTROL),
+            (
+                Action::HistorySearch,
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+            ),
         ];
 
         for (action, code, modifiers) in cases {
@@ -534,11 +545,11 @@ mod tests {
     /// ordinary row in the table, rebindable exactly like every other.
     #[test]
     fn the_redraw_chord_is_rebindable_from_config() {
-        let binds = Keybinds::from_config(&configured(&[("redraw", "ctrl+r")]))
+        let binds = Keybinds::from_config(&configured(&[("redraw", "f6")]))
             .expect("a legible binding loads");
 
         assert_eq!(
-            binds.action(pressed(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            binds.action(pressed(KeyCode::F(6), KeyModifiers::NONE)),
             Some(Action::Redraw),
             "the rebind reaches the action"
         );
@@ -549,6 +560,45 @@ mod tests {
             ),
             "and the default is replaced, not kept alongside"
         );
+    }
+
+    /// Ctrl+R has no upstream counterpart either (**D447**); upstream's own
+    /// ctrl+r is `session_rename`, which ganja does not have.
+    #[test]
+    fn the_history_search_chord_is_rebindable_from_config() {
+        let binds = Keybinds::from_config(&configured(&[("history_search", "f7")]))
+            .expect("a legible binding loads");
+
+        assert_eq!(
+            binds.action(pressed(KeyCode::F(7), KeyModifiers::NONE)),
+            Some(Action::HistorySearch),
+            "the rebind reaches the action"
+        );
+        assert!(
+            !binds.binds(
+                Action::HistorySearch,
+                pressed(KeyCode::Char('r'), KeyModifiers::CONTROL)
+            ),
+            "and the default is replaced, not kept alongside"
+        );
+    }
+
+    /// A rebind is accepted and takes for its own action even when the chord
+    /// collides with another action's default — `ctrl+t` is `themes_open`'s
+    /// own binding, and [`Keybinds::binds`] still answers `true` for
+    /// `history_search` too. Which of the two [`Keybinds::action`] resolves a
+    /// bare press to is the separate, first-match-wins rule the reference
+    /// order decides; a config that creates a collision is the person's own
+    /// to avoid, not something `from_config` refuses.
+    #[test]
+    fn a_rebind_still_binds_even_when_it_collides_with_anothers_default() {
+        let binds = Keybinds::from_config(&configured(&[("history_search", "ctrl+t")]))
+            .expect("a legible binding loads");
+
+        assert!(binds.binds(
+            Action::HistorySearch,
+            pressed(KeyCode::Char('t'), KeyModifiers::CONTROL)
+        ));
     }
 
     #[test]
