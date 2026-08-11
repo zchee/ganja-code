@@ -398,6 +398,11 @@ mod tests {
     }
 
     /// The card describes the run it is shown in, not the build's defaults.
+    ///
+    /// Scoped to the `/themes` row rather than the whole screen: `ctrl+t` is
+    /// legitimately on the card now, as `transcript`'s own default
+    /// (**D453**), so a blanket "the screen must not contain ctrl+t" would
+    /// fail for a reason that has nothing to do with this rebind.
     #[test]
     fn a_rebound_key_is_the_one_the_card_shows() {
         let configured: BTreeMap<String, String> =
@@ -405,11 +410,15 @@ mod tests {
         let keys = Keybinds::from_config(&configured).expect("a legible binding loads");
 
         let screen = rendered(&mut Help::new(keys));
+        let themes_row = screen
+            .lines()
+            .find(|line| line.contains("/themes"))
+            .unwrap_or_else(|| panic!("the /themes row should be listed:\n{screen}"));
 
-        assert!(screen.contains("f7"), "{screen}");
+        assert!(themes_row.contains("f7"), "{themes_row}");
         assert!(
-            !screen.contains("ctrl+t"),
-            "the replaced default should be gone:\n{screen}"
+            !themes_row.contains("ctrl+t"),
+            "the replaced default should be gone from its own row:\n{themes_row}"
         );
     }
 

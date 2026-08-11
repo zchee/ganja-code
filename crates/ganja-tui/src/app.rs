@@ -10,6 +10,7 @@
 //! keep streaming cheap without making typing feel laggy.
 
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -45,6 +46,7 @@ use crate::{
         effort,
         files::Files,
         help::Help,
+        inspector::{Feed, Inspector, TurnUsage},
         list::{self, ListDialog},
         palette::Palette,
         permission::Permission,
@@ -82,6 +84,16 @@ const SHORTCUT_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL.union(KeyModifier
 /// card's own height: the card sizes itself inside the render and nothing out
 /// here has seen the result.
 const HELP_PAGE: isize = 8;
+
+/// Cap on the Ctrl+T inspector's raw-log ring buffer (**F2**), named so the
+/// bound is visible rather than implicit. Every core event this session
+/// emits is teed in before [`App::handle_core`] consumes the original.
+const MAX_EVENT_LOG: usize = 2000;
+
+/// Cap on the Ctrl+T inspector's per-turn usage table (**F2**). Far more than
+/// a real session reaches — one row per *finished* turn, not per event — but
+/// still bounded rather than open-ended.
+const MAX_TURN_USAGE: usize = 1000;
 
 /// How long a first Esc stays armed for the rewind gesture (**F7**).
 ///
@@ -285,6 +297,18 @@ pub struct App {
     palette_filter: String,
     /// The reference card, while it is open.
     help: Option<Help>,
+    /// The Ctrl+T inspector overlay, while it is open (**F2**).
+    inspector: Option<Inspector>,
+    /// Every core event this session has emitted, capped (**F2**): what the
+    /// inspector's raw-log tab replays. Teed from `AppEvent::Core`'s own
+    /// `Clone` (`event.rs:14`) before `App::handle_core` consumes the
+    /// original by value.
+    event_log: VecDeque<CoreEvent>,
+    /// One row per turn that reported a `Usage`, capped the same way: what
+    /// the inspector's per-turn token tab replays. The reasoning and cache
+    /// splits ride along untouched, where `App::record`'s own running totals
+    /// collapse them.
+    turn_usages: VecDeque<TurnUsage>,
     /// The inline command menu, while the buffer is a command being typed.
     dropdown: Option<Dropdown>,
     /// The inline file menu, while the buffer is mentioning a file.
@@ -442,6 +466,9 @@ impl App {
             palette: None,
             palette_filter: String::new(),
             help: None,
+            inspector: None,
+            event_log: VecDeque::new(),
+            turn_usages: VecDeque::new(),
             dropdown: None,
             files: None,
             engine_commands,
@@ -656,6 +683,7 @@ impl App {
                 self.urgent = true;
             }
             AppEvent::Core(event) => {
+                self.tee_event(&event);
                 self.handle_core(*event);
                 self.dirty = true;
                 // Run after every engine event, because the event that just
@@ -674,6 +702,17 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Tees `event` into the Ctrl+T inspector's raw-log ring buffer before
+    /// [`App::handle_core`] consumes the original by value (**F2**).
+    /// [`CoreEvent`] is `Clone` (`event.rs:14`) precisely so this can happen
+    /// without disturbing the one path that already owns the event.
+    fn tee_event(&mut self, event: &CoreEvent) {
+        self.event_log.push_back(event.clone());
+        if self.event_log.len() > MAX_EVENT_LOG {
+            self.event_log.pop_front();
+        }
     }
 
     /// Looks at where the MCP servers stand, and says so if one failed.
@@ -839,6 +878,24 @@ impl App {
                 }
                 if let Some(help) = &mut self.help {
                     help.render(transcript, buffer, &self.theme);
+                }
+                // A view, not a mode (**F2**): everything it reads is handed
+                // in fresh from `App`'s own state, so a turn streaming
+                // beneath it is never behind what this shows.
+                if let Some(inspector) = &mut self.inspector {
+                    let session = self.engine.current_session();
+                    inspector.render(
+                        transcript,
+                        buffer,
+                        &self.theme,
+                        &Feed {
+                            session: session.as_ref(),
+                            messages: &self.chat.messages(),
+                            events: &self.event_log,
+                            usages: &self.turn_usages,
+                            totals: self.totals,
+                        },
+                    );
                 }
                 if let Some(question) = &self.question {
                     question.render(transcript, buffer, &self.theme);
@@ -1136,6 +1193,32 @@ impl App {
             return Ok(());
         }
 
+        if let Some(inspector) = &mut self.inspector {
+            // The toggle's other half: Ctrl+T opened it, and closes it again
+            // from anywhere inside — the same "from anywhere idle-or-
+            // streaming" reach the chord opens it from (**F2**).
+            if key.code == KeyCode::Esc || self.keys.binds(keybind::Action::TranscriptOpen, key) {
+                self.inspector = None;
+                return Ok(());
+            }
+            match key.code {
+                KeyCode::Left => inspector.previous_tab(),
+                KeyCode::Right => inspector.next_tab(),
+                KeyCode::Char('1') => inspector.select_index(0),
+                KeyCode::Char('2') => inspector.select_index(1),
+                KeyCode::Char('3') => inspector.select_index(2),
+                KeyCode::Up | KeyCode::Char('k') => inspector.scroll(-1),
+                KeyCode::Down | KeyCode::Char('j') => inspector.scroll(1),
+                KeyCode::PageUp => inspector.scroll(-HELP_PAGE),
+                KeyCode::PageDown => inspector.scroll(HELP_PAGE),
+                KeyCode::Home => inspector.scroll_to_top(),
+                KeyCode::End => inspector.scroll(isize::MAX),
+                _ => {}
+            }
+
+            return Ok(());
+        }
+
         if self.sessions.is_some() {
             self.handle_picker_key(key.code).await;
 
@@ -1210,6 +1293,10 @@ impl App {
             }
             Some(keybind::Action::HistorySearch) => {
                 self.open_history_search();
+                return Ok(());
+            }
+            Some(keybind::Action::TranscriptOpen) => {
+                self.open_inspector();
                 return Ok(());
             }
             // Something else may have drawn over the screen without this
@@ -1402,6 +1489,7 @@ impl App {
             || self.chooser.is_some()
             || self.palette.is_some()
             || self.help.is_some()
+            || self.inspector.is_some()
     }
 
     /// Runs the command a palette row or a menu row named.
@@ -2098,6 +2186,11 @@ impl App {
     /// Opens the theme picker with the cursor on the theme already in use.
     fn open_themes(&mut self) {
         self.theme_list = Some(ThemeList::new(self.themes.names(), self.themes.active()));
+    }
+
+    /// Opens the Ctrl+T inspector overlay, always on its first tab (**F2**).
+    fn open_inspector(&mut self) {
+        self.inspector = Some(Inspector::new());
     }
 
     /// One keypress while the theme picker is open, which owns every key.
@@ -2895,6 +2988,7 @@ impl App {
                 self.sync_effort_status();
             }
             CoreEvent::MessageFinished {
+                message_id,
                 reason,
                 usage,
                 error,
@@ -2915,7 +3009,7 @@ impl App {
                 self.queue.strand();
                 self.sync_queue_status();
                 if let Some(usage) = usage {
-                    self.record(&usage);
+                    self.record(&message_id, &usage);
                 }
                 if error.is_some() {
                     self.status.set_notice(error);
@@ -2924,12 +3018,13 @@ impl App {
         }
     }
 
-    /// Adds what a turn spent to the session totals.
+    /// Adds what a turn spent to the session totals, and keeps its own row
+    /// for the Ctrl+T inspector's per-turn token tab (**F2**).
     ///
     /// Tokens accumulate whatever the model is, so a run against the fake
     /// provider still shows counts; dollars only appear once the catalog can
     /// price the model, because a made-up figure is worse than none.
-    fn record(&mut self, usage: &Usage) {
+    fn record(&mut self, message_id: &MessageId, usage: &Usage) {
         // The three input counters are disjoint — `Usage` says so, and each
         // provider is what normalizes to it — so what a turn spent on the way
         // in is their sum rather than `input_tokens` alone.
@@ -2949,6 +3044,18 @@ impl App {
         }
 
         self.status.set_totals(self.totals);
+
+        // Retained whole, reasoning and cache splits included, where the
+        // totals above collapse them: the inspector's job is to show what
+        // the running totals throw away.
+        self.turn_usages.push_back(TurnUsage {
+            message_id: message_id.clone(),
+            model: self.model.clone(),
+            usage: *usage,
+        });
+        if self.turn_usages.len() > MAX_TURN_USAGE {
+            self.turn_usages.pop_front();
+        }
     }
 
     fn needs_draw(&self) -> bool {
@@ -3073,8 +3180,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        App, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, ListDialog, MessageId, Mode,
-        NO_EFFORTS, Palette, Permission, RevertScope, Rewind, WireListing, permission_reply,
+        App, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, ListDialog, MAX_EVENT_LOG,
+        MessageId, Mode, NO_EFFORTS, Palette, Permission, RevertScope, Rewind, WireListing,
+        permission_reply,
     };
 
     /// The session every hand-built fixture event happens in. One pinned id,
@@ -3939,6 +4047,83 @@ mod tests {
 
         assert_eq!(app.totals.input_tokens, 1_000);
         assert_eq!(app.totals.output_tokens, 100);
+    }
+
+    /// The wire's reasoning and cache splits survive into the Ctrl+T
+    /// inspector's own per-turn row (**F2**), where the running totals above
+    /// collapse them into two numbers.
+    #[tokio::test]
+    async fn message_finished_retains_a_turn_usage_row_with_its_full_split() {
+        const MODEL: &str = "claude-sonnet-5";
+
+        let mut app = App::new(engine_asking(MODEL), None, Themes::builtin());
+        let reply_id = Message::assistant(MODEL).id;
+        let usage = Usage {
+            input_tokens: 3,
+            output_tokens: 4,
+            reasoning_tokens: 5,
+            cache_read_tokens: 6,
+            cache_write_tokens: 7,
+        };
+
+        app.handle(AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
+            message_id: reply_id.clone(),
+            reason: FinishReason::Completed,
+            usage: Some(usage),
+            error: None,
+            completed: 0,
+        }))
+        .await
+        .expect("a turn end is handled");
+
+        let row = app.turn_usages.back().expect("a row should have been kept");
+        assert_eq!(row.message_id, reply_id);
+        assert_eq!(row.model, MODEL);
+        assert_eq!(row.usage, usage);
+    }
+
+    /// The complement of [`a_turn_without_usage_does_not_disturb_the_totals`]:
+    /// a turn that reported nothing has nothing to add a row about either.
+    #[tokio::test]
+    async fn a_turn_without_usage_adds_no_turn_usage_row() {
+        let mut app = app();
+
+        app.handle(AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
+            message_id: Message::assistant(fake::MODEL).id,
+            reason: FinishReason::Cancelled,
+            usage: None,
+            error: None,
+            completed: 0,
+        }))
+        .await
+        .expect("a cancel is handled");
+
+        assert!(
+            app.turn_usages.is_empty(),
+            "a turn that reported no usage should add no row"
+        );
+    }
+
+    /// The raw-log ring buffer is capped rather than growing without bound
+    /// (**F2**) — a synchronous unit test on `App::tee_event` directly,
+    /// rather than routing thousands of events through `handle`, which would
+    /// pay for a `replay_queued` call this behavior has nothing to do with.
+    #[test]
+    fn the_raw_log_caps_rather_than_growing_without_bound() {
+        let mut app = app();
+        let event = CoreEvent::AgentChanged {
+            session_id: session(),
+            agent: "build".to_owned(),
+            model: fake::MODEL.to_owned(),
+        };
+
+        for _ in 0..(MAX_EVENT_LOG + 10) {
+            app.tee_event(&event);
+        }
+
+        assert_eq!(app.event_log.len(), MAX_EVENT_LOG);
     }
 
     #[tokio::test]
@@ -4916,9 +5101,10 @@ mod tests {
     async fn moving_the_cursor_in_the_theme_picker_applies_what_it_lands_on() {
         let mut app = app();
 
-        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-            .await
-            .expect("control-t is handled");
+        // `ctrl+t` opens the Ctrl+T inspector now (**D453**); the picker's
+        // own default chord is gone, so these fixtures open it the way
+        // `snapshot_help_dialog_open` opens the reference card.
+        app.run_command(command::Action::Themes).await;
 
         assert!(app.theme_list.is_some(), "the picker should be open");
         assert_eq!(
@@ -4944,9 +5130,10 @@ mod tests {
     #[tokio::test]
     async fn cancelling_the_theme_picker_puts_back_the_theme_it_opened_on() {
         let mut app = app();
-        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-            .await
-            .expect("control-t is handled");
+        // `ctrl+t` opens the Ctrl+T inspector now (**D453**); the picker's
+        // own default chord is gone, so these fixtures open it the way
+        // `snapshot_help_dialog_open` opens the reference card.
+        app.run_command(command::Action::Themes).await;
         app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
             .await
             .expect("j is handled");
@@ -4964,9 +5151,10 @@ mod tests {
     #[tokio::test]
     async fn keeping_a_theme_closes_the_picker_and_leaves_it_applied() {
         let mut app = app();
-        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-            .await
-            .expect("control-t is handled");
+        // `ctrl+t` opens the Ctrl+T inspector now (**D453**); the picker's
+        // own default chord is gone, so these fixtures open it the way
+        // `snapshot_help_dialog_open` opens the reference card.
+        app.run_command(command::Action::Themes).await;
         app.handle(key(KeyCode::Char('k'), KeyModifiers::NONE))
             .await
             .expect("k is handled");
@@ -4985,9 +5173,10 @@ mod tests {
     #[tokio::test]
     async fn keys_while_the_theme_picker_is_open_do_not_reach_the_editor() {
         let mut app = app();
-        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-            .await
-            .expect("control-t is handled");
+        // `ctrl+t` opens the Ctrl+T inspector now (**D453**); the picker's
+        // own default chord is gone, so these fixtures open it the way
+        // `snapshot_help_dialog_open` opens the reference card.
+        app.run_command(command::Action::Themes).await;
 
         for event in typing("jkx") {
             app.handle(event).await.expect("typing is handled");
@@ -5009,9 +5198,10 @@ mod tests {
         }
         app.draw(&mut terminal(40, 12)).expect("a frame draws");
 
-        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-            .await
-            .expect("control-t is handled");
+        // `ctrl+t` opens the Ctrl+T inspector now (**D453**); the picker's
+        // own default chord is gone, so these fixtures open it the way
+        // `snapshot_help_dialog_open` opens the reference card.
+        app.run_command(command::Action::Themes).await;
         app.handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 0,
@@ -5264,9 +5454,10 @@ mod tests {
         themes.adopt_store(store.clone());
         let mut app = App::new(engine(), None, themes);
 
-        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-            .await
-            .expect("control-t is handled");
+        // `ctrl+t` opens the Ctrl+T inspector now (**D453**); the picker's
+        // own default chord is gone, so these fixtures open it the way
+        // `snapshot_help_dialog_open` opens the reference card.
+        app.run_command(command::Action::Themes).await;
         app.handle(key(KeyCode::Char('k'), KeyModifiers::NONE))
             .await
             .expect("k is handled");
@@ -5293,9 +5484,10 @@ mod tests {
         themes.adopt_store(store.clone());
         let mut app = App::new(engine(), None, themes);
 
-        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-            .await
-            .expect("control-t is handled");
+        // `ctrl+t` opens the Ctrl+T inspector now (**D453**); the picker's
+        // own default chord is gone, so these fixtures open it the way
+        // `snapshot_help_dialog_open` opens the reference card.
+        app.run_command(command::Action::Themes).await;
         app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
             .await
             .expect("j is handled");
@@ -5387,9 +5579,10 @@ mod tests {
         let mut app = app();
         palette_transcript(&mut app);
 
-        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-            .await
-            .expect("control-t is handled");
+        // `ctrl+t` opens the Ctrl+T inspector now (**D453**); the picker's
+        // own default chord is gone, so these fixtures open it the way
+        // `snapshot_help_dialog_open` opens the reference card.
+        app.run_command(command::Action::Themes).await;
 
         assert!(
             app.theme_list.is_some(),
@@ -6420,6 +6613,140 @@ mod tests {
             .await
             .expect("escape is handled");
         assert!(app.help.is_none());
+    }
+
+    /// Ctrl+T opens the inspector overlay (**F2**, **D453**) and both Esc and
+    /// Ctrl+T itself close it again — a toggle, not a one-way door.
+    #[tokio::test]
+    async fn ctrl_t_opens_the_inspector_and_either_esc_or_ctrl_t_closes_it() {
+        let mut app = app();
+        assert!(app.inspector.is_none());
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+t is handled");
+        assert!(app.inspector.is_some());
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.inspector.is_none(), "escape should close it");
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+t is handled");
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+t is handled again");
+        assert!(app.inspector.is_none(), "ctrl+t itself should close it too");
+    }
+
+    /// Left/Right cycle the tabs and the digit keys jump straight to one, all
+    /// reflected in what actually renders rather than just in which key was
+    /// pressed.
+    #[tokio::test]
+    async fn digit_keys_and_arrows_switch_the_inspectors_tab() {
+        let mut app = app();
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+t opens the overlay");
+
+        let mut terminal = terminal(120, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("no session yet"),
+            "the overlay opens on the transcript tab:\n{}",
+            screen(&terminal)
+        );
+
+        app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE))
+            .await
+            .expect("2 jumps to the log tab");
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("no events yet"),
+            "got:\n{}",
+            screen(&terminal)
+        );
+
+        app.handle(key(KeyCode::Left, KeyModifiers::NONE))
+            .await
+            .expect("left cycles back a tab");
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("no session yet"),
+            "left from the log tab should land back on the transcript tab:\n{}",
+            screen(&terminal)
+        );
+    }
+
+    /// A view, not a mode (**F2**): opening the overlay does not pause a
+    /// streaming turn, and the transcript underneath keeps growing exactly as
+    /// it would with nothing open.
+    #[tokio::test]
+    async fn the_inspector_does_not_pause_a_streaming_turn() {
+        let mut app = app();
+        let reply = Message::assistant("canned");
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
+            message: reply.clone(),
+        }))
+        .await
+        .expect("the reply starts");
+        assert!(app.status.is_streaming());
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+t opens the overlay");
+
+        let part = Part::text("");
+        app.handle(AppEvent::core(CoreEvent::PartStarted {
+            session_id: session(),
+            message_id: reply.id.clone(),
+            part: part.clone(),
+        }))
+        .await
+        .expect("a part starts");
+        app.handle(AppEvent::core(CoreEvent::PartDelta {
+            session_id: session(),
+            message_id: reply.id.clone(),
+            part_id: part.id.clone(),
+            delta: "still streaming".to_owned(),
+        }))
+        .await
+        .expect("a fragment is handled");
+
+        assert!(
+            app.status.is_streaming(),
+            "the overlay must not pause the turn"
+        );
+        let grew = app.chat.messages().iter().any(|(_, parts)| {
+            parts
+                .iter()
+                .any(|part| part.as_text() == Some("still streaming"))
+        });
+        assert!(
+            grew,
+            "the transcript should keep growing while the overlay is open"
+        );
+    }
+
+    /// Opened the way a user opens it, over a real transcript — this is what
+    /// pins the overlay's border, its tab strip and its footer inside the
+    /// full three-pane frame.
+    #[tokio::test]
+    async fn snapshot_inspector_dialog_open() {
+        let mut app = app();
+        palette_transcript(&mut app);
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+t opens the overlay");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
     }
 
     #[tokio::test]
