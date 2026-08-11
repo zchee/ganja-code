@@ -1,0 +1,598 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ganja-config",
+  "title": "ganja configuration",
+  "description": "A ganja.jsonc / ganja.json file. Both names are read in three tiers — the global config home, the one file GANJA_CONFIG or --config names, then every directory from the working directory up to the project root — and later beats earlier. Both extensions are parsed as JSONC: line and block comments and trailing commas are accepted, while single-quoted strings, unquoted keys, hexadecimal numbers and missing commas are not. This schema describes the resulting JSON value; the comment and trailing-comma syntax is a property of the reader, not of the value. Every top-level key this build understands is listed here, and any other key is a hard load error naming it.",
+  "$comment": "Derived from crates/ganja-core/src/config.rs:602-705 (struct Config, #[serde(deny_unknown_fields)]). Audited against config.rs and crates/ganja-core/tests/config_schema.rs, which catches drift in both directions.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor schema reference. Read so that writing one is not an error; nothing consults it."
+    },
+    "model": {
+      "type": "string",
+      "description": "Default model, \"provider/model\", split on the first slash so openrouter/anthropic/claude-3 names the model anthropic/claude-3.",
+      "examples": ["anthropic/claude-sonnet-4-5", "openai/gpt-5"]
+    },
+    "small_model": {
+      "type": "string",
+      "description": "Cheaper model for the requests a session makes about itself — titles and summaries."
+    },
+    "default_provider": {
+      "type": "string",
+      "description": "Provider a session runs as when no other tier names one: a builtin id or one declared in `provider`. It supplies only the provider; an id nothing ships or declares is refused at selection rather than at load.",
+      "examples": ["anthropic", "openai", "grok", "github-copilot", "cursor", "fake"]
+    },
+    "default_agent": {
+      "type": "string",
+      "description": "Agent a session starts on.",
+      "examples": ["build", "plan", "general", "explore"]
+    },
+    "agent": {
+      "type": "object",
+      "description": "Agent definitions, by name. A name nothing answers to becomes a new agent in mode \"all\"; a builtin's fields are replaced field by field.",
+      "default": {},
+      "additionalProperties": { "$ref": "#/$defs/AgentConfig" }
+    },
+    "agents": {
+      "$ref": "#/$defs/AgentsConfig",
+      "description": "How this session runs the agents it has, as opposed to what they are (`agent`). Its own settings object beside the `agent` map rather than a key inside it, so a `concurrency` setting cannot collide with an agent actually named that.",
+      "default": {}
+    },
+    "permission": {
+      "$ref": "#/$defs/PermissionConfig",
+      "description": "Permission rules layered over the built-in ones.",
+      "default": {}
+    },
+    "instructions": {
+      "type": "array",
+      "description": "Extra instruction files, as paths or globs. The one array that concatenates across tiers (order-preserving, deduplicated) rather than being replaced by the closest tier. An http(s) entry is skipped with a warning rather than fetched (D2).",
+      "default": [],
+      "items": { "type": "string" }
+    },
+    "theme": {
+      "type": "string",
+      "description": "Theme by name: one of the ported builtins, or a theme file under <config home>/themes/."
+    },
+    "theme_mode": {
+      "$ref": "#/$defs/ThemeMode",
+      "description": "Which variant of the selected theme to render."
+    },
+    "keybinds": {
+      "type": "object",
+      "description": "Key bindings, by action name. The value is one binding or several comma-separated alternatives (\"ctrl+c,ctrl+q\"); an empty value leaves the action reachable by no chord. Core keeps this map raw — the TUI resolves it and refuses an action name it does not have.",
+      "$comment": "Action names and their defaults: crates/ganja-tui/src/keybind.rs:48-86.",
+      "default": {},
+      "propertyNames": {
+        "enum": [
+          "app_exit",
+          "palette_open",
+          "sessions_open",
+          "themes_open",
+          "agent_cycle",
+          "input_newline",
+          "redraw",
+          "history_search",
+          "transcript"
+        ]
+      },
+      "additionalProperties": { "type": "string" },
+      "properties": {
+        "app_exit": { "type": "string", "default": "ctrl+c,ctrl+q,ctrl+d" },
+        "palette_open": { "type": "string", "default": "ctrl+p" },
+        "sessions_open": { "type": "string", "default": "ctrl+s" },
+        "themes_open": {
+          "type": "string",
+          "default": "",
+          "description": "Bound to nothing by default: ctrl+t went to the transcript overlay (D453). /themes and the palette still open it."
+        },
+        "agent_cycle": { "type": "string", "default": "tab" },
+        "input_newline": {
+          "type": "string",
+          "default": "shift+enter,ctrl+enter,alt+enter,ctrl+j"
+        },
+        "redraw": { "type": "string", "default": "ctrl+l" },
+        "history_search": { "type": "string", "default": "ctrl+r" },
+        "transcript": { "type": "string", "default": "ctrl+t" }
+      }
+    },
+    "shell": {
+      "type": "string",
+      "description": "Shell the `bash` tool runs commands in."
+    },
+    "command": {
+      "type": "object",
+      "description": "Custom slash commands, by name.",
+      "default": {},
+      "additionalProperties": { "$ref": "#/$defs/CommandConfig" }
+    },
+    "mcp": {
+      "type": "object",
+      "description": "MCP servers this session may connect to, by name. The name is half of every tool those servers contribute (mcp__<server>__<tool>), so it is what a permission rule is written against.",
+      "default": {},
+      "additionalProperties": { "$ref": "#/$defs/McpServer" }
+    },
+    "hooks": {
+      "type": "object",
+      "description": "Commands this session runs at the nine moments the hook engine fires, keyed by the event's own spelling. An event name nothing answers to is refused by name at load. Hooks run with the user's own authority and pass no permission gate.",
+      "$comment": "Event names: crates/ganja-core/src/hook.rs:104-169 (HookEvent, EVENTS); refusal: config.rs:1428-1462 (check_hooks).",
+      "default": {},
+      "propertyNames": { "$ref": "#/$defs/HookEventName" },
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/HookMatcher" }
+      }
+    },
+    "lsp": {
+      "$ref": "#/$defs/LspConfig",
+      "description": "Language servers this session may run. Absent is none of them, exactly as `false` is."
+    },
+    "provider": {
+      "type": "object",
+      "description": "Endpoints this build can talk to besides the ones it ships, by id. The id is what GANJA_PROVIDER, --model <id>/…, `model` and a stored credential all name. An id this build already ships is refused at load, because such an entry would never be reached.",
+      "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs:1336-1367 (check_providers) against crates/ganja-provider/src/provider.rs:168-175 (PROVIDERS).",
+      "default": {},
+      "propertyNames": {
+        "type": "string",
+        "not": {
+          "enum": ["anthropic", "openai", "grok", "github-copilot", "fake", "cursor"]
+        }
+      },
+      "additionalProperties": { "$ref": "#/$defs/ProviderConfig" }
+    },
+    "webfetch": {
+      "$ref": "#/$defs/WebfetchConfig",
+      "description": "What the `webfetch` tool may reach.",
+      "default": {}
+    },
+    "skills": {
+      "$ref": "#/$defs/SkillsConfig",
+      "description": "Where this session looks for skills besides ganja's own two homes.",
+      "default": {}
+    },
+    "snapshot": {
+      "type": "boolean",
+      "description": "Whether this session snapshots the working tree, which is what /undo restores from. Absent is on: only writing false switches it off.",
+      "default": true
+    }
+  },
+  "$defs": {
+    "AgentConfig": {
+      "title": "Agent definition",
+      "description": "One agent, as a config file describes it. Deliberately open to unknown keys: upstream's definitions carry `temperature`, `top_p`, `steps`, `variant`, `options` and `color`, which this build has no use for and will not fail on.",
+      "$comment": "crates/ganja-core/src/config.rs:207-225 (AgentConfig, no deny_unknown_fields).",
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Model this agent asks for, \"provider/model\"."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "System prompt, which replaces the base prompt rather than adding to it."
+        },
+        "description": {
+          "type": "string",
+          "description": "One line describing the agent, which the task tool shows the model."
+        },
+        "mode": {
+          "$ref": "#/$defs/AgentMode",
+          "description": "Who may use it."
+        },
+        "hidden": {
+          "type": "boolean",
+          "description": "A hidden agent exists but is not offered in a picker."
+        },
+        "disable": {
+          "type": "boolean",
+          "description": "A disabled agent is removed entirely."
+        },
+        "permission": {
+          "$ref": "#/$defs/PermissionConfig",
+          "description": "Rules layered over the built-in ones for calls this agent makes.",
+          "default": {}
+        }
+      }
+    },
+    "AgentsConfig": {
+      "title": "Agent execution settings",
+      "description": "How this session runs the agents it has, rather than what they are. Not a key upstream has: upstream runs one subagent at a time, so it has nothing to size (D462).",
+      "$comment": "crates/ganja-core/src/config.rs:718-730 (AgentsConfig, deny_unknown_fields); default of 4 at :743 (AgentsConfig::DEFAULT_CONCURRENCY); refusal of zero at :1470-1480 (check_agents).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": {
+          "type": "integer",
+          "description": "How many `task` calls from one assistant step may run at the same time. Absent is 4. Refused at load when it is zero — a cap of nothing is a session where every delegation hangs, which is not a thing anybody means to write.",
+          "minimum": 1,
+          "default": 4
+        }
+      }
+    },
+    "AgentMode": {
+      "title": "Agent mode",
+      "description": "Which agents an agent definition may be used as: only the user may switch to a primary, only the task tool may spawn a subagent, `all` is both.",
+      "$comment": "crates/ganja-core/src/config.rs:175-184 (AgentMode, rename_all = lowercase).",
+      "type": "string",
+      "enum": ["primary", "subagent", "all"]
+    },
+    "ThemeMode": {
+      "title": "Theme mode",
+      "description": "Whether the theme renders for a dark or a light terminal.",
+      "$comment": "crates/ganja-core/src/config.rs:187-194 (ThemeMode, rename_all = lowercase).",
+      "type": "string",
+      "enum": ["dark", "light"]
+    },
+    "PermissionAction": {
+      "title": "Permission action",
+      "description": "What a rule does with the calls it covers: allow runs them unasked, ask puts them in front of the user, deny refuses them without a dialog. Any other string parses and is kept verbatim, and is treated as `ask` — a rule this build cannot carry out still says the call is not routine.",
+      "$comment": "crates/ganja-permission/src/permission.rs:416-432 (Action; Other(String) is #[serde(untagged)], so the vocabulary is open).",
+      "type": "string",
+      "anyOf": [
+        { "const": "allow" },
+        { "const": "ask" },
+        { "const": "deny" },
+        { "type": "string" }
+      ]
+    },
+    "PermissionRuleSet": {
+      "title": "Permission rules for one tool",
+      "description": "Either one action for every call to the tool (\"bash\": \"ask\"), or an action per call pattern in the order written (\"bash\": {\"git *\": \"allow\", \"*\": \"ask\"}). Order is semantic: the last matching rule wins.",
+      "$comment": "crates/ganja-permission/src/permission.rs:457-513 (RuleSet).",
+      "anyOf": [
+        { "$ref": "#/$defs/PermissionAction" },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/PermissionAction" }
+        }
+      ]
+    },
+    "PermissionConfig": {
+      "title": "Permission block",
+      "description": "Either a bare action covering everything, or an object mapping tool names to rules. A bare action replaces everything below it instead of merging into it. Keys are tool ids — read, edit, write, glob, grep, bash, todowrite, webfetch, websearch, skill, question, task, plan_exit, bash_output, kill_shell, an mcp__<server>__<tool> name, or the pseudo-permission external_directory, which a call raises beside the tool's own when it would work outside the project.",
+      "$comment": "crates/ganja-permission/src/permission.rs:525-538 and 597-633 (PermissionConfig); external_directory at permission.rs:133.",
+      "anyOf": [
+        { "$ref": "#/$defs/PermissionAction" },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/PermissionRuleSet" }
+        }
+      ]
+    },
+    "CommandConfig": {
+      "title": "Custom command",
+      "description": "One custom slash command. Open to unknown keys.",
+      "$comment": "crates/ganja-core/src/config.rs:506-518 (CommandConfig, no deny_unknown_fields).",
+      "type": "object",
+      "required": ["template"],
+      "properties": {
+        "template": {
+          "type": "string",
+          "description": "The prompt the command sends, with $1..$N and $ARGUMENTS placeholders; a !`cmd` substitution runs at the project root and @file attaches like a composer mention."
+        },
+        "description": {
+          "type": "string",
+          "description": "One line describing it, shown in the palette."
+        },
+        "agent": {
+          "type": "string",
+          "description": "Agent the command runs as, when it should not run as the current one."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model the command asks for, \"provider/model\"."
+        }
+      }
+    },
+    "McpServer": {
+      "title": "MCP server",
+      "description": "One MCP server a session may connect to, tagged by `type`. An entry with no `type` is a parse error rather than a silently absent server.",
+      "$comment": "crates/ganja-core/src/config.rs:267-274 (McpServer, internally tagged, rename_all = lowercase).",
+      "oneOf": [
+        { "$ref": "#/$defs/McpLocal" },
+        { "$ref": "#/$defs/McpRemote" }
+      ]
+    },
+    "McpLocal": {
+      "title": "Local MCP server",
+      "description": "A child process spoken to over its stdio.",
+      "$comment": "crates/ganja-core/src/config.rs:327-347 (McpLocal, deny_unknown_fields); empty command refused at config.rs:1385-1415 (check_mcp).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "command"],
+      "properties": {
+        "type": { "const": "local" },
+        "command": {
+          "type": "array",
+          "description": "The program and its arguments, [cmd, args...]. Refused empty: an entry with nothing to run is not a server.",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Directory the child runs in. A relative path resolves against the project root."
+        },
+        "environment": {
+          "type": "object",
+          "description": "Variables layered over the ones this process already has.",
+          "default": {},
+          "additionalProperties": { "type": "string" }
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "A disabled server is configured and not connected.",
+          "default": true
+        },
+        "timeout": { "$ref": "#/$defs/McpTimeout" },
+        "output_limit": {
+          "type": "integer",
+          "description": "Bytes one tool call to this server may return before the result is clamped. Absent gets the same budget every other tool in the registry answers to. Refused at load when it is zero — a byte budget of nothing refuses every result.",
+          "minimum": 1
+        }
+      }
+    },
+    "McpRemote": {
+      "title": "Remote MCP server",
+      "description": "An HTTP endpoint spoken to over streamable HTTP.",
+      "$comment": "crates/ganja-core/src/config.rs:350-374 (McpRemote, deny_unknown_fields); URL rule at config.rs:1385-1415 (check_mcp).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "url"],
+      "properties": {
+        "type": { "const": "remote" },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Where it lives. Refused unless it is https, or http to loopback — `headers` is where a token goes."
+        },
+        "headers": {
+          "type": "object",
+          "description": "Headers sent with every request.",
+          "default": {},
+          "additionalProperties": { "type": "string" }
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "A disabled server is configured and not connected.",
+          "default": true
+        },
+        "timeout": { "$ref": "#/$defs/McpTimeout" },
+        "output_limit": {
+          "type": "integer",
+          "description": "Bytes one tool call to this server may return before the result is clamped. Absent gets the same budget every other tool in the registry answers to. Refused at load when it is zero — a byte budget of nothing refuses every result.",
+          "minimum": 1
+        },
+        "oauth": {
+          "$ref": "#/$defs/McpOauth",
+          "description": "Discovers this server's own authorization server (RFC 8414) and logs in against it with dynamic client registration (RFC 7591) and PKCE, rather than a static `headers` entry carrying a fixed token. Absent means no login flow — `headers` is still the way to send a static credential."
+        }
+      }
+    },
+    "McpOauth": {
+      "title": "MCP OAuth marker",
+      "description": "Turns on OAuth discovery and dynamic registration for a remote MCP server. Carries nothing today — discovery finds the endpoints and dynamic registration finds the client — but is its own type rather than a bare boolean so a future field (a preregistered client_id, a scope) has somewhere to land without another migration of this shape. `oauth: {}` is the whole spelling; any key inside it is refused.",
+      "$comment": "crates/ganja-core/src/config.rs:381-383 (McpOauth, deny_unknown_fields).",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "McpTimeout": {
+      "title": "MCP request budget",
+      "description": "Milliseconds one request to this server may take, governing requests only. Absent, a tool call gets 60000 and a tools/list gets 30000. The connect budget is a fixed 30000 and is never taken from here. Zero is not a value: the field is a non-zero integer.",
+      "$comment": "Defaults MCP_CALL_TIMEOUT / MCP_LIST_TIMEOUT / MCP_CONNECT_TIMEOUT at crates/ganja-core/src/config.rs:247, :250, :259.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "ProviderConfig": {
+      "title": "Configured provider endpoint",
+      "description": "One endpoint a config declares, and how to talk to it. There is deliberately no apiKey key: ganja's credentials travel the environment or auth.json, and `key_env` names the variable instead. Being selectable is not being cataloged — a configured provider has no sizing, pricing or auto-compaction, and must be told which model to ask for.",
+      "$comment": "crates/ganja-core/src/config.rs:406-430 (ProviderConfig, deny_unknown_fields); checks at config.rs:1336-1367 (check_providers).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dialect", "base_url"],
+      "properties": {
+        "dialect": {
+          "$ref": "#/$defs/Dialect",
+          "description": "Which request/response mapping the endpoint speaks. Required: guessing it from a URL is how an Anthropic body reaches a chat-completions server."
+        },
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Where it lives. Refused unless it is https, or http to loopback — the credential travels in a header on every request."
+        },
+        "key_env": {
+          "type": "string",
+          "description": "The environment variable holding the endpoint's key, consulted before the credential store. Absent means the store alone answers, under this entry's own id. A blank or whitespace-only value is refused, because it names no variable.",
+          "pattern": "\\S"
+        },
+        "headers": {
+          "type": "object",
+          "description": "Headers sent with every request, beside the credential.",
+          "default": {},
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "Dialect": {
+      "title": "Wire dialect",
+      "description": "The wire a config-named endpoint speaks: POST {base}/chat/completions with a bearer token, or POST {base}/v1/messages with x-api-key and the pinned Anthropic version.",
+      "$comment": "crates/ganja-provider/src/provider/compat.rs:50-73 (Dialect, rename_all = kebab-case).",
+      "type": "string",
+      "enum": ["openai-chat-completions", "anthropic-messages"]
+    },
+    "LspConfig": {
+      "title": "Language server configuration",
+      "description": "true for the builtin servers, false for none, or a map of server names to entries merged over the builtins. Absent means the same as false. Across tiers two maps merge entry by entry and anything else replaces.",
+      "$comment": "crates/ganja-core/src/config.rs:439-477 (LspConfig, hand-written Deserialize); builtin ids rust and gopls at crates/ganja-core/src/lsp/server.rs:29-38.",
+      "anyOf": [
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "properties": {
+            "rust": { "$ref": "#/$defs/LspBuiltinEntry" },
+            "gopls": { "$ref": "#/$defs/LspBuiltinEntry" }
+          },
+          "additionalProperties": { "$ref": "#/$defs/LspCustomEntry" }
+        }
+      ]
+    },
+    "LspEntry": {
+      "title": "Language server entry",
+      "description": "One language server, as a config file describes it.",
+      "$comment": "crates/ganja-core/src/config.rs:484-503 (LspEntry, deny_unknown_fields); the required-field rules at config.rs:1287-1309 (check_lsp).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "array",
+          "description": "The program and its arguments. Replaces a builtin's spawn entirely — it is not extra arguments for the builtin's binary. Required except on a disabled entry.",
+          "items": { "type": "string" }
+        },
+        "extensions": {
+          "type": "array",
+          "description": "Extensions this server is asked about, each with its leading dot. An empty list matches every file. Absent inherits the builtin's, and a server with no builtin to inherit from must say.",
+          "items": { "type": "string" },
+          "examples": [[".rs"], [".go", ".mod"]]
+        },
+        "disabled": {
+          "type": "boolean",
+          "description": "Switches a server off. The one legal shape with no command.",
+          "default": false
+        },
+        "env": {
+          "type": "object",
+          "description": "Variables layered over the ones this process already has.",
+          "default": {},
+          "additionalProperties": { "type": "string" }
+        },
+        "initialization": {
+          "description": "initializationOptions, and what a workspace/configuration request is answered out of."
+        }
+      }
+    },
+    "LspBuiltinEntry": {
+      "title": "Builtin language server entry",
+      "description": "An entry for a server this build ships (rust, gopls): it inherits `extensions` from the builtin, and needs a command unless it is disabled.",
+      "allOf": [
+        { "$ref": "#/$defs/LspEntry" },
+        {
+          "if": {
+            "properties": { "disabled": { "const": true } },
+            "required": ["disabled"]
+          },
+          "else": { "required": ["command"] }
+        }
+      ]
+    },
+    "LspCustomEntry": {
+      "title": "Custom language server entry",
+      "description": "An entry for a server this build ships no definition for: it must bring its own command and extensions, unless it is disabled.",
+      "allOf": [
+        { "$ref": "#/$defs/LspEntry" },
+        {
+          "if": {
+            "properties": { "disabled": { "const": true } },
+            "required": ["disabled"]
+          },
+          "else": { "required": ["command", "extensions"] }
+        }
+      ]
+    },
+    "HookEventName": {
+      "title": "Hook event",
+      "description": "The nine moments a hook can be attached to. Only PreToolUse and UserPromptSubmit can refuse what is about to happen.",
+      "$comment": "crates/ganja-core/src/hook.rs:104-169 (HookEvent::name).",
+      "type": "string",
+      "enum": [
+        "PreToolUse",
+        "PostToolUse",
+        "UserPromptSubmit",
+        "Notification",
+        "Stop",
+        "SubagentStop",
+        "SessionStart",
+        "SessionEnd",
+        "PreCompact"
+      ]
+    },
+    "HookMatcher": {
+      "title": "Hook group",
+      "description": "One group of hooks for one event: which subjects it applies to, and what to run for them. Claude Code's shape verbatim (D456), so a .claude/settings.json block can be pasted in and still mean what it meant.",
+      "$comment": "crates/ganja-core/src/config.rs:539-550 (HookMatcher, deny_unknown_fields).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "matcher": {
+          "type": "string",
+          "format": "regex",
+          "description": "A regular expression the event's subject must match — the tool name for PreToolUse/PostToolUse, the trigger for PreCompact, the source for SessionStart. Absent or empty matches everything, as does any value on an event with no subject. A value that is not a regular expression is refused at load."
+        },
+        "hooks": {
+          "type": "array",
+          "description": "What to run when it matches, all of them concurrently.",
+          "default": [],
+          "items": { "$ref": "#/$defs/HookHandler" }
+        }
+      }
+    },
+    "HookHandler": {
+      "title": "Hook handler",
+      "description": "One handler in a group, tagged by `type`. One kind today; Claude's http, prompt and agent handlers are recorded follow-ups rather than silently accepted keys.",
+      "$comment": "crates/ganja-core/src/config.rs:560-578 (HookHandler / HookCommand, internally tagged, rename_all = lowercase, deny_unknown_fields).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "command"],
+      "properties": {
+        "type": { "const": "command" },
+        "command": {
+          "type": "string",
+          "description": "The command line, run by the same POSIX shell the bash tool uses, with the event's JSON envelope on its standard input. Refused at load when it is empty or only whitespace.",
+          "pattern": "\\S"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "How long it may take, in seconds.",
+          "minimum": 0,
+          "default": 60
+        }
+      }
+    },
+    "WebfetchConfig": {
+      "title": "webfetch reach",
+      "description": "What the `webfetch` tool may reach.",
+      "$comment": "crates/ganja-core/src/config.rs:757-770 (WebfetchConfig, deny_unknown_fields).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_private": {
+          "type": "boolean",
+          "description": "Whether webfetch may fetch a URL resolving onto this machine or a private network. Absent is no: only true opens it.",
+          "default": false
+        }
+      }
+    },
+    "SkillsConfig": {
+      "title": "Skill discovery",
+      "description": "Where a session looks for skills besides ganja's own two homes, <config home>/skills and <project root>/.ganja/skills. Nothing foreign is discovered — ~/.claude/skills and friends are one line of `paths` away, never automatic.",
+      "$comment": "crates/ganja-core/src/config.rs:781-799 (SkillsConfig, deny_unknown_fields); resolution at config.rs:808-845 (Config::skill_paths, Config::skill_urls).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "type": "array",
+          "description": "Further directories holding skills, each scanned for SKILL.md files below it, and each ranking above ganja's own two. ~/ expands against the home directory and a relative path resolves against the session's working directory; a path naming no directory is warned about and dropped.",
+          "default": [],
+          "items": { "type": "string" },
+          "examples": [["~/.claude/skills"]]
+        },
+        "urls": {
+          "type": "array",
+          "description": "Endpoints skills would be downloaded from. Accepted and not fetched; the key exists so a config carrying one still loads.",
+          "default": [],
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

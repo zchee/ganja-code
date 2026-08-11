@@ -12,6 +12,7 @@
 |------|-------------|
 | `Cargo.toml` | Workspace manifest. **Every** dependency version is declared here; member crates only opt in with `x.workspace = true`. Each entry carries a comment explaining why that crate (or that feature) is in the tree. |
 | `Cargo.lock` | Resolved dependency graph; committed. Large — read only when a specific version is in question. |
+| `ganja-config.schema.json` | Draft 2020-12 JSON Schema for `ganja.jsonc`/`ganja.json`, so an editor's `$schema` reference gets real completion. Not upstream parity by omission — opencode publishes its own, and this is the same idea. `crates/ganja-core/tests/config_schema.rs` is the drift test: it feeds the real loader a bogus key and asserts serde's own `deny_unknown_fields` enumeration is exactly this file's `properties`, in both directions, for `Config` and the two MCP shapes, and validates a kitchen-sink document and the schema's own refusals against it. |
 | `rust-toolchain.toml` | Pins a **date-pinned nightly** (`nightly-2026-08-03`) plus clippy, rustfmt, rust-analyzer; CI's toolchain steps repeat the same date because the action does not read this file. Edition 2024. |
 | `CLAUDE.md` | Symlink to this file, so tools that look for either name read the same document. |
 | `PRACTICE.md` | Phase-to-exercise mapping for the owner, a Go expert learning Rust. Explanations here lean on Go anchors. |

@@ -97,6 +97,9 @@ libc.workspace = true
 # The scripted-provider/recorder-tool/storage-seeding scaffolding
 # `tests/*.rs` shares across binaries — see `crates/ganja-testkit`.
 ganja-testkit.workspace = true
+# Compiles `ganja-config.schema.json` and validates fixtures against it in
+# `tests/config_schema.rs`. Nothing in the library itself reads a schema.
+jsonschema.workspace = true
 # Only for `tests/mentions.rs`'s image-attachment check: encodes a pixel
 # fixture and decodes the request's base64 payload back, so the assertion is
 # "a real PNG of the right dimensions reached the wire" rather than "some
