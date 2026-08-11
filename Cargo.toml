@@ -254,8 +254,10 @@ unicode-width = "0.2.2"
 # handles sealed via `SetSecurityInfo` before the first secret byte, the
 # spill directory born private. MIT OR Apache-2.0, and already in the tree
 # transitively at three versions; this pins the newest. The feature list is
-# the set the windows lint job compiled — `LocalFree`'s module has moved
-# across windows-sys versions, so the job, not memory, fixes the list.
+# the set the windows lint lane compiled while it existed — `LocalFree`'s
+# module has moved across windows-sys versions — and since that lane left
+# with the rest of the parked windows support (2026-08-12), nothing verifies
+# this list until a windows lane returns.
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",

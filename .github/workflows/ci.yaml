@@ -161,31 +161,6 @@ jobs:
         with:
           command: check
 
-  # The only real-time signal for cfg(windows) code: the dev hosts cannot
-  # cross-compile this workspace (the C build scripts behind the bundled
-  # sqlite and the TLS stack want MSVC headers), so this job is the compile
-  # loop, one push away. Compile and lint only — no test suite, no upstream
-  # provisioning; the test lane's return is a separate decision with its own
-  # posture. A new gate born blocking, not a paused lane flipping: there is
-  # no red history here to earn out of.
-  windows-lint:
-    name: windows-lint
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          # The same date rust-toolchain.toml pins; this action does not read
-          # that file, so the date is repeated here on purpose.
-          toolchain: nightly-2026-08-07
-          components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-
   test:
     name: test (${{ matrix.os }})
     strategy:
@@ -194,15 +169,15 @@ jobs:
         os:
           - ubuntu-26.04
           - xcode-27
-          # Blocking, like every other lane. It returned observational when
-          # the windows behavior work landed, and earned this posture red by
-          # red — each one a product fix, a test fix, or a named divergence —
-          # until consecutive runs came back green; a red here is a real
-          # signal now, not weather to be excused.
-          - windows-2025
+          # A windows-2025 entry stood here (and a windows-lint job above)
+          # until 2026-08-12: windows support is parked for now, and the
+          # lanes left with it. The cfg(windows) code still in the tree has
+          # no compile signal while this holds; a revival is a deliberate
+          # decision that starts observational again, not a paused lane
+          # flipping back.
     runs-on: ${{ matrix.os }}
-    # bash exists on every runner here (Git Bash on windows), so one shell
-    # keeps the run steps portable instead of forking them per OS.
+    # Naming bash adds pipefail to every run step, which the runners'
+    # implicit `bash -e` default does not.
     defaults:
       run:
         shell: bash
@@ -247,11 +222,6 @@ jobs:
           persist-credentials: false
 
       - name: cache the upstream dependency install
-        # Not on windows: bun's node_modules layout does not survive the
-        # cache tar round-trip there — a restored tree reds the golden and
-        # mcp suites with EPERM while a fresh install stays green — so the
-        # lane pays the install every run instead of inheriting the poison.
-        if: runner.os != 'Windows'
         uses: actions/cache@v6
         with:
           path: upstream/opencode-v1.18.13/node_modules
@@ -260,14 +230,6 @@ jobs:
       - name: install the upstream dependencies
         working-directory: upstream/opencode-v1.18.13
         run: bun install --frozen-lockfile
-
-      # The compile gate, kept separable from the test signal even now that
-      # both block: when this lane reds, the first question is whether the
-      # tree stopped building here or a test stopped passing, and this step
-      # answers it without reading a suite log.
-      - name: the workspace compiles on windows
-        if: runner.os == 'Windows'
-        run: cargo check --workspace
 
       - name: test
         run: cargo nextest run --workspace --profile ci
