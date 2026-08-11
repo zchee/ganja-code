@@ -116,6 +116,10 @@ pub struct Status {
     /// Whether the composer is running shell commands, which changes which
     /// keys are worth reminding the user about.
     shell: bool,
+    /// How many messages are waiting for the running turn (**F4**). Shown only
+    /// while there are any, so a session that never queues one renders the bar
+    /// it always did.
+    queued: usize,
 }
 
 impl Status {
@@ -130,6 +134,7 @@ impl Status {
             agent: None,
             effort: None,
             shell: false,
+            queued: 0,
         }
     }
 
@@ -147,6 +152,11 @@ impl Status {
     /// Records whether the composer is running shell commands.
     pub fn set_shell(&mut self, shell: bool) {
         self.shell = shell;
+    }
+
+    /// Records how many messages are waiting for the running turn.
+    pub fn set_queued(&mut self, queued: usize) {
+        self.queued = queued;
     }
 
     /// Records what the engine is doing now.
@@ -202,6 +212,14 @@ impl Status {
             left.push_str(SEPARATOR);
         }
         left.push_str(&self.activity.label());
+        // What is waiting sits beside what is happening, because the two
+        // together are the answer to "where is my message": a queue with a
+        // depth and no visible strip row would otherwise be the one state
+        // nothing on screen accounts for.
+        if self.queued > 0 {
+            left.push_str(SEPARATOR);
+            left.push_str(&format!("{} queued", self.queued));
+        }
         // Spend sits beside the state, where its width is predictable; the
         // notice is last because it is the one part with no length limit.
         if let Some(totals) = &self.totals {
@@ -290,6 +308,22 @@ mod tests {
             "got {:?}",
             rendered(&status, 100)
         );
+    }
+
+    /// The depth appears only while something is waiting, so a session that
+    /// never queues a message renders the bar it always did (**F4**).
+    #[test]
+    fn the_bar_names_the_queue_only_while_something_is_waiting() {
+        let mut status = Status::new(None);
+        assert!(!rendered(&status, 100).contains("queued"));
+
+        status.set_queued(2);
+
+        let line = rendered(&status, 100);
+        assert!(line.contains("2 queued"), "got {line:?}");
+
+        status.set_queued(0);
+        assert!(!rendered(&status, 100).contains("queued"));
     }
 
     /// The segment appears only while an effort is selected, so every bar

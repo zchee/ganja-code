@@ -236,6 +236,74 @@ pub(crate) struct TurnHandle {
     /// The wait a reply command answers, when one is open. Shared with the
     /// turn task, which sets and clears it.
     pub(crate) permission: Arc<std::sync::Mutex<Option<PendingReply>>>,
+    /// Messages a [`Command::Steer`] left for this turn to take on, and the
+    /// ones it already took. Shared with the turn task, which is the only
+    /// thing that drains it — the same per-turn-cell shape as the permission
+    /// wait above, and for the same reason: the engine's command paths never
+    /// reach into a running turn except through a cell the turn owns.
+    ///
+    /// [`Command::Steer`]: crate::protocol::Command::Steer
+    pub(crate) steer: Arc<std::sync::Mutex<Steering>>,
+}
+
+/// One mid-turn message, as a [`Command::Steer`] handed it over.
+///
+/// [`Command::Steer`]: crate::protocol::Command::Steer
+pub(crate) struct SteerInput {
+    /// The frontend's correlation id, echoed back as
+    /// [`Event::SteerConsumed`] the moment this becomes a message.
+    pub(crate) id: String,
+    pub(crate) text: String,
+    /// Read when the request carrying this message is built, never here: a
+    /// steer's mentions obey the same read-at-send rule a prompt's do.
+    pub(crate) mentions: Vec<crate::protocol::Mention>,
+}
+
+/// The running turn's mailbox: what has been handed to it, and what it has
+/// already taken.
+///
+/// Both halves live in one cell because they are two views of the same queue
+/// and are only ever moved together — a drain pops from [`waiting`] and pushes
+/// to [`consumed`] under one lock, so no reader can see a message that has
+/// left the first and not yet reached the second.
+///
+/// [`waiting`]: Steering::waiting
+/// [`consumed`]: Steering::consumed
+#[derive(Default)]
+pub(crate) struct Steering {
+    /// Messages that arrived and have not been drained. A cancelled turn
+    /// leaves them here untouched: nobody consumed them, no
+    /// [`Event::SteerConsumed`] claimed they were, and the frontend's own
+    /// fallback lane owns them from the [`Event::MessageFinished`] onward.
+    ///
+    /// The same is true of a turn that has no step loop to drain them with —
+    /// a `!` passthrough or a compaction, neither of which asks the model
+    /// anything. A steer sent into one of those is accepted (the slot *is*
+    /// occupied) and simply never consumed, which is the honest answer: there
+    /// was no model request for it to join.
+    waiting: Vec<SteerInput>,
+    /// The user messages already drained, in drain order.
+    ///
+    /// They are *appended after* the assistant message in both the requests
+    /// this turn builds and the history it leaves behind, which is the order
+    /// their stored ids already sort in — the assistant's id was minted when
+    /// the turn opened, before any of these existed. A resumed session
+    /// therefore replays exactly what the live turn asked.
+    consumed: Vec<Message>,
+}
+
+impl Steering {
+    /// Hands `input` to the turn. Called from the engine's command path, never
+    /// from the turn task.
+    pub(crate) fn push(&mut self, input: SteerInput) {
+        self.waiting.push(input);
+    }
+
+    /// Everything waiting, taken in arrival order and left for the caller to
+    /// turn into messages.
+    fn take_waiting(&mut self) -> Vec<SteerInput> {
+        std::mem::take(&mut self.waiting)
+    }
 }
 
 /// One open request the person owes an answer to: the id a reply must name,
@@ -640,6 +708,13 @@ pub(crate) struct Turn {
     /// Where an open permission request waits for its reply; the same cell the
     /// engine's [`TurnHandle`] routes replies into.
     pub(crate) pending: Arc<std::sync::Mutex<Option<PendingReply>>>,
+    /// Where a [`Command::Steer`] leaves a message for this turn; the same
+    /// cell the engine's [`TurnHandle`] pushes into. A child turn gets one of
+    /// its own that nothing can reach — no handle of a child's is ever put in
+    /// the slot — so the drain below is a uniform no-op there.
+    ///
+    /// [`Command::Steer`]: crate::protocol::Command::Steer
+    pub(crate) steer: Arc<std::sync::Mutex<Steering>>,
     /// Every subscriber's queue, which this turn publishes into. A root turn
     /// shares the engine's; a child turn gets one seeded with its private
     /// channel, so the send sites below never know the difference.
@@ -739,6 +814,12 @@ impl Turn {
             prompt: parts.prompt,
             cancel: parts.cancel,
             pending: Arc::clone(&spawn.pending),
+            // A mailbox of its own, and one nothing can post to: a child's
+            // turn handle never reaches the engine's slot, so no `Steer` can
+            // name it. Sharing the parent's would be worse than useless — it
+            // would let a person's correction land in a subagent's private
+            // conversation instead of in the one they are watching.
+            steer: Arc::default(),
             // A fanout of one, so the loop publishes the same way whoever is
             // listening; the watcher on the other end stays the only reader.
             events: Arc::new(Fanout::new(parts.events)),
@@ -786,6 +867,116 @@ impl Turn {
     fn flush_deadline(&self) -> Option<Instant> {
         self.persist.as_ref().and_then(Persist::flush_deadline)
     }
+
+    /// The mid-turn messages this turn has already taken on, in drain order.
+    ///
+    /// Cloned rather than borrowed because every caller composes them into a
+    /// request or a history it then owns, and holding the lock across either
+    /// would hold it across an await.
+    fn steered(&self) -> Vec<Message> {
+        self.steer
+            .lock()
+            .expect("the steer mailbox is never poisoned")
+            .consumed
+            .clone()
+    }
+}
+
+/// The parts a mention becomes on the message that carried it.
+///
+/// A reference and nothing more: what the file says is read when a request is
+/// built, which is what makes the model see the file as it is *then* rather
+/// than as it was when somebody typed the `@`. Shared by the prompt that opens
+/// a turn and by every steer the turn takes on afterwards, so the two cannot
+/// drift into attaching differently.
+fn mention_parts(mentions: &[crate::protocol::Mention]) -> impl Iterator<Item = Part> + '_ {
+    mentions.iter().map(|mention| {
+        Part::file_range(
+            mention.path.clone(),
+            crate::attachment::mime(&mention.path),
+            mention.start,
+            mention.end,
+        )
+    })
+}
+
+/// Takes whatever a [`Command::Steer`] left for this turn and turns each one
+/// into a real user message: announced, persisted, and appended to what the
+/// next request carries.
+///
+/// Returns whether anything was drained — which the finish path reads as "do
+/// not end the turn yet" — or breaks when the turn is over.
+///
+/// **A cancelled turn drains nothing.** The check is first and deliberate: a
+/// turn that is stopping must not consume a message it will never answer, and
+/// leaving it in the mailbox is what lets the frontend's fallback lane own it.
+/// Nothing else here interacts with the permission cell, so a steer that
+/// arrived while a dialog was open simply drains at the boundary after the
+/// dialog resolved, like any other.
+///
+/// [`Command::Steer`]: crate::protocol::Command::Steer
+async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, bool> {
+    if turn.cancel.is_cancelled() {
+        return ControlFlow::Continue(false);
+    }
+
+    let waiting = turn
+        .steer
+        .lock()
+        .expect("the steer mailbox is never poisoned")
+        .take_waiting();
+    if waiting.is_empty() {
+        return ControlFlow::Continue(false);
+    }
+
+    for input in waiting {
+        // The id goes out first: a frontend retires its queue entry in the
+        // same breath the message appears, and never before the engine has
+        // committed to taking it.
+        if let ControlFlow::Break(stop) = deliver(
+            turn,
+            Event::SteerConsumed {
+                session_id: turn.session_id.clone(),
+                id: input.id,
+            },
+        )
+        .await
+        {
+            return ControlFlow::Break(stop);
+        }
+
+        let mut user = Message::user(input.text);
+        user.parts.extend(mention_parts(&input.mentions));
+
+        // Disk before the provider hears it, exactly as the opening prompt
+        // reaches it: a `kill -9` mid-stream must still preserve what was
+        // asked, whenever in the turn it was asked.
+        if let Some(persist) = &turn.persist {
+            persist.user(&user);
+        }
+        // Recorded before the announcement for the same reason: the request
+        // this turn builds next is composed from here, and a frontend that
+        // applies the event holds what that request will carry.
+        turn.steer
+            .lock()
+            .expect("the steer mailbox is never poisoned")
+            .consumed
+            .push(user.clone());
+
+        if let ControlFlow::Break(stop) = deliver(
+            turn,
+            Event::MessageStarted {
+                session_id: turn.session_id.clone(),
+                message: user,
+            },
+        )
+        .await
+        {
+            return ControlFlow::Break(stop);
+        }
+    }
+
+    ControlFlow::Continue(true)
 }
 
 /// Why a turn ended, and what to say about it.
@@ -847,6 +1038,19 @@ pub(crate) async fn run_turn(turn: Turn) {
     // the summary is already the whole history by the time it returns.
     if !matches!(turn.kind, TurnKind::Compact) && assistant.has_content() {
         turn.history.lock().await.push(assistant.clone());
+    }
+
+    // Then the messages a `Steer` added mid-turn, in the order they were
+    // taken. After the reply, never before it: their ids sort there, a
+    // resumed session reads them back there, and every request this turn built
+    // already carried them there. Unconditional on the assistant above — a
+    // steer that was consumed is a message the person really sent and the disk
+    // really holds, whether or not the reply it interrupted came to anything.
+    {
+        let steered = turn.steered();
+        if !steered.is_empty() {
+            turn.history.lock().await.extend(steered);
+        }
     }
 
     let finished_clean = matches!(
@@ -1211,14 +1415,7 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
     // A mention is a reference and nothing more; what the file says is read
     // when a request is built. See [`PartBody::File`].
     if let TurnKind::Prompt { mentions } = &turn.kind {
-        user.parts.extend(mentions.iter().map(|mention| {
-            Part::file_range(
-                mention.path.clone(),
-                crate::attachment::mime(&mention.path),
-                mention.start,
-                mention.end,
-            )
-        }));
+        user.parts.extend(mention_parts(mentions));
     }
     // The prompt reaches the disk before the provider hears it: a `kill -9`
     // mid-stream must still preserve what was asked.
@@ -1292,9 +1489,32 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
             StepEnd::Finished { reason, mut calls } => {
                 if calls.is_empty() {
                     // A request that ended without calling anything is the
-                    // model done talking, and its reason is the turn's.
-                    record_patch(turn, &mut assistant, before.take()).await;
-                    return (assistant, Some(Outcome::finished(reason)));
+                    // model done talking — unless somebody typed while it was.
+                    // The mailbox is checked **before** the turn ends, which
+                    // is the whole of "a queued message keeps the turn going":
+                    // a steer waiting here continues the loop and the finish
+                    // tail is simply not reached. Without this check a steer
+                    // that landed during the model's last request would be
+                    // announced by nothing and answered by nobody.
+                    match drain_steers(turn).await {
+                        ControlFlow::Break(stop) => {
+                            record_patch(turn, &mut assistant, before.take()).await;
+                            return (assistant, stop);
+                        }
+                        ControlFlow::Continue(false) => {
+                            record_patch(turn, &mut assistant, before.take()).await;
+                            return (assistant, Some(Outcome::finished(reason)));
+                        }
+                        // The same bookkeeping a tool step's boundary does, so
+                        // the continued turn measures its next step against
+                        // the tree as it stands rather than against the one
+                        // this step opened on.
+                        ControlFlow::Continue(true) => {
+                            record_patch(turn, &mut assistant, before.take()).await;
+                            before = track(turn).await;
+                            continue;
+                        }
+                    }
                 }
 
                 // Calls resolve sequentially in arrival order: a later call
@@ -1323,6 +1543,14 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
                 // started from.
                 record_patch(turn, &mut assistant, before.take()).await;
                 before = track(turn).await;
+
+                // The step boundary: the tool results are in and the request
+                // that carries them has not been built yet, which is the one
+                // moment a new user message can join this turn without
+                // reordering anything the model has already been told.
+                if let ControlFlow::Break(stop) = drain_steers(turn).await {
+                    return (assistant, stop);
+                }
             }
         }
     }
@@ -2005,6 +2233,12 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
         if assistant.has_content() {
             messages.push(assistant.clone());
         }
+        // And after it, whatever a `Steer` added while it was being written.
+        // They sort **after** the reply they interrupted because that is the
+        // order their stored ids give them — the assistant's id was minted
+        // when the turn opened — so what this request carries is exactly what
+        // a resumed session would replay.
+        messages.extend(turn.steered());
 
         // Upstream's `session/reminders.ts` appends these to the last user
         // message, and — on the path this port takes — never writes them
@@ -3361,6 +3595,7 @@ mod tests {
             prompt: "run it".to_owned(),
             cancel,
             pending: Arc::new(std::sync::Mutex::new(None)),
+            steer: Arc::default(),
             events: Arc::new(Fanout::new(events)),
             slot: Arc::new(Mutex::new(None)),
             history: Arc::new(Mutex::new(Vec::new())),

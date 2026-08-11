@@ -131,6 +131,7 @@ fn shape(event: &Event) -> String {
                 PermissionReply::Reject => "reject",
             }
         ),
+        Event::SteerConsumed { id, .. } => format!("steer_consumed:{id}"),
         Event::QuestionAsked { questions, .. } => format!("question_asked:{}", questions.len()),
         Event::QuestionReplied { answers, .. } => format!("question_replied:{}", answers.len()),
         Event::QuestionRejected { .. } => "question_rejected".to_owned(),

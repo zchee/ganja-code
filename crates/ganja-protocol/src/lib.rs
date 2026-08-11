@@ -756,6 +756,46 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mentions: Vec<Mention>,
     },
+    /// Hands a message to the turn that is **already** streaming, which takes
+    /// it on at its next step boundary rather than starting a turn of its own.
+    ///
+    /// The turn stays singular: this is not a second prompt and it does not
+    /// repeal the one-turn-at-a-time rule that refuses one. What it adds is an
+    /// explicit mailbox the running loop drains between steps, so a correction
+    /// typed while the model works reaches *that* model request instead of
+    /// waiting for the next turn.
+    ///
+    /// **D450** (`steer-is-an-explicit-command`). Upstream v1.18.13 has the
+    /// same *observable* behavior and no contract for it: `session/prompt.ts`
+    /// persists a message mid-turn and `effect/runner.ts`'s loop re-reads the
+    /// conversation each iteration, so whether a prompt starts a turn or
+    /// silently joins one is decided by a race nobody named. Porting that
+    /// shape would have meant repealing the refusal a frontend depends on and
+    /// putting nothing in its place. This is the same outcome reached through
+    /// a command of its own — with a correlation id a frontend can render
+    /// against and a typed refusal when it loses the race — which is the shape
+    /// Codex's `session/input_queue.rs` and `session/inject.rs` also arrived
+    /// at.
+    ///
+    /// The payload is [`Command::SendPrompt`]'s plus [`id`](Self::Steer::id).
+    /// A steer that arrives with nothing streaming is refused rather than
+    /// promoted to a prompt: which of the two a message is belongs to whoever
+    /// typed it, not to how the timing fell.
+    Steer {
+        /// The frontend's own correlation id, echoed back by
+        /// [`Event::SteerConsumed`]. It exists so a rendered queue entry can
+        /// be retired exactly when the engine provably took the message, and
+        /// never on a guess: no id, and a frontend showing what is still
+        /// waiting would have to infer it from the transcript.
+        id: String,
+        /// What the user typed.
+        text: String,
+        /// Files the user attached to it, read when the request that carries
+        /// this message is built — the same read-at-send rule a prompt's
+        /// mentions follow. Absent from the wire when there are none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<Mention>,
+    },
     /// Stops the turn that is streaming; a no-op when the engine is idle.
     /// When the turn is waiting on a permission, cancelling also refuses it.
     CancelTurn,
@@ -1042,6 +1082,24 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         directories: Vec<String>,
     },
+    /// A [`Command::Steer`]'s message was taken into the running turn.
+    ///
+    /// Emitted immediately before the [`Event::MessageStarted`] that carries
+    /// it, so a frontend retires its queue entry in the same breath as the
+    /// message appears in the transcript, and never earlier.
+    ///
+    /// There is no complementary "not consumed" event, and there is nothing
+    /// for one to say: a steer is either taken (this), refused when it
+    /// arrives (`EngineError::NotStreaming`, the engine's own answer to the
+    /// command), or still unconsumed when [`Event::MessageFinished`] ends the
+    /// turn — which is itself the signal, since a turn that has ended will
+    /// never drain another one.
+    SteerConsumed {
+        /// Session this happened in.
+        session_id: SessionId,
+        /// The id the [`Command::Steer`] carried.
+        id: String,
+    },
     /// A permission request was answered — by the user, or by a cancel
     /// refusing it — so a frontend can retire the dialog.
     PermissionReplied {
@@ -1199,6 +1257,7 @@ impl Event {
             | Event::PartDelta { session_id, .. }
             | Event::PartUpdated { session_id, .. }
             | Event::PermissionRequested { session_id, .. }
+            | Event::SteerConsumed { session_id, .. }
             | Event::PermissionReplied { session_id, .. }
             | Event::QuestionAsked { session_id, .. }
             | Event::QuestionReplied { session_id, .. }
@@ -1355,6 +1414,20 @@ mod tests {
                     end: Some(20),
                 }],
             },
+            Command::Steer {
+                id: "steer-1".to_owned(),
+                text: "actually, use the other file".to_owned(),
+                mentions: Vec::new(),
+            },
+            Command::Steer {
+                id: "steer-2".to_owned(),
+                text: "this one".to_owned(),
+                mentions: vec![Mention {
+                    path: "src/main.rs".to_owned(),
+                    start: Some(10),
+                    end: Some(20),
+                }],
+            },
             Command::CancelTurn,
             Command::ReplyPermission {
                 id: PermissionId::from("perm_1".to_owned()),
@@ -1443,6 +1516,10 @@ mod tests {
                 session_id: pinned_session(),
                 id: PermissionId::from("perm_1".to_owned()),
                 reply: PermissionReply::Reject,
+            },
+            Event::SteerConsumed {
+                session_id: pinned_session(),
+                id: "steer-1".to_owned(),
             },
             Event::RevertChanged {
                 session_id: pinned_session(),
@@ -1563,6 +1640,36 @@ mod tests {
                     }],
                 }),
                 r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs","start":12,"end":40}]}"#,
+            ),
+            // A steer with nothing attached writes no `mentions` key at all,
+            // exactly as a prompt without one does: the two commands carry the
+            // same payload and so keep the same absence rule.
+            (
+                serde_json::to_string(&Command::Steer {
+                    id: "steer-1".to_owned(),
+                    text: "use the other file".to_owned(),
+                    mentions: Vec::new(),
+                }),
+                r#"{"type":"steer","id":"steer-1","text":"use the other file"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::Steer {
+                    id: "steer-2".to_owned(),
+                    text: "this one".to_owned(),
+                    mentions: vec![Mention {
+                        path: "src/main.rs".to_owned(),
+                        start: Some(10),
+                        end: Some(20),
+                    }],
+                }),
+                r#"{"type":"steer","id":"steer-2","text":"this one","mentions":[{"path":"src/main.rs","start":10,"end":20}]}"#,
+            ),
+            (
+                serde_json::to_string(&Event::SteerConsumed {
+                    session_id: pinned_session(),
+                    id: "steer-1".to_owned(),
+                }),
+                r#"{"type":"steer_consumed","session_id":"ses_1","id":"steer-1"}"#,
             ),
             (
                 serde_json::to_string(&Command::CancelTurn),
@@ -2052,6 +2159,63 @@ mod tests {
                     start: None,
                     end: None,
                 }],
+            }
+        );
+    }
+
+    /// A steer's payload is a prompt's, so it keeps a prompt's absence rule in
+    /// both directions: a command written without the key reads back as
+    /// "nothing attached" rather than failing, and one written with it reads
+    /// back whole.
+    #[test]
+    fn a_steer_without_mentions_parses_as_one_with_nothing_attached() {
+        let decoded: Command =
+            serde_json::from_str(r#"{"type":"steer","id":"steer-1","text":"use the other file"}"#)
+                .expect("the mention-free shape parses");
+
+        assert_eq!(
+            decoded,
+            Command::Steer {
+                id: "steer-1".to_owned(),
+                text: "use the other file".to_owned(),
+                mentions: Vec::new(),
+            }
+        );
+
+        let decoded: Command = serde_json::from_str(
+            r#"{"type":"steer","id":"steer-2","text":"this one","mentions":[{"path":"a.rs"}]}"#,
+        )
+        .expect("the attached shape parses");
+        assert_eq!(
+            decoded,
+            Command::Steer {
+                id: "steer-2".to_owned(),
+                text: "this one".to_owned(),
+                mentions: vec![Mention {
+                    path: "a.rs".to_owned(),
+                    start: None,
+                    end: None,
+                }],
+            }
+        );
+    }
+
+    /// The event a queue entry is retired by, read back off the wire: its id
+    /// is the frontend's own string and travels unchanged, because a frontend
+    /// matching on anything else would be matching on a guess.
+    #[test]
+    fn a_consumed_steer_reads_back_naming_the_id_the_command_carried() {
+        let decoded: Event = serde_json::from_str(
+            r#"{"type":"steer_consumed","session_id":"ses_1","id":"steer-1"}"#,
+        )
+        .expect("the event parses");
+
+        assert_eq!(decoded.session_id(), &pinned_session());
+        assert_eq!(
+            decoded,
+            Event::SteerConsumed {
+                session_id: pinned_session(),
+                id: "steer-1".to_owned(),
             }
         );
     }

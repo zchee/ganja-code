@@ -18,7 +18,7 @@ use std::{
 use anyhow::{Context as _, Result};
 use etcetera::{BaseStrategy as _, base_strategy::Xdg};
 use futures::StreamExt as _;
-use ganja_core::{Engine, attachment, catalog, provider};
+use ganja_core::{Engine, EngineError, attachment, catalog, provider};
 use ganja_protocol::{
     Command, Event as CoreEvent, FinishReason, Mention, Message, PartBody, PermissionReply, Role,
     ToolState, Usage,
@@ -49,6 +49,7 @@ use crate::{
         palette::Palette,
         permission::Permission,
         question::Question,
+        queue::Queue,
         search::HistorySearch,
         sessions::{self, Sessions},
         status::{Activity, Status, Totals},
@@ -269,6 +270,26 @@ pub struct App {
     /// What the next `RevertChanged { revert: None }` means, decided by the
     /// last command this frontend sent that could produce one. See [`Cleared`].
     cleared: Cleared,
+    /// Messages typed while a turn already held the engine (**F4**): handed to
+    /// that turn as a `Command::Steer` where it could take them, held for
+    /// replay where it could not.
+    queue: Queue,
+    /// Whether a turn holds the engine's slot. Read off the event stream — the
+    /// assistant envelope opens it, the finish closes it — rather than asked
+    /// of the engine, because the slot is the engine's and a frontend that
+    /// polled it would still be one event behind. Both races that leaves are
+    /// answered by the engine's own typed refusals: `Busy` on the prompt that
+    /// thought it was idle, `NotStreaming` on the steer that thought it was
+    /// not.
+    turn_running: bool,
+    /// How many messages this session has queued, so each gets a correlation
+    /// id of its own for `SteerConsumed` to name.
+    steers: u32,
+    /// Whether the engine is holding a revert. The fallback lane pauses while
+    /// one is: a prompt after an undo is what makes that undo permanent, and
+    /// a message queued before the user undid anything must not be what
+    /// decides it for them.
+    revert_pending: bool,
     /// Where a mention resolves from, and where the walk that offers files
     /// starts.
     cwd: PathBuf,
@@ -392,6 +413,10 @@ impl App {
             // showing entries the engine still holds is recoverable, and
             // dropping entries it holds is not.
             cleared: Cleared::Unhide,
+            queue: Queue::default(),
+            turn_running: false,
+            steers: 0,
+            revert_pending: false,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             clipboard: Box::new(clipboard::System::default()),
@@ -592,10 +617,18 @@ impl App {
             AppEvent::Core(event) => {
                 self.handle_core(*event);
                 self.dirty = true;
+                // Run after every engine event, because the event that just
+                // landed may have been the one that ended the turn — and the
+                // end of a turn is the moment the fallback lane can act.
+                self.replay_queued().await;
             }
             AppEvent::Tick => {
                 self.poll_mcp();
                 self.poll_wire_models().await;
+                // The other door into the same lane: a replay that lost a race
+                // to a turn starting under it keeps its place and is retried
+                // here, where nothing else would wake the loop to try again.
+                self.replay_queued().await;
             }
         }
 
@@ -728,6 +761,11 @@ impl App {
                 // all — showing (upstream `context/theme.tsx:269`).
                 buffer.set_style(area, self.theme.background);
                 self.chat.render(transcript, buffer, &self.theme);
+                // What is waiting sits directly above the composer, under
+                // whichever inline menu is open: the strip is a standing
+                // account of messages the engine still owes, and a menu is a
+                // transient answer to what is being typed right now.
+                self.queue.render(prompt, buffer, &self.theme);
                 // Anchored to the editor and drawn over the transcript, which
                 // is what makes it read as part of what is being typed rather
                 // than as another dialog.
@@ -1201,6 +1239,14 @@ impl App {
             // the history — the arrow falls through to the widget unchanged, so
             // Up on a one-line draft the user has edited still just moves within
             // it.
+            // The queue sits in front of the history: with something waiting
+            // and nothing typed, Up takes the newest queued message back for
+            // editing rather than walking past it into last week's prompts
+            // (**F4**). Once the strip is empty the walk below is reached
+            // unchanged.
+            KeyCode::Up if self.editor.is_empty() && self.withdraw_queued() => {
+                self.sync_menus().await;
+            }
             KeyCode::Up
                 if self.editor.on_first_line() && self.recall(history::Direction::Older) =>
             {
@@ -2208,10 +2254,48 @@ impl App {
             return;
         }
 
+        // A turn already holds the engine, so what was typed is not a prompt:
+        // it is a message for the turn that is running (**F4**). See
+        // [`App::enqueue`].
+        if self.turn_running {
+            self.enqueue(prompt).await;
+            return;
+        }
+
+        match self.start_turn_with(prompt.clone()).await {
+            Ok(()) => self.clear_composer(),
+            // A turn started between the event that said none was running and
+            // this send. Nothing is lost and nothing is refused at the user:
+            // the message joins the queue the steer would have joined, and the
+            // fallback lane replays it when the engine is idle again.
+            Err(EngineError::Busy) => {
+                let id = self.mint_steer_id();
+                self.queue.push_fallback(id, prompt);
+                self.clear_composer();
+                self.sync_queue_status();
+            }
+            // The editor keeps the text, so a refused prompt is never lost.
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
+    }
+
+    /// Hands `prompt` to the engine as a turn of its own and reports what the
+    /// engine said about it.
+    ///
+    /// The tail of [`App::submit`], shared with the fallback lane's replay so
+    /// that a queued message reaches the engine through exactly the path a
+    /// freshly typed one does — its `@` mentions resolved *now*, when it is
+    /// sent, rather than when it was queued.
+    ///
+    /// The composer is deliberately not touched here. Whether refused text
+    /// stays on screen is the caller's decision, and the two callers make it
+    /// differently: a person's own keystrokes stay where they can see them,
+    /// while a replayed entry goes back to the queue that owns it.
+    async fn start_turn_with(&mut self, prompt: String) -> Result<(), EngineError> {
         // The raw buffer is what history remembers — slash and `@` tokens
-        // included, upstream stores the literal input — so it is captured here,
-        // before `prompt` is moved into the send below, and only committed once
-        // the engine accepts it.
+        // included, upstream stores the literal input — so it is captured
+        // here, before `prompt` is moved into the send below, and only
+        // committed once the engine accepts it.
         let remembered = history::PromptInfo::text(&prompt);
 
         // Set before the send rather than after it: a prompt after an undo is
@@ -2255,25 +2339,162 @@ impl App {
                 // suppressed inside `append`, so re-sending a recalled prompt
                 // does not fill the history with copies of it.
                 self.history.append(remembered);
-                self.editor.clear();
-                self.dropdown = None;
-                self.files = None;
-                // The submit-time half of graceful degradation: a mention the
-                // wire cannot carry is named *before* the turn, and the
-                // engine-side text block will name it again inside.
-                self.status.set_notice((!degraded.is_empty()).then(|| {
-                    format!(
-                        "attached by name only — this provider's wire does not carry: {}",
-                        degraded.join(", ")
-                    )
-                }));
+                self.warn_degraded(&degraded);
+
+                Ok(())
             }
-            // The editor keeps the text, so a refused prompt is never lost.
             Err(refusal) => {
                 self.cleared = previously;
-                self.status.set_notice(Some(refusal.to_string()));
+
+                Err(refusal)
             }
         }
+    }
+
+    /// Takes what was typed while a turn was running: hands it to that turn
+    /// where the turn can take it, and holds it for the end of the turn where
+    /// it cannot.
+    ///
+    /// Steering is the primary lane and the queue is the fallback, which is
+    /// the design all three surveyed implementations converge on — Codex
+    /// injects into the running turn and keeps `queued_user_messages` for what
+    /// cannot be injected, and Claude Code does the same split. The refusal
+    /// path here is the frontend half of `EngineError::NotStreaming`: the
+    /// engine answers a steer that lost its turn with a type rather than a
+    /// guess, and the answer decides which lane owns the message.
+    async fn enqueue(&mut self, prompt: String) {
+        let id = self.mint_steer_id();
+
+        // An engine command never steers. It is not a message the model reads
+        // — it acts on the engine between turns — so the fallback lane runs it
+        // once this turn ends, which is Claude Code's own split.
+        if self.engine_command(&prompt).is_some() {
+            self.queue.push_fallback(id, prompt);
+            self.clear_composer();
+            self.sync_queue_status();
+            return;
+        }
+
+        let mentions = mention::attachable(&prompt, &self.root);
+        let degraded = self.degraded(&mentions);
+        let sent = self
+            .engine
+            .send(Command::Steer {
+                id: id.clone(),
+                text: prompt.clone(),
+                mentions,
+            })
+            .await;
+
+        match sent {
+            Ok(()) => {
+                self.history.append(history::PromptInfo::text(&prompt));
+                self.queue.push_steered(id, prompt);
+                self.clear_composer();
+                self.warn_degraded(&degraded);
+            }
+            // The turn ended between the event that said it was running and
+            // this send. Nothing steers an idle engine, so the fallback lane
+            // takes the message and replays it as a prompt.
+            Err(EngineError::NotStreaming) => {
+                self.queue.push_fallback(id, prompt);
+                self.clear_composer();
+            }
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
+
+        self.sync_queue_status();
+    }
+
+    /// Sends the oldest message the fallback lane owns, once the engine is
+    /// idle again.
+    ///
+    /// One per idle moment, deliberately: the send it makes starts a turn, and
+    /// the next entry waits for that turn to end — which is the FIFO the lane
+    /// exists to be. Run after every engine event and on every tick, so the
+    /// end of a turn and the retry of a lost race reach it through the same
+    /// door.
+    async fn replay_queued(&mut self) {
+        if self.turn_running || self.revert_pending {
+            return;
+        }
+        let Some(entry) = self.queue.take_next_fallback() else {
+            return;
+        };
+
+        match self.start_turn_with(entry.text.clone()).await {
+            Ok(()) => {}
+            // A turn started underneath the replay: the entry keeps its place
+            // at the front of the queue and the next tick tries again. The
+            // text was never in the composer, so nothing had to survive a
+            // refusal for this to be lossless.
+            Err(EngineError::Busy) => self.queue.requeue_front(entry),
+            // Anything else is an answer that will not change by being asked
+            // again — a `/command` this build does not have, a session with
+            // nothing to undo — so the entry is dropped rather than retried
+            // forever, and the bar says what happened to it.
+            Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
+        }
+
+        self.sync_queue_status();
+        // A tick-driven replay changes the strip and the bar without any of
+        // the paths that already mark the frame dirty having run.
+        self.dirty = true;
+    }
+
+    /// Takes the newest queued message back into the composer for editing.
+    ///
+    /// Returns whether there was one, so an Up arrow falls through to the
+    /// history walk when the queue is empty: the queue sits *in front of* the
+    /// history and nothing else about that walk changes.
+    ///
+    /// A steered entry cannot be un-sent — there is no command that takes a
+    /// steer back — so a withdrawal that races the engine's own
+    /// `SteerConsumed` leaves the message in the transcript exactly once and
+    /// the recalled copy in the composer, where the person decides whether to
+    /// send it again. Nothing here resends anything.
+    fn withdraw_queued(&mut self) -> bool {
+        let Some(entry) = self.queue.withdraw_newest() else {
+            return false;
+        };
+        self.editor.set_text(&entry.text);
+        self.sync_queue_status();
+
+        true
+    }
+
+    /// The next correlation id for a queued message.
+    ///
+    /// Per session and nothing more: no other frontend mints one, and the
+    /// engine only ever echoes it back in `Event::SteerConsumed`.
+    fn mint_steer_id(&mut self) -> String {
+        self.steers = self.steers.saturating_add(1);
+
+        format!("steer-{}", self.steers)
+    }
+
+    /// Shows how many messages are waiting, or clears the segment.
+    fn sync_queue_status(&mut self) {
+        self.status.set_queued(self.queue.depth());
+    }
+
+    /// Empties the composer and the two menus that were about what was in it.
+    fn clear_composer(&mut self) {
+        self.editor.clear();
+        self.dropdown = None;
+        self.files = None;
+    }
+
+    /// The submit-time half of graceful degradation: a mention the wire cannot
+    /// carry is named *before* the turn, and the engine-side text block will
+    /// name it again inside.
+    fn warn_degraded(&mut self, degraded: &[String]) {
+        self.status.set_notice((!degraded.is_empty()).then(|| {
+            format!(
+                "attached by name only — this provider's wire does not carry: {}",
+                degraded.join(", ")
+            )
+        }));
     }
 
     /// The mentions whose bytes the selected provider will not carry, as
@@ -2358,6 +2579,9 @@ impl App {
             } => {
                 if message.role == Role::Assistant {
                     self.status.set_activity(Activity::Streaming);
+                    // The turn now holds the engine's slot, which is what
+                    // makes the next Enter a steer rather than a prompt.
+                    self.turn_running = true;
                 }
                 self.chat.start_message(message);
             }
@@ -2400,6 +2624,15 @@ impl App {
                 self.permission = Some(Permission::new(id, tool, title, args, directories));
                 self.status.set_activity(Activity::Permission);
             }
+            // The engine took a queued message into the running turn, so the
+            // strip entry has done its job: what it stood for is about to
+            // arrive as the ordinary user message this event precedes. An id
+            // nothing answers to is the withdrawal race, and is not an error —
+            // see [`App::withdraw_queued`].
+            CoreEvent::SteerConsumed { id, .. } => {
+                self.queue.consume(&id);
+                self.sync_queue_status();
+            }
             CoreEvent::PermissionReplied { id, .. } => {
                 let names_open_request = self
                     .permission
@@ -2420,6 +2653,11 @@ impl App {
                 revert,
                 prompt,
             } => {
+                // While one stands, the fallback lane holds: a replayed prompt
+                // would commit the undo the user just made, and doing that on
+                // their behalf with a message they queued beforehand is not a
+                // decision this frontend gets to take.
+                self.revert_pending = revert.is_some();
                 match revert {
                     Some(info) => self.chat.revert(info.message_id, info.files),
                     None => match self.cleared {
@@ -2481,6 +2719,15 @@ impl App {
                     FinishReason::Cancelled => Activity::Stopped,
                     FinishReason::Failed => Activity::Failed,
                 });
+                // The slot is free, and every steer this turn did not take is
+                // one no turn ever will: a finished turn drains no mailbox, so
+                // whatever is still on the strip becomes the fallback lane's
+                // to replay. A cancelled turn converges here too — its
+                // unconsumed messages were never announced, and this is where
+                // they are re-owned.
+                self.turn_running = false;
+                self.queue.strand();
+                self.sync_queue_status();
                 if let Some(usage) = usage {
                     self.record(&usage);
                 }
@@ -2537,7 +2784,17 @@ impl App {
     /// it, and without this arm the finished fetch would sit unopened until
     /// an unrelated keypress.
     fn wants_wakeup(&self) -> bool {
-        self.dirty || self.status.is_streaming() || self.pending_mcp() || self.wire_fetch.is_some()
+        self.dirty
+            || self.status.is_streaming()
+            || self.pending_mcp()
+            || self.wire_fetch.is_some()
+            // The fifth is the fallback lane: a queued message whose replay
+            // lost a race has nothing else to wake the loop and try again.
+            // Only while the lane could actually act — a turn in flight is
+            // woken by its own events, and a paused lane waiting on a revert
+            // is waiting on a person, so neither is a reason to keep the loop
+            // spinning at frame rate.
+            || (self.queue.has_fallback() && !self.turn_running && !self.revert_pending)
     }
 
     fn until_next_frame(&self) -> Duration {
@@ -3117,8 +3374,12 @@ mod tests {
         }
     }
 
+    /// **F4.** What used to be refused is now steered: a second Enter while a
+    /// turn holds the engine hands the text to *that* turn and shows it
+    /// waiting, rather than bouncing it off the Busy contract — which the
+    /// engine still keeps, and which this frontend simply stops asking about.
     #[tokio::test]
-    async fn a_second_prompt_mid_turn_is_refused_without_losing_the_text() {
+    async fn a_second_prompt_mid_turn_is_steered_into_the_running_turn() {
         let (mut app, mut events) = wired().await;
         for event in typing("first") {
             app.handle(event).await.expect("typing is handled");
@@ -3128,6 +3389,7 @@ mod tests {
             .expect("enter is handled");
         // Both message envelopes, so the turn is visibly under way.
         pump(&mut app, &mut events, 2).await;
+        assert!(app.turn_running, "the fixture needs a turn in flight");
 
         for event in typing("second") {
             app.handle(event).await.expect("typing is handled");
@@ -3136,19 +3398,25 @@ mod tests {
             .await
             .expect("enter is handled");
 
-        assert_eq!(
-            app.editor.prompt().as_deref(),
-            Some("second"),
-            "a refused prompt must stay in the editor"
+        assert!(
+            app.editor.is_empty(),
+            "a steered message leaves the composer, like any accepted one"
+        );
+        assert_eq!(app.queue.depth(), 1);
+        assert!(
+            app.queue.entries()[0].is_steered(),
+            "the engine took it, so the strip waits on SteerConsumed"
         );
 
         let mut terminal = terminal(100, 12);
         app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
         assert!(
-            screen(&terminal).contains("already streaming"),
-            "the refusal should be explained:\n{}",
-            screen(&terminal)
+            !screen.contains("already streaming"),
+            "nothing was refused, so nothing should say so:\n{screen}"
         );
+        assert!(screen.contains("second"), "got:\n{screen}");
+        assert!(screen.contains("1 queued"), "got:\n{screen}");
     }
 
     /// Drives the real engine, so this covers the whole path a keystroke takes:
@@ -8119,13 +8387,17 @@ mod tests {
         app.run_command(command::Action::Redo).await;
         assert_eq!(app.cleared, Cleared::Unhide);
 
-        // ...and a prompt the engine refuses must not take it away again.
+        // ...and a prompt the engine refuses must not take it away again. The
+        // refusal a *prompt* can still meet since steering landed is `Busy`:
+        // the turn above is running while this side has not yet seen the event
+        // that says so, which is exactly the race the fallback lane exists for
+        // (**F4**).
+        app.turn_running = false;
         app.editor.set_text("the prompt the engine will refuse");
         app.submit().await;
 
-        assert_eq!(
-            app.editor.prompt().as_deref(),
-            Some("the prompt the engine will refuse"),
+        assert!(
+            app.editor.is_empty() && app.queue.depth() == 1,
             "the fixture only proves anything while the prompt really is refused"
         );
         assert_eq!(
@@ -8307,5 +8579,450 @@ mod tests {
             assert!(screen.contains(row), "{row} should be listed:\n{screen}");
         }
         assert!(!screen.contains("[up/down] scroll"), "{screen}");
+    }
+
+    // ---- F4: steering and the queue behind it -----------------------------
+
+    /// Drives a real turn to a streaming state and hands back the stream, so a
+    /// steering test acts while the engine really is busy rather than while a
+    /// flag says it is.
+    async fn streaming() -> (App, BoxStream<'static, CoreEvent>) {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "the turn to steer").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        // Both envelopes: the second is the assistant's, which is what tells
+        // this side a turn holds the engine.
+        pump(&mut app, &mut events, 2).await;
+        assert!(app.turn_running, "the fixture needs a turn in flight");
+
+        (app, events)
+    }
+
+    /// Runs the rest of a turn's events through the app, so a test never
+    /// leaves one streaming behind it.
+    async fn finish(app: &mut App, events: &mut BoxStream<'static, CoreEvent>) {
+        while let Some(event) = events.next().await {
+            let finished = matches!(event, CoreEvent::MessageFinished { .. });
+            app.handle(AppEvent::core(event))
+                .await
+                .expect("an engine event is handled");
+            if finished {
+                return;
+            }
+        }
+    }
+
+    /// The strip exists to be emptied by the engine's own word, and by nothing
+    /// else: `SteerConsumed` naming an id is what retires that entry.
+    #[tokio::test]
+    async fn a_queued_entry_leaves_the_strip_when_the_engine_says_it_consumed_it() {
+        let (mut app, mut events) = streaming().await;
+        typed(&mut app, "one more thing").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert_eq!(app.queue.depth(), 1);
+
+        let id = app.queue.entries()[0].id.clone();
+        app.handle(AppEvent::core(CoreEvent::SteerConsumed {
+            session_id: app.engine.session_id(),
+            id,
+        }))
+        .await
+        .expect("the event is handled");
+
+        assert!(
+            app.queue.is_empty(),
+            "the engine took it, so the strip lets go"
+        );
+        assert!(!status_line(&mut app).contains("queued"));
+
+        finish(&mut app, &mut events).await;
+    }
+
+    /// The whole path with nothing scripted in the middle: a real engine takes
+    /// the steer, drains it before the turn it would otherwise have ended,
+    /// announces it, and the strip empties on the engine's own word.
+    #[tokio::test]
+    async fn a_real_turn_takes_the_steer_and_the_strip_empties_on_its_own() {
+        let (mut app, mut events) = streaming().await;
+        typed(&mut app, "and one more thing").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert_eq!(app.queue.depth(), 1);
+
+        let mut consumed = false;
+        loop {
+            let event = events.next().await.expect("the turn keeps reporting");
+            let finished = matches!(event, CoreEvent::MessageFinished { .. });
+            consumed |= matches!(event, CoreEvent::SteerConsumed { .. });
+            app.handle(AppEvent::core(event))
+                .await
+                .expect("an engine event is handled");
+            if finished {
+                break;
+            }
+        }
+
+        assert!(consumed, "the running turn took the message");
+        assert!(app.queue.is_empty(), "so the strip let go of it");
+
+        let mut terminal = terminal(80, 20);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(
+            screen.contains("and one more thing"),
+            "and it is in the transcript, not on the strip:\n{screen}"
+        );
+        assert!(
+            !screen.contains("press up to edit queued messages"),
+            "the strip is gone:\n{screen}"
+        );
+    }
+
+    /// An id nothing answers to is the withdrawal race, and is not an error:
+    /// the entry was already taken back and the message lands exactly once.
+    #[tokio::test]
+    async fn a_consumed_id_that_names_nothing_changes_nothing() {
+        let (mut app, mut events) = streaming().await;
+        typed(&mut app, "one more thing").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        app.handle(AppEvent::core(CoreEvent::SteerConsumed {
+            session_id: app.engine.session_id(),
+            id: "steer-nobody".to_owned(),
+        }))
+        .await
+        .expect("the event is handled");
+
+        assert_eq!(app.queue.depth(), 1, "an unrelated id retires nothing");
+
+        finish(&mut app, &mut events).await;
+    }
+
+    /// **Acceptance 4, Up.** With something waiting and nothing typed, Up
+    /// takes the newest queued message back into the composer — and takes it
+    /// off the strip, which is the whole of "withdraw".
+    #[tokio::test]
+    async fn up_recalls_and_withdraws_the_newest_queued_message() {
+        let (mut app, mut events) = streaming().await;
+        for text in ["first correction", "second correction"] {
+            typed(&mut app, text).await;
+            app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+                .await
+                .expect("enter is handled");
+        }
+        assert_eq!(app.queue.depth(), 2);
+
+        app.handle(key(KeyCode::Up, KeyModifiers::NONE))
+            .await
+            .expect("up is handled");
+
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("second correction"),
+            "the newest entry comes back for editing"
+        );
+        assert_eq!(app.queue.depth(), 1, "and leaves the strip");
+
+        finish(&mut app, &mut events).await;
+    }
+
+    /// The queue sits *in front of* the history: once the strip is empty the
+    /// same key walks remembered prompts exactly as it always did.
+    #[tokio::test]
+    async fn up_walks_the_history_again_once_the_strip_is_empty() {
+        let directory = temporary();
+        let mut app = app_with_history(&directory, &["an older prompt"]);
+
+        app.handle(key(KeyCode::Up, KeyModifiers::NONE))
+            .await
+            .expect("up is handled");
+
+        assert_eq!(app.editor.prompt().as_deref(), Some("an older prompt"));
+    }
+
+    /// **Acceptance 4, cancel.** The engine drains nothing on a cancel, so
+    /// every entry still on the strip becomes the fallback lane's — and the
+    /// lane sends it once the engine is idle.
+    #[tokio::test]
+    async fn an_unconsumed_steer_survives_a_cancelled_turn_into_the_fallback_lane() {
+        let (mut app, mut events) = streaming().await;
+        typed(&mut app, "the correction nobody took").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert!(app.queue.entries()[0].is_steered());
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        finish(&mut app, &mut events).await;
+
+        // The finish stranded it and the same handler replayed it, so the
+        // engine has a turn of its own for the message now.
+        assert!(
+            app.queue.is_empty(),
+            "the lane owns it and has sent it: {:?}",
+            app.queue.entries()
+        );
+        let started = events
+            .next()
+            .await
+            .expect("the replay starts a turn of its own");
+        let CoreEvent::MessageStarted { message, .. } = started else {
+            panic!("a turn opens with the user's message");
+        };
+        assert_eq!(
+            message
+                .parts
+                .iter()
+                .filter_map(ganja_protocol::Part::as_text)
+                .collect::<String>(),
+            "the correction nobody took"
+        );
+
+        finish(&mut app, &mut events).await;
+    }
+
+    /// **Acceptance 4, the revert pause.** A replayed prompt would commit the
+    /// undo the user just made, so the lane holds while one is outstanding —
+    /// and the entry is still there, on screen, rather than quietly gone.
+    #[tokio::test]
+    async fn the_fallback_lane_pauses_while_a_revert_is_outstanding() {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "the first turn").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        finish(&mut app, &mut events).await;
+
+        // Refused `NotStreaming`, so the entry is the fallback lane's — the
+        // one kind a replay could send, and the kind this test holds back.
+        app.turn_running = true;
+        typed(&mut app, "the queued correction").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        app.turn_running = false;
+        assert_eq!(app.queue.depth(), 1);
+
+        app.handle(AppEvent::core(CoreEvent::RevertChanged {
+            session_id: app.engine.session_id(),
+            revert: Some(ganja_protocol::RevertInfo {
+                message_id: ganja_protocol::MessageId::from("msg_1".to_owned()),
+                files: Vec::new(),
+            }),
+            prompt: None,
+        }))
+        .await
+        .expect("the revert is handled");
+        assert!(app.revert_pending);
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        assert_eq!(
+            app.queue.depth(),
+            1,
+            "the entry waits for the person to decide about the revert"
+        );
+        assert!(status_line(&mut app).contains("1 queued"));
+
+        // And once the revert is over, the same entry goes.
+        app.handle(AppEvent::core(CoreEvent::RevertChanged {
+            session_id: app.engine.session_id(),
+            revert: None,
+            prompt: None,
+        }))
+        .await
+        .expect("the cleared revert is handled");
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        assert!(app.queue.is_empty(), "the pause was a pause, not a drop");
+        finish(&mut app, &mut events).await;
+    }
+
+    /// **Acceptance 4, the race towards idle.** A steer that arrives after the
+    /// turn ended is refused `NotStreaming`, joins the fallback lane, and is
+    /// replayed exactly once — no loss, no duplicate.
+    #[tokio::test]
+    async fn a_steer_that_loses_the_turn_is_refused_and_replayed_exactly_once() {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "the first turn").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        finish(&mut app, &mut events).await;
+
+        // The turn is over; this side has not noticed, which is the race.
+        app.turn_running = true;
+        typed(&mut app, "the message that lost the race").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.queue.depth(), 1);
+        assert!(
+            !app.queue.entries()[0].is_steered(),
+            "a refused steer belongs to the fallback lane"
+        );
+
+        // The lane sends it on the next tick, and sends it once.
+        app.turn_running = false;
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        assert!(app.queue.is_empty());
+
+        let mut prompts = 0;
+        loop {
+            let event = events.next().await.expect("the replay runs a turn");
+            let finished = matches!(event, CoreEvent::MessageFinished { .. });
+            if let CoreEvent::MessageStarted { message, .. } = &event
+                && message.role == ganja_protocol::Role::User
+            {
+                prompts += 1;
+                assert_eq!(
+                    message
+                        .parts
+                        .iter()
+                        .filter_map(ganja_protocol::Part::as_text)
+                        .collect::<String>(),
+                    "the message that lost the race"
+                );
+            }
+            app.handle(AppEvent::core(event))
+                .await
+                .expect("an engine event is handled");
+            if finished {
+                break;
+            }
+        }
+        assert_eq!(prompts, 1, "exactly once");
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        assert!(
+            app.queue.is_empty(),
+            "and nothing is left to send a second time"
+        );
+    }
+
+    /// **Acceptance 4, the Busy retry.** A replay that loses a race to a turn
+    /// starting underneath it keeps its place at the front and is tried again.
+    #[tokio::test]
+    async fn a_replay_that_meets_busy_keeps_its_place_and_is_retried() {
+        let (mut app, mut events) = streaming().await;
+
+        // Queued while a turn really is running, but with this side believing
+        // it is idle: the send below meets `Busy` and the entry is what
+        // survives it.
+        app.turn_running = false;
+        typed(&mut app, "the message that met busy").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.queue.depth(), 1, "the refusal cost nothing");
+        assert!(app.editor.is_empty());
+
+        // Another tick while the turn is still running: still refused, still
+        // first in the queue.
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        assert_eq!(app.queue.depth(), 1);
+
+        // And once the turn ends, the same entry goes.
+        finish(&mut app, &mut events).await;
+        assert!(app.queue.is_empty(), "the retry took");
+
+        finish(&mut app, &mut events).await;
+    }
+
+    /// **Acceptance 4, the slash split.** An engine command acts on the engine
+    /// between turns, so it never steers: it waits for the end of the turn.
+    #[tokio::test]
+    async fn an_engine_command_typed_mid_turn_waits_for_the_end_of_the_turn() {
+        let (mut app, mut events) = streaming().await;
+
+        // With an argument, so the inline command menu is closed and Enter is
+        // the submit rather than the menu's own selection.
+        typed(&mut app, "/init focus on the tests").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.queue.depth(), 1);
+        assert!(
+            !app.queue.entries()[0].is_steered(),
+            "a command is not a message the model reads"
+        );
+        assert!(app.editor.is_empty());
+
+        finish(&mut app, &mut events).await;
+        assert!(app.queue.is_empty(), "and it runs when the turn is over");
+
+        finish(&mut app, &mut events).await;
+    }
+
+    /// Shell mode keeps the refusal it always had: upstream's server refuses a
+    /// shell command while busy too, and steering does not change what a `!`
+    /// line is.
+    #[tokio::test]
+    async fn a_shell_submission_mid_turn_is_still_refused_and_never_queued() {
+        let (mut app, mut events) = streaming().await;
+
+        typed(&mut app, "!").await;
+        typed(&mut app, "echo hello").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.editor.prompt().as_deref(), Some("echo hello"));
+        assert_eq!(app.editor.mode(), Mode::Shell);
+        assert!(app.queue.is_empty(), "nothing steers a shell line");
+
+        app.set_shell(false);
+        app.editor.clear();
+        finish(&mut app, &mut events).await;
+    }
+
+    /// Esc is the cancel and nothing else: a person stopping a turn has not
+    /// said anything about the messages they queued for it.
+    #[tokio::test]
+    async fn escape_does_not_clear_the_strip() {
+        let (mut app, mut events) = streaming().await;
+        typed(&mut app, "still wanted").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+
+        assert_eq!(app.queue.depth(), 1, "Esc says nothing about the queue");
+
+        finish(&mut app, &mut events).await;
+    }
+
+    /// The whole strip, as a person sees it: the waiting message, the hint
+    /// line under it, and the depth on the bar.
+    #[tokio::test]
+    async fn snapshot_queued_messages_strip() {
+        let (mut app, mut events) = streaming().await;
+        for text in ["run the tests too", "and then commit"] {
+            typed(&mut app, text).await;
+            app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+                .await
+                .expect("enter is handled");
+        }
+
+        let mut terminal = terminal(80, 16);
+        app.draw(&mut terminal).expect("a frame draws");
+        insta::assert_snapshot!(screen(&terminal));
+
+        finish(&mut app, &mut events).await;
     }
 }
