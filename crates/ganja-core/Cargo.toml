@@ -70,6 +70,11 @@ rmcp.workspace = true
 # `bundled` (declared at the workspace) keeps the pragma defaults the storage
 # layer relies on compiled in rather than inherited from the platform.
 rusqlite.workspace = true
+# The one secret this crate's own code reads rather than only tests: an MCP
+# server's stored OAuth access token, exposed once to build the `Authorization:
+# Bearer` header `mcp.rs`'s dial sends. Every other credential stays inside
+# `ganja-provider`'s wires.
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -97,10 +102,6 @@ ganja-testkit.workspace = true
 # "a real PNG of the right dimensions reached the wire" rather than "some
 # bytes did."
 png.workspace = true
-# Only the credential tests: they build the `SecretString`s a store is seeded
-# with and read back what a redaction left. The engine itself holds no key
-# material any more — that went to `ganja-provider` with the wires.
-secrecy.workspace = true
 # The credential tests write real files, with real permission bits, in a
 # directory that goes away afterwards.
 tempfile.workspace = true

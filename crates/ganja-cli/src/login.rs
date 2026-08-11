@@ -616,10 +616,14 @@ fn nothing_stored(error: impl std::fmt::Display) -> anyhow::Error {
 /// The task is aborted on the way out. Left running it would hold the process's
 /// interrupt handler for a wait that has already finished, so the next `Ctrl-C`
 /// would be swallowed by nobody.
-struct Interrupt(tokio::task::JoinHandle<()>);
+///
+/// `pub(crate)`: `ganja mcp login`'s browser wait in `main.rs` needs the same
+/// keystroke-to-cancellation shape a provider login already has, and it is
+/// not provider-specific in any way — nothing about it names a vendor.
+pub(crate) struct Interrupt(tokio::task::JoinHandle<()>);
 
 impl Interrupt {
-    fn watching(cancel: CancellationToken) -> Self {
+    pub(crate) fn watching(cancel: CancellationToken) -> Self {
         Self(tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
                 cancel.cancel();

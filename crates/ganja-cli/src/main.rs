@@ -130,12 +130,16 @@ enum Command {
         #[command(subcommand)]
         action: Config,
     },
-    /// Show the configured MCP servers and the tools they lend.
+    /// Show the configured MCP servers and the tools they lend, or manage one.
     ///
-    /// Every enabled server is connected, so the standing reported is one this
-    /// build actually reached rather than one the config merely asked for, and
-    /// every connection is closed again before this returns.
-    Mcp,
+    /// With no further word: every enabled server is connected, so the
+    /// standing reported is one this build actually reached rather than one
+    /// the config merely asked for, and every connection is closed again
+    /// before this returns.
+    Mcp {
+        #[command(subcommand)]
+        action: Option<McpAction>,
+    },
     /// List the models this build knows how to size and price.
     Models {
         /// List only the models this provider serves.
@@ -160,6 +164,21 @@ enum Command {
     Serve(serve::ServeArgs),
     /// List the stored sessions of the project this was run in.
     Sessions,
+}
+
+#[derive(Debug, Subcommand)]
+enum McpAction {
+    /// Start an OAuth login for one remote server configured with `oauth`.
+    ///
+    /// Discovery, registration and the browser wait all run here — the same
+    /// flow the `/mcp` dialog's Login action drives — and a completed login
+    /// is stored under `mcp:<server>`, ready for the next connect. Refused by
+    /// name for a server that is not configured, is local, or names no
+    /// `oauth`: there is nothing this build could mean by a login for it.
+    Login {
+        /// The server's name, as configured under `mcp`.
+        server: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -444,7 +463,7 @@ async fn main() -> Result<()> {
         None => ganja_tui::run(cli.resume.wanted(), cli.select.overrides()).await,
         Some(Command::Auth { action }) => auth_command(action).await,
         Some(Command::Config { action }) => config_command(action),
-        Some(Command::Mcp) => mcp_command().await,
+        Some(Command::Mcp { action }) => mcp_command(action).await,
         Some(Command::Models { provider, refresh }) => models_command(provider, refresh).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Serve(args)) => serve::serve(args).await,
@@ -574,7 +593,11 @@ fn log_directory() -> Result<PathBuf> {
 /// **Everything is read before the shutdown, and the shutdown always runs.**
 /// Closing a connection takes its client and clears its definitions, so a
 /// listing that shut down first would report every server as lending nothing.
-async fn mcp_command() -> Result<()> {
+async fn mcp_command(action: Option<McpAction>) -> Result<()> {
+    if let Some(McpAction::Login { server }) = action {
+        return mcp_login_command(&server).await;
+    }
+
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
     let config = ganja_core::config::Config::load(&cwd).context("failed to read the config")?;
 
@@ -625,6 +648,63 @@ async fn mcp_command() -> Result<()> {
             report(&lent, name);
         }
     }
+
+    Ok(())
+}
+
+/// Runs an OAuth login for `server` and stores what it produces.
+///
+/// The same flow the `/mcp` dialog's Login action drives — discovery,
+/// registration, PKCE, the loopback wait — reached here instead through
+/// [`ganja_provider::auth::mcp_oauth`] directly, since a one-shot CLI process
+/// has no engine to ask and no reason to build one: an MCP server's
+/// credential is a peer of the session, not of a model provider, the same
+/// reasoning [`mcp_command`]'s own listing is built on.
+///
+/// **Nothing here writes a credential until the login has actually
+/// succeeded** — the same "a login that was cancelled left nothing behind"
+/// property [`login::oauth`] and its own flows are built on.
+///
+/// # Errors
+///
+/// Refused by name when `server` is not configured, is a local server, or
+/// names no `oauth`; otherwise whatever discovery, registration or the
+/// exchange failed with.
+async fn mcp_login_command(server: &str) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read the working directory")?;
+    let config = ganja_core::config::Config::load(&cwd).context("failed to read the config")?;
+
+    let entry = config
+        .mcp
+        .get(server)
+        .with_context(|| format!("mcp server \"{server}\" is not configured"))?;
+    let ganja_core::config::McpServer::Remote(remote) = entry else {
+        bail!("mcp server \"{server}\" is a local server; oauth is for remote servers only");
+    };
+    if remote.oauth.is_none() {
+        bail!("mcp server \"{server}\" has no `oauth` configured");
+    }
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _interrupt = login::Interrupt::watching(cancel.clone());
+
+    let login = ganja_provider::auth::mcp_oauth::Login::new(&remote.url)
+        .with_context(|| format!("mcp server \"{server}\" could not start a login"))?;
+    let browser = login
+        .browser()
+        .await
+        .with_context(|| format!("mcp server \"{server}\": discovery or registration failed"))?;
+    eprintln!("Go to: {}", browser.url());
+    eprintln!("Waiting for authorization...");
+
+    let credential = browser
+        .wait(ganja_provider::auth::mcp_oauth::CALLBACK_DEADLINE, &cancel)
+        .await
+        .with_context(|| format!("mcp server \"{server}\": nothing was stored"))?;
+    ganja_provider::auth::set_oauth(&format!("mcp:{server}"), &credential)
+        .context("the credential could not be stored")?;
+
+    println!("mcp server \"{server}\": login stored");
 
     Ok(())
 }

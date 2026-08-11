@@ -211,6 +211,60 @@ fn a_project_with_no_configured_servers_invites_rather_than_lists() {
         .stderr(predicate::str::is_empty());
 }
 
+/// An invocation of `ganja mcp login <server>` in `project`, isolated the
+/// same way [`listing`] is — a login neither reads nor writes a developer's
+/// real credential store or config home.
+fn login(
+    project: &TempDir,
+    data: &TempDir,
+    config: Option<&std::path::Path>,
+    server: &str,
+) -> Command {
+    let mut command = listing(project, data, config);
+    command.args(["login", server]);
+
+    command
+}
+
+/// The three ways `ganja mcp login` refuses without reaching a network: the
+/// name is not configured, it names a local server (oauth is remote-only),
+/// or it is remote but names no `oauth` — each is a config-validation
+/// question `mcp_login_command` answers before anything about the flow
+/// itself. What discovery, registration and the exchange do once a login
+/// actually starts is pinned in `ganja-provider`'s own unit tests and in
+/// `ganja-core/tests/mcp_oauth.rs`'s end-to-end run through the credential
+/// store — this file's own job is the listing and this validation, not the
+/// wire.
+#[test]
+fn a_login_is_refused_by_name_before_it_reaches_a_network() {
+    let project = project();
+    let data = TempDir::new().expect("a temporary directory is creatable");
+    let path = config_file(
+        &project,
+        &json!({
+            "mcp": {
+                "hub": { "type": "remote", "url": "https://mcp.example/mcp" },
+                "fs": { "type": "local", "command": ["ganja-no-such-program-8842"] },
+            }
+        }),
+    );
+
+    login(&project, &data, Some(&path), "nowhere")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"nowhere\" is not configured"));
+
+    login(&project, &data, Some(&path), "fs")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"fs\"").and(predicate::str::contains("local server")));
+
+    login(&project, &data, Some(&path), "hub")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no `oauth` configured"));
+}
+
 /// A loopback endpoint speaking streamable HTTP, answered by its URL.
 ///
 /// A thread per connection and the standard library's own listener, because

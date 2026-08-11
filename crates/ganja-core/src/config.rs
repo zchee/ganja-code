@@ -364,7 +364,23 @@ pub struct McpRemote {
     pub timeout: Option<NonZeroU64>,
     /// Byte budget on one tool result; see [`McpServer::output_limit`].
     pub output_limit: Option<u64>,
+    /// Discovers this server's own authorization server and logs in against
+    /// it, rather than sending a static [`headers`](Self::headers) entry —
+    /// see [`crate::mcp`]'s "OAuth" section for the flow this unlocks
+    /// (**D466**). A marker rather than a settings object: nothing about the
+    /// flow is configurable in this build yet, so there is nothing to write
+    /// beyond naming that the server wants it.
+    pub oauth: Option<McpOauth>,
 }
+
+/// Turns on OAuth for a [`McpRemote`] entry. Carries nothing today —
+/// discovery finds the endpoints, and dynamic registration finds the client —
+/// but is its own type rather than a bare `bool` so a future field (a
+/// preregistered `client_id`, a scope) has somewhere to land without another
+/// migration of this shape.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct McpOauth {}
 
 /// What `enabled` means when an entry does not say: upstream connects unless
 /// told not to (`mcp/index.ts:514-517`).
@@ -1471,8 +1487,8 @@ mod tests {
 
     use super::{
         AgentMode, AgentsConfig, Config, ConfigError, Dialect, HookCommand, HookHandler,
-        HookMatcher, LspConfig, McpServer, NonZeroU64, Overrides, ThemeMode, existing, merge_files,
-        project_files, read, split_model,
+        HookMatcher, LspConfig, McpOauth, McpServer, NonZeroU64, Overrides, ThemeMode, existing,
+        merge_files, project_files, read, split_model,
     };
     use crate::permission::{Action, RuleSet};
 
@@ -1909,6 +1925,11 @@ mod tests {
                     "url": "https://mcp.example/mcp",
                     "headers": {"Authorization": "Bearer x"},
                     "enabled": false
+                },
+                "auth": {
+                    "type": "remote",
+                    "url": "https://oauth.example/mcp",
+                    "oauth": {}
                 }
             }}"#,
         )
@@ -1935,6 +1956,19 @@ mod tests {
             remote.output_limit, None,
             "an entry that says nothing about its budget gets the global default"
         );
+        assert_eq!(
+            remote.oauth, None,
+            "an entry that says nothing has no login"
+        );
+
+        let McpServer::Remote(auth) = &config.mcp["auth"] else {
+            panic!("the third entry is remote");
+        };
+        assert_eq!(
+            auth.oauth,
+            Some(McpOauth::default()),
+            "`oauth: {{}}` turns discovery and dynamic registration on for this server"
+        );
     }
 
     /// Every one of these is a config that would otherwise have described a
@@ -1945,12 +1979,6 @@ mod tests {
             // Upstream skips a type-less entry with a log line; a config that
             // names a server means to have one.
             (r#"{"mcp": {"x": {"command": ["a"]}}}"#, "type"),
-            // MCP OAuth is not ported, so the key that asks for it fails loud
-            // rather than being ignored.
-            (
-                r#"{"mcp": {"x": {"type": "remote", "url": "https://a.test", "oauth": {}}}}"#,
-                "oauth",
-            ),
             (r#"{"mcp": {"x": {"type": "local", "command": []}}}"#, "x"),
             (
                 r#"{"mcp": {"x": {"type": "remote", "url": "http://mcp.example/mcp"}}}"#,
