@@ -239,8 +239,8 @@ ganja 独自の変数(`GANJA_MODEL`・`GANJA_FAKE_SCRIPT`・`GANJA_MODELS_URL`/`
 | サーフェス | 補足 | ganja |
 |---|---|---|
 | [セッション rename / tag / move / export ダイアログ](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | | ❌ |
-| [タイムライン+任意時点フォーク](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-timeline.tsx) | `<leader>g` | ❌ |
-| [メッセージ inspect](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-message.tsx) | | ❌ |
+| [タイムライン+任意時点フォーク](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-timeline.tsx) | `<leader>g` | ⚠️ チェックポイント一覧の半分は移植済み — `/rewind` + アイドル時の Esc Esc がユーザーメッセージを新しい順に列挙、Timeline のピッカーと同じ形;過去時点からのセッション fork は未移植(セッション fork ❌、§2) |
+| [メッセージ inspect](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-message.tsx) | | ⚠️ Revert は `/rewind` の第二段(`Command::RevertTo`、Both/Conversation/Files スコープ — upstream の単一 revert の上位互換)として移植済み;Fork は未移植(セッション fork なし)、Copy はこのピッカーからは呼べない(`/copy-message` が独立コマンドとして存在) |
 | [workspace UI](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | create/list/file-changes/destination | ❌ 設計ごと対象外 |
 | [サイドバー](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/feature-plugins/sidebar) | context/files/lsp/mcp/todo ペイン | ❌ |
 | [diff ビューア](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component/diff-viewer) | ファイルツリー・split/unified・hunk ナビ | ❌ インライン unified のみ |
@@ -256,8 +256,14 @@ ganja 独自の変数(`GANJA_MODEL`・`GANJA_FAKE_SCRIPT`・`GANJA_MODELS_URL`/`
 ## 14. TUI — keybind 全レジストリ
 
 ポート済み・rebind 可能(6): [`app_exit`・`command_list`・`session_list`・`theme_list`・`agent_cycle`・`input_newline`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/config/keybind.ts)。
-以下は同レジストリの残り。*upstream の composer に Tab 補完は存在しない —
-Tab は `agent_cycle`(ポート済み)、補完メニューはフィルタ+Enter(ポート済み)。*
+以下は同レジストリの残り。*upstream にも `@`/`/` メニュー自身の Tab 補完が
+存在する。独立した `prompt.autocomplete.complete` バインドで(下記6つのポート済み
+トップレベルアクションにも下表の行にも含まれない)、upstream の Tab はディレクト
+リなら選択前にその場で展開もする(`autocomplete.tsx:618-627`)。ganja も両メ
+ニューで Tab 確定するようになった(`@` は Enter と同一挙動、`/` は実行せず
+補完のみで Claude Code 由来の提示上の divergence、D446)が、ganja の `@` ウォー
+カーはファイルのみを返すためディレクトリ降下は未移植。両メニューが閉じている
+とき Tab は引き続き `agent_cycle`(ポート済み)を兼ねる。*
 
 | アクション | 既定 | ganja |
 |---|---|---|
@@ -270,11 +276,11 @@ Tab は `agent_cycle`(ポート済み)、補完メニューはフィルタ+Enter
 | `theme_switch_mode` / `theme_mode_lock` | none | ❌ |
 | `sidebar_toggle` / `scrollbar_toggle` / `status_view` / `debug_view` | `<leader>b`,`<leader>s` | ❌ |
 | `session_export` / `session_copy` | `<leader>x` / none | ❌ / ⚠️ `/copy` ✅ |
-| `session_move` / `session_timeline` / `session_fork` / `session_rename` / `session_delete` / `session_share` / `session_unshare` | ctrl+r・ctrl+d 等 | ❌ |
+| `session_move` / `session_timeline` / `session_fork` / `session_rename` / `session_delete` / `session_share` / `session_unshare` | ctrl+r・ctrl+d 等 | ⚠️ `session_timeline` の一覧機能は移植済み(`/rewind` + アイドル時の Esc Esc がユーザーメッセージのチェックポイントを新しい順に列挙、Timeline と同じ形)だが `<leader>g` キー自体はなし;残り6つ(move/fork/rename/delete/share/unshare)は❌のまま |
 | `session_new` / `session_compact` / `session_interrupt` | `<leader>n` / `<leader>c` / escape | ⚠️ `/new`・`/compact`・Esc キャンセルは✅・rebind 不可 |
 | `session_background` | ctrl+b | ❌ |
 | `session_toggle_timestamps` / `_generic_tool_output` | none | ❌ |
-| `session_queued_prompts` | `<leader>q` | ❌ |
+| `session_queued_prompts` | `<leader>q` | ⚠️ ganja のキュー欄が composer 上部に steer 未消費のエントリを表示し、Up で最新のものを呼戻し・撤回できる — 発想は同じだが専用の leader キー一覧ダイアログはなし |
 | `session_child_first/child_cycle/child_cycle_reverse/parent` | `<leader>down`・right・left・up | ❌ |
 | `session_pin_toggle` / `session_quick_switch_1..9` | ctrl+f / `<leader>1-9` | ❌ |
 | `stash_delete` | ctrl+d | ❌ |
@@ -287,7 +293,7 @@ Tab は `agent_cycle`(ポート済み)、補完メニューはフィルタ+Enter
 | `messages_copy` / `messages_undo` / `messages_redo` / `messages_toggle_conceal` | `<leader>y/u/r/h` | ⚠️ `/copy-message`・`/undo`・`/redo` ✅・キーと conceal ❌ |
 | `tool_details` / `display_thinking` | none | ❌ |
 | `prompt_submit` / `prompt_editor_context_clear` / `prompt_skills` / `prompt_stash(_pop/_list)` / `workspace_set` | none | ❌ |
-| `input_clear` / `input_paste` | ctrl+c / ctrl+v | ❌ / ⚠️ bracketed paste のみ |
+| `input_clear` / `input_paste` | ctrl+c / ctrl+v | ❌ / ⚠️ bracketed paste(自動・テキスト)は✅;ctrl+v 自体もクリップボード画像ペースト用に配線済み(PNG・プロセス内エンコード、D449)— 画像には bracketed 経路がないため |
 | `input_submit` / `input_move_*` / `input_backspace` / `input_delete` | return・矢印 等 | ⚠️ 動作は✅・rebind 不可(Up/Down は履歴接続✅) |
 | `input_select_*`(left/right/up/down/line/buffer/visual-line、10種) | shift+系 | ❌ 選択機構ごと不在 |
 | `input_line_home/end` / `input_visual_line_home/end` / `input_buffer_home/end` | ctrl+a/e・alt+a/e・home/end | ⚠️ 一部内蔵・視覚行❌ |

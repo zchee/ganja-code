@@ -16,11 +16,11 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 
 | 機能 | キー | ganja |
 |---|---|---|
-| [`@` ファジー検索+ Tab 確定](https://developers.openai.com/codex/cli) | `@` + Tab | ⚠️ `@` メニューは✅・Tab 確定なし(Enter のみ) |
-| [Esc-Esc バックトラック](https://developers.openai.com/codex/cli) | Esc Esc | ❌ 過去プロンプトを選択・編集し、以降のターンを巻き戻す |
+| [`@` ファジー検索+ Tab 確定](https://developers.openai.com/codex/cli) | `@` + Tab | ✅ Tab で確定・Enter と同一挙動;ディレクトリ降下(`@dir`→`@dir/`)は未実装 — ganja のウォーカーはファイルのみを返す |
+| [Esc-Esc バックトラック](https://developers.openai.com/codex/cli) | Esc Esc | ⚠️ アイドル時の Esc Esc は ganja 自前のリワインドピッカーを開く — 過去のユーザーメッセージをチェックポイントとして選び、Both/Conversation/Files のスコープを選択;Codex と異なり composer へ過去プロンプトを書き戻して編集する機構はなく、アイドル時限定(実行中の Esc は従来通りキャンセル) |
 | [トランスクリプトオーバーレイ](https://developers.openai.com/codex/cli) | Ctrl+T | ❌ 生ログ・ターン毎トークン・tool/MCP 展開 |
-| [メッセージキュー](https://developers.openai.com/codex/cli) | 実行中に Enter | ❌ Busy 中は拒否 |
-| [クリップボード画像ペースト](https://developers.openai.com/codex/cli) | Ctrl+V | ❌(`@` 添付は✅) |
+| [メッセージキュー](https://developers.openai.com/codex/cli) | 実行中に Enter | ✅ 実行中のターンへ次のステップ境界で steer(`Command::Steer`)— Codex 自身の `input_queue`/`inject` と同じ形;steer できないもの(拒否・未消費・スラッシュコマンド)は再生キューにフォールバック(Codex の `queued_user_messages` 側に相当) |
+| [クリップボード画像ペースト](https://developers.openai.com/codex/cli) | Ctrl+V | ✅ PNG をプロセス内エンコード(OS ツール呼出しなし)し、`@` mention パイプライン経由で添付 |
 | [スラッシュコマンド補完](https://developers.openai.com/codex/cli) | `/` | ✅ |
 | [reasoning effort のホットキー](https://github.com/openai/codex/blob/main/docs/config.md) | Alt+, / Alt+. | ❌(`/effort` リスト選択は✅) |
 | [ステータスライン構成](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ❌ 固定ステータスバー(テーマは✅) |

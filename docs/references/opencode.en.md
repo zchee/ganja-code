@@ -239,8 +239,8 @@ repository root's `AGENTS.md`.
 | Surface | Notes | ganja |
 |---|---|---|
 | [Session rename / tag / move / export dialogs](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | | ❌ |
-| [Timeline + fork-from-timeline](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-timeline.tsx) | `<leader>g` | ❌ |
-| [Message inspect dialog](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-message.tsx) | | ❌ |
+| [Timeline + fork-from-timeline](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-timeline.tsx) | `<leader>g` | ⚠️ the checkpoint-list half is ported — `/rewind` + idle Esc Esc list every user message newest-first, Timeline's own picker shape; forking a session from a past point is not (Session forking ❌, §2) |
+| [Message inspect dialog](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-message.tsx) | | ⚠️ Revert is ported as `/rewind`'s second step (`Command::RevertTo`, Both/Conversation/Files scopes — a superset of upstream's single revert); Fork isn't (no session forking) and Copy isn't reachable from this picker (`/copy-message` is its own command) |
 | [Workspace UI](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | create/list/file-changes/destination | ❌ out of scope by design |
 | [Sidebar](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/feature-plugins/sidebar) | context/files/lsp/mcp/todo panes | ❌ |
 | [Diff viewer](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component/diff-viewer) | file tree, split/unified, hunk nav | ❌ inline unified diffs only |
@@ -256,9 +256,15 @@ repository root's `AGENTS.md`.
 ## 14. TUI — the full keybind registry
 
 Ported and rebindable (6): [`app_exit`, `command_list`, `session_list`, `theme_list`, `agent_cycle`, `input_newline`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/config/keybind.ts).
-Everything below is from the same registry. *Tab completion does not exist in
-the upstream composer — Tab is `agent_cycle` (ported); both completion menus
-are filter-plus-Enter (ported).*
+Everything below is from the same registry. *Tab also completes upstream's own
+`@`/`/` menus, through a separate `prompt.autocomplete.complete` binding (not
+one of the six ported top-level actions, and not one of the rows below) —
+upstream's Tab there additionally expands a directory in place before
+selecting (`autocomplete.tsx:618-627`). ganja now Tab-accepts in both menus
+too (`@` byte-identical to Enter; `/` completes the buffer without
+submitting, a Claude Code presentation divergence, D446), but ganja's `@`
+walker is files-only, so directory-descent stays unported. Tab still doubles
+as `agent_cycle` (ported) whenever neither menu is open.*
 
 | Action(s) | Default | ganja |
 |---|---|---|
@@ -271,11 +277,11 @@ are filter-plus-Enter (ported).*
 | `theme_switch_mode` / `theme_mode_lock` | none | ❌ |
 | `sidebar_toggle` / `scrollbar_toggle` / `status_view` / `debug_view` | `<leader>b`,`<leader>s` | ❌ |
 | `session_export` / `session_copy` | `<leader>x` / none | ❌ / ⚠️ `/copy` ✅ |
-| `session_move` / `session_timeline` / `session_fork` / `session_rename` / `session_delete` / `session_share` / `session_unshare` | ctrl+r, ctrl+d, … | ❌ |
+| `session_move` / `session_timeline` / `session_fork` / `session_rename` / `session_delete` / `session_share` / `session_unshare` | ctrl+r, ctrl+d, … | ⚠️ `session_timeline`'s browsing is ported (`/rewind` + idle Esc Esc list every user-message checkpoint newest-first, Timeline's own shape) though its `<leader>g` key isn't; the other six (move/fork/rename/delete/share/unshare) stay ❌ |
 | `session_new` / `session_compact` / `session_interrupt` | `<leader>n` / `<leader>c` / escape | ⚠️ `/new`, `/compact`, Esc-cancel ✅; keys not rebindable |
 | `session_background` | ctrl+b | ❌ |
 | `session_toggle_timestamps` / `_generic_tool_output` | none | ❌ |
-| `session_queued_prompts` | `<leader>q` | ❌ |
+| `session_queued_prompts` | `<leader>q` | ⚠️ ganja's queue strip renders steered/unconsumed entries above the composer and Up recalls-and-withdraws the newest one — the same idea, no dedicated leader-key list dialog |
 | `session_child_first/child_cycle/child_cycle_reverse/parent` | `<leader>down`, right, left, up | ❌ |
 | `session_pin_toggle` / `session_quick_switch_1..9` | ctrl+f / `<leader>1-9` | ❌ |
 | `stash_delete` | ctrl+d | ❌ |
@@ -288,7 +294,7 @@ are filter-plus-Enter (ported).*
 | `messages_copy` / `messages_undo` / `messages_redo` / `messages_toggle_conceal` | `<leader>y/u/r/h` | ⚠️ `/copy-message`, `/undo`, `/redo` ✅; keys + conceal ❌ |
 | `tool_details` / `display_thinking` | none | ❌ |
 | `prompt_submit` / `prompt_editor_context_clear` / `prompt_skills` / `prompt_stash(_pop/_list)` / `workspace_set` | none | ❌ |
-| `input_clear` / `input_paste` | ctrl+c / ctrl+v | ❌ / ⚠️ bracketed paste only |
+| `input_clear` / `input_paste` | ctrl+c / ctrl+v | ❌ / ⚠️ bracketed paste (automatic, text) ✅; ctrl+v itself is now wired too, for clipboard image paste (PNG, in-process, D449) since images have no bracketed channel |
 | `input_submit` / `input_move_*` / `input_backspace` / `input_delete` | return, arrows, … | ⚠️ behaviors ✅, not rebindable (Up/Down feed history ✅) |
 | `input_select_*` (left/right/up/down/line/buffer/visual-line, 10 actions) | shift+… | ❌ no selection machinery |
 | `input_line_home/end` / `input_visual_line_home/end` / `input_buffer_home/end` | ctrl+a/e, alt+a/e, home/end | ⚠️ partial built-ins; visual-line ❌ |
