@@ -1175,6 +1175,42 @@ impl Engine {
         servers.status()
     }
 
+    /// How many tools each connected MCP server currently lends — the same
+    /// count [`Engine::mcp_status`]'s companion for a `/mcp` row or `ganja
+    /// mcp`'s listing, [`mcp::Servers::tool_counts`] under the engine's own
+    /// servers.
+    #[must_use]
+    pub fn mcp_tool_counts(&self) -> BTreeMap<String, usize> {
+        let Some(servers) = &self.mcp else {
+            return BTreeMap::new();
+        };
+
+        servers.tool_counts()
+    }
+
+    /// Every configured MCP server, by name — including one still on its
+    /// first dial, absent from [`Engine::mcp_status`]'s map until that
+    /// resolves; see [`mcp::Servers::names`].
+    #[must_use]
+    pub fn mcp_names(&self) -> Vec<String> {
+        self.mcp
+            .as_ref()
+            .map_or_else(Vec::new, |servers| servers.names())
+    }
+
+    /// Re-dials one MCP server by name; see [`mcp::Servers::reconnect`].
+    ///
+    /// `Err` when there are no MCP servers configured at all, naming the
+    /// server the same way [`mcp::Servers::reconnect`]'s own refusals do —
+    /// there is nothing this engine could mean by the name either way.
+    pub async fn reconnect_mcp(&self, name: &str) -> Result<(), String> {
+        let Some(servers) = &self.mcp else {
+            return Err(format!("mcp server \"{name}\" is not configured"));
+        };
+
+        servers.reconnect(name).await
+    }
+
     /// Closes every MCP connection and ends every local server's process
     /// group.
     pub async fn shutdown_mcp(&self) {
@@ -2490,9 +2526,13 @@ impl Engine {
             return;
         };
         // A connection that went away is one whose tools stop being offered;
-        // this is where that is noticed, because there is no reconnect to
-        // notice it anywhere else.
+        // this is where that is noticed.
         servers.reap();
+        // A server whose very first dial never succeeded gets its one
+        // automatic re-dial here — spawned and never awaited, so this call
+        // returns immediately and the once-per-turn contract below is
+        // unaffected by however long the retry takes (**D463**).
+        servers.retry_once();
 
         let generation = servers.generation();
         let mut installed = self

@@ -4,6 +4,15 @@
 //! the tool is for; the subcommands exist to set it up and to answer questions
 //! about it without taking the screen over.
 
+// `main`'s dispatch `match` covers every subcommand in one async fn, and the
+// generated state machine's layout computation — which only clippy's fuller
+// analysis walks, not a plain build — sits close enough to the default 128
+// query-depth limit that one more subcommand arm growing by a few lines
+// overflows it. Raising the limit is the standard fix for a large async fn's
+// state machine (rustc suggests exactly this); splitting the match is a
+// larger, unrelated refactor this file's growth does not otherwise call for.
+#![recursion_limit = "256"]
+
 use std::{
     io::{self, IsTerminal as _, Read as _, Write as _},
     path::PathBuf,
@@ -584,6 +593,7 @@ async fn mcp_command() -> Result<()> {
     servers.connect_all().await;
 
     let standing = servers.status();
+    let counts = servers.tool_counts();
     let lent: Vec<String> = servers
         .tools()
         .iter()
@@ -591,14 +601,20 @@ async fn mcp_command() -> Result<()> {
         .collect();
     servers.shutdown().await;
 
-    println!("{:<20}  {:<9}  ADDRESS", "SERVER", "STATUS");
+    println!("{:<20}  {:<9}  {:<5}  ADDRESS", "SERVER", "STATUS", "TOOLS");
     // Driven by the config rather than by the statuses, which deliberately omit
     // a server nothing has finished trying: after an awaited `connect_all` there
     // is no such server, and a row that could silently vanish is worse than one
     // that reports it has no standing.
     for (name, entry) in &config.mcp {
         let status = standing.get(name);
-        println!("{:<20}  {:<9}  {}", name, word(status), address(entry));
+        println!(
+            "{:<20}  {:<9}  {:<5}  {}",
+            name,
+            word(status),
+            tools_column(counts.get(name).copied()),
+            address(entry)
+        );
 
         // A failed server's reason and a connected server's tools both hang
         // under the row, and no server is ever both.
@@ -637,6 +653,14 @@ fn report(lent: &[String], server: &str) {
     for id in lending {
         println!("{INDENT}{id}");
     }
+}
+
+/// The TOOLS column's value for a server: how many tools it lends, or a dash
+/// for one that cannot be lending any — disabled, failed, or never reached
+/// (**tool-counts**, alongside `word`'s STATUS column and `report`'s own
+/// per-tool detail underneath a connected row).
+fn tools_column(count: Option<usize>) -> String {
+    count.map_or_else(|| "-".to_owned(), |count| count.to_string())
 }
 
 /// What a server's standing is called in the listing.

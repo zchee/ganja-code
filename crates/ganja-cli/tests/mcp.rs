@@ -122,6 +122,36 @@ fn the_listing_names_each_server_its_standing_and_the_tools_it_lends() {
         );
 }
 
+/// The TOOLS column names how many tools a connected server lends, and says
+/// nothing countable for one that cannot be lending any.
+#[test]
+fn the_listing_names_a_tool_count_beside_each_servers_standing() {
+    let project = project();
+    let data = TempDir::new().expect("a temporary directory is creatable");
+    let url = endpoint();
+    let path = config_file(
+        &project,
+        &json!({
+            "mcp": {
+                "hub": { "type": "remote", "url": url },
+                "broken": { "type": "local", "command": ["ganja-no-such-program-8842"] },
+                "off": { "type": "local", "command": ["never-run"], "enabled": false },
+            }
+        }),
+    );
+
+    listing(&project, &data, Some(&path))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("TOOLS")
+                // The one server that lent a tool (`hub`, the endpoint above
+                // advertises exactly one: `ping`) is the only row that can
+                // print a count of "1".
+                .and(predicate::str::is_match(r"hub\s+connected\s+1\s+").unwrap()),
+        );
+}
+
 /// Each server's standing is its own, which is the whole claim of the listing.
 ///
 /// Asserted by counting rather than by containment: "connected" appearing

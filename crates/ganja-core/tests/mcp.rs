@@ -40,6 +40,7 @@ use std::{
 use futures::stream::BoxStream;
 use ganja_core::{
     Config, Engine, McpServers, McpStatus,
+    config::McpServer,
     permission::Permissions,
     protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState},
     provider::{ChatRequest, Provider},
@@ -516,7 +517,11 @@ async fn structured_and_binary_answers_are_rendered_for_a_model_that_reads_text(
 }
 
 /// A server that dies mid-session is marked failed, and its tools stop being
-/// offered at the next turn — there is no reconnect, by design.
+/// offered at the next turn — nothing here reconnects it on its own
+/// (**D463**: the automatic retry is for a server whose *first* dial never
+/// succeeded, and this one connected fine before it vanished, so
+/// `retry_once` leaves it alone; reviving it is `reconnect_revives_a_killed_
+/// stdio_server_and_the_next_turn_re_registers_its_tools`'s claim, below).
 #[tokio::test]
 async fn a_server_that_dies_mid_session_fails_and_loses_its_tools() {
     let (provider, requests) = ScriptedProvider::new(vec![
@@ -564,6 +569,268 @@ async fn a_server_that_dies_mid_session_fails_and_loses_its_tools() {
             .iter()
             .any(|name| name.starts_with("mcp__reference__")),
         "a dead server's tools must not still be offered: {offered:?}"
+    );
+
+    engine.shutdown_mcp().await;
+}
+
+/// `Engine::reconnect_mcp` revives a killed stdio server, and the *next* turn
+/// — never the one already running — is the one whose tools carry it
+/// (**D463**, acceptance criterion 5).
+#[tokio::test]
+async fn reconnect_revives_a_killed_stdio_server_and_the_next_turn_re_registers_its_tools() {
+    let (provider, requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__reference__vanish", json!({})),
+        says("it is gone"),
+        says("still here"),
+        says("back again"),
+    ]);
+    let config = reference_server("reference");
+    let engine = engine_with(provider, &config).await;
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    turn(&engine, &mut events, "kill it", PermissionReply::Once).await;
+    // The withdrawal only lands at the *next* turn's `refresh_mcp`, same as
+    // the death test above.
+    turn(&engine, &mut events, "anything else", PermissionReply::Once).await;
+    assert!(
+        matches!(
+            engine.mcp_status().get("reference"),
+            Some(McpStatus::Failed { .. })
+        ),
+        "the server must be failed before a reconnect can mean anything: {:?}",
+        engine.mcp_status()
+    );
+
+    engine
+        .reconnect_mcp("reference")
+        .await
+        .expect("a failed server accepts a reconnect");
+    assert_eq!(
+        engine.mcp_status().get("reference"),
+        Some(&McpStatus::Connected),
+        "reconnect awaits the dial, so the outcome is already known when it returns: {:?}",
+        engine.mcp_status()
+    );
+
+    turn(&engine, &mut events, "one more time", PermissionReply::Once).await;
+    let offered = offered(
+        requests
+            .lock()
+            .expect("the request log is never poisoned")
+            .last()
+            .expect("the third turn asked the model"),
+    );
+    assert!(
+        offered.contains(&"mcp__reference__echo".to_owned()),
+        "the revived server's tools must be offered again: {offered:?}"
+    );
+
+    engine.shutdown_mcp().await;
+}
+
+/// Reconnect is refused, naming why, for a server it does not mean anything
+/// about: a name nothing configured, one `enabled: false` turned off on
+/// purpose, and one that is already connected.
+#[tokio::test]
+async fn reconnect_is_refused_for_a_server_it_does_not_mean_anything_about() {
+    let mut config = reference_server("reference");
+    config.mcp.insert(
+        "off".to_owned(),
+        serde_json::from_value(json!({
+            "type": "local",
+            "command": ["never-run"],
+            "enabled": false,
+        }))
+        .expect("the fixture entry parses"),
+    );
+    let (provider, _requests) = ScriptedProvider::new(vec![says("nothing to do")]);
+    let engine = engine_with(provider, &config).await;
+
+    // `engine_with` only waits for *a* status to appear, and "off" reports
+    // one (`Disabled`) synchronously at construction — well before "reference"
+    // has necessarily finished dialling. Wait for the one this test is about.
+    let deadline = tokio::time::Instant::now() + READY;
+    while tokio::time::Instant::now() < deadline
+        && engine.mcp_status().get("reference") != Some(&McpStatus::Connected)
+    {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        engine.mcp_status().get("reference"),
+        Some(&McpStatus::Connected),
+        "the fixture server must have connected before this test means anything"
+    );
+
+    let already_connected = engine
+        .reconnect_mcp("reference")
+        .await
+        .expect_err("a connected server refuses a reconnect");
+    assert!(
+        already_connected.contains("already connected"),
+        "{already_connected}"
+    );
+
+    let disabled = engine
+        .reconnect_mcp("off")
+        .await
+        .expect_err("a disabled server refuses a reconnect");
+    assert!(disabled.contains("disabled"), "{disabled}");
+
+    let unconfigured = engine
+        .reconnect_mcp("nothing-names-this")
+        .await
+        .expect_err("an unconfigured name refuses a reconnect");
+    assert!(unconfigured.contains("not configured"), "{unconfigured}");
+
+    engine.shutdown_mcp().await;
+}
+
+/// The last refusal reconnect can make: a server still on its very first
+/// dial, absent from [`McpStatus`]'s map rather than [`McpStatus::Failed`].
+/// `delayed_reference_server` is what makes the window deterministic, the
+/// same fixture and reasoning `a_connect_that_finishes_after_shutdown_does_
+/// not_revive_the_session` uses.
+#[cfg(unix)]
+#[tokio::test]
+async fn reconnect_is_refused_while_a_server_is_still_on_its_first_dial() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let pidfile = scratch.path().join("pid");
+    let config = delayed_reference_server("fixture", &pidfile, Duration::from_millis(600));
+    let servers = McpServers::new(config.mcp.clone(), Path::new("."));
+
+    let connecting = {
+        let servers = Arc::clone(&servers);
+        tokio::spawn(async move { servers.connect_all().await })
+    };
+    // No sleep: `status()` reports nothing for "fixture" until the delayed
+    // dial resolves, which the 600ms sleep inside the fixture holds off far
+    // longer than this reconnect call takes to run.
+    let still_dialling = servers
+        .reconnect("fixture")
+        .await
+        .expect_err("a server on its first dial refuses a reconnect");
+    assert!(
+        still_dialling.contains("first connection attempt"),
+        "{still_dialling}"
+    );
+
+    connecting.await.expect("connect_all does not panic");
+    servers.shutdown().await;
+}
+
+/// A server whose first-ever dial never succeeds gets exactly one automatic
+/// re-dial — never zero, because a transient failure deserves one free swing,
+/// and never two, because a genuinely dead server must not add a connect
+/// attempt to every turn for the rest of the session (**D463**).
+///
+/// The command counts its own invocations into a file rather than a process
+/// exit code, because what is being proved is *how many times* `connect` ran,
+/// not merely whether it succeeded — a plain broken command answers "failed"
+/// identically on every attempt and would not tell one attempt from three.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_server_whose_first_dial_failed_is_retried_automatically_exactly_once() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let counter = scratch.path().join("attempts");
+    let config: Config = serde_json::from_value(json!({
+        "mcp": {
+            "flaky": {
+                "type": "local",
+                "command": ["sh", "-c", format!("echo x >> {} ; exit 1", counter.display())],
+            }
+        }
+    }))
+    .expect("the fixture config is a config");
+    let (provider, _requests) =
+        ScriptedProvider::new(vec![says("one"), says("two"), says("three")]);
+    let engine = engine_with(provider, &config).await;
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    assert_eq!(
+        attempts(&counter),
+        1,
+        "the startup dial is the first attempt"
+    );
+    assert!(matches!(
+        engine.mcp_status().get("flaky"),
+        Some(McpStatus::Failed { .. })
+    ));
+
+    // The retry fires at this turn's `refresh_mcp` and is not awaited there;
+    // give it a moment to land before counting.
+    turn(&engine, &mut events, "hello", PermissionReply::Once).await;
+    let deadline = tokio::time::Instant::now() + READY;
+    while tokio::time::Instant::now() < deadline && attempts(&counter) < 2 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        attempts(&counter),
+        2,
+        "one turn start must spend the one automatic retry"
+    );
+
+    // A second, and a third, turn start must not spend a second one.
+    turn(&engine, &mut events, "again", PermissionReply::Once).await;
+    turn(&engine, &mut events, "again still", PermissionReply::Once).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        attempts(&counter),
+        2,
+        "a server that keeps failing gets one free retry per session, not one per turn"
+    );
+
+    engine.shutdown_mcp().await;
+}
+
+/// How many lines `counter` holds — one per invocation of the fixture command
+/// above, since `sh` never buffers a single `echo` across runs.
+#[cfg(unix)]
+fn attempts(counter: &Path) -> usize {
+    std::fs::read_to_string(counter)
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// An MCP server's own `output_limit` clamps a result over its budget, with
+/// the spill-file notice every one-shot tool in the tree gives (acceptance
+/// criterion 5). The reference server's own `echo` tool is reused rather than
+/// adding a fixture tool for this: it hands back whatever `text` it is given,
+/// so a long argument is all a caller needs to make one.
+#[tokio::test]
+async fn an_over_cap_result_is_clamped_with_the_spill_notice() {
+    let (provider, _requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__reference__echo", json!({ "text": "x".repeat(5000) })),
+        says("done"),
+    ]);
+    let mut config = reference_server("reference");
+    match config
+        .mcp
+        .get_mut("reference")
+        .expect("the fixture entry is present")
+    {
+        McpServer::Local(local) => local.output_limit = Some(100),
+        McpServer::Remote(_) => unreachable!("the fixture entry is local"),
+    }
+    let engine = engine_with(provider, &config).await;
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    let seen = turn(
+        &engine,
+        &mut events,
+        "echo something huge",
+        PermissionReply::Once,
+    )
+    .await;
+
+    let output = completed(&tool_part(&seen, "mcp__reference__echo"));
+    assert!(output.contains("bytes truncated"), "{output}");
+    assert!(output.contains("Full output saved to:"), "{output}");
+    assert!(
+        output.len() < 5000,
+        "the 100-byte budget must have actually decided the outcome: {} bytes",
+        output.len()
     );
 
     engine.shutdown_mcp().await;

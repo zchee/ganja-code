@@ -12,12 +12,12 @@ One │/compact       Compact session                                        │
 -let│/effort        Switch model effort                                    │    
 +let│/agents        Switch agent                                           │    
 cont│/themes        Switch theme                                           │    
-[err│/help          Help                                                   │    
-refu│/exit          Exit the app                     ctrl+c, ctrl+q, ctrl+d│    
+[err│/mcp           MCP servers                                            │    
+refu│/help          Help                                                   │    
+    │/exit          Exit the app                     ctrl+c, ctrl+q, ctrl+d│    
     │/copy          Copy session transcript                                │    
-    │/copy-message  Copy message                                           │    
     │                                                                      │    
-    │[up/down] scroll   [Esc] close                              1-12 of 23│    
+    │[up/down] scroll   [Esc] close                              1-12 of 24│    
     └──────────────────────────────────────────────────────────────────────┘    
                                                                                 
 ┌ message ─────────────────────────────────────────────────────────────────────┐

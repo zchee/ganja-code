@@ -53,6 +53,9 @@ pub enum Action {
     Agents,
     /// Open the theme picker.
     Themes,
+    /// Open the `/mcp` dialog: every configured server's status and tool
+    /// count, with Reconnect on a failed one.
+    Mcp,
     /// Open the key and command reference.
     Help,
     /// Leave.
@@ -93,6 +96,7 @@ impl Action {
             | Self::Models
             | Self::Effort
             | Self::Agents
+            | Self::Mcp
             | Self::Help
             | Self::Copy
             | Self::CopyMessage
@@ -238,6 +242,15 @@ pub const COMMANDS: &[Entry] = &[
         aliases: &[],
         title: "Switch theme",
         description: "Repaint the screen in another palette",
+        category: Category::System,
+        suggested: false,
+    },
+    Entry {
+        action: Action::Mcp,
+        name: "mcp",
+        aliases: &[],
+        title: "MCP servers",
+        description: "See what every configured server lends, and reconnect a failed one",
         category: Category::System,
         suggested: false,
     },
@@ -595,6 +608,7 @@ mod tests {
             ("effort", &[][..], Action::Effort),
             ("agents", &[][..], Action::Agents),
             ("themes", &[][..], Action::Themes),
+            ("mcp", &[][..], Action::Mcp),
             ("help", &[][..], Action::Help),
             ("exit", &["quit", "q"][..], Action::Exit),
             ("copy", &[][..], Action::Copy),

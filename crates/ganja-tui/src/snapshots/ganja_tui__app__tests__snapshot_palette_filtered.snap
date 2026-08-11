@@ -14,8 +14,8 @@ One edit│> /compact       Compact session                              │
 context │  /copy          Copy session transcript                      │        
 [error] │agent                                                         │        
 refused:│  /effort        Switch model effort                          │        
-        │  /models        Switch model                                 │        
-        │session                                                       │        
+        │system                                                        │        
+        │  /mcp           MCP servers                                  │        
         │                                                              │        
         │[type] filter   [up/down] move   [Enter] run   [Esc] close    │        
         └──────────────────────────────────────────────────────────────┘        
