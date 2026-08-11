@@ -307,7 +307,13 @@ fn scripted(project: &TempDir, data: &TempDir, script: &serde_json::Value) -> Ga
         // Permission answers and spilled tool output both land under the data
         // home, so a scenario with its own keeps it from reading what another
         // stored — or from writing into a developer's real one.
-        .env("XDG_DATA_HOME", data.path());
+        .env("XDG_DATA_HOME", data.path())
+        // The global config home moves with it: a developer's real
+        // `ganja.jsonc` can pick a provider or a theme, either of which would
+        // change what this smoke's screen holds.
+        .env("HOME", data.path())
+        .env("XDG_CONFIG_HOME", data.path().join("config"))
+        .env_remove("GANJA_CONFIG_HOME");
 
     Ganja::spawn(command, SCRIPTED_ROWS)
 }
