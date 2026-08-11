@@ -48,8 +48,8 @@
 | [permission mode 切替](https://code.claude.com/docs/en/iam) | Shift+Tab | ❌ モード概念なし。plan agent が plan mode の近似 |
 | [Extended Thinking 切替](https://code.claude.com/docs/en/interactive-mode) | Tab / Cmd+T | ❌(代わりに `/effort` がレベルを選ぶ) |
 | [リワインド / チェックポイント](https://code.claude.com/docs/en/checkpointing) | Esc Esc・`/rewind` | ✅ `/rewind` + アイドル時の Esc Esc で二段階チェックポイントピッカー(Both/Conversation/Files スコープ、`Command::RevertTo`);upstream の part 単位アンカー(`partID`)は未移植 — チェックポイントはユーザーメッセージ単位 |
-| [実行中タスクのバックグラウンド化](https://code.claude.com/docs/en/interactive-mode) | Ctrl+B | ❌ バックグラウンド実行自体なし |
-| [トランスクリプト/verbose 切替](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O | ❌ 表示は一種類 |
+| [実行中タスクのバックグラウンド化](https://code.claude.com/docs/en/interactive-mode) | Ctrl+B | ⚠️ バックグラウンド実行自体は存在(`bash` の `run_in_background`、`bash_output`/`kill_shell`);実行中のフォアグラウンド呼出しを後からバックグラウンド化するジェスチャーはなし |
+| [トランスクリプト/verbose 切替](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O | ✅ Ctrl+T インスペクタ — フルターミナル占有・3タブ(展開トランスクリプト・生イベントログ・ターン毎トークン表);表現は Codex CLI 自身のオーバーレイと Claude Code の Ctrl+O フッター文言を合成 |
 | [エージェント切替](https://code.claude.com/docs/en/sub-agents) | — | ✅ Tab で順繰り(ganja 独自既定)・逆順は ❌ |
 
 ## 3. スラッシュコマンド
@@ -67,9 +67,9 @@
 | [`/agents`](https://code.claude.com/docs/en/sub-agents) | エージェント管理・作成 | ⚠️ 切替のみ・作成/編集 UI なし |
 | [`/config`](https://code.claude.com/docs/en/settings) | 対話式設定 | ❌ 設定ファイルのみ |
 | [`/permissions`](https://code.claude.com/docs/en/iam) | 権限の閲覧・編集 UI | ❌ 保存ルールに UI なし |
-| [`/mcp`](https://code.claude.com/docs/en/mcp) | MCP 管理・認証ダイアログ | ❌ `ganja mcp` 一覧+ステータスバー通知のみ |
+| [`/mcp`](https://code.claude.com/docs/en/mcp) | MCP 管理・認証ダイアログ | ✅ 二段階ダイアログ: サーバー一覧(状態・ツール数・エラー)→ Reconnect/Login アクション、`ganja mcp` CLI 一覧も併存 |
 | [`/memory`](https://code.claude.com/docs/en/memory) | メモリーファイル編集 | ❌ |
-| [`/hooks`](https://code.claude.com/docs/en/hooks) | フック管理 | ❌ フック機構ごと不在 |
+| [`/hooks`](https://code.claude.com/docs/en/hooks) | フック管理 | ⚠️ フック機構自体は✅(config 宣言・9イベント);閲覧・編集用の対話 UI はなし |
 | [`/statusline`](https://code.claude.com/docs/en/statusline) | ステータスバーのスクリプト化 | ❌ 固定 |
 | [`/output-style`](https://code.claude.com/docs/en/output-styles) | 応答スタイル | ❌ |
 | [`/context`](https://code.claude.com/docs/en/costs) | 文脈使用量の可視化グリッド | ❌ 合計のみ |
@@ -93,7 +93,7 @@
 | [`Glob`](https://code.claude.com/docs/en/settings) | パターンファイル検索 | ✅ in-process(ripgrep crates) |
 | [`Grep`](https://code.claude.com/docs/en/settings) | 正規表現検索 | ✅ in-process |
 | [`Bash`](https://code.claude.com/docs/en/settings) | チェーン対応の権限チェック付きシェル | ✅ "always" 用の arity 表を含む |
-| [`BashOutput` / `KillShell`](https://code.claude.com/docs/en/settings) | バックグラウンドシェルの読取・停止 | ❌ バックグラウンドシェルなし |
+| [`BashOutput` / `KillShell`](https://code.claude.com/docs/en/settings) | バックグラウンドシェルの読取・停止 | ✅ `bash_output`(差分ポーリング+正規表現 `filter`)・`kill_shell` — upstream opencode に対応物なし(D454) |
 | [`WebFetch`](https://code.claude.com/docs/en/settings) | URL 取得・解析 | ✅ `webfetch` |
 | [`WebSearch`](https://code.claude.com/docs/en/settings) | web 検索 | ✅ `websearch`(Exa/Parallel) |
 | [`Task`](https://code.claude.com/docs/en/sub-agents) | サブエージェント起動 | ✅ `task` |
@@ -121,9 +121,9 @@
 
 | 機能 | 補足 | ganja |
 |---|---|---|
-| [フックイベント](https://code.claude.com/docs/en/hooks) | PreToolUse・PostToolUse・UserPromptSubmit・Notification・Stop・SubagentStop・SessionStart・SessionEnd・PreCompact(+権限判定フック) | ❌ 機構ごと不在 |
-| [フックプロトコル](https://code.claude.com/docs/en/hooks) | stdin に JSON・exit 2 でツール呼出をブロック・stdout で文脈注入 | ❌ |
-| [matcher](https://code.claude.com/docs/en/hooks) | ツール別正規表現(`Edit\|Write`) | ❌ |
+| [フックイベント](https://code.claude.com/docs/en/hooks) | PreToolUse・PostToolUse・UserPromptSubmit・Notification・Stop・SubagentStop・SessionStart・SessionEnd・PreCompact(+権限判定フック) | ✅ 9イベント全て、config 宣言(`hooks` キー、Claude 自身の `{matcher, hooks:[...]}` 形をそのまま採用)— upstream opencode に対応物なし(D456) |
+| [フックプロトコル](https://code.claude.com/docs/en/hooks) | stdin に JSON・exit 2 でツール呼出をブロック・stdout で文脈注入 | ⚠️ 同じ envelope・exit code セマンティクス;ブロックは v1 では PreToolUse/UserPromptSubmit のみ(ブロックが意味を持つ2イベント)に限定;`transcript_path` なし(SQLite 保存のため、D457);`updatedInput` 書換えと Stop フックの強制継続は未実装 |
+| [matcher](https://code.claude.com/docs/en/hooks) | ツール別正規表現(`Edit\|Write`) | ✅ 正規表現 matcher に加え、PreCompact/SessionStart 用の列挙語彙 |
 
 ## 7. カスタムコマンド・メモリー内部
 
@@ -145,7 +145,7 @@
 |---|---|---|
 | [エージェント定義ファイル](https://code.claude.com/docs/en/sub-agents) | `.claude/agents/*.md`(name/description/model/tools) | ⚠️ config 宣言 agent(model+rules)・エージェント毎ツール許可なし |
 | [記述による自動委譲](https://code.claude.com/docs/en/sub-agents) | モデルがエージェントを選ぶ | ⚠️ task ツールが記述付き roster を提示 |
-| [並列サブエージェント](https://code.claude.com/docs/en/sub-agents) | 同時実行 | ❌ one-turn-at-a-time |
+| [並列サブエージェント](https://code.claude.com/docs/en/sub-agents) | 同時実行 | ✅ 1アシスタントステップ内で連続する `task` 呼出しが並行 fan-out(`agents.concurrency` 上限、既定4)し完了順に fan-in;root ターンは引き続き直列(D462) |
 | [`isolation: worktree`](https://code.claude.com/docs/en/sub-agents) | worktree 内で実行 | ❌ |
 | [エージェントへの skill 事前ロード](https://code.claude.com/docs/en/sub-agents) | `skills:` | ❌ |
 | [SKILL.md ロード](https://code.claude.com/docs/en/skills) | | ✅ ganja の2ホーム+`skills.paths` |
@@ -162,10 +162,10 @@
 | [transport](https://code.claude.com/docs/en/mcp) | stdio・streamable HTTP・SSE | ✅ stdio+streamable HTTP・legacy SSE ❌ |
 | [設定スコープ](https://code.claude.com/docs/en/mcp) | local(`~/.claude.json`)/ project(`.mcp.json`)/ user+優先順位 | ⚠️ グローバル+プロジェクト config・repo 毎 local スコープなし |
 | [CLI 管理](https://code.claude.com/docs/en/mcp) | `claude mcp add/list --scope --transport` | ⚠️ `ganja mcp` は一覧のみ・追加は config 直書き |
-| [OAuth](https://code.claude.com/docs/en/mcp) | PKCE・メタデータ発見・トークン更新 | ❌ config キーを明示拒否 |
+| [OAuth](https://code.claude.com/docs/en/mcp) | PKCE・メタデータ発見・トークン更新 | ✅ RFC 8414 発見+RFC 7591 登録(フォールバック client id)+PKCE/loopback+401 時の refresh-then-redial;意図的に最小構成 — resource-metadata discovery なし・呼出し中の reactive re-auth なし(D466) |
 | [project スコープの初回承認](https://code.claude.com/docs/en/mcp) | repo 注入サーバー対策 | ✅ より強い: 全 MCP ツールが既定で ask |
-| [タイムアウト・出力上限](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`・`MCP_TOOL_TIMEOUT`・`MAX_MCP_OUTPUT_TOKENS` | ❌ |
-| 再接続 | 死んだサーバーの復帰 | ❌ 一度 dial したきり |
+| [タイムアウト・出力上限](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`・`MCP_TOOL_TIMEOUT`・`MAX_MCP_OUTPUT_TOKENS` | ⚠️ サーバー毎 `timeout`/`output_limit` config キー(バイト単位・トークンではない);グローバルな env var ノブはなし |
+| 再接続 | 死んだサーバーの復帰 | ✅ `/mcp` ダイアログの手動 Reconnect(`Failed` な任意サーバー)+初回 dial が失敗したサーバー限定のセッション1回だけの自動リトライ(D463) |
 
 ## 10. モデル・コンテキスト設定
 

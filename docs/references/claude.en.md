@@ -49,8 +49,8 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | [Permission mode cycling](https://code.claude.com/docs/en/iam) | Shift+Tab | ❌ no mode concept; the plan agent approximates plan mode |
 | [Extended thinking toggle](https://code.claude.com/docs/en/interactive-mode) | Tab / Cmd+T | ❌ (`/effort` selects a level instead) |
 | [Rewind / checkpoints](https://code.claude.com/docs/en/checkpointing) | Esc Esc, `/rewind` | ✅ `/rewind` + idle Esc Esc open a two-step checkpoint picker (Both/Conversation/Files scopes, `Command::RevertTo`); upstream's part-level anchor (`partID`) not ported — checkpoints are whole user messages |
-| [Background a running task](https://code.claude.com/docs/en/interactive-mode) | Ctrl+B | ❌ no background execution |
-| [Transcript / verbose toggle](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O | ❌ one rendering |
+| [Background a running task](https://code.claude.com/docs/en/interactive-mode) | Ctrl+B | ⚠️ background execution exists (`bash`'s `run_in_background`, `bash_output`/`kill_shell`); no gesture backgrounds an *already-running* foreground call |
+| [Transcript / verbose toggle](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O | ✅ Ctrl+T inspector — full-terminal takeover, three tabs (expanded transcript, raw event log, per-turn tokens); presentation synthesizes Codex CLI's own overlay and Claude Code's Ctrl+O footer wording |
 | [Agent switching](https://code.claude.com/docs/en/sub-agents) | — | ✅ Tab cycles agents (ganja's own default); reverse cycle ❌ |
 
 ## 3. Slash commands
@@ -68,9 +68,9 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | [`/agents`](https://code.claude.com/docs/en/sub-agents) | manage/create agents | ⚠️ switching only; no create/edit UI |
 | [`/config`](https://code.claude.com/docs/en/settings) | interactive settings | ❌ config files only |
 | [`/permissions`](https://code.claude.com/docs/en/iam) | rules viewer/editor | ❌ stored rules, no UI |
-| [`/mcp`](https://code.claude.com/docs/en/mcp) | MCP manage/auth dialog | ❌ `ganja mcp` listing + status-bar notice |
+| [`/mcp`](https://code.claude.com/docs/en/mcp) | MCP manage/auth dialog | ✅ two-step dialog: server list (status, tool count, error) → Reconnect/Login actions, `ganja mcp` CLI listing beside it |
 | [`/memory`](https://code.claude.com/docs/en/memory) | memory file editor | ❌ |
-| [`/hooks`](https://code.claude.com/docs/en/hooks) | hooks manager | ❌ no hooks system |
+| [`/hooks`](https://code.claude.com/docs/en/hooks) | hooks manager | ⚠️ the hook system itself is ✅ (config-declared, nine events); no interactive manager UI to view/edit them |
 | [`/statusline`](https://code.claude.com/docs/en/statusline) | status bar scripting | ❌ fixed status bar |
 | [`/output-style`](https://code.claude.com/docs/en/output-styles) | response styles | ❌ |
 | [`/context`](https://code.claude.com/docs/en/costs) | context usage grid | ❌ totals only |
@@ -94,7 +94,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | [`Glob`](https://code.claude.com/docs/en/settings) | pattern file search | ✅ in-process (ripgrep crates) |
 | [`Grep`](https://code.claude.com/docs/en/settings) | regex content search | ✅ in-process |
 | [`Bash`](https://code.claude.com/docs/en/settings) | shell with chain-aware permission checks | ✅ incl. upstream's arity table for "always" answers |
-| [`BashOutput` / `KillShell`](https://code.claude.com/docs/en/settings) | background shell readback and kill | ❌ no background shells |
+| [`BashOutput` / `KillShell`](https://code.claude.com/docs/en/settings) | background shell readback and kill | ✅ `bash_output` (delta polling + regex `filter`), `kill_shell` — no upstream opencode counterpart (D454) |
 | [`WebFetch`](https://code.claude.com/docs/en/settings) | fetch and parse a URL | ✅ `webfetch` |
 | [`WebSearch`](https://code.claude.com/docs/en/settings) | web search | ✅ `websearch` (Exa/Parallel) |
 | [`Task`](https://code.claude.com/docs/en/sub-agents) | spawn subagents | ✅ `task` |
@@ -122,9 +122,9 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 
 | Feature | Notes | ganja |
 |---|---|---|
-| [Hook events](https://code.claude.com/docs/en/hooks) | PreToolUse · PostToolUse · UserPromptSubmit · Notification · Stop · SubagentStop · SessionStart · SessionEnd · PreCompact (+ permission-decision hooks) | ❌ the whole mechanism |
-| [Hook protocol](https://code.claude.com/docs/en/hooks) | JSON payload on stdin; exit 2 blocks the tool call; stdout feeds context back | ❌ |
-| [Matchers](https://code.claude.com/docs/en/hooks) | per-tool regex matchers (`Edit\|Write`) | ❌ |
+| [Hook events](https://code.claude.com/docs/en/hooks) | PreToolUse · PostToolUse · UserPromptSubmit · Notification · Stop · SubagentStop · SessionStart · SessionEnd · PreCompact (+ permission-decision hooks) | ✅ all nine, config-declared (`hooks` key, Claude's own `{matcher, hooks:[...]}` shape kept verbatim) — no upstream opencode counterpart at all (D456) |
+| [Hook protocol](https://code.claude.com/docs/en/hooks) | JSON payload on stdin; exit 2 blocks the tool call; stdout feeds context back | ⚠️ same envelope and exit-code semantics; blocking is v1-scoped to PreToolUse/UserPromptSubmit (the two events blocking means something for); no `transcript_path` (SQLite storage, D457); `updatedInput` rewriting and Stop-hook forced continuation not built |
+| [Matchers](https://code.claude.com/docs/en/hooks) | per-tool regex matchers (`Edit\|Write`) | ✅ regex matchers, plus enumerated vocabularies for PreCompact/SessionStart |
 
 ## 7. Custom slash commands and memory internals
 
@@ -146,7 +146,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 |---|---|---|
 | [Agent definition files](https://code.claude.com/docs/en/sub-agents) | `.claude/agents/*.md` with name/description/model/tools frontmatter | ⚠️ config-declared agents with model + rules; no per-agent tool grants |
 | [Auto-delegation by description](https://code.claude.com/docs/en/sub-agents) | the model picks the agent | ⚠️ the task tool offers the roster with descriptions |
-| [Parallel subagents](https://code.claude.com/docs/en/sub-agents) | concurrent execution | ❌ one turn at a time |
+| [Parallel subagents](https://code.claude.com/docs/en/sub-agents) | concurrent execution | ✅ consecutive `task` calls in one assistant step fan out concurrently (capped by `agents.concurrency`, default 4) and fan back in on completion order; root turns still stay serial (D462) |
 | [`isolation: worktree`](https://code.claude.com/docs/en/sub-agents) | subagent in its own git worktree | ❌ |
 | [Skill preloading (`skills:` on agents)](https://code.claude.com/docs/en/sub-agents) | | ❌ |
 | [SKILL.md loading](https://code.claude.com/docs/en/skills) | | ✅ ganja's two homes + `skills.paths` |
@@ -163,10 +163,10 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | [Transports](https://code.claude.com/docs/en/mcp) | stdio, streamable HTTP, SSE | ✅ stdio + streamable HTTP; legacy SSE ❌ |
 | [Config scopes](https://code.claude.com/docs/en/mcp) | local (`~/.claude.json`) / project (`.mcp.json`) / user, with precedence | ⚠️ global + project config tiers; no per-user-per-repo local scope |
 | [CLI management](https://code.claude.com/docs/en/mcp) | `claude mcp add/list --scope --transport` | ⚠️ `ganja mcp` lists; adding is config-file only |
-| [OAuth](https://code.claude.com/docs/en/mcp) | PKCE flows, metadata discovery, token refresh | ❌ refused loudly by config key |
+| [OAuth](https://code.claude.com/docs/en/mcp) | PKCE flows, metadata discovery, token refresh | ✅ RFC 8414 discovery + RFC 7591 registration (fallback client id) + PKCE/loopback + refresh-then-redial on 401; deliberately minimal — no resource-metadata discovery, no per-request reactive re-auth mid-call (D466) |
 | [Project-scope first-use approval](https://code.claude.com/docs/en/mcp) | guard against repo-injected servers | ✅ stronger: every MCP tool asks by default |
-| [Timeout/output knobs](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `MAX_MCP_OUTPUT_TOKENS` | ❌ |
-| Reconnection | recover a dead server | ❌ dialled once (Claude Code reconnects via /mcp) |
+| [Timeout/output knobs](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `MAX_MCP_OUTPUT_TOKENS` | ⚠️ per-server `timeout`/`output_limit` config keys (bytes, not tokens); no global env-var knobs |
+| Reconnection | recover a dead server | ✅ `/mcp` dialog's manual Reconnect (any `Failed` server) + a bounded once-per-session automatic retry for a server whose first dial never succeeded (D463) |
 
 ## 10. Model and context configuration
 

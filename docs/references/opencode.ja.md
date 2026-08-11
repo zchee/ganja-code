@@ -150,7 +150,7 @@ ganja が仕様として読むピン済みタグ(`anomalyco/opencode@v1.18.13`)�
 | [`small_model`](https://opencode.ai/docs/config) | タイトルと要約 | ✅ |
 | Anthropic subscription OAuth(Pro/Max) | upstream は Anthropic の規約遵守のため削除。コミュニティプラグインは自己責任で存在 | n/a — ganja は最初から持たず、ピン時点に仕様もなかった |
 | xAI device-code ログイン | [v1.18.14](https://github.com/anomalyco/opencode/releases/tag/v1.18.14) から単一フロー | ✅ ganja の grok ログインは元から device flow — 両者が収斂 |
-| MCP OAuth | リモート MCP 認証 | ❌ config キーを明示拒否 |
+| MCP OAuth | リモート MCP 認証 | ✅ P13 の追加、upstream に対応物なし — v1.18.13 チェックアウトは今も `oauth` キーを明示拒否: RFC 8414 発見+RFC 7591 登録+PKCE/loopback+401 時の refresh-then-redial を `mcp:<server>` 予約キーに保存(D466) |
 | [`providers login/list/logout`](https://opencode.ai/docs/providers) | 統一資格情報 UI | ⚠️ `auth` は ganja のプロバイダのみ |
 | anthropic / openai(両資格情報)/ grok / copilot / cursor / fake + compat | ganja の名簿。cursor は ganja 独自で upstream に対応物なし | ✅ OAuth ログインと credential-travel 境界含む |
 
@@ -162,7 +162,7 @@ ganja が仕様として読むピン済みタグ(`anomalyco/opencode@v1.18.13`)�
 | [リモート MCP サーバー](https://opencode.ai/docs/mcp-servers) | `url`・`headers`・`enabled` | ✅ |
 | `<mcp_instructions>`・tools/list_changed | | ✅ |
 | [MCP prompts / resources](https://opencode.ai/docs/mcp-servers) | prompts はコマンド化、resources は列挙可能 | ❌ |
-| MCP 再接続 / 動的有効・無効 | | ❌ 起動時に一度 dial したきり |
+| MCP 再接続 / 動的有効・無効 | | ⚠️ 再接続は✅(P13、upstream 対応物なし — `Failed` サーバー向け手動 `/mcp` Reconnect + セッション1回限りの自動リトライ、D463);実行時の動的有効・無効はまだ❌、`enabled` は config ファイルのみ |
 | [LSP ビルトインの広さ](https://opencode.ai/docs/lsp) | typescript・pyright・gopls・rust-analyzer・clangd・zls・elixir-ls 等 | ⚠️ `rust` と `gopls` の 2 つのみ |
 | [LSP 自動インストール](https://opencode.ai/docs/lsp) | サーバーをダウンロード(`OPENCODE_DISABLE_LSP_DOWNLOAD` で停止) | ❌ 決してインストールしない |
 | [カスタム LSP サーバー](https://opencode.ai/docs/lsp) | `command`・`extensions`・`env`・`initialization`・エントリ毎 `disabled` | ✅ |
@@ -220,7 +220,7 @@ ganja 独自の変数(`GANJA_MODEL`・`GANJA_FAKE_SCRIPT`・`GANJA_MODELS_URL`/`
 
 | サブシステム | 補足 | ganja |
 |---|---|---|
-| [プラグイン](https://opencode.ai/docs/plugins) | JS ランタイム。npm 指定 + ローカル `{plugin,plugins}/*.{ts,js}`。フック(`tool.execute.before/after`・`permission.ask`・`chat.message`・イベントバス)。`@opencode-ai/plugin` の型。ctx は SDK クライアントと Bun の `$` を運ぶ | ❌ 対象外 |
+| [プラグイン](https://opencode.ai/docs/plugins) | JS ランタイム。npm 指定 + ローカル `{plugin,plugins}/*.{ts,js}`。フック(`tool.execute.before/after`・`permission.ask`・`chat.message`・イベントバス)。`@opencode-ai/plugin` の型。ctx は SDK クライアントと Bun の `$` を運ぶ | ❌ JS プラグインランタイム自体は対象外;ganja 独自の `hooks` config キー(P13)は**別物の Claude 型機構**— 9つの名前付きイベント・`sh -c` コマンドハンドラ・JS ランタイムなし・イベントバスなし — この行の移植ではない(D456) |
 | [share](https://opencode.ai/docs/share) | `opencode.ai/s/<id>` 公開・`/share` `/unshare`・`manual`/`auto`/`disabled` | ❌ 対象外 |
 | [フォーマッタ](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/format/formatter.ts) | 26+ のビルトイン(gofmt・prettier・biome・ruff・rustfmt・shfmt・terraform・clang-format 等)が編集後に走る。フォーマッタ毎の無効化またはカスタム `command`+`extensions`+`environment` | ❌ |
 | [バックグラウンドエージェント](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/background) | 非同期派遣・要約・通知 | ❌ |
@@ -285,7 +285,7 @@ ganja 独自の変数(`GANJA_MODEL`・`GANJA_FAKE_SCRIPT`・`GANJA_MODELS_URL`/`
 | `session_pin_toggle` / `session_quick_switch_1..9` | ctrl+f / `<leader>1-9` | ❌ |
 | `stash_delete` | ctrl+d | ❌ |
 | `model_provider_list` / `model_favorite_toggle` / `model_cycle_recent(_reverse)` / `model_cycle_favorite(_reverse)` | ctrl+a・ctrl+f・f2 | ❌(`/models` は✅) |
-| `mcp_list` / `provider_connect` / `console_org_switch` | none | ❌ |
+| `mcp_list` / `provider_connect` / `console_org_switch` | none | ⚠️ `mcp_list` のサーバー状態閲覧は `/mcp` コマンドとして移植(P13、専用キーなし)/ ❌ / ❌ |
 | `agent_list` / `agent_cycle_reverse` | `<leader>a` / shift+tab | ⚠️ `/agents` ✅ / ❌ |
 | `variant_cycle` / `variant_list` | ctrl+t / none | ❌ 順繰り(`/effort` リストは✅・カタログ合成 roster) |
 | `messages_page_up/…/half_page_down`(6) | pageup 等 | ⚠️ スクロールは✅・rebind 不可 |

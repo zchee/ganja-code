@@ -18,7 +18,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 |---|---|---|
 | [`@` ファジー検索+ Tab 確定](https://developers.openai.com/codex/cli) | `@` + Tab | ✅ Tab で確定・Enter と同一挙動;ディレクトリ降下(`@dir`→`@dir/`)は未実装 — ganja のウォーカーはファイルのみを返す |
 | [Esc-Esc バックトラック](https://developers.openai.com/codex/cli) | Esc Esc | ⚠️ アイドル時の Esc Esc は ganja 自前のリワインドピッカーを開く — 過去のユーザーメッセージをチェックポイントとして選び、Both/Conversation/Files のスコープを選択;Codex と異なり composer へ過去プロンプトを書き戻して編集する機構はなく、アイドル時限定(実行中の Esc は従来通りキャンセル) |
-| [トランスクリプトオーバーレイ](https://developers.openai.com/codex/cli) | Ctrl+T | ❌ 生ログ・ターン毎トークン・tool/MCP 展開 |
+| [トランスクリプトオーバーレイ](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ 同じキー、3タブ(完全な tool/MCP 入出力を含む展開トランスクリプト・生イベントログ・ターン毎トークン表);フルターミナル占有とバナーはこのオーバーレイ独自の表現、フッター文言は Claude Code の Ctrl+O から |
 | [メッセージキュー](https://developers.openai.com/codex/cli) | 実行中に Enter | ✅ 実行中のターンへ次のステップ境界で steer(`Command::Steer`)— Codex 自身の `input_queue`/`inject` と同じ形;steer できないもの(拒否・未消費・スラッシュコマンド)は再生キューにフォールバック(Codex の `queued_user_messages` 側に相当) |
 | [クリップボード画像ペースト](https://developers.openai.com/codex/cli) | Ctrl+V | ✅ PNG をプロセス内エンコード(OS ツール呼出しなし)し、`@` mention パイプライン経由で添付 |
 | [スラッシュコマンド補完](https://developers.openai.com/codex/cli) | `/` | ✅ |
@@ -42,7 +42,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | [`/resume`](https://developers.openai.com/codex/cli) | TUI 内セッションピッカー | ✅ `/sessions` |
 | [`/feedback`](https://developers.openai.com/codex/cli) | サニタイズ済み診断のベンダー送信 | ❌(テレメトリチャネル自体なし) |
 | `/new` / `/quit` | セッション制御 | ✅ 相当 |
-| [`/mcp`](https://github.com/openai/codex/blob/main/docs/config.md) | MCP 接続状態 | ⚠️ `ganja mcp` CLI 一覧のみ |
+| [`/mcp`](https://github.com/openai/codex/blob/main/docs/config.md) | MCP 接続状態 | ✅ `/mcp` ダイアログ(状態・ツール数・Reconnect/Login アクション)+ `ganja mcp` CLI 一覧 |
 | `/login` / `/logout` | TUI 内の資格情報切替 | ⚠️ `auth` CLI のみ |
 
 ## 3. セキュリティ・実行モード
@@ -92,7 +92,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | [`view_image` ツール](https://github.com/openai/codex/blob/main/docs/config.md) | モデルが自発的にローカル画像をパス指定で読む | ❌ 画像文脈はユーザー添付のみ |
 | シェル実行 | | ✅ `bash` |
 | best-of-N *(低確度)* | N 並列生成→比較選択 | ❌ |
-| [MCP クライアント](https://github.com/openai/codex/blob/main/docs/config.md) | stdio(`command`/`args`/`env`)+ streamable HTTP(`url`/`bearer_token_env_var`)・サーバー毎 enable+タイムアウト・OAuth ストア(keyring/file) | ⚠️ stdio+HTTP ✅・サーバー毎タイムアウト/bearer-env/enable/OAuth ❌ |
+| [MCP クライアント](https://github.com/openai/codex/blob/main/docs/config.md) | stdio(`command`/`args`/`env`)+ streamable HTTP(`url`/`bearer_token_env_var`)・サーバー毎 enable+タイムアウト・OAuth ストア(keyring/file) | ✅ stdio+HTTP・サーバー毎 `enabled`/`timeout`/`output_limit`・静的 `headers`(bearer もここに書く);OAuth も追加(RFC 8414 発見+RFC 7591 登録+PKCE、`mcp:<server>` 予約キーに保存、D466) |
 | [Codex の MCP サーバー化](https://developers.openai.com/codex/cli) | エンジンを MCP として公開 | ❌ |
 
 ## 7. セッション・保存・診断
