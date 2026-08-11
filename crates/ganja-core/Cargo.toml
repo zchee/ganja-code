@@ -57,6 +57,10 @@ jsonc-parser = { workspace = true, features = ["serde"] }
 lsp-types.workspace = true
 # The HTTP providers speak SSE, so only `stream` and `json` are load-bearing;
 # the workspace declaration pins rustls so no build here reaches for OpenSSL.
+# A configured hook's `matcher`, compiled once at load and asked whether it
+# matches one tool name, one compaction trigger or one session source. See the
+# workspace declaration for why neither matcher already in the tree fits.
+regex.workspace = true
 reqwest.workspace = true
 # Config-named MCP servers are spoken to through the official SDK rather than
 # a second hand-rolled JSON-RPC client: the workspace declaration carries the

@@ -95,6 +95,13 @@ pub(crate) fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
     if let Some(lsp) = lsp {
         engine = engine.with_lsp(lsp);
     }
+    // Here rather than at either call site, which is this module's whole
+    // purpose: a headless turn fires the same hooks a screen does, and a hook
+    // installed in one frontend and forgotten in another is the drift this
+    // assembly exists to prevent.
+    if let Some(hooks) = ganja_core::hook::Hooks::new(&config.hooks, project.root()) {
+        engine = engine.with_hooks(hooks);
+    }
     let model = engine.model();
     let engine = engine
         .with_system_parts(

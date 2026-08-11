@@ -995,3 +995,74 @@ fn continuing_with_nothing_stored_starts_a_fresh_session() {
         .stdout(predicate::str::contains(CLOSING));
     assert_eq!(run.sessions().len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Hooks (P13-W3): the engine owns them, so a headless turn fires exactly what
+// a screen would.
+// ---------------------------------------------------------------------------
+
+/// Acceptance criterion 3's last clause: hooks fire identically under
+/// `ganja run`.
+///
+/// The proof is the binary's own doing — the config is discovered by the real
+/// loader, the hooks are installed by the real assembly, and the ledger is
+/// written by the real shell commands — so what this pins is that no part of
+/// the hook path is a frontend's. Three events, one per phase of a run: the
+/// session opening, the prompt arriving, the turn ending.
+#[test]
+fn hooks_fire_for_a_headless_run_exactly_as_they_would_for_a_screen() {
+    let run = Run::playing(&one_word());
+    let ledger = run.path().join("ledger");
+    let record = format!("{{ cat; echo; }} >> {}", ledger.display());
+    fs::write(
+        run.path().join("ganja.jsonc"),
+        serde_json::json!({
+            "hooks": {
+                "SessionStart": [{ "hooks": [{ "type": "command", "command": record }] }],
+                "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": record }] }],
+                "Stop": [{ "hooks": [{ "type": "command", "command": record }] }],
+            }
+        })
+        .to_string(),
+    )
+    .expect("the project config is writable");
+
+    run.ganja_in_its_own_homes()
+        .args(["run", "hello"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(CLOSING));
+
+    let written = fs::read_to_string(&ledger).expect("the hooks ran and wrote their envelopes");
+    let envelopes: Vec<Value> = written
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("each hook wrote one envelope"))
+        .collect();
+    let events: Vec<&str> = envelopes
+        .iter()
+        .map(|envelope| envelope["hook_event_name"].as_str().unwrap_or("?"))
+        .collect();
+    assert_eq!(
+        events,
+        vec!["SessionStart", "UserPromptSubmit", "Stop"],
+        "a headless run opens, is prompted and ends, in that order: {written}"
+    );
+
+    // The envelope a run's hook reads is the documented one, with the project
+    // this run happened in — not the directory the harness was launched from.
+    assert_eq!(envelopes[0]["source"].as_str(), Some("startup"));
+    assert_eq!(envelopes[1]["prompt"].as_str(), Some("hello"));
+    assert!(
+        envelopes
+            .iter()
+            .all(|envelope| envelope["session_id"] == envelopes[0]["session_id"]),
+        "every fire names the one session the run had: {written}"
+    );
+    assert!(
+        envelopes
+            .iter()
+            .all(|envelope| envelope.get("transcript_path").is_none()),
+        "D457: this build has no JSONL transcript to name"
+    );
+}

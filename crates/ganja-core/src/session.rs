@@ -87,6 +87,17 @@ fn invalid_call(detail: &str) -> String {
     format!("The arguments provided to the tool are invalid: {detail}")
 }
 
+/// What the model reads when a `PreToolUse` hook refused a call.
+///
+/// `reason` is the hook's own words — its stderr on an exit 2, or its
+/// `permissionDecisionReason` — and it is quoted whole, because the point of
+/// blocking with a message is that the model is told what to do differently.
+/// The sentence around it names the hook so the model does not read a refusal
+/// somebody's script wrote as a refusal the person just gave.
+fn blocked_by_hook(reason: &str) -> String {
+    format!("A PreToolUse hook refused this tool call: {reason}")
+}
+
 /// Environment variable that opts the fake provider into a real title
 /// request. Unset — the default — a fake session takes the fallback title
 /// without any provider call, because scripted demos and PTY tests count
@@ -738,6 +749,20 @@ pub(crate) struct Turn {
     /// job outlives whichever turn started it. [`None`] on every scripted
     /// and golden run that built a [`Turn`] without one.
     pub(crate) jobs: Option<Arc<dyn crate::tool::job::Jobs>>,
+    /// What a config asked to be run around this turn's tool calls and at its
+    /// end — engine-owned and shared with every subagent it spawns, because a
+    /// `PreToolUse` hook that stopped applying inside a delegated turn would be
+    /// a gate with a hole in it. [`None`] is a session whose config asked for
+    /// none, where every seam below does nothing at all.
+    pub(crate) hooks: Option<Arc<crate::hook::Hooks>>,
+    /// Whether this turn is a subagent's.
+    ///
+    /// One question, one field, and it decides exactly one thing: which of the
+    /// two stop hooks this turn's end fires. `Stop` is the *session's* — a root
+    /// turn finished — and `SubagentStop` belongs to the caller in
+    /// [`crate::subagent`], which is the only place that knows which agent ran
+    /// and how it ended. Nothing else here varies on it.
+    pub(crate) delegated: bool,
     /// Write-through and session bookkeeping, when the engine persists.
     /// [`None`] is an in-memory engine, and every hook below is a no-op.
     pub(crate) persist: Option<Persist>,
@@ -848,8 +873,32 @@ impl Turn {
             // work, not about a subagent's own `bash` calls losing a
             // capability its parent has.
             jobs: host.jobs.clone(),
+            // The session's, shared for the reason the rules are: a hook that
+            // watches every `edit` must watch a subagent's too, or a delegated
+            // turn is the way around it. What the child does *not* do is fire
+            // the session's `Stop` — see `delegated` just below.
+            hooks: host.hooks.clone(),
+            delegated: true,
             persist: parts.persist,
         }
+    }
+
+    /// Runs whatever this session configured for `payload`'s event, and puts
+    /// whatever failed in the log.
+    ///
+    /// The default outcome on a session with no hooks, which is what lets every
+    /// fire site below read as one statement rather than as a branch. Nothing
+    /// here can fail: a hook that could end a turn would be a hook that could
+    /// take a session down by exiting badly.
+    async fn fire_hook(&self, payload: crate::hook::Payload) -> crate::hook::Outcome {
+        let Some(hooks) = &self.hooks else {
+            return crate::hook::Outcome::default();
+        };
+        let event = payload.event();
+        let outcome = hooks.fire(self.session_id.as_str(), &payload).await;
+        outcome.report(event);
+
+        outcome
     }
 
     /// Writes `part` through immediately, when the engine persists.
@@ -1115,6 +1164,23 @@ pub(crate) async fn run_turn(turn: Turn) {
     // half must land even with nobody left to tell. Cancel converges through
     // this same tail: there is no second site to drift.
     announce_pending_switch(&turn).await;
+
+    // Inside the pinned tail, and deliberately: a `Stop` hook is defined to run
+    // at the end of a turn, and releasing the slot first would let the next
+    // prompt's turn start while it was still running — so a hook that formats
+    // the tree would be racing the edits of the turn after the one it was
+    // written for. The cost is that the busy window now includes the hook's own
+    // budget, which is the point of the budget. A subagent's turn fires nothing
+    // here: `SubagentStop` is its end, and only its caller knows which agent
+    // ran (**D461**).
+    if !turn.delegated {
+        turn.fire_hook(crate::hook::Payload::Stop {
+            // Forced continuation is a recorded follow-up, so no turn in this
+            // build is ever running because a Stop hook asked for one.
+            stop_hook_active: false,
+        })
+        .await;
+    }
 
     *turn.slot.lock().await = None;
 
@@ -1917,6 +1983,20 @@ async fn compact_if_needed(
         (info.summary.clone(), model.context_window)
     };
 
+    // Past every return above, so this fires when a compaction is really about
+    // to happen and never for a turn that merely looked at the fill level and
+    // walked away. `forced` is the whole vocabulary: the two trigger sites are
+    // the automatic one at the top of a turn and the `/compact` a person typed,
+    // which is exactly Claude's `auto`/`manual`.
+    turn.fire_hook(crate::hook::Payload::PreCompact {
+        trigger: if forced {
+            crate::hook::Trigger::Manual
+        } else {
+            crate::hook::Trigger::Auto
+        },
+    })
+    .await;
+
     let window = turn.history.lock().await.clone();
     let (previous, context) = match (&summary_id, window.first()) {
         // The window already opens with an earlier summary: upstream folds it
@@ -2717,6 +2797,23 @@ async fn resolve(
         return fail_call(turn, assistant, call, args, &message).await;
     };
 
+    // Before the gate, because a `PreToolUse` hook is defined to run before the
+    // call and its answer can change what the gate does: a refusal ends the
+    // call here, and an "allow" skips the dialog an ask-gated call would
+    // otherwise raise (**D458** — it skips the *ask*, and never overturns a
+    // `deny` rule the same person wrote in the same file). Whatever context it
+    // asked to add rides with the call to its result below, which is where the
+    // model reads it.
+    let hook = turn
+        .fire_hook(crate::hook::Payload::PreToolUse {
+            tool_name: call.name.clone(),
+            tool_input: args.clone(),
+        })
+        .await;
+    if let Some(reason) = &hook.blocked {
+        return fail_call(turn, assistant, call, args, &blocked_by_hook(reason)).await;
+    }
+
     // The one consultation this call gets. What a refusal quotes, what the
     // dialog discloses and what an "always" writes down are all read off the
     // same call in the same moment — three separate derivations, the last of
@@ -2738,6 +2835,10 @@ async fn resolve(
 
             return fail_call(turn, assistant, call, args, &message).await;
         }
+        // A hook already approved it, so nobody is asked. The rules are not
+        // rewritten and nothing is remembered: this is one call's answer, given
+        // by the user's own code, for this call alone.
+        Decision::Ask if hook.allowed => {}
         Decision::Ask => {
             match wait_permission(
                 turn,
@@ -2844,6 +2945,7 @@ async fn resolve(
                     message_id: assistant.id.clone(),
                     call_id: call.id.clone(),
                 },
+                hooks: turn.hooks.clone(),
             }) as Arc<dyn question::Asker>),
             // Present exactly where the approval cell was threaded: a parent
             // turn of an engine whose registry holds build. A child turn
@@ -2908,6 +3010,30 @@ async fn resolve(
                 output
                     .output
                     .push_str(&lsp.annotate(&call.name, &args, &turn.cwd).await);
+            }
+
+            // After the annotation, so a `PostToolUse` hook is shown what the
+            // model will actually read rather than a draft of it, and so its
+            // own context lands last. Observational: nothing it says can turn a
+            // call that succeeded into one that failed — an exit 2 here is
+            // reported like any other failure (`HookEvent::blocking`).
+            let after = turn
+                .fire_hook(crate::hook::Payload::PostToolUse {
+                    tool_name: call.name.clone(),
+                    tool_input: args.clone(),
+                    tool_response: serde_json::json!({
+                        "output": output.output,
+                        "title": output.title,
+                        "metadata": output.metadata,
+                    }),
+                })
+                .await;
+            // Both halves of one call's hook conversation reach the model at
+            // the one place it reads a call's result: what the `PreToolUse`
+            // hook asked to add, then what the `PostToolUse` one did.
+            for context in hook.context.iter().chain(&after.context) {
+                output.output.push_str("\n\n");
+                output.output.push_str(context);
             }
 
             emit_tool_state(
@@ -2988,6 +3114,17 @@ async fn wait_permission(
     args: &serde_json::Value,
     outside: &[PathBuf],
 ) -> ControlFlow<Option<Outcome>, PermissionReply> {
+    // Fire-and-forget, unlike every other seam in this file: a `Notification`
+    // hook exists to tell somebody their attention is wanted — a desktop
+    // notification, a terminal bell — and awaiting one would make the dialog
+    // itself wait for a program whose whole job is to run beside it. Each hook
+    // still has its own budget, and the detached task holds nothing the turn
+    // needs.
+    notify_hook(
+        turn,
+        format!("ganja needs your permission to use {}", call.name),
+    );
+
     let (sender, receiver) = oneshot::channel();
     let id = PermissionId::ascending();
     *turn
@@ -3181,6 +3318,10 @@ pub(crate) struct Ask {
     pub(crate) cancel: CancellationToken,
     /// Where in the transcript the question was asked from.
     pub(crate) source: QuestionSource,
+    /// The session's hooks, for the `Notification` one this seam fires. Carried
+    /// rather than reached through the turn for the reason everything else here
+    /// is: this holds the turn's pieces without holding the turn.
+    pub(crate) hooks: Option<Arc<crate::hook::Hooks>>,
 }
 
 impl std::fmt::Debug for Ask {
@@ -3219,6 +3360,23 @@ impl question::Asker for Ask {
         &self,
         questions: Vec<question::Prompt>,
     ) -> Result<Vec<question::Answer>, question::Unanswered> {
+        // The session's other "somebody is wanted" moment, notified the same
+        // detached way the permission dialog is and for the same reason.
+        if let Some(hooks) = self.hooks.clone() {
+            let session = self.session_id.as_str().to_owned();
+            tokio::spawn(async move {
+                let outcome = hooks
+                    .fire(
+                        &session,
+                        &crate::hook::Payload::Notification {
+                            message: "ganja is waiting for an answer to a question".to_owned(),
+                        },
+                    )
+                    .await;
+                outcome.report(crate::hook::HookEvent::Notification);
+            });
+        }
+
         let (sender, receiver) = oneshot::channel();
         let id = QuestionId::ascending();
         *self
@@ -3313,6 +3471,24 @@ impl Ask {
             })
             .await;
     }
+}
+
+/// Starts this session's `Notification` hooks and does not wait for them.
+///
+/// Detached on purpose; see the call sites. Nothing is reported back — a
+/// notifier that failed is in the log by the time anybody looks, and there is
+/// no dialog it could have changed.
+fn notify_hook(turn: &Turn, message: String) {
+    let Some(hooks) = turn.hooks.clone() else {
+        return;
+    };
+    let session = turn.session_id.as_str().to_owned();
+    tokio::spawn(async move {
+        let outcome = hooks
+            .fire(&session, &crate::hook::Payload::Notification { message })
+            .await;
+        outcome.report(crate::hook::HookEvent::Notification);
+    });
 }
 
 /// Clears the reply slot for a request that will never be answered.
@@ -3619,6 +3795,8 @@ mod tests {
             spawn: None,
             pending_switch: None,
             jobs: None,
+            hooks: None,
+            delegated: false,
             persist: None,
         };
 
@@ -4017,6 +4195,7 @@ mod tests {
             lsp,
             persistence: None,
             jobs: None,
+            hooks: None,
         };
 
         let spawn = Spawn {

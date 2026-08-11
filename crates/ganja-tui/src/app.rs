@@ -631,6 +631,20 @@ impl App {
     /// Returns an error if the engine refuses a subscription, or if the
     /// terminal cannot be read from or drawn to.
     pub async fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let outcome = self.drive(terminal).await;
+        // Whichever way the loop ended, the error paths included: this session
+        // is over, and a `SessionEnd` hook that only fired on the clean exits
+        // would miss exactly the endings somebody would want to hear about.
+        // Held here rather than in `lib.rs` because `run` consumes the app, and
+        // the id the envelope names is the session the engine is on *now* —
+        // which a resume may have moved since startup.
+        self.engine.session_end(ganja_core::hook::EXIT_REASON).await;
+
+        outcome
+    }
+
+    /// The loop itself; see [`App::run`], which owns what happens after it.
+    async fn drive(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         let mut core_events = self
             .engine
             .subscribe()

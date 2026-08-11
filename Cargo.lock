@@ -1240,6 +1240,7 @@ dependencies = [
  "libc",
  "lsp-types",
  "png",
+ "regex",
  "reqwest",
  "rmcp",
  "rusqlite",
