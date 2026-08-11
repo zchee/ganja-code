@@ -50,20 +50,15 @@
 
 use std::{
     io::{self, IsTerminal as _, Read as _, Write},
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::PathBuf,
 };
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, ValueEnum};
 use futures::StreamExt as _;
 use ganja_client::Prompt;
-use ganja_core::{
-    AgentRegistry, Engine, EngineError, SessionId, Storage, catalog,
-    config::{Config, Overrides},
-    instruction, provider,
-};
-use ganja_permission::{Project, permission};
+use ganja_core::{Engine, EngineError, SessionId, config::Overrides};
+use ganja_permission::permission;
 use ganja_protocol::{
     Command as EngineCommand, Event, FinishReason, Message, Part, PartBody, PartId,
     PermissionReply, Role, ToolState,
@@ -71,7 +66,10 @@ use ganja_protocol::{
 use secrecy::ExposeSecret as _;
 use serde_json::Value;
 
-use crate::{STORAGE, millis_now, printable};
+use crate::{
+    assemble::{Assembled, assemble},
+    millis_now, printable,
+};
 
 /// Every `type` an nd-JSON object may carry: upstream's six and no seventh
 /// (`run.ts:720`, `:741`, `:745`, `:749`, `:762`, `:784`).
@@ -282,13 +280,22 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
     let assembled = assemble(
         &cwd,
-        Overrides {
+        &Overrides {
             model: args.model,
             agent: args.agent,
             config_file: args.config,
         },
     )?;
-    let Assembled { engine, servers } = assembled;
+    let Assembled {
+        engine, servers, ..
+    } = assembled;
+    refuse_interactive_permissions(&engine);
+    // Dialled in the background, exactly as the UI dials them: a server that
+    // never answers costs its tools rather than the run. No file watcher
+    // beside it, though — the stale-read notice it feeds is delivered at the
+    // top of a *later* turn, and a one-shot run has no later turn (deviation:
+    // run-does-not-watch-files).
+    engine.connect_mcp();
 
     let session = select_session(&engine, args.r#continue, args.session.as_deref()).await?;
     // After the session, so the flag outranks whatever effort a resumed row
@@ -320,12 +327,6 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 }
 
-/// The engine a run drives, and the servers whose processes it has to end.
-struct Assembled {
-    engine: Engine,
-    servers: Arc<ganja_core::McpServers>,
-}
-
 /// Applies `--effort` to the engine before the turn, or does nothing when
 /// the flag was not given.
 ///
@@ -338,91 +339,6 @@ async fn effort_switch(engine: &Engine, effort: Option<String>) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Builds the engine `run` drives.
-///
-/// The same assembly `ganja-tui` performs, in the same order and for the same
-/// reasons, minus everything about a screen: no themes, no key bindings, no
-/// catalog refresh loop behind the frame — a one-shot run prices from whatever
-/// is already cached — and no filesystem watcher, since the stale-read notice
-/// it feeds is delivered at the top of a *later* turn and there is no later
-/// turn (deviation: run-does-not-watch-files).
-fn assemble(cwd: &Path, overrides: Overrides) -> Result<Assembled> {
-    let config = Config::load_with(cwd, &overrides).context("failed to read the configuration")?;
-    // Adopted before anything sizes a request: the disk tier is what the UI
-    // last fetched, and a run that skipped it would compact against the
-    // compiled-in snapshot's numbers instead.
-    catalog::load_cached();
-    let selection = provider::select(&config).context("failed to select a provider")?;
-    if let Some(notice) = &selection.notice {
-        // stderr, so it cannot land in the middle of an nd-JSON stream.
-        eprintln!("note: {notice}");
-    }
-    let agents = Arc::new(AgentRegistry::build(&config).context("failed to resolve the agents")?);
-    let project = Project::resolve(cwd);
-    let storage = Storage::open(
-        project
-            .data_dir()
-            .context("failed to locate the project's data directory")?
-            .join(STORAGE),
-    );
-    let commands = Arc::new(ganja_core::command::Registry::build(
-        &config,
-        project.root(),
-    ));
-    let servers = ganja_core::McpServers::new(config.mcp.clone(), project.root());
-    let lsp = ganja_core::Lsp::new(config.lsp.as_ref(), project.root());
-    let snapshots = Arc::new(ganja_core::Snapshots::new(
-        &project,
-        config.snapshots_enabled(),
-    ));
-    let mut tools = ganja_core::tool::Registry::with_builtins();
-    if config.webfetch_allows_private() {
-        tools = tools.with(Arc::new(
-            ganja_core::tool::webfetch::WebfetchTool::allowing_private(),
-        ));
-    }
-    // Over the top of the roster's rootless one, out of the **same** value the
-    // prompt's `<available_skills>` block is built from below: a session that
-    // is offered a skill has to be able to load it, and only a caller holding
-    // the config and the directory can resolve where either half looks.
-    tools = tools.with(Arc::new(ganja_core::tool::skill::SkillTool::over(
-        instruction::skill_roots(&config, cwd),
-    )));
-
-    let mut engine = Engine::persistent(
-        selection.provider,
-        selection.model,
-        Arc::new(tools),
-        ganja_permission::Permissions::load(cwd),
-        storage,
-    )
-    .with_agents(agents)
-    .with_commands(commands)
-    .with_mcp(Arc::clone(&servers))
-    .with_snapshots(snapshots);
-    if let Some(lsp) = lsp {
-        engine = engine.with_lsp(lsp);
-    }
-    let model = engine.model();
-    let engine = engine
-        .with_system_parts(
-            Some(instruction::base_prompt(&model).to_owned()),
-            instruction::suffix(&config, cwd, &model),
-        )
-        .with_environment({
-            let config = config.clone();
-            let cwd = cwd.to_owned();
-            move |model| instruction::suffix(&config, &cwd, model)
-        });
-
-    refuse_interactive_permissions(&engine);
-    // Dialled in the background, exactly as the UI dials them: a server that
-    // never answers costs its tools rather than the run.
-    engine.connect_mcp();
-
-    Ok(Assembled { engine, servers })
 }
 
 /// Installs [`REFUSED`] as standing rules the engine re-applies itself.

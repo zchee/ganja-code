@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 
 use ganja_core::{Engine, permission::Permissions, provider::ProviderEvent, tool::Registry};
 use ganja_serve::{Handle, ServeConfig};
-use ganja_testkit::ScriptedProvider;
+use ganja_testkit::{ScriptedProvider, says};
 
 /// A heartbeat quick enough that a suite sees one without waiting ten
 /// seconds.
@@ -39,6 +39,16 @@ pub fn scripted_engine(
         Arc::new(tools),
         permissions,
     ))
+}
+
+/// The one-turn engine most suites open with: a scripted "hi", no tools, and
+/// default permissions.
+pub fn engine() -> Arc<Engine> {
+    scripted_engine(
+        vec![says("hi")],
+        Registry::new(Vec::new()),
+        Permissions::default(),
+    )
 }
 
 /// A loopback config for the working directory, on an OS-assigned port so

@@ -6,19 +6,9 @@
 mod support;
 
 use base64::Engine as _;
-use ganja_core::{permission::Permissions, tool::Registry};
 use ganja_serve::{Credentials, ServeError};
-use ganja_testkit::says;
 use secrecy::SecretString;
-use support::{base_url, loopback_config, scripted_engine};
-
-fn engine() -> std::sync::Arc<ganja_core::Engine> {
-    scripted_engine(
-        vec![says("hi")],
-        Registry::new(Vec::new()),
-        Permissions::default(),
-    )
-}
+use support::{base_url, engine, loopback_config};
 
 #[tokio::test]
 async fn a_non_loopback_bind_with_no_password_is_refused_at_startup() {

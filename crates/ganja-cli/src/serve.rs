@@ -21,22 +21,13 @@
 //! `POST /permission/{id}/reply` (deviation:
 //! serve-keeps-interactive-permissions).
 
-use std::{
-    io::Write as _,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{io::Write as _, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use clap::Args;
-use ganja_core::{
-    AgentRegistry, Engine, Storage, catalog,
-    config::{Config, Overrides},
-    instruction, provider,
-};
-use ganja_permission::Project;
+use ganja_core::config::Overrides;
 
-use crate::STORAGE;
+use crate::assemble::assemble;
 
 /// `ganja serve`'s flags — upstream's network options, minus what this build
 /// has no feature behind (see the module docs).
@@ -63,7 +54,10 @@ pub struct ServeArgs {
 /// the deliberate one: a non-loopback bind with no password configured.
 pub async fn serve(args: ServeArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
-    let assembled = assemble(&cwd)?;
+    let assembled = assemble(&cwd, &Overrides::default())?;
+    // Dialled in the background, exactly as the UI dials them: a server that
+    // never answers costs its tools rather than the listener.
+    assembled.engine.connect_mcp();
 
     let credentials = ganja_serve::Credentials::from_env();
     if credentials.is_none() {
@@ -117,101 +111,6 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     engine.shutdown_lsp();
 
     Ok(())
-}
-
-/// The engine a server drives, and what has to outlive it: the MCP server
-/// handles whose processes the shutdown ends, the storage handle the
-/// read-only routes answer from, and the paths and config the informational
-/// routes serve.
-struct Assembled {
-    engine: Engine,
-    servers: Arc<ganja_core::McpServers>,
-    storage: Storage,
-    root: PathBuf,
-    data: PathBuf,
-    config: Config,
-}
-
-/// The same assembly `run` performs, in the same order and for the same
-/// reasons (`run.rs`, `assemble`), keeping the handles the serve layer needs
-/// where `run` could let them go.
-fn assemble(cwd: &Path) -> Result<Assembled> {
-    let config = Config::load_with(cwd, &Overrides::default())
-        .context("failed to read the configuration")?;
-    // Adopted before anything sizes a request, exactly as `run` adopts it.
-    catalog::load_cached();
-    let selection = provider::select(&config).context("failed to select a provider")?;
-    if let Some(notice) = &selection.notice {
-        eprintln!("note: {notice}");
-    }
-    let agents = Arc::new(AgentRegistry::build(&config).context("failed to resolve the agents")?);
-    let project = Project::resolve(cwd);
-    let data = project
-        .data_dir()
-        .context("failed to locate the project's data directory")?;
-    let storage = Storage::open(data.join(STORAGE));
-    let commands = Arc::new(ganja_core::command::Registry::build(
-        &config,
-        project.root(),
-    ));
-    let servers = ganja_core::McpServers::new(config.mcp.clone(), project.root());
-    let lsp = ganja_core::Lsp::new(config.lsp.as_ref(), project.root());
-    let snapshots = Arc::new(ganja_core::Snapshots::new(
-        &project,
-        config.snapshots_enabled(),
-    ));
-    let mut tools = ganja_core::tool::Registry::with_builtins();
-    if config.webfetch_allows_private() {
-        tools = tools.with(Arc::new(
-            ganja_core::tool::webfetch::WebfetchTool::allowing_private(),
-        ));
-    }
-    // Over the top of the roster's rootless one, out of the **same** value the
-    // prompt's `<available_skills>` block is built from below: a session that
-    // is offered a skill has to be able to load it, and only a caller holding
-    // the config and the directory can resolve where either half looks.
-    tools = tools.with(Arc::new(ganja_core::tool::skill::SkillTool::over(
-        instruction::skill_roots(&config, cwd),
-    )));
-
-    let mut engine = Engine::persistent(
-        selection.provider,
-        selection.model,
-        Arc::new(tools),
-        ganja_permission::Permissions::load(cwd),
-        storage.clone(),
-    )
-    .with_agents(agents)
-    .with_commands(commands)
-    .with_mcp(Arc::clone(&servers))
-    .with_snapshots(snapshots);
-    if let Some(lsp) = lsp {
-        engine = engine.with_lsp(lsp);
-    }
-    let model = engine.model();
-    let engine = engine
-        .with_system_parts(
-            Some(instruction::base_prompt(&model).to_owned()),
-            instruction::suffix(&config, cwd, &model),
-        )
-        .with_environment({
-            let config = config.clone();
-            let cwd = cwd.to_owned();
-            move |model| instruction::suffix(&config, &cwd, model)
-        });
-
-    // Dialled in the background, exactly as the UI dials them: a server that
-    // never answers costs its tools rather than the listener.
-    engine.connect_mcp();
-
-    Ok(Assembled {
-        engine,
-        servers,
-        storage,
-        root: project.root().to_owned(),
-        data,
-        config,
-    })
 }
 
 /// The first of SIGINT or SIGTERM, which are the two ways a supervisor or a

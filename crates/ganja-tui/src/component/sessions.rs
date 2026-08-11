@@ -445,7 +445,12 @@ mod tests {
 
     #[test]
     fn a_zero_area_draws_nothing_and_does_not_panic() {
-        rendered(&sessions(), Rect::new(0, 0, 0, 0));
+        let screen = rendered(&sessions(), Rect::new(0, 0, 0, 0));
+
+        assert!(
+            screen.is_empty(),
+            "a zero area has no cell to hold: {screen}"
+        );
     }
 
     /// The same protection the permission dialog is pinned for, on the other
