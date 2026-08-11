@@ -561,6 +561,7 @@ mod tests {
             spawn: None,
             ask: None,
             switch: None,
+            jobs: None,
         }
     }
 

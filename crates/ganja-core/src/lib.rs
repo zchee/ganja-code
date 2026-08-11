@@ -36,6 +36,11 @@ pub mod command;
 pub mod config;
 pub mod engine;
 pub mod instruction;
+/// Background shell jobs — `bash` calls run with `run_in_background: true` —
+/// outliving the turns that start them. The trait every caller reaches this
+/// through ([`tool::job::Jobs`]) lives in `ganja-tool`, the same seam
+/// `tool::task::Subagents` draws; this module is the one implementation.
+pub mod job;
 pub mod lsp;
 pub mod mcp;
 pub mod provider;

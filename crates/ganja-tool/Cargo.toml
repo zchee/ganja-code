@@ -24,7 +24,10 @@ futures.workspace = true
 ganja-permission.workspace = true
 # `glob` and `grep` walk the filesystem in-process rather than shelling to
 # `rg`, sharing the same crates ripgrep itself is built on for byte-identical
-# glob and ignore-file semantics.
+# glob and ignore-file semantics. `grep-matcher` is `bash_output`'s: the
+# `Matcher` trait `RegexMatcher` implements, applied to an in-memory chunk of
+# a background job's output rather than a walked file.
+grep-matcher.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
 ignore.workspace = true

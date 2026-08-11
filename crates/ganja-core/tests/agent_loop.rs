@@ -227,6 +227,8 @@ fn the_builtin_registry_advertises_every_tool() {
             "websearch",
             "skill",
             "question",
+            "bash_output",
+            "kill_shell",
         ]
     );
     assert!(

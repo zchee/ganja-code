@@ -109,6 +109,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .context("the server did not stop cleanly")?;
     assembled.servers.shutdown().await;
     engine.shutdown_lsp();
+    engine.shutdown_jobs().await;
 
     Ok(())
 }

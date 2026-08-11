@@ -98,6 +98,13 @@ futures = "0.3.33"
 # the whole requirement: a userspace generator would be state to seed, reseed
 # and reason about for thirty-two bytes drawn once per login.
 getrandom = "0.4.3"
+# The `Matcher` trait `grep-regex`'s `RegexMatcher` implements — already in
+# the dependency graph transitively through `grep-regex`/`grep-searcher`,
+# named directly here because `bash_output`'s line filter matches against an
+# in-memory chunk of output rather than a file `grep-searcher` would walk, so
+# it needs the matcher's `is_match` alone and none of the searcher's Sink
+# machinery.
+grep-matcher = "0.1.9"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 # webfetch's markdown format is a real HTML→markdown conversion (upstream

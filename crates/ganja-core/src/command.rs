@@ -706,6 +706,7 @@ mod tests {
             spawn: None,
             ask: None,
             switch: None,
+            jobs: None,
         };
         let command = |template: &str| Definition {
             name: "fixture".to_owned(),

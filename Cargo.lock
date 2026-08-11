@@ -1349,6 +1349,7 @@ dependencies = [
  "etcetera",
  "futures",
  "ganja-permission",
+ "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "htmd",

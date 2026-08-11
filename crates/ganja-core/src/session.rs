@@ -733,6 +733,11 @@ pub(crate) struct Turn {
     /// discipline as `spawn: None`: a child's tail must never run phase one
     /// against its private fanout and its own persist.
     pub(crate) pending_switch: Option<Arc<std::sync::Mutex<PendingSwitch>>>,
+    /// What a call tracks a background job through — engine-owned and shared
+    /// by every turn this session runs, root or subagent alike, because a
+    /// job outlives whichever turn started it. [`None`] on every scripted
+    /// and golden run that built a [`Turn`] without one.
+    pub(crate) jobs: Option<Arc<dyn crate::tool::job::Jobs>>,
     /// Write-through and session bookkeeping, when the engine persists.
     /// [`None`] is an in-memory engine, and every hook below is a no-op.
     pub(crate) persist: Option<Persist>,
@@ -837,6 +842,12 @@ impl Turn {
             // session's row; and its rules already deny `plan_exit`, so
             // the belt has braces.
             pending_switch: None,
+            // The parent's own registry, shared rather than withheld: a
+            // background job outlives whichever turn started it, and the
+            // depth guard `spawn: None` states is about delegating *more*
+            // work, not about a subagent's own `bash` calls losing a
+            // capability its parent has.
+            jobs: host.jobs.clone(),
             persist: parts.persist,
         }
     }
@@ -1703,6 +1714,7 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
         // the switch seam stays empty too.
         ask: None,
         switch: None,
+        jobs: None,
     };
     let tool = shell::ShellTool::new();
     let running = tool.run_reporting(input.clone(), &ctx, Some(progress));
@@ -2842,6 +2854,11 @@ async fn resolve(
                     pending: Arc::clone(cell),
                 }) as Arc<dyn crate::tool::plan::Switcher>
             }),
+            // Shared with every call in this session, root or subagent alike
+            // (`Turn::child` carries it forward too): a background job
+            // outlives the turn that started it, so which turn started it is
+            // not a reason to track it differently.
+            jobs: turn.jobs.clone(),
         };
         let running = tool.run(args.clone(), &ctx);
         tokio::pin!(running);
@@ -3601,6 +3618,7 @@ mod tests {
             history: Arc::new(Mutex::new(Vec::new())),
             spawn: None,
             pending_switch: None,
+            jobs: None,
             persist: None,
         };
 
@@ -3998,6 +4016,7 @@ mod tests {
             credentials: Credentials::Guarded(PARENTS_STORE.into()),
             lsp,
             persistence: None,
+            jobs: None,
         };
 
         let spawn = Spawn {

@@ -194,6 +194,10 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     // named to it at the top of the next turn. A watcher that will not start
     // is one warning and nothing else.
     engine.watch_files();
+    // Held apart the same way `servers` is: `engine` moves into `App::new`
+    // below, and a background job's own process group has to be ended
+    // whichever way this run ends, exactly as every local MCP server's does.
+    let jobs = Arc::clone(engine.jobs());
 
     let seed = match resume {
         Some(resume) => stored_transcript(&engine, resume).await?,
@@ -253,6 +257,7 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
     // than through `Engine::shutdown_mcp`, which is the same call one layer
     // down: the engine moved into the app, and `App::run` consumes it.
     servers.shutdown().await;
+    jobs.shutdown().await;
     let restored = restore();
 
     outcome.and(restored)

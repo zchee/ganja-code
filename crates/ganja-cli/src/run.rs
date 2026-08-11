@@ -320,6 +320,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // went, and before the refusal below leaves the function.
     servers.shutdown().await;
     engine.shutdown_lsp();
+    engine.shutdown_jobs().await;
 
     match outcome? {
         None => Ok(()),
