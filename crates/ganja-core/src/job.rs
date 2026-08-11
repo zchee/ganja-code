@@ -432,7 +432,10 @@ fn render_chunk(bytes: &[u8], dropped: bool, spill: Option<&std::path::Path>) ->
     }
 }
 
-#[cfg(test)]
+// Unix-only as a module rather than test by test: every test but one drives
+// a real `sh` through the registry, and the tree-kill tests assert
+// process-group semantics that have no Windows spelling.
+#[cfg(all(test, unix))]
 mod tests {
     use std::time::Duration;
 
@@ -444,7 +447,6 @@ mod tests {
     /// A command this platform's shell can run, split the way
     /// [`tokio::process::Command`] wants it, mirroring the two-argument
     /// shape `ganja_tool::shell::ShellTool::spawn` builds.
-    #[cfg(unix)]
     fn shell(command: &str) -> Command {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
