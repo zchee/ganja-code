@@ -140,6 +140,12 @@ async fn refusal(response: reqwest::Response, presented: &Presented) -> Provider
     // one anything downstream should be able to find.
     body.zeroize();
 
+    // The masked copy, and only after the masking: this is the one place a
+    // provider's own words about a refusal exist, and a status bar shows the
+    // last of them while a log file keeps every one. Warn rather than debug —
+    // a turn that did not happen is worth reading about without `-v`.
+    tracing::warn!(status, message, "the provider refused the request");
+
     ProviderError::Status { status, message }
 }
 

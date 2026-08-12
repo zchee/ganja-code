@@ -34,7 +34,7 @@
 
 use std::{collections::HashMap, ops::ControlFlow, path::PathBuf, sync::Arc, time::Duration};
 
-use futures::StreamExt as _;
+use futures::{StreamExt as _, stream::BoxStream};
 use tokio::{
     sync::{Mutex, mpsc, oneshot},
     time::Instant,
@@ -50,7 +50,7 @@ use crate::{
         QuestionAnswer, QuestionId, QuestionInfo, QuestionOption, QuestionSource, Role, ToolState,
         Usage, now,
     },
-    provider::{ChatRequest, Provider, ProviderEvent},
+    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
     storage::{SessionId, SessionInfo, Storage, StorageError},
     tool::{
         Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput, question, shell,
@@ -1322,9 +1322,9 @@ fn clip_title(prompt: &str) -> String {
 
 /// Starts the detached task that titles an untitled session, unless nothing
 /// needs doing. Spec: upstream `packages/opencode/src/session/prompt.ts`
-/// (`ensureTitle`) — a toolless request to the provider's cheapest catalog
-/// model, falling back to the session model, and any failure falls back to
-/// the clipped first prompt.
+/// (`ensureTitle`) — a toolless request to the provider's cheapest
+/// chat-capable catalog model, falling back to the session model, and any
+/// failure falls back to the clipped first prompt.
 ///
 /// Detached on purpose: the task never holds the turn slot, so the next
 /// prompt is never waiting on bookkeeping. The title is storage-only in P4 —
@@ -1401,32 +1401,45 @@ async fn spawn_title_if_untitled(turn: &Turn) {
     });
 }
 
-/// Asks the provider's cheapest stablemate for a title, returning [`None`]
-/// for any failure — the caller owns the fallback.
+/// Asks the provider's cheapest chat-capable stablemate for a title, returning
+/// [`None`] for any failure — the caller owns the fallback.
 async fn request_title(
     provider: &dyn Provider,
     session_model: &str,
     first_user: Message,
 ) -> Option<String> {
-    // Cheapest by fresh-input price, upstream's "small model"; a provider the
-    // catalog does not know keeps the session's own model.
-    let model = catalog::models()
-        .filter(|info| info.provider_id == provider.id())
-        .min_by(|a, b| a.pricing.input.total_cmp(&b.pricing.input))
-        .map_or_else(|| session_model.to_owned(), |info| info.id.to_owned());
+    let chosen = title_model(catalog::models(), provider.id(), session_model);
 
-    let request = ChatRequest {
-        model,
-        system: Some(TITLE_PROMPT.to_owned()),
-        messages: vec![Message::user(TITLE_INSTRUCTION), first_user],
-        tools: Vec::new(),
-        // No effort: this request may ask a cheaper stablemate the selected
-        // name was never validated against.
-        effort_options: serde_json::Map::new(),
-    };
-
-    let mut events = match provider.stream(request, CancellationToken::new()).await {
+    let mut events = match title_stream(provider, &chosen, first_user.clone()).await {
         Ok(events) => events,
+        // A refusal from `stream` is a turn that never started, so asking again
+        // costs one round trip and can spend nothing else. It is load-bearing
+        // rather than belt-and-braces: a ChatGPT seat serves four model ids
+        // (`responses.rs`'s `ALLOWED_MODELS`) and the openai catalog's cheapest
+        // chat-capable row is none of them, so the capability filter alone
+        // would still leave every subscription session titled by the fallback.
+        // The session's own model is the one candidate already validated by
+        // construction — the turn that just earned this title ran on it — and
+        // the guard keeps a provider that refused *that* from being asked
+        // twice.
+        Err(error) if chosen != session_model => {
+            tracing::debug!(
+                %error,
+                model = %chosen,
+                "the title model was refused; asking the session's own model"
+            );
+
+            match title_stream(provider, session_model, first_user).await {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "the title request was refused; falling back to the prompt"
+                    );
+                    return None;
+                }
+            }
+        }
         Err(error) => {
             tracing::warn!(%error, "the title request was refused; falling back to the prompt");
             return None;
@@ -1456,6 +1469,72 @@ async fn request_title(
     }
 
     clean_title(&text)
+}
+
+/// Opens one toolless title request against `model`.
+///
+/// Split out of [`request_title`] because the request is built twice: once for
+/// the model the catalog chose, and once for the session's own model when the
+/// wire refused the first before it left the process.
+async fn title_stream(
+    provider: &dyn Provider,
+    model: &str,
+    first_user: Message,
+) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+    let request = ChatRequest {
+        model: model.to_owned(),
+        system: Some(TITLE_PROMPT.to_owned()),
+        messages: vec![Message::user(TITLE_INSTRUCTION), first_user],
+        tools: Vec::new(),
+        // No effort: this request may ask a cheaper stablemate the selected
+        // name was never validated against.
+        effort_options: serde_json::Map::new(),
+    };
+
+    provider.stream(request, CancellationToken::new()).await
+}
+
+/// The model a title request asks for: `provider_id`'s cheapest **chat-capable**
+/// row, or `session_model` when the catalog offers none.
+///
+/// Cheapest by fresh-input price is upstream's "small model" in spirit, and it
+/// was the whole of the rule until a ChatGPT-seat session was found asking
+/// `text-embedding-3-small` for a title on every conversation — the cheapest
+/// openai row the published catalog carries, and not a model that can hold a
+/// conversation at all.
+///
+/// **The capability signal is [`catalog::ModelInfo::tool_call`], and not the
+/// row's output modalities** — the field that sounds right and is not.
+/// models.dev publishes `text-embedding-3-small` as `modalities: {"input":
+/// ["text"], "output": ["text"]}`, so a modality filter would select exactly
+/// the row this exists to exclude, and carrying a new catalog field to do it
+/// would buy nothing. `tool_call` is the one capability [`catalog::ModelInfo`]
+/// holds that every embedding row answers `false` to and every chat model
+/// answers `true` to. It is a proxy — a title request offers no tools — and a
+/// slightly strict one costs nothing: the worst it can do is pass over a chat
+/// model whose row claims no tool support, and the next-cheapest chat model
+/// titles the session just as well.
+///
+/// Takes the rows rather than reading [`catalog::models`] itself, the way
+/// `catalog`'s own `scoped` does, so the pick can be tested against a table
+/// without installing one over the process-global one every other test reads.
+fn title_model(
+    rows: impl Iterator<Item = Arc<catalog::ModelInfo>>,
+    provider_id: &str,
+    session_model: &str,
+) -> String {
+    // `Iterator::filter` spelled out rather than called as a method:
+    // `futures::StreamExt` is in scope in this module and carries a `filter` of
+    // its own, which makes the bare call ambiguous on a generic parameter. The
+    // concrete `iter::Filter` it answers with is unambiguous again.
+    Iterator::filter(rows, |info| {
+        info.provider_id == provider_id && info.tool_call
+    })
+    .min_by(|a, b| a.pricing.input.total_cmp(&b.pricing.input))
+    // A provider the catalog does not know — and one whose every row was
+    // filtered away — keeps the session's own model, which is the one name
+    // already known to work on this wire.
+    .map_or_else(|| session_model.to_owned(), |info| info.id.clone())
 }
 
 /// Upstream's title cleaning: `<think>` blocks stripped, the first non-empty
@@ -4061,9 +4140,10 @@ mod tests {
 
     use super::{
         Answered, BufferedCall, ChildParts, PendingReplies, Turn, TurnKind, add_usage, attached,
-        parse_args, resolve, resolve_mentions, sliced,
+        parse_args, resolve, resolve_mentions, sliced, title_model,
     };
     use crate::{
+        catalog,
         engine::Fanout,
         permission::Permissions,
         protocol::{
@@ -4807,6 +4887,83 @@ mod tests {
         assert!(
             Arc::ptr_eq(&shared, &lsp),
             "the same service, not a second one started behind the parent's back"
+        );
+    }
+
+    /// A catalog row, differing from the next only in what the title pick
+    /// reads: who serves it, what it costs, and whether it can be given tools.
+    fn row(provider_id: &str, id: &str, input: f64, tool_call: bool) -> Arc<catalog::ModelInfo> {
+        Arc::new(catalog::ModelInfo {
+            id: id.to_owned(),
+            provider_id: provider_id.to_owned(),
+            name: id.to_owned(),
+            context_window: 128_000,
+            max_output: 8_000,
+            input_limit: None,
+            pricing: catalog::Pricing {
+                input,
+                output: input * 4.0,
+                cache_read: input / 10.0,
+                cache_write: None,
+            },
+            family: None,
+            release_date: None,
+            tool_call,
+            status: catalog::ModelStatus::Active,
+            reasoning: false,
+            reasoning_options: None,
+            variants: std::collections::BTreeMap::new(),
+        })
+    }
+
+    /// The published openai roster in miniature: the cheapest row by fresh
+    /// input is an embedding model, which is exactly the shape that had every
+    /// ChatGPT-seat session asking `text-embedding-3-small` for a title and
+    /// being refused by the wire's own allowlist.
+    fn openai_rows() -> Vec<Arc<catalog::ModelInfo>> {
+        vec![
+            row("openai", "text-embedding-3-small", 0.02, false),
+            row("openai", "gpt-5-nano", 0.05, true),
+            row("openai", "gpt-5.6", 5.0, true),
+            row("anthropic", "claude-haiku-4-5", 0.01, true),
+        ]
+    }
+
+    #[test]
+    fn the_title_model_is_never_a_row_that_cannot_be_given_tools() {
+        let chosen = title_model(openai_rows().into_iter(), "openai", "gpt-5.4");
+
+        assert_eq!(
+            chosen, "gpt-5-nano",
+            "the cheapest chat-capable row wins, not the cheaper embedding one"
+        );
+    }
+
+    /// Another provider's row is cheaper than every one of this provider's, and
+    /// a pick that read the price before the provider would take it.
+    #[test]
+    fn the_title_model_is_only_ever_one_the_session_provider_serves() {
+        let chosen = title_model(openai_rows().into_iter(), "openai", "gpt-5.4");
+
+        assert_ne!(chosen, "claude-haiku-4-5");
+    }
+
+    /// Two ways the roster comes up empty — a provider the catalog has never
+    /// heard of, and one whose every row was filtered away — and both keep the
+    /// session's own model, which is the one name known to work on this wire.
+    #[test]
+    fn a_provider_with_no_chat_capable_row_keeps_the_sessions_own_model() {
+        assert_eq!(
+            title_model(openai_rows().into_iter(), "cursor", "default"),
+            "default",
+            "an uncataloged provider keeps its session model"
+        );
+
+        let embeddings_only = vec![row("openai", "text-embedding-3-small", 0.02, false)];
+        assert_eq!(
+            title_model(embeddings_only.into_iter(), "openai", "gpt-5.4"),
+            "gpt-5.4",
+            "a roster filtered to nothing must not leave the pick empty"
         );
     }
 }

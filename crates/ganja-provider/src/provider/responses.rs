@@ -580,6 +580,18 @@ impl Provider for ResponsesProvider {
         let built = self.request(&resolved, &request)?;
         let backend = self.backend;
 
+        // The backend is here and nowhere else: it is what decides the URL, the
+        // headers and whether the seat's allowlist applies at all, so a turn
+        // read back from a log file without it is a turn whose refusals cannot
+        // be explained.
+        tracing::debug!(
+            provider = ID,
+            model = request.model,
+            ?backend,
+            endpoint = super::endpoint(built.url()),
+            "requesting a turn"
+        );
+
         open(
             &self.client,
             built,
@@ -1292,14 +1304,16 @@ const DONE: &str = "[DONE]";
 ///
 /// The status was 200 by the time any of these arrived and this API's `code` is
 /// a slug rather than a number, so `500` is the truest thing there is to say —
-/// the same reading the sibling's error chunks get.
+/// the same reading the sibling's error chunks get. What the object *did* say
+/// is [`super::reported`]'s business, so that a body carrying a `code` and no
+/// `message` stops reading as a body that carried nothing.
 fn failure(error: &Value) -> ProviderError {
+    let message = super::reported(error);
+    tracing::warn!(provider = ID, message, "the turn died mid-stream");
+
     ProviderError::Status {
         status: 500,
-        message: error["message"]
-            .as_str()
-            .unwrap_or("the provider reported an error")
-            .to_owned(),
+        message,
     }
 }
 

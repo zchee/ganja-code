@@ -59,6 +59,29 @@ struct Cli {
     resume: ResumeArgs,
     #[command(flatten)]
     select: SelectArgs,
+    /// Write the log file at debug level instead of info.
+    ///
+    /// What that buys is the provider wires' own account of a turn — the model
+    /// and endpoint each request chose, the status that came back, and the
+    /// body of a refusal — which is what makes a failure diagnosable after the
+    /// fact rather than only while it is happening.
+    ///
+    /// RUST_LOG still wins wherever it is set: it can name one module and one
+    /// level where this flag has only the one setting, so a flag that overrode
+    /// it would take away the only way to ask for less than everything. This
+    /// replaces the default, and nothing more.
+    ///
+    /// Write it after the subcommand — `ganja models -v` — or on its own for
+    /// the UI: `ganja -v models` is refused, because
+    /// `args_conflicts_with_subcommands` negates *every* argument written
+    /// before a subcommand and clap has no exemption for a global one
+    /// (`clap_builder/src/parser/parser.rs:484`, which branches on nothing but
+    /// "some argument matched").
+    // `global` is what puts it on every subcommand rather than only on the UI
+    // run, and it is the whole reason the flag can be written at all beside
+    // `models`, `run` or `serve`.
+    #[arg(long, short = 'v', global = true)]
+    verbose: bool,
 }
 
 /// Which stored session the UI opens, if any.
@@ -447,6 +470,19 @@ const LOG_FILES: usize = 7;
 /// cannot parse.
 const DEFAULT_FILTER: &str = "info";
 
+/// What `-v` traces instead, when `RUST_LOG` says nothing.
+///
+/// This workspace's crates at debug and everything else left at info, rather
+/// than a bare `debug`: the point of the flag is the provider wires' account of
+/// a turn, and hyper, h2 and rustls at debug bury it under socket bookkeeping
+/// nobody asked for.
+///
+/// One directive covers all nine crates because an `EnvFilter` target is
+/// matched as a **raw string prefix** (`filter/env/directive.rs`), and every
+/// target here — `ganja_core::session`, `ganja_provider::provider::responses`,
+/// and the rest — begins with those five letters.
+const VERBOSE_FILTER: &str = "info,ganja=debug";
+
 /// Where a project's sessions live, under its data directory.
 ///
 /// Pinned to the directory `ganja-tui` opens `Engine::persistent` on: the two
@@ -467,8 +503,11 @@ async fn main() -> Result<()> {
     // usage error do not create a log directory for a run that never started.
     let cli = Cli::parse();
     // Held until `main` returns: dropping the guard stops the appender's
-    // worker thread, and whatever it had not written is lost.
-    let _logging = install_logging();
+    // worker thread, and whatever it had not written is lost. The flag comes
+    // from the already-parsed `Cli` because this runs before any subcommand is
+    // dispatched, and a level decided after the fact would miss the startup it
+    // was set to watch.
+    let _logging = install_logging(cli.verbose);
 
     match cli.command {
         None => ganja_tui::run(cli.resume.wanted(), cli.select.overrides()).await,
@@ -505,9 +544,13 @@ fn config_command(action: Config) -> Result<()> {
 /// directory that will not be created costs the run its log and says so on
 /// stderr — safe, because this happens before the terminal is taken over.
 ///
+/// `verbose` is `-v`, and it moves the *default* level only: see
+/// [`resolve_filter`] for the precedence and [`VERBOSE_FILTER`] for what it
+/// turns on.
+///
 /// The returned guard flushes the appender's worker thread when it drops.
 #[must_use]
-fn install_logging() -> Option<WorkerGuard> {
+fn install_logging(verbose: bool) -> Option<WorkerGuard> {
     let directory = match log_directory() {
         Ok(directory) => directory,
         Err(error) => return declined(&format!("{error:#}")),
@@ -539,8 +582,12 @@ fn install_logging() -> Option<WorkerGuard> {
     };
 
     let (writer, guard) = tracing_appender::non_blocking(appender);
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_FILTER));
+    let filter = resolve_filter(
+        std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV)
+            .ok()
+            .as_deref(),
+        verbose,
+    );
     let installed = tracing_subscriber::fmt()
         .with_writer(writer)
         // A file is not a terminal, so colour codes in it are noise every
@@ -555,6 +602,34 @@ fn install_logging() -> Option<WorkerGuard> {
         Ok(()) => Some(guard),
         Err(error) => declined(&format!("a subscriber is already installed: {error}")),
     }
+}
+
+/// What the run traces, given whatever `RUST_LOG` said and whether `-v` was
+/// passed.
+///
+/// **`RUST_LOG` outranks the flag.** The variable names a module and a level
+/// where the flag has only its one setting, so a flag that overrode it would
+/// take away the only way to ask for less than everything — or for more than
+/// this workspace's own crates. The flag moves the default, which is the level
+/// a run has when nobody said anything.
+///
+/// `configured` is passed in rather than read here so the precedence can be
+/// exercised without a test mutating the environment of the process it shares
+/// with every other test in this binary.
+fn resolve_filter(configured: Option<&str>, verbose: bool) -> tracing_subscriber::EnvFilter {
+    // A value that will not parse falls through to the default, which is what
+    // `try_from_default_env` did before the flag existed. An *empty* value is a
+    // value: it parses, to a filter that enables nothing, and honouring that is
+    // the same behaviour this had when it read the variable directly.
+    configured
+        .and_then(|spelled| tracing_subscriber::EnvFilter::try_new(spelled).ok())
+        .unwrap_or_else(|| {
+            tracing_subscriber::EnvFilter::new(if verbose {
+                VERBOSE_FILTER
+            } else {
+                DEFAULT_FILTER
+            })
+        })
 }
 
 /// Says why there will be no log this run, and answers [`None`] so the caller
@@ -1461,7 +1536,10 @@ mod tests {
     };
     use ganja_protocol::Usage;
 
-    use super::{Cli, Command, UNTITLED, age, billed_tokens, matching, per_mtok, providers, title};
+    use super::{
+        Cli, Command, UNTITLED, age, billed_tokens, matching, per_mtok, providers, resolve_filter,
+        title,
+    };
 
     #[test]
     fn the_ui_flags_map_onto_the_override_tier() {
@@ -1494,6 +1572,83 @@ mod tests {
         assert!(
             Cli::try_parse_from(["ganja", "--model", "x/y", "models"]).is_err(),
             "a listing that read like it honored --model would be lying"
+        );
+    }
+
+    /// `global = true` is what puts the flag on every subcommand rather than
+    /// only on the UI run — a log level means the same thing for a listing as
+    /// for a session, where a resume flag means nothing at all.
+    #[test]
+    fn every_invocation_takes_the_verbose_flag() {
+        for spelled in [
+            vec!["ganja", "-v"],
+            vec!["ganja", "--verbose"],
+            vec!["ganja", "models", "-v"],
+            vec!["ganja", "sessions", "--verbose"],
+            vec!["ganja", "run", "-v", "what does this crate do"],
+        ] {
+            let cli = Cli::try_parse_from(&spelled)
+                .unwrap_or_else(|error| panic!("{spelled:?} has to parse: {error}"));
+
+            assert!(cli.verbose, "{spelled:?} asked for the debug log");
+        }
+
+        assert!(
+            !Cli::parse_from(["ganja", "models"]).verbose,
+            "the flag is off unless it was passed"
+        );
+    }
+
+    /// The position the flag's doc comment promises, pinned so that a clap
+    /// release which *does* exempt a global argument shows up here as a failing
+    /// assertion rather than as documentation that quietly stopped being true.
+    #[test]
+    fn the_verbose_flag_is_written_after_the_subcommand_not_before_it() {
+        assert!(
+            Cli::try_parse_from(["ganja", "-v", "models"]).is_err(),
+            "`args_conflicts_with_subcommands` negates every argument written \
+             before a subcommand, global ones included"
+        );
+    }
+
+    /// The precedence the flag's own doc comment promises, in both directions:
+    /// the flag moves the default, and an explicit `RUST_LOG` outranks it.
+    #[test]
+    fn rust_log_outranks_the_verbose_flag_and_the_flag_outranks_the_default() {
+        use tracing_subscriber::filter::LevelFilter;
+
+        assert_eq!(
+            resolve_filter(None, false).max_level_hint(),
+            Some(LevelFilter::INFO),
+            "without the flag nothing about today's default may move"
+        );
+
+        let verbose = resolve_filter(None, true);
+        assert_eq!(
+            verbose.max_level_hint(),
+            Some(LevelFilter::DEBUG),
+            "the flag has to reach debug or it buys nothing"
+        );
+        assert!(
+            verbose.to_string().contains("ganja=debug"),
+            "debug is for this workspace's crates, not for hyper's socket \
+             bookkeeping: {verbose}"
+        );
+
+        for flag in [false, true] {
+            assert_eq!(
+                resolve_filter(Some("warn"), flag).max_level_hint(),
+                Some(LevelFilter::WARN),
+                "an explicit RUST_LOG wins whether or not -v was passed"
+            );
+        }
+
+        // A variable that will not parse is not an instruction, so it falls
+        // through to whatever the flag asked for — which is what the filter
+        // did with an unreadable RUST_LOG before the flag existed.
+        assert_eq!(
+            resolve_filter(Some("=not a filter="), true).max_level_hint(),
+            Some(LevelFilter::DEBUG)
         );
     }
 

@@ -205,6 +205,18 @@ impl Provider for OpenAiProvider {
                 ProviderError::Transport(presented.redact(&format!("malformed request: {error}")))
             })?;
 
+        // `wire` and not `provider`: grok, github-copilot and every configured
+        // chat-completions endpoint delegate their whole `stream` to this one,
+        // so the name a session runs under is not knowable here. The endpoint
+        // beside it is what tells those sessions apart, which is the fact a
+        // reader of the log actually needs.
+        tracing::debug!(
+            wire = ID,
+            model = request.model,
+            endpoint = super::endpoint(built.url()),
+            "requesting a turn"
+        );
+
         open(&self.client, built, &presented, cancel, Mapping::default()).await
     }
 }
@@ -666,11 +678,14 @@ impl Mapping {
 }
 
 /// Turns an error object into the failure the turn reports.
+///
+/// What the object said is [`super::reported`]'s business, so that a body
+/// carrying a `code` and no `message` — which on this wire is the ordinary
+/// shape of a gateway's error chunk — stops reading as a body that carried
+/// nothing.
 fn failure(error: &Value) -> ProviderError {
-    let message = error["message"]
-        .as_str()
-        .unwrap_or("the provider reported an error")
-        .to_owned();
+    let message = super::reported(error);
+    tracing::warn!(wire = ID, message, "the turn died mid-stream");
 
     match error["code"]
         .as_u64()
