@@ -98,8 +98,12 @@ pub struct ContextEstimate {
 /// request stamped; this computes from the same inputs the *next* request
 /// will be assembled from, which is why it answers on a fresh session with
 /// zero turns and immediately after a revert.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContextBreakdown {
+    /// The active model's id — the same string [`Engine::model`] answers,
+    /// carried so the `/context` panel can name what it measured (and resolve
+    /// a catalog display name) without a second accessor round trip.
+    pub model: String,
     /// The system prompt's fixed half: the agent's own prompt (or the model
     /// family's base prompt), plus the environment block.
     pub system_prompt: u64,
@@ -111,6 +115,20 @@ pub struct ContextBreakdown {
     /// instructions the servers sent about themselves — both exist only
     /// because a server is connected, so both are its cost.
     pub tools_mcp: u64,
+    /// How many builtin tools [`ContextBreakdown::tools_builtin`] priced.
+    ///
+    /// The counts are **metadata for the panel's detail sections** (P14 W7),
+    /// never token figures: [`ContextBreakdown::total`] sums nothing from
+    /// them. Only the two tool counts exist because only the tools are walked
+    /// item by item here — the instruction-file and skill shares are measured
+    /// off the composed suffix as one string
+    /// ([`crate::instruction`]'s `suffix_measure`), so no honest item count
+    /// passes through for them and none is invented.
+    pub tools_builtin_count: usize,
+    /// How many MCP-lent tools [`ContextBreakdown::tools_mcp`] priced — the
+    /// tools alone, though the token figure also carries the servers' own
+    /// instructions.
+    pub tools_mcp_count: usize,
     /// The skills block of the system prompt.
     pub skills: u64,
     /// The conversation's user half.
@@ -1775,6 +1793,7 @@ impl Engine {
                 .expect("the tool registry is never poisoned"),
         );
         let (mut builtin_chars, mut mcp_chars) = (0_usize, 0_usize);
+        let (mut builtin_count, mut mcp_count) = (0_usize, 0_usize);
         for definition in registry.definitions() {
             let chars = definition.name.chars().count()
                 + definition.description.chars().count()
@@ -1783,8 +1802,10 @@ impl Engine {
             // `mcp__<server>__<tool>`, and nothing else may be.
             if definition.name.starts_with("mcp__") {
                 mcp_chars += chars;
+                mcp_count += 1;
             } else {
                 builtin_chars += chars;
+                builtin_count += 1;
             }
         }
         // What the connected servers said about themselves rides the same
@@ -1822,13 +1843,17 @@ impl Engine {
             }
         }
 
-        let window = catalog::model(&self.model()).map(|model| model.context_window);
+        let model = self.model();
+        let window = catalog::model(&model).map(|model| model.context_window);
 
         ContextBreakdown {
+            model,
             system_prompt: estimate_tokens(head_chars + measure.environment),
             instructions: estimate_tokens(measure.instructions),
             tools_builtin: estimate_tokens(builtin_chars),
             tools_mcp: estimate_tokens(mcp_chars),
+            tools_builtin_count: builtin_count,
+            tools_mcp_count: mcp_count,
             skills: estimate_tokens(measure.skills),
             conversation_user: user,
             conversation_assistant: assistant,
@@ -4383,6 +4408,47 @@ mod tests {
             + breakdown.conversation_assistant;
         assert!(summed > 0, "the furnished engine fills categories");
         assert_eq!(summed, breakdown.total());
+    }
+
+    /// The counts ride the same walk that priced the tools, and the model id
+    /// is the engine's own: with only the builtins registered, the builtin
+    /// count is exactly the registry's roster and the MCP count is zero.
+    #[tokio::test]
+    async fn the_breakdown_counts_the_tools_the_same_walk_priced() {
+        let breakdown = furnished(MODEL).context_breakdown().await;
+
+        assert_eq!(
+            breakdown.tools_builtin_count,
+            Registry::with_builtins().definitions().len(),
+            "every builtin the registry serves is counted once"
+        );
+        assert_eq!(breakdown.tools_mcp_count, 0, "no server is connected");
+        assert_eq!(breakdown.model, MODEL, "the id the engine runs under");
+    }
+
+    /// AC4 undisturbed: the counts are metadata for the panel's detail
+    /// sections, so two breakdowns that differ only in them agree on every
+    /// token figure — the total and the free space sum nothing from a count.
+    #[test]
+    fn the_counts_are_metadata_and_move_no_token_figure() {
+        use super::ContextBreakdown;
+
+        let bare = ContextBreakdown {
+            system_prompt: 1_000,
+            tools_builtin: 2_000,
+            tools_mcp: 500,
+            window: Some(10_000),
+            reserve: Some(1_000),
+            ..ContextBreakdown::default()
+        };
+        let counted = ContextBreakdown {
+            tools_builtin_count: 12,
+            tools_mcp_count: 193,
+            ..bare.clone()
+        };
+
+        assert_eq!(bare.total(), counted.total());
+        assert_eq!(bare.free(), counted.free());
     }
 
     /// The free-space row is window − used − reserve, read off the exposed

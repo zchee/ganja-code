@@ -18,12 +18,14 @@
 //! weekly buckets — which ride a vendor usage API ganja does not speak;
 //! those rows are **explicitly absent**, with one honest line naming why,
 //! rather than drawn empty or faked (the plan's honest-degradation rule,
-//! ruled sufficient in Open question 2). Its `Total duration` and code-change
-//! rows are absent the same way: the dialog receives no such data. Two
-//! honest additions ride the pinned shapes: the per-model lines carry a
-//! reasoning item Claude's line lacks, because ganja really tracks that
-//! counter, and the per-turn table stays — inspector data with no Claude
-//! equivalent, kept from W4.
+//! ruled sufficient in Open question 2). Its `Total duration` row renders
+//! when the opener hands one in (W7: the app's own wall clock since it was
+//! built — never an invented API duration); its code-change row stays absent
+//! the same way as the plan meters: no data source exists anywhere in the
+//! TUI. Two honest additions ride the pinned shapes: the per-model lines
+//! carry a reasoning item Claude's line lacks, because ganja really tracks
+//! that counter, and the per-turn table stays — inspector data with no
+//! Claude equivalent, kept from W4.
 //!
 //! AC5 still holds by construction: the `Total cost:` value is
 //! [`Totals::cost_usd`] — the status bar's own accumulator, not a second
@@ -90,6 +92,11 @@ pub struct Data {
     pub context: Option<(u64, u64)>,
     /// One row per finished turn, the inspector's own rows.
     pub turns: Vec<TurnUsage>,
+    /// Wall-clock time this session has been open — the app's own clock,
+    /// measured from its construction, because that is the only duration
+    /// this side truly holds (W7). Absent, the row is absent: an invented
+    /// duration would be worse than none.
+    pub duration: Option<std::time::Duration>,
 }
 
 /// The dialog itself.
@@ -193,6 +200,17 @@ impl Usage {
             clip(&format!("  {:<16} {cost}", "Total cost:"), inner_width),
             theme.fg,
         ));
+        // The pinned row between cost and the per-model lines — rendered
+        // only over a duration the opener really measured.
+        if let Some(duration) = self.data.duration {
+            lines.push(Line::styled(
+                clip(
+                    &format!("  {:<16} {}", "Total duration:", compact_duration(duration)),
+                    inner_width,
+                ),
+                theme.fg,
+            ));
+        }
         lines.push(Line::styled(
             clip("  Usage by model:", inner_width),
             theme.fg,
@@ -341,6 +359,22 @@ impl Usage {
     }
 }
 
+/// A wall duration in the screenshot's compact spelling: `3h 9m`, `2m`, or
+/// `45s` under a minute — never more than two units, because a person asking
+/// how long a session ran does not want its seconds once it has hours.
+fn compact_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    let (hours, minutes) = (seconds / 3_600, (seconds % 3_600) / 60);
+
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 /// The last few characters of a message id — the counter half is the half
 /// that tells two ids minted moments apart apart, the inspector's own rule.
 fn short_id(id: &ganja_protocol::MessageId) -> String {
@@ -393,6 +427,7 @@ mod tests {
                     cache_write_tokens: 7,
                 },
             }],
+            duration: None,
         }
     }
 
@@ -484,6 +519,38 @@ mod tests {
             .expect("the fixture sent input");
 
         assert!((rate - 0.375).abs() < f64::EPSILON, "got {rate}");
+    }
+
+    /// The pinned `Total duration` row renders the opener's own wall clock
+    /// in the compact spelling, and its absence renders no row at all — an
+    /// invented duration would be worse than none.
+    #[test]
+    fn the_duration_row_formats_compactly_and_only_over_a_measured_duration() {
+        use std::time::Duration;
+
+        for (duration, spelled) in [
+            (Duration::from_secs(3 * 3_600 + 9 * 60), "3h 9m"),
+            (Duration::from_secs(2 * 60), "2m"),
+            (Duration::from_secs(45), "45s"),
+        ] {
+            let screen = rendered(
+                &Usage::new(Data {
+                    duration: Some(duration),
+                    ..data()
+                }),
+                AREA,
+            );
+            assert!(
+                screen.contains(&format!("Total duration:  {spelled}")),
+                "want {spelled} in:\n{screen}"
+            );
+        }
+
+        let unmeasured = rendered(&Usage::new(data()), AREA);
+        assert!(
+            !unmeasured.contains("Total duration"),
+            "no measured duration, no row:\n{unmeasured}"
+        );
     }
 
     /// The plan-limit meters Claude Code leads with are explicitly absent,

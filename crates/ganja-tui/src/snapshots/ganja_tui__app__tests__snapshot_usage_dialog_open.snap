@@ -1,6 +1,6 @@
 ---
 source: crates/ganja-tui/src/app.rs
-assertion_line: 10485
+assertion_line: 10504
 expression: screen(&terminal)
 ---
                                                                                 
@@ -8,6 +8,7 @@ expression: screen(&terminal)
   ┌ usage ───────────────────────────────────────────────────────────────────┐  
   │Session                                                                   │  
   │  Total cost:      unpriced — uncataloged model                           │  
+  │  Total duration:  0s                                                     │  
   │  Usage by model:                                                         │  
   │    canned:  1.2k input, 34 output, 5 reasoning, 600 cache read, 100 cache│  
   │                                                                          │  
@@ -25,7 +26,6 @@ expression: screen(&terminal)
   │                                                                          │  
   │[Esc] close                                                               │  
   └──────────────────────────────────────────────────────────────────────────┘  
-                                                                                
                                                                                 
 ┌ message ─────────────────────────────────────────────────────────────────────┐
 │ Ask ganja something...                                                       │

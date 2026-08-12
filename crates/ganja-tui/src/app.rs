@@ -558,6 +558,11 @@ pub struct App {
     /// diff against what was last drawn.
     stale: bool,
     last_draw: Instant,
+    /// When this app was built — the `/usage` dialog's `Total duration`
+    /// (W7). The app's own wall clock, not the stored session's: a resumed
+    /// session's earlier processes left no clock behind, and inventing one
+    /// would put a wrong figure where an honest short one belongs.
+    session_start: Instant,
     quit: bool,
 }
 
@@ -661,6 +666,7 @@ impl App {
             urgent: true,
             stale: false,
             last_draw: Instant::now(),
+            session_start: Instant::now(),
             quit: false,
         }
     }
@@ -2953,10 +2959,14 @@ impl App {
     /// Opens the `/context` panel over the engine's on-demand breakdown
     /// (**D470**) — computed now, from the same state the next request would
     /// be assembled from, which is what makes the panel answer on a fresh
-    /// session and immediately after a revert.
+    /// session and immediately after a revert. The catalog display name is
+    /// resolved here, beside the one caller that holds the breakdown, so the
+    /// component never reads the compiled-in catalog itself (W7); an
+    /// uncataloged model passes no name and renders its id once.
     async fn open_context(&mut self) {
         let breakdown = self.engine.context_breakdown().await;
-        self.context_dialog = Some(context::Context::new(self.model.clone(), breakdown));
+        let display = catalog::model(&breakdown.model).map(|model| model.name.clone());
+        self.context_dialog = Some(context::Context::new(display, breakdown));
     }
 
     /// Opens the `/usage` panel over what this side already holds (**D471**):
@@ -2994,6 +3004,11 @@ impl App {
             splits,
             context: estimate.window.map(|window| (estimate.tokens, window)),
             turns: self.turn_usages.iter().cloned().collect(),
+            // The app's own wall clock (W7): the one duration this side
+            // truly measures. A resumed session's earlier processes left no
+            // clock behind, so this is honestly the app's lifetime, not the
+            // stored session's.
+            duration: Some(self.session_start.elapsed()),
         }));
     }
 
@@ -10322,10 +10337,13 @@ mod tests {
     /// window, shared by the panel tests below.
     fn breakdown_fixture() -> ganja_core::engine::ContextBreakdown {
         ganja_core::engine::ContextBreakdown {
+            model: "claude-sonnet-5".to_owned(),
             system_prompt: 3_000,
             instructions: 2_000,
             tools_builtin: 11_000,
             tools_mcp: 1_000,
+            tools_builtin_count: 12,
+            tools_mcp_count: 3,
             skills: 500,
             conversation_user: 4_000,
             conversation_assistant: 8_500,
@@ -10432,7 +10450,7 @@ mod tests {
     async fn snapshot_context_dialog_open() {
         let mut app = app();
         app.context_dialog = Some(component::context::Context::new(
-            "claude-sonnet-5".to_owned(),
+            Some("Claude Sonnet 5".to_owned()),
             breakdown_fixture(),
         ));
 
@@ -10448,8 +10466,9 @@ mod tests {
     async fn snapshot_context_dialog_degraded() {
         let mut app = app();
         app.context_dialog = Some(component::context::Context::new(
-            fake::MODEL.to_owned(),
+            None,
             ganja_core::engine::ContextBreakdown {
+                model: fake::MODEL.to_owned(),
                 window: None,
                 reserve: None,
                 ..breakdown_fixture()

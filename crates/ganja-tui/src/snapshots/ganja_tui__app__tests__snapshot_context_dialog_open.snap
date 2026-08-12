@@ -1,6 +1,6 @@
 ---
 source: crates/ganja-tui/src/app.rs
-assertion_line: 10442
+assertion_line: 10460
 expression: screen(&terminal)
 ---
                                                                                 
@@ -17,7 +17,7 @@ expression: screen(&terminal)
   │⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶                                   │  
   │⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶                                   │  
   │                                                                          │  
-  │claude-sonnet-5                                                           │  
+  │Claude Sonnet 5                                                           │  
   │30.0k/100.0k tokens (30%)                                                 │  
   │                                                                          │  
   │Estimated usage by category                                               │  
