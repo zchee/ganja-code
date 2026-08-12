@@ -350,6 +350,56 @@ pub enum ProviderError {
     Parse(String),
 }
 
+/// What an in-body error object says, for the message the turn reports.
+///
+/// Every wire here mapped a missing `message` onto one generic sentence — "the
+/// provider reported an error" — which is what a user was shown for a failure
+/// whose body did carry a `type` and a `code`, and left nothing at all in the
+/// log to read afterwards. Three cases, in order:
+///
+/// - a `message`, which is what almost every vendor sends, is used verbatim;
+/// - no message but some naming — `type`, `code`, `param` — is rendered as
+///   those fields, because a slug is a thing to search for where a generic
+///   sentence is not;
+/// - a body with neither says **so**, rather than saying nothing in words that
+///   read like a message the provider chose.
+///
+/// Nothing is redacted here and nothing needs to be: these are the same fields
+/// that already became the user-facing error, and the one path where a body
+/// could quote the credential it refused is the HTTP one, where
+/// [`retry::refusal`] masks it through [`Presented::redact`] before it becomes
+/// either a message or a log line.
+pub(super) fn reported(error: &serde_json::Value) -> String {
+    if let Some(message) = error["message"].as_str()
+        && !message.trim().is_empty()
+    {
+        return message.to_owned();
+    }
+
+    let named: Vec<String> = ["type", "code", "param"]
+        .into_iter()
+        .filter_map(|field| {
+            let value = &error[field];
+            let spelled = match value {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Null => return None,
+                other => other.to_string(),
+            };
+
+            (!spelled.trim().is_empty()).then(|| format!("{field}: {spelled}"))
+        })
+        .collect();
+
+    if named.is_empty() {
+        return "the provider reported an error and its body carried no detail".to_owned();
+    }
+
+    format!(
+        "the provider reported an error with no message ({})",
+        named.join(", ")
+    )
+}
+
 /// A source of assistant text.
 ///
 /// One call to [`Provider::stream`] serves one turn. `cancel` fires when the
@@ -746,13 +796,44 @@ async fn open<M: Mapper>(
     cancel: CancellationToken,
     mapper: M,
 ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+    // Taken before the request is moved into the send, so the answer can be
+    // read against the endpoint it came from. Each wire has already logged the
+    // provider and model it chose; this is the one seam that knows the URL.
+    let endpoint = endpoint(request.url());
+
     let response = match retry::send(client, request, presented, &cancel).await {
         Ok(response) => response,
         Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
+        // A refusal is already logged with its body by `retry::refusal`, and a
+        // transport failure carries its own cause chain to the caller.
         Err(error) => return Err(error),
     };
+    tracing::debug!(
+        status = response.status().as_u16(),
+        endpoint,
+        "the provider answered"
+    );
 
     Ok(events(response.bytes_stream().boxed(), cancel, mapper))
+}
+
+/// Where a request went, with everything that could be a credential removed.
+///
+/// Scheme, host, port and path — never the query string and never the
+/// userinfo. A base URL is allowed to carry credentials in its userinfo and a
+/// query string is a documented place to put a token (`?auth_token=`, which
+/// `ganja-serve` refuses to log for the same reason), so a diagnostic that
+/// rendered either would be a diagnostic that writes secrets to a file.
+pub(super) fn endpoint(url: &Url) -> String {
+    let authority = match (url.host_str(), url.port()) {
+        (Some(host), Some(port)) => format!("{host}:{port}"),
+        (Some(host), None) => host.to_owned(),
+        // A URL with no host is not one of ours; naming the scheme alone still
+        // says which wire was reached without inventing an authority.
+        (None, _) => String::new(),
+    };
+
+    format!("{}://{authority}{}", url.scheme(), url.path())
 }
 
 /// Drives `chunks` through the frame splitter and `mapper`.
@@ -1022,9 +1103,74 @@ mod tests {
 
     use super::{
         CredentialSource, Mapper, Presented, ProviderError, ProviderEvent, check_base_url,
-        configured_headers, events, responses, shown_base_url, sse::Frame, unusable,
+        configured_headers, endpoint, events, reported, responses, shown_base_url, sse::Frame,
+        unusable,
     };
     use crate::{auth, protocol::FinishReason};
+
+    /// The three shapes an in-body error object arrives in, and the rule that
+    /// none of them may be answered with a sentence that says nothing.
+    #[test]
+    fn an_error_body_is_reported_as_whatever_it_actually_carried() {
+        assert_eq!(
+            reported(&serde_json::json!({"message": "rate limited", "code": "429"})),
+            "rate limited",
+            "a message is the provider's own words and wins outright"
+        );
+
+        // The shape that produced the report this exists for: a status bar
+        // reading "the provider answered 500: the provider reported an error"
+        // over a body that named the failure perfectly well.
+        let named = reported(&serde_json::json!({
+            "type": "server_error",
+            "code": "model_overloaded",
+            "param": serde_json::Value::Null,
+        }));
+        assert!(
+            named.contains("type: server_error") && named.contains("code: model_overloaded"),
+            "a slug is a thing to search for where a generic sentence is not: {named}"
+        );
+        assert!(
+            !named.contains("param"),
+            "a null field is not detail, and rendering it as one is noise: {named}"
+        );
+
+        // A number where the schema says string, because `code` is a number on
+        // at least one wire here and a body is not a contract.
+        assert!(reported(&serde_json::json!({"code": 503})).contains("code: 503"));
+
+        for empty in [
+            serde_json::json!({}),
+            serde_json::json!({"message": "   "}),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(
+                reported(&empty),
+                "the provider reported an error and its body carried no detail",
+                "a body with nothing in it has to say so, not sound like a message"
+            );
+        }
+    }
+
+    /// A log line is a file on disk, so the one field of a URL that is allowed
+    /// to carry a credential — and the one that is a documented place to put a
+    /// token — must never reach it.
+    #[test]
+    fn a_logged_endpoint_carries_neither_userinfo_nor_a_query_string() {
+        let url = reqwest::Url::parse(
+            "https://someone:sk-test-canary-XYZ@api.example.com:8443/v1/responses\
+             ?auth_token=sk-test-canary-ABC",
+        )
+        .expect("a parseable URL");
+
+        let rendered = endpoint(&url);
+
+        assert_eq!(rendered, "https://api.example.com:8443/v1/responses");
+        assert!(
+            !rendered.contains("canary"),
+            "a credential reached a log line: {rendered}"
+        );
+    }
 
     /// `headers` is where a configured endpoint's token goes, so a refusal
     /// about one may name the header and never its value.

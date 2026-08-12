@@ -266,6 +266,13 @@ impl Provider for AnthropicProvider {
                 ProviderError::Transport(presented.redact(&format!("malformed request: {error}")))
             })?;
 
+        tracing::debug!(
+            provider = ID,
+            model = request.model,
+            endpoint = super::endpoint(built.url()),
+            "requesting a turn"
+        );
+
         open(&self.client, built, &presented, cancel, Mapping::default()).await
     }
 }
@@ -769,10 +776,8 @@ fn index(data: &Value) -> Option<u64> {
 /// [`ProviderError::is_retryable`] work on a mid-stream overload.
 fn failure(error: &Value) -> ProviderError {
     let kind = error["type"].as_str().unwrap_or("api_error");
-    let message = error["message"]
-        .as_str()
-        .unwrap_or("the provider reported an error")
-        .to_owned();
+    let message = super::reported(error);
+    tracing::warn!(provider = ID, kind, message, "the turn died mid-stream");
 
     match kind {
         "invalid_request_error" => ProviderError::Status {
