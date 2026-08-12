@@ -14,6 +14,7 @@ pub mod history;
 pub mod keybind;
 pub(crate) mod markdown;
 pub mod mention;
+pub mod notify;
 pub mod theme;
 pub mod transcript;
 
@@ -32,7 +33,10 @@ use ganja_core::{
 use ganja_permission::Project;
 use ganja_protocol::Message;
 use ratatui::crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture,
+    },
     execute,
 };
 use tokio_util::sync::CancellationToken;
@@ -247,6 +251,10 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
             )
             .with_provider(provider_id)
             .with_keybinds(keys)
+            // The `tui` table's moments, written to the same stdout the frame
+            // rides — the notifier the app's focus gate emits through
+            // (**D468**).
+            .with_notifier(notify::Notifier::to_stdout(config.tui.clone()))
             // The one place the prompt history reaches the disk: the default
             // store is inert, so a test that does not opt in never touches the
             // machine's own history.
@@ -377,20 +385,24 @@ async fn stored_transcript(engine: &Engine, resume: Resume) -> Result<Vec<Messag
         .context("failed to resume the session")
 }
 
-/// Turns on wheel reporting and bracketed paste, and extends the panic hook to
-/// turn both back off.
+/// Turns on wheel reporting, bracketed paste and focus reporting, and extends
+/// the panic hook to turn all three back off.
 ///
 /// Bracketed paste is what makes a pasted paragraph one event instead of a
 /// stream of keystrokes — without it, the newline in the middle of a paste is
 /// an Enter, and Enter here sends the prompt. Left enabled on the way out it
 /// would leave the user's shell wrapping their pastes in escapes nothing there
-/// reads (**R13**).
+/// reads (**R13**). Focus reporting is how the notifier's gate learns whether
+/// anybody is watching (**D468**), and it holds to the same discipline: left
+/// on, the user's shell would be fed focus escapes nothing there reads.
 fn capture_input() -> Result<()> {
     execute!(stdout(), EnableMouseCapture).context("failed to enable mouse reporting")?;
     execute!(stdout(), EnableBracketedPaste).context("failed to enable bracketed paste")?;
+    execute!(stdout(), EnableFocusChange).context("failed to enable focus reporting")?;
 
     let installed = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(stdout(), DisableFocusChange);
         let _ = execute!(stdout(), DisableBracketedPaste);
         let _ = execute!(stdout(), DisableMouseCapture);
         installed(info);
@@ -400,13 +412,14 @@ fn capture_input() -> Result<()> {
 }
 
 fn restore() -> Result<()> {
+    let focus = execute!(stdout(), DisableFocusChange).context("failed to disable focus reporting");
     let paste =
         execute!(stdout(), DisableBracketedPaste).context("failed to disable bracketed paste");
     let mouse =
         execute!(stdout(), DisableMouseCapture).context("failed to disable mouse reporting");
     let terminal = ratatui::try_restore().context("failed to restore the terminal");
 
-    paste.and(mouse).and(terminal)
+    focus.and(paste).and(mouse).and(terminal)
 }
 
 #[cfg(test)]
