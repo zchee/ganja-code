@@ -776,8 +776,9 @@ fn index(data: &Value) -> Option<u64> {
 /// [`ProviderError::is_retryable`] work on a mid-stream overload.
 fn failure(error: &Value) -> ProviderError {
     let kind = error["type"].as_str().unwrap_or("api_error");
+    // Not logged here: the failure is warned once, redacted, at
+    // `provider::shielded`, the seam that holds the credential to mask with.
     let message = super::reported(error);
-    tracing::warn!(provider = ID, kind, message, "the turn died mid-stream");
 
     match kind {
         "invalid_request_error" => ProviderError::Status {

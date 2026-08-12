@@ -1308,8 +1308,9 @@ const DONE: &str = "[DONE]";
 /// is [`super::reported`]'s business, so that a body carrying a `code` and no
 /// `message` stops reading as a body that carried nothing.
 fn failure(error: &Value) -> ProviderError {
+    // Not logged here: the failure is warned once, redacted, at
+    // `provider::shielded`, the seam that holds the credential to mask with.
     let message = super::reported(error);
-    tracing::warn!(provider = ID, message, "the turn died mid-stream");
 
     ProviderError::Status {
         status: 500,

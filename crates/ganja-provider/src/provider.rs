@@ -350,6 +350,23 @@ pub enum ProviderError {
     Parse(String),
 }
 
+impl ProviderError {
+    /// Re-spells every message through `presented`'s redaction, so a wire
+    /// that echoed back the credential it refused cannot hand it to the
+    /// status bar or a log line.
+    fn redacted(self, presented: &Presented) -> Self {
+        match self {
+            Self::Auth(message) => Self::Auth(presented.redact(&message)),
+            Self::Transport(message) => Self::Transport(presented.redact(&message)),
+            Self::Status { status, message } => Self::Status {
+                status,
+                message: presented.redact(&message),
+            },
+            Self::Parse(message) => Self::Parse(presented.redact(&message)),
+        }
+    }
+}
+
 /// What an in-body error object says, for the message the turn reports.
 ///
 /// Every wire here mapped a missing `message` onto one generic sentence — "the
@@ -364,11 +381,11 @@ pub enum ProviderError {
 /// - a body with neither says **so**, rather than saying nothing in words that
 ///   read like a message the provider chose.
 ///
-/// Nothing is redacted here and nothing needs to be: these are the same fields
-/// that already became the user-facing error, and the one path where a body
-/// could quote the credential it refused is the HTTP one, where
-/// [`retry::refusal`] masks it through [`Presented::redact`] before it becomes
-/// either a message or a log line.
+/// Nothing is redacted here because nothing here can redact: no [`Presented`]
+/// is in scope in a decoder. The masking happens at the two seams that do
+/// hold the credential — [`retry::refusal`] for an HTTP refusal's body, and
+/// [`shielded`] for everything a wire maps into a mid-stream failure — before
+/// any of it becomes a message or a log line.
 pub(super) fn reported(error: &serde_json::Value) -> String {
     if let Some(message) = error["message"].as_str()
         && !message.trim().is_empty()
@@ -382,8 +399,11 @@ pub(super) fn reported(error: &serde_json::Value) -> String {
             let value = &error[field];
             let spelled = match value {
                 serde_json::Value::String(text) => text.clone(),
-                serde_json::Value::Null => return None,
-                other => other.to_string(),
+                serde_json::Value::Number(number) => number.to_string(),
+                serde_json::Value::Bool(flag) => flag.to_string(),
+                // An array or object here is structure, not a name; inlining
+                // one would put a blob where a searchable slug belongs.
+                _ => return None,
             };
 
             (!spelled.trim().is_empty()).then(|| format!("{field}: {spelled}"))
@@ -814,7 +834,37 @@ async fn open<M: Mapper>(
         "the provider answered"
     );
 
-    Ok(events(response.bytes_stream().boxed(), cancel, mapper))
+    Ok(shielded(
+        events(response.bytes_stream().boxed(), cancel, mapper),
+        presented.clone(),
+        endpoint,
+    ))
+}
+
+/// Redacts every mid-stream failure before it leaves the wire.
+///
+/// The HTTP refusal path masks its body through [`retry::refusal`], but an
+/// error that arrives *inside* a 200 stream is mapped by each wire's own
+/// `failure()`, which holds no [`Presented`] to mask with — and a
+/// config-declared endpoint or a gateway can echo the credential it rejected
+/// in exactly such a frame. This is the one seam every wire's events flow
+/// through that still holds the credential, so the redaction and the one log
+/// line both live here rather than being re-plumbed into three decoders.
+fn shielded(
+    events: BoxStream<'static, ProviderEvent>,
+    presented: Presented,
+    endpoint: String,
+) -> BoxStream<'static, ProviderEvent> {
+    events
+        .map(move |event| match event {
+            ProviderEvent::Failed(error) => {
+                let error = error.redacted(&presented);
+                tracing::warn!(%error, endpoint, "the turn died mid-stream");
+                ProviderEvent::Failed(error)
+            }
+            other => other,
+        })
+        .boxed()
 }
 
 /// Where a request went, with everything that could be a credential removed.
@@ -1103,13 +1153,47 @@ mod tests {
 
     use super::{
         CredentialSource, Mapper, Presented, ProviderError, ProviderEvent, check_base_url,
-        configured_headers, endpoint, events, reported, responses, shown_base_url, sse::Frame,
-        unusable,
+        configured_headers, endpoint, events, reported, responses, shielded, shown_base_url,
+        sse::Frame, unusable,
     };
     use crate::{auth, protocol::FinishReason};
 
     /// The three shapes an in-body error object arrives in, and the rule that
     /// none of them may be answered with a sentence that says nothing.
+    /// The mid-stream half of the credential rule: an in-body error frame is
+    /// mapped by a decoder holding no [`Presented`], so [`shielded`] is where
+    /// the mask goes on — and a message quoting the refused credential must
+    /// leave the wire wearing it.
+    #[test]
+    fn a_mid_stream_failure_cannot_carry_the_credential_it_quoted() {
+        use futures::StreamExt as _;
+
+        let presented = Presented::new("sk-canary-0123456789").expect("a credential");
+        let failures = stream::iter(vec![
+            ProviderEvent::Failed(ProviderError::Status {
+                status: 500,
+                message: "the key sk-canary-0123456789 was rejected".to_owned(),
+            }),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ])
+        .boxed();
+
+        let events: Vec<ProviderEvent> = futures::executor::block_on(
+            shielded(failures, presented, "https://example.test/v1".to_owned()).collect(),
+        );
+        let ProviderEvent::Failed(ProviderError::Status { message, .. }) = &events[0] else {
+            panic!("the failure survives the shield: {events:?}");
+        };
+        assert!(
+            !message.contains("sk-canary-0123456789") && message.contains("[redacted]"),
+            "the credential must not leave the wire: {message}"
+        );
+        assert!(
+            matches!(events[1], ProviderEvent::Finish(_)),
+            "everything that is not a failure passes untouched"
+        );
+    }
+
     #[test]
     fn an_error_body_is_reported_as_whatever_it_actually_carried() {
         assert_eq!(
@@ -1138,6 +1222,17 @@ mod tests {
         // A number where the schema says string, because `code` is a number on
         // at least one wire here and a body is not a contract.
         assert!(reported(&serde_json::json!({"code": 503})).contains("code: 503"));
+
+        // Structure where the schema says string: skipped rather than inlined,
+        // so a hostile or malformed body cannot put a blob in the message.
+        let structured = reported(&serde_json::json!({
+            "type": {"nested": "object"},
+            "code": "model_overloaded",
+        }));
+        assert!(
+            structured.contains("code: model_overloaded") && !structured.contains("nested"),
+            "an object-valued field is not a name: {structured}"
+        );
 
         for empty in [
             serde_json::json!({}),
