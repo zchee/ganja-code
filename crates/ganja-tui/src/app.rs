@@ -19,7 +19,7 @@ use std::{
 use anyhow::{Context as _, Result};
 use etcetera::{BaseStrategy as _, base_strategy::Xdg};
 use futures::StreamExt as _;
-use ganja_core::{Engine, EngineError, attachment, catalog, provider};
+use ganja_core::{Engine, EngineError, attachment, catalog, config::NotificationEvent, provider};
 use ganja_protocol::{
     Command, Event as CoreEvent, FinishReason, Mention, Message, MessageId, PartBody,
     PermissionReply, RevertScope, Role, ToolState, Usage,
@@ -63,7 +63,7 @@ use crate::{
     external,
     history::{self, History},
     keybind::{self, Keybinds},
-    mention,
+    mention, notify,
     theme::{Theme, Themes},
     transcript,
 };
@@ -414,6 +414,17 @@ pub struct App {
     /// time and serializes after a frame instead of landing in the middle of
     /// one. See [`App::draw`].
     pending_osc: Vec<String>,
+    /// Whether the terminal reports itself looked at, off the crossterm
+    /// focus-change events. **Assumed focused at startup**: crossterm only
+    /// learns the state from the first focus event, and until one arrives the
+    /// quiet reading is the one a wrong guess costs least under — a session
+    /// that starts watched and never loses focus should never hear a bell
+    /// (**D468**).
+    focused: bool,
+    /// The focus-gated notification writer (**D468**). Holds the loaded `tui`
+    /// table; [`App::announce`] is the one door to it, which is where the
+    /// focus gate lives.
+    notifier: notify::Notifier,
     /// How many MCP servers this run configured, and therefore how many
     /// statuses there are still to wait for. Zero means nothing to watch, and
     /// the poll below never runs.
@@ -532,6 +543,8 @@ impl App {
             // the disk here would mean every test touched the real history.
             history: History::default(),
             pending_osc: Vec::new(),
+            focused: true,
+            notifier: notify::Notifier::default(),
             mcp_servers: 0,
             mcp_notice: None,
             mcp_resolved: 0,
@@ -590,6 +603,18 @@ impl App {
     #[must_use]
     pub fn with_clipboard_scratch_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.clipboard_scratch = Some(dir.into());
+
+        self
+    }
+
+    /// Announces through `notifier` instead of the inert default.
+    ///
+    /// A builder because only the startup lane holds a loaded config to build
+    /// one from — the default announces nothing, so a test that does not opt
+    /// in writes no escape anywhere (**D468**).
+    #[must_use]
+    pub fn with_notifier(mut self, notifier: notify::Notifier) -> Self {
+        self.notifier = notifier;
 
         self
     }
@@ -1048,10 +1073,33 @@ impl App {
             // paste on: an Enter inside pasted text is a line, not a submit.
             // A modal owns the keyboard while it is up, and it owns this too.
             TermEvent::Paste(text) if !self.modal_open() => self.paste(&text).await,
+            // What the notifier's gate reads (**D468**): a terminal being
+            // looked at needs no announcement, and these two events are the
+            // only way this side ever learns which it is.
+            TermEvent::FocusGained => self.focused = true,
+            TermEvent::FocusLost => self.focused = false,
             _ => {}
         }
 
         Ok(())
+    }
+
+    /// Announces `event` with `summary` — unless somebody is watching.
+    ///
+    /// **D468** (`tui-notifications`): the Codex CLI's focus-gated terminal
+    /// notification, which upstream opencode does not make. The gate lives
+    /// here, on the app's own focus knowledge, and each triggering *moment*
+    /// calls this exactly once — emission rides the event that is the moment,
+    /// never the frames drawn after it. External-program notification is
+    /// deliberately not duplicated on these seams: a config that wants a
+    /// command run already has the `Notification`/`Stop` hooks (**D456**),
+    /// which carry the full JSON envelope a one-line escape never could.
+    fn announce(&mut self, event: NotificationEvent, summary: &str) {
+        if self.focused {
+            return;
+        }
+
+        self.notifier.notify(event, summary);
     }
 
     /// Inserts pasted `text` at the cursor.
@@ -3285,6 +3333,13 @@ impl App {
                 directories,
                 ..
             } => {
+                // A dialog raised is a person needed, shown now or queued
+                // behind the one already up — either way the turn is blocked
+                // on an answer, which is the moment **D468** announces.
+                self.announce(
+                    NotificationEvent::ApprovalRequested,
+                    &format!("approval requested: {title}"),
+                );
                 let asked = Permission::new(id, tool, title, args, directories);
                 match &self.permission {
                     // A dialog is already up. Queueing rather than replacing is
@@ -3379,6 +3434,12 @@ impl App {
                 }
             }
             CoreEvent::QuestionAsked { id, questions, .. } => {
+                // The other dialog that blocks a turn on a person, so the
+                // same **D468** moment as a permission request.
+                self.announce(
+                    NotificationEvent::ApprovalRequested,
+                    "a question is waiting for an answer",
+                );
                 self.question = questions
                     .into_iter()
                     .next()
@@ -3420,6 +3481,17 @@ impl App {
                     FinishReason::Cancelled => Activity::Stopped,
                     FinishReason::Failed => Activity::Failed,
                 });
+                // The tail that flips the app out of streaming is the turn's
+                // one end, which is what makes it **D468**'s turn-complete
+                // moment: once per finish event, never per frame.
+                self.announce(
+                    NotificationEvent::TurnComplete,
+                    match reason {
+                        FinishReason::Completed => "turn complete",
+                        FinishReason::Cancelled => "turn cancelled",
+                        FinishReason::Failed => "turn failed",
+                    },
+                );
                 // The slot is free, and every steer this turn did not take is
                 // one no turn ever will: a finished turn drains no mailbox, so
                 // whatever is still on the strip becomes the fallback lane's
@@ -9168,6 +9240,116 @@ mod tests {
             status_line(&mut app).contains("Failed to copy to clipboard"),
             "got: {}",
             status_line(&mut app)
+        );
+    }
+
+    /// An app announcing through a capture buffer under the `tui` table
+    /// `tui` parses to, plus the handle the assertions read (**D468**).
+    fn notifying_app(tui: serde_json::Value) -> (App, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+        let config: ganja_core::config::TuiConfig =
+            serde_json::from_value(tui).expect("the fixture is a tui table");
+        let capture = crate::notify::Capture::default();
+        let log = capture.log();
+        let app = app().with_notifier(crate::notify::Notifier::over(config, Box::new(capture)));
+
+        (app, log)
+    }
+
+    /// Every byte the notifier has written so far.
+    fn notified(log: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> Vec<u8> {
+        log.lock().expect("the capture lock holds").clone()
+    }
+
+    #[tokio::test]
+    async fn an_unfocused_finished_turn_writes_exactly_one_osc9_notification() {
+        let (mut app, log) = notifying_app(serde_json::json!({"notifications": true}));
+
+        app.handle(AppEvent::Term(TermEvent::FocusLost))
+            .await
+            .expect("a focus event is handled");
+        app.handle(finished(fake::MODEL, Usage::default()))
+            .await
+            .expect("a finish is handled");
+
+        let bytes = String::from_utf8(notified(&log)).expect("the escape is utf-8");
+        assert_eq!(
+            bytes, "\x1b]9;turn complete\x07",
+            "one sequence, whole, and nothing beside it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_focused_finished_turn_writes_nothing() {
+        let (mut app, log) = notifying_app(serde_json::json!({"notifications": true}));
+
+        app.handle(AppEvent::Term(TermEvent::FocusLost))
+            .await
+            .expect("a focus event is handled");
+        app.handle(AppEvent::Term(TermEvent::FocusGained))
+            .await
+            .expect("a focus event is handled");
+        app.handle(finished(fake::MODEL, Usage::default()))
+            .await
+            .expect("a finish is handled");
+
+        assert!(
+            notified(&log).is_empty(),
+            "a watched terminal hears nothing"
+        );
+    }
+
+    /// Crossterm only learns the state from the first focus event, so a turn
+    /// finishing before one arrived runs on the assumption that somebody is
+    /// watching — quiet-by-default (**D468**).
+    #[tokio::test]
+    async fn a_turn_finishing_before_any_focus_event_is_assumed_watched() {
+        let (mut app, log) = notifying_app(serde_json::json!({"notifications": true}));
+
+        app.handle(finished(fake::MODEL, Usage::default()))
+            .await
+            .expect("a finish is handled");
+
+        assert!(notified(&log).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_bel_method_writes_exactly_the_bell_byte() {
+        let (mut app, log) =
+            notifying_app(serde_json::json!({"notifications": true, "notification_method": "bel"}));
+
+        app.handle(AppEvent::Term(TermEvent::FocusLost))
+            .await
+            .expect("a focus event is handled");
+        app.handle(finished(fake::MODEL, Usage::default()))
+            .await
+            .expect("a finish is handled");
+
+        assert_eq!(notified(&log), b"\x07");
+    }
+
+    #[tokio::test]
+    async fn an_approval_only_config_notifies_on_a_permission_dialog_and_not_at_turn_end() {
+        let (mut app, log) =
+            notifying_app(serde_json::json!({"notifications": ["approval-requested"]}));
+        app.handle(AppEvent::Term(TermEvent::FocusLost))
+            .await
+            .expect("a focus event is handled");
+
+        app.handle(finished(fake::MODEL, Usage::default()))
+            .await
+            .expect("a finish is handled");
+        assert!(
+            notified(&log).is_empty(),
+            "turn end is a moment this config did not ask for"
+        );
+
+        app.handle(AppEvent::core(permission_event("perm_1")))
+            .await
+            .expect("a permission request is handled");
+        let bytes = String::from_utf8(notified(&log)).expect("the escape is utf-8");
+        assert_eq!(
+            bytes, "\x1b]9;approval requested: cargo test\x07",
+            "the one asked-for moment announces, once"
         );
     }
 
