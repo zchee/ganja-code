@@ -273,7 +273,7 @@ impl Provider for AnthropicProvider {
             "requesting a turn"
         );
 
-        open(&self.client, built, &presented, cancel, Mapping::default()).await
+        open::<Mapping>(&self.client, built, &presented, cancel).await
     }
 }
 

@@ -817,36 +817,166 @@ fn is_terminal(event: &ProviderEvent) -> bool {
 /// A cancelled turn is not one of those: it yields an empty stream, because
 /// the engine reads a stream that ends after a cancel as `Cancelled`, and a
 /// user who pressed Esc has not hit an error.
-async fn open<M: Mapper>(
+async fn open<M: Mapper + Default>(
     client: &reqwest::Client,
     request: reqwest::Request,
     presented: &Presented,
     cancel: CancellationToken,
-    mapper: M,
 ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
     // Taken before the request is moved into the send, so the answer can be
     // read against the endpoint it came from. Each wire has already logged the
     // provider and model it chose; this is the one seam that knows the URL.
     let endpoint = endpoint(request.url());
 
-    let response = match retry::send(client, request, presented, &cancel).await {
-        Ok(response) => response,
-        Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
-        // A refusal is already logged with its body by `retry::refusal`, and a
-        // transport failure carries its own cause chain to the caller.
-        Err(error) => return Err(error),
-    };
-    tracing::debug!(
-        status = response.status().as_u16(),
-        endpoint,
-        "the provider answered"
-    );
+    // A body that cannot be replayed cannot ride D475 either: it is sent
+    // exactly once, through the same single-shot arm `retry::send` gives it.
+    if request.try_clone().is_none() {
+        let response = match retry::send(client, request, presented, &cancel).await {
+            Ok(response) => response,
+            Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
+            Err(error) => return Err(error),
+        };
 
-    Ok(shielded(
-        events(response.bytes_stream().boxed(), cancel, mapper),
-        presented.clone(),
-        endpoint,
-    ))
+        return Ok(shielded(
+            events(response.bytes_stream().boxed(), cancel, M::default()),
+            presented.clone(),
+            endpoint,
+        ));
+    }
+
+    let mut attempt = 0;
+    let settled = loop {
+        let replay = request
+            .try_clone()
+            .expect("a body that cannot replay took the single-shot arm above");
+        let response = match retry::send(client, replay, presented, &cancel).await {
+            Ok(response) => response,
+            Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
+            // A refusal is already logged with its body by `retry::refusal`,
+            // and a transport failure carries its own cause chain.
+            Err(error) => return Err(error),
+        };
+        tracing::debug!(
+            status = response.status().as_u16(),
+            endpoint,
+            "the provider answered"
+        );
+
+        // A fresh mapper per attempt: a retried turn starts over, and a
+        // mapper that remembered the dead attempt's half-open state would
+        // splice two turns together.
+        match peeked(events(
+            response.bytes_stream().boxed(),
+            cancel.clone(),
+            M::default(),
+        ))
+        .await
+        {
+            Peeked::Content { prefix, rest } => break stream::iter(prefix).chain(rest).boxed(),
+            Peeked::Ended { prefix } => break stream::iter(prefix).boxed(),
+            Peeked::Died { mut prefix, error } => {
+                if !reopens(attempt, &error) {
+                    prefix.push(ProviderEvent::Failed(error));
+                    break stream::iter(prefix).boxed();
+                }
+
+                attempt += 1;
+                // The attempt count only: the message may quote a credential,
+                // and it reaches the log redacted through `shielded` when the
+                // last attempt hands its failure on.
+                tracing::debug!(
+                    attempt,
+                    "the turn died before it said anything; reopening it"
+                );
+                tokio::select! {
+                    () = cancel.cancelled() => return Ok(stream::empty().boxed()),
+                    () = tokio::time::sleep(retry::stream_backoff(attempt)) => {}
+                }
+            }
+        }
+    };
+
+    Ok(shielded(settled, presented.clone(), endpoint))
+}
+
+/// How many times a turn that has shown nothing may be reopened (**D475**,
+/// `in-body-overload-retry`).
+///
+/// The standing rule — never retry once the provider has started streaming —
+/// exists because a replay would duplicate or discard text somebody has
+/// already seen. An in-body failure that arrives *before the first content
+/// event* has shown nothing to duplicate: the codex backend reports its
+/// overload exactly so (HTTP 200, then an `error` frame carrying "servers are
+/// currently overloaded"), and refusing to retry it turned every capacity
+/// blip into a dead turn. So a retryable failure on a still-empty transcript
+/// is reopened, on the ported backoff schedule, at most this many times; the
+/// moment any content arrives the standing rule owns the stream again. A
+/// deliberate divergence from the posture `retry`'s module doc pins, recorded
+/// there too.
+const STREAM_RETRIES: u32 = 3;
+
+/// Whether the transcript would show `event` — the boundary [`STREAM_RETRIES`]
+/// may never cross.
+fn matters(event: &ProviderEvent) -> bool {
+    match event {
+        ProviderEvent::TextDelta(_)
+        | ProviderEvent::ReasoningDelta(_)
+        | ProviderEvent::ReasoningState { .. }
+        | ProviderEvent::ToolCallStart { .. }
+        | ProviderEvent::ToolCallDelta { .. }
+        | ProviderEvent::ToolCallEnd { .. } => true,
+        ProviderEvent::Usage(_) | ProviderEvent::Finish(_) | ProviderEvent::Failed(_) => false,
+    }
+}
+
+/// What peeking a fresh attempt's stream settled on.
+enum Peeked {
+    /// Content arrived; `prefix` ends with the event that proved it, and
+    /// `rest` is everything not yet read.
+    Content {
+        prefix: Vec<ProviderEvent>,
+        rest: BoxStream<'static, ProviderEvent>,
+    },
+    /// The stream ended without content and without failing.
+    Ended { prefix: Vec<ProviderEvent> },
+    /// The stream failed while the transcript was still empty: `prefix`
+    /// holds only non-content events, and `error` is not among them.
+    Died {
+        prefix: Vec<ProviderEvent>,
+        error: ProviderError,
+    },
+}
+
+/// Reads `stream` up to its first content event, failure, or end (**D475**).
+///
+/// Buffered events are re-emitted in order by the caller, so a peeked stream
+/// is indistinguishable from an untouched one.
+async fn peeked(mut stream: BoxStream<'static, ProviderEvent>) -> Peeked {
+    let mut prefix = Vec::new();
+
+    loop {
+        match stream.next().await {
+            Some(ProviderEvent::Failed(error)) => return Peeked::Died { prefix, error },
+            Some(event) => {
+                let content = matters(&event);
+                prefix.push(event);
+                if content {
+                    return Peeked::Content {
+                        prefix,
+                        rest: stream,
+                    };
+                }
+            }
+            None => return Peeked::Ended { prefix },
+        }
+    }
+}
+
+/// Whether a turn that died empty on `attempt` (zero-based) is worth
+/// reopening (**D475**): only while retries remain, and only for a failure
+/// that sending again could plausibly outlive.
+fn reopens(attempt: u32, error: &ProviderError) -> bool {
+    attempt < STREAM_RETRIES && error.is_retryable()
 }
 
 /// Redacts every mid-stream failure before it leaves the wire.
@@ -1160,14 +1290,87 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        CredentialSource, Mapper, Presented, ProviderError, ProviderEvent, check_base_url,
-        configured_headers, endpoint, events, reported, responses, shielded, shown_base_url,
-        sse::Frame, unusable,
+        CredentialSource, Mapper, Peeked, Presented, ProviderError, ProviderEvent, check_base_url,
+        configured_headers, endpoint, events, peeked, reopens, reported, responses, retry,
+        shielded, shown_base_url, sse::Frame, unusable,
     };
     use crate::{auth, protocol::FinishReason};
 
     /// The three shapes an in-body error object arrives in, and the rule that
     /// none of them may be answered with a sentence that says nothing.
+    /// D475's boundary, from the peek's side: content settles the stream,
+    /// an empty failure reads as a death worth judging, and a clean end
+    /// keeps what it buffered.
+    #[test]
+    fn peeking_settles_on_the_first_content_event_and_hands_back_the_rest() {
+        use futures::StreamExt as _;
+
+        let settled = futures::executor::block_on(peeked(
+            stream::iter(vec![
+                ProviderEvent::Usage(crate::protocol::Usage::default()),
+                ProviderEvent::TextDelta("first".to_owned()),
+                ProviderEvent::TextDelta("second".to_owned()),
+            ])
+            .boxed(),
+        ));
+        let Peeked::Content { prefix, rest } = settled else {
+            panic!("text settles the stream");
+        };
+        assert_eq!(prefix.len(), 2, "the prefix ends with the proving event");
+        assert!(matches!(prefix[1], ProviderEvent::TextDelta(ref text) if text == "first"));
+        let rest: Vec<ProviderEvent> = futures::executor::block_on(rest.collect());
+        assert_eq!(rest.len(), 1, "nothing past the peek is consumed");
+
+        let died = futures::executor::block_on(peeked(
+            stream::iter(vec![ProviderEvent::Failed(ProviderError::Status {
+                status: 500,
+                message: "overloaded".to_owned(),
+            })])
+            .boxed(),
+        ));
+        assert!(
+            matches!(died, Peeked::Died { ref prefix, .. } if prefix.is_empty()),
+            "a failure on an empty transcript is a death, not content"
+        );
+
+        let ended = futures::executor::block_on(peeked(
+            stream::iter(vec![
+                ProviderEvent::Usage(crate::protocol::Usage::default()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ])
+            .boxed(),
+        ));
+        assert!(
+            matches!(ended, Peeked::Ended { ref prefix } if prefix.len() == 2),
+            "a clean end keeps what it buffered"
+        );
+    }
+
+    /// D475's bound and its classification: three reopenings for a transient
+    /// death, none for a fourth and none for a failure a retry cannot fix.
+    #[test]
+    fn an_empty_turns_transient_death_is_reopened_at_most_three_times() {
+        let overloaded = ProviderError::Status {
+            status: 500,
+            message: "Our servers are currently overloaded.".to_owned(),
+        };
+        assert!(reopens(0, &overloaded) && reopens(1, &overloaded) && reopens(2, &overloaded));
+        assert!(
+            !reopens(3, &overloaded),
+            "the fourth death is the turn's answer"
+        );
+        assert!(
+            !reopens(0, &ProviderError::Auth("expired".to_owned())),
+            "a failure retrying cannot fix is never reopened"
+        );
+
+        // The ported schedule, headerless: 2s, 4s, 8s, capped far later.
+        assert_eq!(retry::stream_backoff(1), std::time::Duration::from_secs(2));
+        assert_eq!(retry::stream_backoff(2), std::time::Duration::from_secs(4));
+        assert_eq!(retry::stream_backoff(3), std::time::Duration::from_secs(8));
+        assert_eq!(retry::stream_backoff(64), retry::MAX_DELAY);
+    }
+
     /// The mid-stream half of the credential rule: an in-body error frame is
     /// mapped by a decoder holding no [`Presented`], so [`shielded`] is where
     /// the mask goes on — and a message quoting the refused credential must

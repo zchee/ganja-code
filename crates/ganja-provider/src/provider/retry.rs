@@ -8,6 +8,12 @@
 //! which of those the user wants. Upstream retries the whole stream because its
 //! session layer owns the transcript rewind; ganja's does not, yet.
 //!
+//! One bounded exception (**D475**): a retryable failure that arrives *inside*
+//! the stream but **before any content event** — the codex backend's overload
+//! wears exactly that shape — has rendered nothing to duplicate or discard,
+//! so `provider::settled` reopens the request up to three times on this
+//! module's schedule before the failure is allowed to end the turn.
+//!
 //! The delays are ported from upstream `packages/opencode/src/session/retry.ts`
 //! (v1.18.13): 2s initial, doubling, capped at 30s, with `retry-after-ms` and
 //! `retry-after` honoured ahead of the schedule.
@@ -55,6 +61,15 @@ const JITTER_PERCENT: u32 = 10;
 /// Longest error body kept for a status message; a status bar cannot hold more
 /// and a provider's HTML error page is not worth a megabyte of transcript.
 const BODY_LIMIT: usize = 400;
+
+/// The delay before in-body retry `attempt` (1-based), for the one exception
+/// the module doc names (**D475**): the ported schedule, headerless, because
+/// an error that arrived inside a 200 stream carried no `retry-after`.
+pub(super) fn stream_backoff(attempt: u32) -> Duration {
+    INITIAL_DELAY
+        .saturating_mul(BACKOFF_FACTOR.saturating_pow(attempt.saturating_sub(1)))
+        .min(MAX_DELAY)
+}
 
 impl ProviderError {
     /// Whether sending the request again could plausibly succeed.
