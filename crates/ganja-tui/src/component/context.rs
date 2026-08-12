@@ -8,17 +8,21 @@
 //! rendering is pinned by real Claude Code screenshots (2026-08-12,
 //! transcribed in the P14 W4f charter): a `Context Usage` title, a 10×20 grid
 //! of single-character cells — stacked discs (U+26C1) per used category, a
-//! hollow square (U+26F6) for free space — with the model, the window line
-//! and the category legend in a column beside it. The *chrome* — the
-//! bordered, centered modal — stays the house shape every dialog here uses
-//! ([`crate::component::mcp`]). Two honest divergences from the screenshot:
-//! the autocompact reserve renders as its own legend row because ganja really
-//! holds one back (its grid cells draw as free — the screenshot distinguishes
-//! only used from free), and the per-category detail sections ("193 tools ·
-//! 518 tokens") are absent because the breakdown carries no item counts to
-//! print. The screenshot's `/context all to expand` footer is not copied:
-//! ganja has no expand mode, and a hint must never name an affordance that
-//! does not exist.
+//! hollow square (U+26F6) for free space — with the model pair (catalog
+//! display name bold over the dim model id; an uncataloged model renders its
+//! id once), the window line and the category legend in a column beside it,
+//! and per-category detail sections below the grid for the categories whose
+//! item counts the breakdown carries (W7: the two tool categories — the
+//! engine walks tools item by item, while the instruction and skill shares
+//! are measured off one composed string, so no honest count exists for
+//! them). The *chrome* — the bordered, centered modal — stays the house
+//! shape every dialog here uses ([`crate::component::mcp`]). One honest
+//! divergence from the screenshot: the autocompact reserve renders as its
+//! own legend row because ganja really holds one back (its grid cells draw
+//! as free — the screenshot distinguishes only used from free). The
+//! screenshot's `/context all to expand` footer is not copied: ganja has no
+//! expand mode, and a hint must never name an affordance that does not
+//! exist.
 //!
 //! The panel says **estimated** where Claude Code says it (P14 pre-mortem 2):
 //! in the `Estimated usage by category` legend header. These are the
@@ -139,19 +143,23 @@ impl Beside {
     }
 }
 
-/// The dialog itself: the breakdown as it stood when `/context` was typed,
-/// and the model it describes.
+/// The dialog itself: the breakdown as it stood when `/context` was typed —
+/// which carries the model id it describes — and the catalog display name
+/// the opener resolved for it, absent for an uncataloged model.
 #[derive(Clone, Debug)]
 pub struct Context {
-    model: String,
+    display: Option<String>,
     breakdown: ContextBreakdown,
 }
 
 impl Context {
-    /// Opens the dialog over `breakdown`, naming `model` in the header.
+    /// Opens the dialog over `breakdown`, with `display` the catalog's
+    /// human name for [`ContextBreakdown::model`] — resolved by the caller
+    /// rather than looked up here, so a test's rendering never depends on
+    /// what the compiled-in catalog happens to hold.
     #[must_use]
-    pub fn new(model: String, breakdown: ContextBreakdown) -> Self {
-        Self { model, breakdown }
+    pub fn new(display: Option<String>, breakdown: ContextBreakdown) -> Self {
+        Self { display, breakdown }
     }
 
     /// The used categories, in the order the grid fills and the legend lists
@@ -283,9 +291,16 @@ impl Context {
 
         let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
         let inner_width = usize::from(width).saturating_sub(2);
+        // Body rows the popup can actually show: the popup is clamped to
+        // `area.height - 2` below and its border eats two more. Passed into
+        // the sized rendering so what does not fit is *dropped* — a panel
+        // that instead clipped its own close hint would pin garbage (the
+        // judgment W4f recorded when one extra line pushed the hint off the
+        // house chat area).
+        let room = usize::from(area.height.saturating_sub(4)).max(1);
 
         let mut lines = match self.breakdown.window {
-            Some(window) => self.sized_lines(window, inner_width, theme),
+            Some(window) => self.sized_lines(window, inner_width, room, theme),
             None => self.degraded_lines(inner_width, theme),
         };
         lines.push(Line::raw(""));
@@ -304,12 +319,24 @@ impl Context {
     }
 
     /// The cataloged rendering: the pinned title, the grid, and the column
-    /// beside it — model, window line, and the category legend. The column
-    /// sits to the grid's right when the panel is wide enough for its widest
-    /// row and drops below the grid when it is not (the house width at an
-    /// 80-column terminal cannot seat a 39-column grid beside a ~45-column
-    /// legend, and clipping every legend row would pin garbage).
-    fn sized_lines(&self, window: u64, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    /// beside it — the model pair, window line, and the category legend —
+    /// then the per-category detail sections, full width. The column sits to
+    /// the grid's right when the panel is wide enough for its widest row and
+    /// drops below the grid when it is not (the house width at an 80-column
+    /// terminal cannot seat a 39-column grid beside a ~45-column legend, and
+    /// clipping every legend row would pin garbage).
+    ///
+    /// `room` is the body rows the popup can show. What overflows it yields
+    /// in fixed order — the detail sections first, then the pair's dim id
+    /// line — so the close hint always survives; the numbers a person opened
+    /// the panel for outrank the metadata around them.
+    fn sized_lines(
+        &self,
+        window: u64,
+        width: usize,
+        room: usize,
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
         let bold = theme.fg.add_modifier(Modifier::BOLD);
         let total = self.breakdown.total();
         let percent = (total as f64) * 100.0 / (window.max(1) as f64);
@@ -317,14 +344,25 @@ impl Context {
         let rows = self.legend();
         let cells = self.cells(window);
 
-        // The column beside the grid. The screenshot stacks a display name
-        // over a dim model id; ganja holds one string, so it renders once.
-        let mut beside = vec![
-            Beside {
+        // The pinned pair: catalog display name bold over the dim model id.
+        // No display name — an uncataloged model — renders the id once, and
+        // a catalog name that *is* the id collapses the same way: two
+        // identical lines would read as a stutter, not a pair.
+        let id = self.breakdown.model.clone();
+        let pair = self.display.as_ref().is_some_and(|name| *name != id);
+        let mut beside = vec![Beside {
+            bullet: None,
+            text: self.display.clone().unwrap_or_else(|| id.clone()),
+            style: bold,
+        }];
+        if pair {
+            beside.push(Beside {
                 bullet: None,
-                text: self.model.clone(),
-                style: bold,
-            },
+                text: id,
+                style: theme.dim,
+            });
+        }
+        beside.extend([
             Beside {
                 bullet: None,
                 text: format!(
@@ -344,7 +382,7 @@ impl Context {
                 text: "Estimated usage by category".to_owned(),
                 style: theme.dim.add_modifier(Modifier::BOLD),
             },
-        ];
+        ]);
         for row in &rows {
             beside.push(Beside {
                 bullet: Some((row.cell, (row.paint)(theme))),
@@ -379,42 +417,112 @@ impl Context {
         // No blank under the title: the stacked layout already runs to 26
         // body lines, and one more would push the close hint off the house
         // chat area at 80×36.
-        let mut lines = vec![Line::styled("Context Usage", bold)];
-
-        let widest = beside.iter().map(Beside::width).max().unwrap_or(0);
-        if width >= GRID_WIDTH + GRID_GAP + widest {
-            for index in 0..grid.len().max(beside.len()) {
-                let mut spans = match grid.get(index) {
-                    Some(row) => row.clone(),
-                    None => vec![Span::raw(" ".repeat(GRID_WIDTH))],
-                };
-                if let Some(row) = beside.get(index) {
-                    spans.push(Span::raw(" ".repeat(GRID_GAP)));
-                    spans.extend(row.spans(width.saturating_sub(GRID_WIDTH + GRID_GAP)));
+        let layout = |beside: &[Beside]| -> Vec<Line<'static>> {
+            let mut lines = vec![Line::styled("Context Usage", bold)];
+            let widest = beside.iter().map(Beside::width).max().unwrap_or(0);
+            if width >= GRID_WIDTH + GRID_GAP + widest {
+                for index in 0..grid.len().max(beside.len()) {
+                    let mut spans = match grid.get(index) {
+                        Some(row) => row.clone(),
+                        None => vec![Span::raw(" ".repeat(GRID_WIDTH))],
+                    };
+                    if let Some(row) = beside.get(index) {
+                        spans.push(Span::raw(" ".repeat(GRID_GAP)));
+                        spans.extend(row.spans(width.saturating_sub(GRID_WIDTH + GRID_GAP)));
+                    }
+                    lines.push(Line::from(spans));
                 }
-                lines.push(Line::from(spans));
+            } else {
+                lines.extend(grid.iter().cloned().map(Line::from));
+                lines.push(Line::raw(""));
+                lines.extend(beside.iter().map(|row| Line::from(row.spans(width))));
             }
-        } else {
-            lines.extend(grid.into_iter().map(Line::from));
-            lines.push(Line::raw(""));
-            lines.extend(beside.iter().map(|row| Line::from(row.spans(width))));
+
+            lines
+        };
+
+        // The blank-plus-hint tail `render` appends still has to fit.
+        const TAIL: usize = 2;
+        let mut lines = layout(&beside);
+        if pair && lines.len() + TAIL > room {
+            beside.remove(1);
+            lines = layout(&beside);
+        }
+        let details = self.detail_lines(width, theme);
+        if !details.is_empty() && lines.len() + details.len() + TAIL <= room {
+            lines.extend(details);
         }
 
-        // The screenshot's per-category detail sections ("193 tools · 518
-        // tokens") would follow here, full width — absent because the
-        // breakdown carries no item counts to print.
+        lines
+    }
+
+    /// The pinned per-category detail sections, full width below the grid:
+    /// a bold name with the dim ` · <hint>` naming ganja's own door or
+    /// source — `/mcp` really exists here; Claude's `/memory` and agent-file
+    /// fictions do not — then `└ <N> tools · <count> tokens`. Exactly the
+    /// categories whose item counts the breakdown carries earn a section
+    /// (W7: the two tool categories), and a zero count earns none — "0
+    /// tools" is noise, not information.
+    fn detail_lines(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let bold = theme.fg.add_modifier(Modifier::BOLD);
+        let sections = [
+            (
+                "System tools",
+                "builtin registry",
+                self.breakdown.tools_builtin_count,
+                self.breakdown.tools_builtin,
+            ),
+            (
+                "MCP tools",
+                "/mcp",
+                self.breakdown.tools_mcp_count,
+                self.breakdown.tools_mcp,
+            ),
+        ];
+
+        let mut lines = Vec::new();
+        for (name, hint, count, tokens) in sections {
+            if count == 0 {
+                continue;
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled(clip(name, width), bold),
+                Span::styled(
+                    clip(
+                        &format!(" \u{b7} {hint}"),
+                        width.saturating_sub(name.width()),
+                    ),
+                    theme.dim,
+                ),
+            ]));
+            let unit = if count == 1 { "tool" } else { "tools" };
+            lines.push(Line::styled(
+                clip(
+                    &format!(
+                        "\u{2514} {count} {unit} \u{b7} {} tokens",
+                        compact_tokens(tokens)
+                    ),
+                    width,
+                ),
+                theme.dim,
+            ));
+        }
+
         lines
     }
 
     /// The uncataloged rendering: totals alone, and the honest sentence —
     /// only the catalog can size a window, so no denominator is invented.
+    /// The model renders as its id once: an uncataloged model has no display
+    /// name to pair it with.
     fn degraded_lines(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         let mut lines = vec![
             Line::styled(
                 clip(
                     &format!(
                         "{} \u{b7} {} tokens \u{2014} estimated",
-                        self.model,
+                        self.breakdown.model,
                         compact_tokens(self.breakdown.total()),
                     ),
                     width,
@@ -485,10 +593,13 @@ mod tests {
     /// window, so shares are easy to reason about by hand.
     fn sized() -> ContextBreakdown {
         ContextBreakdown {
+            model: "claude-sonnet-5".to_owned(),
             system_prompt: 3_000,
             instructions: 2_000,
             tools_builtin: 11_000,
             tools_mcp: 1_000,
+            tools_builtin_count: 12,
+            tools_mcp_count: 3,
             skills: 500,
             conversation_user: 4_000,
             conversation_assistant: 8_500,
@@ -527,7 +638,7 @@ mod tests {
     #[test]
     fn the_legend_total_is_the_accessors_total_and_free_space_its_free() {
         let breakdown = sized();
-        let dialog = Context::new("claude-sonnet-5".to_owned(), breakdown);
+        let dialog = Context::new(None, breakdown.clone());
 
         let used: u64 = dialog.used().iter().map(|row| row.tokens).sum();
         assert_eq!(used, breakdown.total());
@@ -558,7 +669,7 @@ mod tests {
                 ..ContextBreakdown::default()
             },
         ] {
-            let dialog = Context::new("m".to_owned(), breakdown);
+            let dialog = Context::new(None, breakdown.clone());
             let cells: usize = dialog
                 .cells(breakdown.window.expect("both fixtures are sized"))
                 .iter()
@@ -572,19 +683,19 @@ mod tests {
     /// in its own header line (P14 pre-mortem 2).
     #[test]
     fn both_renderings_say_estimated() {
-        let sized = rendered(&Context::new("m".to_owned(), sized()), WIDE);
+        let sized = rendered(&Context::new(None, sized()), WIDE);
         assert!(
             sized.contains("Estimated usage by category"),
             "got:\n{sized}"
         );
 
-        let degraded = rendered(&Context::new("m".to_owned(), unsized_model()), NARROW);
+        let degraded = rendered(&Context::new(None, unsized_model()), NARROW);
         assert!(degraded.contains("estimated"), "got:\n{degraded}");
     }
 
     #[test]
     fn a_sized_window_renders_the_title_the_grid_and_every_legend_row() {
-        let screen = rendered(&Context::new("claude-sonnet-5".to_owned(), sized()), WIDE);
+        let screen = rendered(&Context::new(None, sized()), WIDE);
 
         assert!(screen.contains("Context Usage"), "the title:\n{screen}");
         for label in [
@@ -614,7 +725,7 @@ mod tests {
     /// legend row keeps it.
     #[test]
     fn the_free_row_drops_the_word_tokens_and_the_reserve_row_keeps_it() {
-        let screen = rendered(&Context::new("claude-sonnet-5".to_owned(), sized()), WIDE);
+        let screen = rendered(&Context::new(None, sized()), WIDE);
 
         assert!(
             screen.contains("Free space: 60.0k (60.0%)"),
@@ -635,7 +746,7 @@ mod tests {
     /// stacks it below where the house width cannot hold both.
     #[test]
     fn the_legend_sits_beside_the_grid_only_when_it_fits() {
-        let beside = rendered(&Context::new("claude-sonnet-5".to_owned(), sized()), WIDE);
+        let beside = rendered(&Context::new(None, sized()), WIDE);
         assert!(
             beside
                 .lines()
@@ -643,7 +754,7 @@ mod tests {
             "wide panels seat the legend beside the grid:\n{beside}"
         );
 
-        let stacked = rendered(&Context::new("claude-sonnet-5".to_owned(), sized()), NARROW);
+        let stacked = rendered(&Context::new(None, sized()), NARROW);
         assert!(
             !stacked
                 .lines()
@@ -656,11 +767,102 @@ mod tests {
         );
     }
 
+    /// The pinned model pair: a catalog display name renders bold over the
+    /// dim model id, and a model the catalog cannot name renders its id
+    /// once — no fake display name is invented.
+    #[test]
+    fn a_display_name_renders_over_the_id_and_its_absence_renders_the_id_once() {
+        let paired = rendered(
+            &Context::new(Some("Claude Sonnet 5".to_owned()), sized()),
+            WIDE,
+        );
+        assert!(paired.contains("Claude Sonnet 5"), "got:\n{paired}");
+        assert!(paired.contains("claude-sonnet-5"), "got:\n{paired}");
+
+        let bare = rendered(&Context::new(None, sized()), WIDE);
+        assert_eq!(
+            bare.matches("claude-sonnet-5").count(),
+            1,
+            "the id renders exactly once:\n{bare}"
+        );
+        let collapsed = rendered(
+            &Context::new(Some("claude-sonnet-5".to_owned()), sized()),
+            WIDE,
+        );
+        assert_eq!(
+            collapsed.matches("claude-sonnet-5").count(),
+            1,
+            "a display name that is the id would stutter as a pair:\n{collapsed}"
+        );
+    }
+
+    /// The detail sections render exactly the categories whose item counts
+    /// the breakdown carries — the two tool categories — and a zero count
+    /// earns no section at all.
+    #[test]
+    fn detail_sections_render_exactly_the_categories_whose_counts_exist() {
+        let screen = rendered(&Context::new(None, sized()), WIDE);
+        assert!(
+            screen.contains("\u{2514} 12 tools \u{b7} 11.0k tokens"),
+            "the builtin section:\n{screen}"
+        );
+        assert!(
+            screen.contains("\u{2514} 3 tools \u{b7} 1.0k tokens"),
+            "the MCP section:\n{screen}"
+        );
+        assert!(
+            screen.contains("MCP tools \u{b7} /mcp"),
+            "the hint names ganja's own door:\n{screen}"
+        );
+
+        let uncounted = rendered(
+            &Context::new(
+                None,
+                ContextBreakdown {
+                    tools_builtin_count: 0,
+                    tools_mcp_count: 0,
+                    ..sized()
+                },
+            ),
+            WIDE,
+        );
+        // Corner-plus-space: the bare corner is also the dialog border's
+        // bottom-left glyph, which every rendering carries.
+        assert!(
+            !uncounted.contains("\u{2514} "),
+            "no count, no section:\n{uncounted}"
+        );
+    }
+
+    /// A panel too short for everything drops the detail sections first and
+    /// the pair's id line second — the close hint always survives, and the
+    /// grid and legend a person opened the panel for outrank the metadata.
+    #[test]
+    fn the_details_and_the_id_line_yield_before_the_close_hint_does() {
+        let short = Rect::new(0, 0, 80, 30);
+        let screen = rendered(
+            &Context::new(Some("Claude Sonnet 5".to_owned()), sized()),
+            short,
+        );
+
+        assert!(screen.contains("[Esc] close"), "got:\n{screen}");
+        // Corner-plus-space, not the bare corner the border also draws.
+        assert!(!screen.contains("\u{2514} "), "details yielded:\n{screen}");
+        assert!(
+            screen.contains("Claude Sonnet 5") && !screen.contains("claude-sonnet-5"),
+            "the pair collapsed to the display name:\n{screen}"
+        );
+        assert!(
+            screen.contains("Free space"),
+            "the legend survived whole:\n{screen}"
+        );
+    }
+
     /// The degraded panel: totals, the honest sentence, and no invented
     /// percentages anywhere.
     #[test]
     fn an_unsized_model_renders_totals_and_the_honest_sentence() {
-        let screen = rendered(&Context::new("fake-1".to_owned(), unsized_model()), NARROW);
+        let screen = rendered(&Context::new(None, unsized_model()), NARROW);
 
         assert!(
             screen.contains("unsized model \u{2014} percentages unavailable"),
@@ -683,7 +885,7 @@ mod tests {
             let area = Rect::new(0, 0, width, height);
             let mut buffer = Buffer::empty(area);
 
-            Context::new("m".to_owned(), sized()).render(area, &mut buffer, &Theme::default());
+            Context::new(None, sized()).render(area, &mut buffer, &Theme::default());
         }
     }
 }
