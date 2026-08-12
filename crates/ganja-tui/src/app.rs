@@ -19,7 +19,11 @@ use std::{
 use anyhow::{Context as _, Result};
 use etcetera::{BaseStrategy as _, base_strategy::Xdg};
 use futures::StreamExt as _;
-use ganja_core::{Engine, EngineError, attachment, catalog, config::NotificationEvent, provider};
+use ganja_core::{
+    Engine, EngineError, attachment, catalog,
+    config::{NotificationEvent, StatuslineConfig},
+    provider,
+};
 use ganja_protocol::{
     Command, Event as CoreEvent, FinishReason, Mention, Message, MessageId, PartBody,
     PermissionReply, RevertScope, Role, ToolState, Usage,
@@ -56,7 +60,7 @@ use crate::{
         rewind::Rewind,
         search::HistorySearch,
         sessions::{self, Sessions},
-        status::{Activity, Status, Totals},
+        status::{Activity, Status, Todos, Totals},
         themes::ThemeList,
     },
     event::AppEvent,
@@ -217,6 +221,30 @@ type WireListing = Option<Result<Vec<provider::ListedModel>, provider::ProviderE
 /// the display name rides beside it, and the active mark follows the model
 /// the session is on — absent when the listing does not carry that model,
 /// which refuses nothing.
+/// Reads the bar's `todos` element off a finished `todowrite` call's
+/// metadata — the whole-list copy the tool publishes for frontends
+/// (`ganja_tool::todo`). A list the metadata does not carry, or carries
+/// malformed, clears the element rather than showing a count nobody wrote.
+fn todo_progress(metadata: &serde_json::Value) -> Option<Todos> {
+    let todos = metadata.get("todos")?.as_array()?;
+    let done = todos
+        .iter()
+        .filter(|todo| todo.get("status").and_then(serde_json::Value::as_str) == Some("completed"))
+        .count();
+    let current = todos.iter().find_map(|todo| {
+        if todo.get("status")?.as_str()? != "in_progress" {
+            return None;
+        }
+        Some(todo.get("content")?.as_str()?.to_owned())
+    });
+
+    Some(Todos {
+        done,
+        total: todos.len(),
+        current,
+    })
+}
+
 fn wire_rows(models: &[provider::ListedModel], current: &str) -> Vec<list::Row> {
     models
         .iter()
@@ -437,6 +465,9 @@ pub struct App {
     /// How many background jobs the status bar last reported running, so a
     /// tick that finds the same count touches nothing (**F1**).
     running_jobs: usize,
+    /// The `(tokens, window)` pair the context meter last showed, so a tick
+    /// that finds the estimate unmoved touches nothing (**D469**).
+    context: Option<(u64, u64)>,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
     /// stored mid-session is picked up by a restart, not by a later fetch.
@@ -489,6 +520,7 @@ impl App {
         let engine_commands = command::EngineCommand::roster(engine.commands());
         let mut status = Status::new(notice);
         status.set_agent(agent.clone());
+        status.set_model(Some(model.clone()));
 
         Self {
             engine,
@@ -549,6 +581,7 @@ impl App {
             mcp_notice: None,
             mcp_resolved: 0,
             running_jobs: 0,
+            context: None,
             wire_models: None,
             wire_fetch: None,
             tools: ganja_tool::Registry::with_builtins(),
@@ -615,6 +648,19 @@ impl App {
     #[must_use]
     pub fn with_notifier(mut self, notifier: notify::Notifier) -> Self {
         self.notifier = notifier;
+
+        self
+    }
+
+    /// Renders the configured statusline roster instead of the default bar.
+    ///
+    /// A builder because only the startup lane holds a loaded config to read
+    /// the `tui.statusline` table from — absent, the bar is the fixed layout
+    /// it always was, so a test that does not opt in renders what it always
+    /// rendered (**D469**).
+    #[must_use]
+    pub fn with_statusline(mut self, statusline: Option<&StatuslineConfig>) -> Self {
+        self.status.set_statusline(statusline);
 
         self
     }
@@ -772,6 +818,7 @@ impl App {
             AppEvent::Tick => {
                 self.poll_mcp();
                 self.poll_jobs();
+                self.poll_context();
                 self.poll_mcp_dialog();
                 self.poll_wire_models().await;
                 // The other door into the same lane: a replay that lost a race
@@ -843,6 +890,26 @@ impl App {
 
         self.running_jobs = running;
         self.status.set_running_jobs(running);
+        self.dirty = true;
+    }
+
+    /// Feeds the context meter the engine's current estimate (**D469**).
+    ///
+    /// Polled on the same tick the job registry is, for the same reason: the
+    /// measure moves only when a turn lands or a session resumes, there is no
+    /// event for it, and a value that has not changed touches nothing. An
+    /// uncataloged model has no window to meter against, and the cleared
+    /// value is the honest-degradation path — the element simply does not
+    /// render.
+    fn poll_context(&mut self) {
+        let estimate = self.engine.context_estimate();
+        let context = estimate.window.map(|window| (estimate.tokens, window));
+        if context == self.context {
+            return;
+        }
+
+        self.context = context;
+        self.status.set_context(context);
         self.dirty = true;
     }
 
@@ -932,7 +999,10 @@ impl App {
                 let [transcript, prompt, status] = Layout::vertical([
                     Constraint::Min(1),
                     Constraint::Length(editor::HEIGHT),
-                    Constraint::Length(1),
+                    // A configured roster may earn a git line above the bar
+                    // and a detail line below it; the default bar is the one
+                    // row it always was (**D469**).
+                    Constraint::Length(self.status.height()),
                 ])
                 .areas(area);
 
@@ -1775,6 +1845,9 @@ impl App {
                 self.chooser = None;
                 self.status.set_activity(Activity::Ready);
                 self.status.set_notice(None);
+                // The list was the old conversation's own state; the fresh
+                // session starts without one.
+                self.status.set_todos(None);
             }
             Err(refusal) => self.status.set_notice(Some(refusal.to_string())),
         }
@@ -2299,6 +2372,7 @@ impl App {
                 // adopts on the switch; pricing follows the engine's answer
                 // rather than what the frontend last remembered.
                 self.model = self.engine.model();
+                self.status.set_model(Some(self.model.clone()));
                 self.chooser = None;
                 self.status.set_notice(None);
             }
@@ -2317,6 +2391,7 @@ impl App {
         {
             Ok(()) => {
                 self.model = model;
+                self.status.set_model(Some(self.model.clone()));
                 // A model that kept the effort keeps the segment, naming the
                 // new model; one that lost it is announced by the engine's
                 // `EffortChanged`, whose handler clears the segment then.
@@ -2499,6 +2574,9 @@ impl App {
             Ok(transcript) => {
                 self.sessions = None;
                 self.chat.clear();
+                // The bar's todo list belonged to the conversation being
+                // left; the resumed one's next `todowrite` refills it.
+                self.status.set_todos(None);
                 self.seed(transcript);
                 // A stored session carries the agent and the model it was left
                 // on, and the engine restores both; the bar would otherwise go
@@ -2506,6 +2584,7 @@ impl App {
                 self.agent = self.engine.agent();
                 self.status.set_agent(self.agent.clone());
                 self.model = self.engine.model();
+                self.status.set_model(Some(self.model.clone()));
                 // The effort rides the same stored row the agent and the
                 // model do, filtered by the engine against the resumed model.
                 self.effort = self.engine.effort();
@@ -3321,6 +3400,15 @@ impl App {
                             Activity::Streaming
                         }
                     });
+                    // The bar's `todos` element reads the copy the tool
+                    // publishes for frontends; nothing else knows how to
+                    // update the list, so it stays whatever the last write
+                    // said (**D469**).
+                    if tool == "todowrite"
+                        && let ToolState::Completed { metadata, .. } = state
+                    {
+                        self.status.set_todos(todo_progress(metadata));
+                    }
                 }
                 self.chat.update_part(&message_id, part);
                 self.sync_task_status();
@@ -3459,6 +3547,7 @@ impl App {
                 self.agent = Some(agent);
                 self.status.set_agent(self.agent.clone());
                 self.model = model;
+                self.status.set_model(Some(self.model.clone()));
                 // The segment names the model, so a switch that kept the
                 // effort re-renders it against the model now active; a
                 // switch that cleared it is followed by its own
@@ -5058,6 +5147,70 @@ mod tests {
             args: serde_json::json!({"command": "cargo test"}),
             directories: Vec::new(),
         }
+    }
+
+    /// The wiring's own mapping (**D469**): only `completed` counts as done,
+    /// and the in-progress entry's title is what the element shows working.
+    #[test]
+    fn the_bar_counts_only_completed_todos_as_done() {
+        let progress = super::todo_progress(&serde_json::json!({"todos": [
+            {"content": "landed", "status": "completed", "priority": "high"},
+            {"content": "underway", "status": "in_progress", "priority": "medium"},
+            {"content": "waiting", "status": "pending", "priority": "low"},
+            {"content": "dropped", "status": "cancelled", "priority": "low"},
+        ]}))
+        .expect("a well-formed list maps");
+        assert_eq!(progress.done, 1);
+        assert_eq!(progress.total, 4);
+        assert_eq!(progress.current.as_deref(), Some("underway"));
+
+        assert!(
+            super::todo_progress(&serde_json::json!({})).is_none(),
+            "metadata without a list clears the element rather than inventing one"
+        );
+    }
+
+    /// The lead wiring for the roster's `todos` element (**D469**): a
+    /// finished `todowrite` fills it from the metadata the tool published.
+    #[tokio::test]
+    async fn a_finished_todowrite_fills_the_bars_todo_element() {
+        let statusline: ganja_core::config::StatuslineConfig =
+            serde_json::from_value(serde_json::json!({"elements": ["todos"]}))
+                .expect("the fixture is a statusline table");
+        let mut app = app().with_statusline(Some(&statusline));
+
+        app.handle(AppEvent::core(CoreEvent::PartUpdated {
+            session_id: session(),
+            message_id: MessageId::from("msg_1".to_owned()),
+            part: Part {
+                id: PartId::from("prt_1".to_owned()),
+                body: PartBody::Tool {
+                    call_id: "call_1".to_owned(),
+                    tool: "todowrite".to_owned(),
+                    state: ToolState::Completed {
+                        input: serde_json::json!({}),
+                        output: "[]".to_owned(),
+                        title: "1 todos".to_owned(),
+                        metadata: serde_json::json!({"todos": [
+                            {"content": "landed", "status": "completed", "priority": "high"},
+                            {"content": "underway", "status": "in_progress", "priority": "medium"},
+                        ]}),
+                        started: 0,
+                        completed: 1,
+                    },
+                },
+            },
+        }))
+        .await
+        .expect("the event applies");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("todos:1/2"),
+            "got:\n{}",
+            screen(&terminal)
+        );
     }
 
     #[tokio::test]

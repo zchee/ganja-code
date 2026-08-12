@@ -156,7 +156,12 @@ const KITCHEN_SINK: &str = r#"{
   "snapshot": false,
   "tui": {
     "notifications": ["turn-complete", "approval-requested"],
-    "notification_method": "bel"
+    "notification_method": "bel",
+    "statusline": {
+      "elements": ["git", "model", "context", "tokens", "session", "cwd", "todos"],
+      "max_width": 160,
+      "detail": true
+    }
   }
 }"#;
 
@@ -375,6 +380,22 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
         !validator.is_valid(&sink),
         "a method nothing sends is refused by the loader naming it; the schema's \
          closed NotificationMethod enum should refuse it too"
+    );
+
+    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    sink["tui"]["statusline"]["zzz_schema_probe"] = json!(1);
+    assert!(
+        !validator.is_valid(&sink),
+        "the statusline table is curated with deny_unknown_fields; the schema's \
+         additionalProperties: false on StatuslineConfig should refuse an unknown key too"
+    );
+
+    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    sink["tui"]["statusline"]["elements"] = json!(["contextbar"]);
+    assert!(
+        !validator.is_valid(&sink),
+        "an element name nothing renders is refused by the loader naming it; the \
+         schema's closed StatuslineElement enum should refuse it too"
     );
 }
 

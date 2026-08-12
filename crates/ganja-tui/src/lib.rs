@@ -255,6 +255,9 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
             // rides — the notifier the app's focus gate emits through
             // (**D468**).
             .with_notifier(notify::Notifier::to_stdout(config.tui.clone()))
+            // The `tui.statusline` roster, when the config wrote one; absent,
+            // the bar keeps its fixed default layout (**D469**).
+            .with_statusline(config.tui.statusline.as_ref())
             // The one place the prompt history reaches the disk: the default
             // store is inert, so a test that does not opt in never touches the
             // machine's own history.
