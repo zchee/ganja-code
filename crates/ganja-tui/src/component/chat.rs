@@ -95,6 +95,17 @@ pub struct Chat {
     offset: Option<usize>,
     /// Height of the last viewport rendered; paging and clamping need it.
     height: usize,
+    /// The user message the Esc Esc backtrack walk is standing on (**D467**),
+    /// painted with the selection style while it is set.
+    ///
+    /// A rendering concern only: which messages the walk may land on, and what
+    /// confirming one does, are [`crate::app::App`]'s — the same split the
+    /// rewind picker draws.
+    backtrack: Option<MessageId>,
+    /// Whether the highlight moved since the last frame, so exactly the next
+    /// render scrolls it into view — and a wheel scroll after that is left
+    /// alone rather than snapped back.
+    backtrack_unseen: bool,
 }
 
 /// What is hidden, and the row that says so.
@@ -257,6 +268,22 @@ impl Chat {
         checkpoints
     }
 
+    /// Moves the backtrack highlight to `anchor`, or clears it (**D467**).
+    ///
+    /// The next render scrolls the highlighted message into view; a cleared
+    /// highlight leaves the viewport wherever it stands, because exiting the
+    /// walk is not a scroll.
+    pub fn set_backtrack(&mut self, anchor: Option<MessageId>) {
+        self.backtrack_unseen = anchor.is_some();
+        self.backtrack = anchor;
+    }
+
+    /// The message the backtrack highlight is on, while the walk is up.
+    #[cfg(test)]
+    pub(crate) fn backtrack_anchor(&self) -> Option<&MessageId> {
+        self.backtrack.as_ref()
+    }
+
     /// Hides everything from `anchor` on, and says so in one row naming
     /// `files`.
     ///
@@ -299,6 +326,7 @@ impl Chat {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.revert = None;
+        self.backtrack = None;
         self.follow_tail();
     }
 
@@ -430,6 +458,21 @@ impl Chat {
             revert.wrap(hidden, area.width, theme);
         }
 
+        // The highlight span exists only after the wrap above, which is why
+        // the walk into view happens here rather than in the setter: the
+        // setter runs before anybody knows how many lines anything takes.
+        let highlight = self.backtrack_span();
+        if let Some((start, length)) = highlight
+            && std::mem::take(&mut self.backtrack_unseen)
+        {
+            let current = self.offset.unwrap_or_else(|| self.max_offset());
+            let whole = start + length <= current + self.height;
+            let taller = length >= self.height;
+            if start < current || !(whole || taller) {
+                self.set_offset(start);
+            }
+        }
+
         let offset = self
             .offset
             .map_or_else(|| self.max_offset(), |offset| offset.min(self.max_offset()));
@@ -441,6 +484,49 @@ impl Chat {
             };
             buffer.set_line(area.x, area.y + row, line, area.width);
         }
+
+        // Painted over the finished rows rather than baked into the wrap
+        // cache, so stepping the highlight costs a restyle and never a
+        // rewrap.
+        if let Some((start, length)) = highlight {
+            let first = start.max(offset);
+            let last = (start + length).min(offset + self.height);
+            for line in first..last {
+                let Ok(row) = u16::try_from(line - offset) else {
+                    break;
+                };
+                buffer.set_style(
+                    Rect::new(area.x, area.y + row, area.width, 1),
+                    theme.selection,
+                );
+            }
+        }
+    }
+
+    /// The highlighted entry's first line and how many of its lines to paint,
+    /// in transcript-line coordinates — or [`None`] when nothing is
+    /// highlighted, the anchor is hidden by a revert, or it left the
+    /// transcript entirely.
+    ///
+    /// The trailing breathing-room blank every entry wraps to stays
+    /// unpainted: a full-width colored bar under the message would read as
+    /// part of the next one.
+    fn backtrack_span(&self) -> Option<(usize, usize)> {
+        let anchor = self.backtrack.as_ref()?;
+        let mut start = 0;
+        for entry in self.shown() {
+            let lines = entry.lines();
+            if entry.id == *anchor {
+                let mut length = lines.len();
+                while length > 0 && lines[length - 1].width() == 0 {
+                    length -= 1;
+                }
+                return Some((start, length));
+            }
+            start += lines.len();
+        }
+
+        None
     }
 
     /// Lines the whole transcript wrapped to at the last rendered width.
@@ -2072,5 +2158,62 @@ mod tests {
 
         assert_eq!(checkpoints[1].title, "the first real line");
         assert_eq!(checkpoints[0].title, id.as_str());
+    }
+
+    /// **D467.** The highlighted message's rows carry the selection style,
+    /// its breathing-room blank stays unpainted, and every other row keeps
+    /// its own colors.
+    #[test]
+    fn the_backtrack_highlight_paints_the_anchors_rows_only() {
+        let theme = Theme::default();
+        let mut chat = Chat::default();
+        let first = Message::user("first prompt");
+        let anchor = first.id.clone();
+        chat.start_message(first);
+        chat.start_message(Message::user("second prompt"));
+        chat.set_backtrack(Some(anchor));
+
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buffer = Buffer::empty(area);
+        chat.render(area, &mut buffer, &theme);
+
+        // Rows 0-2 are the first entry (label, text, blank), 3-5 the second.
+        let style = |row: u16| buffer[(0u16, row)].style();
+        assert_eq!(style(0).fg, theme.selection.fg, "the label row is painted");
+        assert_eq!(style(1).fg, theme.selection.fg, "the text row is painted");
+        assert_ne!(style(2), style(1), "the breathing-room blank is not");
+        assert_ne!(style(3).fg, theme.selection.fg, "the next message is not");
+    }
+
+    /// Stepping the highlight to a message above the viewport scrolls it into
+    /// view — once, on the frame after the step, so a later scroll stays
+    /// where the reader put it.
+    #[test]
+    fn the_backtrack_highlight_scrolls_into_view_once() {
+        let mut chat = Chat::default();
+        let first = Message::user("the oldest prompt");
+        let anchor = first.id.clone();
+        chat.start_message(first);
+        transcript(&mut chat, 12);
+
+        let screen = rendered(&mut chat, VIEWPORT).join("\n");
+        assert!(
+            !screen.contains("the oldest prompt"),
+            "the fixture starts with the anchor scrolled away:\n{screen}"
+        );
+
+        chat.set_backtrack(Some(anchor));
+        let screen = rendered(&mut chat, VIEWPORT).join("\n");
+        assert!(
+            screen.contains("the oldest prompt"),
+            "the highlight is brought into view:\n{screen}"
+        );
+
+        chat.scroll_lines(isize::try_from(chat.line_count()).unwrap_or(isize::MAX));
+        let screen = rendered(&mut chat, VIEWPORT).join("\n");
+        assert!(
+            !screen.contains("the oldest prompt"),
+            "a later scroll is not snapped back:\n{screen}"
+        );
     }
 }
