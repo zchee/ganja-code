@@ -1,20 +1,56 @@
 //! The status bar: what the engine is doing, what it has spent, plus the keys
 //! that matter.
+//!
+//! Two renderings share one set of named elements (**D469**,
+//! `hud-statusline`, no upstream counterpart — opencode's footer is fixed).
+//! With no `tui.statusline` in the config the bar draws exactly what it
+//! always drew, segment for segment, which is what keeps every full-frame
+//! snapshot taken over that bar unchanged. A config that names elements gets
+//! the oh-my-claudecode HUD's behavior instead: the named elements only, in
+//! the named order, joined with dim ` | ` separators, truncated with an
+//! ellipsis at the width limit, a `repo:… | branch:…` line *above* the bar
+//! when `git` is named, and an optional detail line under it — the rendering
+//! the P14 screenshot pinned. The rate-bucket meters that screenshot also
+//! shows (5h/week/spend) are deliberately absent: they need a vendor usage
+//! API ganja does not speak, so the meter renderer is built once ([`meter`])
+//! and the elements wait for a data source rather than inventing one.
 
-use std::time::{Duration, Instant};
+use std::{
+    cell::RefCell,
+    fs,
+    path::{Path, PathBuf},
+    time::{Duration, Instant, SystemTime},
+};
 
-use ganja_core::catalog::compact_tokens;
+use ganja_core::{
+    catalog::compact_tokens,
+    config::{StatuslineConfig, StatuslineElement},
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::{Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr as _;
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::theme::Theme;
 
 /// Separates the things on the left of the bar.
 const SEPARATOR: &str = " \u{b7} ";
+
+/// Separates a configured roster's elements — the OMC HUD's separator, dim so
+/// the elements read and the plumbing recedes.
+const HUD_SEPARATOR: &str = " | ";
+
+/// What a truncated line ends with. Three ASCII dots rather than U+2026
+/// because that is what OMC's `truncateLineToMaxWidth` appends, and the HUD
+/// rendering is a port of that behavior.
+const ELLIPSIS: &str = "...";
+
+/// Bar cells between a meter's brackets — the screenshot's pinned shape,
+/// `ctx:[####----]NN%`.
+const METER_SLOTS: u64 = 8;
 
 /// Spinner phases, one braille cell each.
 const SPINNER: [&str; 8] = [
@@ -97,6 +133,38 @@ impl Totals {
     }
 }
 
+/// Todo progress, handed in from the todowrite state the chat renders — the
+/// bar cannot see tool results, so the app feeds it what the `todos` element
+/// shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Todos {
+    /// How many entries are completed.
+    pub done: usize,
+    /// How many entries there are.
+    pub total: usize,
+    /// The in-progress entry's title, when one is in progress.
+    pub current: Option<String>,
+}
+
+/// The `.git/HEAD` identity the git line renders: a **file read**, cached
+/// until HEAD's mtime moves, never a `git` subprocess — nothing in the pinned
+/// rendering needs porcelain, and a subprocess per render tick is the cost
+/// the plan's script-statusline option was rejected over (P14 review
+/// changelog MINOR 4).
+#[derive(Debug, Default)]
+struct GitCache {
+    /// The repository's HEAD file — through a linked worktree's `gitdir:`
+    /// pointer when there is one — or absent when no ancestor of the working
+    /// directory is a repository.
+    head: Option<PathBuf>,
+    /// The repository's name: the directory holding `.git`.
+    repo: Option<String>,
+    /// HEAD's mtime when `branch` was parsed.
+    read_at: Option<SystemTime>,
+    /// What HEAD named at `read_at`.
+    branch: Option<String>,
+}
+
 /// The bottom line of the screen.
 #[derive(Debug)]
 pub struct Status {
@@ -139,12 +207,41 @@ pub struct Status {
     /// one dialog with a second already queued has to be told there is a
     /// second.
     queued_dialogs: usize,
+    /// The roster a config asked for; absent renders the default bar, which
+    /// is exactly the bar this build always drew (**D469**).
+    elements: Option<Vec<StatuslineElement>>,
+    /// Widest a configured roster may draw; absent is the area's own width.
+    max_width: Option<u16>,
+    /// Whether elements with more than a segment's worth may draw a detail
+    /// line under the bar.
+    detail: bool,
+    /// The model the next turn asks for, for the `model` element's
+    /// `Model: <name>` form — the default bar names a model only through the
+    /// effort segment, so this arrives by its own setter.
+    model: Option<String>,
+    /// `(estimated tokens, window)` for the `context` meter, absent until the
+    /// app polls `Engine::context_estimate` — and kept absent for an
+    /// uncataloged model, whose window nobody can size.
+    context: Option<(u64, u64)>,
+    /// Todo progress for the `todos` element.
+    todos: Option<Todos>,
+    /// When this bar was built — the `session` element's zero. Not `since`,
+    /// which every activity change resets.
+    started: Instant,
+    /// The working directory's name, captured once for the `cwd` element.
+    cwd: Option<String>,
+    /// The git identity, discovered once and re-read only when HEAD moves.
+    /// Interior mutability because `render` takes `&self` and the cache is a
+    /// rendering detail, not state anybody else observes.
+    git: RefCell<GitCache>,
 }
 
 impl Status {
     /// Builds a status bar that starts idle, optionally carrying a notice.
     #[must_use]
     pub fn new(notice: Option<String>) -> Self {
+        let workdir = std::env::current_dir().ok();
+
         Self {
             activity: Activity::Ready,
             since: Instant::now(),
@@ -157,7 +254,68 @@ impl Status {
             running_jobs: 0,
             running_tasks: 0,
             queued_dialogs: 0,
+            elements: None,
+            max_width: None,
+            detail: false,
+            model: None,
+            context: None,
+            todos: None,
+            started: Instant::now(),
+            cwd: workdir
+                .as_deref()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned()),
+            git: RefCell::new(workdir.as_deref().map(discover_git).unwrap_or_default()),
         }
+    }
+
+    /// Applies the config's `tui.statusline` table: the roster, the width
+    /// cap, and whether a detail line may draw. [`None`] — no table written —
+    /// keeps the default bar.
+    pub fn set_statusline(&mut self, statusline: Option<&StatuslineConfig>) {
+        self.elements = statusline.and_then(|table| table.elements.clone());
+        self.max_width = statusline.and_then(|table| table.max_width);
+        self.detail = statusline.and_then(|table| table.detail).unwrap_or(false);
+    }
+
+    /// Names the model the next turn asks for, for the `model` element.
+    pub fn set_model(&mut self, model: Option<String>) {
+        self.model = model;
+    }
+
+    /// Records `(estimated tokens, window)` for the `context` meter, or
+    /// clears it — which an uncataloged model, whose window nobody can size,
+    /// does.
+    pub fn set_context(&mut self, context: Option<(u64, u64)>) {
+        self.context = context;
+    }
+
+    /// Records todo progress for the `todos` element.
+    pub fn set_todos(&mut self, todos: Option<Todos>) {
+        self.todos = todos;
+    }
+
+    /// How many rows this bar wants: one, plus the git line above it and the
+    /// detail line under it when the configured roster earns them. The
+    /// default bar is always exactly the one row it always was.
+    #[must_use]
+    pub fn height(&self) -> u16 {
+        let Some(elements) = &self.elements else {
+            return 1;
+        };
+
+        let mut height = 1;
+        if elements.contains(&StatuslineElement::Git) && self.git.borrow().head.is_some() {
+            height += 1;
+        }
+        if self.detail
+            && elements.contains(&StatuslineElement::Todos)
+            && self.detail_text().is_some()
+        {
+            height += 1;
+        }
+
+        height
     }
 
     /// Names the agent the next turn runs as.
@@ -226,6 +384,14 @@ impl Status {
             return;
         }
 
+        match &self.elements {
+            None => self.render_default(area, buffer, theme),
+            Some(elements) => self.render_roster(elements, area, buffer, theme),
+        }
+    }
+
+    /// The bar this build always drew, byte for byte — the default roster.
+    fn render_default(&self, area: Rect, buffer: &mut Buffer, theme: &Theme) {
         let mut left = String::new();
         if self.is_streaming() {
             left.push_str(self.spinner());
@@ -314,6 +480,230 @@ impl Status {
         buffer.set_line(area.x, area.y, &Line::from(spans), area.width);
     }
 
+    /// The configured roster: the named elements only, in the named order,
+    /// with the git line above and the detail line under when they earned
+    /// their rows.
+    fn render_roster(
+        &self,
+        elements: &[StatuslineElement],
+        area: Rect,
+        buffer: &mut Buffer,
+        theme: &Theme,
+    ) {
+        let limit = usize::from(self.max_width.map_or(area.width, |cap| cap.min(area.width)));
+
+        let mut git = elements
+            .contains(&StatuslineElement::Git)
+            .then(|| self.git_spans(theme))
+            .flatten();
+        let mut detail = (self.detail && elements.contains(&StatuslineElement::Todos))
+            .then(|| self.detail_text())
+            .flatten()
+            .map(|title| {
+                vec![
+                    Span::styled("working: ".to_owned(), theme.dim),
+                    Span::styled(title, theme.fg),
+                ]
+            });
+
+        // The main line is the one row that never yields: a shorter area
+        // drops the detail line first, then the git line.
+        let available = usize::from(area.height);
+        if 1 + usize::from(git.is_some()) + usize::from(detail.is_some()) > available {
+            detail = None;
+        }
+        if 1 + usize::from(git.is_some()) > available {
+            git = None;
+        }
+
+        // The elements, in the config's order. Git renders above and hints
+        // render right-aligned, so neither takes a slot in the flow.
+        let mut main: Vec<Span<'static>> = Vec::new();
+        for element in elements {
+            if matches!(element, StatuslineElement::Git | StatuslineElement::Hints) {
+                continue;
+            }
+            let Some(mut segment) = self.hud_segment(*element, theme) else {
+                continue;
+            };
+            if !main.is_empty() {
+                main.push(Span::styled(HUD_SEPARATOR.to_owned(), theme.dim));
+            }
+            main.append(&mut segment);
+        }
+        let mut main = truncate_spans(main, limit, theme);
+
+        // The hints keep their right edge, exactly as the default bar draws
+        // them — inside the width cap, so a capped bar stays one block.
+        if elements.contains(&StatuslineElement::Hints) {
+            let hints = self.hints();
+            let used: usize = main.iter().map(|span| span.content.width()).sum();
+            let gap = limit.saturating_sub(used + hints.width());
+            if gap > 0 {
+                main.push(Span::raw(" ".repeat(gap)));
+                main.push(Span::styled(hints, theme.dim));
+            }
+        }
+
+        let mut y = area.y;
+        if let Some(git) = git {
+            buffer.set_line(
+                area.x,
+                y,
+                &Line::from(truncate_spans(git, limit, theme)),
+                area.width,
+            );
+            y += 1;
+        }
+        buffer.set_line(area.x, y, &Line::from(main), area.width);
+        y += 1;
+        if let Some(detail) = detail {
+            buffer.set_line(
+                area.x,
+                y,
+                &Line::from(truncate_spans(detail, limit, theme)),
+                area.width,
+            );
+        }
+    }
+
+    /// One named element's spans, or [`None`] while it has nothing to say —
+    /// the same appear-only-while-nonzero posture the default bar holds.
+    fn hud_segment(&self, element: StatuslineElement, theme: &Theme) -> Option<Vec<Span<'static>>> {
+        let plain = |text: String| Some(vec![Span::styled(text, theme.accent)]);
+
+        match element {
+            StatuslineElement::Activity => {
+                let mut text = String::new();
+                if self.is_streaming() {
+                    text.push_str(self.spinner());
+                    text.push(' ');
+                }
+                text.push_str(&self.activity.label());
+                plain(text)
+            }
+            StatuslineElement::Agent => self.agent.clone().and_then(plain),
+            StatuslineElement::Effort => self
+                .effort
+                .as_ref()
+                .and_then(|(model, effort)| plain(format!("{model} ({effort})"))),
+            StatuslineElement::Queued => (self.queued > 0)
+                .then(|| plain(format!("{} queued", self.queued)))
+                .flatten(),
+            StatuslineElement::Jobs => (self.running_jobs > 0)
+                .then(|| plain(format!("{} bash running", self.running_jobs)))
+                .flatten(),
+            StatuslineElement::Tasks => (self.running_tasks > 1)
+                .then(|| plain(format!("{} tasks running", self.running_tasks)))
+                .flatten(),
+            StatuslineElement::Dialogs => (self.queued_dialogs > 0)
+                .then(|| {
+                    plain(format!(
+                        "{} {} queued",
+                        self.queued_dialogs,
+                        if self.queued_dialogs == 1 {
+                            "dialog"
+                        } else {
+                            "dialogs"
+                        }
+                    ))
+                })
+                .flatten(),
+            StatuslineElement::Tokens => self
+                .totals
+                .as_ref()
+                .and_then(|totals| plain(totals.segment())),
+            StatuslineElement::Notice => self.notice.clone().and_then(plain),
+            StatuslineElement::Model => self.model.clone().map(|model| {
+                vec![
+                    // The screenshot's label form, `Model: Fable 5`.
+                    Span::styled("Model: ".to_owned(), theme.dim),
+                    Span::styled(model, theme.fg.add_modifier(Modifier::BOLD)),
+                ]
+            }),
+            StatuslineElement::Context => self
+                .context
+                .map(|(tokens, window)| meter("ctx", percent_of(tokens, window), theme)),
+            StatuslineElement::Session => {
+                // Whole minutes with an `m`, OMC's own `renderSession` shape.
+                plain(format!(
+                    "session:{}m",
+                    self.started.elapsed().as_secs() / 60
+                ))
+            }
+            StatuslineElement::Cwd => self.cwd.clone().map(|name| {
+                vec![
+                    Span::styled("cwd:".to_owned(), theme.dim),
+                    Span::styled(name, theme.fg),
+                ]
+            }),
+            StatuslineElement::Todos => {
+                self.todos
+                    .as_ref()
+                    .filter(|todos| todos.total > 0)
+                    .map(|todos| {
+                        let mut text = format!("todos:{}/{}", todos.done, todos.total);
+                        // The in-progress title rides inline — OMC's
+                        // `renderTodosWithCurrent` — unless the detail line is on,
+                        // where it gets a whole row instead of a squeezed suffix.
+                        if !self.detail
+                            && let Some(current) = &todos.current
+                        {
+                            text.push_str(&format!(" (working: {current})"));
+                        }
+                        vec![Span::styled(text, theme.accent)]
+                    })
+            }
+            // Rendered above the bar and at its right edge respectively;
+            // `render_roster` owns both placements.
+            StatuslineElement::Git | StatuslineElement::Hints => None,
+        }
+    }
+
+    /// The `repo:<name> | branch:<branch>` line, values bold — the
+    /// screenshot's pinned shape — re-reading HEAD only when its mtime moved.
+    fn git_spans(&self, theme: &Theme) -> Option<Vec<Span<'static>>> {
+        let mut cache = self.git.borrow_mut();
+        let head = cache.head.clone()?;
+        let repo = cache.repo.clone()?;
+
+        match fs::metadata(&head).and_then(|meta| meta.modified()) {
+            Ok(stamp) => {
+                if cache.read_at != Some(stamp) {
+                    cache.branch = fs::read_to_string(&head)
+                        .ok()
+                        .as_deref()
+                        .and_then(head_name);
+                    cache.read_at = Some(stamp);
+                }
+            }
+            Err(_) => {
+                // HEAD went away under us — a deleted worktree, most likely.
+                // Say nothing rather than a stale branch.
+                cache.branch = None;
+                cache.read_at = None;
+            }
+        }
+
+        let branch = cache.branch.clone()?;
+        let bold = theme.fg.add_modifier(Modifier::BOLD);
+        Some(vec![
+            Span::styled("repo:".to_owned(), theme.dim),
+            Span::styled(repo, bold),
+            Span::styled(HUD_SEPARATOR.to_owned(), theme.dim),
+            Span::styled("branch:".to_owned(), theme.dim),
+            Span::styled(branch, bold),
+        ])
+    }
+
+    /// What the detail line would say: the in-progress todo's title.
+    fn detail_text(&self) -> Option<String> {
+        self.todos
+            .as_ref()
+            .filter(|todos| todos.total > 0)
+            .and_then(|todos| todos.current.clone())
+    }
+
     /// The reminders this mode is worth showing.
     fn hints(&self) -> &'static str {
         if self.shell { SHELL_HINTS } else { HINTS }
@@ -326,11 +716,182 @@ impl Status {
     }
 }
 
+/// Cuts `spans` at `limit` cells, ending a cut line with [`ELLIPSIS`] — OMC's
+/// `truncateLineToMaxWidth`, over spans instead of ANSI strings.
+fn truncate_spans(spans: Vec<Span<'static>>, limit: usize, theme: &Theme) -> Vec<Span<'static>> {
+    let width: usize = spans.iter().map(|span| span.content.width()).sum();
+    if width <= limit {
+        return spans;
+    }
+
+    let target = limit.saturating_sub(ELLIPSIS.width());
+    let mut kept: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for span in spans {
+        let span_width = span.content.width();
+        if used + span_width <= target {
+            used += span_width;
+            kept.push(span);
+            continue;
+        }
+        // The span that crosses the cut is kept up to the last whole
+        // character that fits, exactly as OMC walks code points.
+        let mut partial = String::new();
+        for character in span.content.chars() {
+            let character_width = character.width().unwrap_or(0);
+            if used + character_width > target {
+                break;
+            }
+            used += character_width;
+            partial.push(character);
+        }
+        if !partial.is_empty() {
+            kept.push(Span::styled(partial, span.style));
+        }
+        break;
+    }
+    kept.push(Span::styled(ELLIPSIS.to_owned(), theme.dim));
+
+    kept
+}
+
+/// One `label:[####----]NN%` meter, the screenshot's pinned shape. Built once
+/// and shared so the rate-bucket elements (5h/week/spend) can ride it the day
+/// ganja can ask a vendor usage API what they hold.
+fn meter(label: &str, percent: u64, theme: &Theme) -> Vec<Span<'static>> {
+    let percent = percent.min(100);
+    let filled = meter_fill(percent);
+    let style = meter_style(percent, theme);
+
+    vec![
+        Span::styled(format!("{label}:["), theme.dim),
+        Span::styled("#".repeat(usize::try_from(filled).unwrap_or(0)), style),
+        Span::styled(
+            "-".repeat(usize::try_from(METER_SLOTS - filled).unwrap_or(0)),
+            theme.dim,
+        ),
+        Span::styled("]".to_owned(), theme.dim),
+        Span::styled(format!("{percent}%"), style),
+    ]
+}
+
+/// How many of a meter's slots are filled at `percent`: OMC's
+/// `Math.round((percent / 100) * barWidth)`, in integers.
+fn meter_fill(percent: u64) -> u64 {
+    (percent.min(100) * METER_SLOTS + 50) / 100
+}
+
+/// The OMC severity ladder (`types.ts` thresholds 70/80/85): ok, warning at
+/// 70, compact-suggestion at 80, critical at 85 — where the fill paints the
+/// error red the screenshot's exhausted meters show. OMC colors warning and
+/// compact the same yellow and tells them apart with a ` COMPRESS?` text
+/// suffix; the pinned `NN%` shape carries no suffix, so both wear the warning
+/// style here and the 80 boundary lives in [`meter_severity`] and its test
+/// rather than in a color nobody could see.
+fn meter_style(percent: u64, theme: &Theme) -> Style {
+    match meter_severity(percent) {
+        Severity::Ok => theme.success,
+        Severity::Warning | Severity::Compact => theme.warning,
+        Severity::Critical => theme.error,
+    }
+}
+
+/// Where `percent` sits on the OMC ladder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Severity {
+    /// Below 70.
+    Ok,
+    /// 70 to 79: worth a glance.
+    Warning,
+    /// 80 to 84: OMC starts suggesting compaction here.
+    Compact,
+    /// 85 and up: about to hit the wall.
+    Critical,
+}
+
+fn meter_severity(percent: u64) -> Severity {
+    match percent {
+        0..70 => Severity::Ok,
+        70..80 => Severity::Warning,
+        80..85 => Severity::Compact,
+        _ => Severity::Critical,
+    }
+}
+
+/// `tokens` as a whole percentage of `window`, clamped to 100 — the display
+/// never claims more than full, whatever the estimate says.
+fn percent_of(tokens: u64, window: u64) -> u64 {
+    if window == 0 {
+        return 100;
+    }
+
+    (tokens.saturating_mul(100) / window).min(100)
+}
+
+/// Finds the repository `dir` sits in: the nearest ancestor holding a `.git`,
+/// through a linked worktree's one-line `gitdir: <path>` file.
+fn discover_git(dir: &Path) -> GitCache {
+    for ancestor in dir.ancestors() {
+        let dotgit = ancestor.join(".git");
+        let head = if dotgit.is_dir() {
+            dotgit.join("HEAD")
+        } else if dotgit.is_file() {
+            let Some(pointed) = fs::read_to_string(&dotgit).ok().and_then(|text| {
+                text.trim()
+                    .strip_prefix("gitdir:")
+                    .map(|path| path.trim().to_owned())
+            }) else {
+                continue;
+            };
+            let gitdir = PathBuf::from(pointed);
+            let gitdir = if gitdir.is_absolute() {
+                gitdir
+            } else {
+                ancestor.join(gitdir)
+            };
+            gitdir.join("HEAD")
+        } else {
+            continue;
+        };
+
+        return GitCache {
+            head: Some(head),
+            repo: ancestor
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            read_at: None,
+            branch: None,
+        };
+    }
+
+    GitCache::default()
+}
+
+/// What a HEAD file names: the branch of a symbolic ref, or the first eight
+/// hex digits of a detached head.
+fn head_name(text: &str) -> Option<String> {
+    let text = text.trim();
+    if let Some(reference) = text.strip_prefix("ref:") {
+        let reference = reference.trim();
+        let branch = reference.strip_prefix("refs/heads/").unwrap_or(reference);
+        return (!branch.is_empty()).then(|| branch.to_owned());
+    }
+
+    (!text.is_empty()).then(|| text.chars().take(8).collect())
+}
+
 #[cfg(test)]
 mod tests {
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use std::{cell::RefCell, fs};
 
-    use super::{Activity, HINTS, SHELL_HINTS, Status, Totals};
+    use ganja_core::config::StatuslineElement;
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use unicode_width::UnicodeWidthStr as _;
+
+    use super::{
+        Activity, HINTS, SHELL_HINTS, Severity, Status, Todos, Totals, discover_git, head_name,
+        meter_fill, meter_severity,
+    };
     use crate::theme::Theme;
 
     fn rendered(status: &Status, width: u16) -> String {
@@ -343,6 +904,31 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_owned()
+    }
+
+    /// Every row of a taller render, for the rosters that earn extra lines.
+    fn rendered_rows(status: &Status, width: u16, height: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        status.render(area, &mut buffer, &Theme::default());
+
+        (0..height)
+            .map(|row| {
+                (0..width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// A status bar rendering `elements`, without going through a config
+    /// file.
+    fn roster(elements: &[StatuslineElement]) -> Status {
+        let mut status = Status::new(None);
+        status.elements = Some(elements.to_vec());
+        status
     }
 
     #[test]
@@ -611,5 +1197,266 @@ mod tests {
 
         status.set_shell(false);
         assert!(rendered(&status, 120).contains(HINTS));
+    }
+
+    /// The acceptance shape for the roster (**D469**): what the config names,
+    /// in the order it names it, and nothing the default bar would have added
+    /// on its own.
+    #[test]
+    fn a_configured_roster_renders_exactly_what_it_names_in_its_order() {
+        let mut status = roster(&[
+            StatuslineElement::Model,
+            StatuslineElement::Context,
+            StatuslineElement::Tokens,
+        ]);
+        status.set_model(Some("claude-opus-5".to_owned()));
+        status.set_context(Some((12_000, 100_000)));
+        status.set_totals(Totals {
+            input_tokens: 40,
+            output_tokens: 7,
+            cost_usd: None,
+        });
+
+        let line = rendered(&status, 120);
+
+        assert_eq!(
+            line, "Model: claude-opus-5 | ctx:[#-------]12% | 40 in \u{b7} 7 out",
+            "the three named elements, in the named order, and nothing else"
+        );
+        assert!(!line.contains("ready"), "the activity was not named");
+    }
+
+    /// The meter's percent is the estimate the app handed in, and 70% is
+    /// where the fill stops being calm (**D469**).
+    #[test]
+    fn the_context_meter_shows_the_handed_in_percent_and_warns_at_seventy() {
+        let theme = Theme::default();
+        let calm = {
+            let mut status = roster(&[StatuslineElement::Context]);
+            status.set_context(Some((69, 100)));
+            status
+        };
+        let line = rendered(&calm, 60);
+        assert!(line.contains("ctx:["), "got {line:?}");
+        assert!(line.contains("]69%"), "got {line:?}");
+
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buffer = Buffer::empty(area);
+        calm.render(area, &mut buffer, &theme);
+        // Cell 5 is the first bar slot, right after "ctx:[".
+        assert_eq!(buffer[(5, 0)].symbol(), "#");
+        assert_eq!(buffer[(5, 0)].style().fg, theme.success.fg);
+
+        let warned = {
+            let mut status = roster(&[StatuslineElement::Context]);
+            status.set_context(Some((70, 100)));
+            status
+        };
+        let mut buffer = Buffer::empty(area);
+        warned.render(area, &mut buffer, &theme);
+        assert_eq!(buffer[(5, 0)].symbol(), "#");
+        assert_eq!(
+            buffer[(5, 0)].style().fg,
+            theme.warning.fg,
+            "seventy percent is where the meter starts warning"
+        );
+    }
+
+    /// OMC's ladder, at its boundaries: fill is `round(percent/100 * 8)` and
+    /// the color steps at 70, 80 and 85 — the last one the red the
+    /// screenshot's exhausted meters wear.
+    #[test]
+    fn the_meter_math_holds_at_the_ladder_boundaries() {
+        assert_eq!(meter_fill(0), 0);
+        assert_eq!(meter_fill(69), 6);
+        assert_eq!(meter_fill(70), 6);
+        assert_eq!(meter_fill(84), 7);
+        assert_eq!(meter_fill(85), 7);
+        assert_eq!(meter_fill(100), 8);
+
+        assert_eq!(meter_severity(0), Severity::Ok);
+        assert_eq!(meter_severity(69), Severity::Ok);
+        assert_eq!(meter_severity(70), Severity::Warning);
+        assert_eq!(meter_severity(79), Severity::Warning);
+        assert_eq!(meter_severity(80), Severity::Compact);
+        assert_eq!(meter_severity(84), Severity::Compact);
+        assert_eq!(meter_severity(85), Severity::Critical);
+        assert_eq!(meter_severity(100), Severity::Critical);
+    }
+
+    /// An estimate past the window still reads as full, never as more.
+    #[test]
+    fn the_context_meter_never_claims_more_than_full() {
+        let mut status = roster(&[StatuslineElement::Context]);
+        status.set_context(Some((250_000, 100_000)));
+
+        let line = rendered(&status, 60);
+
+        assert!(line.contains("ctx:[########]100%"), "got {line:?}");
+    }
+
+    /// A roster wider than the bar ends with the OMC ellipsis instead of a
+    /// silent cut.
+    #[test]
+    fn a_narrow_roster_truncates_with_an_ellipsis() {
+        let mut status = roster(&[StatuslineElement::Model]);
+        status.set_model(Some("a-model-with-a-very-long-name".to_owned()));
+
+        let line = rendered(&status, 20);
+
+        assert_eq!(line.width(), 20, "got {line:?}");
+        assert!(line.ends_with("..."), "got {line:?}");
+    }
+
+    /// `max_width` caps the bar below the terminal's width, OMC's `maxWidth`.
+    #[test]
+    fn a_width_cap_truncates_before_the_terminal_edge_does() {
+        let mut status = roster(&[StatuslineElement::Model]);
+        status.max_width = Some(20);
+        status.set_model(Some("a-model-with-a-very-long-name".to_owned()));
+
+        let line = rendered(&status, 120);
+
+        assert!(line.ends_with("..."), "got {line:?}");
+        assert!(line.len() <= 20, "got {line:?}");
+    }
+
+    /// The git line reads `.git/HEAD` off the disk — both spellings — and
+    /// sits above the main line, the screenshot's pinned placement.
+    #[test]
+    fn the_git_line_reads_a_symbolic_head_as_its_branch() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let repo = directory.path().join("my-repo");
+        fs::create_dir_all(repo.join(".git")).expect("the fixture repository is creatable");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD writes");
+
+        let mut status = roster(&[StatuslineElement::Git, StatuslineElement::Activity]);
+        status.git = RefCell::new(discover_git(&repo));
+
+        let rows = rendered_rows(&status, 60, 2);
+        assert_eq!(rows[0], "repo:my-repo | branch:main");
+        assert_eq!(rows[1], "ready");
+        assert_eq!(status.height(), 2);
+    }
+
+    #[test]
+    fn a_detached_head_reads_as_a_short_hash() {
+        assert_eq!(
+            head_name("f0e1d2c3b4a5968778695a4b3c2d1e0f11223344\n").as_deref(),
+            Some("f0e1d2c3")
+        );
+        assert_eq!(
+            head_name("ref: refs/heads/feature/x\n").as_deref(),
+            Some("feature/x")
+        );
+        assert_eq!(head_name(""), None);
+    }
+
+    /// The cache re-reads HEAD only when its mtime moves — the whole point of
+    /// the file read over a subprocess (P14 review changelog MINOR 4).
+    #[test]
+    fn the_git_line_follows_a_branch_switch_through_the_head_mtime() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let repo = directory.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).expect("the fixture repository is creatable");
+        let head = repo.join(".git/HEAD");
+        fs::write(&head, "ref: refs/heads/main\n").expect("HEAD writes");
+
+        let mut status = roster(&[StatuslineElement::Git]);
+        status.git = RefCell::new(discover_git(&repo));
+        assert!(rendered_rows(&status, 60, 2)[0].contains("branch:main"));
+
+        // A fresh mtime, far enough from the first write that coarse
+        // filesystem timestamps cannot collapse the two.
+        fs::write(&head, "ref: refs/heads/next\n").expect("HEAD rewrites");
+        let bumped = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        let stamp = fs::FileTimes::new().set_modified(bumped);
+        fs::File::options()
+            .append(true)
+            .open(&head)
+            .and_then(|file| file.set_times(stamp))
+            .expect("the mtime moves");
+
+        assert!(
+            rendered_rows(&status, 60, 2)[0].contains("branch:next"),
+            "a moved mtime invalidates the cache"
+        );
+    }
+
+    /// A linked worktree's `.git` is a file pointing at the real gitdir; the
+    /// line still names the worktree's own directory and branch.
+    #[test]
+    fn a_linked_worktree_resolves_head_through_its_gitdir_pointer() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let gitdir = directory.path().join("main/.git/worktrees/wt");
+        fs::create_dir_all(&gitdir).expect("the fixture gitdir is creatable");
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/hotfix\n").expect("HEAD writes");
+        let worktree = directory.path().join("wt");
+        fs::create_dir_all(&worktree).expect("the fixture worktree is creatable");
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .expect("the pointer writes");
+
+        let mut status = roster(&[StatuslineElement::Git]);
+        status.git = RefCell::new(discover_git(&worktree));
+
+        assert_eq!(rendered_rows(&status, 60, 2)[0], "repo:wt | branch:hotfix");
+    }
+
+    /// A too-short area drops the detail line first and the git line second —
+    /// the main line is the one row that never yields.
+    #[test]
+    fn a_short_area_keeps_the_main_line_over_the_extra_ones() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let repo = directory.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).expect("the fixture repository is creatable");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD writes");
+
+        let mut status = roster(&[StatuslineElement::Git, StatuslineElement::Activity]);
+        status.git = RefCell::new(discover_git(&repo));
+
+        let rows = rendered_rows(&status, 60, 1);
+        assert_eq!(rows[0], "ready", "one row leaves only the main line");
+    }
+
+    /// The `todos` element carries its progress inline and moves the title to
+    /// the detail line when one is allowed.
+    #[test]
+    fn todos_move_their_title_to_the_detail_line_when_detail_is_on() {
+        let mut status = roster(&[StatuslineElement::Todos]);
+        status.set_todos(Some(Todos {
+            done: 2,
+            total: 5,
+            current: Some("wire the meter".to_owned()),
+        }));
+
+        assert_eq!(rendered(&status, 80), "todos:2/5 (working: wire the meter)");
+
+        status.detail = true;
+        let rows = rendered_rows(&status, 80, 2);
+        assert_eq!(rows[0], "todos:2/5");
+        assert_eq!(rows[1], "working: wire the meter");
+        assert_eq!(status.height(), 2);
+    }
+
+    /// The session element counts from the bar's own birth, in OMC's
+    /// whole-minute form.
+    #[test]
+    fn the_session_element_counts_whole_minutes_from_birth() {
+        let status = roster(&[StatuslineElement::Session]);
+
+        assert_eq!(rendered(&status, 40), "session:0m");
+    }
+
+    /// The `hints` element keeps the right edge the default bar gave it.
+    #[test]
+    fn a_roster_with_hints_keeps_them_right_aligned() {
+        let status = roster(&[StatuslineElement::Activity, StatuslineElement::Hints]);
+
+        let line = rendered(&status, 100);
+        assert!(line.starts_with("ready"), "got {line:?}");
+        assert!(line.ends_with(HINTS), "got {line:?}");
     }
 }

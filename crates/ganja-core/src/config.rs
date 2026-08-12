@@ -778,6 +778,11 @@ pub struct TuiConfig {
     /// to leave the tier below it alone. [`TuiConfig::notification_method`]
     /// is what reads it.
     pub notification_method: Option<NotificationMethod>,
+    /// How the status bar is composed; see [`StatuslineConfig`].
+    ///
+    /// **Absent is the default roster** — the bar this build has always
+    /// drawn.
+    pub statusline: Option<StatuslineConfig>,
 }
 
 impl TuiConfig {
@@ -794,6 +799,80 @@ impl TuiConfig {
     pub fn notification_method(&self) -> NotificationMethod {
         self.notification_method.unwrap_or_default()
     }
+}
+
+/// What the status bar renders, in what order, and how wide (**D469**,
+/// `hud-statusline`).
+///
+/// Not a key upstream has: the segment roster ports the oh-my-claudecode
+/// HUD's behavior onto the bar ganja already draws, which opencode's TUI does
+/// not offer. The Codex CLI's `[tui] status_line` is the same *idea* — a
+/// user-ordered element list — and this table is where ganja spells it.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StatuslineConfig {
+    /// The elements to render, left to right, exactly and only these.
+    ///
+    /// **Absent is the default roster** — every segment today's bar carries,
+    /// in the order it carries them. An element name nothing renders is
+    /// refused at load naming it, [`NotificationEvent`]'s posture.
+    pub elements: Option<Vec<StatuslineElement>>,
+    /// Widest the bar may draw, in terminal cells.
+    ///
+    /// **Absent is the terminal's own width.** Anything past it is truncated
+    /// with an ellipsis rather than wrapped — the OMC HUD's `maxWidth`
+    /// behavior.
+    pub max_width: Option<u16>,
+    /// Whether elements that carry more than a segment's worth — todos, for
+    /// now — may draw a detail line under the bar.
+    ///
+    /// **Absent is no**: an extra line is a row taken from the transcript,
+    /// which only somebody who asked for it should pay.
+    pub detail: Option<bool>,
+}
+
+/// One thing the status bar can render, named the way a config names it.
+///
+/// The first block is today's bar, segment for segment; the second is the
+/// HUD vocabulary the P14 screenshot pinned. Rate-bucket elements (5h/week/
+/// spend meters) are deliberately not here: they need a vendor usage API
+/// ganja does not speak, and a name that renders nothing would be a lie the
+/// loader let through.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatuslineElement {
+    /// What the engine is doing now, with the spinner while it streams.
+    Activity,
+    /// The agent the next turn runs as.
+    Agent,
+    /// The `model (effort)` pair, shown only while an effort is selected.
+    Effort,
+    /// How many messages are waiting for the running turn.
+    Queued,
+    /// How many background `bash` jobs are running.
+    Jobs,
+    /// How many delegated children the running turn has in flight.
+    Tasks,
+    /// How many permission dialogs are waiting behind the open one.
+    Dialogs,
+    /// The session's token and dollar totals.
+    Tokens,
+    /// The notice beside the state — failures, MCP servers out of reach.
+    Notice,
+    /// The key reminders, right-aligned as they always were.
+    Hints,
+    /// The repository and branch, on their own line above the bar.
+    Git,
+    /// The active model, in the screenshot's `Model: <name>` label form.
+    Model,
+    /// The context meter, `ctx:[####----]NN%`.
+    Context,
+    /// How long this session has been open, `session:2m`.
+    Session,
+    /// The working directory's name.
+    Cwd,
+    /// Todo progress, `todos:N/M` plus the in-progress title.
+    Todos,
 }
 
 /// Which notification moments a `tui.notifications` key asked for.
@@ -1039,6 +1118,20 @@ impl Config {
             &mut self.tui.notification_method,
             other.tui.notification_method,
         );
+        // Field by field, like the rest of the `tui` table: a project that
+        // only reorders `elements` keeps the global tier's `max_width`, and
+        // the element list itself replaces wholesale — arrays replace, this
+        // file's rule everywhere but `instructions`.
+        if let Some(incoming) = other.tui.statusline {
+            match &mut self.tui.statusline {
+                Some(existing) => {
+                    overlay(&mut existing.elements, incoming.elements);
+                    overlay(&mut existing.max_width, incoming.max_width);
+                    overlay(&mut existing.detail, incoming.detail);
+                }
+                vacant => *vacant = Some(incoming),
+            }
+        }
         overlay(
             &mut self.webfetch.allow_private,
             other.webfetch.allow_private,
@@ -1613,8 +1706,8 @@ mod tests {
     use super::{
         AgentMode, AgentsConfig, Config, ConfigError, Dialect, HookCommand, HookHandler,
         HookMatcher, LspConfig, McpOauth, McpServer, NonZeroU64, NotificationEvent,
-        NotificationMethod, Notifications, Overrides, ThemeMode, existing, merge_files,
-        project_files, read, split_model,
+        NotificationMethod, Notifications, Overrides, StatuslineConfig, StatuslineElement,
+        ThemeMode, existing, merge_files, project_files, read, split_model,
     };
     use crate::permission::{Action, RuleSet};
 
@@ -1976,6 +2069,100 @@ mod tests {
             merged.tui.notification_method(),
             NotificationMethod::Bel,
             "the method it said nothing about stays"
+        );
+    }
+
+    /// The roster is user-ordered and exact: what the config names, in the
+    /// order it names it, is what the bar renders (**D469**).
+    #[test]
+    fn a_statusline_roster_keeps_the_order_the_config_wrote() {
+        let config = parse(
+            r#"{"tui": {"statusline": {
+              "elements": ["model", "context", "tokens"],
+              "max_width": 120,
+              "detail": true
+            }}}"#,
+        )
+        .expect("it parses");
+
+        let statusline = config.tui.statusline.expect("the table was written");
+        assert_eq!(
+            statusline.elements,
+            Some(vec![
+                StatuslineElement::Model,
+                StatuslineElement::Context,
+                StatuslineElement::Tokens,
+            ])
+        );
+        assert_eq!(statusline.max_width, Some(120));
+        assert_eq!(statusline.detail, Some(true));
+    }
+
+    /// An element name nothing renders is refused naming it — serde's closed
+    /// enum, the same refusal an unknown notification event gets.
+    #[test]
+    fn an_element_name_nothing_renders_is_refused_by_name() {
+        let error = parse(r#"{"tui": {"statusline": {"elements": ["contextbar"]}}}"#)
+            .expect_err("an unknown element name is refused");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("contextbar"), "{message}");
+        assert!(
+            message.contains("context"),
+            "the refusal should list what the roster does have: {message}"
+        );
+    }
+
+    /// The statusline table is curated like the `tui` table above it.
+    #[test]
+    fn a_key_the_statusline_table_does_not_have_is_refused_by_name() {
+        let error = parse(r#"{"tui": {"statusline": {"zzz_probe": 1}}}"#)
+            .expect_err("an unknown key inside statusline is refused");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("zzz_probe"), "{message}");
+    }
+
+    /// Field by field, like the rest of the `tui` table: a project that only
+    /// reorders elements keeps the global tier's width cap, and a tier that
+    /// says nothing leaves the whole table alone.
+    #[test]
+    fn a_closer_tier_overlays_the_statusline_table_field_by_field() {
+        let mut merged =
+            parse(r#"{"tui": {"statusline": {"elements": ["model"], "max_width": 100}}}"#)
+                .expect("it parses");
+        merged.merge(
+            parse(r#"{"tui": {"statusline": {"elements": ["context", "tokens"]}}}"#)
+                .expect("it parses"),
+        );
+
+        let statusline = merged.tui.statusline.expect("the table survives the merge");
+        assert_eq!(
+            statusline.elements,
+            Some(vec![StatuslineElement::Context, StatuslineElement::Tokens]),
+            "the closer tier's list replaces wholesale"
+        );
+        assert_eq!(
+            statusline.max_width,
+            Some(100),
+            "the width it said nothing about stays"
+        );
+
+        let mut untouched =
+            parse(r#"{"tui": {"statusline": {"detail": true}}}"#).expect("it parses");
+        untouched.merge(parse(r#"{"tui": {}}"#).expect("it parses"));
+        assert_eq!(
+            untouched.tui.statusline,
+            Some(StatuslineConfig {
+                elements: None,
+                max_width: None,
+                detail: Some(true),
+            }),
+            "a tier that says nothing leaves the table alone"
         );
     }
 

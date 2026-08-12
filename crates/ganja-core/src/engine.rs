@@ -70,6 +70,22 @@ use crate::{
 /// one is evicted.
 pub const EVENT_CAPACITY: usize = 1024;
 
+/// How full the current session's context is, as [`Engine::context_estimate`]
+/// answers it: the estimate the last request stamped, and the window the
+/// catalog sizes the active model at — absent for a model it does not know,
+/// which is also the session that never auto-compacts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextEstimate {
+    /// Estimated tokens the next request will carry —
+    /// [`SessionInfo::context_tokens`], the measure compaction compares
+    /// against the window. Zero before a first turn, and always zero on an
+    /// engine built without storage, which stores no measure to read.
+    pub tokens: u64,
+    /// The catalog's context window for the active model, or [`None`] for an
+    /// uncataloged one.
+    pub window: Option<u64>,
+}
+
 /// A command the engine refused.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -1581,6 +1597,36 @@ impl Engine {
             .expect("the live session is never poisoned")
             .info
             .clone()
+    }
+
+    /// How full the current session's context is against its model's window —
+    /// the same two numbers compaction reads at turn start
+    /// ([`crate::session`]'s trigger: stored [`SessionInfo::context_tokens`]
+    /// against the catalog's `context_window`), exposed for a status display
+    /// to poll on its tick, exactly as [`Engine::jobs`] is. Deliberately not a
+    /// protocol event: the measure only moves when a request finishes, and a
+    /// frontend already ticks.
+    #[must_use]
+    pub fn context_estimate(&self) -> ContextEstimate {
+        let tokens = self
+            .persistence
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .live
+                    .lock()
+                    .expect("the live session is never poisoned")
+                    .info
+                    .as_ref()
+                    .map(|info| info.context_tokens)
+            })
+            .unwrap_or(0);
+        // Absent for an uncataloged model, the same answer compaction gives:
+        // only the catalog can say what fits, and inventing a denominator
+        // would put a percentage on a window nobody measured.
+        let window = catalog::model(&self.model()).map(|model| model.context_window);
+
+        ContextEstimate { tokens, window }
     }
 
     /// Installs the stored session `id` as the engine's current one and
@@ -3942,6 +3988,75 @@ mod tests {
         for request in requests.iter() {
             assert_eq!(request.system.as_deref(), Some(SYSTEM));
         }
+    }
+
+    /// The status bar's context meter polls this the way it polls `jobs()`:
+    /// the estimate is the stored measure compaction reads, and the window is
+    /// the catalog's — both visible without a turn in flight (**D469**).
+    #[tokio::test]
+    async fn the_context_estimate_reports_the_stored_measure_against_the_catalog_window() {
+        let model = crate::catalog::default_model("anthropic")
+            .expect("the catalog has a default for a provider this build ships");
+        let window = crate::catalog::model(model)
+            .expect("the default model is in the catalog")
+            .context_window;
+
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let storage = Storage::open(directory.path().join("storage"));
+        let session = SessionId::ascending();
+        let info = SessionInfo {
+            id: session.clone(),
+            version: storage::VERSION,
+            title: Some("seeded".to_owned()),
+            created: 1,
+            updated: 2,
+            usage: Usage::default(),
+            context_tokens: 1_234,
+            summary: None,
+            agent: None,
+            model: None,
+            effort: None,
+            parent: None,
+            revert: None,
+        };
+        storage.save_info(&info).expect("the seeded record writes");
+
+        let engine = Engine::persistent(
+            Arc::new(FakeProvider::new("ok", std::time::Duration::from_millis(1))),
+            model,
+            Arc::new(Registry::new(Vec::new())),
+            Permissions::default(),
+            storage,
+        );
+
+        let before = engine.context_estimate();
+        assert_eq!(
+            before.tokens, 0,
+            "before a resume there is no session to have measured anything"
+        );
+        assert_eq!(before.window, Some(window));
+
+        engine.resume(&session).await.expect("the session loads");
+
+        let after = engine.context_estimate();
+        assert_eq!(
+            after.tokens, 1_234,
+            "the stored measure is what the bar shows"
+        );
+        assert_eq!(after.window, Some(window));
+    }
+
+    /// A model the catalog does not know has no window to report — the same
+    /// honest absence that keeps such a session from ever auto-compacting.
+    #[tokio::test]
+    async fn the_context_estimate_has_no_window_for_an_uncataloged_model() {
+        let estimate = engine().context_estimate();
+
+        assert_eq!(estimate.tokens, 0, "an ephemeral engine stores no measure");
+        assert_eq!(
+            estimate.window, None,
+            "only the catalog can size a window, and it does not know the fake model"
+        );
     }
 
     /// The successor to `a_second_subscriber_is_refused`, asserting the
