@@ -268,7 +268,7 @@ enum Chooser {
 
 /// What the background model-listing fetch resolves to: the seam's whole
 /// answer, with [`None`] still meaning the catalog owns this provider.
-type WireListing = Option<Result<Vec<provider::ListedModel>, provider::ProviderError>>;
+type WireListing = Option<Result<provider::WireModels, provider::ProviderError>>;
 
 /// The chooser rows a wire listing becomes: the id is what a switch sends,
 /// the display name rides beside it, and the active mark follows the model
@@ -1033,17 +1033,17 @@ impl App {
         let claimed = self.modal_open() || self.dropdown.is_some() || self.files.is_some();
 
         match handle.await {
-            Ok(Some(Ok(models))) if models.is_empty() => {
+            Ok(Some(Ok(listed))) if listed.models.is_empty() => {
                 self.status
                     .set_notice(Some(format!("the {} wire served no models", self.provider)));
             }
-            Ok(Some(Ok(models))) => {
+            Ok(Some(Ok(listed))) => {
                 self.status.set_notice(None);
                 if !claimed {
-                    let rows = wire_rows(&models, &self.model);
+                    let rows = wire_rows(&listed.models, &self.model);
                     self.chooser = Some((Chooser::Models, ListDialog::new(" models ", rows)));
                 }
-                self.wire_models = Some(models);
+                self.wire_models = Some(listed.models);
             }
             // The catalog is this provider's source of truth and it had no
             // rows: the empty list a `/model` on such a provider has always
@@ -2356,32 +2356,43 @@ impl App {
         relative_paths(&self.cwd, &found.output)
     }
 
-    /// Opens the model list over this provider's catalog entries — or, when
-    /// the catalog has none, over the roster its wire serves.
+    /// Opens the model list over the roster this session's *wire* owns where
+    /// there is one, and over this provider's catalog entries otherwise.
+    ///
+    /// The wire wins where it answers, and that is now a decision rather than
+    /// an accident of an empty table: cursor has no catalog rows to lose, but a
+    /// ChatGPT seat's provider has plenty and its offering is still the pinned
+    /// five (**D476**) — offering a session the vendor's whole catalog would
+    /// list models its own backend refuses. `wire_lists_models` is the seam's
+    /// own decision asked synchronously, because this opens a dialog or spawns
+    /// a fetch and cannot await to find out which.
     ///
     /// This provider's only: a switch is same-provider by construction, so a
     /// row for anything else would be a refusal with a nice label on it.
     ///
     /// The wire path runs off the render loop: the fetch is spawned, the tick
     /// that reaps it opens the list, and until then a slow endpoint costs a
-    /// status line rather than a frozen frame.
+    /// status line rather than a frozen frame. That the seat's arm answers
+    /// instantly buys it no shortcut — one lane for both keeps one code path.
     fn open_models(&mut self) {
-        let rows: Vec<list::Row> = catalog::models()
-            .filter(|model| model.provider_id == self.provider)
-            .map(|model| list::Row {
-                value: model.id.to_owned(),
-                label: model.id.to_owned(),
-                detail: Some(model.name.to_owned()),
-                active: model.id == self.model,
-            })
-            .collect();
-        if !rows.is_empty() {
-            self.chooser = Some((Chooser::Models, ListDialog::new(" models ", rows)));
-            return;
+        if !provider::wire_lists_models(&self.provider) {
+            let rows: Vec<list::Row> = catalog::models()
+                .filter(|model| model.provider_id == self.provider)
+                .map(|model| list::Row {
+                    value: model.id.to_owned(),
+                    label: model.id.to_owned(),
+                    detail: Some(model.name.to_owned()),
+                    active: model.id == self.model,
+                })
+                .collect();
+            if !rows.is_empty() {
+                self.chooser = Some((Chooser::Models, ListDialog::new(" models ", rows)));
+                return;
+            }
         }
 
-        // The catalog has nothing, so the wire's listing answers — from the
-        // App-lifetime cache when a fetch already landed it.
+        // The wire's listing answers — from the App-lifetime cache when a
+        // fetch already landed it.
         if let Some(models) = &self.wire_models {
             let rows = wire_rows(models, &self.model);
             self.chooser = Some((Chooser::Models, ListDialog::new(" models ", rows)));
@@ -7246,6 +7257,16 @@ mod tests {
         }
     }
 
+    /// A whole seam answer around `models`. The notice is the seam's to write
+    /// and nothing in this crate renders it — the chooser shows rows — so a
+    /// fixture supplies any of them.
+    fn served(models: Vec<ganja_core::provider::ListedModel>) -> ganja_core::provider::WireModels {
+        ganja_core::provider::WireModels {
+            models,
+            notice: "a listing fixture",
+        }
+    }
+
     /// Ticks until the in-flight listing fetch has been reaped.
     ///
     /// The loop the real select loop runs, minus the frame budget: the fetch
@@ -7348,7 +7369,7 @@ mod tests {
         assert!(app.chooser.is_none(), "nothing to show yet");
 
         landing
-            .send(Some(Ok(vec![listed("planted-one", "Planted One")])))
+            .send(Some(Ok(served(vec![listed("planted-one", "Planted One")]))))
             .expect("the fetch is still listening");
         reap_wire_fetch(&mut app).await;
 
@@ -7388,7 +7409,7 @@ mod tests {
         let mut app = app().with_provider("cursor");
         app.help = Some(Help::new(app.keys.clone()));
         app.wire_fetch = Some(tokio::spawn(async {
-            Some(Ok(vec![listed("planted-one", "Planted One")]))
+            Some(Ok(served(vec![listed("planted-one", "Planted One")])))
         }));
 
         reap_wire_fetch(&mut app).await;
@@ -7408,7 +7429,7 @@ mod tests {
     #[tokio::test]
     async fn a_wire_that_serves_no_models_says_so_instead_of_opening_an_empty_dialog() {
         let mut app = app().with_provider("cursor");
-        app.wire_fetch = Some(tokio::spawn(async { Some(Ok(Vec::new())) }));
+        app.wire_fetch = Some(tokio::spawn(async { Some(Ok(served(Vec::new()))) }));
 
         reap_wire_fetch(&mut app).await;
         assert!(app.chooser.is_none(), "no dialog opens over nothing");
