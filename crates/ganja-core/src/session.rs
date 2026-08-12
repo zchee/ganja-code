@@ -1523,18 +1523,12 @@ fn title_model(
     provider_id: &str,
     session_model: &str,
 ) -> String {
-    // `Iterator::filter` spelled out rather than called as a method:
-    // `futures::StreamExt` is in scope in this module and carries a `filter` of
-    // its own, which makes the bare call ambiguous on a generic parameter. The
-    // concrete `iter::Filter` it answers with is unambiguous again.
-    Iterator::filter(rows, |info| {
-        info.provider_id == provider_id && info.tool_call
-    })
-    .min_by(|a, b| a.pricing.input.total_cmp(&b.pricing.input))
-    // A provider the catalog does not know — and one whose every row was
-    // filtered away — keeps the session's own model, which is the one name
-    // already known to work on this wire.
-    .map_or_else(|| session_model.to_owned(), |info| info.id.clone())
+    rows.filter(|info| info.provider_id == provider_id && info.tool_call)
+        .min_by(|a, b| a.pricing.input.total_cmp(&b.pricing.input))
+        // A provider the catalog does not know — and one whose every row was
+        // filtered away — keeps the session's own model, which is the one name
+        // already known to work on this wire.
+        .map_or_else(|| session_model.to_owned(), |info| info.id.clone())
 }
 
 /// Upstream's title cleaning: `<think>` blocks stripped, the first non-empty

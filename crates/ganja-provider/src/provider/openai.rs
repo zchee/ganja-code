@@ -684,8 +684,9 @@ impl Mapping {
 /// shape of a gateway's error chunk — stops reading as a body that carried
 /// nothing.
 fn failure(error: &Value) -> ProviderError {
+    // Not logged here: the failure is warned once, redacted, at
+    // `provider::shielded`, the seam that holds the credential to mask with.
     let message = super::reported(error);
-    tracing::warn!(wire = ID, message, "the turn died mid-stream");
 
     match error["code"]
         .as_u64()
