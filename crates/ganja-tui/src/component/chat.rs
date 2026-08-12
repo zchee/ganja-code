@@ -130,6 +130,10 @@ struct Entry {
     /// Only a resume can know this — a live message is equally unfinished
     /// while it streams, and there the absence means "still arriving".
     interrupted: bool,
+    /// Why the turn behind this reply died, when it did: the provider's own
+    /// words, painted under the reply where the person is looking rather than
+    /// squeezed into the status bar's one line.
+    error: Option<String>,
     /// Stage 1 of the cache: one parsed markdown document per assistant text
     /// part. Deliberately *not* inside [`Wrapped`] — a resize and a streamed
     /// delta both clear that, and neither is a reason to parse again.
@@ -175,10 +179,27 @@ impl Chat {
             role: message.role,
             parts: message.parts,
             interrupted,
+            error: None,
             markdown: HashMap::new(),
             wrapped: None,
         });
         self.follow_tail();
+    }
+
+    /// Paints `error` under the entry it ended, in the transcript the person
+    /// is actually looking at when a turn dies. Answers whether the entry
+    /// exists — a failure so early that no reply ever started has nowhere
+    /// here to land, and the caller still owns a status-bar fallback for it.
+    pub fn set_error(&mut self, message_id: &MessageId, error: String) -> bool {
+        let Some(entry) = self.entry_mut(message_id) else {
+            return false;
+        };
+
+        entry.error = Some(error);
+        entry.wrapped = None;
+        self.follow_tail();
+
+        true
     }
 
     /// Every entry on screen, oldest first, as its role and its parts.
@@ -712,6 +733,15 @@ impl Entry {
                 | PartBody::Patch { .. }
                 | PartBody::Reasoning { .. } => {}
             }
+        }
+        if let Some(error) = &self.error {
+            // The `[interrupted]` marker's own shape, because it answers the
+            // same question — why this reply stops where it does.
+            lines.extend(
+                wrap(&format!("[error] {error}"), usize::from(width))
+                    .into_iter()
+                    .map(|line| Line::styled(line, theme.error)),
+            );
         }
         if self.interrupted {
             lines.extend(
@@ -1547,6 +1577,36 @@ mod tests {
         assert!(
             !lines.iter().any(|line| line.contains("[running] shell")),
             "the pending block should have been replaced, not kept alongside, got {lines:?}"
+        );
+    }
+
+    /// A dead turn's reason belongs where the person is looking: the
+    /// provider's words land under the reply they ended, in the error style,
+    /// and a message the transcript never met says so instead of vanishing.
+    #[test]
+    fn a_failed_turns_error_is_painted_under_its_reply() {
+        let mut chat = Chat::default();
+        let reply = Message::assistant("canned");
+        chat.start_message(reply.clone());
+
+        assert!(
+            chat.set_error(
+                &reply.id,
+                "Our servers are currently overloaded.".to_owned()
+            ),
+            "the reply is on the transcript, so the error has a home"
+        );
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("[error] Our servers are currently overloaded.")),
+            "the error paints under the reply, got {lines:?}"
+        );
+
+        assert!(
+            !chat.set_error(&MessageId::from("msg_ghost".to_owned()), "lost".to_owned()),
+            "an entry the transcript never met reports itself unplaceable"
         );
     }
 

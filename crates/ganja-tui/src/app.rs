@@ -3978,8 +3978,16 @@ impl App {
                 if let Some(usage) = usage {
                     self.record(&message_id, &usage);
                 }
-                if error.is_some() {
-                    self.status.set_notice(error);
+                if let Some(error) = error {
+                    // The transcript is where a person is looking when a turn
+                    // dies, so the provider's words land there, under the
+                    // reply they cut short; the status bar keeps only its
+                    // `failed` activity state. A failure so early that no
+                    // reply entry exists falls back to the notice — somewhere
+                    // beats nowhere.
+                    if !self.chat.set_error(&message_id, error.clone()) {
+                        self.status.set_notice(Some(error));
+                    }
                 }
             }
         }
@@ -4795,6 +4803,61 @@ mod tests {
         .await
         .expect("a turn end is handled");
         assert!(!app.status.is_streaming());
+    }
+
+    /// The provider's dying words land in the transcript, where the person is
+    /// looking, and not in the status bar — whose one line keeps only the
+    /// failed state. A failure whose reply never started still lands
+    /// somewhere: the notice.
+    #[tokio::test]
+    async fn a_provider_error_lands_in_the_transcript_and_not_the_status_bar() {
+        let mut app = app();
+        let reply = Message::assistant("canned");
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
+            message: reply.clone(),
+        }))
+        .await
+        .expect("a message start is handled");
+        app.handle(AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
+            message_id: reply.id,
+            reason: FinishReason::Failed,
+            usage: None,
+            error: Some("Our servers are currently overloaded.".to_owned()),
+            completed: 0,
+        }))
+        .await
+        .expect("a turn end is handled");
+
+        let mut terminal = terminal(120, 12);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("[error] Our servers are currently overloaded."),
+            "the transcript carries the provider's words, got:\n{}",
+            screen(&terminal)
+        );
+        assert!(
+            !status_line(&mut app).contains("overloaded"),
+            "the status bar does not repeat them: {}",
+            status_line(&mut app)
+        );
+
+        app.handle(AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
+            message_id: MessageId::from("msg_ghost".to_owned()),
+            reason: FinishReason::Failed,
+            usage: None,
+            error: Some("dead before a word".to_owned()),
+            completed: 0,
+        }))
+        .await
+        .expect("a turn end is handled");
+        assert!(
+            status_line(&mut app).contains("dead before a word"),
+            "a failure with no reply entry still lands somewhere: {}",
+            status_line(&mut app)
+        );
     }
 
     /// A turn the provider refused ends the same way any other does, with the
