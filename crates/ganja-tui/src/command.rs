@@ -61,6 +61,9 @@ pub enum Action {
     Context,
     /// Open the `/usage` panel: what this session has spent (**D471**).
     Usage,
+    /// Open the `/plugin` dialog: every installed plugin's state and
+    /// components, with the store's own actions beside them (**D474**).
+    Plugin,
     /// Open the key and command reference.
     Help,
     /// Leave.
@@ -104,6 +107,7 @@ impl Action {
             | Self::Mcp
             | Self::Context
             | Self::Usage
+            | Self::Plugin
             | Self::Help
             | Self::Copy
             | Self::CopyMessage
@@ -280,6 +284,19 @@ pub const COMMANDS: &[Entry] = &[
         aliases: &[],
         title: "Session usage",
         description: "See what this session has spent, and its cache hit rate",
+        category: Category::System,
+        suggested: false,
+    },
+    // Claude Code's `/plugin`, over ganja's own install store — no upstream
+    // opencode counterpart, like the whole plugin system (**D472**; the
+    // dialog itself is **D474**). `System` because the store is this build's,
+    // not the conversation's.
+    Entry {
+        action: Action::Plugin,
+        name: "plugin",
+        aliases: &[],
+        title: "Plugins",
+        description: "See the installed plugins; add, install, enable, disable or reload one",
         category: Category::System,
         suggested: false,
     },
@@ -660,6 +677,7 @@ mod tests {
             ("mcp", &[][..], Action::Mcp),
             ("context", &[][..], Action::Context),
             ("usage", &[][..], Action::Usage),
+            ("plugin", &[][..], Action::Plugin),
             ("help", &[][..], Action::Help),
             ("exit", &["quit", "q"][..], Action::Exit),
             ("copy", &[][..], Action::Copy),

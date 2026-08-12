@@ -20,7 +20,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | 機能 | キー | ganja |
 |---|---|---|
 | [`@` ファジー検索+ Tab 確定](https://developers.openai.com/codex/cli) | `@` + Tab | ✅ Tab で確定・Enter と同一挙動;ディレクトリ降下(`@dir`→`@dir/`)は未実装 — ganja のウォーカーはファイルのみを返す |
-| [Esc-Esc バックトラック](https://developers.openai.com/codex/cli) | Esc Esc | ⚠️ アイドル時の Esc Esc は ganja 自前のリワインドピッカーを開く — 過去のユーザーメッセージをチェックポイントとして選び、Both/Conversation/Files のスコープを選択;Codex と異なり composer へ過去プロンプトを書き戻して編集する機構はなく、アイドル時限定(実行中の Esc は従来通りキャンセル) |
+| [Esc-Esc バックトラック](https://developers.openai.com/codex/cli) | Esc Esc | ✅ アイドル時の Esc Esc がバックトラックウォークに入る(D467): 最新のユーザーメッセージがトランスクリプト上でハイライトされ、さらに Esc で一つずつ古い方へ、Enter でその直前まで巻き戻し**かつそのプロンプトを composer へ書き戻して編集できる**;他のキーは何も巻き戻さず抜け、実行中の Esc は従来通りキャンセル、`/rewind` は二段階スコープピッカーのまま |
 | [メッセージキュー](https://developers.openai.com/codex/cli) | 実行中に Enter | ✅ 実行中のターンへ次のステップ境界で steer(`Command::Steer`)— Codex 自身の `input_queue`/`inject` と同じ形;steer できないもの(拒否・未消費・スラッシュコマンド)は再生キューにフォールバック(Codex の `queued_user_messages` 側に相当) |
 | [クリップボード画像ペースト](https://developers.openai.com/codex/cli) | Ctrl+V | ✅ PNG をプロセス内エンコード(OS ツール呼出しなし)し、`@` mention パイプライン経由で添付 |
 | [スラッシュコマンド補完](https://developers.openai.com/codex/cli) | `/` | ✅ |
@@ -37,11 +37,11 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | 機能 | 補足 | ganja |
 |---|---|---|
 | [トランスクリプトオーバーレイ](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ 同じキー、3タブ(完全な tool/MCP 入出力を含む展開トランスクリプト・生イベントログ・ターン毎トークン表);フルターミナル占有とバナーはこのオーバーレイ独自の表現、フッター文言は Claude Code の Ctrl+O から |
-| [ステータスライン構成](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ❌ 固定ステータスバー(テーマは✅) |
+| [ステータスライン構成](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ✅ `tui.statusline` の要素ロースター(D469): ユーザー順の名前付き要素、幅対応、OMC HUD の描画形(メーター・git 行・任意の詳細行);要素語彙は Codex の id リストではなく ganja 自身のもので、未知の名前はロード時に拒否 |
 | [オンボーディングフロー](https://developers.openai.com/codex/cli) | 初回起動時の認証選択(ChatGPT OAuth / API キー)・config 初期化 | ❌ ganja はステータスバー通知付きで fake プロバイダ起動;`auth login` は別の CLI 手順 |
 | [承認ダイアログ](https://github.com/openai/codex/blob/main/docs/getting-started.md) | 実行前のコマンド/パッチのプレビュー;承認・セッション内承認・フィードバック付き拒否 | ⚠️ ganja の permission ダイアログ(allow / always / deny)— "always" はセッションと共に消えず、プロジェクト毎ストアに永続化 |
 | [ネイティブ diff 描画](https://developers.openai.com/codex/cli) | `apply_patch` の変更を適用前に色付き unified diff で表示 | ⚠️ 編集毎のインライン unified diff;適用前プレビュー段はなし(permission ダイアログが呼出しを運ぶ) |
-| [デスクトップ/ターミナル通知](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] notifications`(turn-complete・approval-requested)・`notification_method` osc9/bel | ❌ ステータスバー通知のみ |
+| [デスクトップ/ターミナル通知](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] notifications`(turn-complete・approval-requested)・`notification_method` osc9/bel | ✅ `tui.notifications` は bool か同じイベントフィルタ、`notification_method` は osc9/bel、端末自身のフォーカスイベントでゲートされ注視中の端末は決して鳴らない(D468) |
 | keybind カスタマイズ *(低確度)* | config 経由の限定的な付替え | ⚠️ ganja の `keybinds` マップは6アクション・カンマ区切り代替・空値で解除 |
 
 ## 3. モード・実行
