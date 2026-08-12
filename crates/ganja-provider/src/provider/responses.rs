@@ -1112,7 +1112,23 @@ impl Mapper for Mapping {
             }
             // A chunk-level error, which is how this API reports a failure that
             // happened after the status was already 200.
-            "error" => events.push(ProviderEvent::Failed(failure(&chunk))),
+            "error" => {
+                // Field *names* only, both levels: an error frame's keys are
+                // schema, never content, so this can say what shape the frame
+                // had without quoting a word of what it said — the words reach
+                // the log redacted, through `provider::shielded`. This is the
+                // ground truth to read the next mid-stream 500 against.
+                let fields: Vec<&str> = chunk
+                    .as_object()
+                    .map(|object| object.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                let nested: Vec<&str> = chunk["error"]
+                    .as_object()
+                    .map(|object| object.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                tracing::debug!(?fields, ?nested, "an error frame arrived");
+                events.push(ProviderEvent::Failed(failure(&chunk)));
+            }
             other => tracing::debug!(event = other, "an unmapped responses event"),
         }
     }

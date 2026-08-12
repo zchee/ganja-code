@@ -387,6 +387,14 @@ impl ProviderError {
 /// [`shielded`] for everything a wire maps into a mid-stream failure — before
 /// any of it becomes a message or a log line.
 pub(super) fn reported(error: &serde_json::Value) -> String {
+    // A frame shaped `{"type": "error", "error": {…}}` keeps its detail one
+    // level down — the codex backend's mid-stream 500 arrived exactly so,
+    // reading as `(type: error)` and nothing else until this looked inside.
+    let error = match &error["error"] {
+        nested @ serde_json::Value::Object(_) => nested,
+        _ => error,
+    };
+
     if let Some(message) = error["message"].as_str()
         && !message.trim().is_empty()
     {
@@ -1232,6 +1240,26 @@ mod tests {
         assert!(
             structured.contains("code: model_overloaded") && !structured.contains("nested"),
             "an object-valued field is not a name: {structured}"
+        );
+
+        // The wrapped shape the codex backend's mid-stream 500 wore: the
+        // detail lives one level down, and reading only the wrapper renders
+        // the useless `(type: error)`.
+        assert_eq!(
+            reported(&serde_json::json!({
+                "type": "error",
+                "error": {"type": "server_error", "message": "boom"},
+            })),
+            "boom",
+            "a nested error object's message outranks the wrapper's naming"
+        );
+        let wrapped = reported(&serde_json::json!({
+            "type": "error",
+            "error": {"code": "overloaded"},
+        }));
+        assert!(
+            wrapped.contains("code: overloaded") && !wrapped.contains("type: error"),
+            "a nested error object's naming outranks the wrapper's: {wrapped}"
         );
 
         for empty in [
