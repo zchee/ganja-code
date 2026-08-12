@@ -5,9 +5,11 @@
 //! for fuzzy-searching remembered prompts, one for rewinding to a checkpoint,
 //! one for the configured MCP servers and what to do about them, the strip of
 //! messages waiting for the running turn, and the two inline menus the editor
-//! raises — one on a leading slash, one on an `@`.
+//! raises — one on a leading slash, one on an `@` — plus the two read-only
+//! panels `/context` and `/usage` raise over the same chrome.
 
 pub mod chat;
+pub mod context;
 pub mod dropdown;
 pub mod editor;
 pub mod effort;
@@ -25,6 +27,7 @@ pub mod search;
 pub mod sessions;
 pub mod status;
 pub mod themes;
+pub mod usage;
 
 /// The first row on screen: far enough down to keep the selected one visible,
 /// and no further. Every scrolling list here answers it the same way.

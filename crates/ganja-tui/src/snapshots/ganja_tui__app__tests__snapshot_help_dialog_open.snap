@@ -13,11 +13,11 @@ One │/compact       Compact session                                        │
 +let│/agents        Switch agent                                           │    
 cont│/themes        Switch theme                                           │    
 [err│/mcp           MCP servers                                            │    
-refu│/help          Help                                                   │    
-    │/exit          Exit the app                     ctrl+c, ctrl+q, ctrl+d│    
-    │/copy          Copy session transcript                                │    
+refu│/context       Context usage                                          │    
+    │/usage         Session usage                                          │    
+    │/help          Help                                                   │    
     │                                                                      │    
-    │[up/down] scroll   [Esc] close                              1-12 of 24│    
+    │[up/down] scroll   [Esc] close                              1-12 of 26│    
     └──────────────────────────────────────────────────────────────────────┘    
                                                                                 
 ┌ message ─────────────────────────────────────────────────────────────────────┐

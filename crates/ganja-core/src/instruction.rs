@@ -93,6 +93,11 @@ const PROJECT: [&str; 3] = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
 /// What every instruction file is introduced with.
 const HEADER: &str = "Instructions from: ";
 
+/// The first line of the skills block, shared with [`suffix_measure`] so the
+/// splitter and the composer can never disagree about where the block starts.
+const SKILLS_HEAD: &str =
+    "Skills provide specialized instructions and workflows for specific tasks.";
+
 /// Days in each month of a non-leap year, for [`civil_date`].
 const MONTH_LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
@@ -287,6 +292,46 @@ fn suffix_from(
     (!prompt.is_empty()).then_some(prompt)
 }
 
+/// A composed suffix taken back apart at the seams [`suffix_from`] joined it
+/// at, as character counts per category — what `Engine::context_breakdown`
+/// prices the `/context` categories from (P14 **D470**).
+///
+/// The three parts partition the string: their sum is always the whole
+/// suffix's character count, which is what lets the breakdown's grid total
+/// equal its accessor total by construction rather than by luck.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SuffixMeasure {
+    /// The environment block: everything before the first instruction file.
+    pub environment: usize,
+    /// The instruction files, headers included.
+    pub instructions: usize,
+    /// The skills block, when one was composed.
+    pub skills: usize,
+}
+
+/// Measures the composed `suffix` by the markers [`suffix_from`] wrote into
+/// it: the first [`HEADER`] line opens the instruction files, and
+/// [`SKILLS_HEAD`] opens the skills block, always last.
+///
+/// A measurement of the string the request path already holds — never a
+/// second composition, which could disagree with what the wire carries — so
+/// this is an estimate's split, not a parse: an instruction file that itself
+/// contains one of the markers shifts characters between neighbouring
+/// categories and changes no total.
+pub(crate) fn suffix_measure(suffix: &str) -> SuffixMeasure {
+    let files = suffix.find(&format!("\n{HEADER}"));
+    let skills = suffix.find(&format!("\n{SKILLS_HEAD}"));
+
+    let environment_end = files.or(skills).unwrap_or(suffix.len());
+    let instructions_end = skills.unwrap_or(suffix.len());
+
+    SuffixMeasure {
+        environment: suffix[..environment_end].chars().count(),
+        instructions: suffix[environment_end..instructions_end].chars().count(),
+        skills: suffix[instructions_end..].chars().count(),
+    }
+}
+
 /// What the model is told about the skills it can load, or nothing when it can
 /// load none it could choose between.
 ///
@@ -305,9 +350,9 @@ fn skills_block(skills: &[skill::Skill]) -> Option<String> {
         return None;
     }
 
-    let mut block = String::from(
-        "Skills provide specialized instructions and workflows for specific tasks.\n\
-         Use the skill tool to load a skill when a task matches its description.\n\
+    let mut block = String::from(SKILLS_HEAD);
+    block.push_str(
+        "\nUse the skill tool to load a skill when a task matches its description.\n\
          <available_skills>",
     );
     for skill in described {
@@ -624,7 +669,7 @@ mod tests {
 
     use super::{
         ANTHROPIC, DEFAULT, GPT, base_prompt, civil_date, compose, discover, environment, find_up,
-        glob, resolve_entry, skill, skills_block, suffix_from, today,
+        glob, resolve_entry, skill, skills_block, suffix_from, suffix_measure, today,
     };
     use crate::config::{Config, SkillsConfig};
 
@@ -1291,5 +1336,88 @@ mod tests {
         };
 
         assert_eq!(config.skill_paths(&root), vec![root.join("tools")]);
+    }
+
+    /// The splitter partitions what the composer joined: the three category
+    /// counts always sum to the whole suffix, and each seam lands where the
+    /// composer wrote its marker — which is what lets `/context`'s categories
+    /// be a split of the request path's own string rather than a second
+    /// composition (P14 **D470**).
+    #[test]
+    fn the_suffix_measure_partitions_the_composed_suffix_at_its_own_seams() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        fs::create_dir_all(&root).expect("the fixture tree is creatable");
+        checkout(&root);
+        plant(&root.join("AGENTS.md"), "always run the tests");
+        let skills = root.join("skills");
+        plant_skill(
+            &skills,
+            "porting",
+            "name: porting\ndescription: How to port.",
+        );
+
+        let suffix = suffix_from(
+            &[],
+            &skill::Roots::none().with_paths([skills]),
+            &Config::default(),
+            &root,
+            "claude-sonnet-5",
+        )
+        .expect("the environment block always says something");
+        let measure = suffix_measure(&suffix);
+
+        assert_eq!(
+            measure.environment + measure.instructions + measure.skills,
+            suffix.chars().count(),
+            "the three parts partition the suffix"
+        );
+        let environment: String = suffix.chars().take(measure.environment).collect();
+        assert!(
+            environment.contains("<env>") && environment.ends_with("</env>"),
+            "the first part is exactly the environment block: {environment}"
+        );
+        let instructions: String = suffix
+            .chars()
+            .skip(measure.environment)
+            .take(measure.instructions)
+            .collect();
+        assert!(
+            instructions.contains("always run the tests"),
+            "the middle part holds the instruction files: {instructions}"
+        );
+        let skills_part: String = suffix
+            .chars()
+            .skip(measure.environment + measure.instructions)
+            .collect();
+        assert!(
+            skills_part.contains("<available_skills>"),
+            "the tail is the skills block: {skills_part}"
+        );
+    }
+
+    /// A suffix with no instruction files and no skills — every scripted and
+    /// golden run's — is all environment, with the other two parts at zero
+    /// rather than mis-attributed.
+    #[test]
+    fn a_bare_environment_suffix_measures_as_environment_alone() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        fs::create_dir_all(&root).expect("the fixture tree is creatable");
+        checkout(&root);
+
+        let suffix = suffix_from(
+            &[],
+            &skill::Roots::none(),
+            &Config::default(),
+            &root,
+            "fake-1",
+        )
+        .expect("the environment block always says something");
+        let measure = suffix_measure(&suffix);
+
+        assert_eq!(measure.environment, suffix.chars().count());
+        assert_eq!(measure.instructions, 0);
+        assert_eq!(measure.skills, 0);
     }
 }

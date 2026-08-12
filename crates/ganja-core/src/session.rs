@@ -2003,6 +2003,30 @@ async fn drive_compact(turn: &Turn) -> (Message, Option<Outcome>) {
     }
 }
 
+/// Tokens `chars` characters of prompt are estimated at: four characters per
+/// token, the compaction fit guard's own convention.
+///
+/// The one estimator this port has (P14 **D470**): `Engine::context_breakdown`
+/// prices every category through this so `/context`'s grid and the summarize
+/// guard above can never disagree about what a character costs. A saturated
+/// count only ever fails toward estimating larger, the safe direction for
+/// both callers.
+pub(crate) fn estimate_tokens(chars: usize) -> u64 {
+    u64::try_from(chars).unwrap_or(u64::MAX) / 4
+}
+
+/// Tokens of a catalog window the auto-compaction trigger holds back: the
+/// trigger in [`compact_if_needed`] fires once the stored measure reaches 90%
+/// of the window (`tokens × 10 ≥ window × 9`), so the top tenth is space a
+/// session never gets to fill before a compaction claims it.
+///
+/// Exposed through `ContextBreakdown::reserve` so `/context`'s
+/// autocompact-reserve row and its tests read this one derivation rather than
+/// re-deriving the complement of the trigger themselves (P14 **D470**).
+pub(crate) fn compaction_reserve(window: u64) -> u64 {
+    window.saturating_sub(window.saturating_mul(9) / 10)
+}
+
 /// Summarizes the live window into a fresh assistant message when the last
 /// request already filled 90% of the model's context window, then resets the
 /// window to that summary so the user's turn proceeds inside budget.
@@ -2109,7 +2133,7 @@ async fn compact_if_needed(
     // estimated at four characters per token — is not sent at all. Skipping
     // keeps the turn alive; the alternative is a summarize request that
     // fails or loops on the very overflow it exists to relieve.
-    let estimated = u64::try_from(prompt.chars().count()).unwrap_or(u64::MAX) / 4;
+    let estimated = estimate_tokens(prompt.chars().count());
     if estimated > context_window.saturating_sub(SUMMARY_OUTPUT_TOKENS) {
         tracing::warn!(
             estimated,
