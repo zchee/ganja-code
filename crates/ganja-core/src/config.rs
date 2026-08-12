@@ -1091,6 +1091,18 @@ impl Config {
         tiers.extend(project_files(cwd));
 
         let mut config = merge_files(&tiers)?;
+        // Installed plugins contribute here — below every explicit tier,
+        // above the builtin defaults each surface resolves later — and per
+        // surface rather than as a fourth tier through [`Config::merge`],
+        // whose per-event-key `hooks` replacement would silently kill every
+        // plugin hook (**D473**; the merge table is `crate::plugin`'s module
+        // doc). No store, no state file: nothing to apply, silently.
+        if let Some(store) = crate::plugin::Store::discover() {
+            crate::plugin::apply(&store, &mut config).map_err(|error| ConfigError::Parse {
+                path: store.state_path(),
+                message: error.to_string(),
+            })?;
+        }
         config.overrides = overrides.clone();
 
         Ok(config)
