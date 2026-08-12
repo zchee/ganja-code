@@ -47,7 +47,7 @@ use std::{
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use serde::{
     Deserialize,
-    de::{self, MapAccess, Visitor},
+    de::{self, MapAccess, SeqAccess, Visitor},
 };
 use url::Url;
 
@@ -646,6 +646,11 @@ pub struct Config {
     /// frontend's question, and core has no way to answer it.
     #[serde(default)]
     pub keybinds: BTreeMap<String, String>,
+    /// What the terminal frontend does beyond drawing frames; see
+    /// [`TuiConfig`]. Kept in core for `keybinds`'s reason: the curated key
+    /// set lives here, even though only the TUI acts on the value.
+    #[serde(default)]
+    pub tui: TuiConfig,
     /// Shell the `bash` tool runs commands in.
     pub shell: Option<String>,
     /// Custom commands, by name.
@@ -747,6 +752,121 @@ impl AgentsConfig {
     pub fn concurrency(&self) -> usize {
         self.concurrency.unwrap_or(Self::DEFAULT_CONCURRENCY)
     }
+}
+
+/// What the terminal frontend does beyond drawing frames.
+///
+/// Core carries it the way it carries `keybinds`: parsed and refused-unknown
+/// here, acted on only by the TUI, because a curated key set that stopped at
+/// the crate boundary would leave a misspelled `tui` key silently ignored —
+/// the exact failure this module refuses everywhere else. Not a key upstream
+/// has: what it configures is the Codex CLI's focus-gated terminal
+/// notification, which opencode does not make (**D468**).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TuiConfig {
+    /// Which moments are announced while the terminal is not looking.
+    ///
+    /// **Absent is none of them**, exactly as `false` is — a terminal that
+    /// rings unasked is noise, not a notification. `true` is both moments; a
+    /// list is exactly the moments it names.
+    pub notifications: Option<Notifications>,
+    /// How an announcement reaches the terminal.
+    ///
+    /// **Absent is [`NotificationMethod::Osc9`]**, and an [`Option`] for
+    /// [`AgentsConfig::concurrency`]'s reason: a tier that says nothing has
+    /// to leave the tier below it alone. [`TuiConfig::notification_method`]
+    /// is what reads it.
+    pub notification_method: Option<NotificationMethod>,
+}
+
+impl TuiConfig {
+    /// Whether this config asks for `event` to be announced.
+    #[must_use]
+    pub fn notifies(&self, event: NotificationEvent) -> bool {
+        self.notifications
+            .as_ref()
+            .is_some_and(|asked| asked.includes(event))
+    }
+
+    /// The method this config asked for, or OSC 9 when it asked for nothing.
+    #[must_use]
+    pub fn notification_method(&self) -> NotificationMethod {
+        self.notification_method.unwrap_or_default()
+    }
+}
+
+/// Which notification moments a `tui.notifications` key asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notifications {
+    /// `true` for both moments, `false` for none of them.
+    Enabled(bool),
+    /// Exactly the moments named.
+    Events(Vec<NotificationEvent>),
+}
+
+impl Notifications {
+    /// Whether `event` is among the moments asked for.
+    #[must_use]
+    pub fn includes(&self, event: NotificationEvent) -> bool {
+        match self {
+            Self::Enabled(enabled) => *enabled,
+            Self::Events(events) => events.contains(&event),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Notifications {
+    /// Hand-written for [`LspConfig`]'s reason: `untagged` discards the error
+    /// every variant produced, and the refusal that matters here — an event
+    /// name nothing announces — must name that event, not report that nothing
+    /// matched.
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Accepts either spelling the `notifications` key may take.
+        struct Shape;
+
+        impl<'de> Visitor<'de> for Shape {
+            type Value = Notifications;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("true, false, or a list of notification event names")
+            }
+
+            fn visit_bool<E: de::Error>(self, enabled: bool) -> Result<Self::Value, E> {
+                Ok(Notifications::Enabled(enabled))
+            }
+
+            fn visit_seq<S: SeqAccess<'de>>(self, seq: S) -> Result<Self::Value, S::Error> {
+                Vec::deserialize(de::value::SeqAccessDeserializer::new(seq))
+                    .map(Notifications::Events)
+            }
+        }
+
+        deserializer.deserialize_any(Shape)
+    }
+}
+
+/// One moment the TUI can announce.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum NotificationEvent {
+    /// A turn finished.
+    TurnComplete,
+    /// A permission or question dialog is waiting for an answer.
+    ApprovalRequested,
+}
+
+/// How an announcement reaches the terminal.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NotificationMethod {
+    /// OSC 9, which terminals that carry it surface as a desktop
+    /// notification. The default because of how it fails: a terminal that
+    /// ignores it shows nothing, where an unwanted bell is a beep every turn.
+    #[default]
+    Osc9,
+    /// BEL, the terminal bell.
+    Bel,
 }
 
 /// What the `webfetch` tool may reach.
@@ -914,6 +1034,11 @@ impl Config {
         overlay(&mut self.shell, other.shell);
         overlay(&mut self.snapshot, other.snapshot);
         overlay(&mut self.agents.concurrency, other.agents.concurrency);
+        overlay(&mut self.tui.notifications, other.tui.notifications);
+        overlay(
+            &mut self.tui.notification_method,
+            other.tui.notification_method,
+        );
         overlay(
             &mut self.webfetch.allow_private,
             other.webfetch.allow_private,
@@ -1487,8 +1612,9 @@ mod tests {
 
     use super::{
         AgentMode, AgentsConfig, Config, ConfigError, Dialect, HookCommand, HookHandler,
-        HookMatcher, LspConfig, McpOauth, McpServer, NonZeroU64, Overrides, ThemeMode, existing,
-        merge_files, project_files, read, split_model,
+        HookMatcher, LspConfig, McpOauth, McpServer, NonZeroU64, NotificationEvent,
+        NotificationMethod, Notifications, Overrides, ThemeMode, existing, merge_files,
+        project_files, read, split_model,
     };
     use crate::permission::{Action, RuleSet};
 
@@ -1742,6 +1868,115 @@ mod tests {
             panic!("expected a parse failure, got {error:?}");
         };
         assert!(message.contains("agents.concurrency"), "{message}");
+    }
+
+    /// `true` is both moments and `false` is none — the same answer absent
+    /// gives — so a config only ever writes the boolean to say something.
+    #[test]
+    fn a_boolean_notifications_key_switches_both_moments_at_once() {
+        let config = parse(r#"{"tui": {"notifications": true}}"#).expect("it parses");
+        assert!(config.tui.notifies(NotificationEvent::TurnComplete));
+        assert!(config.tui.notifies(NotificationEvent::ApprovalRequested));
+
+        let config = parse(r#"{"tui": {"notifications": false}}"#).expect("it parses");
+        assert!(!config.tui.notifies(NotificationEvent::TurnComplete));
+        assert!(!config.tui.notifies(NotificationEvent::ApprovalRequested));
+
+        let config = parse("{}").expect("it parses");
+        assert!(
+            !config.tui.notifies(NotificationEvent::TurnComplete),
+            "absent is none of them"
+        );
+    }
+
+    /// The list form is a selection, not a switch: only the moments it names
+    /// are announced.
+    #[test]
+    fn a_notification_list_names_exactly_the_moments_it_announces() {
+        let config = parse(r#"{"tui": {"notifications": ["turn-complete"]}}"#).expect("it parses");
+        assert!(config.tui.notifies(NotificationEvent::TurnComplete));
+        assert!(!config.tui.notifies(NotificationEvent::ApprovalRequested));
+    }
+
+    /// A misspelled event would be a notification that never fires, silently —
+    /// `check_hooks`'s argument, applied to a smaller vocabulary.
+    #[test]
+    fn an_event_name_nothing_announces_is_refused_by_name() {
+        let error = parse(r#"{"tui": {"notifications": ["turn-done"]}}"#)
+            .expect_err("an event nothing announces is refused");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("turn-done"), "{message}");
+        assert!(
+            message.contains("turn-complete"),
+            "and the refusal lists what would have worked: {message}"
+        );
+    }
+
+    /// The method vocabulary is as closed as the event one.
+    #[test]
+    fn a_notification_method_nothing_sends_is_refused_by_name() {
+        let error = parse(r#"{"tui": {"notification_method": "toast"}}"#)
+            .expect_err("a method nothing sends is refused");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("toast"), "{message}");
+        assert!(
+            message.contains("osc9"),
+            "and the refusal lists what would have worked: {message}"
+        );
+    }
+
+    /// The `tui` table is curated like the top level: a key it does not have
+    /// is a setting that would silently not work.
+    #[test]
+    fn a_key_the_tui_table_does_not_have_is_refused_by_name() {
+        let error = parse(r#"{"tui": {"zzz_probe": 1}}"#)
+            .expect_err("an unknown key inside tui is refused");
+
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("zzz_probe"), "{message}");
+    }
+
+    /// OSC 9 degrades to nothing on a terminal that ignores it, which is the
+    /// right failure for a default.
+    #[test]
+    fn the_notification_method_is_osc9_until_a_config_says_otherwise() {
+        let config = parse(r#"{"tui": {}}"#).expect("it parses");
+        assert_eq!(config.tui.notification_method(), NotificationMethod::Osc9);
+
+        let config = parse(r#"{"tui": {"notification_method": "bel"}}"#).expect("it parses");
+        assert_eq!(config.tui.notification_method(), NotificationMethod::Bel);
+    }
+
+    /// The table merges the way `agents` and `webfetch` do: field by field,
+    /// with a tier that says nothing leaving the tier below it alone.
+    #[test]
+    fn a_closer_tier_overlays_the_tui_table_field_by_field() {
+        let mut merged = parse(r#"{"tui": {"notifications": true, "notification_method": "bel"}}"#)
+            .expect("it parses");
+        merged.merge(
+            parse(r#"{"tui": {"notifications": ["approval-requested"]}}"#).expect("it parses"),
+        );
+
+        assert_eq!(
+            merged.tui.notifications,
+            Some(Notifications::Events(vec![
+                NotificationEvent::ApprovalRequested
+            ])),
+            "the closer tier's selection replaces"
+        );
+        assert_eq!(
+            merged.tui.notification_method(),
+            NotificationMethod::Bel,
+            "the method it said nothing about stays"
+        );
     }
 
     /// Per event, wholesale — the `mcp` arm's semantics, applied for the reason
