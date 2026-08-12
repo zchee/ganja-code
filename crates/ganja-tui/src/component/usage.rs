@@ -1,26 +1,34 @@
 //! The `/usage` dialog: what this session has spent, in Claude Code's panel
-//! language — section headers and horizontal meters — over what ganja
-//! actually holds: the status bar's own running totals, the per-turn rows the
-//! Ctrl+T inspector already keeps, the context estimate the bar's meter
+//! language — section headers, label-value rows, block bars — over what
+//! ganja actually holds: the status bar's running totals, the per-turn rows
+//! the Ctrl+T inspector already keeps, the context estimate the bar's meter
 //! polls, and the cache splits the session record accumulates.
 //!
 //! **D471** (`slash-usage`): upstream opencode has no such surface at all, so
-//! nothing here cites an upstream file. Claude Code's panel leads with
-//! subscription plan-limit meters — the 5h and weekly buckets — which ride a
-//! vendor usage API ganja does not speak; those rows are **explicitly
-//! absent**, with one honest line naming why, rather than drawn empty or
-//! faked (the plan's honest-degradation rule, ruled sufficient for this
-//! phase in Open question 2). The meter shape is the HUD statusline's own
-//! pinned `[####----]` ASCII bar, not Claude's shaded blocks, so one build
-//! draws its meters one way.
+//! nothing here cites an upstream file. The rendering is pinned by real
+//! Claude Code screenshots (2026-08-12, transcribed in the P14 W4f charter):
+//! a `Session` section with a `Total cost:` row and per-model `Usage by
+//! model:` lines — cost in parentheses at the tail — and solid block bars
+//! (filled cells, dim remainder, ` NN%` after) where W4 drew the HUD's ASCII
+//! `[####----]` meter. The HUD status bar deliberately keeps that ASCII
+//! shape ([`crate::component::status`]): the two surfaces differ per pin
+//! now, this one by the screenshot, that one by its own frozen test.
 //!
-//! The totals line **is** [`Totals::segment`] — the status bar's exact
-//! string, not a second formatting of the same numbers (AC5) — and the
-//! per-turn table reuses the inspector's [`TurnUsage`] rows; its few
-//! formatting columns are deliberately duplicated here rather than shared,
-//! because the inspector is another lane's frozen surface and a helper
-//! carved out of it for four format strings would couple two dialogs that
-//! merely look alike.
+//! Claude's panel leads with subscription plan-limit meters — the 5h and
+//! weekly buckets — which ride a vendor usage API ganja does not speak;
+//! those rows are **explicitly absent**, with one honest line naming why,
+//! rather than drawn empty or faked (the plan's honest-degradation rule,
+//! ruled sufficient in Open question 2). Its `Total duration` and code-change
+//! rows are absent the same way: the dialog receives no such data. Two
+//! honest additions ride the pinned shapes: the per-model lines carry a
+//! reasoning item Claude's line lacks, because ganja really tracks that
+//! counter, and the per-turn table stays — inspector data with no Claude
+//! equivalent, kept from W4.
+//!
+//! AC5 still holds by construction: the `Total cost:` value is
+//! [`Totals::cost_usd`] — the status bar's own accumulator, not a second
+//! sum — and the per-model and per-turn rows reuse the inspector's
+//! [`TurnUsage`] records verbatim.
 //!
 //! A snapshot, not a view: everything is read when the dialog opens. Esc
 //! closes it; [`crate::app::App`] owns that key, the same split every other
@@ -31,7 +39,8 @@ use ganja_protocol::Usage as TokenUsage;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Rect},
-    text::{Line, Text},
+    style::Modifier,
+    text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Widget as _},
 };
 
@@ -40,15 +49,18 @@ use crate::{
     theme::Theme,
 };
 
-/// Widest the modal grows, the house width every dialog here uses.
-const MAX_WIDTH: u16 = 76;
+/// Widest the modal grows. Wider than the house 76: the pinned per-model
+/// line — model id, five comma-separated counters, the cost tail — runs to
+/// ~90 columns, and capping at the house width would clip it on every
+/// terminal; narrow terminals still clip it honestly.
+const MAX_WIDTH: u16 = 96;
 
 /// Tallest the modal grows: enough for the sections and a handful of turn
 /// rows; a longer session keeps its newest rows, the ones a person opening
 /// the panel is asking about.
 const MAX_HEIGHT: u16 = 24;
 
-/// Columns inside a meter's brackets, the HUD statusline's own bar width.
+/// Cells in a block bar, the same span of columns the old ASCII meter held.
 const METER_WIDTH: usize = 20;
 
 /// The key hint at the dialog's foot.
@@ -66,11 +78,12 @@ const COUNT_WIDTH: usize = 8;
 /// Everything the dialog shows, read once when `/usage` opens.
 #[derive(Clone, Debug, Default)]
 pub struct Data {
-    /// The status bar's running totals — rendered through their own
-    /// formatter, so the two surfaces cannot disagree (AC5).
+    /// The status bar's running totals — the `Total cost:` row renders their
+    /// own accumulated cost, so the two surfaces cannot disagree (AC5).
     pub totals: Totals,
     /// The session's accumulated splits: cache traffic and reasoning, which
-    /// the running totals collapse.
+    /// the running totals collapse — the cache bar's numerator and
+    /// denominator.
     pub splits: TokenUsage,
     /// `(estimated tokens, window)`, absent for an uncataloged model — the
     /// same pair the status bar's context meter polls.
@@ -107,16 +120,52 @@ impl Usage {
         Some(splits.cache_read_tokens as f64 / input as f64)
     }
 
-    /// The HUD statusline's pinned meter shape: `[####----] NN%`.
-    fn meter(fraction: f64) -> String {
+    /// Per-model sums of the finished turns — the screenshot's `Usage by
+    /// model:` rows — in first-use order. Each turn is priced on its own,
+    /// so a model the catalog cannot price sums its tokens and simply
+    /// carries no cost tail.
+    fn by_model(&self) -> Vec<(String, TokenUsage, Option<f64>)> {
+        let mut rows: Vec<(String, TokenUsage, Option<f64>)> = Vec::new();
+        for turn in &self.data.turns {
+            let cost = catalog::model(&turn.model)
+                .map(|model| catalog::cost(&turn.usage, &model).total_usd);
+            match rows.iter_mut().find(|(model, ..)| *model == turn.model) {
+                Some((_, usage, total)) => {
+                    usage.input_tokens = usage.input_tokens.saturating_add(turn.usage.input_tokens);
+                    usage.output_tokens =
+                        usage.output_tokens.saturating_add(turn.usage.output_tokens);
+                    usage.reasoning_tokens = usage
+                        .reasoning_tokens
+                        .saturating_add(turn.usage.reasoning_tokens);
+                    usage.cache_read_tokens = usage
+                        .cache_read_tokens
+                        .saturating_add(turn.usage.cache_read_tokens);
+                    usage.cache_write_tokens = usage
+                        .cache_write_tokens
+                        .saturating_add(turn.usage.cache_write_tokens);
+                    *total = match (*total, cost) {
+                        (Some(sum), Some(add)) => Some(sum + add),
+                        (kept, added) => kept.or(added),
+                    };
+                }
+                None => rows.push((turn.model.clone(), turn.usage, cost)),
+            }
+        }
+
+        rows
+    }
+
+    /// The pinned block bar: filled cells, dim remainder, the percentage
+    /// after — the caller appends its own phrase (` used`, ` of input read
+    /// from cache`).
+    fn bar(fraction: f64, theme: &Theme) -> Vec<Span<'static>> {
         let filled = ((fraction * METER_WIDTH as f64).round() as usize).min(METER_WIDTH);
 
-        format!(
-            "[{}{}] {:.0}%",
-            "#".repeat(filled),
-            "-".repeat(METER_WIDTH - filled),
-            fraction * 100.0
-        )
+        vec![
+            Span::styled("\u{2588}".repeat(filled), theme.info),
+            Span::styled("\u{2591}".repeat(METER_WIDTH - filled), theme.dim),
+            Span::styled(format!(" {:.0}%", fraction * 100.0), theme.fg),
+        ]
     }
 
     /// Draws the modal centered over `area`.
@@ -129,49 +178,72 @@ impl Usage {
         let available = area.height.saturating_sub(2).clamp(1, MAX_HEIGHT);
         let inner_width = usize::from(width).saturating_sub(2);
         let room = usize::from(available).saturating_sub(2);
+        let header = theme.accent.add_modifier(Modifier::BOLD);
 
         let mut lines = Vec::new();
 
-        // Session: the status bar's own segment string, then the splits it
-        // collapses.
-        lines.push(Line::styled(clip("Session", inner_width), theme.accent));
+        // Session: the pinned label-value rows — the bar's own cost, then
+        // one line per model summed off the inspector's turn rows.
+        lines.push(Line::styled(clip("Session", inner_width), header));
+        let cost = self.data.totals.cost_usd.map_or_else(
+            || "unpriced \u{2014} uncataloged model".to_owned(),
+            |dollars| format!("${dollars:.2}"),
+        );
         lines.push(Line::styled(
-            clip(&format!("  {}", self.data.totals.segment()), inner_width),
+            clip(&format!("  {:<16} {cost}", "Total cost:"), inner_width),
             theme.fg,
         ));
-        let splits = &self.data.splits;
         lines.push(Line::styled(
-            clip(
-                &format!(
-                    "  input {} \u{b7} output {} \u{b7} reasoning {} \u{b7} cache read {} \u{b7} cache write {}",
-                    compact_tokens(splits.input_tokens),
-                    compact_tokens(splits.output_tokens),
-                    compact_tokens(splits.reasoning_tokens),
-                    compact_tokens(splits.cache_read_tokens),
-                    compact_tokens(splits.cache_write_tokens),
-                ),
-                inner_width,
-            ),
-            theme.dim,
+            clip("  Usage by model:", inner_width),
+            theme.fg,
         ));
-        lines.push(Line::raw(""));
-
-        // Context: the same estimate the status bar's meter polls, or the
-        // same honest absence.
-        lines.push(Line::styled(clip("Context", inner_width), theme.accent));
-        match self.data.context {
-            Some((tokens, window)) => {
-                let fraction = (tokens as f64 / window.max(1) as f64).min(1.0);
+        let models = self.by_model();
+        if models.is_empty() {
+            lines.push(Line::styled(clip("    none yet", inner_width), theme.dim));
+        } else {
+            for (model, usage, cost) in models {
+                // Reasoning rides as one more comma item: Claude's line has
+                // no equivalent, but ganja really tracks the counter.
+                let tail = cost.map_or_else(String::new, |dollars| format!(" (${dollars:.2})"));
                 lines.push(Line::styled(
                     clip(
                         &format!(
-                            "  {} of {} tokens \u{2014} estimated",
-                            Self::meter(fraction),
-                            compact_tokens(window),
+                            "    {model}:  {} input, {} output, {} reasoning, {} cache read, {} cache write{tail}",
+                            compact_tokens(usage.input_tokens),
+                            compact_tokens(usage.output_tokens),
+                            compact_tokens(usage.reasoning_tokens),
+                            compact_tokens(usage.cache_read_tokens),
+                            compact_tokens(usage.cache_write_tokens),
                         ),
                         inner_width,
                     ),
                     theme.fg,
+                ));
+            }
+        }
+        lines.push(Line::raw(""));
+
+        // Context: the same estimate the status bar's meter polls, as the
+        // pinned block bar with its dim sub-line — or the same honest
+        // absence.
+        lines.push(Line::styled(clip("Context", inner_width), header));
+        match self.data.context {
+            Some((tokens, window)) => {
+                let fraction = (tokens as f64 / window.max(1) as f64).min(1.0);
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(Self::bar(fraction, theme));
+                spans.push(Span::styled(" used", theme.fg));
+                lines.push(Line::from(spans));
+                lines.push(Line::styled(
+                    clip(
+                        &format!(
+                            "  {} of {} tokens \u{2014} estimated",
+                            compact_tokens(tokens),
+                            compact_tokens(window),
+                        ),
+                        inner_width,
+                    ),
+                    theme.dim,
                 ));
             }
             None => lines.push(Line::styled(
@@ -181,16 +253,16 @@ impl Usage {
         }
         lines.push(Line::raw(""));
 
-        // Cache: what the splits above bought.
-        lines.push(Line::styled(clip("Cache", inner_width), theme.accent));
+        // Cache: what the splits bought — a real, derived rate Claude shows
+        // only as raw counters (which the Session lines now carry too).
+        lines.push(Line::styled(clip("Cache", inner_width), header));
         match self.cache_hit_rate() {
-            Some(rate) => lines.push(Line::styled(
-                clip(
-                    &format!("  {} of input read from cache", Self::meter(rate)),
-                    inner_width,
-                ),
-                theme.fg,
-            )),
+            Some(rate) => {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(Self::bar(rate, theme));
+                spans.push(Span::styled(" of input read from cache", theme.fg));
+                lines.push(Line::from(spans));
+            }
             None => lines.push(Line::styled(
                 clip("  nothing sent yet", inner_width),
                 theme.dim,
@@ -198,8 +270,9 @@ impl Usage {
         }
         lines.push(Line::raw(""));
 
-        // Turns: the inspector's rows, newest kept when the room runs out.
-        lines.push(Line::styled(clip("Turns", inner_width), theme.accent));
+        // Turns: the inspector's rows, newest kept when the room runs out —
+        // a ganja addition Claude's panel has no equivalent of.
+        lines.push(Line::styled(clip("Turns", inner_width), header));
         if self.data.turns.is_empty() {
             lines.push(Line::styled(
                 clip("  no finished turns yet", inner_width),
@@ -286,11 +359,12 @@ mod tests {
     use super::{Data, TokenUsage, TurnUsage, Usage};
     use crate::{component::status::Totals, theme::Theme};
 
+    /// Wide enough for the pinned per-model line to render whole.
     const AREA: Rect = Rect {
         x: 0,
         y: 0,
-        width: 80,
-        height: 26,
+        width: 100,
+        height: 28,
     };
 
     fn data() -> Data {
@@ -338,30 +412,67 @@ mod tests {
             .join("\n")
     }
 
-    /// AC5's core: the session line is the status bar's own segment string,
-    /// byte for byte, not a second formatting of the same numbers.
+    /// AC5's core: the `Total cost:` value is the status bar's own
+    /// accumulated cost, and the per-model line carries the turn rows' own
+    /// numbers — nothing in the Session section is summed a second way.
     #[test]
-    fn the_session_line_is_the_status_bars_own_segment_string() {
-        let data = data();
-        let segment = data.totals.segment();
+    fn the_session_section_renders_the_totals_own_cost_and_the_turns_own_numbers() {
+        let screen = rendered(&Usage::new(data()), AREA);
+
+        assert!(screen.contains("Total cost:"), "got:\n{screen}");
+        assert!(screen.contains("$0.50"), "the totals' 0.5 USD:\n{screen}");
+        assert!(
+            screen.contains(
+                "claude-sonnet-5:  3 input, 4 output, 5 reasoning, 6 cache read, 7 cache write"
+            ),
+            "the turn's own split:\n{screen}"
+        );
+    }
+
+    /// Two turns on the same model fold into one `Usage by model:` line
+    /// whose numbers are the turns' sums.
+    #[test]
+    fn turns_on_the_same_model_fold_into_one_summed_line() {
+        let mut data = data();
+        data.turns.push(data.turns[0].clone());
 
         let screen = rendered(&Usage::new(data), AREA);
-        assert!(screen.contains(&segment), "want {segment:?} in:\n{screen}");
+        assert!(
+            screen.contains(
+                "claude-sonnet-5:  6 input, 8 output, 10 reasoning, 12 cache read, 14 cache write"
+            ),
+            "got:\n{screen}"
+        );
     }
 
     #[test]
-    fn every_split_and_the_turn_table_are_shown() {
+    fn every_section_and_the_turn_table_are_shown() {
         let screen = rendered(&Usage::new(data()), AREA);
 
         for section in ["Session", "Context", "Cache", "Turns"] {
             assert!(screen.contains(section), "{section} missing:\n{screen}");
         }
-        for label in ["reasoning 5", "cache read 6", "cache write 7"] {
-            assert!(screen.contains(label), "{label} missing:\n{screen}");
-        }
+        assert!(screen.contains("Usage by model:"), "got:\n{screen}");
         assert!(
             screen.contains("estimated"),
-            "the context meter says estimated:\n{screen}"
+            "the context sub-line says estimated:\n{screen}"
+        );
+    }
+
+    /// The pinned block bar replaced the ASCII meter: filled cells, dim
+    /// remainder, the percentage after — 50k of 200k is a quarter.
+    #[test]
+    fn the_context_bar_is_block_cells_followed_by_the_percentage() {
+        let screen = rendered(&Usage::new(data()), AREA);
+
+        assert!(
+            screen.contains("\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2591}"),
+            "five filled cells then the remainder:\n{screen}"
+        );
+        assert!(screen.contains("25% used"), "got:\n{screen}");
+        assert!(
+            !screen.contains("[#") && !screen.contains("#-"),
+            "the ASCII meter is gone from this panel:\n{screen}"
         );
     }
 
@@ -401,6 +512,11 @@ mod tests {
 
         assert!(screen.contains("nothing sent yet"), "got:\n{screen}");
         assert!(screen.contains("no finished turns yet"), "got:\n{screen}");
+        assert!(screen.contains("none yet"), "got:\n{screen}");
+        assert!(
+            screen.contains("unpriced \u{2014} uncataloged model"),
+            "an unpriced session says so on the cost row:\n{screen}"
+        );
     }
 
     #[test]

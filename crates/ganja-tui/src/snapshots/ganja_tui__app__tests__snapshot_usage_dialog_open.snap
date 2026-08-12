@@ -1,20 +1,21 @@
 ---
 source: crates/ganja-tui/src/app.rs
+assertion_line: 10485
 expression: screen(&terminal)
 ---
                                                                                 
                                                                                 
-                                                                                
   ┌ usage ───────────────────────────────────────────────────────────────────┐  
   │Session                                                                   │  
-  │  1.9k in · 34 out                                                        │  
-  │  input 1.2k · output 34 · reasoning 5 · cache read 600 · cache write 100 │  
+  │  Total cost:      unpriced — uncataloged model                           │  
+  │  Usage by model:                                                         │  
+  │    canned:  1.2k input, 34 output, 5 reasoning, 600 cache read, 100 cache│  
   │                                                                          │  
   │Context                                                                   │  
   │  unsized model — no window to meter                                      │  
   │                                                                          │  
   │Cache                                                                     │  
-  │  [######--------------] 32% of input read from cache                     │  
+  │  ██████░░░░░░░░░░░░░░ 32% of input read from cache                       │  
   │                                                                          │  
   │Turns                                                                     │  
   │  turn             in      out   reason  cache-r  cache-w     cost        │  
