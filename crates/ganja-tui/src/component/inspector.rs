@@ -403,8 +403,6 @@ fn token_lines(usages: &VecDeque<TurnUsage>, totals: Totals, theme: &Theme) -> V
     )];
 
     for row in usages {
-        let cost =
-            catalog::model(&row.model).map(|model| catalog::cost(&row.usage, &model).total_usd);
         lines.push(Line::styled(
             format!(
                 "{:<ID_WIDTH$} {:<MODEL_WIDTH$} {:>COUNT_WIDTH$} {:>COUNT_WIDTH$} {:>COUNT_WIDTH$} {:>COUNT_WIDTH$} {:>COUNT_WIDTH$} {:>COST_WIDTH$}",
@@ -415,7 +413,7 @@ fn token_lines(usages: &VecDeque<TurnUsage>, totals: Totals, theme: &Theme) -> V
                 row.usage.reasoning_tokens,
                 row.usage.cache_read_tokens,
                 row.usage.cache_write_tokens,
-                cost.map_or_else(|| "-".to_owned(), |dollars| format!("${dollars:.4}")),
+                turn_cost(row),
             ),
             theme.fg,
         ));
@@ -433,13 +431,24 @@ fn token_lines(usages: &VecDeque<TurnUsage>, totals: Totals, theme: &Theme) -> V
 /// The last few characters of a message id — the counter half of the
 /// millis-plus-counter id ([`ganja_protocol::ascending`]) is what actually
 /// tells two ids minted moments apart apart, so it is the half worth keeping
-/// in a column this narrow.
-fn short_id(id: &MessageId) -> String {
+/// in a column this narrow. `pub(crate)` because `/usage`'s turn table shows
+/// the same rows and must spell them the same way (AC5) — one formatter,
+/// never a second copy to drift.
+pub(crate) fn short_id(id: &MessageId) -> String {
     let raw = id.as_str();
 
     raw.get(raw.len().saturating_sub(8)..)
         .unwrap_or(raw)
         .to_owned()
+}
+
+/// A turn row's cost cell: catalog-priced, `-` when the model is uncataloged.
+/// Shared with `/usage`'s table for the same one-formatter reason as
+/// [`short_id`].
+pub(crate) fn turn_cost(row: &TurnUsage) -> String {
+    catalog::model(&row.model)
+        .map(|model| catalog::cost(&row.usage, &model).total_usd)
+        .map_or_else(|| "-".to_owned(), |dollars| format!("${dollars:.4}"))
 }
 
 /// The footer's right-edge marker: the active tab's mode word beside how far
