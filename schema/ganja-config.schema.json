@@ -117,7 +117,7 @@
     "hooks": {
       "type": "object",
       "description": "Commands this session runs at the nine moments the hook engine fires, keyed by the event's own spelling. An event name nothing answers to is refused by name at load. Hooks run with the user's own authority and pass no permission gate.",
-      "$comment": "Event names: crates/ganja-core/src/hook.rs:104-169 (HookEvent, EVENTS); refusal: config.rs:1646-1680 (check_hooks).",
+      "$comment": "Event names: crates/ganja-core/src/hook.rs:104-169 (HookEvent, EVENTS); refusal: config.rs:1658-1692 (check_hooks).",
       "default": {},
       "propertyNames": { "$ref": "#/$defs/HookEventName" },
       "additionalProperties": {
@@ -132,7 +132,7 @@
     "provider": {
       "type": "object",
       "description": "Endpoints this build can talk to besides the ones it ships, by id. The id is what GANJA_PROVIDER, --model <id>/…, `model` and a stored credential all name. An id this build already ships is refused at load, because such an entry would never be reached.",
-      "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs:1554-1585 (check_providers) against crates/ganja-provider/src/provider.rs:168-175 (PROVIDERS).",
+      "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs:1566-1597 (check_providers) against crates/ganja-provider/src/provider.rs:168-175 (PROVIDERS).",
       "default": {},
       "propertyNames": {
         "type": "string",
@@ -204,7 +204,7 @@
     "AgentsConfig": {
       "title": "Agent execution settings",
       "description": "How this session runs the agents it has, rather than what they are. Not a key upstream has: upstream runs one subagent at a time, so it has nothing to size (D462).",
-      "$comment": "crates/ganja-core/src/config.rs:723-735 (AgentsConfig, deny_unknown_fields); default of 4 at :748 (AgentsConfig::DEFAULT_CONCURRENCY); refusal of zero at :1688-1698 (check_agents).",
+      "$comment": "crates/ganja-core/src/config.rs:723-735 (AgentsConfig, deny_unknown_fields); default of 4 at :748 (AgentsConfig::DEFAULT_CONCURRENCY); refusal of zero at :1700-1710 (check_agents).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -303,7 +303,7 @@
     "McpLocal": {
       "title": "Local MCP server",
       "description": "A child process spoken to over its stdio.",
-      "$comment": "crates/ganja-core/src/config.rs:327-347 (McpLocal, deny_unknown_fields); empty command refused at config.rs:1603-1633 (check_mcp).",
+      "$comment": "crates/ganja-core/src/config.rs:327-347 (McpLocal, deny_unknown_fields); empty command refused at config.rs:1615-1645 (check_mcp).",
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "command"],
@@ -341,7 +341,7 @@
     "McpRemote": {
       "title": "Remote MCP server",
       "description": "An HTTP endpoint spoken to over streamable HTTP.",
-      "$comment": "crates/ganja-core/src/config.rs:350-374 (McpRemote, deny_unknown_fields); URL rule at config.rs:1603-1633 (check_mcp).",
+      "$comment": "crates/ganja-core/src/config.rs:350-374 (McpRemote, deny_unknown_fields); URL rule at config.rs:1615-1645 (check_mcp).",
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "url"],
@@ -392,7 +392,7 @@
     "ProviderConfig": {
       "title": "Configured provider endpoint",
       "description": "One endpoint a config declares, and how to talk to it. There is deliberately no apiKey key: ganja's credentials travel the environment or auth.json, and `key_env` names the variable instead. Being selectable is not being cataloged — a configured provider has no sizing, pricing or auto-compaction, and must be told which model to ask for.",
-      "$comment": "crates/ganja-core/src/config.rs:406-430 (ProviderConfig, deny_unknown_fields); checks at config.rs:1554-1585 (check_providers).",
+      "$comment": "crates/ganja-core/src/config.rs:406-430 (ProviderConfig, deny_unknown_fields); checks at config.rs:1566-1597 (check_providers).",
       "type": "object",
       "additionalProperties": false,
       "required": ["dialect", "base_url"],
@@ -445,7 +445,7 @@
     "LspEntry": {
       "title": "Language server entry",
       "description": "One language server, as a config file describes it.",
-      "$comment": "crates/ganja-core/src/config.rs:484-503 (LspEntry, deny_unknown_fields); the required-field rules at config.rs:1505-1527 (check_lsp).",
+      "$comment": "crates/ganja-core/src/config.rs:484-503 (LspEntry, deny_unknown_fields); the required-field rules at config.rs:1517-1539 (check_lsp).",
       "type": "object",
       "additionalProperties": false,
       "properties": {

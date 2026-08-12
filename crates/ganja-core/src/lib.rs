@@ -48,6 +48,12 @@ pub mod instruction;
 pub mod job;
 pub mod lsp;
 pub mod mcp;
+/// Claude Code plugins: the `.claude-plugin` manifest and marketplace
+/// shapes, the install store under the config home, and the merge that turns
+/// an installed plugin into a config contributor. Engine-side because the
+/// contributions land in [`Config`](config::Config) at load, before any
+/// frontend exists to ask.
+pub mod plugin;
 pub mod provider;
 pub mod session;
 pub mod snapshot;

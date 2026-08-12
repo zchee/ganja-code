@@ -31,6 +31,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 mod assemble;
 mod import;
 mod login;
+mod plugin;
 mod run;
 mod serve;
 
@@ -148,6 +149,16 @@ enum Command {
         /// Fetch the published catalog first, however recently it was fetched.
         #[arg(long)]
         refresh: bool,
+    },
+    /// Manage installed plugins and the marketplaces they come from.
+    ///
+    /// A plugin's skills, agents, hooks, MCP servers and LSP entries join
+    /// the config at the next session start. Installing is explicit on
+    /// purpose: hooks and servers run with your own authority, and the typed
+    /// command is the consent.
+    Plugin {
+        #[command(subcommand)]
+        action: plugin::PluginAction,
     },
     /// Send one message and print the turn it produces, without the UI.
     ///
@@ -465,6 +476,7 @@ async fn main() -> Result<()> {
         Some(Command::Config { action }) => config_command(action),
         Some(Command::Mcp { action }) => mcp_command(action).await,
         Some(Command::Models { provider, refresh }) => models_command(provider, refresh).await,
+        Some(Command::Plugin { action }) => plugin::plugin_command(action),
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Serve(args)) => serve::serve(args).await,
         Some(Command::Sessions) => sessions_command(),
