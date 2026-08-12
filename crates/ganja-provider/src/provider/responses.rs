@@ -592,15 +592,9 @@ impl Provider for ResponsesProvider {
             "requesting a turn"
         );
 
-        open(
-            &self.client,
-            built,
-            &resolved.presented,
-            cancel,
-            Mapping::default(),
-        )
-        .await
-        .map_err(|error| reauth(backend, error))
+        open::<Mapping>(&self.client, built, &resolved.presented, cancel)
+            .await
+            .map_err(|error| reauth(backend, error))
     }
 }
 
