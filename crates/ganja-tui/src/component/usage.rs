@@ -47,7 +47,11 @@ use ratatui::{
 };
 
 use crate::{
-    component::{chat::clip, inspector::TurnUsage, status::Totals},
+    component::{
+        chat::clip,
+        inspector::{TurnUsage, short_id, turn_cost},
+        status::Totals,
+    },
     theme::Theme,
 };
 
@@ -312,8 +316,6 @@ impl Usage {
             let visible = room.saturating_sub(fixed).max(1);
             let skipped = self.data.turns.len().saturating_sub(visible);
             for row in self.data.turns.iter().skip(skipped) {
-                let cost = catalog::model(&row.model)
-                    .map(|model| catalog::cost(&row.usage, &model).total_usd);
                 lines.push(Line::styled(
                     clip(
                         &format!(
@@ -324,7 +326,7 @@ impl Usage {
                             row.usage.reasoning_tokens,
                             row.usage.cache_read_tokens,
                             row.usage.cache_write_tokens,
-                            cost.map_or_else(|| "-".to_owned(), |dollars| format!("${dollars:.4}")),
+                            turn_cost(row),
                         ),
                         inner_width,
                     ),
@@ -375,16 +377,6 @@ fn compact_duration(duration: std::time::Duration) -> String {
     }
 }
 
-/// The last few characters of a message id — the counter half is the half
-/// that tells two ids minted moments apart apart, the inspector's own rule.
-fn short_id(id: &ganja_protocol::MessageId) -> String {
-    let raw = id.as_str();
-
-    raw.get(raw.len().saturating_sub(8)..)
-        .unwrap_or(raw)
-        .to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use ganja_protocol::Message;
@@ -429,6 +421,29 @@ mod tests {
             }],
             duration: None,
         }
+    }
+
+    /// AC5's "same formatter" clause, pinned as a regression test now that
+    /// the sharing is literal: the panel's turn row spells its id and cost
+    /// cells through the inspector's own functions, so the two tables cannot
+    /// drift apart without this test noticing.
+    #[test]
+    fn a_turn_row_is_spelled_by_the_inspectors_own_formatter() {
+        use crate::component::inspector::{short_id, turn_cost};
+
+        let data = data();
+        let row = &data.turns[0];
+        let screen = rendered(&Usage::new(data.clone()), AREA);
+
+        assert!(
+            screen.contains(&short_id(&row.message_id)),
+            "the turn row carries the inspector's own id spelling; got:\n{screen}"
+        );
+        assert!(
+            screen.contains(&turn_cost(row)),
+            "the turn row carries the inspector's own cost cell ({}); got:\n{screen}",
+            turn_cost(row)
+        );
     }
 
     fn rendered(dialog: &Usage, area: Rect) -> String {
