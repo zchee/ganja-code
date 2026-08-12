@@ -1,0 +1,34 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+                                                                                
+                                                                                
+                                                                                
+  ┌ usage ───────────────────────────────────────────────────────────────────┐  
+  │Session                                                                   │  
+  │  1.9k in · 34 out                                                        │  
+  │  input 1.2k · output 34 · reasoning 5 · cache read 600 · cache write 100 │  
+  │                                                                          │  
+  │Context                                                                   │  
+  │  unsized model — no window to meter                                      │  
+  │                                                                          │  
+  │Cache                                                                     │  
+  │  [######--------------] 32% of input read from cache                     │  
+  │                                                                          │  
+  │Turns                                                                     │  
+  │  turn             in      out   reason  cache-r  cache-w     cost        │  
+  │  _fixture       1200       34        5      600      100        -        │  
+  │                                                                          │  
+  │plan limits (5h/weekly) unavailable: no vendor usage API                  │  
+  │                                                                          │  
+  │[Esc] close                                                               │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready · 1.9k in · 34 out

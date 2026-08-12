@@ -56,6 +56,11 @@ pub enum Action {
     /// Open the `/mcp` dialog: every configured server's status and tool
     /// count, with Reconnect on a failed one.
     Mcp,
+    /// Open the `/context` panel: what fills the model's context window,
+    /// estimated per category (**D470**).
+    Context,
+    /// Open the `/usage` panel: what this session has spent (**D471**).
+    Usage,
     /// Open the key and command reference.
     Help,
     /// Leave.
@@ -97,6 +102,8 @@ impl Action {
             | Self::Effort
             | Self::Agents
             | Self::Mcp
+            | Self::Context
+            | Self::Usage
             | Self::Help
             | Self::Copy
             | Self::CopyMessage
@@ -251,6 +258,28 @@ pub const COMMANDS: &[Entry] = &[
         aliases: &[],
         title: "MCP servers",
         description: "See what every configured server lends, and reconnect a failed one",
+        category: Category::System,
+        suggested: false,
+    },
+    // Claude Code's `/context` and `/usage`, with no upstream opencode
+    // counterpart at all (**D470**, **D471**). Filed under `System` for the
+    // copy commands' reason: both panels look at the conversation and do
+    // nothing to it.
+    Entry {
+        action: Action::Context,
+        name: "context",
+        aliases: &[],
+        title: "Context usage",
+        description: "See what fills the model's context window, estimated per category",
+        category: Category::System,
+        suggested: false,
+    },
+    Entry {
+        action: Action::Usage,
+        name: "usage",
+        aliases: &[],
+        title: "Session usage",
+        description: "See what this session has spent, and its cache hit rate",
         category: Category::System,
         suggested: false,
     },
@@ -629,6 +658,8 @@ mod tests {
             ("agents", &[][..], Action::Agents),
             ("themes", &[][..], Action::Themes),
             ("mcp", &[][..], Action::Mcp),
+            ("context", &[][..], Action::Context),
+            ("usage", &[][..], Action::Usage),
             ("help", &[][..], Action::Help),
             ("exit", &["quit", "q"][..], Action::Exit),
             ("copy", &[][..], Action::Copy),

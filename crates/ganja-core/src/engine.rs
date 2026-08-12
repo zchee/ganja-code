@@ -86,6 +86,75 @@ pub struct ContextEstimate {
     pub window: Option<u64>,
 }
 
+/// What fills the next request, category by category, as
+/// [`Engine::context_breakdown`] answers it — the `/context` dialog's data
+/// (**D470**, `slash-context`: upstream opencode has no such surface; the
+/// categories are Claude Code's own panel mapped onto what ganja assembles).
+///
+/// Every count is an **estimate** by the compaction fit guard's own
+/// chars-per-token convention ([`crate::session`]'s `estimate_tokens`), except
+/// where a turn reported actuals — see [`Engine::context_breakdown`] on the
+/// conversation shares. [`ContextEstimate`] reads the stored measure the last
+/// request stamped; this computes from the same inputs the *next* request
+/// will be assembled from, which is why it answers on a fresh session with
+/// zero turns and immediately after a revert.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextBreakdown {
+    /// The system prompt's fixed half: the agent's own prompt (or the model
+    /// family's base prompt), plus the environment block.
+    pub system_prompt: u64,
+    /// The instruction files — the `AGENTS.md` family — headers included.
+    pub instructions: u64,
+    /// The builtin tools' schemas, names and descriptions.
+    pub tools_builtin: u64,
+    /// What the connected MCP servers add: their tools' schemas, and the
+    /// instructions the servers sent about themselves — both exist only
+    /// because a server is connected, so both are its cost.
+    pub tools_mcp: u64,
+    /// The skills block of the system prompt.
+    pub skills: u64,
+    /// The conversation's user half.
+    pub conversation_user: u64,
+    /// The conversation's assistant half, tool traffic included.
+    pub conversation_assistant: u64,
+    /// The catalog's context window for the active model, or [`None`] for an
+    /// uncataloged one — the same honest absence [`ContextEstimate::window`]
+    /// reports.
+    pub window: Option<u64>,
+    /// Tokens auto-compaction holds back — the top tenth of the window, the
+    /// complement of [`crate::session`]'s 90% trigger. Carried on the result
+    /// so a free-space consumer never re-derives the trigger; absent exactly
+    /// when the window is.
+    pub reserve: Option<u64>,
+}
+
+impl ContextBreakdown {
+    /// Every category summed — what the grid's legend must add up to.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.system_prompt
+            .saturating_add(self.instructions)
+            .saturating_add(self.tools_builtin)
+            .saturating_add(self.tools_mcp)
+            .saturating_add(self.skills)
+            .saturating_add(self.conversation_user)
+            .saturating_add(self.conversation_assistant)
+    }
+
+    /// What is left: window − used − reserve, or [`None`] for a model whose
+    /// window nobody can size.
+    #[must_use]
+    pub fn free(&self) -> Option<u64> {
+        let window = self.window?;
+
+        Some(
+            window
+                .saturating_sub(self.total())
+                .saturating_sub(self.reserve.unwrap_or(0)),
+        )
+    }
+}
+
 /// A command the engine refused.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -1627,6 +1696,112 @@ impl Engine {
         let window = catalog::model(&self.model()).map(|model| model.context_window);
 
         ContextEstimate { tokens, window }
+    }
+
+    /// What the next request would carry, category by category (**D470**).
+    ///
+    /// Computed on demand from the same state the request assembly reads —
+    /// the system halves `Engine::system_for` would join, the tool registry
+    /// a turn would snapshot, the live window minus what a standing revert
+    /// hides — never stashed per turn, so it answers on a fresh session with
+    /// zero turns and immediately after a revert. The split of the composed
+    /// suffix is [`crate::instruction`]'s own (`suffix_measure`), against the
+    /// markers its composer wrote, and every estimate goes through the
+    /// compaction fit guard's chars-per-token convention: one estimator, not
+    /// a second tokenizer.
+    ///
+    /// The conversation share **prefers actuals**: an assistant message whose
+    /// turn reported a [`Usage`] is priced at its reported `output_tokens` —
+    /// plus the estimate for its tool results, which came back *to* the model
+    /// and were never part of anything a provider counted as output.
+    pub async fn context_breakdown(&self) -> ContextBreakdown {
+        use crate::session::{compaction_reserve, estimate_tokens};
+
+        // The head the next request would carry: the agent's own prompt where
+        // the session runs as one, the base half where it does not —
+        // `system_for`'s rule, read from the same fields.
+        let head = {
+            let agent = self.active().agent.clone();
+            agent
+                .and_then(|name| {
+                    self.agents
+                        .as_ref()
+                        .and_then(|registry| registry.get(&name))
+                        .and_then(|agent| agent.prompt.clone())
+                })
+                .or_else(|| self.base_half())
+        };
+        let suffix = self.environment_half().unwrap_or_default();
+        let measure = crate::instruction::suffix_measure(&suffix);
+        let head_chars = head.as_deref().map_or(0, |head| head.chars().count());
+
+        let registry = Arc::clone(
+            &self
+                .tools
+                .lock()
+                .expect("the tool registry is never poisoned"),
+        );
+        let (mut builtin_chars, mut mcp_chars) = (0_usize, 0_usize);
+        for definition in registry.definitions() {
+            let chars = definition.name.chars().count()
+                + definition.description.chars().count()
+                + definition.schema.to_string().chars().count();
+            // The registry's own naming rule: everything a server lends is
+            // `mcp__<server>__<tool>`, and nothing else may be.
+            if definition.name.starts_with("mcp__") {
+                mcp_chars += chars;
+            } else {
+                builtin_chars += chars;
+            }
+        }
+        // What the connected servers said about themselves rides the same
+        // category as their tools: both are what having the server costs.
+        if let Some(instructions) = self.mcp.as_ref().and_then(|servers| servers.instructions()) {
+            mcp_chars += instructions.chars().count();
+        }
+
+        // The live window, minus what a standing revert hides: the next
+        // prompt's `truncate_reverted` drops everything from the anchor on,
+        // so a breakdown read between the revert and that prompt must not
+        // count messages the request will never carry.
+        let hidden_from = self.reverted().map(|state| state.message_id);
+        let (mut user, mut assistant) = (0_u64, 0_u64);
+        {
+            let history = self.history.lock().await;
+            for message in history.iter() {
+                if hidden_from
+                    .as_ref()
+                    .is_some_and(|anchor| message.id >= *anchor)
+                {
+                    continue;
+                }
+                let (generated, tool_results) = message_chars(message);
+                let tokens = match (&message.role, message.usage) {
+                    (Role::Assistant, Some(usage)) => usage
+                        .output_tokens
+                        .saturating_add(estimate_tokens(tool_results)),
+                    _ => estimate_tokens(generated.saturating_add(tool_results)),
+                };
+                match message.role {
+                    Role::User => user = user.saturating_add(tokens),
+                    Role::Assistant => assistant = assistant.saturating_add(tokens),
+                }
+            }
+        }
+
+        let window = catalog::model(&self.model()).map(|model| model.context_window);
+
+        ContextBreakdown {
+            system_prompt: estimate_tokens(head_chars + measure.environment),
+            instructions: estimate_tokens(measure.instructions),
+            tools_builtin: estimate_tokens(builtin_chars),
+            tools_mcp: estimate_tokens(mcp_chars),
+            skills: estimate_tokens(measure.skills),
+            conversation_user: user,
+            conversation_assistant: assistant,
+            window,
+            reserve: window.map(compaction_reserve),
+        }
     }
 
     /// Installs the stored session `id` as the engine's current one and
@@ -3378,6 +3553,55 @@ const INTERRUPTED: &str = "the session was interrupted before this call finished
 /// [`PendingSwitch::None`], so the sentence rides one request and never
 /// returns (deviation: approval-rides-the-request — upstream stores a
 /// synthetic user message instead).
+/// Characters of `message` the next request would carry, split into what its
+/// author produced — text, the tool calls' names and argument JSON, a
+/// reasoning part's sealed state, a mention's path — and what came back from
+/// tools: the outputs and errors, which are the one share of an assistant
+/// message a provider's reported `output_tokens` never covered, so
+/// [`Engine::context_breakdown`] estimates them even where it has actuals.
+///
+/// Bookkeeping parts (the step markers, a patch record) count nothing: no
+/// wire carries them.
+fn message_chars(message: &Message) -> (usize, usize) {
+    let (mut generated, mut results) = (0_usize, 0_usize);
+
+    for part in &message.parts {
+        match &part.body {
+            PartBody::Text { text } => generated += text.chars().count(),
+            PartBody::Tool {
+                call_id,
+                tool,
+                state,
+            } => {
+                generated += call_id.chars().count() + tool.chars().count();
+                match state {
+                    ToolState::Pending => {}
+                    ToolState::Running { input, .. } => {
+                        generated += input.to_string().chars().count();
+                    }
+                    ToolState::Completed { input, output, .. } => {
+                        generated += input.to_string().chars().count();
+                        results += output.chars().count();
+                    }
+                    ToolState::Error { input, error, .. } => {
+                        generated += input.to_string().chars().count();
+                        results += error.chars().count();
+                    }
+                }
+            }
+            // The stored part is a reference; its content is read at send
+            // time, so the path is the only length this side holds.
+            PartBody::File { path, .. } => generated += path.chars().count(),
+            PartBody::Reasoning { encrypted, .. } => {
+                generated += encrypted.as_deref().map_or(0, |blob| blob.chars().count());
+            }
+            PartBody::StepStart | PartBody::StepFinish { .. } | PartBody::Patch { .. } => {}
+        }
+    }
+
+    (generated, results)
+}
+
 fn reminders(
     agent: Option<&str>,
     previous: Option<&str>,
@@ -3544,7 +3768,7 @@ mod tests {
     use super::{Engine, EngineError, STALE_FILES, stale_notice};
     use crate::{
         permission::Permissions,
-        protocol::{Command, Event, FinishReason, Message, Role, Usage},
+        protocol::{Command, Event, FinishReason, Message, RevertScope, Role, Usage},
         provider::{
             ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake::MODEL,
         },
@@ -4056,6 +4280,196 @@ mod tests {
         assert_eq!(
             estimate.window, None,
             "only the catalog can size a window, and it does not know the fake model"
+        );
+    }
+
+    /// An engine with something in every fixed category, for the breakdown
+    /// tests: a base prompt, a suffix carrying an instruction file and a
+    /// skills block spelled with the composer's own markers, and the builtin
+    /// tools.
+    fn furnished(model: &str) -> Engine {
+        let suffix = "You are powered by the model named fake.\n<env>\n  Working directory: /\n</env>\
+                      \nInstructions from: /project/AGENTS.md\nalways run the tests\
+                      \nSkills provide specialized instructions and workflows for specific tasks.\n<available_skills>\n</available_skills>";
+
+        Engine::new(
+            Arc::new(FakeProvider::new(
+                "one two",
+                std::time::Duration::from_millis(1),
+            )),
+            model,
+            Arc::new(Registry::with_builtins()),
+            Permissions::default(),
+        )
+        .with_system_parts(Some("obey the tests".to_owned()), Some(suffix.to_owned()))
+    }
+
+    /// The grid's contract: the legend can only add up to the panel's total
+    /// because the accessor's categories add up to its own.
+    #[tokio::test]
+    async fn the_breakdown_categories_sum_to_the_total() {
+        let breakdown = furnished(MODEL).context_breakdown().await;
+
+        let summed = breakdown.system_prompt
+            + breakdown.instructions
+            + breakdown.tools_builtin
+            + breakdown.tools_mcp
+            + breakdown.skills
+            + breakdown.conversation_user
+            + breakdown.conversation_assistant;
+        assert!(summed > 0, "the furnished engine fills categories");
+        assert_eq!(summed, breakdown.total());
+    }
+
+    /// The free-space row is window − used − reserve, read off the exposed
+    /// reserve rather than re-derived from the compaction trigger.
+    #[tokio::test]
+    async fn free_space_is_the_window_minus_the_total_minus_the_reserve() {
+        let model = crate::catalog::default_model("anthropic")
+            .expect("the catalog has a default for a provider this build ships");
+        let window = crate::catalog::model(model)
+            .expect("the default model is in the catalog")
+            .context_window;
+
+        let engine = furnished(model);
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+        engine
+            .send(Command::SendPrompt {
+                text: "fill the conversation a little".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        drain(&mut events).await;
+
+        let breakdown = engine.context_breakdown().await;
+        assert_eq!(breakdown.window, Some(window));
+        let reserve = breakdown.reserve.expect("a sized window has a reserve");
+        assert!(reserve > 0, "the trigger holds a tenth back");
+        assert_eq!(
+            breakdown.free(),
+            Some(window - breakdown.total() - reserve),
+            "free space is what the window has left after the load and the reserve"
+        );
+    }
+
+    /// Review changelog MAJOR 3's whole point: `/context` on a session that
+    /// has said nothing must still show what the first request would carry —
+    /// the fixed shares are computed on demand, not stashed by a turn that
+    /// never ran.
+    #[tokio::test]
+    async fn a_fresh_session_reports_system_and_tool_shares_and_no_conversation() {
+        let breakdown = furnished(MODEL).context_breakdown().await;
+
+        assert_eq!(breakdown.conversation_user, 0);
+        assert_eq!(breakdown.conversation_assistant, 0);
+        assert!(breakdown.system_prompt > 0, "{breakdown:?}");
+        assert!(breakdown.instructions > 0, "{breakdown:?}");
+        assert!(breakdown.skills > 0, "{breakdown:?}");
+        assert!(breakdown.tools_builtin > 0, "{breakdown:?}");
+        assert_eq!(breakdown.tools_mcp, 0, "no server is connected");
+    }
+
+    /// A standing conversation revert hides the anchor and everything after
+    /// it from the *next* request — `truncate_reverted` runs at the next
+    /// prompt — so a breakdown read in between must already leave those
+    /// messages out.
+    #[tokio::test]
+    async fn a_breakdown_right_after_a_revert_reflects_the_truncated_conversation() {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        engine
+            .send(Command::SendPrompt {
+                text: "the first prompt".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        drain(&mut events).await;
+        let after_one_turn = engine.context_breakdown().await;
+
+        engine
+            .send(Command::SendPrompt {
+                text: "the second prompt, which the revert takes back".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        let second_turn = drain(&mut events).await;
+        let anchor = second_turn
+            .iter()
+            .find_map(|event| match event {
+                Event::MessageStarted { message, .. } if message.role == Role::User => {
+                    Some(message.id.clone())
+                }
+                _ => None,
+            })
+            .expect("the second turn opened with its user message");
+
+        let after_two_turns = engine.context_breakdown().await;
+        assert!(
+            after_two_turns.conversation_user > after_one_turn.conversation_user,
+            "the second turn grew the conversation"
+        );
+
+        engine
+            .send(Command::RevertTo {
+                message_id: anchor,
+                scope: RevertScope::Conversation,
+            })
+            .await
+            .expect("a checkpoint that exists is revertable");
+
+        let after_revert = engine.context_breakdown().await;
+        assert_eq!(
+            (
+                after_revert.conversation_user,
+                after_revert.conversation_assistant
+            ),
+            (
+                after_one_turn.conversation_user,
+                after_one_turn.conversation_assistant
+            ),
+            "what the revert hid is already left out"
+        );
+    }
+
+    /// The same honest absence `context_estimate` reports: no catalog row, no
+    /// window, no reserve, no free-space figure — the dialog's degraded panel.
+    #[tokio::test]
+    async fn the_breakdown_has_no_window_for_an_uncataloged_model() {
+        let breakdown = furnished(MODEL).context_breakdown().await;
+
+        assert_eq!(breakdown.window, None);
+        assert_eq!(breakdown.reserve, None);
+        assert_eq!(breakdown.free(), None);
+    }
+
+    /// AC4's one-estimator claim, spelled honestly: `context_estimate` reads
+    /// the stored measure a finished request stamped — an *actual*, which no
+    /// on-demand estimate can be asserted equal to — so what "one estimator"
+    /// means, and what this pins, is the **convention**: the breakdown prices
+    /// characters exactly as the compaction fit guard does, four to a token,
+    /// and never through a second tokenizer.
+    #[tokio::test]
+    async fn the_breakdown_prices_by_the_compaction_estimators_own_convention() {
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+        engine
+            .send(Command::SendPrompt {
+                text: "x".repeat(400),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        drain(&mut events).await;
+
+        let breakdown = engine.context_breakdown().await;
+        assert_eq!(
+            breakdown.conversation_user,
+            crate::session::estimate_tokens(400),
+            "four hundred characters are a hundred tokens under the shared convention"
         );
     }
 

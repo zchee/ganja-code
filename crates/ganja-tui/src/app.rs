@@ -45,6 +45,7 @@ use crate::{
     NOTICE_SEPARATOR, clipboard, command,
     component::{
         chat::{Chat, WHEEL_LINES},
+        context,
         dropdown::{self, Dropdown},
         editor::{self, Editor, Mode},
         effort,
@@ -62,6 +63,7 @@ use crate::{
         sessions::{self, Sessions},
         status::{Activity, Status, Todos, Totals},
         themes::ThemeList,
+        usage,
     },
     event::AppEvent,
     external,
@@ -344,6 +346,12 @@ pub struct App {
     rewind: Option<Rewind>,
     /// The `/mcp` dialog, while it is open (**F5**).
     mcp_dialog: Option<mcp::Mcp>,
+    /// The `/context` panel, while it is open (**D470**). A snapshot of the
+    /// engine's breakdown taken when the command ran, never re-polled.
+    context_dialog: Option<context::Context>,
+    /// The `/usage` panel, while it is open (**D471**). The same
+    /// read-on-open posture.
+    usage_dialog: Option<usage::Usage>,
     /// The models or agents the user is choosing between, and which of the two
     /// the list is.
     chooser: Option<(Chooser, ListDialog)>,
@@ -542,6 +550,8 @@ impl App {
             history_search: None,
             rewind: None,
             mcp_dialog: None,
+            context_dialog: None,
+            usage_dialog: None,
             chooser: None,
             palette: None,
             palette_filter: String::new(),
@@ -1046,6 +1056,12 @@ impl App {
                 if let Some(mcp_dialog) = &self.mcp_dialog {
                     mcp_dialog.render(transcript, buffer, &self.theme);
                 }
+                if let Some(context_dialog) = &self.context_dialog {
+                    context_dialog.render(transcript, buffer, &self.theme);
+                }
+                if let Some(usage_dialog) = &self.usage_dialog {
+                    usage_dialog.render(transcript, buffer, &self.theme);
+                }
                 if let Some((_, chooser)) = &self.chooser {
                     chooser.render(transcript, buffer, &self.theme);
                 }
@@ -1482,6 +1498,24 @@ impl App {
             return Ok(());
         }
 
+        // The two read-only panels: modal like every dialog, but with nothing
+        // to steer — Esc closes, everything else is claimed and ignored.
+        if self.context_dialog.is_some() {
+            if key.code == KeyCode::Esc {
+                self.context_dialog = None;
+            }
+
+            return Ok(());
+        }
+
+        if self.usage_dialog.is_some() {
+            if key.code == KeyCode::Esc {
+                self.usage_dialog = None;
+            }
+
+            return Ok(());
+        }
+
         if self.chooser.is_some() {
             self.handle_chooser_key(key.code).await;
 
@@ -1733,6 +1767,8 @@ impl App {
             || self.history_search.is_some()
             || self.rewind.is_some()
             || self.mcp_dialog.is_some()
+            || self.context_dialog.is_some()
+            || self.usage_dialog.is_some()
             || self.chooser.is_some()
             || self.palette.is_some()
             || self.help.is_some()
@@ -1751,6 +1787,8 @@ impl App {
             command::Action::Agents => self.open_agents(),
             command::Action::Themes => self.open_themes(),
             command::Action::Mcp => self.open_mcp(),
+            command::Action::Context => self.open_context().await,
+            command::Action::Usage => self.open_usage(),
             command::Action::Help => self.help = Some(Help::new(self.keys.clone())),
             command::Action::Exit => self.quit = true,
             command::Action::Copy => self.copy_transcript(),
@@ -2824,6 +2862,53 @@ impl App {
     /// and tool count (**F5**).
     fn open_mcp(&mut self) {
         self.mcp_dialog = Some(mcp::Mcp::new(self.mcp_dialog_rows()));
+    }
+
+    /// Opens the `/context` panel over the engine's on-demand breakdown
+    /// (**D470**) — computed now, from the same state the next request would
+    /// be assembled from, which is what makes the panel answer on a fresh
+    /// session and immediately after a revert.
+    async fn open_context(&mut self) {
+        let breakdown = self.engine.context_breakdown().await;
+        self.context_dialog = Some(context::Context::new(self.model.clone(), breakdown));
+    }
+
+    /// Opens the `/usage` panel over what this side already holds (**D471**):
+    /// the status bar's totals, the inspector's per-turn rows, and the same
+    /// context estimate the bar's meter polls. The cache and reasoning splits
+    /// come from the session record where one exists — it accumulates every
+    /// turn, resumes included — and from summing the in-memory turn rows on
+    /// an engine that stores nothing.
+    fn open_usage(&mut self) {
+        let splits = self
+            .engine
+            .current_session()
+            .map(|session| session.usage)
+            .unwrap_or_else(|| {
+                self.turn_usages
+                    .iter()
+                    .fold(Usage::default(), |sum, row| Usage {
+                        input_tokens: sum.input_tokens.saturating_add(row.usage.input_tokens),
+                        output_tokens: sum.output_tokens.saturating_add(row.usage.output_tokens),
+                        reasoning_tokens: sum
+                            .reasoning_tokens
+                            .saturating_add(row.usage.reasoning_tokens),
+                        cache_read_tokens: sum
+                            .cache_read_tokens
+                            .saturating_add(row.usage.cache_read_tokens),
+                        cache_write_tokens: sum
+                            .cache_write_tokens
+                            .saturating_add(row.usage.cache_write_tokens),
+                    })
+            });
+        let estimate = self.engine.context_estimate();
+
+        self.usage_dialog = Some(usage::Usage::new(usage::Data {
+            totals: self.totals,
+            splits,
+            context: estimate.window.map(|window| (estimate.tokens, window)),
+            turns: self.turn_usages.iter().cloned().collect(),
+        }));
     }
 
     /// The `/mcp` dialog's rows, fresh off the engine.
@@ -9945,6 +10030,175 @@ mod tests {
         app.run_command(command::Action::Mcp).await;
 
         let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    // ---- D470/D471: the `/context` and `/usage` panels ----
+
+    /// A breakdown with something in every category over a small round
+    /// window, shared by the panel tests below.
+    fn breakdown_fixture() -> ganja_core::engine::ContextBreakdown {
+        ganja_core::engine::ContextBreakdown {
+            system_prompt: 3_000,
+            instructions: 2_000,
+            tools_builtin: 11_000,
+            tools_mcp: 1_000,
+            skills: 500,
+            conversation_user: 4_000,
+            conversation_assistant: 8_500,
+            window: Some(100_000),
+            reserve: Some(10_000),
+        }
+    }
+
+    /// `/context` opens the panel from the command roster — computed on the
+    /// spot, so a fresh session with zero turns still gets one — and Esc
+    /// closes it.
+    #[tokio::test]
+    async fn slash_context_opens_the_panel_and_esc_closes_it() {
+        let mut app = app();
+        assert_eq!(
+            command::lookup("context").map(|entry| entry.action),
+            Some(command::Action::Context),
+            "/context is on the roster"
+        );
+
+        app.run_command(command::Action::Context).await;
+        assert!(app.context_dialog.is_some(), "/context opens the panel");
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.context_dialog.is_none(), "escape closes it");
+    }
+
+    /// `/usage` opens its panel from the roster, and Esc closes it.
+    #[tokio::test]
+    async fn slash_usage_opens_the_panel_and_esc_closes_it() {
+        let mut app = app();
+        assert_eq!(
+            command::lookup("usage").map(|entry| entry.action),
+            Some(command::Action::Usage),
+            "/usage is on the roster"
+        );
+
+        app.run_command(command::Action::Usage).await;
+        assert!(app.usage_dialog.is_some(), "/usage opens the panel");
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.usage_dialog.is_none(), "escape closes it");
+    }
+
+    /// AC5: the `/usage` session line is the status bar's own `Totals`
+    /// string — the same formatter, asserted against the same value the bar
+    /// itself renders — never a second formatting of the same numbers.
+    #[tokio::test]
+    async fn the_usage_panel_shows_the_status_bars_own_totals_string() {
+        let mut app = app();
+        app.record(
+            &MessageId::from("msg_1".to_owned()),
+            &Usage {
+                input_tokens: 1_200,
+                output_tokens: 34,
+                reasoning_tokens: 5,
+                cache_read_tokens: 600,
+                cache_write_tokens: 100,
+            },
+        );
+
+        app.run_command(command::Action::Usage).await;
+        let mut terminal = terminal(80, 30);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        let segment = app.totals.segment();
+        assert!(
+            screen(&terminal).contains(&segment),
+            "want the bar's own {segment:?} in:\n{}",
+            screen(&terminal)
+        );
+    }
+
+    /// The plan-limit meters Claude Code leads with ride a vendor usage API
+    /// ganja does not speak: the panel carries the one honest line naming
+    /// why, and no such meter is ever drawn (D471, plan Open question 2).
+    #[tokio::test]
+    async fn the_usage_panel_carries_no_plan_limit_meter_and_says_why() {
+        let mut app = app();
+        app.run_command(command::Action::Usage).await;
+        let mut terminal = terminal(80, 30);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+
+        assert!(
+            screen.contains("plan limits (5h/weekly) unavailable: no vendor usage API"),
+            "got:\n{screen}"
+        );
+        assert!(
+            !screen.contains("5h:[") && !screen.contains("wk:["),
+            "no plan-limit meter may be drawn:\n{screen}"
+        );
+    }
+
+    /// The `/context` grid over a sized fixture breakdown (screenshot:
+    /// Claude Code's grid-and-legend panel; house dialog chrome). The
+    /// breakdown is injected rather than computed so the cells and legend
+    /// are stable whatever machine renders them.
+    #[tokio::test]
+    async fn snapshot_context_dialog_open() {
+        let mut app = app();
+        app.context_dialog = Some(component::context::Context::new(
+            "claude-sonnet-5".to_owned(),
+            breakdown_fixture(),
+        ));
+
+        let mut terminal = terminal(80, 36);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// The same panel degraded: no window, so totals alone and the honest
+    /// sentence — no invented denominator.
+    #[tokio::test]
+    async fn snapshot_context_dialog_degraded() {
+        let mut app = app();
+        app.context_dialog = Some(component::context::Context::new(
+            fake::MODEL.to_owned(),
+            ganja_core::engine::ContextBreakdown {
+                window: None,
+                reserve: None,
+                ..breakdown_fixture()
+            },
+        ));
+
+        let mut terminal = terminal(80, 36);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// The `/usage` panel over a session with one recorded turn (screenshot:
+    /// Claude Code's sectioned panel; house dialog chrome, HUD meter shape).
+    #[tokio::test]
+    async fn snapshot_usage_dialog_open() {
+        let mut app = app();
+        app.record(
+            &MessageId::from("msg_fixture".to_owned()),
+            &Usage {
+                input_tokens: 1_200,
+                output_tokens: 34,
+                reasoning_tokens: 5,
+                cache_read_tokens: 600,
+                cache_write_tokens: 100,
+            },
+        );
+
+        app.run_command(command::Action::Usage).await;
+        let mut terminal = terminal(80, 30);
         app.draw(&mut terminal).expect("a frame draws");
 
         insta::assert_snapshot!(screen(&terminal));
