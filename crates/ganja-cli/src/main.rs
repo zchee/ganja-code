@@ -1326,7 +1326,7 @@ fn read_unechoed() -> Result<Option<SecretString>> {
 
 /// Lists what this build can size and price, filtered to `provider` when one
 /// was named — or, for a provider whose wire carries its own roster, what the
-/// stored login is served, live.
+/// stored credential is offered.
 ///
 /// The cached catalog is adopted here rather than left to the first lookup:
 /// the disk tier is a layer somebody installs, and a listing that skipped
@@ -1342,18 +1342,21 @@ fn read_unechoed() -> Result<Option<SecretString>> {
 async fn models_command(provider: Option<String>, refresh: bool) -> Result<()> {
     // The wire-listed tier answers before the catalog machinery is touched: a
     // `Some` from the seam means the wire — not the table — knows what the
-    // stored credential may name. The listing is live on every call, which is
-    // why `--refresh` is not consulted here: it keeps its catalog meaning,
-    // and there is no cache of this to force past.
+    // stored credential may name. `--refresh` is not consulted on this path
+    // either way: cursor's roster is live on every call with no cache to force
+    // past, and a ChatGPT seat's is pinned in the binary where no fetch can
+    // reach it (**D476**). The notice each answer carries says which.
     if let Some(wanted) = provider.as_deref()
         && let Some(listing) = ganja_core::provider::wire_model_listing(wanted).await
     {
-        let models = listing?;
-        println!(
-            "{wanted} models, live from the wire; uncataloged, so sizing and cost display are off"
-        );
+        let listed = listing?;
+        // The notice is the seam's, not this command's: cursor's roster is
+        // fetched live and unpriced while a ChatGPT seat's is pinned in the
+        // binary and may well be cataloged, and one sentence about both would
+        // be false about one of them (**D476**).
+        println!("{wanted} models, {}", listed.notice);
         println!("\n{:<32}  NAME", "MODEL");
-        for model in models {
+        for model in listed.models {
             println!("{:<32}  {}", model.id, model.name);
         }
 

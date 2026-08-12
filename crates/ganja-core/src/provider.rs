@@ -141,54 +141,135 @@ pub struct ListedModel {
     pub name: String,
 }
 
-/// The live roster for a provider whose *wire*, not the catalog, knows what
-/// the stored credential may name — today exactly cursor, whose
-/// `GetUsableModels` listing is the only source its uncataloged tier has.
-/// Everyone else answers [`None`], and the catalog keeps describing them.
+/// A roster the wire owns, and the one line a surface must print beside it.
 ///
-/// Live on every call, deliberately: upstream's cursor plugin caches its
-/// discovery per process, but both callers here already hold the answer the
-/// way they need it — the TUI caches for the App's lifetime and the CLI is
-/// one-shot — so a cache at this seam would only be a second staleness to
-/// reason about (deviation: cursor-model-listing-uncached-at-the-seam).
+/// The notice exists because the two rosters here are true in different ways
+/// and a header that said one thing about both would be wrong about one of
+/// them: cursor's is fetched live and unpriced, the ChatGPT seat's is pinned in
+/// the binary and may well be cataloged. Static, because both sentences are
+/// facts about a code path rather than about a run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WireModels {
+    /// The models to offer, in the order to offer them.
+    pub models: Vec<ListedModel>,
+    /// Where they came from, and what does not apply to them — one line, meant
+    /// to be printed after `"<provider> models, "`.
+    pub notice: &'static str,
+}
+
+/// What [`WireModels::notice`] says about cursor's roster.
+const CURSOR_NOTICE: &str = "live from the wire; uncataloged, so sizing and cost display are off";
+
+/// What it says about a ChatGPT seat's, which is neither live nor unpriced —
+/// so it says neither (**D476**).
+const SEAT_NOTICE: &str =
+    "pinned to what a ChatGPT subscription is offered; --refresh does not apply";
+
+/// Whether [`wire_model_listing`] answers for `provider_id`: the same decision,
+/// asked without taking the listing.
+///
+/// A surface that must choose between the catalog and the wire *before* it
+/// spawns anything needs this synchronously — the TUI's `/model` opens one
+/// dialog or spawns one fetch, and cannot await to find out which. Both arms
+/// are local: a name comparison, or [`openai_seat`]'s read of the environment
+/// and the credential store.
+///
+/// A store that cannot be read answers `false` here, which sends the caller to
+/// the catalog. That is the honest fallback for a *listing*: browsing openai's
+/// rows is useful with or without a credential, and the store's real repair
+/// belongs to the paths that need to authenticate.
+#[must_use]
+pub fn wire_lists_models(provider_id: &str) -> bool {
+    match provider_id {
+        cursor::ID => true,
+        openai::ID => openai_seat().unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// The roster for a provider whose *wire*, not the catalog, says what the
+/// stored credential may name. Everyone else answers [`None`], and the catalog
+/// keeps describing them.
+///
+/// Two providers answer, for opposite reasons:
+///
+/// - **cursor**, whose `GetUsableModels` listing is the only source its
+///   uncataloged tier has. Live on every call, deliberately: upstream's cursor
+///   plugin caches its discovery per process, but both callers here already
+///   hold the answer the way they need it — the TUI caches for the App's
+///   lifetime and the CLI is one-shot — so a cache at this seam would only be
+///   a second staleness to reason about (deviation:
+///   `cursor-model-listing-uncached-at-the-seam`).
+/// - **openai on a ChatGPT seat**, whose offering is
+///   [`responses::SEAT_ROSTER`]'s pinned five (**D476**). No network and no
+///   catalog read decides membership: the list is compile-time, and the catalog
+///   is consulted only for a human name it may or may not know. A session on
+///   an API key is not a seat, so it answers [`None`] and the catalog stays its
+///   source of truth — as does a machine holding no openai credential at all,
+///   because a listing must stay usable logged out.
 ///
 /// # Errors
 ///
 /// The inner [`ProviderError`] is the wire's own: `Auth` naming
 /// `ganja auth login cursor` when no login is stored — the store is read
 /// before anything is dialled — and the transport, status and parse classes
-/// after that.
-pub async fn wire_model_listing(
-    provider_id: &str,
-) -> Option<Result<Vec<ListedModel>, ProviderError>> {
-    if provider_id != cursor::ID {
+/// after that. The seat arm cannot fail; it reaches nothing.
+pub async fn wire_model_listing(provider_id: &str) -> Option<Result<WireModels, ProviderError>> {
+    if !wire_lists_models(provider_id) {
         return None;
     }
 
-    Some(cursor_models().await)
+    if provider_id == cursor::ID {
+        return Some(cursor_models().await);
+    }
+
+    Some(Ok(seat_models()))
+}
+
+/// The ChatGPT-seat half of [`wire_model_listing`]: the pinned five, named by
+/// the catalog where it happens to know them.
+///
+/// The lookup is provider-scoped so a same-named row of another vendor cannot
+/// supply the name, and its absence is not a gap to report — an id is a
+/// perfectly good label, and membership never depended on the table.
+fn seat_models() -> WireModels {
+    WireModels {
+        models: responses::SEAT_ROSTER
+            .iter()
+            .map(|id| ListedModel {
+                id: (*id).to_owned(),
+                name: catalog::model_for(openai::ID, id)
+                    .map_or_else(|| (*id).to_owned(), |info| info.name.clone()),
+            })
+            .collect(),
+        notice: SEAT_NOTICE,
+    }
 }
 
 /// The cursor half of [`wire_model_listing`]: the stored login, one listing
 /// call, and the entries in the order the server sent them.
-async fn cursor_models() -> Result<Vec<ListedModel>, ProviderError> {
+async fn cursor_models() -> Result<WireModels, ProviderError> {
     let wire = cursor::CursorWire::from_stored()?;
     let entries = wire.usable_models().await?;
 
-    Ok(entries
-        .into_iter()
-        .filter_map(|entry| {
-            // An entry with no id is nothing a request could ask for. The
-            // name is `display_name` — proto field 4, the human string —
-            // never `display_model_id`, which is the server-side id again.
-            let id = entry.model_id.filter(|id| !id.is_empty())?;
-            let name = entry
-                .display_name
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| id.clone());
+    Ok(WireModels {
+        models: entries
+            .into_iter()
+            .filter_map(|entry| {
+                // An entry with no id is nothing a request could ask for. The
+                // name is `display_name` — proto field 4, the human string —
+                // never `display_model_id`, which is the server-side id again.
+                let id = entry.model_id.filter(|id| !id.is_empty())?;
+                let name = entry
+                    .display_name
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| id.clone());
 
-            Some(ListedModel { id, name })
-        })
-        .collect())
+                Some(ListedModel { id, name })
+            })
+            .collect(),
+        notice: CURSOR_NOTICE,
+    })
 }
 
 /// A resolved provider, together with the model to ask when nothing named one.
@@ -249,21 +330,45 @@ impl Wire {
 /// credential": those are different situations needing different repairs, and
 /// only the second can say what to fix.
 fn openai_provider() -> Result<Wire, ProviderError> {
-    if key_for(openai::ID)?.is_none() {
-        let stored =
-            auth::oauth_for(openai::ID).map_err(|error| ProviderError::Auth(error.to_string()))?;
-
-        if stored.is_some() {
-            return Ok(Wire {
-                provider: Arc::new(ResponsesProvider::from_stored()?),
-                default_model: Some(responses::SUBSCRIPTION_DEFAULT),
-            });
-        }
+    if openai_seat()? {
+        return Ok(Wire {
+            provider: Arc::new(ResponsesProvider::from_stored()?),
+            default_model: Some(responses::SUBSCRIPTION_DEFAULT),
+        });
     }
 
     // A key, or neither — and the second is `require_key`'s error, unchanged,
     // because it is the same lookup it always was.
     Ok(Wire::catalog(ResponsesProvider::from_env()?))
+}
+
+/// Whether an openai session is a **ChatGPT seat** — the codex backend — rather
+/// than the platform.
+///
+/// The one place that decision is made. [`openai_provider`] builds a wire from
+/// it and [`wire_lists_models`] decides a roster from it, and they must not
+/// disagree: a session running on the seat that browsed the platform's models
+/// would offer models its own backend refuses.
+///
+/// Exactly [`openai_provider`]'s own reading, in its order — a key, exported or
+/// stored, is read first and outranks a login, because that is what [`key_for`]
+/// has always meant. A store that cannot be read is reported rather than
+/// treated as "no credential": those are different situations needing different
+/// repairs, and only the second can say what to fix.
+///
+/// # Errors
+///
+/// Returns [`ProviderError::Auth`] when the credential store exists and cannot
+/// be read or understood. Holding neither credential is `Ok(false)`, not an
+/// error — that is the platform arm, whose own refusal names the variable.
+fn openai_seat() -> Result<bool, ProviderError> {
+    if key_for(openai::ID)?.is_some() {
+        return Ok(false);
+    }
+
+    Ok(auth::oauth_for(openai::ID)
+        .map_err(|error| ProviderError::Auth(error.to_string()))?
+        .is_some())
 }
 
 /// The provider a config's `provider` entry describes.
@@ -716,17 +821,21 @@ mod tests {
         );
     }
 
-    /// The listing seam's whole negative half: for everything that is not
-    /// cursor — cataloged builtins, the fake provider, config-declared
-    /// endpoints, outright typos — the answer is [`None`] before anything is
-    /// read or dialled, and the catalog stays the source of truth. The
-    /// positive half mutates `XDG_DATA_HOME` and so lives in its own test
-    /// binary, `tests/cursor_models_listing.rs`.
+    /// The listing seam's whole credential-independent negative half: for
+    /// cataloged builtins, the fake provider, config-declared endpoints and
+    /// outright typos the answer is [`None`] before anything is read or
+    /// dialled, and the catalog stays the source of truth.
+    ///
+    /// `openai` is deliberately absent from this list although it is usually
+    /// one of them: its answer now reads the environment and the credential
+    /// store (**D476**), so pinning it here would make this test's verdict the
+    /// developer's logins. Both of its arms live in
+    /// `tests/openai_seat_models_listing.rs`, which redirects the store, as
+    /// cursor's positive half lives in `tests/cursor_models_listing.rs`.
     #[tokio::test]
     async fn the_wire_listing_answers_none_where_the_catalog_is_the_source_of_truth() {
         for provider in [
             "anthropic",
-            openai::ID,
             grok::ID,
             fake::ID,
             "local-llama",

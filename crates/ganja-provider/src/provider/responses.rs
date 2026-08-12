@@ -182,6 +182,39 @@ const BETA: &str = "responses=experimental";
 /// `codex.ts:15-16`.
 const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"];
 
+/// The models a ChatGPT seat is **offered**, in the order to offer them
+/// (**D476**, `seat-roster-pinned`).
+///
+/// No upstream counterpart: `codex.ts` filters the vendor's catalog through
+/// [`serves`] and offers whatever survives, so the roster a seat browses drifts
+/// with `models.dev`. This is the owner's own pin instead — five ids, this
+/// order, decided once and answered from the binary.
+///
+/// **Offered is not servable, and the split is the whole point.** [`serves`]
+/// stays the `codex.ts:281-292` port it always was, so a session that names
+/// `--model openai/gpt-5.4` explicitly still takes its turn; what this narrows
+/// is only what a listing *volunteers*. `gpt-5.4` and `gpt-5.4-mini` are
+/// therefore servable and deliberately unoffered, and
+/// [`SUBSCRIPTION_DEFAULT`] — one of them — is deliberately not first here,
+/// because what a seat defaults to and what it offers to browse are two
+/// decisions.
+///
+/// **The catalog cannot move this list.** Membership is these five lines;
+/// `ganja models --refresh` re-reads sizing and pricing and never this. A
+/// catalog row is consulted for one thing only, a human-readable name, and its
+/// absence costs nothing — the id stands in.
+///
+/// Every id here has to satisfy [`serves`]: an offer this backend would then
+/// refuse is a lie the listing tells, and the test below is what keeps it
+/// honest.
+pub const SEAT_ROSTER: [&str; 5] = [
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.3-codex-spark",
+];
+
 /// What a subscription session asks for when nothing named a model.
 ///
 /// **Not [`crate::catalog::default_model`]**, and the reason is the shape of
@@ -1339,7 +1372,7 @@ mod tests {
     use super::{
         ACCOUNT_HEADER, ALLOWED_MODELS, BETA, BETA_HEADER, Backend, Body, CHAT_COMPLETIONS_ONLY,
         DEFAULT_BASE_URL, ID, Mapping, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider,
-        SUBSCRIPTION_DEFAULT, generation, reauth, seals_reasoning, serves,
+        SEAT_ROSTER, SUBSCRIPTION_DEFAULT, generation, reauth, seals_reasoning, serves,
     };
     use crate::{
         auth::{self, AuthError, OauthCredential, RefreshOauth},
@@ -1749,6 +1782,40 @@ mod tests {
              generation rule, which is what keeps it from moving under us when \
              the rule does"
         );
+    }
+
+    /// The obligation [`SEAT_ROSTER`] carries: an offer this backend would
+    /// then refuse is a listing that lies, and the two halves of the roster
+    /// reach [`serves`] by different routes — two are named by
+    /// [`ALLOWED_MODELS`], three are admitted by the generation rule — so the
+    /// pin has to be asserted over the whole list rather than over either.
+    #[test]
+    fn every_model_the_seat_offers_is_one_the_seat_serves() {
+        for offered in SEAT_ROSTER {
+            assert!(
+                serves(offered),
+                "the roster offers `{offered}`, which this backend refuses"
+            );
+        }
+    }
+
+    /// The other half of **D476**: the pin narrows what is *offered*, never
+    /// what is *servable*. Somebody who types `--model openai/gpt-5.4` on a
+    /// seat still takes their turn, although no listing volunteered it — which
+    /// is why the roster is a separate constant rather than a shorter
+    /// [`ALLOWED_MODELS`].
+    #[test]
+    fn a_model_the_roster_leaves_out_is_still_one_an_explicit_request_may_name() {
+        for unoffered in ["gpt-5.4", "gpt-5.4-mini"] {
+            assert!(
+                !SEAT_ROSTER.contains(&unoffered),
+                "`{unoffered}` is deliberately unoffered"
+            );
+            assert!(
+                serves(unoffered),
+                "and deliberately still servable: the pin is an offer, not a gate"
+            );
+        }
     }
 
     /// The field the live pass died on. A body without it is answered
