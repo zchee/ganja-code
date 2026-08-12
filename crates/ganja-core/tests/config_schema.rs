@@ -153,7 +153,11 @@ const KITCHEN_SINK: &str = r#"{
   },
   "webfetch": { "allow_private": true },
   "skills": { "paths": ["~/.claude/skills"], "urls": ["https://example/skills"] },
-  "snapshot": false
+  "snapshot": false,
+  "tui": {
+    "notifications": ["turn-complete", "approval-requested"],
+    "notification_method": "bel"
+  }
 }"#;
 
 /// The single environment-mutating test in this binary: everything that
@@ -348,6 +352,48 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
         "McpOauth is an empty struct with deny_unknown_fields; the schema's \
          additionalProperties: false on McpOauth should refuse an extra key too"
     );
+
+    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    sink["tui"]["zzz_schema_probe"] = json!(1);
+    assert!(
+        !validator.is_valid(&sink),
+        "the tui table is curated with deny_unknown_fields; the schema's \
+         additionalProperties: false on TuiConfig should refuse an unknown key too"
+    );
+
+    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    sink["tui"]["notifications"] = json!(["turn-done"]);
+    assert!(
+        !validator.is_valid(&sink),
+        "an event name nothing announces is refused by the loader naming it; the \
+         schema's closed NotificationEvent enum should refuse it too"
+    );
+
+    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    sink["tui"]["notification_method"] = json!("toast");
+    assert!(
+        !validator.is_valid(&sink),
+        "a method nothing sends is refused by the loader naming it; the schema's \
+         closed NotificationMethod enum should refuse it too"
+    );
+}
+
+/// The `tui.notifications` key takes either spelling, and the kitchen sink
+/// can only carry one of them (the list). The boolean form is validated here
+/// so the schema's `anyOf` is exercised on both arms.
+#[test]
+fn the_boolean_notification_spelling_also_validates() {
+    let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
+
+    for spelling in [json!(true), json!(false)] {
+        let mut sink: Value =
+            serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+        sink["tui"]["notifications"] = spelling.clone();
+        assert!(
+            validator.is_valid(&sink),
+            "tui.notifications takes a bare boolean: {spelling}"
+        );
+    }
 }
 
 /// The other half of
