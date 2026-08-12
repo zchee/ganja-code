@@ -3,7 +3,8 @@
 //! for choosing a stored session to resume, one for choosing a theme, one for
 //! choosing a model or an agent, the command palette, the reference card, one
 //! for fuzzy-searching remembered prompts, one for rewinding to a checkpoint,
-//! one for the configured MCP servers and what to do about them, the strip of
+//! one for the configured MCP servers and what to do about them, one for the
+//! installed plugins and the store actions beside them, the strip of
 //! messages waiting for the running turn, and the two inline menus the editor
 //! raises — one on a leading slash, one on an `@` — plus the two read-only
 //! panels `/context` and `/usage` raise over the same chrome.
@@ -20,6 +21,7 @@ pub mod list;
 pub mod mcp;
 pub mod palette;
 pub mod permission;
+pub mod plugin;
 pub mod question;
 pub mod queue;
 pub mod rewind;

@@ -258,7 +258,7 @@ mod tests {
         x: 0,
         y: 0,
         width: 76,
-        height: 32,
+        height: 33,
     };
 
     /// What an 80×24 terminal actually hands this dialog: the app draws it

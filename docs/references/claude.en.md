@@ -56,7 +56,7 @@ docs unless marked otherwise.*
 | [Todo checklist panel](https://code.claude.com/docs/en/interactive-mode) | Ctrl+T toggles a task side-panel | ⚠️ todos render in-chat only; ganja's Ctrl+T went to the inspector |
 | [Permission dialog](https://code.claude.com/docs/en/iam) | tool call preview, approve/deny, mode switch in-dialog | ✅ upstream's dialog semantics (`a`/`A`/`d`), queued when several children ask at once; no in-dialog mode switching (no mode concept) |
 | [Trust dialog](https://code.claude.com/docs/en/iam) | first-launch directory trust prompt | ❌ no trust tier; permission rules gate everything instead |
-| [Status line scripting](https://code.claude.com/docs/en/statusline) | `/statusline`, `statusLine` command fed session JSON on stdin | ❌ fixed status bar (themes ✅) |
+| [Status line scripting](https://code.claude.com/docs/en/statusline) | `/statusline`, `statusLine` command fed session JSON on stdin | ⚠️ native `tui.statusline` element roster instead (D469): user-ordered named segments, HUD-shaped meters, optional git/detail lines — no external script protocol, deliberately (no subprocess per render tick) |
 | [Terminal setup](https://code.claude.com/docs/en/terminal-config) | `/terminal-setup`: keybinding + terminal profile tuning | ❌ nothing to configure; bracketed paste and OSC 52 are unconditional |
 | [Spinner tips](https://code.claude.com/docs/en/settings) | `spinnerTipsEnabled` | ❌ |
 | [Customizable keybindings](https://code.claude.com/docs/en/interactive-mode) *(low confidence on the file's schema)* | `~/.claude/keybindings.json`: context-aware bindings and chords | ⚠️ `keybinds` config map — comma-separated alternates per action, an empty value unbinds; no contexts, no chords |
@@ -89,16 +89,16 @@ docs unless marked otherwise.*
 | [`/mcp`](https://code.claude.com/docs/en/mcp) | MCP manage/auth dialog | ✅ two-step dialog: server list (status, tool count, error) → Reconnect/Login actions, `ganja mcp` CLI listing beside it |
 | [`/memory`](https://code.claude.com/docs/en/memory) | memory file editor | ❌ |
 | [`/hooks`](https://code.claude.com/docs/en/hooks) | hooks manager | ⚠️ the hook system itself is ✅ (config-declared, nine events); no interactive manager UI to view/edit them |
-| [`/statusline`](https://code.claude.com/docs/en/statusline) | status bar scripting | ❌ fixed status bar |
+| [`/statusline`](https://code.claude.com/docs/en/statusline) | status bar scripting | ❌ no scripting command; the bar is configured natively via `tui.statusline` (D469) |
 | [`/output-style`](https://code.claude.com/docs/en/output-styles) | response styles | ❌ |
-| [`/context`](https://code.claude.com/docs/en/costs) | context usage grid | ❌ totals only |
+| [`/context`](https://code.claude.com/docs/en/costs) | context usage grid | ✅ per-category grid + legend over the compaction estimator's breakdown (D470); an unsized model degrades to totals with an honest notice, never an invented denominator |
 | [`/todos`](https://code.claude.com/docs/en/interactive-mode) | task checklist view | ⚠️ todos render in-chat only |
-| [`/usage`](https://code.claude.com/docs/en/costs) | usage/cost breakdown | ⚠️ session totals only |
+| [`/usage`](https://code.claude.com/docs/en/costs) | usage/cost breakdown | ⚠️ session totals, cache/reasoning splits, context % and the per-turn table (D471); no plan-limit meters — ganja speaks no vendor usage API, and the panel says so instead of drawing one |
 | [`/doctor`](https://code.claude.com/docs/en/troubleshooting) | self-diagnostics | ❌ |
 | [`/export`](https://code.claude.com/docs/en/slash-commands) | export conversation | ⚠️ `/copy` only |
 | [`/cd`](https://code.claude.com/docs/en/slash-commands) *(low confidence)* | change directory | ❌ launch-directory-only is a design stance |
 | [`/add-dir`](https://code.claude.com/docs/en/common-workflows) | grant extra directories mid-session | ❌ |
-| [`/plugin`](https://code.claude.com/docs/en/plugins) | marketplace add / install / reload | ❌ |
+| [`/plugin`](https://code.claude.com/docs/en/plugins) | marketplace add / install / reload | ✅ two-step dialog over the install store (D474): per-plugin Enable/Disable/Remove, Add marketplace / Install / Reload beside them; Reload is honest-split — hooks and skill roots rebuild in-session, agents/MCP/LSP say restart required |
 | [`/vim`](https://code.claude.com/docs/en/interactive-mode) | vim editing | ❌ |
 
 ## 5. Built-in tools
@@ -170,8 +170,8 @@ docs unless marked otherwise.*
 | [Skill auto-triggering + `paths` scoping](https://code.claude.com/docs/en/skills) | description- and path-matched invocation | ❌ explicit load only |
 | [`context: fork`](https://code.claude.com/docs/en/skills) | run the skill in a forked subagent, return only results | ❌ |
 | [Skill `allowed-tools`](https://code.claude.com/docs/en/skills) | tool restriction incl. `mcp__*` wildcards | ❌ |
-| [Plugins: 5 component types](https://code.claude.com/docs/en/plugins) | skills, agents, hooks, MCP servers, LSP servers | ❌ |
-| [Marketplaces](https://code.claude.com/docs/en/plugins) | `marketplace.json`, `/plugin install`, `/reload-plugins` | ❌ |
+| [Plugins: 5 component types](https://code.claude.com/docs/en/plugins) | skills, agents, hooks, MCP servers, LSP servers | ✅ all five merge as config contributors (D472/D473): hooks append, MCP servers arrive namespaced `plugin:<name>:<server>` and ask by default, skills roots concatenate, agents/LSP merge per key with explicit config winning; the `commands/` sixth surface is deferred |
+| [Marketplaces](https://code.claude.com/docs/en/plugins) | `marketplace.json`, `/plugin install`, `/reload-plugins` | ⚠️ `marketplace.json` verbatim, added from a git URL or local path, installs spelled `<plugin>@<marketplace>` (D472); remote source objects (`github:` etc.) parse but do not install yet, and reload is restart-honest (D474) |
 
 ## 10. MCP and LSP
 
@@ -184,7 +184,7 @@ docs unless marked otherwise.*
 | [Project-scope first-use approval](https://code.claude.com/docs/en/mcp) | guard against repo-injected servers | ✅ stronger: every MCP tool asks by default |
 | [Timeout/output knobs](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `MAX_MCP_OUTPUT_TOKENS` | ⚠️ per-server `timeout`/`output_limit` config keys (bytes, not tokens); no global env-var knobs |
 | Reconnection | recover a dead server | ✅ `/mcp` dialog's manual Reconnect (any `Failed` server) + a bounded once-per-session automatic retry for a server whose first dial never succeeded (D463) |
-| [LSP servers via plugins](https://code.claude.com/docs/en/plugins) | plugins may bundle LSP servers | ⚠️ ganja's LSP is first-party config (`lsp` key: rust/gopls builtins + custom entries), not a plugin surface |
+| [LSP servers via plugins](https://code.claude.com/docs/en/plugins) | plugins may bundle LSP servers | ✅ a plugin's `.lsp.json` merges into the first-party `lsp` table per key, explicit config winning and an explicit `lsp: false` never overturned (D473) |
 
 ## 11. Models, providers and auth
 

@@ -20,7 +20,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | Feature | Keys | ganja |
 |---|---|---|
 | [`@` fuzzy file search with Tab-accept](https://developers.openai.com/codex/cli) | `@` + Tab | ✅ Tab accepts, byte-identical to Enter; directory-descent (`@dir`→`@dir/`) not built — ganja's walker is files-only |
-| [Esc-Esc backtrack](https://developers.openai.com/codex/cli) | Esc Esc | ⚠️ idle Esc Esc now opens ganja's own rewind picker — pick a past user-message checkpoint, then Both/Conversation/Files scope; unlike Codex it doesn't re-populate the composer with the old prompt for editing, and it's gated to an idle composer (mid-turn Esc still cancels) |
+| [Esc-Esc backtrack](https://developers.openai.com/codex/cli) | Esc Esc | ✅ idle Esc Esc enters the backtrack walk (D467): the newest user message highlights in the transcript, each further Esc steps one older, Enter reverts to before it **and re-populates the composer with that prompt for editing**; any other key exits without reverting, mid-turn Esc still cancels, and `/rewind` keeps the two-step scope picker |
 | [Queued messages](https://developers.openai.com/codex/cli) | Enter while running | ✅ steers into the running turn at its next step boundary (`Command::Steer`) — the same shape as Codex's own `input_queue`/`inject`; what can't steer (refused, unconsumed, slash commands) falls back to a replayed queue, Codex's `queued_user_messages` half |
 | [Clipboard image paste](https://developers.openai.com/codex/cli) | Ctrl+V | ✅ PNG-encoded in-process (no OS shell-out) and attached through the `@`-mention pipeline |
 | [Slash-command autocomplete](https://developers.openai.com/codex/cli) | `/` | ✅ |
@@ -37,11 +37,11 @@ status-line rows moved here from §1, the rest is researched.*
 | Feature | Notes | ganja |
 |---|---|---|
 | [Transcript overlay](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ same chord, three tabs (expanded transcript incl. full tool/MCP input+output, raw event log, per-turn token table); full-terminal takeover and the banner are this overlay's own presentation, Claude Code's Ctrl+O supplies the one-line footer wording |
-| [Status-line composition](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ❌ fixed status bar (themes ✅) |
+| [Status-line composition](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ✅ `tui.statusline` element roster (D469): user-ordered named elements, width-aware, rendered in the OMC HUD's shape (meters, git line, optional detail lines); the element vocabulary is ganja's own, not Codex's id list, and an unknown name is refused at load |
 | [Onboarding flow](https://developers.openai.com/codex/cli) | first-run auth choice (ChatGPT OAuth / API key), config bootstrap | ❌ ganja boots into the fake provider with a status-bar notice; `auth login` is a separate CLI step |
 | [Approval dialog](https://github.com/openai/codex/blob/main/docs/getting-started.md) | pending command/patch preview; approve, approve-for-session, deny with feedback | ⚠️ ganja's permission dialog (allow / always / deny) — "always" persists to the per-project store instead of dying with the session |
 | [Native diff rendering](https://developers.openai.com/codex/cli) | `apply_patch` changes shown as colored unified diffs before applying | ⚠️ inline unified diffs per edit; no pre-apply preview step (permission dialog carries the call instead) |
-| [Desktop/terminal notifications](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] notifications` (turn-complete, approval-requested), `notification_method` osc9/bel | ❌ status-bar notices only |
+| [Desktop/terminal notifications](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] notifications` (turn-complete, approval-requested), `notification_method` osc9/bel | ✅ `tui.notifications` as a bool or the same event filter, `notification_method` osc9/bel, focus-gated off the terminal's own focus events so a watched terminal never rings (D468) |
 | Keybinding customization *(low confidence)* | limited remapping via config | ⚠️ ganja's `keybinds` map covers six actions, comma-separated alternates, empty unbinds |
 
 ## 3. Modes and execution

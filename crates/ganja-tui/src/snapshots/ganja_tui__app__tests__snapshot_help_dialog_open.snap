@@ -15,9 +15,9 @@ cont│/themes        Switch theme                                           │
 [err│/mcp           MCP servers                                            │    
 refu│/context       Context usage                                          │    
     │/usage         Session usage                                          │    
-    │/help          Help                                                   │    
+    │/plugin        Plugins                                                │    
     │                                                                      │    
-    │[up/down] scroll   [Esc] close                              1-12 of 26│    
+    │[up/down] scroll   [Esc] close                              1-12 of 27│    
     └──────────────────────────────────────────────────────────────────────┘    
                                                                                 
 ┌ message ─────────────────────────────────────────────────────────────────────┐

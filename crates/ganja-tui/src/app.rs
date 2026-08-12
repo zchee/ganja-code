@@ -56,6 +56,7 @@ use crate::{
         mcp,
         palette::Palette,
         permission::Permission,
+        plugin,
         question::Question,
         queue::Queue,
         rewind::Rewind,
@@ -158,6 +159,12 @@ const CLIPBOARD_EMPTY: &str = "the clipboard holds neither text nor an image";
 /// upstream's toast message, reworded for ganja (`app.tsx:717`).
 const NO_EFFORTS: &str = "The current model does not support any efforts.";
 
+/// What the `/plugin` dialog's Reload answers when it worked (**D474**): the
+/// honest split, verbatim. Hooks and the skill roots really are rebuilt
+/// in-session; the agents roster, the MCP dials and the LSP servers are
+/// assembled at startup and are *named as such* rather than half-reloaded.
+const RELOAD_SPLIT: &str = "reloaded now: hooks, skills \u{b7} restart required: agents, mcp, lsp";
+
 /// The one-line notice a failed MCP server earns in the status bar, or [`None`]
 /// while every configured server is either connected, disabled, or still being
 /// dialled.
@@ -185,6 +192,50 @@ fn mcp_notice(
         .collect();
 
     (!failures.is_empty()).then(|| failures.join(NOTICE_SEPARATOR))
+}
+
+/// Runs one store-backed `/plugin` action and answers with the notice line
+/// the dialog shows — the confirmation the CLI would print, or the refusal,
+/// git's captured stderr included, since [`ganja_core::plugin::PluginError`]
+/// carries a failed clone's stderr as its message.
+///
+/// A free function because [`App::run_plugin_effect`] runs it on a blocking
+/// task: what it needs is the store and the decision, and handing it less
+/// than `self` is what makes that spawn possible.
+fn run_store_effect(store: &ganja_core::plugin::Store, effect: plugin::Effect) -> String {
+    match effect {
+        plugin::Effect::Enable(name) => match store.set_enabled(&name, true) {
+            Ok(()) => format!("enabled {name}"),
+            Err(error) => error.to_string(),
+        },
+        plugin::Effect::Disable(name) => match store.set_enabled(&name, false) {
+            Ok(()) => format!("disabled {name}"),
+            Err(error) => error.to_string(),
+        },
+        plugin::Effect::Remove(name) => match store.remove(&name) {
+            Ok(()) => format!("removed {name}"),
+            Err(error) => error.to_string(),
+        },
+        plugin::Effect::AddMarketplace(origin) => match store.add_marketplace(&origin) {
+            Ok(name) => format!("added marketplace {name} from {origin}"),
+            Err(error) => error.to_string(),
+        },
+        plugin::Effect::Install(spec) => {
+            // The CLI's own spelling rule, kept verbatim so the two doors
+            // refuse the same way.
+            let Some((name, marketplace)) = spec.split_once('@') else {
+                return format!(
+                    "spell it <plugin>@<marketplace>, the way `ganja plugin list` and the \
+                     marketplace file spell it; got \"{spec}\""
+                );
+            };
+            match store.install(name, marketplace) {
+                Ok(()) => format!("installed {name} from {marketplace}, enabled"),
+                Err(error) => error.to_string(),
+            }
+        }
+        plugin::Effect::Reload => unreachable!("the reload never reaches the store helper"),
+    }
 }
 
 /// What a `RevertChanged` carrying no revert means for the messages this
@@ -346,6 +397,12 @@ pub struct App {
     rewind: Option<Rewind>,
     /// The `/mcp` dialog, while it is open (**F5**).
     mcp_dialog: Option<mcp::Mcp>,
+    /// The `/plugin` dialog, while it is open (**D474**).
+    plugin_dialog: Option<plugin::Plugin>,
+    /// Where the plugin store lives, when a test moved it; [`None`] resolves
+    /// the real store under the config home when the dialog opens, the same
+    /// discovery `ganja plugin` runs.
+    plugin_store: Option<ganja_core::plugin::Store>,
     /// The `/context` panel, while it is open (**D470**). A snapshot of the
     /// engine's breakdown taken when the command ran, never re-polled.
     context_dialog: Option<context::Context>,
@@ -550,6 +607,8 @@ impl App {
             history_search: None,
             rewind: None,
             mcp_dialog: None,
+            plugin_dialog: None,
+            plugin_store: None,
             context_dialog: None,
             usage_dialog: None,
             chooser: None,
@@ -671,6 +730,20 @@ impl App {
     #[must_use]
     pub fn with_statusline(mut self, statusline: Option<&StatuslineConfig>) -> Self {
         self.status.set_statusline(statusline);
+
+        self
+    }
+
+    /// Reads and writes plugins in `store` instead of discovering the real
+    /// one under the config home.
+    ///
+    /// A builder for the reason [`App::with_history`] is one: the default
+    /// discovers the machine's own store only when the `/plugin` dialog
+    /// opens, so a test that hands one in never touches a real person's
+    /// plugins.
+    #[must_use]
+    pub fn with_plugin_store(mut self, store: ganja_core::plugin::Store) -> Self {
+        self.plugin_store = Some(store);
 
         self
     }
@@ -1055,6 +1128,9 @@ impl App {
                 }
                 if let Some(mcp_dialog) = &self.mcp_dialog {
                     mcp_dialog.render(transcript, buffer, &self.theme);
+                }
+                if let Some(plugin_dialog) = &self.plugin_dialog {
+                    plugin_dialog.render(transcript, buffer, &self.theme);
                 }
                 if let Some(context_dialog) = &self.context_dialog {
                     context_dialog.render(transcript, buffer, &self.theme);
@@ -1498,6 +1574,14 @@ impl App {
             return Ok(());
         }
 
+        // The whole event, not just the code: the free-text step takes
+        // printable characters, the way the question dialog's editor does.
+        if self.plugin_dialog.is_some() {
+            self.handle_plugin_key(key).await;
+
+            return Ok(());
+        }
+
         // The two read-only panels: modal like every dialog, but with nothing
         // to steer — Esc closes, everything else is claimed and ignored.
         if self.context_dialog.is_some() {
@@ -1767,6 +1851,7 @@ impl App {
             || self.history_search.is_some()
             || self.rewind.is_some()
             || self.mcp_dialog.is_some()
+            || self.plugin_dialog.is_some()
             || self.context_dialog.is_some()
             || self.usage_dialog.is_some()
             || self.chooser.is_some()
@@ -1789,6 +1874,7 @@ impl App {
             command::Action::Mcp => self.open_mcp(),
             command::Action::Context => self.open_context().await,
             command::Action::Usage => self.open_usage(),
+            command::Action::Plugin => self.open_plugin(),
             command::Action::Help => self.help = Some(Help::new(self.keys.clone())),
             command::Action::Exit => self.quit = true,
             command::Action::Copy => self.copy_transcript(),
@@ -3071,6 +3157,201 @@ impl App {
         if let Some(dialog) = &mut self.mcp_dialog {
             dialog.refresh(rows);
         }
+    }
+
+    /// Opens the `/plugin` dialog over what the store holds right now.
+    ///
+    /// The rows come off [`ganja_core::plugin::Store::list`] — the same call
+    /// `ganja plugin list` prints — so the dialog and the CLI are two views
+    /// of one answer, which is what keeps them from disagreeing (**D472**'s
+    /// one-collector rule). A store that cannot be read opens the dialog
+    /// anyway, with the refusal on its notice line: an unreadable state file
+    /// is worth a person's attention, not a silent no-op.
+    fn open_plugin(&mut self) {
+        let (rows, notice) = self.plugin_rows();
+        let mut dialog = plugin::Plugin::new(rows);
+        if let Some(notice) = notice {
+            dialog.set_notice(notice);
+        }
+        self.plugin_dialog = Some(dialog);
+    }
+
+    /// The store the dialog acts on: the one a test handed in, or the real
+    /// one under the config home — resolved per action rather than held,
+    /// so an environment that changes homes between sessions is never read
+    /// through a stale path.
+    fn resolve_plugin_store(&self) -> Option<ganja_core::plugin::Store> {
+        self.plugin_store
+            .clone()
+            .or_else(ganja_core::plugin::Store::discover)
+    }
+
+    /// The `/plugin` dialog's rows, fresh off the store, with anything the
+    /// read had to complain about.
+    fn plugin_rows(&self) -> (Vec<plugin::Row>, Option<String>) {
+        let Some(store) = self.resolve_plugin_store() else {
+            return (
+                Vec::new(),
+                Some(
+                    "no config home could be resolved, so there is nowhere to keep plugins"
+                        .to_owned(),
+                ),
+            );
+        };
+        match store.list() {
+            Ok(listings) => (
+                listings
+                    .into_iter()
+                    .map(|listing| plugin::Row {
+                        summary: plugin::summarize(&listing.components),
+                        name: listing.name,
+                        enabled: listing.enabled,
+                        marketplace: listing.marketplace,
+                    })
+                    .collect(),
+                None,
+            ),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        }
+    }
+
+    /// One keypress while the `/plugin` dialog is open, which owns every
+    /// key. The free-text step takes the printable ones, the way the
+    /// question dialog's editor does; everywhere else the keys are the
+    /// `/mcp` dialog's, Esc closing the dialog except where the input step
+    /// consumes it as "cancel the edit".
+    async fn handle_plugin_key(&mut self, key: KeyEvent) {
+        let Some(dialog) = &mut self.plugin_dialog else {
+            return;
+        };
+
+        if dialog.is_typing() {
+            match key.code {
+                KeyCode::Esc => {
+                    dialog.cancel();
+                }
+                KeyCode::Backspace => dialog.backspace(),
+                KeyCode::Enter => {
+                    if let Some(effect) = dialog.submit() {
+                        self.run_plugin_effect(effect).await;
+                    }
+                }
+                KeyCode::Char(character) if !key.modifiers.intersects(SHORTCUT_MODIFIERS) => {
+                    dialog.push(character);
+                }
+                _ => {}
+            }
+
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                if !dialog.cancel() {
+                    self.plugin_dialog = None;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => dialog.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => dialog.move_selection(1),
+            KeyCode::Enter => {
+                if let Some(effect) = dialog.submit() {
+                    self.run_plugin_effect(effect).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Runs what the dialog decided, and reflects the outcome on it: the
+    /// rows re-read from the store, the result — a confirmation, a refusal,
+    /// or a failed clone's captured git stderr — on the notice line, never a
+    /// silent state.
+    ///
+    /// The store calls run under [`tokio::task::spawn_blocking`] because two
+    /// of them are not quick — a marketplace add may be a `git clone`, an
+    /// install copies a tree — and the others ride the same path rather
+    /// than earning a second one. The await still holds the event loop for
+    /// the duration; a clone over a slow network is a frozen frame, which is
+    /// the honest v1 this dialog ships rather than a background lane of its
+    /// own.
+    async fn run_plugin_effect(&mut self, effect: plugin::Effect) {
+        let notice = match effect {
+            plugin::Effect::Reload => self.reload_plugins(),
+            effect => match self.resolve_plugin_store() {
+                None => "no config home could be resolved, so there is nowhere to keep plugins"
+                    .to_owned(),
+                Some(store) => {
+                    tokio::task::spawn_blocking(move || run_store_effect(&store, effect))
+                        .await
+                        .unwrap_or_else(|error| format!("the store task failed: {error}"))
+                }
+            },
+        };
+
+        let (rows, read_failure) = self.plugin_rows();
+        if let Some(dialog) = &mut self.plugin_dialog {
+            dialog.refresh(rows);
+            dialog.set_notice(read_failure.unwrap_or(notice));
+        }
+    }
+
+    /// Re-reads the plugin store through a fresh config load and rebuilds
+    /// what can rebuild in-session — **D474** (`plugin-reload-honesty`),
+    /// declared here, at the action itself.
+    ///
+    /// The honest split, and why it falls where it does:
+    ///
+    /// - **Hooks** rebuild: the fresh config's `hooks` table — its own tiers
+    ///   plus every enabled plugin's contributions, merged by the same
+    ///   `plugin::apply` the startup load ran — replaces the engine's table
+    ///   whole, effective at the next fire.
+    /// - **Skill roots** rebuild: the base tool registry is recomposed the
+    ///   way the startup path composed it — builtins, the webfetch opt-in,
+    ///   and a skill tool over `instruction::skill_roots` — and the prompt's
+    ///   environment half is recomposed with it, so `<available_skills>`
+    ///   and the loadable roots move together.
+    /// - **Agents, MCP dials and LSP servers do not**: the roster, the
+    ///   dials and the spawns are assembled at startup, and half-reloading
+    ///   any of them — an agent list that changed under a running roster, a
+    ///   server redialled mid-session — would be a lie about what this
+    ///   session is running. The dialog *names* them restart-required
+    ///   instead ([`RELOAD_SPLIT`]).
+    ///
+    /// One caveat, owned rather than hidden: the reload re-reads the config
+    /// the way a fresh start would — discovered tiers plus the `GANJA_CONFIG`
+    /// environment file — but a `--config` *flag* lives in the process's own
+    /// argv, which this frontend was deliberately not handed. A session
+    /// launched with that flag reloads without the flagged file's hooks and
+    /// skills; the restart the dialog already recommends for the other three
+    /// surfaces is the accurate remedy for that edge too.
+    fn reload_plugins(&mut self) -> String {
+        let config = match ganja_core::config::Config::load(&self.cwd) {
+            Ok(config) => config,
+            Err(error) => return format!("reload failed: {error}"),
+        };
+
+        self.engine
+            .replace_hooks(ganja_core::hook::Hooks::new(&config.hooks, &self.root));
+
+        // The startup path's own composition, re-run: `crate::run` builds
+        // exactly these three layers before handing the registry over.
+        let mut tools = ganja_tool::Registry::with_builtins();
+        if config.webfetch_allows_private() {
+            tools = tools.with(Arc::new(
+                ganja_tool::webfetch::WebfetchTool::allowing_private(),
+            ));
+        }
+        tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(
+            ganja_core::instruction::skill_roots(&config, &self.cwd),
+        )));
+        self.engine.replace_base_tools(Arc::new(tools));
+
+        let cwd = self.cwd.clone();
+        self.engine.replace_environment(move |model| {
+            ganja_core::instruction::suffix(&config, &cwd, model)
+        });
+
+        RELOAD_SPLIT.to_owned()
     }
 
     /// Hands the editor's contents to the engine.
@@ -11584,6 +11865,341 @@ mod tests {
         }
 
         let mut terminal = terminal(80, 20);
+        app.draw(&mut terminal).expect("a frame draws");
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    // ---- D474: the `/plugin` dialog ----
+
+    /// Writes `text` to `root/relative`, creating directories as needed.
+    fn plant(root: &std::path::Path, relative: &str, text: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("the fixture tree is creatable");
+        }
+        fs::write(path, text).expect("the fixture file is writable");
+    }
+
+    /// A store at its own temporary root, holding one installed plugin —
+    /// `formatter` from `company-tools`, carrying one hook and a skills
+    /// directory — built through the store's own doors, never by hand.
+    fn plugin_store_fixture(directory: &TempDir) -> ganja_core::plugin::Store {
+        let market = directory.path().join("market");
+        plant(
+            &market,
+            ".claude-plugin/marketplace.json",
+            r#"{
+              "name": "company-tools",
+              "owner": { "name": "DevTools" },
+              "plugins": [{ "name": "formatter", "source": "./plugins/formatter" }]
+            }"#,
+        );
+        plant(
+            &market,
+            "plugins/formatter/hooks/hooks.json",
+            r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "true"}]}]}}"#,
+        );
+        plant(&market, "plugins/formatter/skills/fmt/SKILL.md", "# fmt\n");
+
+        let store = ganja_core::plugin::Store::at(directory.path().join("plugin-store"));
+        store
+            .add_marketplace(market.to_str().expect("the fixture path is unicode"))
+            .expect("the fixture marketplace adds");
+        store
+            .install("formatter", "company-tools")
+            .expect("the fixture plugin installs");
+
+        store
+    }
+
+    /// `/plugin` opens from the roster and Esc walks back out — from the
+    /// list, and from the per-plugin action step, the `/mcp` dialog's own
+    /// two-step Esc.
+    #[tokio::test]
+    async fn slash_plugin_opens_the_dialog_and_esc_walks_back_out() {
+        let directory = temporary();
+        let store = plugin_store_fixture(&directory);
+        let mut app = app().with_plugin_store(store);
+        assert_eq!(
+            command::lookup("plugin").map(|entry| entry.action),
+            Some(command::Action::Plugin),
+            "/plugin is on the roster"
+        );
+
+        app.run_command(command::Action::Plugin).await;
+        assert!(app.plugin_dialog.is_some(), "/plugin opens the dialog");
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.plugin_dialog.is_none(), "escape closes the list step");
+
+        app.run_command(command::Action::Plugin).await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert!(
+            app.plugin_dialog
+                .as_ref()
+                .is_some_and(component::plugin::Plugin::is_choosing_action),
+            "enter on a plugin row opens its actions"
+        );
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("escape is handled");
+        assert!(app.plugin_dialog.is_none(), "escape closes the action step");
+    }
+
+    /// **AC6's agreement half**: the dialog's rows are the store's own
+    /// listing — the same `Store::list` the `ganja plugin` CLI prints —
+    /// field for field, summary included.
+    #[tokio::test]
+    async fn the_plugin_dialog_lists_what_the_store_holds_and_agrees_with_the_collector() {
+        let directory = temporary();
+        let store = plugin_store_fixture(&directory);
+        let listings = store.list().expect("the fixture store lists");
+        let mut app = app().with_plugin_store(store);
+
+        let (rows, complaint) = app.plugin_rows();
+        assert_eq!(complaint, None);
+        assert_eq!(rows.len(), listings.len());
+        for (row, listing) in rows.iter().zip(&listings) {
+            assert_eq!(row.name, listing.name);
+            assert_eq!(row.enabled, listing.enabled);
+            assert_eq!(row.marketplace, listing.marketplace);
+            assert_eq!(
+                row.summary,
+                component::plugin::summarize(&listing.components),
+                "the summary is computed from the collector's own component lines"
+            );
+        }
+
+        app.run_command(command::Action::Plugin).await;
+        let mut terminal = terminal(90, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(screen.contains("formatter"), "got:\n{screen}");
+        assert!(screen.contains("Enabled"), "got:\n{screen}");
+        assert!(screen.contains("company-tools"), "got:\n{screen}");
+        assert!(
+            screen.contains("1 hook \u{b7} skills"),
+            "the hook and the skills directory both count:\n{screen}"
+        );
+    }
+
+    /// Disable, enable and remove round-trip through the dialog: each lands
+    /// in `plugins.json`, and the rows repaint from the store rather than
+    /// from a tally of their own. A disabled plugin's row shows Disabled.
+    #[tokio::test]
+    async fn enable_disable_and_remove_round_trip_through_the_dialog() {
+        let directory = temporary();
+        let store = plugin_store_fixture(&directory);
+        let mut app = app().with_plugin_store(store.clone());
+        app.run_command(command::Action::Plugin).await;
+
+        // Enter opens the row's actions; Enter again runs the toggle, which
+        // reads Disable on an enabled row.
+        for _ in 0..2 {
+            app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        assert!(
+            !store.state().expect("the state reads").plugins["formatter"].enabled,
+            "the dialog's Disable landed in plugins.json"
+        );
+        let mut terminal = terminal(90, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("Disabled"),
+            "the row repaints disabled:\n{}",
+            screen(&terminal)
+        );
+
+        // The same toggle now reads Enable.
+        for _ in 0..2 {
+            app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        assert!(
+            store.state().expect("the state reads").plugins["formatter"].enabled,
+            "the dialog's Enable landed too"
+        );
+
+        // Remove is the action after the toggle.
+        for code in [KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
+            app.handle(key(code, KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        assert!(
+            store.state().expect("the state reads").plugins.is_empty(),
+            "remove deletes the state entry"
+        );
+        assert!(
+            !store.plugin_root("formatter").exists(),
+            "and the installed directory with it"
+        );
+    }
+
+    /// The free-text step is the frontend's own: Enter submits to the store,
+    /// Esc cancels the edit, and the engine hears nothing either way — no
+    /// event, no question, nothing in the composer.
+    #[tokio::test]
+    async fn the_add_input_submits_on_enter_and_cancels_on_esc_without_an_engine_command() {
+        let directory = temporary();
+        let market = directory.path().join("market");
+        plant(
+            &market,
+            ".claude-plugin/marketplace.json",
+            r#"{"name": "m", "owner": {"name": "o"}, "plugins": []}"#,
+        );
+        let store = ganja_core::plugin::Store::at(directory.path().join("plugin-store"));
+        let mut app = app().with_plugin_store(store.clone());
+        let mut events = app.engine.subscribe().await.expect("the first subscriber");
+
+        app.run_command(command::Action::Plugin).await;
+        // An empty store starts the cursor on "Add marketplace".
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        assert!(
+            app.plugin_dialog
+                .as_ref()
+                .is_some_and(component::plugin::Plugin::is_typing),
+            "add opens the free-text step"
+        );
+
+        // Esc cancels the edit and keeps the dialog open.
+        app.handle(key(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        assert!(
+            app.plugin_dialog
+                .as_ref()
+                .is_some_and(|dialog| !dialog.is_typing()),
+            "esc cancels the edit without closing the dialog"
+        );
+
+        // Enter with a real path submits to the store.
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        for character in market.to_str().expect("unicode").chars() {
+            app.handle(key(KeyCode::Char(character), KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        assert!(
+            store
+                .state()
+                .expect("the state reads")
+                .marketplaces
+                .contains_key("m"),
+            "the typed marketplace was added"
+        );
+
+        assert!(
+            app.editor.is_empty(),
+            "nothing typed at the dialog reaches the composer"
+        );
+        assert!(app.question.is_none(), "and no question round trip exists");
+        assert!(
+            events.next().now_or_never().is_none(),
+            "the engine heard nothing from any of it"
+        );
+    }
+
+    /// A marketplace add that fails surfaces the refusal in the dialog —
+    /// including a clone's, whose message carries git's own captured stderr.
+    #[tokio::test]
+    async fn a_failed_marketplace_add_surfaces_the_captured_error_in_the_dialog() {
+        let directory = temporary();
+        let store = ganja_core::plugin::Store::at(directory.path().join("plugin-store"));
+        let mut app = app().with_plugin_store(store);
+        app.run_command(command::Action::Plugin).await;
+
+        // `.git` routes through a real `git clone`, which fails and is
+        // captured; the notice is the error's own Display, stderr included.
+        let missing = directory.path().join("nowhere.git");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        for character in missing.to_str().expect("unicode").chars() {
+            app.handle(key(KeyCode::Char(character), KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+
+        assert!(app.plugin_dialog.is_some(), "the dialog stays open");
+        let mut terminal = terminal(100, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("git clone failed"),
+            "the captured failure is on the notice line:\n{}",
+            screen(&terminal)
+        );
+    }
+
+    /// **D474 pinned**: the reload notice names exactly what rebuilt
+    /// in-session and what needs a restart — the honest split, verbatim.
+    #[test]
+    fn the_reload_notice_pins_the_honest_split() {
+        assert_eq!(
+            super::RELOAD_SPLIT,
+            "reloaded now: hooks, skills \u{b7} restart required: agents, mcp, lsp"
+        );
+    }
+
+    /// The dialog's list step, over two fixed rows and the three store
+    /// actions (screenshot: no reference available; house `/mcp` chrome).
+    #[tokio::test]
+    async fn snapshot_plugin_dialog_open() {
+        let mut app = app();
+        app.plugin_dialog = Some(component::plugin::Plugin::new(vec![
+            component::plugin::Row {
+                name: "formatter".to_owned(),
+                enabled: true,
+                marketplace: "company-tools".to_owned(),
+                summary: "1 hook \u{b7} skills".to_owned(),
+            },
+            component::plugin::Row {
+                name: "deployer".to_owned(),
+                enabled: false,
+                marketplace: "company-tools".to_owned(),
+                summary: "1 mcp \u{b7} 1 agent".to_owned(),
+            },
+        ]));
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// The same dialog one Enter later: the per-plugin action menu.
+    #[tokio::test]
+    async fn snapshot_plugin_action_menu() {
+        let mut app = app();
+        let mut dialog = component::plugin::Plugin::new(vec![component::plugin::Row {
+            name: "formatter".to_owned(),
+            enabled: true,
+            marketplace: "company-tools".to_owned(),
+            summary: "1 hook \u{b7} skills".to_owned(),
+        }]);
+        assert_eq!(dialog.submit(), None, "enter opens the action step");
+        app.plugin_dialog = Some(dialog);
+
+        let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");
         insta::assert_snapshot!(screen(&terminal));
     }

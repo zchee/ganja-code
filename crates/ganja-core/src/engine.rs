@@ -1142,6 +1142,25 @@ impl Engine {
         self
     }
 
+    /// Replaces how the environment half is composed, in place, and
+    /// recomposes it now — [`Engine::with_environment`]'s in-session twin,
+    /// and one third of the `/plugin` dialog's Reload seam (**D474**,
+    /// declared at that action): a reload that moves the skill roots has to
+    /// move the `<available_skills>` block the closure composes too, or the
+    /// prompt keeps advertising skills the tool no longer serves.
+    ///
+    /// `&mut self` rather than a lock of its own, deliberately: the one
+    /// caller is a frontend that owns its engine outright, and the borrow is
+    /// what keeps this impossible to reach while a turn holds the engine
+    /// through that same owner.
+    pub fn replace_environment(
+        &mut self,
+        compose: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) {
+        self.environment = Some(Arc::new(compose));
+        self.recompose_environment();
+    }
+
     /// The environment half as it currently stands.
     fn environment_half(&self) -> Option<String> {
         self.prompt_suffix
@@ -1360,6 +1379,20 @@ impl Engine {
         self.hooks = Some(hooks);
 
         self
+    }
+
+    /// Replaces what runs at the nine hook moments, in place — the hooks
+    /// half of the `/plugin` dialog's Reload seam (**D474**, declared at
+    /// that action). A turn already in flight keeps the [`Arc`] it cloned
+    /// when it started, so the swap lands at the next fire — the next
+    /// turn's seams and the session-level hooks alike — never under a call
+    /// that is already bracketed.
+    ///
+    /// [`None`] uninstalls: a reload that leaves no hooks table behind
+    /// leaves an engine that does no hook work, exactly like one whose
+    /// config never asked.
+    pub fn replace_hooks(&mut self, hooks: Option<Arc<hook::Hooks>>) {
+        self.hooks = hooks;
     }
 
     /// Fires `SessionStart` with the source a fresh session has, and keeps
@@ -2798,9 +2831,16 @@ impl Engine {
             .lent_tools
             .lock()
             .expect("the tool registry is never poisoned") = Arc::clone(&lent);
+        self.rebuild_offered(lent);
+    }
 
-        // The task tool's roster is per agent, so the offered set is rebuilt
-        // through `install`, which is the one place that knows how.
+    /// Rebuilds the offered set from a freshly composed lent set.
+    ///
+    /// The task tool's roster is per agent, so the offered set is rebuilt
+    /// through `install`, which is the one place that knows how. Shared by
+    /// the MCP-generation rebuild above and [`Engine::replace_base_tools`],
+    /// so the two cannot disagree about what riding the rebuild means.
+    fn rebuild_offered(&self, lent: Arc<Registry>) {
         let name = self.active().agent.clone();
         let agent = self
             .agents
@@ -2818,6 +2858,30 @@ impl Engine {
                     .expect("the tool registry is never poisoned") = lent;
             }
         }
+    }
+
+    /// Replaces the base tool registry — the set the caller hands over at
+    /// construction, before MCP lends and the task tool ride it — and
+    /// rebuilds the lent and offered sets from it now. The skills half of
+    /// the `/plugin` dialog's Reload seam (**D474**, declared at that
+    /// action): the frontends install the skill tool over this registry, so
+    /// a reload that moves the skill roots swaps the whole base set the way
+    /// the startup path composed it.
+    ///
+    /// A turn already holding a snapshot keeps the tools it started with —
+    /// the same contract the MCP rebuild keeps — and the next turn is
+    /// offered the new set.
+    pub fn replace_base_tools(&mut self, tools: Arc<Registry>) {
+        self.base_tools = tools;
+        let lent = match &self.mcp {
+            Some(servers) => Arc::new(self.base_tools.with_all(servers.tools())),
+            None => Arc::clone(&self.base_tools),
+        };
+        *self
+            .lent_tools
+            .lock()
+            .expect("the tool registry is never poisoned") = Arc::clone(&lent);
+        self.rebuild_offered(lent);
     }
 
     /// The tools the next turn offers the model.
@@ -4940,6 +5004,84 @@ mod tests {
         assert!(
             matches!(event, Event::EffortChanged { effort: None, .. }),
             "got {event:?}"
+        );
+    }
+
+    // ---- D474: the `/plugin` Reload seam ----
+
+    /// The skills half of the reload: swapping the base registry is what the
+    /// next turn is offered, task-tool riding and all — asserted through the
+    /// same private accessor the turn assembly reads.
+    #[test]
+    fn replacing_the_base_tools_is_what_the_next_turn_is_offered() {
+        let mut engine = engine();
+        assert!(
+            engine.tools().get("read").is_none(),
+            "the fixture starts with an empty registry, or the swap proves nothing"
+        );
+
+        engine.replace_base_tools(Arc::new(Registry::with_builtins()));
+
+        assert!(
+            engine.tools().get("read").is_some(),
+            "the offered set is rebuilt from the replaced base"
+        );
+        assert!(
+            engine.lent().get("read").is_some(),
+            "the lent set a subagent is offered moves with it"
+        );
+    }
+
+    /// The hooks half of the reload: an install lands for the next fire, and
+    /// [`None`] uninstalls rather than leaving the old table standing.
+    #[test]
+    fn replacing_the_hooks_installs_for_the_next_fire_and_none_uninstalls() {
+        let mut engine = engine();
+        assert!(engine.hooks.is_none(), "the fixture starts hookless");
+
+        let table = std::collections::BTreeMap::from([(
+            "Stop".to_owned(),
+            vec![crate::config::HookMatcher {
+                matcher: None,
+                hooks: vec![crate::config::HookHandler::Command(
+                    crate::config::HookCommand {
+                        command: "true".to_owned(),
+                        timeout: None,
+                    },
+                )],
+            }],
+        )]);
+        let hooks = crate::hook::Hooks::new(&table, &PathBuf::from("."))
+            .expect("one Stop handler is a hooks table");
+        engine.replace_hooks(Some(hooks));
+        assert!(
+            engine
+                .hooks
+                .as_ref()
+                .is_some_and(|hooks| hooks.fires(crate::hook::HookEvent::Stop)),
+            "the swapped-in table is the one the next fire reads"
+        );
+
+        engine.replace_hooks(None);
+        assert!(
+            engine.hooks.is_none(),
+            "a reload that found no hooks leaves an engine that does no hook work"
+        );
+    }
+
+    /// The prompt half of the reload: the replaced closure is recomposed on
+    /// the spot, so the suffix the next request carries already reflects it.
+    #[test]
+    fn replacing_the_environment_recomposes_the_suffix_immediately() {
+        let mut engine = engine();
+        assert_eq!(engine.environment_half(), None);
+
+        engine.replace_environment(|model| Some(format!("environment for {model}")));
+
+        assert_eq!(
+            engine.environment_half().as_deref(),
+            Some(format!("environment for {MODEL}").as_str()),
+            "the swap recomposes now rather than waiting for a model switch"
         );
     }
 }

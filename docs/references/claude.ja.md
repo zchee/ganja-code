@@ -54,7 +54,7 @@
 | [Todo チェックリストパネル](https://code.claude.com/docs/en/interactive-mode) | Ctrl+T でタスクのサイドパネルを開閉 | ⚠️ todo はチャット内描画のみ;ganja の Ctrl+T はインスペクタに割当済み |
 | [permission ダイアログ](https://code.claude.com/docs/en/iam) | ツール呼出しのプレビュー・承認/拒否・ダイアログ内モード切替 | ✅ upstream 由来のダイアログセマンティクス(`a`/`A`/`d`)、複数の子が同時に尋ねるとキュー化;ダイアログ内モード切替はなし(モード概念自体がない) |
 | [trust ダイアログ](https://code.claude.com/docs/en/iam) | 初回起動時のディレクトリ信頼確認 | ❌ trust 層なし;すべて permission ルールが門番 |
-| [ステータスラインのスクリプト化](https://code.claude.com/docs/en/statusline) | `/statusline`、セッション JSON を stdin で受ける `statusLine` コマンド | ❌ 固定ステータスバー(テーマは✅) |
+| [ステータスラインのスクリプト化](https://code.claude.com/docs/en/statusline) | `/statusline`、セッション JSON を stdin で受ける `statusLine` コマンド | ⚠️ 代わりにネイティブな `tui.statusline` 要素ロースター(D469): ユーザー順の名前付きセグメント、HUD 形のメーター、任意の git 行・詳細行 — 外部スクリプトプロトコルは意図的に無し(描画ティックごとのサブプロセスを作らない) |
 | [ターミナル設定](https://code.claude.com/docs/en/terminal-config) | `/terminal-setup`: キーバインド・ターミナルプロファイル調整 | ❌ 調整対象なし;bracketed paste と OSC 52 は無条件 |
 | [スピナー tips](https://code.claude.com/docs/en/settings) | `spinnerTipsEnabled` | ❌ |
 | [カスタム keybindings](https://code.claude.com/docs/en/interactive-mode) *(ファイルスキーマは低確度)* | `~/.claude/keybindings.json`: コンテキスト対応バインドとコード列 | ⚠️ ganja は `keybinds` config マップ — アクション毎にカンマ区切りの代替、空値で解除;コンテキストもコード列もなし |
@@ -87,16 +87,16 @@
 | [`/mcp`](https://code.claude.com/docs/en/mcp) | MCP 管理・認証ダイアログ | ✅ 二段階ダイアログ: サーバー一覧(状態・ツール数・エラー)→ Reconnect/Login アクション、`ganja mcp` CLI 一覧も併存 |
 | [`/memory`](https://code.claude.com/docs/en/memory) | メモリーファイル編集 | ❌ |
 | [`/hooks`](https://code.claude.com/docs/en/hooks) | フック管理 | ⚠️ フック機構自体は✅(config 宣言・9イベント);閲覧・編集用の対話 UI はなし |
-| [`/statusline`](https://code.claude.com/docs/en/statusline) | ステータスバーのスクリプト化 | ❌ 固定 |
+| [`/statusline`](https://code.claude.com/docs/en/statusline) | ステータスバーのスクリプト化 | ❌ スクリプト化コマンドは無し;バー自体は `tui.statusline` でネイティブに構成できる(D469) |
 | [`/output-style`](https://code.claude.com/docs/en/output-styles) | 応答スタイル | ❌ |
-| [`/context`](https://code.claude.com/docs/en/costs) | 文脈使用量の可視化グリッド | ❌ 合計のみ |
+| [`/context`](https://code.claude.com/docs/en/costs) | 文脈使用量の可視化グリッド | ✅ 圧縮見積もり器と同じ内訳でカテゴリ別グリッド+凡例を描画(D470);ウィンドウ未収載モデルは正直に合計表示へ縮退し、分母を発明しない |
 | [`/todos`](https://code.claude.com/docs/en/interactive-mode) | タスクチェックリスト表示 | ⚠️ チャット内描画のみ |
-| [`/usage`](https://code.claude.com/docs/en/costs) | 使用量・コスト内訳 | ⚠️ セッション合計のみ |
+| [`/usage`](https://code.claude.com/docs/en/costs) | 使用量・コスト内訳 | ⚠️ セッション合計・キャッシュ/推論の内訳・文脈 %・ターン別テーブル(D471);プラン上限メーターは無し — ganja はベンダーの usage API を話さず、パネルはそれを描かずに明言する |
 | [`/doctor`](https://code.claude.com/docs/en/troubleshooting) | 自己診断 | ❌ |
 | [`/export`](https://code.claude.com/docs/en/slash-commands) | 会話のエクスポート | ⚠️ `/copy` のみ |
 | [`/cd`](https://code.claude.com/docs/en/slash-commands) *(低確度)* | 作業ディレクトリ変更 | ❌ 起動ディレクトリ固定は設計判断 |
 | [`/add-dir`](https://code.claude.com/docs/en/common-workflows) | セッション中の追加ディレクトリ許可 | ❌ |
-| [`/plugin`](https://code.claude.com/docs/en/plugins) | marketplace 追加・install・reload | ❌ |
+| [`/plugin`](https://code.claude.com/docs/en/plugins) | marketplace 追加・install・reload | ✅ インストールストア上の二段階ダイアログ(D474): プラグイン行ごとに Enable/Disable/Remove、その下に Add marketplace / Install / Reload;Reload は正直な分割 — hooks とスキルルートはセッション内で再構築、agents/MCP/LSP は restart required と明言 |
 | [`/vim`](https://code.claude.com/docs/en/interactive-mode) | vim 編集 | ❌ |
 
 ## 5. 内蔵ツール
@@ -168,8 +168,8 @@
 | [自動トリガー+`paths` スコープ](https://code.claude.com/docs/en/skills) | 記述・パスマッチ発動 | ❌ 明示ロードのみ |
 | [`context: fork`](https://code.claude.com/docs/en/skills) | fork したサブエージェントで実行し結果のみ返す | ❌ |
 | [skill の `allowed-tools`](https://code.claude.com/docs/en/skills) | `mcp__*` ワイルドカード含む制限 | ❌ |
-| [プラグイン: 5 コンポーネント](https://code.claude.com/docs/en/plugins) | skills・agents・hooks・MCP・LSP | ❌ |
-| [marketplace](https://code.claude.com/docs/en/plugins) | `marketplace.json`・`/plugin install`・`/reload-plugins` | ❌ |
+| [プラグイン: 5 コンポーネント](https://code.claude.com/docs/en/plugins) | skills・agents・hooks・MCP・LSP | ✅ 5 面すべてが config への寄与としてマージされる(D472/D473): hooks は追記、MCP は `plugin:<name>:<server>` に名前空間化され既定で確認要求、skills ルートは連結、agents/LSP はキー単位で明示 config が勝つ;6 面目の `commands/` は後送り |
+| [marketplace](https://code.claude.com/docs/en/plugins) | `marketplace.json`・`/plugin install`・`/reload-plugins` | ⚠️ `marketplace.json` をそのまま解釈、git URL かローカルパスから追加、インストールは `<plugin>@<marketplace>` 表記(D472);リモート source オブジェクト(`github:` 等)はパースのみでまだインストール不可、reload は restart-honest(D474) |
 
 ## 10. MCP・LSP
 
@@ -182,7 +182,7 @@
 | [project スコープの初回承認](https://code.claude.com/docs/en/mcp) | repo 注入サーバー対策 | ✅ より強い: 全 MCP ツールが既定で ask |
 | [タイムアウト・出力上限](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`・`MCP_TOOL_TIMEOUT`・`MAX_MCP_OUTPUT_TOKENS` | ⚠️ サーバー毎 `timeout`/`output_limit` config キー(バイト単位・トークンではない);グローバルな env var ノブはなし |
 | 再接続 | 死んだサーバーの復帰 | ✅ `/mcp` ダイアログの手動 Reconnect(`Failed` な任意サーバー)+初回 dial が失敗したサーバー限定のセッション1回だけの自動リトライ(D463) |
-| [plugin 経由の LSP サーバー](https://code.claude.com/docs/en/plugins) | プラグインが LSP サーバーを同梱できる | ⚠️ ganja の LSP はファーストパーティ config(`lsp` キー: rust/gopls 内蔵+カスタムエントリ)でプラグイン面ではない |
+| [plugin 経由の LSP サーバー](https://code.claude.com/docs/en/plugins) | プラグインが LSP サーバーを同梱できる | ✅ プラグインの `.lsp.json` がファーストパーティの `lsp` テーブルへキー単位でマージされ、明示 config が勝ち、明示の `lsp: false` は決して覆されない(D473) |
 
 ## 11. モデル・プロバイダ・認証
 
