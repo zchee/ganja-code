@@ -1,10 +1,11 @@
-//! The Esc Esc drill (**F7**, **D452**): the rewind gesture through a real
-//! pty, across the two states its guard is about.
+//! The Esc Esc drill (**D452** amended by **D467**): the backtrack gesture
+//! through a real pty, across the two states its guard is about — and the
+//! split, in which `/rewind` alone still opens the Claude-style picker.
 //!
 //! The gesture only exists at an **idle** composer. While a turn streams, Esc
 //! is the cancel and nothing else — and it forgets any press before it, so a
 //! double-press racing a turn's end cancels and then does nothing rather than
-//! opening a picker over a conversation somebody was still watching. That is a
+//! opening a walk over a conversation somebody was still watching. That is a
 //! rule about *timing*, and a unit test can only assert it against a flag; this
 //! asserts it against a real terminal, a real engine and a turn that really is
 //! streaming.
@@ -12,11 +13,13 @@
 //! # What this waits for, and why
 //!
 //! Per `pty_smoke.rs`'s rules, a string reaches the pty whole only when it is
-//! drawn over cells it differs from. Both waits here are strings that have
-//! never been on screen before — the picker's hint line, which nothing else
-//! draws, and a checkpoint row's `No code restore` annotation, which cannot
-//! exist until the picker has a checkpoint to annotate. The window runs eighty
-//! rows so the centered dialog lands on blank cells below the transcript.
+//! drawn over cells it differs from. The waits here are strings that have
+//! never been on screen before — the walk's status-bar hint, appended past the
+//! bar's short segments onto cells that were blank; the picker's hint line,
+//! which nothing else draws; and a checkpoint row's `No code restore`
+//! annotation, which cannot exist until the picker has a checkpoint to
+//! annotate. The window runs eighty rows so the centered dialog lands on blank
+//! cells below the transcript.
 //!
 //! # Why the two Escs are not one write
 //!
@@ -89,6 +92,11 @@ const ROWS: u16 = 80;
 /// The picker's hint line, which nothing else on screen draws. Pinned to
 /// `ganja_tui::component::rewind`.
 const PICKER_HINTS: &str = "[Enter] continue   [Esc] cancel";
+
+/// The head of the walk's status-bar hint, shown only while the backtrack
+/// walk is up. Pinned to `ganja_tui::app::BACKTRACK_HINT`; a prefix rather
+/// than the whole line so a narrow bar cannot clip the wait's tail away.
+const WALK_HINT: &str = "backtrack: Esc older";
 
 /// A checkpoint row's annotation for a turn that changed no file. It cannot
 /// appear until the picker has a checkpoint, which is what makes it the right
@@ -251,18 +259,25 @@ fn gesture(session: &mut Ganja) {
 }
 
 #[test]
-fn esc_esc_opens_the_rewind_picker_only_while_the_composer_is_idle() {
+fn esc_esc_walks_back_only_at_an_idle_composer_and_rewind_keeps_the_picker() {
     let project = project();
     let data = temporary();
     let mut session = scripted(&project, &data);
 
     // ---- idle, before anything has been asked ---------------------------
+    // The picker no longer rides the gesture (D467), and over an empty
+    // transcript there is nothing to walk either. The same picker string is
+    // waited for again at the end, through `/rewind`, which is what keeps
+    // this absence honest.
 
     gesture(&mut session);
-    session
-        .expect(PICKER_HINTS)
-        .expect("Esc Esc at an idle composer should open the rewind picker");
-    escape(&mut session);
+    session.set_expect_timeout(Some(ABSENCE_DEADLINE));
+    let opened = session.expect(PICKER_HINTS);
+    session.set_expect_timeout(Some(EXIT_DEADLINE));
+    assert!(
+        opened.is_err(),
+        "Esc Esc opens no picker any more, and no walk over an empty transcript"
+    );
 
     // ---- streaming -------------------------------------------------------
 
@@ -274,20 +289,39 @@ fn esc_esc_opens_the_rewind_picker_only_while_the_composer_is_idle() {
 
     gesture(&mut session);
     session.set_expect_timeout(Some(ABSENCE_DEADLINE));
-    let opened = session.expect(NO_CODE);
+    let walked = session.expect(WALK_HINT);
     session.set_expect_timeout(Some(EXIT_DEADLINE));
     assert!(
-        opened.is_err(),
-        "no picker may open over a turn the user is still watching"
+        walked.is_err(),
+        "no walk may open over a turn the user is still watching"
     );
 
     // ---- idle again, which is also what says the Esc really cancelled ----
 
     gesture(&mut session);
-    session.expect(NO_CODE).expect(
-        "with the turn cancelled the gesture is armed again, and the picker \
-         lists the prompt as a checkpoint",
+    session.expect(WALK_HINT).expect(
+        "with the turn cancelled the gesture is armed again, and the walk \
+         highlights the prompt",
     );
+
+    // Any key that is neither Esc nor Enter leaves the walk without
+    // reverting; backspace is one that then also types nothing.
+    session.send("\x7f").expect("failed to send Backspace");
+    drain(&mut session);
+
+    // ---- the picker's only door is /rewind now ---------------------------
+
+    // The pty carries a frame's rows top to bottom, so the checkpoint row is
+    // waited for before the hint line drawn beneath it.
+    session.send("/rewind").expect("failed to type /rewind");
+    session.send("\r").expect("failed to send Enter");
+    session.expect(NO_CODE).expect(
+        "the picker lists the cancelled prompt as a checkpoint that changed \
+         no file",
+    );
+    session
+        .expect(PICKER_HINTS)
+        .expect("/rewind should still open the two-step picker");
 
     escape(&mut session);
     session.quit_and_assert_clean_exit();
