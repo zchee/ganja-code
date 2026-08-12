@@ -1,5 +1,6 @@
 ---
 source: crates/ganja-tui/src/app.rs
+assertion_line: 10462
 expression: screen(&terminal)
 ---
                                                                                 
@@ -14,12 +15,12 @@ expression: screen(&terminal)
   │canned · 30.0k tokens — estimated                                         │  
   │unsized model — percentages unavailable                                   │  
   │                                                                          │  
-  │  █ System prompt            3.0k tokens                                  │  
-  │  █ Instruction files        2.0k tokens                                  │  
-  │  █ Builtin tools           11.0k tokens                                  │  
-  │  █ MCP tools                1.0k tokens                                  │  
-  │  █ Skills                    500 tokens                                  │  
-  │  █ Messages                12.5k tokens                                  │  
+  │  ⛁ System prompt            3.0k tokens                                  │  
+  │  ⛁ System tools            11.0k tokens                                  │  
+  │  ⛁ MCP tools                1.0k tokens                                  │  
+  │  ⛁ Memory files             2.0k tokens                                  │  
+  │  ⛁ Skills                    500 tokens                                  │  
+  │  ⛁ Messages                12.5k tokens                                  │  
   │  total                     30.0k tokens                                  │  
   │                                                                          │  
   │[Esc] close                                                               │  
