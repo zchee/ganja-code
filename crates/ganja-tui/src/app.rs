@@ -96,12 +96,28 @@ const MAX_EVENT_LOG: usize = 2000;
 /// still bounded rather than open-ended.
 const MAX_TURN_USAGE: usize = 1000;
 
-/// How long a first Esc stays armed for the rewind gesture (**F7**).
+/// How long a first Esc stays armed for the backtrack gesture (**D467**).
 ///
 /// Short enough that two deliberate presses are the only thing that reaches
 /// it, and that an Esc a person meant as "never mind" is over long before
 /// their next one.
 const ESC_CHORD: Duration = Duration::from_millis(500);
+
+/// What the status bar says while the backtrack walk is up, cleared with it.
+const BACKTRACK_HINT: &str = "backtrack: Esc older, Enter revert, any other key exits";
+
+/// The Esc Esc backtrack walk's state, while it is up (**D467**).
+///
+/// Ids only, off the same roster the rewind picker lists — never the roster's
+/// titles: a [`crate::component::rewind::Checkpoint`]'s `title` is the
+/// prompt's first line clipped for a row, and the composer prefill must be
+/// the whole prompt, which only the engine's `RevertChanged` carries.
+struct Backtrack {
+    /// The user messages the highlight can land on, newest first.
+    candidates: Vec<MessageId>,
+    /// Which of them it is on.
+    index: usize,
+}
 
 /// Most files the `@` menu offers at once. Upstream's server default
 /// (`server/routes/instance/httpapi/handlers/file.ts:43-60`).
@@ -365,6 +381,9 @@ pub struct App {
     /// When Esc was last pressed with nothing streaming and no modal open, for
     /// the Esc Esc gesture. See the Esc arm in [`App::handle_key`].
     last_esc: Option<Instant>,
+    /// The backtrack walk, while the Esc Esc gesture is stepping the
+    /// transcript's user messages (**D467**).
+    backtrack: Option<Backtrack>,
     /// Where a mention resolves from, and where the walk that offers files
     /// starts.
     cwd: PathBuf,
@@ -503,6 +522,7 @@ impl App {
             revert_pending: false,
             code_only_rewind: false,
             last_esc: None,
+            backtrack: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             clipboard: Box::new(clipboard::System::default()),
@@ -1181,6 +1201,28 @@ impl App {
             self.last_esc = None;
         }
 
+        // The backtrack walk (**D467**) claims exactly two keys while it is
+        // up: Esc steps the highlight one user message older, Enter reverts
+        // to the one it is on. Anything else is a person doing something else
+        // — the walk exits silently and the key then lands wherever it would
+        // have without it, which is why this only sometimes returns. Above
+        // the dialogs on the same reasoning as the sequence break: no dialog
+        // can be open while the walk is (both need the composer idle), and a
+        // key that would open one must exit the walk first.
+        if self.backtrack.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.step_backtrack();
+                    return Ok(());
+                }
+                KeyCode::Enter if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
+                    self.confirm_backtrack().await;
+                    return Ok(());
+                }
+                _ => self.close_backtrack(),
+            }
+        }
+
         if let Some(permission) = &self.permission {
             // Every other key is swallowed while the modal is open: the
             // editor and the transcript beneath it are not what the user is
@@ -1423,9 +1465,16 @@ impl App {
             // prompt.
             KeyCode::Esc if self.editor.mode() == Mode::Shell => self.set_shell(false),
             // Esc alone cancels — a no-op while idle, which is exactly what it
-            // should do there — and **Esc Esc at an idle composer** opens the
-            // rewind picker (**D452**, `esc-esc-gesture`; Claude Code's,
-            // `claude.ja.md:50`, with no upstream counterpart).
+            // should do there — and **Esc Esc at an idle composer** enters the
+            // backtrack walk (**D467**, `esc-esc-backtrack-codex`; the OpenAI
+            // Codex CLI's gesture, with no upstream counterpart): the newest
+            // user message lights up in the transcript, each further Esc
+            // steps one older, and Enter takes the conversation back to
+            // before it with the prompt handed back for editing. **D452**
+            // amended: the gesture used to open the rewind picker — that
+            // Claude-style two-step (checkpoint, then scope) stays reachable
+            // as `/rewind`, so the split is Esc Esc = Codex backtrack,
+            // `/rewind` = Claude picker.
             //
             // Hardcoded here rather than bound: [`keybind`]'s table maps one
             // chord to one action and cannot express a sequence, and teaching
@@ -1433,7 +1482,7 @@ impl App {
             // guard is deliberately "idle at *both* presses": while a turn
             // streams Esc stays the cancel and forgets any first press, so a
             // double-press racing a turn's end cancels and then does nothing,
-            // rather than opening a picker over a conversation the user was
+            // rather than starting a walk over a conversation the user was
             // still watching. A modal's Esc never reaches here at all — every
             // dialog returns above.
             KeyCode::Esc if self.turn_running => {
@@ -1446,7 +1495,7 @@ impl App {
                     .is_some_and(|pressed| pressed.elapsed() <= ESC_CHORD) =>
             {
                 self.last_esc = None;
-                self.open_rewind();
+                self.open_backtrack();
             }
             KeyCode::Esc => {
                 self.last_esc = Some(Instant::now());
@@ -2494,11 +2543,78 @@ impl App {
     /// Opens the rewind picker over the checkpoints the transcript holds
     /// (**F7**).
     ///
-    /// Reached two ways, both Claude Code's: `/rewind` — from the palette or
-    /// the `/` menu, like `/undo` and for the same reason (**D4**: there is no
-    /// leader key here) — and the Esc Esc gesture at an idle composer.
+    /// Reached as `/rewind`, from the palette or the `/` menu, like `/undo`
+    /// and for the same reason (**D4**: there is no leader key here). The Esc
+    /// Esc gesture that once landed here is the backtrack walk's now
+    /// (**D467**, [`App::open_backtrack`]); this picker stays the door to the
+    /// `Files` and `Both` scopes.
     fn open_rewind(&mut self) {
         self.rewind = Some(Rewind::new(self.chat.checkpoints()));
+    }
+
+    /// Enters the backtrack walk (**D467**): the newest user message lights
+    /// up, and the status bar says what the two claimed keys do.
+    ///
+    /// A transcript with no user message has nothing to walk, so the gesture
+    /// is a no-op there rather than a mode with nothing highlighted.
+    fn open_backtrack(&mut self) {
+        let candidates: Vec<MessageId> = self
+            .chat
+            .checkpoints()
+            .into_iter()
+            .map(|checkpoint| checkpoint.message_id)
+            .collect();
+        let Some(newest) = candidates.first().cloned() else {
+            return;
+        };
+
+        self.chat.set_backtrack(Some(newest));
+        self.status.set_notice(Some(BACKTRACK_HINT.to_owned()));
+        self.backtrack = Some(Backtrack {
+            candidates,
+            index: 0,
+        });
+    }
+
+    /// One more Esc in the walk: the highlight steps one user message older,
+    /// holding at the oldest rather than wrapping — past the top, another
+    /// press means "further back" and there is no further back to offer.
+    fn step_backtrack(&mut self) {
+        if let Some(backtrack) = &mut self.backtrack {
+            backtrack.index = (backtrack.index + 1).min(backtrack.candidates.len() - 1);
+            self.chat
+                .set_backtrack(Some(backtrack.candidates[backtrack.index].clone()));
+        }
+    }
+
+    /// Enter in the walk: revert the conversation to before the highlighted
+    /// message.
+    ///
+    /// Conversation-only on purpose — Codex's backtrack forks the chat and
+    /// leaves the working tree alone; `/rewind` remains the door to the file
+    /// scopes. The composer prefill is not done here: the engine's
+    /// `RevertChanged` carries the whole prompt back, and the one handler of
+    /// that event is the one prefill mechanism.
+    async fn confirm_backtrack(&mut self) {
+        let Some(backtrack) = self.backtrack.take() else {
+            return;
+        };
+        self.chat.set_backtrack(None);
+        self.status.set_notice(None);
+
+        let message_id = backtrack.candidates[backtrack.index].clone();
+        self.rewind_to(message_id, RevertScope::Conversation).await;
+    }
+
+    /// Leaves the walk without reverting anything: highlight and hint both
+    /// come down, and nothing is sent.
+    fn close_backtrack(&mut self) {
+        if self.backtrack.take().is_some() {
+            self.chat.set_backtrack(None);
+            // The hint is the only notice a live walk can be showing, so
+            // clearing outright cannot eat somebody else's message.
+            self.status.set_notice(None);
+        }
     }
 
     /// One keypress while the rewind picker is open, which owns every key: its
@@ -3492,9 +3608,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        App, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, ListDialog, MAX_EVENT_LOG,
-        MessageId, Mode, NO_EFFORTS, Palette, Permission, RevertScope, Rewind, WireListing,
-        permission_reply,
+        App, BACKTRACK_HINT, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, ListDialog,
+        MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, Palette, Permission, RevertScope, Rewind,
+        WireListing, permission_reply,
     };
 
     /// The session every hand-built fixture event happens in. One pinned id,
@@ -10435,29 +10551,58 @@ mod tests {
         );
     }
 
-    /// **The gesture (D452).** Two Escs at an idle composer open the picker.
+    /// **The gesture (D467).** Two Escs at an idle composer enter the
+    /// backtrack walk on the newest user message, and each further Esc steps
+    /// one older, holding at the oldest rather than wrapping.
     #[tokio::test]
-    async fn esc_esc_at_an_idle_composer_opens_the_picker() {
+    async fn esc_esc_highlights_the_newest_prompt_and_each_esc_steps_one_older() {
         let mut app = with_checkpoints();
+        let newest = app.chat.checkpoints()[0].message_id.clone();
+        let oldest = app.chat.checkpoints()[1].message_id.clone();
 
         escapes(&mut app, 1).await;
-        assert!(app.rewind.is_none(), "one Esc is still just a cancel");
+        assert!(app.backtrack.is_none(), "one Esc is still just a cancel");
 
         escapes(&mut app, 1).await;
-        assert!(app.rewind.is_some(), "the second one opens the picker");
+        assert_eq!(
+            app.chat.backtrack_anchor(),
+            Some(&newest),
+            "the second lands on the newest prompt"
+        );
+        assert!(
+            app.rewind.is_none(),
+            "the picker is /rewind's, not the gesture's"
+        );
+
+        escapes(&mut app, 1).await;
+        assert_eq!(app.chat.backtrack_anchor(), Some(&oldest), "one step older");
+
+        escapes(&mut app, 1).await;
+        assert_eq!(
+            app.chat.backtrack_anchor(),
+            Some(&oldest),
+            "the walk holds at the oldest"
+        );
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains(BACKTRACK_HINT),
+            "the status bar says what the walk's keys do"
+        );
     }
 
     /// **The gesture's guard.** While a turn streams Esc is the cancel and
     /// nothing else — and it forgets any first press, so a double-press racing
     /// a turn's end cancels and then does nothing.
     #[tokio::test]
-    async fn esc_esc_while_a_turn_streams_cancels_and_opens_nothing() {
+    async fn esc_esc_while_a_turn_streams_cancels_and_never_backtracks() {
         let (mut app, mut events) = streaming().await;
 
         escapes(&mut app, 2).await;
         assert!(
-            app.rewind.is_none(),
-            "no picker opens over a turn the user is watching"
+            app.backtrack.is_none(),
+            "no walk starts over a turn the user is watching"
         );
 
         finish(&mut app, &mut events).await;
@@ -10466,9 +10611,9 @@ mod tests {
         // The turn is over, so the gesture is armed again — and the press that
         // happened while it was streaming does not count towards it.
         escapes(&mut app, 1).await;
-        assert!(app.rewind.is_none(), "the streaming press was forgotten");
+        assert!(app.backtrack.is_none(), "the streaming press was forgotten");
         escapes(&mut app, 1).await;
-        assert!(app.rewind.is_some());
+        assert!(app.backtrack.is_some());
     }
 
     /// Two Escs far enough apart are two cancels, not a gesture.
@@ -10481,7 +10626,7 @@ mod tests {
         assert!(app.last_esc.is_some(), "the fixture needs a stale press");
 
         escapes(&mut app, 1).await;
-        assert!(app.rewind.is_none(), "the window had closed");
+        assert!(app.backtrack.is_none(), "the window had closed");
     }
 
     /// The gesture is a sequence: anything typed between the two presses ends
@@ -10495,9 +10640,155 @@ mod tests {
         escapes(&mut app, 1).await;
 
         assert!(
-            app.rewind.is_none(),
+            app.backtrack.is_none(),
             "that was a cancel, a letter, a cancel"
         );
+    }
+
+    /// A transcript with no user message gives the gesture nothing to walk.
+    #[tokio::test]
+    async fn esc_esc_over_an_empty_transcript_enters_nothing() {
+        let mut app = app();
+
+        escapes(&mut app, 2).await;
+
+        assert!(app.backtrack.is_none(), "there is nothing to step through");
+    }
+
+    /// A key that is neither Esc nor Enter leaves the walk silently — nothing
+    /// reverted, highlight and hint down — and then lands where it would have
+    /// without it.
+    #[tokio::test]
+    async fn any_other_key_exits_the_walk_without_reverting_and_is_then_handled() {
+        let mut app = with_checkpoints();
+        escapes(&mut app, 2).await;
+        assert!(app.backtrack.is_some(), "the fixture needs a live walk");
+
+        typed(&mut app, "n").await;
+
+        assert!(app.backtrack.is_none(), "the walk exits silently");
+        assert!(
+            app.chat.backtrack_anchor().is_none(),
+            "the highlight is down"
+        );
+        assert!(!app.chat.is_reverted(), "and nothing was reverted");
+        assert_eq!(app.editor.text(), "n", "the key was then handled as typing");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            !screen(&terminal).contains(BACKTRACK_HINT),
+            "the hint left with the walk"
+        );
+    }
+
+    /// **Acceptance 1, the whole gesture.** Enter reverts the conversation to
+    /// before the highlighted prompt and the composer holds the *whole*
+    /// multi-line prompt — a prefill fed from the checkpoint roster's
+    /// render-clipped titles would drop the second line, which is the point.
+    #[tokio::test]
+    async fn backtrack_enter_reverts_and_hands_back_the_whole_multi_line_prompt() {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "the first line").await;
+        app.handle(key(KeyCode::Char('j'), KeyModifiers::CONTROL))
+            .await
+            .expect("the newline chord is handled");
+        typed(&mut app, "and the second").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        finish(&mut app, &mut events).await;
+
+        escapes(&mut app, 2).await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        pump(&mut app, &mut events, 1).await;
+
+        assert!(app.backtrack.is_none(), "confirming closes the walk");
+        assert!(app.chat.is_reverted(), "the engine hid the checkpoint");
+        assert_eq!(
+            app.editor.text(),
+            "the first line\nand the second",
+            "the whole prompt comes back, not its clipped first line"
+        );
+        assert!(
+            !app.code_only_rewind,
+            "a backtrack is conversation-only and never reads as a code rewind"
+        );
+    }
+
+    /// The engine's answer to a backtrack names the prompt it took back:
+    /// `RevertChanged.prompt` is `Some`, which is what makes the existing
+    /// composer-prefill path the walk's one prefill mechanism.
+    #[tokio::test]
+    async fn a_backtrack_revert_announces_the_prompt_it_took_back() {
+        let (mut app, mut events) = wired().await;
+        typed(&mut app, "the prompt to step back to").await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        finish(&mut app, &mut events).await;
+
+        escapes(&mut app, 2).await;
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let event = events.next().await.expect("the engine answers the revert");
+        let CoreEvent::RevertChanged { prompt, .. } = &event else {
+            panic!("expected RevertChanged, got {event:?}");
+        };
+        assert_eq!(
+            prompt.as_deref(),
+            Some("the prompt to step back to"),
+            "the event itself carries the prompt for the composer"
+        );
+        app.handle(AppEvent::core(event))
+            .await
+            .expect("the revert is handled");
+    }
+
+    /// `/rewind` is untouched by the gesture's retargeting: it still opens the
+    /// Claude-style two-step picker, never the walk (**D467**'s split).
+    #[tokio::test]
+    async fn slash_rewind_still_opens_the_picker_and_never_the_walk() {
+        let mut app = with_checkpoints();
+
+        app.run_command(command::Action::Rewind).await;
+
+        assert!(
+            app.rewind.is_some(),
+            "the two-step picker is /rewind's door"
+        );
+        assert!(app.backtrack.is_none(), "the walk is the gesture's alone");
+    }
+
+    /// A transcript already showing a revert offers the walk only what is
+    /// still visible — the roster it steps is the checkpoint roster, which
+    /// already leaves out what a standing revert hides.
+    #[tokio::test]
+    async fn a_walk_over_a_standing_revert_offers_only_visible_prompts() {
+        let mut app = app();
+        let anchor = two_exchanges(&mut app);
+        app.handle(reverted(&anchor, None))
+            .await
+            .expect("a revert is handled");
+        assert!(
+            app.chat.is_reverted(),
+            "the fixture needs a standing revert"
+        );
+
+        escapes(&mut app, 2).await;
+
+        let backtrack = app.backtrack.as_ref().expect("the gesture still works");
+        assert_eq!(
+            backtrack.candidates.len(),
+            1,
+            "the hidden prompt is not on offer"
+        );
+        let visible = app.chat.checkpoints()[0].message_id.clone();
+        assert_eq!(app.chat.backtrack_anchor(), Some(&visible));
     }
 
     /// **Acceptance 7, Esc.** Esc at either step changes nothing: no command
