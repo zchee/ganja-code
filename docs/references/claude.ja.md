@@ -91,7 +91,7 @@
 | [`/output-style`](https://code.claude.com/docs/en/output-styles) | 応答スタイル | ❌ |
 | [`/context`](https://code.claude.com/docs/en/costs) | 文脈使用量の可視化グリッド | ✅ 圧縮見積もり器と同じ内訳でカテゴリ別グリッド+凡例を描画(D470);ウィンドウ未収載モデルは正直に合計表示へ縮退し、分母を発明しない |
 | [`/todos`](https://code.claude.com/docs/en/interactive-mode) | タスクチェックリスト表示 | ⚠️ チャット内描画のみ |
-| [`/usage`](https://code.claude.com/docs/en/costs) | 使用量・コスト内訳 | ⚠️ セッション合計・キャッシュ/推論の内訳・文脈 %・ターン別テーブル(D471)+ ベンダーのレート窓を映す「Current window」セクション(D484、応答ヘッダ由来・期限切れは decay);プラン上限メーターは無し — それだけが usage API を要し、パネルはそれを描かずに明言する |
+| [`/usage`](https://code.claude.com/docs/en/costs) | 使用量・コスト内訳 | ✅ セッション合計・キャッシュ/推論の内訳・文脈 %・ターン別テーブル(D471)+「Current window」セクション(D484)に加え、バックエンドが実際に送るプラン上限メーターを描画(D485): ChatGPT シートの 5h/weekly used-percent 窓と Copilot のクォータスナップショットを毎応答のヘッダから読む(文法は各ベンダー公式クライアントから引用);何も送らないクレデンシャル(Platform キー、Anthropic の Admin 専用 usage API)だけを honest-absence の末尾が名指しする |
 | [`/doctor`](https://code.claude.com/docs/en/troubleshooting) | 自己診断 | ❌ |
 | [`/export`](https://code.claude.com/docs/en/slash-commands) | 会話のエクスポート | ⚠️ `/copy` のみ |
 | [`/cd`](https://code.claude.com/docs/en/slash-commands) *(低確度)* | 作業ディレクトリ変更 | ❌ 起動ディレクトリ固定は設計判断 |
