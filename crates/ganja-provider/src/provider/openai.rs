@@ -226,7 +226,7 @@ impl Provider for OpenAiProvider {
         tracing::debug!(
             wire = ID,
             model = request.model,
-            endpoint = super::endpoint(built.url()),
+            endpoint = super::endpoint(built.url(), &self.base_url),
             "requesting a turn"
         );
 
@@ -237,6 +237,7 @@ impl Provider for OpenAiProvider {
             },
             &self.client,
             built,
+            &self.base_url,
             &presented,
             &self.rates,
             cancel,

@@ -825,18 +825,6 @@ pub enum AuthError {
         /// What is stored instead, in words that quote nothing.
         found: &'static str,
     },
-    /// The stored access token is spent, and nothing refreshed it.
-    ///
-    /// Recoverable: the refresh token is still there, and
-    /// [`Refresher::usable`] is what spends it.
-    #[error(
-        "the stored {provider_id} access token has expired; it can be renewed \
-         from the refresh token that is stored beside it"
-    )]
-    Expired {
-        /// The provider whose token expired.
-        provider_id: String,
-    },
     /// A refresh ran, and the provider refused it. Only a new login fixes this.
     #[error(
         "the stored {provider_id} credential was refused when it was renewed \
@@ -868,14 +856,19 @@ pub enum AuthError {
 }
 
 /// What a caller can do about an [`AuthError`], without matching every variant.
+///
+/// Four, since P22 (`flp`). There was a fifth — `Expired`, "the access token
+/// is spent and renewable" — retired with the variant it classified: nothing
+/// in production ever built one. A spent token is not a failure any caller
+/// sees, because [`Refresher::usable`] renews it and reports only what came
+/// back, so the outcomes a caller acts on are a refusal, an absence, a store
+/// to repair, or a renewal that never got that far.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthErrorKind {
     /// The store could not be read or written. Repair the file.
     Storage,
     /// There is no OAuth credential here. Log in.
     NotOauth,
-    /// The access token is spent and renewable. Renew it.
-    Expired,
     /// The credential is dead. Log in again.
     ReauthRequired,
     /// The renewal did not happen. Retry.
@@ -906,7 +899,6 @@ impl AuthError {
                 AuthErrorKind::Storage
             }
             Self::NotOauth { .. } => AuthErrorKind::NotOauth,
-            Self::Expired { .. } => AuthErrorKind::Expired,
             Self::ReauthRequired { .. } => AuthErrorKind::ReauthRequired,
             Self::RefreshUnavailable { .. } => AuthErrorKind::RefreshUnavailable,
         }
@@ -3148,8 +3140,13 @@ mod tests {
         );
     }
 
-    /// A caller holding an expired credential and no way to renew it is told
-    /// which of the four situations it is in, and what fixes it.
+    /// A caller that cannot get a usable credential is told which of the four
+    /// situations it is in, and what fixes it.
+    ///
+    /// Four since P22 (`flp`) and four before it: the retired `Expired` row
+    /// was the fifth error and the fourth *kind*, because a spent-but-renewable
+    /// token is not an outcome any caller is handed — [`Refresher::usable`]
+    /// renews it and reports only what came back.
     #[test]
     fn every_failure_says_which_of_them_it_is_and_what_to_do() {
         #[cfg(not(windows))]
@@ -3171,15 +3168,6 @@ mod tests {
             "icacls",
         );
         let taxonomy = [
-            (
-                // Recoverable, and the message has to say so: the refresh
-                // token stored beside it is what renews this one.
-                AuthError::Expired {
-                    provider_id: "openai".to_owned(),
-                },
-                AuthErrorKind::Expired,
-                "refresh token",
-            ),
             (
                 AuthError::NotOauth {
                     provider_id: "openai".to_owned(),

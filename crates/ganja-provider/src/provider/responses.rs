@@ -724,7 +724,7 @@ impl Provider for ResponsesProvider {
             provider = ID,
             model = request.model,
             ?backend,
-            endpoint = super::endpoint(built.url()),
+            endpoint = super::endpoint(built.url(), &self.base_url),
             "requesting a turn"
         );
 
@@ -732,6 +732,7 @@ impl Provider for ResponsesProvider {
             move || Mapping::for_backend(backend, aliases.clone()),
             &self.client,
             built,
+            &self.base_url,
             &resolved.presented,
             &self.rates,
             cancel,

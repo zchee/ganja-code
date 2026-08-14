@@ -26,7 +26,10 @@
 //! which need no usage API — get a `Current window` section of their own, in
 //! the same block-bar shape, tightest budget first. A backend that
 //! sends no such headers renders no section at all, and a window past its own
-//! reset renders as expired rather than as a live figure.
+//! reset renders as expired rather than as a live figure. P22 widened that
+//! last clause rather than changing it: a window whose vendor sent no reset at
+//! all renders `resets: —` — nothing dated it, so it can neither be shown
+//! expired nor given an instant it never had.
 //!
 //! P17 narrowed it again, and this time on the plan meters themselves
 //! (**D485**): the W-A1 probe found two backends spelling the 5h/weekly
@@ -145,6 +148,15 @@ const NO_PLAN_LIMITS: [&str; 3] = [
 /// passed. The vendor said a true thing at a moment that is over; renaming it
 /// is the whole staleness guard (P16 pre-mortem 4).
 const EXPIRED: &str = "expired \u{2014} refreshes on the next request";
+
+/// What the same section says when a bucket's vendor sent no reset at all
+/// (**D484** as P22 amended it: grok's `x-ratelimit-*` carry the counts and no
+/// clock).
+///
+/// An em-dash where the instant would be, rather than a manufactured one or a
+/// borrowed [`EXPIRED`]: nothing dated this window, so nothing may say it has
+/// gone stale and nothing may say when it comes back.
+const NO_RESET: &str = "resets: \u{2014}";
 
 /// Column widths of the per-turn table, matching the inspector's tab so the
 /// same rows read the same in both places.
@@ -417,15 +429,20 @@ impl Usage {
                         window.kind,
                         compact_tokens(window.remaining),
                         compact_tokens(window.limit),
-                        if window.expired(now) {
-                            EXPIRED.to_owned()
-                        } else {
-                            format!(
+                        match window.reset {
+                            Some(_) if window.expired(now) => EXPIRED.to_owned(),
+                            Some(reset) => format!(
                                 "resets in {}",
-                                compact_duration(
-                                    window.reset.duration_since(now).unwrap_or_default()
-                                )
-                            )
+                                compact_duration(reset.duration_since(now).unwrap_or_default())
+                            ),
+                            // A vendor that sent no reset at all (grok's
+                            // shape, D484 as P22 amended it): an empty slot
+                            // says the clock is missing without inventing one,
+                            // and [`EXPIRED`] cannot fire for a window nobody
+                            // dated. `plan_label`'s three arms, on the sibling
+                            // shape — with its own wording, because this row's
+                            // other clause is already `resets in`.
+                            None => NO_RESET.to_owned(),
                         },
                     ),
                     theme.fg,
@@ -703,19 +720,22 @@ mod tests {
     }
 
     /// One rate-limit window, `remaining` of `limit` left, refilling `in_secs`
-    /// from [`NOW`] — negative for one whose reset has already gone by.
-    fn window(kind: &str, limit: u64, remaining: u64, in_secs: i64) -> RateWindow {
-        let offset = Duration::from_secs(in_secs.unsigned_abs());
-
+    /// from [`NOW`] — negative for one whose reset has already gone by, and
+    /// [`None`] for a vendor that dated it not at all (grok's shape, D484 as
+    /// P22 amended it).
+    fn window(kind: &str, limit: u64, remaining: u64, in_secs: Option<i64>) -> RateWindow {
         RateWindow {
             kind: kind.to_owned(),
             limit,
             remaining,
-            reset: if in_secs < 0 {
-                NOW - offset
-            } else {
-                NOW + offset
-            },
+            reset: in_secs.map(|seconds| {
+                let offset = Duration::from_secs(seconds.unsigned_abs());
+                if seconds < 0 {
+                    NOW - offset
+                } else {
+                    NOW + offset
+                }
+            }),
         }
     }
 
@@ -1048,8 +1068,8 @@ mod tests {
         let screen = rendered(
             &Usage::new(Data {
                 rates: vec![
-                    window("requests", 1_000, 900, 90),
-                    window("input-tokens", 80_000, 20_000, 30),
+                    window("requests", 1_000, 900, Some(90)),
+                    window("input-tokens", 80_000, 20_000, Some(30)),
                 ],
                 now: Some(NOW),
                 ..data()
@@ -1080,7 +1100,7 @@ mod tests {
     fn a_window_past_its_reset_renders_as_expired_rather_than_as_a_live_number() {
         let screen = rendered(
             &Usage::new(Data {
-                rates: vec![window("requests", 1_000, 4, -1)],
+                rates: vec![window("requests", 1_000, 4, Some(-1))],
                 now: Some(NOW),
                 ..data()
             }),
@@ -1100,6 +1120,35 @@ mod tests {
         assert!(screen.contains("4 of 1.0k left"), "got:\n{screen}");
     }
 
+    /// AC3, the other half of that guard (`53v`): a bucket its vendor never
+    /// dated is drawn with an empty reset slot — never as expired, and never
+    /// with an instant nobody sent. Grok's shape, which before P22 the parser
+    /// dropped whole.
+    #[test]
+    fn a_window_its_vendor_never_dated_says_so_instead_of_borrowing_a_clock() {
+        let screen = rendered(
+            &Usage::new(Data {
+                rates: vec![window("requests", 1_000, 900, None)],
+                now: Some(NOW),
+                ..data()
+            }),
+            AREA,
+        );
+
+        assert!(
+            screen.contains("requests \u{b7} 900 of 1.0k left, resets: \u{2014}"),
+            "the counts are the vendor's and the clock is nobody's:\n{screen}"
+        );
+        assert!(
+            !screen.contains("expired"),
+            "the staleness marker may not fire for a window nothing dated:\n{screen}"
+        );
+        assert!(
+            !screen.contains("resets in"),
+            "and no countdown may be invented for it either:\n{screen}"
+        );
+    }
+
     /// More windows than the section draws are counted, never dropped in
     /// silence — and the ones kept are the tightest (**D484**).
     #[test]
@@ -1107,10 +1156,10 @@ mod tests {
         let screen = rendered(
             &Usage::new(Data {
                 rates: vec![
-                    window("requests", 100, 99, 60),
-                    window("input-tokens", 100, 5, 60),
-                    window("output-tokens", 100, 50, 60),
-                    window("tokens", 100, 90, 60),
+                    window("requests", 100, 99, Some(60)),
+                    window("input-tokens", 100, 5, Some(60)),
+                    window("output-tokens", 100, 50, Some(60)),
+                    window("tokens", 100, 90, Some(60)),
                 ],
                 now: Some(NOW),
                 ..data()
