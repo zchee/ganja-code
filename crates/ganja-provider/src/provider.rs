@@ -102,6 +102,7 @@ pub mod rate;
 pub mod responses;
 pub mod retry;
 pub mod sse;
+pub mod toolname;
 
 pub use rate::{PlanWindow, RateWindow, RateWindows};
 
