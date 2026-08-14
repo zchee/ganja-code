@@ -72,7 +72,8 @@ fn memory_dir(root: &Path) -> PathBuf {
 /// the answers a person would have given — which is exactly how the engine
 /// assembles them.
 fn permissions(root: &Path, config: &Config) -> Permissions {
-    let registry = AgentRegistry::build(config).expect("the fixture config resolves an agent");
+    let registry =
+        AgentRegistry::from_config(config).expect("the fixture config resolves an agent");
     let mut permissions = Permissions::load(root);
     permissions.set_baseline(
         registry
@@ -274,7 +275,8 @@ fn a_write_under_the_memory_root_runs_unasked_when_memory_is_on(root: &Path) {
 fn a_subagent_is_given_no_door_to_write_the_memory_it_was_shown(root: &Path) {
     let config = asked_for_memory();
     let parent = permissions(root, &config);
-    let registry = AgentRegistry::build(&config).expect("the fixture config resolves an agent");
+    let registry =
+        AgentRegistry::from_config(&config).expect("the fixture config resolves an agent");
     let child = parent.derive_subagent(
         registry
             .get("general")

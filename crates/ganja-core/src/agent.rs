@@ -48,12 +48,42 @@
 //! not ported: a denied call still reaches the gate and comes back as a
 //! refusal the model reads, which is the same outcome by the route this port
 //! already has for every other refusal.
+//!
+//! # Agent definition files (**D482**)
+//!
+//! Beside the config's `agent` map there is a **file tier**: a markdown file
+//! per agent, under ganja's own two homes and no others —
+//! `<config home>/agents/*.md` and `<project root>/.ganja/agents/*.md`, the
+//! standing skills precedent ([`crate::config::default_skill_dirs`]). Nothing
+//! foreign is discovered: no `~/.claude/agents`, no walk-up. Its shape is
+//! Claude Code's — frontmatter naming the agent, its `description`, its
+//! `model` and the `tools` it may use, with the body as the prompt — and no
+//! upstream opencode counterpart exists at all.
+//!
+//! Three things are decided here rather than borrowed:
+//!
+//! - **A `tools:` list compiles to permission rules**, which is the only
+//!   tool-enable mechanism this build has ([`tool_rules`]). Claude *hides* the
+//!   tools an agent may not use; ganja **refuses** them — the schema still
+//!   carries them and the call comes back as refusal text the model reads,
+//!   which is the same route every other refusal here takes.
+//! - **A `model:` must be a full `provider/model` id.** Claude's `opus` /
+//!   `sonnet` aliases name nothing this build can resolve, so a file carrying
+//!   one is skipped with a warning naming the file and the form expected,
+//!   rather than starting a session against a model nobody chose.
+//! - **The file tier sits below the config tier**: builtin < global file <
+//!   project file < `agent.<name>` in `ganja.jsonc`, and the collision is
+//!   logged by name. A config `disable: true` removes a file agent outright,
+//!   which is the escape hatch that keeps the config the last word.
 
-use std::path::Path;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::{
-    config::{AgentConfig, AgentMode, Config},
-    permission::{Action, EXTERNAL_DIRECTORY, Rule},
+    config::{AgentConfig, AgentMode, Config, config_home},
+    permission::{Action, EXTERNAL_DIRECTORY, MCP_PREFIX, Rule},
 };
 
 /// The pattern that covers every call to a permission.
@@ -71,6 +101,59 @@ pub const GENERAL: &str = "general";
 
 /// Name of the search subagent.
 pub const EXPLORE: &str = "explore";
+
+/// The subdirectory of each home an agent definition file lives in (**D482**).
+const AGENTS_SUBDIR: &str = "agents";
+
+/// The project half of ganja's own two homes, `<project root>/.ganja`.
+///
+/// Spelled here because `config`'s own constant is private to that module.
+/// Its twin is [`crate::config::default_skill_dirs`], which resolves the same
+/// pair for skills; a single shared helper is the tidier end state and is
+/// flagged for the consolidation pass rather than taken while the file tiers
+/// are landing in parallel.
+const PROJECT_HOME: &str = ".ganja";
+
+/// Every tool this build registers, which is the roster a `tools:` list is
+/// judged against.
+///
+/// A name, not a shape: MCP tools are named only once a server has been
+/// dialled, so [`tool_rules`] closes that whole namespace with
+/// [`MCP_PREFIX`]'s glob instead. `task` is here although the engine — not
+/// [`crate::tool::Registry::with_builtins`] — registers it, because an agent
+/// restricted to reading must not be able to delegate its way out of the
+/// restriction. Upstream's permission aliases (`apply_patch`, `shell`) are
+/// not: no tool answers to either name here.
+const TOOL_NAMES: &[&str] = &[
+    "read",
+    "edit",
+    "write",
+    "glob",
+    "grep",
+    "bash",
+    "bash_output",
+    "kill_shell",
+    "todowrite",
+    "webfetch",
+    "websearch",
+    "skill",
+    "task",
+    "question",
+    "plan_exit",
+    "plan_enter",
+];
+
+/// The tools a `tools:` list may never close, and may never open either.
+///
+/// `question` is how a turn asks the person watching it something, and the two
+/// plan doors are how a session changes what it is doing. None of the three is
+/// work the model does *to* the project, and an agent file that lists five
+/// tools is describing that work — so a wall built from such a list leaves all
+/// three exactly as it found them: `question` keeps its un-ruled allow, and
+/// the doors keep whichever answer [`defaults`] and the agent's own delta gave
+/// them, which is what stops a `tools:` line silently sealing the plan agent's
+/// exit (or handing an unrelated agent a door into it).
+const CONVERSATION_TOOLS: &[&str] = &["question", "plan_exit", "plan_enter"];
 
 /// The search subagent's prompt, ported verbatim (MIT; see
 /// `THIRD_PARTY_NOTICES.md`).
@@ -165,8 +248,13 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The agents `config` describes: the builtins, overlaid with its `agent`
-    /// map.
+    /// The agents this session may run as: the builtins, then the definition
+    /// files under `root`'s two homes, then the config's `agent` map over both.
+    ///
+    /// `root` is the **project root**, not the directory the process happens to
+    /// have been started in — the same value the command roster, the MCP
+    /// servers and the LSP workspaces are resolved against, so that opening a
+    /// subdirectory and opening the checkout offer the same agents.
     ///
     /// # Errors
     ///
@@ -174,8 +262,37 @@ impl Registry {
     /// above it — names an agent that does not exist, is a subagent, or is
     /// hidden, and when nothing visible is left to start on. Upstream throws in
     /// exactly these four places (`agent.ts`, `defaultInfo`).
-    pub fn build(config: &Config) -> Result<Self, AgentError> {
+    ///
+    /// A definition file that cannot be read is **not** one of those: it is
+    /// skipped with a warning naming it, and the session starts without it.
+    pub fn build(config: &Config, root: &Path) -> Result<Self, AgentError> {
+        Self::from_dirs(config, &definition_dirs(root))
+    }
+
+    /// The agents `config` alone describes: the builtins and its `agent` map,
+    /// with **no** file tier read at all.
+    ///
+    /// For a caller that holds no project root, and for a fixture that must
+    /// resolve the same agents on every machine — a definition file in the
+    /// config home of whoever is running a suite must not be able to change
+    /// what that suite sees.
+    ///
+    /// # Errors
+    ///
+    /// The four [`Registry::build`] returns, for the same reasons.
+    pub fn from_config(config: &Config) -> Result<Self, AgentError> {
+        Self::from_dirs(config, &[])
+    }
+
+    /// The same, over the directories handed in rather than the two resolved
+    /// from a root.
+    ///
+    /// Split out for the reason [`memory_rules`] is: what the file tier *does*
+    /// can then be asserted against two temporary directories, instead of a
+    /// test having to own the process's `GANJA_CONFIG_HOME` to say it.
+    fn from_dirs(config: &Config, directories: &[PathBuf]) -> Result<Self, AgentError> {
         let mut agents = builtins(config);
+        file_tier(&mut agents, config, directories);
         overlay(&mut agents, config);
 
         let default = resolve_default(&agents, config)?;
@@ -454,10 +571,11 @@ fn defaults() -> Vec<Rule> {
 ///
 /// The process's own working directory, resolved through the same
 /// [`crate::instruction::memory_dir`] the prompt is composed from, so the door
-/// and the block cannot name two different places. Threading a `cwd` into
-/// [`Registry::build`] was the tidier alternative and was not taken: three
-/// frontends call it, every one of them from the directory the process was
-/// started in, and the engine reads its own `cwd` from exactly there too.
+/// and the block cannot name two different places. [`Registry::build`] has since
+/// grown a `root` of its own (**D482**), and this deliberately still does not
+/// read it: `memory_dir` resolves the project from whatever it is handed, so
+/// the two agree — and the prompt half composes from the working directory, so
+/// switching only this half would be the one way to make them disagree.
 fn memory_door(config: &Config) -> Vec<Rule> {
     if !config.memory_enabled() {
         return Vec::new();
@@ -575,6 +693,418 @@ fn apply(agent: &mut Agent, definition: &AgentConfig) {
     agent.rules.extend(definition.permission.rules());
 }
 
+/// The file tier: every `agents/*.md` under ganja's own two homes, applied in
+/// discovery order (**D482**).
+///
+/// Global first and project second, so a definition in the checkout wins the
+/// name — the order every layered thing here resolves in. Applying a file is
+/// the same act as applying a config definition ([`apply`]) plus whatever its
+/// `tools:` line compiles to, which is what makes "a file agent is an agent"
+/// true rather than approximately true: it joins the same vector, so the Tab
+/// cycle, `/agents` and the task roster all see it by the rules they already
+/// have.
+fn file_tier(agents: &mut Vec<Agent>, config: &Config, directories: &[PathBuf]) {
+    for directory in directories {
+        for definition in definitions_in(directory) {
+            if config.agent.contains_key(&definition.name) {
+                // Principle: the curated config is the last word, and a
+                // collision it wins is worth saying out loud — the file is
+                // still applied, and `overlay` then runs over the top of it.
+                tracing::info!(
+                    agent = definition.name.as_str(),
+                    file = %definition.source.display(),
+                    "an `agent` entry in the configuration overrides this definition file"
+                );
+            }
+            apply_definition(agents, &definition, config);
+        }
+    }
+}
+
+/// Ganja's own two homes, in precedence order: `agents/` under
+/// [`config_home`], then `<project root>/.ganja/agents`.
+///
+/// The global half is spelled through [`config_home`] rather than against the
+/// XDG path directly, for that function's own reason: `GANJA_CONFIG_HOME` — or
+/// a `~/.ganja` — moves this build's config, its global `AGENTS.md`, its
+/// skills and now its agents together, and a session cannot end up reading one
+/// of them out of a directory the others are not in.
+fn definition_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if let Some(home) = config_home() {
+        found.push(home.join(AGENTS_SUBDIR));
+    }
+    let project = root.join(PROJECT_HOME).join(AGENTS_SUBDIR);
+    // The two collapse into one for somebody whose project root *is* the
+    // directory `config_home` landed on. Reading it twice would warn about
+    // every file as a duplicate of itself.
+    if !found.contains(&project) {
+        found.push(project);
+    }
+
+    found
+}
+
+/// The definitions one directory holds, in file-name order, with the
+/// unreadable and the malformed skipped by name.
+///
+/// Flat: a subdirectory is not descended into, so Claude's namespaced
+/// `agents/team/reviewer.md` is a recorded follow-up rather than a silent
+/// half-feature. Order is the file name's, so what a directory offers does not
+/// depend on the order the filesystem happens to list it in.
+fn definitions_in(directory: &Path) -> Vec<Definition> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        // A home that holds no `agents/` is the normal case, not a failure.
+        return Vec::new();
+    };
+
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                && path.is_file()
+        })
+        .collect();
+    files.sort();
+
+    let mut found: Vec<Definition> = Vec::new();
+    for file in files {
+        let text = match fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(file = %file.display(), %error, "an agent definition file could not be read; skipping it");
+                continue;
+            }
+        };
+        match Definition::parse(&file, &text) {
+            Ok(definition) => {
+                if found.iter().any(|other| other.name == definition.name) {
+                    tracing::warn!(
+                        agent = definition.name.as_str(),
+                        file = %file.display(),
+                        "another file in this directory already defines that agent; skipping it"
+                    );
+                    continue;
+                }
+                found.push(definition);
+            }
+            Err(reason) => tracing::warn!(
+                file = %file.display(),
+                reason = reason.as_str(),
+                "skipping an agent definition file"
+            ),
+        }
+    }
+
+    found
+}
+
+/// Applies one definition to the roster, over whatever already answers to its
+/// name.
+fn apply_definition(agents: &mut Vec<Agent>, definition: &Definition, config: &Config) {
+    let position = match agents
+        .iter()
+        .position(|agent| agent.name == definition.name)
+    {
+        Some(position) => position,
+        None => {
+            agents.push(fresh(&definition.name, config));
+            agents.len() - 1
+        }
+    };
+    apply(&mut agents[position], &definition.config);
+
+    // After the rules `fresh` (or a builtin) already carried, which puts an
+    // agent's own tool roster over the config's *global* `permission` block
+    // and under its `agent.<name>` one — the specific answer beating the
+    // general one, in both directions.
+    if let Some(tools) = &definition.tools {
+        agents[position]
+            .rules
+            .extend(tool_rules(tools, &definition.name));
+    }
+}
+
+/// What one `agents/*.md` file says.
+///
+/// The fields land in an [`AgentConfig`] rather than in a shape of their own,
+/// so that a file and a config entry are merged by the same [`apply`] — there
+/// is one field-by-field overlay in this module, and both tiers go through it.
+#[derive(Clone, Debug, PartialEq)]
+struct Definition {
+    /// What the agent is called: the frontmatter's `name`, or the file stem.
+    name: String,
+    /// Where it was read from, for the warnings and the collision log.
+    source: PathBuf,
+    /// The fields a config entry could have stated.
+    config: AgentConfig,
+    /// The `tools:` line, split into names — `None` when the file states none,
+    /// which is what leaves an agent with today's whole roster.
+    tools: Option<Vec<String>>,
+}
+
+impl Definition {
+    /// The definition `text` describes, or the reason it was skipped.
+    ///
+    /// Every refusal is a skip-with-warning rather than an error that stops a
+    /// session: a file somebody is halfway through writing must not be able to
+    /// keep ganja from starting.
+    fn parse(file: &Path, text: &str) -> Result<Self, String> {
+        let (frontmatter, body) = split(text).unwrap_or(("", text));
+        let fields = fields(frontmatter);
+
+        let stem = file
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = fields
+            .get("name")
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(stem);
+        if name.is_empty() {
+            return Err("it names no agent and its file name is empty".to_owned());
+        }
+        if name.contains('/') || name.contains('\\') {
+            return Err(format!(
+                "`name: {name}` holds a path separator, and an agent is named, not located"
+            ));
+        }
+
+        let model = fields
+            .get("model")
+            .map(|model| model.trim().to_owned())
+            .filter(|model| !model.is_empty());
+        if let Some(model) = &model
+            && !model.contains('/')
+        {
+            return Err(format!(
+                "`model: {model}` is not a full `provider/model` id (for example \
+                 `anthropic/claude-sonnet-4-5`); this build resolves no model aliases"
+            ));
+        }
+
+        let mode = match fields.get("mode").map(|mode| mode.trim()) {
+            None | Some("") => None,
+            Some(mode) => Some(
+                serde_json::from_value::<AgentMode>(serde_json::Value::String(mode.to_owned()))
+                    .map_err(|_| {
+                        format!("`mode: {mode}` is not one of `primary`, `subagent`, `all`")
+                    })?,
+            ),
+        };
+        let hidden = match fields.get("hidden").map(|hidden| hidden.trim()) {
+            None | Some("") => None,
+            Some(hidden) => Some(
+                hidden
+                    .parse::<bool>()
+                    .map_err(|_| format!("`hidden: {hidden}` is not `true` or `false`"))?,
+            ),
+        };
+
+        Ok(Self {
+            name,
+            source: file.to_owned(),
+            config: AgentConfig {
+                model,
+                prompt: Some(body.trim().to_owned()).filter(|body| !body.is_empty()),
+                description: fields
+                    .get("description")
+                    .map(|description| description.trim().to_owned())
+                    .filter(|description| !description.is_empty()),
+                mode,
+                hidden,
+                // A file cannot disable itself — deleting it is that — and it
+                // carries no `permission` block: `tools:` is the vocabulary
+                // this shape offers, and a second, richer one in the same file
+                // would be two ways to say the same thing.
+                disable: None,
+                permission: crate::permission::PermissionConfig::default(),
+            },
+            tools: fields.get("tools").map(|tools| tool_names(tools)),
+        })
+    }
+}
+
+/// The tool names a `tools:` value lists.
+///
+/// Comma- and/or whitespace-separated, which is how Claude's own files are
+/// written, and tolerant of the inline-list spelling (`[read, grep]`) an
+/// editor's YAML autocompletion produces.
+fn tool_names(value: &str) -> Vec<String> {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split([',', ' ', '\t', '\n'])
+        .map(|name| name.trim().trim_matches(['"', '\'']).to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// A `tools:` list, compiled to rules (**the D482 heart**).
+///
+/// # The divergence
+///
+/// Claude restricts an agent by handing the model a **smaller schema**: a tool
+/// left off the list is not offered at all. This build has one mechanism for
+/// what an agent may do — the permission engine — and one posture about
+/// refusals: *refused, never hidden*. So the list becomes rules. An unlisted
+/// tool stays in the schema, the model may call it, and the call comes back as
+/// the same refusal text a denied `edit` comes back as, which the model reads
+/// and acts on. The information the model loses under Claude's shape (that the
+/// tool exists at all) it keeps here, and the outcome — the call does not run
+/// — is identical.
+///
+/// # The spelling
+///
+/// A deny per *other* name, not one blanket `"*": "deny"` with exceptions
+/// carved back out of it. The blanket form is what [`EXPLORE`] uses and it is
+/// wrong here, twice over: it would also close [`EXTERNAL_DIRECTORY`] (turning
+/// a question about working outside the project into a refusal) and it would
+/// close whatever door the agent underneath already had — a `tools:` line on a
+/// file named `build.md` would seal `plan_enter`, which is the one thing that
+/// agent has. Naming the others leaves both of those exactly where they were.
+///
+/// [`CONVERSATION_TOOLS`] are in neither half: never denied, and never allowed
+/// either. The MCP namespace *is* denied, by glob, because its names are not
+/// known until a server has been dialled — and the allows are emitted last, so
+/// a list naming one MCP tool by hand still outranks that glob.
+fn tool_rules(listed: &[String], agent: &str) -> Vec<Rule> {
+    let mut rules = Vec::new();
+
+    for name in TOOL_NAMES {
+        if CONVERSATION_TOOLS.contains(name) || listed.iter().any(|tool| tool == name) {
+            continue;
+        }
+        rules.push(rule(name, ANY, Action::Deny));
+    }
+    rules.push(rule(&format!("{MCP_PREFIX}{ANY}"), ANY, Action::Deny));
+
+    for name in listed {
+        if CONVERSATION_TOOLS.contains(&name.as_str()) {
+            tracing::info!(
+                agent,
+                tool = name.as_str(),
+                "a `tools:` list neither opens nor closes this one; it is left as it was"
+            );
+            continue;
+        }
+        if !TOOL_NAMES.contains(&name.as_str()) && !name.starts_with(MCP_PREFIX) {
+            // Emitted anyway: a rule about a tool that does not exist decides
+            // nothing. The warning is because the likeliest cause is a typo,
+            // and a typo silently *removes* a tool the file meant to keep.
+            tracing::warn!(
+                agent,
+                tool = name.as_str(),
+                "a `tools:` list names no tool this build registers"
+            );
+        }
+        rules.push(rule(name, ANY, Action::Allow));
+    }
+
+    rules
+}
+
+/// The frontmatter and the body of a markdown file that opens with one.
+///
+/// **Twin**: `ganja_tool::skill`'s own `split`/`fields`/`unquote`, which is
+/// where this parser was ported from, and which is private to that crate; W1's
+/// command files grow a third. One shared minimal-YAML reader is the right end
+/// state and is flagged for the consolidation pass — extracting it while three
+/// lanes are landing at once would mean editing files those lanes own.
+fn split(text: &str) -> Option<(&str, &str)> {
+    // A byte-order mark ahead of the fence is what an editor on another
+    // platform leaves behind, and it must not cost somebody their agent.
+    let text = text.trim_start_matches('\u{feff}');
+    let rest = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))?;
+
+    for (index, _) in rest.match_indices("\n---") {
+        let after = &rest[index + 4..];
+        // The closing fence owns its whole line: `---` inside a value is not
+        // the end of the block.
+        if after.is_empty() || after.starts_with('\n') || after.starts_with("\r\n") {
+            let frontmatter = &rest[..index];
+            let body = after
+                .strip_prefix("\r\n")
+                .or_else(|| after.strip_prefix('\n'));
+
+            return Some((frontmatter, body.unwrap_or(after)));
+        }
+    }
+
+    None
+}
+
+/// The scalar fields a frontmatter block names.
+///
+/// Everything this port asks of YAML: `key: value` at the top level, with
+/// quotes stripped, plus the block scalars (`|`, `|-`, `>`, `>-`) a long
+/// description is usually written as. Nested maps are skipped; no field read
+/// here is one, and a `tools:` written as a block list is read as the empty
+/// value it leaves on that line rather than guessed at.
+fn fields(frontmatter: &str) -> std::collections::BTreeMap<String, String> {
+    let mut fields = std::collections::BTreeMap::new();
+    let mut lines = frontmatter.lines().peekable();
+
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_end_matches('\r');
+        if trimmed.trim().is_empty() || trimmed.trim_start().starts_with('#') {
+            continue;
+        }
+        // An indented line belongs to whatever came before it, and what came
+        // before it was either a block scalar this already consumed or a
+        // structure this does not read.
+        if trimmed.starts_with([' ', '\t']) {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let (key, value) = (key.trim().to_owned(), value.trim());
+
+        if matches!(value, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
+            let folded = value.starts_with('>');
+            let mut block: Vec<String> = Vec::new();
+            while let Some(next) = lines.peek() {
+                let next = next.trim_end_matches('\r');
+                if !next.trim().is_empty() && !next.starts_with([' ', '\t']) {
+                    break;
+                }
+                block.push(next.trim().to_owned());
+                lines.next();
+            }
+            while block.last().is_some_and(String::is_empty) {
+                block.pop();
+            }
+            fields.insert(key, block.join(if folded { " " } else { "\n" }));
+            continue;
+        }
+
+        fields.insert(key, unquote(value).to_owned());
+    }
+
+    fields
+}
+
+/// `value` without the quotes it may be wrapped in.
+fn unquote(value: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+
+    value
+}
+
 /// Which agent a session starts on.
 ///
 /// The `--agent` flag outranks `default_agent`, which outranks the first
@@ -617,7 +1147,7 @@ fn resolve_default(agents: &[Agent], config: &Config) -> Result<String, AgentErr
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, path::Path};
 
     use serde_json::json;
 
@@ -649,8 +1179,14 @@ mod tests {
             .map(|rule| rule.action.clone())
     }
 
+    /// The registry `config` resolves with **no** file tier at all.
+    ///
+    /// Every case below that is about the config says so by going through
+    /// here: a definition directory nobody handed in cannot be read, so what
+    /// these assert does not depend on what is in the config home of whoever
+    /// is running the suite.
     fn registry(config: &Config) -> Registry {
-        Registry::build(config).expect("the fixture config resolves an agent")
+        Registry::from_dirs(config, &[]).expect("the fixture config resolves an agent")
     }
 
     #[test]
@@ -1194,7 +1730,7 @@ mod tests {
         ];
 
         for (config, expected) in cases {
-            assert_eq!(Registry::build(&config).err(), Some(expected));
+            assert_eq!(Registry::from_dirs(&config, &[]).err(), Some(expected));
         }
     }
 
@@ -1220,7 +1756,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Registry::build(&config).err(),
+            Registry::from_dirs(&config, &[]).err(),
             Some(AgentError::Unknown {
                 name: "nope".to_owned()
             })
@@ -1245,7 +1781,7 @@ mod tests {
         };
 
         assert_eq!(
-            Registry::build(&config).err(),
+            Registry::from_dirs(&config, &[]).err(),
             Some(AgentError::NoneVisible)
         );
     }
@@ -1265,5 +1801,413 @@ mod tests {
         let registry = Registry::new(agents).expect("one selectable agent is enough");
         assert_eq!(registry.default_agent(), "solo");
         assert!(Registry::new(Vec::new()).is_err());
+    }
+
+    // ---- Agent definition files (**D482**) ------------------------------
+    //
+    // Every case here hands the directories in rather than resolving them from
+    // a root, so none of it reads — or depends on the emptiness of — the
+    // config home of whoever is running the suite. That the two homes are the
+    // ones resolved is `tests/agent_files.rs`, which owns `GANJA_CONFIG_HOME`
+    // in a binary of its own.
+
+    /// A definition directory holding `files`, as `(file name, contents)`.
+    fn homes(files: &[(&str, &str)]) -> (tempfile::TempDir, Vec<std::path::PathBuf>) {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        for (name, contents) in files {
+            std::fs::write(directory.path().join(name), contents).expect("the fixture is written");
+        }
+        let path = vec![directory.path().to_path_buf()];
+
+        (directory, path)
+    }
+
+    /// The registry `config` resolves with `files` in its one definition
+    /// directory.
+    fn with_files(config: &Config, files: &[(&str, &str)]) -> (tempfile::TempDir, Registry) {
+        let (directory, dirs) = homes(files);
+        let registry = Registry::from_dirs(config, &dirs).expect("the fixture resolves an agent");
+
+        (directory, registry)
+    }
+
+    /// The whole shape in one file: a name it does not state, a description
+    /// and a model it does, and a body that becomes the prompt.
+    #[test]
+    fn a_definition_file_is_an_agent_named_after_it() {
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[(
+                "reviewer.md",
+                "---\ndescription: Reviews a diff.\nmodel: anthropic/claude-haiku-4.5\n---\n\
+                 You review changes and say what is wrong with them.\n",
+            )],
+        );
+        let reviewer = registry.get("reviewer").expect("the file defines an agent");
+
+        assert_eq!(reviewer.description.as_deref(), Some("Reviews a diff."));
+        assert_eq!(
+            reviewer.model.as_deref(),
+            Some("anthropic/claude-haiku-4.5")
+        );
+        assert_eq!(
+            reviewer.prompt.as_deref(),
+            Some("You review changes and say what is wrong with them."),
+            "the body is the prompt, and a prompt replaces the base one"
+        );
+        assert_eq!(
+            reviewer.mode,
+            AgentMode::All,
+            "the same default a config-defined agent gets"
+        );
+        assert!(reviewer.selectable(), "so a person may switch to it");
+        assert!(reviewer.spawnable(), "and the task tool may spawn it");
+    }
+
+    /// The frontmatter's own `name` outranks the file it is in, and the
+    /// vocabulary for `mode` and `hidden` is the config's.
+    #[test]
+    fn a_stated_name_outranks_the_file_name() {
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[(
+                "any-file-name.md",
+                "---\nname: auditor\nmode: subagent\nhidden: true\n---\nAudit.\n",
+            )],
+        );
+        let auditor = registry.get("auditor").expect("the frontmatter named it");
+
+        assert!(registry.get("any-file-name").is_none());
+        assert_eq!(auditor.mode, AgentMode::Subagent);
+        assert!(auditor.hidden);
+    }
+
+    /// The refusals, each of them a skip that names the file and leaves the
+    /// session startable.
+    #[test]
+    fn a_definition_nobody_could_act_on_is_skipped_with_a_reason() {
+        let cases = [
+            (
+                "---\nname: team/reviewer\n---\nbody",
+                "path separator",
+                "holds a path separator",
+            ),
+            (
+                "---\nmode: occasionally\n---\nbody",
+                "an unknown mode",
+                "`primary`, `subagent`, `all`",
+            ),
+            (
+                "---\nhidden: sometimes\n---\nbody",
+                "an unknown hidden",
+                "`true` or `false`",
+            ),
+        ];
+
+        for (text, what, expected) in cases {
+            let reason = super::Definition::parse(Path::new("/agents/a.md"), text)
+                .expect_err(&format!("{what} is refused"));
+            assert!(reason.contains(expected), "{what}: {reason}");
+        }
+    }
+
+    /// **AC5.** Claude's `opus`/`sonnet`/`haiku` name nothing this build can
+    /// resolve, so a file carrying one is refused by name rather than
+    /// silently ignored — and the message says what a model id looks like
+    /// here.
+    #[test]
+    fn a_model_alias_is_refused_and_the_full_form_is_named() {
+        let reason = super::Definition::parse(
+            Path::new("/agents/reviewer.md"),
+            "---\nmodel: opus\n---\nbody",
+        )
+        .expect_err("an alias is not a model id");
+
+        assert!(reason.contains("opus"), "{reason}");
+        assert!(reason.contains("provider/model"), "{reason}");
+        assert!(reason.contains("anthropic/"), "{reason}");
+
+        // And the session still starts: the file is skipped, nothing else is.
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[("reviewer.md", "---\nmodel: opus\n---\nbody")],
+        );
+        assert!(registry.get("reviewer").is_none());
+        assert_eq!(registry.default_agent(), BUILD);
+    }
+
+    /// Two files in one directory cannot both be `reviewer`; the first by file
+    /// name keeps it. (Across *directories* the later one wins, which is the
+    /// precedence case below.)
+    #[test]
+    fn a_second_file_claiming_a_name_in_one_directory_is_skipped() {
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[
+                ("a-reviewer.md", "---\nname: reviewer\n---\nfirst"),
+                ("b-reviewer.md", "---\nname: reviewer\n---\nsecond"),
+            ],
+        );
+
+        assert_eq!(
+            registry.get("reviewer").expect("one of them won").prompt,
+            Some("first".to_owned())
+        );
+    }
+
+    /// **AC4, at the rules.** A listed tool is allowed, an unlisted one is
+    /// denied — and denied is not hidden: the call still reaches the gate.
+    #[test]
+    fn a_tools_list_allows_what_it_names_and_denies_the_rest() {
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[(
+                "searcher.md",
+                "---\ntools: read, grep\n---\nYou search and report.\n",
+            )],
+        );
+        let rules = &registry.get("searcher").expect("the file defines it").rules;
+
+        for allowed in ["read", "grep"] {
+            assert_eq!(decides(rules, allowed, ANY_CALL), Some(Action::Allow));
+        }
+        for denied in ["edit", "write", "bash", "task", "todowrite", "skill"] {
+            assert_eq!(
+                decides(rules, denied, ANY_CALL),
+                Some(Action::Deny),
+                "{denied}"
+            );
+        }
+        assert_eq!(
+            decides(rules, "mcp__docs__search", ANY_CALL),
+            Some(Action::Deny),
+            "a namespace whose names are unknown until a server is dialled is closed by glob"
+        );
+        assert_eq!(
+            decides(rules, crate::permission::EXTERNAL_DIRECTORY, "/tmp/*"),
+            Some(Action::Ask),
+            "and the location gate is left exactly where it was"
+        );
+    }
+
+    /// The guard: a wall never closes the three tools a *conversation* is made
+    /// of. A `tools:` line on a file named after the build agent must not seal
+    /// the one door that agent has.
+    #[test]
+    fn a_tools_list_leaves_the_conversation_tools_where_it_found_them() {
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[(
+                "build.md",
+                "---\ntools: read, plan_exit\n---\nYou build carefully.\n",
+            )],
+        );
+        let rules = &registry
+            .get(BUILD)
+            .expect("the file overlaid a builtin")
+            .rules;
+
+        assert_eq!(
+            decides(rules, "plan_enter", ANY_CALL),
+            Some(Action::Allow),
+            "build's own door survives a roster that does not mention it"
+        );
+        assert_eq!(
+            decides(rules, "plan_exit", ANY_CALL),
+            Some(Action::Deny),
+            "and listing a door neither opens it: the shared default still decides"
+        );
+        assert_eq!(
+            decides(rules, "question", ANY_CALL),
+            None,
+            "asking the person watching is not work a roster describes"
+        );
+        assert_eq!(decides(rules, "edit", ANY_CALL), Some(Action::Deny));
+    }
+
+    /// No `tools:` key at all is today's semantics, unchanged: an agent with
+    /// the whole roster and not one rule about it.
+    #[test]
+    fn a_file_that_states_no_tools_builds_no_wall() {
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[("reviewer.md", "---\ndescription: r\n---\nReview.\n")],
+        );
+        let rules = &registry.get("reviewer").expect("the file defines it").rules;
+
+        for tool in ["edit", "write", "bash", "task", "read"] {
+            assert_eq!(
+                decides(rules, tool, ANY_CALL),
+                None,
+                "{tool} is decided by the shared defaults, as it always was"
+            );
+        }
+    }
+
+    /// **AC4's second half.** A subagent spawned by a restricted agent runs
+    /// under the parent's refusals: the wall travels down, the allows do not.
+    #[test]
+    fn a_subagent_inherits_the_wall_a_tools_list_built() {
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[("searcher.md", "---\ntools: read\n---\nSearch.\n")],
+        );
+        let mut parent = Permissions::default();
+        parent.set_baseline(
+            registry
+                .get("searcher")
+                .expect("the file defines it")
+                .rules
+                .clone(),
+        );
+
+        let mut child = registry
+            .get(GENERAL)
+            .expect("general is a builtin subagent")
+            .rules
+            .clone();
+        child.extend(parent.inherited_by_subagent());
+
+        assert_eq!(
+            decides(&child, "edit", ANY_CALL),
+            Some(Action::Deny),
+            "what the parent may not do, a child it spawns may not do either"
+        );
+        assert_eq!(
+            decides(&child, "read", ANY_CALL),
+            None,
+            "and the parent's allow does not travel: the child is back on the defaults"
+        );
+    }
+
+    /// Precedence, pinned pairwise: the project directory wins the name over
+    /// the global one, and the config wins over both — field by field.
+    #[test]
+    fn a_project_file_outranks_a_global_one_and_the_config_outranks_both() {
+        let global = tempfile::tempdir().expect("a temporary directory");
+        let project = tempfile::tempdir().expect("a temporary directory");
+        std::fs::write(
+            global.path().join("reviewer.md"),
+            "---\ndescription: the global one\nmodel: anthropic/claude-haiku-4.5\n---\nglobal",
+        )
+        .expect("the fixture is written");
+        std::fs::write(
+            project.path().join("reviewer.md"),
+            "---\ndescription: the project one\n---\nproject",
+        )
+        .expect("the fixture is written");
+        let dirs = vec![global.path().to_path_buf(), project.path().to_path_buf()];
+
+        let registry =
+            Registry::from_dirs(&Config::default(), &dirs).expect("the fixture resolves an agent");
+        let reviewer = registry.get("reviewer").expect("both files define it");
+        assert_eq!(reviewer.description.as_deref(), Some("the project one"));
+        assert_eq!(reviewer.prompt.as_deref(), Some("project"));
+        assert_eq!(
+            reviewer.model.as_deref(),
+            Some("anthropic/claude-haiku-4.5"),
+            "a field the project file left out keeps what the global one said"
+        );
+
+        let mut agent = Definitions::new();
+        agent.insert(
+            "reviewer".to_owned(),
+            AgentConfig {
+                description: Some("the configured one".to_owned()),
+                ..AgentConfig::default()
+            },
+        );
+        let config = Config {
+            agent,
+            ..Config::default()
+        };
+        let reviewer = Registry::from_dirs(&config, &dirs)
+            .expect("the fixture resolves an agent")
+            .get("reviewer")
+            .cloned()
+            .expect("the config kept it");
+        assert_eq!(reviewer.description.as_deref(), Some("the configured one"));
+        assert_eq!(
+            reviewer.prompt.as_deref(),
+            Some("project"),
+            "and the config states nothing about the prompt, so the file's survives"
+        );
+    }
+
+    /// **AC3's escape hatch.** The config is the last word, including the word
+    /// "no": a `disable: true` removes a file agent outright.
+    #[test]
+    fn a_config_disable_removes_a_file_agent() {
+        let mut agent = Definitions::new();
+        agent.insert(
+            "reviewer".to_owned(),
+            AgentConfig {
+                disable: Some(true),
+                ..AgentConfig::default()
+            },
+        );
+        let config = Config {
+            agent,
+            ..Config::default()
+        };
+        let (_directory, dirs) = homes(&[("reviewer.md", "---\ndescription: r\n---\nReview.")]);
+
+        let registry = Registry::from_dirs(&config, &dirs).expect("the builtins are still there");
+        assert!(registry.get("reviewer").is_none());
+    }
+
+    /// What a directory of hostile files costs: nothing. Every one of them is
+    /// skipped and the agents around them resolve.
+    #[test]
+    fn a_directory_of_unreadable_files_leaves_the_session_startable() {
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[
+                ("empty.md", ""),
+                (
+                    "unterminated.md",
+                    "---\nname: nope\ndescription: no closing fence\n",
+                ),
+                ("binary.md", "\u{0}\u{1}\u{2}not markdown"),
+                ("not-markdown.txt", "---\nname: ignored\n---\nbody"),
+                ("good.md", "---\ndescription: fine\n---\nWork.\n"),
+            ],
+        );
+
+        assert!(
+            registry.get("good").is_some(),
+            "the readable one still lands"
+        );
+        assert!(
+            registry.get("ignored").is_none(),
+            "a file that is not `.md` is not a definition"
+        );
+        // A file with no frontmatter at all is not hostile, only terse: it is
+        // an agent named after itself whose whole text is its prompt.
+        for name in ["empty", "unterminated", "binary"] {
+            let agent = registry.get(name).expect("named after its file");
+            assert!(agent.description.is_none(), "{name}");
+        }
+        assert_eq!(registry.default_agent(), BUILD);
+    }
+
+    /// The one parser detail worth its own case: how a `tools:` value is
+    /// split, in every spelling a person or an editor writes it in.
+    #[test]
+    fn a_tools_value_is_read_in_every_spelling_it_is_written_in() {
+        for value in [
+            "read, grep",
+            "read grep",
+            "read,grep",
+            "[read, grep]",
+            "\"read\", 'grep'",
+        ] {
+            assert_eq!(
+                super::tool_names(value),
+                vec!["read".to_owned(), "grep".to_owned()],
+                "{value}"
+            );
+        }
+        assert!(super::tool_names("  ").is_empty());
     }
 }

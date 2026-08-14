@@ -4796,7 +4796,7 @@ mod tests {
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
             model: fake::MODEL.to_owned(),
             agents: Arc::new(
-                crate::agent::Registry::build(&crate::config::Config::default())
+                crate::agent::Registry::from_config(&crate::config::Config::default())
                     .expect("the default config resolves agents"),
             ),
             tools: Arc::new(Registry::new(Vec::new())),

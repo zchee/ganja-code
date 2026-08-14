@@ -758,7 +758,7 @@ mod tests {
     };
 
     fn registry() -> Registry {
-        Registry::build(&Config::default()).expect("the default config resolves agents")
+        Registry::from_config(&Config::default()).expect("the default config resolves agents")
     }
 
     #[test]

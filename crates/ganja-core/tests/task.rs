@@ -640,7 +640,7 @@ async fn a_refusal_the_parent_is_under_reaches_the_child() {
         json!({ "agent": { "build": { "permission": { "webfetch": "deny" } } } }),
     )
     .expect("the fixture is a config");
-    let agents = AgentRegistry::build(&config).expect("the fixture resolves an agent");
+    let agents = AgentRegistry::from_config(&config).expect("the fixture resolves an agent");
     assert!(
         !agents
             .get("general")

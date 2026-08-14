@@ -51,8 +51,13 @@ pub(crate) fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
         // stderr, so it cannot land in the middle of an nd-JSON stream.
         eprintln!("note: {notice}");
     }
-    let agents = Arc::new(AgentRegistry::build(&config).context("failed to resolve the agents")?);
     let project = Project::resolve(cwd);
+    // The project root, like every other roster resolved here: an agent
+    // definition file under `.ganja/` belongs to the checkout rather than to
+    // whichever subdirectory this process was started in.
+    let agents = Arc::new(
+        AgentRegistry::build(&config, project.root()).context("failed to resolve the agents")?,
+    );
     let data = project
         .data_dir()
         .context("failed to locate the project's data directory")?;

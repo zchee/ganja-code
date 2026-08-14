@@ -201,7 +201,7 @@ async fn a_command_that_names_an_agent_runs_as_it_for_one_turn() {
         Permissions::default(),
     )
     .with_agents(Arc::new(
-        ganja_core::AgentRegistry::build(&config).expect("the fixture resolves an agent"),
+        ganja_core::AgentRegistry::from_config(&config).expect("the fixture resolves an agent"),
     ))
     .with_commands(Arc::new(command::Registry::build(
         &config,
