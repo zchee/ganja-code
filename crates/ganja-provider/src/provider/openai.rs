@@ -32,7 +32,10 @@ use crate::{
     provider::{
         ChatRequest, CredentialSource, Mapper, NO_RESULT, Presented, Provider, ProviderError,
         ProviderEvent, check_base_url, client, open, require_key, setting, shown_base_url,
-        splice_effort, sse::Frame, steps,
+        splice_effort,
+        sse::Frame,
+        steps,
+        toolname::{Aliases, OPENAI_CAP, alias},
     },
 };
 
@@ -194,6 +197,10 @@ impl Provider for OpenAiProvider {
         // this wire maps none of them, and a collision resolves to the wire.
         let own = Body::new(&request);
         let body = splice_effort(&request.effort_options, &own);
+        // Built from the same roster the body just advertised, so the decoder
+        // reads back exactly what this request offered. Cloned per attempt
+        // because `open` may call the factory again on a retry.
+        let aliases = Aliases::of(&request.tools, OPENAI_CAP);
         let built = self
             .client
             .post(format!(
@@ -224,7 +231,10 @@ impl Provider for OpenAiProvider {
         );
 
         open(
-            Mapping::default,
+            move || Mapping {
+                aliases: aliases.clone(),
+                ..Mapping::default()
+            },
             &self.client,
             built,
             &presented,
@@ -277,7 +287,9 @@ struct ToolSpec<'a> {
 /// The half of a tool advertisement that describes the function.
 #[derive(Debug, Serialize)]
 struct FunctionSpec<'a> {
-    name: &'a str,
+    /// The name the model is told, which is the registry's own unless that one
+    /// is outside this API's `^[a-zA-Z0-9_-]{1,64}$` — see [`alias`].
+    name: Cow<'a, str>,
     description: &'a str,
     /// The argument schema, which this API names `parameters`.
     parameters: &'a Value,
@@ -313,7 +325,10 @@ struct Call<'a> {
 /// The half of a call that says what was called, and how.
 #[derive(Debug, Serialize)]
 struct CallFunction<'a> {
-    name: &'a str,
+    /// Under the same [`alias`] the model was originally offered the tool as —
+    /// aliasing is deterministic, so replaying a transcript needs nothing
+    /// remembered from the turn that made the call.
+    name: Cow<'a, str>,
     /// The arguments as a JSON *string*, which is how this API carries them —
     /// the model streams them as text, and a server is free to hand back
     /// whatever it was given, valid JSON or not.
@@ -410,7 +425,7 @@ impl<'a> Body<'a> {
                 .map(|tool| ToolSpec {
                     kind: "function",
                     function: FunctionSpec {
-                        name: &tool.name,
+                        name: alias(&tool.name, OPENAI_CAP),
                         description: &tool.description,
                         parameters: &tool.schema,
                     },
@@ -443,7 +458,7 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
                     id: call_id,
                     kind: "function",
                     function: CallFunction {
-                        name: tool,
+                        name: alias(tool, OPENAI_CAP),
                         arguments: arguments(state),
                     },
                 });
@@ -531,6 +546,9 @@ struct Mapping {
     /// chunk's `tool_calls` array — which is the only thing that correlates
     /// arguments with the call they belong to.
     tools: HashMap<u64, String>,
+    /// What this request's advertised names map back to, empty for the
+    /// ordinary roster whose names this API already accepts.
+    aliases: Aliases,
     /// Set once a choice reported why it stopped.
     stopped: bool,
 }
@@ -650,7 +668,13 @@ impl Mapping {
 
                     events.push(ProviderEvent::ToolCallStart {
                         id: id.clone(),
-                        name: function["name"].as_str().unwrap_or_default().to_owned(),
+                        // Back through this request's own map: what the engine
+                        // executes, what the permission rules match and what
+                        // the transcript records is the registry name, never
+                        // the one the wire had to advertise.
+                        name: self
+                            .aliases
+                            .original(function["name"].as_str().unwrap_or_default().to_owned()),
                     });
                     id
                 }
@@ -732,7 +756,9 @@ mod tests {
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
-    use super::{Body, Mapping, NO_RESULT, OpenAiProvider};
+    use super::{
+        Aliases, Body, Frame, Mapper as _, Mapping, NO_RESULT, OPENAI_CAP, OpenAiProvider, alias,
+    };
     use crate::{
         catalog,
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
@@ -1314,6 +1340,138 @@ mod tests {
                 },
             }]),
             "got {body}"
+        );
+    }
+
+    /// The live field failure the alias exists for: a plugin-contributed MCP
+    /// server arrives namespaced `plugin:<name>:<server>` (**D473**), so its
+    /// tools are named like this — 69 characters, with colons besides, which
+    /// `meta/muse-spark-1.2` over openrouter refused as
+    /// ``\`name\` must be at most 64 characters, got 69``.
+    const REFUSED_NAME: &str =
+        "mcp__plugin:mcp-gemini-search:mcp-gemini-search__deep_research_result";
+
+    /// [`a_tool`] under the name that got a live turn killed.
+    fn a_refused_tool() -> ToolDefinition {
+        ToolDefinition {
+            name: REFUSED_NAME.to_owned(),
+            ..a_tool()
+        }
+    }
+
+    /// Whether `name` is one this API's `^[a-zA-Z0-9_-]{1,64}$` accepts.
+    fn conforms(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= OPENAI_CAP
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    }
+
+    #[test]
+    fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
+        let request = ChatRequest {
+            effort_options: Default::default(),
+            model: "gpt-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("research it")],
+            tools: vec![a_refused_tool()],
+        };
+
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+        let advertised = body["tools"][0]["function"]["name"]
+            .as_str()
+            .expect("the tool is advertised");
+
+        assert_ne!(
+            advertised, REFUSED_NAME,
+            "the refused name must not go out again"
+        );
+        assert!(conforms(advertised), "{advertised} is still refusable");
+        assert_eq!(
+            body["tools"][0]["function"]["description"], "Reads a file from disk.",
+            "only the name is answered here: {body}"
+        );
+    }
+
+    /// The other half of the same seam. What the engine executes, what the
+    /// permission rules match and what the transcript records is the registry
+    /// name, so an alias the model calls back has to be undone before the
+    /// event leaves the wire.
+    #[test]
+    fn a_call_answering_with_the_alias_comes_back_out_under_the_registry_name() {
+        let tools = vec![a_refused_tool()];
+        let advertised = alias(REFUSED_NAME, OPENAI_CAP).into_owned();
+        let mut mapping = Mapping {
+            aliases: Aliases::of(&tools, OPENAI_CAP),
+            ..Mapping::default()
+        };
+        let mut seen = Vec::new();
+
+        mapping.frame(
+            &Frame {
+                event: None,
+                data: json!({
+                    "choices": [{"index": 0, "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": advertised, "arguments": ""},
+                    }]}}],
+                })
+                .to_string(),
+            },
+            &mut seen,
+        );
+
+        assert_eq!(
+            seen,
+            vec![ProviderEvent::ToolCallStart {
+                id: "call_1".to_owned(),
+                name: REFUSED_NAME.to_owned(),
+            }],
+            "got {seen:?}"
+        );
+    }
+
+    /// A call replayed on a later request has to name what that request's own
+    /// roster named, or the model is handed a trace citing a tool it was never
+    /// offered. Aliasing is deterministic, so both sides recompute it rather
+    /// than remembering anything across turns.
+    #[test]
+    fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
+        let mut assistant = Message::assistant("gpt-test");
+        assistant.parts.push(tool_part(
+            "call_1",
+            REFUSED_NAME,
+            ToolState::Completed {
+                input: json!({"filePath": "src/main.rs"}),
+                output: "a report".to_owned(),
+                title: "deep research".to_owned(),
+                metadata: json!({}),
+                started: 1,
+                completed: 2,
+            },
+        ));
+
+        let request = ChatRequest {
+            effort_options: Default::default(),
+            model: "gpt-test".to_owned(),
+            system: None,
+            messages: vec![Message::user("research it"), assistant],
+            tools: vec![a_refused_tool()],
+        };
+
+        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+        let advertised = &body["tools"][0]["function"]["name"];
+
+        assert!(
+            conforms(advertised.as_str().expect("a name")),
+            "got {advertised}"
+        );
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["name"], *advertised,
+            "the replayed call has to name exactly what the roster named: {body}"
         );
     }
 
