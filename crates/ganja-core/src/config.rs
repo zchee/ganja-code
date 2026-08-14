@@ -324,7 +324,7 @@ impl McpServer {
     /// the model's context than a builtin tool is by default.
     ///
     /// Plain [`u64`] rather than [`NonZeroU64`] like [`McpServer::timeout`]:
-    /// `output_limit: 0` is refused by name in [`check_mcp`], naming the
+    /// `output_limit: 0` is refused by name in `check_mcp`, naming the
     /// server it describes, rather than by a generic "expected a nonzero"
     /// message from serde — a byte budget of nothing is a server whose every
     /// result would be entirely cut, which is worth saying plainly.
@@ -355,7 +355,7 @@ impl McpServer {
     ///
     /// **The one authority for all three.** It is a method rather than a
     /// private helper of the loader because three callers make exactly this
-    /// judgment about exactly this type: the loader ([`check_mcp`], per file),
+    /// judgment about exactly this type: the loader (`check_mcp`, per file),
     /// `ganja mcp add` before it writes an entry, and `ganja config
     /// import-opencode` before it writes a whole file. Each of the three used
     /// to re-spell the refusals, which is three places for them to drift into
@@ -1631,7 +1631,7 @@ fn explicit_file(overrides: &Overrides) -> Option<PathBuf> {
 /// else `<XDG config>/ganja`, else `~/.ganja` — the directory that holds
 /// `ganja.jsonc`), and
 /// the project half hangs off `Project::resolve`, the same worktree resolution
-/// [`project_files`] stops its walk at and the permission engine files its
+/// `project_files` stops its walk at and the permission engine files its
 /// answers under. Nothing here invents a way to find a directory.
 #[must_use]
 pub fn default_skill_dirs(cwd: &Path) -> Vec<PathBuf> {

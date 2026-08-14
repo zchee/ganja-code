@@ -810,7 +810,7 @@ impl App {
     ///
     /// A builder because only the startup lane holds the command line that
     /// asked for it: the default is a session that asks, so a test that does
-    /// not opt in raises every dialog it always raised. See [`App::yolo`] for
+    /// not opt in raises every dialog it always raised. See `App::yolo` for
     /// what the bypass covers and what it deliberately leaves alone.
     #[must_use]
     pub fn with_yolo(mut self, yolo: bool) -> Self {

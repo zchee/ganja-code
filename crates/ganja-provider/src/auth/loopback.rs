@@ -99,7 +99,7 @@ pub enum LoopbackError {
     /// The provider redirected back with a refusal instead of a code.
     #[error("the provider refused the authorization ({error})")]
     Denied {
-        /// The provider's own error code, or [`UNNAMED`] when what arrived was
+        /// The provider's own error code, or `UNNAMED` when what arrived was
         /// not code-shaped. Never anything longer, and never free text.
         error: String,
     },

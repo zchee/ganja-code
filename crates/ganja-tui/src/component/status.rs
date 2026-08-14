@@ -14,7 +14,7 @@
 //! also shows waiting for a data source rather than inventing one; **P16 found
 //! one** (**D484**) that is not the missing usage API — the rate-limit headers
 //! every response already carries — and the `rate` element draws the tightest
-//! of them through the same [`meter`] the `ctx` element uses. **P17 found the
+//! of them through the same `meter` the `ctx` element uses. **P17 found the
 //! rest of it** (**D485**): two backends spell the plan's own 5h/weekly
 //! budgets in headers too, so `rate` draws that bucket beside the throttling
 //! one for a credential that serves it. What is still absent is what still has

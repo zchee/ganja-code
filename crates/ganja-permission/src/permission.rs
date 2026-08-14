@@ -630,7 +630,7 @@ impl<'de> Deserialize<'de> for PermissionConfig {
 /// thing kept true by hand.
 ///
 /// Holding one of these across the wait for an answer is safe because none of
-/// it is a snapshot of anything mutable: [`Permissions::outside_dirs`] reads
+/// it is a snapshot of anything mutable: `Permissions::outside_dirs` reads
 /// the project's bounds and the call's arguments, and what an "always" would
 /// learn is a function of those same two. Only [`CallDecision::action`] and
 /// [`CallDecision::rules`] consult the rules at all, and both are read before
@@ -1297,7 +1297,7 @@ fn covering(directory: &Path) -> String {
 /// gate. So the longest ancestor that *does* exist is canonicalized and the
 /// rest appended to it, which is upstream's own fallback
 /// (`packages/core/src/location-mutation.ts`, `resolvePath`). Whatever `..`
-/// survives in that remainder is collapsed lexically by [`lexical`]: it stands
+/// survives in that remainder is collapsed lexically by `lexical`: it stands
 /// on a canonical prefix by then, so there is no link left for it to mean
 /// something else through.
 ///
@@ -1305,7 +1305,7 @@ fn covering(directory: &Path) -> String {
 /// `..` back out of the project, or a link planted inside it — land outside
 /// where it belongs.
 ///
-/// Every canonical answer goes through [`plain`] first, because on Windows
+/// Every canonical answer goes through `plain` first, because on Windows
 /// `canonicalize` answers in the verbatim spelling and this function's output
 /// is what rules are written from and compared against.
 ///

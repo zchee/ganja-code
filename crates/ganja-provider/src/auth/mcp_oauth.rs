@@ -21,7 +21,7 @@
 //! one request against the origin, not the resource-metadata-first,
 //! path-aware search newer MCP revisions describe; registration asks for
 //! nothing beyond what RFC 7591 requires; no scope is ever requested, because
-//! `oauth: {}` — [`ganja_core::config::McpOauth`], a bare marker — carries
+//! `oauth: {}` — `ganja_core::config::McpOauth`, a bare marker — carries
 //! none to ask with. Anything past discovery → PKCE → token → refresh is a
 //! named follow-up, not an oversight: per-request reactive re-authorization
 //! (a `WWW-Authenticate` challenge mid-call) and resource-metadata discovery
@@ -39,9 +39,9 @@
 //!
 //! **Every endpoint discovery names is validated too, not just the origin.**
 //! [`Login::new`] restricts the origin discovery is asked at to `https` or
-//! loopback `http`; [`Login::discover`] holds every endpoint it reads back —
+//! loopback `http`; `Login::discover` holds every endpoint it reads back —
 //! `authorization_endpoint`, `token_endpoint`, `registration_endpoint` — to
-//! that same rule before any of them is used, and [`renew`] re-checks a
+//! that same rule before any of them is used, and `renew` re-checks a
 //! stored credential's remembered `token_endpoint` on every renewal, because
 //! a server naming an endpoint of its own choosing is exactly the server this
 //! validation has to distrust. The check deliberately does not require an
@@ -50,7 +50,7 @@
 //!
 //! **Storage rides the existing store, at a reserved key.** A login here is
 //! stamped under `mcp:<server>` — [`super::storage_key`] passes that prefix
-//! through unchanged, it names nothing in [`super::STORAGE_ALIASES`] — and
+//! through unchanged, it names nothing in `super::STORAGE_ALIASES` — and
 //! [`OauthCredential::extra`] carries two fields no other login writes:
 //! `token_endpoint` and `client_id`, discovered and registered once and read
 //! back by every [`Refresher::refresh`], because a refresh has to ask the
@@ -708,7 +708,7 @@ fn extra_str(credential: &OauthCredential, key: &str) -> Option<String> {
 }
 
 /// Renews a stored MCP-server credential by reading the endpoint and client
-/// id [`credential`] minted it back out of [`OauthCredential::extra`], rather
+/// id `credential` minted it back out of [`OauthCredential::extra`], rather
 /// than holding either itself — one stateless value serves every
 /// oauth-configured server this way, and it is what
 /// [`ganja_core::mcp`](../../../ganja_core/mcp/index.html) calls both to

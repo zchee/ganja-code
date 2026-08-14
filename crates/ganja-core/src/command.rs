@@ -21,7 +21,7 @@
 //!
 //! Beside the builtins and the `command` table a config declares, a command may
 //! also arrive as a **Markdown file** in one of ganja's own two homes — see
-//! [`command_dirs`], where that tier and its ledger number are declared.
+//! `command_dirs`, where that tier and its ledger number are declared.
 
 use std::{
     collections::BTreeMap,
@@ -183,7 +183,7 @@ impl Registry {
     /// A config command that reuses a builtin's name replaces it: upstream's
     /// `mergeDeep` gives the user's own definition the last word, and a file
     /// tier changes nothing about that. A *file* that reuses a builtin's name
-    /// is refused instead of layered — see [`file_commands`] — so `/init` is
+    /// is refused instead of layered — see `file_commands` — so `/init` is
     /// one thing everywhere until somebody says otherwise in the config file
     /// that this build refuses unknown keys in.
     ///

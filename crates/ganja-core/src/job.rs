@@ -14,10 +14,10 @@
 //!
 //! # Lifetime
 //!
-//! A job outlives the turn that started it. [`JobRegistry`] owns one root
-//! [`CancellationToken`]; every job's own token is a child of it, so a
+//! A job outlives the turn that started it. [`crate::job::JobRegistry`] owns one root
+//! [`tokio_util::sync::CancellationToken`]; every job's own token is a child of it, so a
 //! turn's cancel — which fires the *turn's* token, never this one — leaves a
-//! background job running, and [`JobRegistry::shutdown`] (the engine's own
+//! background job running, and [`crate::job::JobRegistry::shutdown`] (the engine's own
 //! exit path, called wherever a frontend already calls
 //! [`crate::engine::Engine::shutdown_mcp`]/`shutdown_lsp`) takes every job
 //! down at once through the same `SIGTERM`-then-`SIGKILL` sequence a

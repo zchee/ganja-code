@@ -221,7 +221,7 @@ pub enum DeviceError {
 
 /// An authorization in progress: what to show a person, and what to poll with.
 ///
-/// [`device_code`](Self::device_code) is held as a secret because it is one:
+/// `device_code` is held as a secret because it is one:
 /// anyone holding it can complete the login and collect the tokens. The user
 /// code and the verification URI are the opposite — they exist to be shown.
 #[derive(Clone)]
@@ -267,7 +267,7 @@ impl DeviceAuthorization {
 }
 
 impl fmt::Debug for DeviceAuthorization {
-    /// Hand-written because [`device_code`](Self::device_code) is a bearer
+    /// Hand-written because `device_code` is a bearer
     /// credential in every sense that matters, and a derived `Debug` would put
     /// it in a log.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

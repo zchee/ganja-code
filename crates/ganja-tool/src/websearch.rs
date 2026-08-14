@@ -23,7 +23,7 @@
 //!   [`ToolCtx`], which carries no session id — deliberately, since it is a bag
 //!   of values rather than a handle back to a session — so the coin cannot be
 //!   flipped the way upstream flips it. The choice is made from what is
-//!   configured instead: [`PROVIDER_ENV`] when it names one, otherwise the
+//!   configured instead: `PROVIDER_ENV` when it names one, otherwise the
 //!   service whose key this machine holds. Which of the two should win when
 //!   both keys are present is a question about accounts and billing that only
 //!   the person running the session can answer; until it is answered, `exa`

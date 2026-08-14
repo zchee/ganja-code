@@ -61,7 +61,7 @@
 //! style question. It needs no code here because each of ganja's three wires
 //! already sends its own vendor's header — `x-api-key` is what
 //! [`super::anthropic`] has always sent. **Choosing the wire chooses the
-//! header**, which is why [`Dialect`] carries no header of its own; the test
+//! header**, which is why `Dialect` carries no header of its own; the test
 //! `each_dialect_presents_the_key_under_the_name_that_dialect_requires` pins
 //! that this stays true.
 //!
@@ -73,7 +73,7 @@
 //!
 //! - **`@ai-sdk/google` rows are refused by name.** Not a gap: the vendor's own
 //!   current runner refuses them too, from an allowlist of exactly the three
-//!   dialects above ([G] `packages/core/src/session/runner/model.ts:164-170`,
+//!   dialects above (\[G\] `packages/core/src/session/runner/model.ts:164-170`,
 //!   restated `:176-179`). Ganja has no Google wire, and inventing one from an
 //!   undocumented path shape would be the guess this port does not make. Zen
 //!   publishes 7 such rows; Go publishes none.
@@ -87,7 +87,7 @@
 //!   and **nothing here invents one**.
 //!
 //!   Limits surface only at exhaustion, as a refusal whose body names
-//!   `FreeUsageLimitError` or `GoUsageLimitError` ([G]
+//!   `FreeUsageLimitError` or `GoUsageLimitError` (\[G\]
 //!   `packages/opencode/src/session/retry.ts:98-140`), carrying a `retry-after`.
 //!   **Both halves are already handled by machinery this module does not
 //!   touch**, which is why it adds no code for either: `retry::refusal` puts

@@ -104,7 +104,7 @@ impl Palette {
         self.colors.get(key).copied()
     }
 
-    /// Whether the theme set [`SELECTED_LIST_ITEM_TEXT`] itself rather than
+    /// Whether the theme set `SELECTED_LIST_ITEM_TEXT` itself rather than
     /// inheriting the background, which is what [`super::Theme::selected_fg`]
     /// branches on first.
     #[must_use]

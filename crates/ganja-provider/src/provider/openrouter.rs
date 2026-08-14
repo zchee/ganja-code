@@ -27,7 +27,7 @@
 //! | `previous_response_id` | never sent | rejected by the same sentence, and this build has never had a field for it: every request is rebuilt whole from ganja's own transcript |
 //! | `include: ["reasoning.encrypted_content"]` | **dropped** | the reference documents no `include` parameter at all, and its own reasoning example shows `encrypted_content` arriving without one. Sending an undocumented field to a gateway is a guess, and this one would be spent on every request |
 //! | a `reasoning` input item replayed | **dropped** | the reference documents no way to send sealed reasoning back, and its multi-turn example (`tool-calling`) carries none. The failure mode decides it: a replay this vendor refuses is a `400` on the *second* request of every reasoning turn, which is most agentic turns |
-//! | `reasoning.summary: "auto"` | **dropped** | both halves of that default are the other vendor's — [`super::responses::seals_reasoning`] is a rule about *its* model ids, and `"auto"` is what *its* CLI sends. The reference documents no way to *ask* for a summary at all, and asks for none in its own examples — yet its settled response carries one, and its stream carries thinking regardless (see the reasoning rows below). A field nobody has to send is not one to invent a default for |
+//! | `reasoning.summary: "auto"` | **dropped** | both halves of that default are the other vendor's — `super::responses::seals_reasoning` is a rule about *its* model ids, and `"auto"` is what *its* CLI sends. The reference documents no way to *ask* for a summary at all, and asks for none in its own examples — yet its settled response carries one, and its stream carries thinking regardless (see the reasoning rows below). A field nobody has to send is not one to invent a default for |
 //! | `reasoning: {effort: …}` | **sent, when an effort is selected** (P20) | the reference publishes the four levels `minimal`/`low`/`medium`/`high` in a table of its own, so this is the one reasoning field it documents. It rides the ordinary effort splice — `crate::effort`'s `Wire::OpenRouter` lane synthesizes exactly `{"reasoning": {"effort": …}}`, and deliberately not the sibling's map, whose `summary` and `include` are the two rows above. No effort selected is still no `reasoning` key |
 //! | `tool_choice: "auto"` | **sent, beside a non-empty roster** (P20) | every tool example in the reference spells it, and what the API assumes in its absence is the one thing that page does not say. The failure it would cause is the expensive kind — a roster advertised and never called — and `"auto"` is what an agent loop wants on every turn. Scoped to this backend: the other two send the Codex CLI's request, which carries no such field |
 //! | `strict` on a tool definition | **dropped** | the reference prints `strict: null` on every tool it defines, which is that field's absent value; it documents no behavior for a boolean, and this build's schemas are generated from the argument structs rather than written to the strict subset, so a `true` would be a promise the roster cannot keep |
@@ -66,7 +66,7 @@
 //! vendor refuses the field. The one thing that would settle them is a live
 //! turn against the real service, which is why the opt-in live test exists; a
 //! probe that shows the replay accepted turns three of these rows into one
-//! [`super::responses::Backend`] predicate flipping to `true`.
+//! `super::responses::Backend` predicate flipping to `true`.
 //!
 //! # Out of scope, named rather than forgotten
 //!

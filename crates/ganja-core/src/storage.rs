@@ -31,7 +31,7 @@
 //! it is what a build reads before it decodes anything: a row a newer build
 //! wrote is left exactly where it is. A row this build cannot decode at all is
 //! skipped with a warning and left in place, which is the database's version
-//! of the rename-aside [`quarantine`] does to a file: nothing is destroyed and
+//! of the rename-aside `quarantine` does to a file: nothing is destroyed and
 //! one unreadable session costs that session, never the ability to start one.
 //!
 //! # Where the writes go

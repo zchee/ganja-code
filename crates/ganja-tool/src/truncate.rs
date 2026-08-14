@@ -10,7 +10,7 @@
 //! that truncated output "will be written to a file" it can `Read` with
 //! `offset`/`limit`. For that to be true, a truncating clamp has to actually
 //! write it: `write_overflow` spills the full, untouched text to a file and
-//! [`hint`] tells the model where, the same as upstream's `Truncate.output`.
+//! `hint` tells the model where, the same as upstream's `Truncate.output`.
 //!
 //! Two upstream pieces are deliberately not ported:
 //!
@@ -125,7 +125,7 @@ pub struct Truncated {
 /// module's doc comment).
 ///
 /// There is no error to report when neither candidate can be written: the
-/// call this wraps already succeeded, and [`clamp_in`] degrades to the
+/// call this wraps already succeeded, and `clamp_in` degrades to the
 /// pathless notice rather than fail it.
 #[must_use]
 pub fn clamp(text: &str) -> Truncated {
@@ -704,7 +704,7 @@ fn candidate_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Deletes spilled output older than [`MAX_AGE`] from every directory a clamp
+/// Deletes spilled output older than `MAX_AGE` from every directory a clamp
 /// might have written one to, and answers with how many files went.
 ///
 /// There is nothing here to report as an error. A directory that does not

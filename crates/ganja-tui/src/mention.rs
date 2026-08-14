@@ -231,7 +231,7 @@ pub fn attachable(text: &str, root: &Path) -> Vec<Mention> {
 /// carries — a terminal that drags in several files sends their paths
 /// whitespace-separated (each quoted, if it needs to be) in one paste event,
 /// and each is its own mention (**F5**). The rule stays upstream's otherwise:
-/// **every** token [`tokenize`] finds must resolve, one miss and the whole
+/// **every** token `tokenize` finds must resolve, one miss and the whole
 /// paste is ordinary text — a pasted shell one-liner naming a real path
 /// (`cat file.txt | grep x`) must not have `file.txt` alone turned into a
 /// mention while `cat`, `|` and `grep` stay text around it.

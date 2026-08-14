@@ -32,7 +32,7 @@
 //! lsp-tool-unported). Nor are the diagnostics carried in tool metadata
 //! (deviation: lsp-no-metadata-map): a frontend renders what the tool said,
 //! and the tool says it in its text. Workspace-wide diagnostic pulls are not
-//! ported either; see [`client`] for which half of that machinery is here and
+//! ported either; see `client` for which half of that machinery is here and
 //! why.
 
 pub(crate) mod client;
@@ -136,9 +136,9 @@ impl Lsp {
     ///
     /// Never fails. Two budgets bound it, and only the second is the wait:
     /// the **first** touch of a session starts the server it needs and its
-    /// handshake is bounded by [`client::INITIALIZE_TIMEOUT`], after which
+    /// handshake is bounded by `client::INITIALIZE_TIMEOUT`, after which
     /// waiting for what the server says is bounded by
-    /// [`client::DOCUMENT_WAIT_TIMEOUT`]. An `edit` whose annotation awaits
+    /// `client::DOCUMENT_WAIT_TIMEOUT`. An `edit` whose annotation awaits
     /// this inline can therefore sit for both.
     pub async fn touch(&self, path: &Path, wait: bool) {
         if !self.contains(path) {

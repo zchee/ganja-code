@@ -16,7 +16,7 @@
 //! 4. the skills this session can load, when there are any — last, where
 //!    upstream puts them (`session/prompt.ts:1257-1268`).
 //!
-//! Which files apply is [`discover`], and the order is upstream's: the one global
+//! Which files apply is `discover`, and the order is upstream's: the one global
 //! file, then the project's own, then whatever `instructions` in the config
 //! named. A file appears once however many routes reach it, at the position the
 //! first route put it.
@@ -40,7 +40,7 @@
 //!   through `libc` for one line — unsafe, and unix-only — buys less than it
 //!   costs.
 //! - **D25** — instruction globs do not consult ignore files, but do keep the
-//!   hidden-file rule; see [`glob`].
+//!   hidden-file rule; see `glob`.
 //! - **D2** — `http(s)` entries in `instructions` are skipped with a warning
 //!   rather than fetched. `skills.urls` takes the same posture, in the same
 //!   words, at [`skill_roots`].
@@ -58,7 +58,7 @@
 //!   rather than ported are all declared at [`memory_dir`].
 //! - **D480** — instruction files **below** the project root are walked in
 //!   lazily as the session touches files under them; the walker, the carrier
-//!   and the honest alternatives are all declared at [`nested_files`].
+//!   and the honest alternatives are all declared at `nested_files`.
 //! - **`skills-block-omitted-when-there-are-none`** — upstream emits the
 //!   heading and the sentence "No skills are currently available." for a
 //!   session that has none (`skill/index.ts:321-323`). Here the whole block is
@@ -563,7 +563,7 @@ fn clamped(content: &str, named: &str) -> (String, bool) {
 /// A session whose config says `memory: true` carries a small store of
 /// durable facts about the project it is working in: `MEMORY.md` is the
 /// index, and each topic is a file of its own beside it. The whole of it is
-/// read into every request's system prompt by [`memory_section`], and the
+/// read into every request's system prompt by `memory_section`, and the
 /// whole of it is maintained by the **model** through the ordinary `read`,
 /// `write` and `edit` tools — there is no memory tool, and deliberately not:
 /// a file the model already knows how to write is one fewer thing to teach
@@ -582,7 +582,7 @@ fn clamped(content: &str, named: &str) -> (String, bool) {
 /// # The block is ganja's own text
 ///
 /// Claude Code's real memory prompt is not public documentation, so the
-/// upkeep instructions in [`memory_section`] are **synthesized, not ported** —
+/// upkeep instructions in `memory_section` are **synthesized, not ported** —
 /// the same posture D477 took for the plan door upstream describes and does
 /// not implement. What is ported is the *shape* the feature has from the
 /// outside: an index, topic files beside it, and a model that keeps them.

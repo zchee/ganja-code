@@ -26,7 +26,7 @@
 //! the stored token byte for byte so that it reddens rather than passes.
 //!
 //! It also never expires ([`auth::copilot`]'s `expires: 0`), which is why this
-//! module's [`NeverRenews`] is a refusal rather than an endpoint: there is no
+//! module's `NeverRenews` is a refusal rather than an endpoint: there is no
 //! renewal path to call, and the only thing that repairs a Copilot credential
 //! the endpoint has stopped accepting is another login.
 
@@ -108,7 +108,7 @@ impl CopilotProvider {
     /// grok's posture inherited verbatim: neither provider refuses to be built
     /// over a missing credential, because the failure a person needs to see is
     /// the one that names the login, and that message is produced once, at the
-    /// first request, by [`CredentialSource::resolved`]. Failing here as well would
+    /// first request, by `CredentialSource::resolved`. Failing here as well would
     /// be a second, earlier, differently-worded version of the same refusal.
     ///
     /// # Errors
@@ -124,7 +124,7 @@ impl CopilotProvider {
     ///
     /// There is no `refresh` parameter, unlike every other OAuth provider here:
     /// a Copilot credential has no renewal path at all, so there is no endpoint
-    /// half for a caller to choose. See [`NeverRenews`].
+    /// half for a caller to choose. See `NeverRenews`.
     ///
     /// # Errors
     ///

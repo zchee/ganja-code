@@ -35,6 +35,21 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Doc links are the one thing in these files nothing else checks. A
+      # `[`Thing`]` whose target was renamed, made private or moved still reads
+      # correctly in the source and still compiles — it just renders as literal
+      # brackets, so the rot is invisible to every gate above and to the person
+      # writing the next paragraph. This workspace leans on intra-doc links
+      # unusually hard (module docs cite the seam they describe), which is
+      # exactly why it had accumulated 136 broken ones by P22 with everything
+      # else green. `--no-deps` holds it to this workspace's own crates;
+      # `rustdoc` itself ships with the `rustc` component, so no new toolchain
+      # component is needed above.
+      - name: rustdoc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - name: ganja-core stays free of terminal dependencies
         run: '! cargo tree -p ganja-core -e normal | grep -q ratatui'
 

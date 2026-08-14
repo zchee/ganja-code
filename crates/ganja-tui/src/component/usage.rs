@@ -190,7 +190,7 @@ pub struct Data {
     pub rates: Vec<RateWindow>,
     /// The vendor's own plan buckets, as `Engine::plan_windows` last answered
     /// (**D485**). Empty renders no `Plan limits` section and the honest
-    /// [`NO_PLAN_LIMITS`] tail instead; non-empty renders the section and no
+    /// `NO_PLAN_LIMITS` tail instead; non-empty renders the section and no
     /// tail. Never both, and never a section over nothing.
     pub plans: Vec<PlanWindow>,
     /// What "now" the section's expiry is judged against. Its own field rather

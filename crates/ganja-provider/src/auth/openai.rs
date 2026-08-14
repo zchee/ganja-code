@@ -32,7 +32,7 @@
 //!   the PKCE verifier. Each of those is called out where it happens.
 //! - **Nothing here writes to the credential store.** Every path returns a
 //!   credential or an error, and storing it is the caller's step. Together with
-//!   the same property in [`loopback`](super::loopback), that makes "a login
+//!   the same property in [`loopback`], that makes "a login
 //!   that failed stores nothing" a fact about which functions exist rather than
 //!   a claim about which branches were taken.
 
@@ -215,7 +215,7 @@ pub enum LoginError {
     },
     /// The issuer answered, and refused.
     ///
-    /// `code` is the issuer's own OAuth error code or [`UNNAMED`] — never a
+    /// `code` is the issuer's own OAuth error code or `UNNAMED` — never a
     /// response body, which is a place a token can appear.
     #[error("the ChatGPT issuer refused while {step}: HTTP {status} ({code})")]
     Refused {
@@ -715,7 +715,7 @@ pub struct Device {
 }
 
 impl fmt::Debug for Device {
-    /// Hand-written because [`device_auth_id`](Self::device_auth_id) is half a
+    /// Hand-written because `device_auth_id` is half a
     /// credential.
     ///
     /// It and `user_code` are together what `poll` presents to claim the grant,

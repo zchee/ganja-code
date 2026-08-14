@@ -510,7 +510,7 @@ impl FileTimes {
     /// The files that went stale since this was last asked, and clears them.
     ///
     /// Draining is what makes the notice fire once per staleness episode
-    /// rather than once per turn: the file stays [`Seen::Stale`] — so `write`
+    /// rather than once per turn: the file stays `Seen::Stale` — so `write`
     /// and `edit` keep refusing it until it is read again — while the *telling*
     /// happens once. A file that is re-read and then changed again is a new
     /// episode, and is named again.

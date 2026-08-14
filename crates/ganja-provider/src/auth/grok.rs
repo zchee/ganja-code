@@ -559,7 +559,7 @@ impl Browser {
 /// A grant that returned no refresh token leaves that field blank
 /// rather than borrowing the access token for it. The credential still works
 /// until it expires; what it cannot do is renew itself, and
-/// [`Refresh::refresh`] says exactly that rather than presenting an access
+/// [`crate::auth::RefreshOauth::refresh`] says exactly that rather than presenting an access
 /// token to an endpoint that wants a refresh one.
 #[must_use]
 pub fn credential_from(tokens: &Tokens) -> OauthCredential {

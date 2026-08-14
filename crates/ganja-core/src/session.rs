@@ -3090,7 +3090,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
 /// a file the model has not opened, and `edit` still refuses it (R9).
 ///
 /// The read is synchronous on the turn task, like every
-/// [`Persist`](Persist) write: these are small files, and the lane that absorbs
+/// [`Persist`] write: these are small files, and the lane that absorbs
 /// backpressure is this one.
 fn resolve_mentions(
     messages: &mut [Message],

@@ -78,7 +78,7 @@ pub struct Checkpoint {
     /// The prompt's first line, clipped to the row at render time.
     pub title: String,
     /// How many distinct files the patch parts in this checkpoint's span
-    /// named. Zero renders [`NO_CODE`].
+    /// named. Zero renders `NO_CODE`.
     pub files: usize,
 }
 
