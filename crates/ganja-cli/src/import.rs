@@ -2067,13 +2067,30 @@ fn section(name: &str, right: &str, rows: &[(String, String)], width: usize) {
 /// does not have, a value of the wrong type — would surface at the next launch,
 /// on a file its owner did not write. Decoding here turns that into an error at
 /// the moment it was caused, and makes a dry run mean something.
+///
+/// Decoding alone is not the whole of what the loader will accept: it runs
+/// `McpServer::check` over every `mcp` entry after decoding, and an entry
+/// that decodes and fails *that* is a file this wrote that the next launch
+/// refuses. The mapping above already declines a remote URL nothing may send
+/// headers to — by the conservative text-level [`reachable_in_the_clear`],
+/// which is what a translator holding a raw `Json` can do — so this is the
+/// belt to that suspenders, and the one authority for all three refusals
+/// rather than a fourth spelling of them.
 fn validate(document: &str) -> Result<()> {
-    jsonc_parser::parse_to_serde_value::<Option<Config>>(
+    let config = jsonc_parser::parse_to_serde_value::<Option<Config>>(
         document,
         &ganja_core::config::parse_options(),
     )
-    .map(|_| ())
-    .map_err(|error| anyhow!("the imported config is not one ganja can load: {error}\n{document}"))
+    .map_err(|error| anyhow!("the imported config is not one ganja can load: {error}\n{document}"))?
+    .unwrap_or_default();
+
+    for (name, server) in &config.mcp {
+        server.check(name).map_err(|message| {
+            anyhow!("the imported config is not one ganja can load: {message}")
+        })?;
+    }
+
+    Ok(())
 }
 
 /// The opencode config to import, and where it was read from.
@@ -3015,6 +3032,33 @@ mod tests {
             vec![("mcp.fs.sparkles", "unknown"), ("mcp.fs.url", "unknown")]
         );
         validate(&rendered).expect("what survived is still a config ganja reads");
+    }
+
+    /// Decoding is not the whole of what the loader accepts, so neither is
+    /// this check: `McpServer::check` runs over every entry after the decode,
+    /// which is the one authority the loader and `ganja mcp add` also call.
+    ///
+    /// Both shapes below decode perfectly — an empty `command` is a legal
+    /// `Vec<String>`, a zero `output_limit` a legal `u64` — and both are
+    /// files the next launch would refuse, which is the one thing a writer
+    /// exists to prevent.
+    #[test]
+    fn a_written_mcp_entry_that_decodes_but_would_not_load_is_still_refused() {
+        for (document, named) in [
+            (
+                r#"{"mcp": {"fs": {"type": "local", "command": []}}}"#,
+                "empty command",
+            ),
+            (
+                r#"{"mcp": {"fs": {"type": "local", "command": ["s"], "output_limit": 0}}}"#,
+                "output_limit of 0",
+            ),
+        ] {
+            let refused = validate(document)
+                .expect_err("the next launch would refuse this, so this run does");
+            let said = refused.to_string();
+            assert!(said.contains(named) && said.contains("\"fs\""), "{said}");
+        }
     }
 
     /// `true` means something narrower here than it does upstream, and a user

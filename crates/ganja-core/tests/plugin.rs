@@ -3,6 +3,11 @@
 //! through the real config loader — the restart-shaped half of P14's
 //! acceptance criterion 6 (the `/plugin` dialog half is the TUI's).
 //!
+//! Every collision the D473 merge table decides is *reported*, and the report
+//! is a `tracing::warn!` nothing used to read back. It is captured here, so
+//! "the config wins and says so" is two assertions rather than one assertion
+//! and a promise.
+//!
 //! One binary, one environment-mutating test — the house rule every config
 //! suite here follows, because `Config::load_with` consults the global tier
 //! and the plugin store through `GANJA_CONFIG_HOME`, and a plain `cargo
@@ -10,13 +15,54 @@
 //! sequentially inside the single `#[test]`, against one pinned temporary
 //! home, so nothing here can read a real user's config or plugins.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    io::{self, Write as _},
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use ganja_core::{
     Config, LspConfig, McpServer,
+    command::Registry,
     config::{CONFIG_ENV, CONFIG_HOME_ENV},
     plugin::Store,
 };
+use tracing_subscriber::fmt::MakeWriter;
+
+/// A `tracing` writer this test can read back, so that "the collision is
+/// reported by name" is an assertion rather than a promise.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    fn logged(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
+    }
+}
+
+impl io::Write for Capture {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the log is never poisoned")
+            .extend_from_slice(buffer);
+
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> MakeWriter<'writer> for Capture {
+    type Writer = Self;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        self.clone()
+    }
+}
 
 /// Writes `text` to `root/relative`, creating whatever directories it needs.
 fn plant(root: &Path, relative: &str, text: &str) {
@@ -27,7 +73,7 @@ fn plant(root: &Path, relative: &str, text: &str) {
     fs::write(path, text).expect("the fixture file is writable");
 }
 
-/// A marketplace holding one plugin that carries all five surfaces — the
+/// A marketplace holding one plugin that carries all six surfaces — the
 /// fixture acceptance criterion 6 names — plus deliberate collisions with
 /// the project config below, so precedence is pinned rather than assumed.
 fn plant_marketplace(market: &Path) {
@@ -76,6 +122,18 @@ fn plant_marketplace(market: &Path) {
         &format!("{plugin}/skills/greeter/SKILL.md"),
         "---\nname: greeter\ndescription: greets\n---\nSay hello.\n",
     );
+    // Two commands: `brief` is the one that arrives, `taken` collides with the
+    // namespaced key the project config spells out for itself and must lose.
+    plant(
+        market,
+        &format!("{plugin}/commands/brief.md"),
+        "---\ndescription: brief me\nargument-hint: <topic>\n---\nbrief me on $ARGUMENTS\n",
+    );
+    plant(
+        market,
+        &format!("{plugin}/commands/taken.md"),
+        "the plugin's version\n",
+    );
     // Two agents: `reviewer` collides with the project config's own and must
     // lose to it; `helper` is the one that actually arrives.
     plant(
@@ -118,6 +176,9 @@ fn plant_project(project: &Path) {
           "agent": {
             "reviewer": { "description": "the config's reviewer" }
           },
+          "command": {
+            "full:taken": { "template": "the config's version" }
+          },
           "lsp": {
             "go": { "command": ["config-gopls"], "extensions": [".go"] }
           },
@@ -127,7 +188,7 @@ fn plant_project(project: &Path) {
 }
 
 #[test]
-fn an_installed_plugin_contributes_all_five_surfaces_until_disabled() {
+fn an_installed_plugin_contributes_all_six_surfaces_until_disabled() {
     let home = tempfile::tempdir().expect("a temporary directory");
     let config_home = home.path().join("ganja-home");
     fs::create_dir_all(&config_home).expect("the config home is creatable");
@@ -141,6 +202,15 @@ fn an_installed_plugin_contributes_all_five_surfaces_until_disabled() {
         std::env::set_var(CONFIG_HOME_ENV, &config_home);
         std::env::remove_var(CONFIG_ENV);
     }
+
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("this binary holds one test, so nothing else has installed one");
 
     let market = home.path().join("market");
     plant_marketplace(&market);
@@ -197,6 +267,38 @@ fn an_installed_plugin_contributes_all_five_surfaces_until_disabled() {
         loaded.skills.paths[1]
     );
 
+    // Commands arrive namespaced `<plugin>:<name>`, Claude's own spelling —
+    // and the one the config spelled for itself is the config's.
+    let brief = &loaded.command["full:brief"];
+    assert_eq!(brief.template, "brief me on $ARGUMENTS\n");
+    assert_eq!(
+        brief.description.as_deref(),
+        Some("brief me — <topic>"),
+        "the file loader's own palette line, not a second parser's"
+    );
+    assert_eq!(
+        loaded.command["full:taken"].template, "the config's version",
+        "explicit config wins the collision"
+    );
+
+    // …and they are commands, not just config keys: the roster a session runs
+    // from holds them under the same names, through the one expansion path.
+    let commands = Registry::build(&loaded, &project);
+    assert_eq!(
+        commands
+            .get("full:brief")
+            .expect("the plugin's command is in the roster")
+            .template,
+        "brief me on $ARGUMENTS\n"
+    );
+    assert_eq!(
+        commands
+            .get("full:taken")
+            .expect("the collided name is still a command")
+            .template,
+        "the config's version"
+    );
+
     // Agents merge per key: the config-declared `reviewer` wins its name,
     // the plugin's `helper` arrives.
     assert_eq!(
@@ -233,6 +335,8 @@ fn an_installed_plugin_contributes_all_five_surfaces_until_disabled() {
         "hook PreToolUse",
         "mcp db",
         "skills",
+        "command brief",
+        "command taken",
         "agent helper",
         "agent reviewer",
         "lsp fixturelsp",
@@ -244,6 +348,42 @@ fn an_installed_plugin_contributes_all_five_surfaces_until_disabled() {
             listing.components
         );
     }
+
+    // Every collision the merge table decided said so, naming the plugin and
+    // the component — the half that used to be emitted and never read back.
+    let logged = capture.logged();
+    io::stdout()
+        .write_all(logged.as_bytes())
+        .expect("the captured log is printable");
+    for (what, named) in [
+        (
+            "the config already defines this agent",
+            r#"agent="reviewer""#,
+        ),
+        (
+            "the config already configures this lsp server",
+            r#"server="go""#,
+        ),
+        (
+            "the config already declares this command",
+            r#"command="full:taken""#,
+        ),
+    ] {
+        assert!(
+            logged.contains(what) && logged.contains(named),
+            "the collision over {named} is reported ({what}): {logged}"
+        );
+    }
+    assert!(
+        logged.contains(r#"plugin="full""#),
+        "and every one of them names the plugin: {logged}"
+    );
+    assert!(
+        !logged.contains(r#"agent="helper""#)
+            && !logged.contains(r#"server="fixturelsp""#)
+            && !logged.contains(r#"command="full:brief""#),
+        "a component nothing collided over is reported by nobody: {logged}"
+    );
 
     // Disabling withdraws every contribution without touching the disk copy.
     store
@@ -257,6 +397,11 @@ fn an_installed_plugin_contributes_all_five_surfaces_until_disabled() {
     );
     assert!(!disabled.mcp.contains_key("plugin:full:db"));
     assert_eq!(disabled.skills.paths, vec!["./own-skills".to_owned()]);
+    assert!(!disabled.command.contains_key("full:brief"));
+    assert!(
+        disabled.command.contains_key("full:taken"),
+        "the config's own entry was never the plugin's to withdraw"
+    );
     assert!(!disabled.agent.contains_key("helper"));
     let Some(LspConfig::Servers(lsp)) = &disabled.lsp else {
         panic!("the config's own lsp map remains");
