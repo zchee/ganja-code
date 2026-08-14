@@ -884,7 +884,8 @@ pub enum StatuslineElement {
     Tokens,
     /// The notice beside the state — failures, MCP servers out of reach.
     Notice,
-    /// The key reminders, right-aligned as they always were.
+    /// The key reminders, right-aligned as they always were — which shell
+    /// mode is now the only mode to have.
     Hints,
     /// The repository and branch, on their own line above the bar.
     Git,
