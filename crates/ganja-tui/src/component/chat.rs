@@ -1684,13 +1684,31 @@ fn task_lines(state: &ToolState, theme: &Theme) -> Vec<Row> {
                 task_heading(agent, field(input, "description")),
                 theme.dim,
             )];
-            // Upstream's own priority: the tool the child is running right now
-            // says more than how many it has run.
-            let detail = match field(metadata, "current_tool") {
-                Some(current) => current.to_owned(),
-                None => format!("{} toolcalls", toolcalls(metadata)),
-            };
-            rows.push(Row::new(RESULT, detail, theme.dim));
+            let log = call_log(metadata);
+            if log.is_empty() {
+                // Upstream's own priority: the tool the child is running right
+                // now says more than how many it has run.
+                let detail = match field(metadata, "current_tool") {
+                    Some(current) => current.to_owned(),
+                    None => format!("{} toolcalls", toolcalls(metadata)),
+                };
+                rows.push(Row::new(RESULT, detail, theme.dim));
+            } else {
+                // What runs inside the task, expanded on the row itself
+                // (2026-08-15): the newest calls in call order — the streaming
+                // shell's posture, what was cut is above what is shown — with
+                // the cut priced off the true total, so the collapsed rows the
+                // engine's own cap dropped are admitted too.
+                let start = log.len().saturating_sub(TOOL_PREVIEW_LINES);
+                let total = usize::try_from(toolcalls(metadata)).unwrap_or(usize::MAX);
+                let hidden = total.saturating_sub(log.len() - start);
+                let mut preview: Vec<(String, Style)> = Vec::new();
+                if hidden > 0 {
+                    preview.push((clamp_hint(hidden), theme.dim));
+                }
+                preview.extend(log.into_iter().skip(start).map(|call| (call, theme.dim)));
+                rows.extend(result_rows(preview, false));
+            }
 
             rows
         }
@@ -1743,6 +1761,22 @@ fn toolcalls(metadata: &serde_json::Value) -> u64 {
         .get("toolcalls")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0)
+}
+
+/// The child's own calls, as the watcher logged them onto the parent's part —
+/// empty for a part that carries no log, which is also every foreign tool's.
+fn call_log(metadata: &serde_json::Value) -> Vec<String> {
+    metadata
+        .get("calls")
+        .and_then(serde_json::Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The task row's header: the agent doing the work and what it was asked for,
@@ -3315,6 +3349,49 @@ mod tests {
                 .iter()
                 .any(|line| line == "\u{25cf} Task(description: \"find the parser\")"),
             "an agent nobody named is left off rather than invented, got {lines:?}"
+        );
+    }
+
+    /// What runs inside a task is on the row, not behind a count
+    /// (2026-08-15): once the watcher's log arrives, the newest calls hang
+    /// under the heading in call order, the cut admitted above them off the
+    /// true total.
+    #[test]
+    fn a_running_task_expands_the_childs_recent_calls_and_admits_the_cut() {
+        let lines = tool_call(
+            "task",
+            ToolState::Running {
+                input: serde_json::json!({
+                    "description": "map it",
+                    "subagent_type": "explore",
+                }),
+                metadata: serde_json::json!({
+                    "toolcalls": 7,
+                    "current_tool": "grep five",
+                    "calls": ["grep one", "grep two", "grep three", "grep four", "grep five"],
+                }),
+                started: 0,
+            },
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "  \u{23bf} \u{2026} +3 lines (ctrl+t to expand)"),
+            "three of seven calls are off the row and said to be: {lines:?}"
+        );
+        let two = lines
+            .iter()
+            .position(|line| line == "    grep two")
+            .expect("the oldest shown call is on screen");
+        assert_eq!(
+            lines[two + 3],
+            "    grep five",
+            "the newest call ends the block in call order: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("grep one")),
+            "the cut call is cut: {lines:?}"
         );
     }
 

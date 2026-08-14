@@ -106,6 +106,9 @@ pub struct Delegated {
     pub text: String,
     /// How many tools it called, which the parent's inline row shows.
     pub toolcalls: usize,
+    /// The calls it made, in order, each named the way its running row named
+    /// it — capped by the engine, with `toolcalls` the true total.
+    pub calls: Vec<String>,
 }
 
 /// Why a delegation came back without an answer.
@@ -246,6 +249,7 @@ impl Tool for TaskTool {
                     "agent": done.agent,
                     "model": done.model,
                     "toolcalls": done.toolcalls,
+                    "calls": done.calls,
                 }),
             }),
             Err(Unanswered::Cancelled) => Err(ToolError::Cancelled),

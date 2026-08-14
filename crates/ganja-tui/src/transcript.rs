@@ -129,11 +129,20 @@ fn formatted(part: &Part) -> String {
 
             match state {
                 ToolState::Pending => {}
-                ToolState::Running { input, .. } => {
-                    rendered.push_str(&fenced("Input", "json", &pretty(input)))
-                }
-                ToolState::Completed { input, output, .. } => {
+                ToolState::Running {
+                    input, metadata, ..
+                } => {
                     rendered.push_str(&fenced("Input", "json", &pretty(input)));
+                    rendered.push_str(&calls_fence(metadata));
+                }
+                ToolState::Completed {
+                    input,
+                    output,
+                    metadata,
+                    ..
+                } => {
+                    rendered.push_str(&fenced("Input", "json", &pretty(input)));
+                    rendered.push_str(&calls_fence(metadata));
                     rendered.push_str(&fenced("Output", "", output));
                 }
                 ToolState::Error { input, error, .. } => {
@@ -187,6 +196,36 @@ fn formatted(part: &Part) -> String {
 /// One labelled fenced block, in upstream's layout.
 fn fenced(label: &str, language: &str, body: &str) -> String {
     format!("\n**{label}:**\n```{language}\n{body}\n```\n")
+}
+
+/// The child-call log a `task` part's metadata carries (2026-08-15), rendered
+/// whole — the expansion the chat row's clamp hint points at, with the rows
+/// the engine's own cap dropped admitted off the true `toolcalls` count.
+/// Empty for a part that carries no log, so every other tool is unchanged.
+fn calls_fence(metadata: &serde_json::Value) -> String {
+    let calls: Vec<&str> = metadata
+        .get("calls")
+        .and_then(serde_json::Value::as_array)
+        .map(|calls| calls.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    if calls.is_empty() {
+        return String::new();
+    }
+
+    let total = metadata
+        .get("toolcalls")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(calls.len(), |total| {
+            usize::try_from(total).unwrap_or(usize::MAX)
+        });
+    let mut body = String::new();
+    let dropped = total.saturating_sub(calls.len());
+    if dropped > 0 {
+        body.push_str(&format!("\u{2026} +{dropped} earlier\n"));
+    }
+    body.push_str(&calls.join("\n"));
+
+    fenced("Calls", "", &body)
 }
 
 /// A tool's arguments, indented the way upstream's `JSON.stringify(_, null, 2)`
@@ -339,6 +378,30 @@ mod tests {
 
         assert!(
             rendered.starts_with("# Untitled session\n\n"),
+            "got: {rendered}"
+        );
+    }
+
+    /// A task part's call log is the expansion the chat row's clamp hint
+    /// points at (2026-08-15): printed whole, the rows the engine's own cap
+    /// dropped admitted off the true count.
+    #[test]
+    fn a_task_call_prints_the_childs_calls_with_the_cap_admitted() {
+        let mut part = completed("task", serde_json::json!({"description": "map it"}), "done");
+        if let PartBody::Tool {
+            state: ToolState::Completed { metadata, .. },
+            ..
+        } = &mut part.body
+        {
+            *metadata = serde_json::json!({"toolcalls": 3, "calls": ["grep a", "read b"]});
+        }
+        let parts = [part];
+
+        let rendered = format(&session(None), &[(Role::Assistant, &parts[..])]);
+
+        assert!(rendered.contains("**Calls:**"), "got: {rendered}");
+        assert!(
+            rendered.contains("\u{2026} +1 earlier\ngrep a\nread b"),
             "got: {rendered}"
         );
     }
