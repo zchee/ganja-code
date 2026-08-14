@@ -72,7 +72,7 @@ arboard = { version = "3.6.1", default-features = false, features = [
     # Linux build into speaking wl-clipboard directly.
     "wayland-data-control",
 ] }
-async-trait = "0.1.91"
+async-trait = "0.1.92"
 # The HTTP server the serve layer stands on. Chosen over a hand-rolled hyper
 # service because upstream's surface is a routed REST-plus-SSE app, and axum's
 # extractors are the idiomatic Rust for exactly that shape; it rides the tokio
@@ -85,13 +85,13 @@ axum = "0.8.9"
 #
 # `simd-unsafe` is one of this crate's own defaults; it is named here so that a
 # later `default-features = false` cannot drop the vectorised codec silently.
-base64 = { version = "0.23.0", features = ["simd-unsafe"] }
-clap = { version = "4.6.5", features = ["derive"] }
+base64 = { version = "0.23.1", features = ["simd-unsafe"] }
+clap = { version = "4.6.6", features = ["derive"] }
 # `ratatui` re-exports this exact crate; depending on it here is what turns on
 # `event-stream`, which the re-export alone cannot request.
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 etcetera = "0.11.0"
-futures = "0.3.33"
+futures = "0.3.34"
 # An OAuth login's unguessable values — the PKCE verifier, and the `state` and
 # `nonce` that make a callback answerable only by the request that opened it.
 # Each is raw bytes rendered as base64url, so the operating system's entropy is
@@ -110,7 +110,7 @@ grep-searcher = "0.1.17"
 # webfetch's markdown format is a real HTML→markdown conversion (upstream
 # uses turndown); before this the markdown answer was tag-stripped text.
 htmd = "0.5.5"
-ignore = "0.4.31"
+ignore = "0.4.33"
 # Config files take comments and trailing commas, the way upstream's do; this
 # parses that dialect into a value `serde` can then decode strictly. `cst` is
 # the concrete syntax tree — the same document with its comments, its key order
@@ -181,7 +181,7 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 # Client-side only — the default `server` feature stays off, because nothing
 # in this workspace serves MCP: the test fixture is a bun server on the
 # reference SDK, which is the point of it.
-rmcp = { version = "3.1.0", default-features = false, features = [
+rmcp = { version = "3.1.2", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",
@@ -195,7 +195,7 @@ rmcp = { version = "3.1.0", default-features = false, features = [
 # on (`foreign_keys`, WAL synchronous level) are build-time properties that
 # differ between system libraries, so pinning the library is what pins the
 # semantics.
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 schemars = "1.2.2"
 # Key material is held in `SecretString` so that it is wiped on drop and cannot
 # reach a `Debug` rendering; `serde` is what lets `auth.json` decode into one.
@@ -217,7 +217,7 @@ serde_json = "1.0.151"
 # `default-features = false` drops `alloc` and `oid`: a fixed-size digest over
 # a 43-byte string needs neither.
 sha2 = { version = "0.11.0", default-features = false }
-similar = "3.1.1"
+similar = "3.1.2"
 # Fenced-code highlighting for the markdown renderer. The regex backend is
 # the pure-Rust `fancy-regex` — `default-onig` would put a C library in
 # every build — and the bundled syntax set is the language table.
@@ -225,7 +225,7 @@ syntect = { version = "5.3.0", default-features = false, features = [
     "default-syntaxes",
     "regex-fancy",
 ] }
-thiserror = "2.0.19"
+thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = [
     "fs",
     "io-util",
