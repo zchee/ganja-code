@@ -198,13 +198,6 @@ impl AnthropicProvider {
         self
     }
 
-    /// Caps replies at `max_tokens` instead of [`DEFAULT_MAX_TOKENS`].
-    #[must_use]
-    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
-        self.max_tokens = max_tokens;
-        self
-    }
-
     /// The reply cap a request for `model` may ask for.
     ///
     /// The configured ceiling, lowered to whatever the catalog says the model
@@ -1917,9 +1910,8 @@ mod tests {
              sonnet's own limit is 128k"
         );
 
-        let modest = AnthropicProvider::new("sk-test-canary-XYZ")
-            .expect("a client builds")
-            .with_max_tokens(4_096);
+        let mut modest = AnthropicProvider::new("sk-test-canary-XYZ").expect("a client builds");
+        modest.max_tokens = 4_096;
 
         assert_eq!(
             modest.max_tokens("claude-sonnet-5"),
@@ -1927,7 +1919,8 @@ mod tests {
             "a caller asking for less than the cap gets what it asked for"
         );
 
-        let generous = provider.with_max_tokens(200_000);
+        let mut generous = provider;
+        generous.max_tokens = 200_000;
 
         assert_eq!(
             generous.max_tokens("claude-haiku-4-5"),

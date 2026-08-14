@@ -555,10 +555,9 @@ impl OauthCredential {
     /// request started now might outlive it.
     ///
     /// `expires == 0` reads as "never" here — Copilot's meaning, and the one
-    /// this predicate has always had. It answers the narrow question the field
-    /// alone can answer, which is why
-    /// [`usable_access`](Self::usable_access) asks it: whether a token may be
-    /// *sent* is the stored record's business and nothing else's.
+    /// this predicate has always had. It answers the narrow question the
+    /// stored field alone can answer, and nothing more: whether the record
+    /// itself calls the token spent.
     ///
     /// **The renewal decision is [`needs_refresh_for`](Self::needs_refresh_for)**,
     /// which reads a zero the way the credential's own provider writes one and
@@ -592,9 +591,10 @@ impl OauthCredential {
     ///
     /// The token's own claim is **only ever a reason to renew**. Nothing here
     /// is a trust decision — see [`token_deadline_ms`], which checks no
-    /// signature — and [`usable_access`](Self::usable_access) deliberately does
-    /// not consult it: a forged `exp` must not be able to make a credential the
-    /// store calls live unusable.
+    /// signature — and [`needs_refresh`](Self::needs_refresh), the reading of
+    /// the stored record alone, deliberately does not consult it: a forged
+    /// `exp` must not be able to make a credential the store calls live look
+    /// spent.
     #[must_use]
     pub fn needs_refresh_for(&self, provider_id: &str, now_ms: u64, skew_ms: u64) -> bool {
         let horizon = now_ms.saturating_add(skew_ms);
@@ -610,30 +610,6 @@ impl OauthCredential {
         }
 
         token_deadline_ms(&self.access).is_some_and(|deadline| deadline <= horizon)
-    }
-
-    /// The token a request should carry, or why it cannot have one.
-    ///
-    /// For a caller that holds a credential and has no way to refresh it —
-    /// which is every caller until a login flow supplies a [`RefreshOauth`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuthError::Expired`] when the access token is spent. That is
-    /// a recoverable state, not a dead credential: [`Refresher::usable`] is
-    /// what recovers it.
-    pub fn usable_access(
-        &self,
-        provider_id: &str,
-        now_ms: u64,
-    ) -> Result<&SecretString, AuthError> {
-        if self.needs_refresh(now_ms, 0) || is_blank(&self.access) {
-            return Err(AuthError::Expired {
-                provider_id: provider_id.to_owned(),
-            });
-        }
-
-        Ok(&self.access)
     }
 
     /// This credential, taking from `previous` whatever it does not carry
@@ -3163,8 +3139,8 @@ mod tests {
             "the token says it is spent, which is a reason to renew it early"
         );
         assert!(
-            credential.usable_access("grok", NOW_MS).is_ok(),
-            "and never a reason to refuse to send what the store calls live"
+            !credential.needs_refresh(NOW_MS, 0),
+            "and never a reason to call spent what the store calls live"
         );
         assert!(
             !credential.needs_refresh(NOW_MS, REFRESH_SKEW_MS),
@@ -3176,30 +3152,6 @@ mod tests {
     /// which of the four situations it is in, and what fixes it.
     #[test]
     fn every_failure_says_which_of_them_it_is_and_what_to_do() {
-        let expires_at = 1_785_000_000_000;
-        let credential = OauthCredential::new(
-            SecretString::from("r"),
-            SecretString::from(CANARY),
-            expires_at,
-        );
-
-        assert_eq!(
-            credential
-                .usable_access("openai", expires_at - 1)
-                .expect("a live token is handed over")
-                .expose_secret(),
-            CANARY
-        );
-
-        let expired = credential
-            .usable_access("openai", expires_at)
-            .expect_err("a spent token is refused");
-        assert_eq!(expired.kind(), AuthErrorKind::Expired);
-        assert!(
-            expired.to_string().contains("refresh token"),
-            "an expired token is recoverable, and the message has to say so: {expired}"
-        );
-
         #[cfg(not(windows))]
         let permissions = (
             AuthError::Permissions {
@@ -3219,6 +3171,15 @@ mod tests {
             "icacls",
         );
         let taxonomy = [
+            (
+                // Recoverable, and the message has to say so: the refresh
+                // token stored beside it is what renews this one.
+                AuthError::Expired {
+                    provider_id: "openai".to_owned(),
+                },
+                AuthErrorKind::Expired,
+                "refresh token",
+            ),
             (
                 AuthError::NotOauth {
                     provider_id: "openai".to_owned(),

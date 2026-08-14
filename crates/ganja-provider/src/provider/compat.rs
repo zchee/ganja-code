@@ -60,18 +60,6 @@ pub enum Dialect {
     AnthropicMessages,
 }
 
-impl Dialect {
-    /// The word a config file spells this dialect with, for a message that has
-    /// to name it back.
-    #[must_use]
-    pub fn spelled(self) -> &'static str {
-        match self {
-            Self::OpenaiChatCompletions => "openai-chat-completions",
-            Self::AnthropicMessages => "anthropic-messages",
-        }
-    }
-}
-
 /// Streams replies from an endpoint a config declared.
 ///
 /// A newtype over whichever wire the dialect names, for [`super::grok`]'s
@@ -215,8 +203,7 @@ mod tests {
             assert_eq!(
                 provider.id(),
                 "local-llama",
-                "{} reported the wire it borrows",
-                dialect.spelled()
+                "{dialect:?} reported the wire it borrows"
             );
             assert!(
                 !PROVIDERS.contains(&provider.id()),
@@ -267,7 +254,9 @@ mod tests {
             (Dialect::OpenaiChatCompletions, "openai-chat-completions"),
             (Dialect::AnthropicMessages, "anthropic-messages"),
         ] {
-            assert_eq!(dialect.spelled(), spelled);
+            // Through the derive, which is the whole mechanism: a dialect is
+            // read from a config file and never written back, so this
+            // direction is the only one there is.
             assert_eq!(
                 serde_json::from_value::<Dialect>(serde_json::json!(spelled))
                     .expect("the word a config file writes"),

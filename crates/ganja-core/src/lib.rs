@@ -83,7 +83,6 @@ pub use ganja_protocol as protocol;
 pub use ganja_provider::{auth, catalog};
 pub use ganja_tool as tool;
 pub use ganja_tool::watch;
-pub use instruction::system_prompt;
 pub use lsp::Lsp;
 pub use mcp::{Servers as McpServers, Status as McpStatus};
 pub use snapshot::{RevertState, Snapshots};

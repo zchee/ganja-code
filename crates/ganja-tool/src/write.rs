@@ -8,12 +8,16 @@
 //! redirect, and a link *at* the file's own name is refused rather than
 //! followed.
 //!
-//! Upstream's diff-for-permission-prompt, BOM preservation, format-on-write
-//! and LSP diagnostics reporting all lean on services this port does not
-//! have at the tool layer (`ctx.ask`, `Format.Service`, `LSP.Service`) —
-//! none of them are wired into [`ToolCtx`], so the base case upstream falls
-//! back to without those services, `"Wrote file successfully."`, is exactly
-//! what this port always returns.
+//! Upstream's diff-for-permission-prompt, format-on-write and LSP
+//! diagnostics reporting lean on two services this port has nothing for at
+//! the tool layer — `Format.Service` and `LSP.Service`, neither wired into
+//! [`ToolCtx`] — and on upstream's permission asker, which is not
+//! [`ToolCtx::ask`]: that seam is the `question` tool's, for asking a person
+//! something, and the permission dialog is the engine's. BOM preservation is
+//! a separate absence and needs no service at all: `edit` keeps a file's mark
+//! from the file's own bytes (`join_bom`) and `write` does not. So the base
+//! case upstream falls back to without those services,
+//! `"Wrote file successfully."`, is exactly what this port always returns.
 
 use std::io::Write as _;
 

@@ -34,10 +34,16 @@
 //! the catalog can size and price is a third fact about each, and neither
 //! implies the other.
 //!
-//! Every HTTP provider shares the same shape — build a request, retry it while
+//! Every SSE provider shares the same shape — build a request, retry it while
 //! it has not started answering, split the `text/event-stream` body into
 //! [`sse::Frame`]s, and map those onto events — so everything except the
-//! mapping lives here.
+//! mapping lives here. [`cursor`] is the exception, and says so three times
+//! over: it splits Connect envelopes rather than SSE frames, runs its own
+//! retry loop around a body that cannot be replayed, and folds events with a
+//! copy of [`events`]'s scaffolding because its duplex answers the server
+//! mid-body. What it does **not** exempt itself from is the credential's
+//! bounds: it sends through [`client`] and [`retry`], and its stream crosses
+//! [`shielded`] like every other wire's.
 //!
 //! Failures are reported in one of two ways, and never as a completed turn. A
 //! request that never starts streaming fails the call to [`Provider::stream`];
@@ -196,10 +202,10 @@ pub const PROVIDERS: [&str; 9] = [
 pub struct ChatRequest {
     /// Model identifier, spelled the way the provider expects it on the wire.
     pub model: String,
-    /// What the model is told before it is told anything else, composed by
-    /// `ganja_core::instruction::system_prompt` and installed with
-    /// `ganja_core::Engine::with_system`. [`None`] is an engine nobody
-    /// configured, and the shape every scripted run asks in.
+    /// What the model is told before it is told anything else, composed from
+    /// `ganja_core::instruction`'s `base_prompt` and `suffix` and installed
+    /// with `ganja_core::Engine::with_system_parts`. [`None`] is an engine
+    /// nobody configured, and the shape every scripted run asks in.
     pub system: Option<String>,
     /// The conversation so far, oldest first, ending with the message the user
     /// just sent.

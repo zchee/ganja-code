@@ -120,7 +120,8 @@ pub struct ShellTool {
     /// Where an overflowing command's output is spilled, when it must not go
     /// where [`truncate::open_spill`] would put it.
     ///
-    /// Only a test ever sets this, through [`ShellTool::spilling_into`]: a
+    /// Only a test ever sets this, through `ShellTool::spilling_into` — gated
+    /// `#[cfg(test)]`, so there is no item here to link: a
     /// test that spilled into the resolved data directory would fill a real
     /// person's `~/.local/share` with fixtures, which `tests/AGENTS.md`
     /// forbids in as many words. Every other build leaves it empty and the

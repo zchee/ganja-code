@@ -644,6 +644,7 @@ impl Chat {
     }
 
     /// Whether new text will scroll into view on its own.
+    #[cfg(test)]
     #[must_use]
     pub fn is_following_tail(&self) -> bool {
         self.offset.is_none()

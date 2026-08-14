@@ -611,7 +611,14 @@ pub struct Config {
     /// `openrouter/anthropic/claude-3` names the model `anthropic/claude-3`.
     pub model: Option<String>,
     /// Cheaper model for the requests a session makes about itself — titles
-    /// and summaries.
+    /// and summaries — as upstream means it.
+    ///
+    /// **Accepted, and consulted by nothing.** A config carrying it is read
+    /// rather than refused, and `ganja config import-opencode` carries it
+    /// across, but no request here reads it: a title picks its model from the
+    /// catalog by price (`session.rs`'s `title_model`) and a summary reuses
+    /// the turn's own. Recorded the way every other honest absence here is,
+    /// because a key that is silently ignored is worse than one that says so.
     pub small_model: Option<String>,
     /// Provider a session runs as when no other tier names one: a builtin id,
     /// or one of [`provider`](Self::provider)'s.
@@ -1489,7 +1496,9 @@ fn explicit_file(overrides: &Overrides) -> Option<PathBuf> {
 /// somebody wants them twice.
 ///
 /// The seams are the ones the rest of the crate already uses: the global half
-/// is [`global_dir`] (the `<XDG config>/ganja` that holds `ganja.jsonc`), and
+/// is [`config_home`] (wherever ganja's own things live — `GANJA_CONFIG_HOME`,
+/// else `<XDG config>/ganja`, else `~/.ganja` — the directory that holds
+/// `ganja.jsonc`), and
 /// the project half hangs off `Project::resolve`, the same worktree resolution
 /// [`project_files`] stops its walk at and the permission engine files its
 /// answers under. Nothing here invents a way to find a directory.
@@ -1841,7 +1850,7 @@ mod tests {
         NotificationMethod, Notifications, Overrides, StatuslineConfig, StatuslineElement,
         ThemeMode, existing, merge_files, project_files, read, split_model,
     };
-    use crate::permission::{Action, RuleSet};
+    use crate::permission::{Action, Rule};
 
     fn temporary() -> TempDir {
         TempDir::new().expect("a temporary directory is creatable")
@@ -1855,19 +1864,15 @@ mod tests {
         fs::write(path, text).expect("the fixture file is writable");
     }
 
-    /// `config`'s permission rules as borrowed tuples, which is the shape the
-    /// order assertions read in.
-    fn flattened(config: &Config) -> Vec<(&str, &str, Action)> {
-        config
-            .permission
-            .entries()
+    /// The rules `spelled` names, in the shape [`PermissionConfig::rules`]
+    /// hands them over — which is what the order assertions read in.
+    fn rules(spelled: &[(&str, &str, Action)]) -> Vec<Rule> {
+        spelled
             .iter()
-            .flat_map(|(tool, set)| match set {
-                RuleSet::All(action) => vec![(tool.as_str(), "*", action.clone())],
-                RuleSet::Patterns(patterns) => patterns
-                    .iter()
-                    .map(|(pattern, action)| (tool.as_str(), pattern.as_str(), action.clone()))
-                    .collect(),
+            .map(|(permission, pattern, action)| Rule {
+                permission: (*permission).to_owned(),
+                pattern: (*pattern).to_owned(),
+                action: action.clone(),
             })
             .collect()
     }
@@ -2920,8 +2925,8 @@ mod tests {
         .expect("a permission object is a config key");
 
         assert_eq!(
-            flattened(&config),
-            vec![
+            config.permission.rules(),
+            rules(&[
                 ("webfetch", "*", Action::Allow),
                 ("bash", "git status", Action::Allow),
                 ("bash", "git *", Action::Ask),
@@ -2929,7 +2934,7 @@ mod tests {
                 // survives as itself rather than being flattened to `ask`.
                 ("bash", "*", Action::Deny),
                 ("edit", "*", Action::Ask),
-            ]
+            ])
         );
     }
 

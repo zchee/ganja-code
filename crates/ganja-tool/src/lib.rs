@@ -254,7 +254,7 @@ impl Registry {
             // shell this machine actually offers.
             Arc::new(shell::ShellTool::new()),
             // Upstream registers one todo tool, which owns the list.
-            Arc::new(todo::TodoWriteTool::new()),
+            Arc::new(todo::TodoWriteTool),
             Arc::new(webfetch::WebfetchTool::new()),
             Arc::new(websearch::WebsearchTool::new()),
             // The roster's skill tool loads nothing: which directories a

@@ -135,9 +135,11 @@ pub fn clamp(text: &str) -> Truncated {
 /// Same as [`clamp`], but spills to exactly `dir` — no XDG resolution, no
 /// temp-dir fallback — so a caller can assert on the overflow file without
 /// touching a real person's data directory, and so a test can force the
-/// degraded path by pointing `dir` somewhere writing will fail.
-#[must_use]
-pub fn clamp_with(text: &str, dir: &Path) -> Truncated {
+/// degraded path by pointing `dir` somewhere writing will fail. Test-only —
+/// no production caller names a spill directory, and the crate gates such a
+/// seam rather than shipping it (`shell.rs`'s `spilling_into`).
+#[cfg(test)]
+fn clamp_with(text: &str, dir: &Path) -> Truncated {
     clamp_in(text, MAX_CHARS, [dir.to_owned()])
 }
 
@@ -151,15 +153,16 @@ pub fn clamp_bytes(text: &str, max_bytes: usize) -> Truncated {
     clamp_in(text, max_bytes, candidate_dirs())
 }
 
-/// [`clamp_bytes`] over exactly `dir`, for the reason [`clamp_with`] exists.
-#[must_use]
-pub fn clamp_bytes_with(text: &str, max_bytes: usize, dir: &Path) -> Truncated {
+/// [`clamp_bytes`] over exactly `dir`, for the reason `clamp_with` exists,
+/// and gated the same way.
+#[cfg(test)]
+fn clamp_bytes_with(text: &str, max_bytes: usize, dir: &Path) -> Truncated {
     clamp_in(text, max_bytes, [dir.to_owned()])
 }
 
-/// Shared implementation behind [`clamp`], [`clamp_with`], [`clamp_bytes`] and
-/// [`clamp_bytes_with`]: clamps `text` to `max_bytes`, then writes it to the
-/// first of `dirs` that accepts it.
+/// Shared implementation behind [`clamp`] and [`clamp_bytes`], and behind the
+/// `#[cfg(test)]` `clamp_with`/`clamp_bytes_with` beside them: clamps `text`
+/// to `max_bytes`, then writes it to the first of `dirs` that accepts it.
 fn clamp_in(text: &str, max_bytes: usize, dirs: impl IntoIterator<Item = PathBuf>) -> Truncated {
     let Some(body) = clamp_body(text, max_bytes) else {
         return Truncated {
@@ -227,9 +230,12 @@ fn clamp_body(text: &str, max_bytes: usize) -> Option<String> {
 
 /// Tells the model where the full output went and how to read it without
 /// pulling the whole thing back into context. Upstream's `hint`, minus the
-/// branch for an agent with a Task tool: this port has not shipped one yet,
-/// so every call is upstream's other branch — the one that points at `grep`
-/// and `read` instead.
+/// branch for an agent holding a Task tool: that branch tells the model to
+/// delegate the reading to a subagent, and this port deliberately does not —
+/// a spill file is read with the tools the caller already has, and which
+/// agents may delegate is not a question a truncation notice may answer. So
+/// every call is upstream's other branch, the one that points at `grep` and
+/// `read` instead.
 fn hint(file: &Path) -> String {
     format!(
         "The tool call succeeded but the output was truncated. Full output saved to: {}\n\
@@ -263,7 +269,7 @@ pub fn open_spill(head: &[u8]) -> Option<(PathBuf, fs::File)> {
 /// Same as [`open_spill`], but into exactly `dir` — no XDG resolution and no
 /// temp-dir fallback — so a test can assert on what was spilled without
 /// filling a real person's data directory with fixtures. Mirrors
-/// [`clamp_with`], which exists for the same reason.
+/// `clamp_with`, which exists for the same reason.
 pub fn open_spill_in(dir: &Path, head: &[u8]) -> Option<(PathBuf, fs::File)> {
     write_overflow(dir, head)
 }
@@ -712,7 +718,7 @@ pub fn sweep() -> usize {
 
 /// The same sweep over exactly `dir` — no XDG resolution and no temp-dir
 /// fallback — so a test can assert on what a sweep removes without reaching
-/// into a real person's data directory. Mirrors [`clamp_with`] and
+/// into a real person's data directory. Mirrors `clamp_with` and
 /// [`open_spill_in`], which exist for the same reason.
 pub(crate) fn sweep_in(dir: &Path) -> usize {
     let Ok(entries) = fs::read_dir(dir) else {

@@ -3,7 +3,7 @@
 //! Spec: Claude Code's `BashOutput` (2.1.x). Upstream opencode has no
 //! equivalent — see [`crate::job`]'s module doc and **D454**. This tool has
 //! nothing to do but ask [`ToolCtx::jobs`] and shape the answer; the
-//! mechanics live in whatever implements [`job::Jobs`].
+//! mechanics live in whatever implements [`crate::job::Jobs`].
 
 use async_trait::async_trait;
 use schemars::JsonSchema;

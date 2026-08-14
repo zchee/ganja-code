@@ -381,8 +381,8 @@ pub enum PartBody {
     /// It is deliberately **outside [`Part::as_text`]**, which means the reply
     /// text and only the reply text: that accessor titles a rewind checkpoint
     /// and answers `/copy --message`, and thinking doing either would be the
-    /// model's scratch paper standing in for its answer. [`Part::as_reasoning`]
-    /// is how a caller that wants this asks for it, by name.
+    /// model's scratch paper standing in for its answer. A caller that wants
+    /// thinking matches this variant, which is what every reader of it does.
     ///
     /// # What an older build does with one
     ///
@@ -706,7 +706,8 @@ impl Part {
     ///
     /// Deliberately not thinking: this is what titles a rewind checkpoint and
     /// what the copy surfaces read, and the model's scratch paper is not its
-    /// answer. [`Part::as_reasoning`] is the door to the other one.
+    /// answer. Thinking is [`PartBody::ReasoningText`], matched by name
+    /// wherever it is wanted.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match &self.body {
@@ -732,24 +733,6 @@ impl Part {
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
-            | PartBody::ServerTool { .. }
-            | PartBody::Reasoning { .. } => None,
-        }
-    }
-
-    /// The **thinking** this part carries in the clear, or [`None`] when it
-    /// carries something else — sealed reasoning included, which is bytes
-    /// rather than words.
-    #[must_use]
-    pub fn as_reasoning(&self) -> Option<&str> {
-        match &self.body {
-            PartBody::ReasoningText { text } => Some(text),
-            PartBody::Text { .. }
-            | PartBody::Tool { .. }
-            | PartBody::File { .. }
-            | PartBody::StepStart
-            | PartBody::StepFinish { .. }
-            | PartBody::Patch { .. }
             | PartBody::ServerTool { .. }
             | PartBody::Reasoning { .. } => None,
         }
@@ -2703,14 +2686,19 @@ mod tests {
     /// surfaces read, and thinking answering it would put the model's scratch
     /// paper where its answer belongs.
     #[test]
-    fn thinking_is_reachable_by_its_own_name_and_never_as_reply_text() {
+    fn thinking_is_its_own_body_and_never_reply_text() {
         let mut thinking = Part::reasoning_text("weighing a greeting");
         let mut reply = Part::text("hello");
 
-        assert_eq!(thinking.as_reasoning(), Some("weighing a greeting"));
+        assert!(
+            matches!(&thinking.body, PartBody::ReasoningText { text } if text == "weighing a greeting")
+        );
         assert_eq!(thinking.as_text(), None, "thinking is not the reply");
         assert!(thinking.as_text_mut().is_none());
-        assert_eq!(reply.as_reasoning(), None, "and the reply is not thinking");
+        assert!(
+            matches!(&reply.body, PartBody::Text { .. }),
+            "and the reply is not thinking"
+        );
 
         // The one accessor that spans both, because a delta names an id and a
         // fragment and never which of the two it is growing.
@@ -2719,7 +2707,9 @@ mod tests {
                 .expect("both kinds of text grow by delta")
                 .push('!');
         }
-        assert_eq!(thinking.as_reasoning(), Some("weighing a greeting!"));
+        assert!(
+            matches!(&thinking.body, PartBody::ReasoningText { text } if text == "weighing a greeting!")
+        );
         assert_eq!(reply.as_text(), Some("hello!"));
 
         assert!(

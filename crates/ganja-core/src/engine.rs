@@ -823,7 +823,7 @@ pub struct Engine {
     /// switch — see the proof on [`TurnSlot`].
     active: std::sync::Mutex<Active>,
     /// The half of the system prompt an agent replaces: the base prompt for
-    /// the model's family, composed by [`crate::instruction::system_prompt`].
+    /// the model's family, composed by [`crate::instruction::base_prompt`].
     /// [`None`] is an engine nobody configured, which every scripted and
     /// golden run relies on.
     ///
@@ -1099,23 +1099,16 @@ impl Engine {
         }
     }
 
-    /// Sets what the model is told before it is told anything else.
+    /// Sets what the model is told before it is told anything else, as its two
+    /// halves.
     ///
     /// Consuming rather than a setter, so it composes with either constructor
     /// and cannot be called on an engine that is already streaming a turn. The
     /// prompt is captured once and carried by every request a turn makes —
     /// including the one that summarizes a conversation for compaction, which
     /// is what stops a compacted session from losing the instructions the rest
-    /// of it was written under.
-    ///
-    /// [`None`] leaves the requests without one, which is what
-    /// [`Engine::new`]'s scripted and golden runs depend on.
-    #[must_use]
-    pub fn with_system(self, system: Option<String>) -> Self {
-        self.with_system_parts(system, None)
-    }
-
-    /// Sets the system prompt as its two halves.
+    /// of it was written under. Two [`None`]s leave the requests without one,
+    /// which is what [`Engine::new`]'s scripted and golden runs depend on.
     ///
     /// `base` is the half an agent replaces — the prompt for the model's
     /// family — and `suffix` is the half none of them do: the environment
@@ -1429,6 +1422,11 @@ impl Engine {
 
     /// Closes every MCP connection and ends every local server's process
     /// group.
+    ///
+    /// The door for a caller holding only an engine, which is what a test that
+    /// asked for one with servers already connected has. A frontend keeps its
+    /// own `Arc<Servers>` and shuts down through that instead — one layer
+    /// down, the same call — because `App::run` consumes the engine.
     pub async fn shutdown_mcp(&self) {
         if let Some(servers) = &self.mcp {
             servers.shutdown().await;
@@ -1670,7 +1668,7 @@ impl Engine {
 
     /// Sets the slash commands this session can run.
     ///
-    /// Consuming for the same reason [`Engine::with_system`] is: the roster is
+    /// Consuming for the same reason [`Engine::with_system_parts`] is: the roster is
     /// resolved once, before anything can be streaming.
     #[must_use]
     pub fn with_commands(mut self, commands: Arc<command::Registry>) -> Self {
@@ -4481,7 +4479,7 @@ mod tests {
             Permissions::default(),
             storage,
         )
-        .with_system(Some(SYSTEM.to_owned()));
+        .with_system_parts(Some(SYSTEM.to_owned()), None);
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
         engine.resume(&session).await.expect("the session loads");
 

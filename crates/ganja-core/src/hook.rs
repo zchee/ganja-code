@@ -420,15 +420,6 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// Whether anything at all came back.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.context.is_empty()
-            && self.notices.is_empty()
-            && self.blocked.is_none()
-            && !self.allowed
-    }
-
     /// Records a refusal, keeping the first reason: several hooks may refuse
     /// one call, and the one that got there first is the one whose sentence is
     /// about the decision the others then agreed with.
@@ -916,7 +907,7 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{EVENTS, HookEvent, Hooks, Payload, Source, Trigger, envelope};
+    use super::{EVENTS, HookEvent, Hooks, Outcome, Payload, Source, Trigger, envelope};
     use crate::config::{HookCommand, HookHandler, HookMatcher};
 
     /// A `hooks` block as a config file would have described it.
@@ -1222,7 +1213,11 @@ mod tests {
             dir.path(),
         );
         let outcome = asking.fire("ses_1", &call).await;
-        assert!(outcome.is_empty(), "ask is the flow with no hook at all");
+        assert_eq!(
+            outcome,
+            Outcome::default(),
+            "ask is the flow with no hook at all"
+        );
     }
 
     #[tokio::test]
@@ -1261,7 +1256,7 @@ mod tests {
                 },
             )
             .await;
-        assert!(outcome.is_empty(), "{outcome:?}");
+        assert_eq!(outcome, Outcome::default(), "{outcome:?}");
     }
 
     #[tokio::test]

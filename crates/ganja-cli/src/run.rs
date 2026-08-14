@@ -167,7 +167,10 @@ pub enum Format {
 /// `--demo` and `--replay*` are about the interactive branch this build does
 /// not have, and `--share`, `--file`, `--title` and `--thinking` name features
 /// ganja has no surface for — a session is titled by its first completed turn,
-/// there is no share endpoint, and no reasoning part to show (deviation:
+/// there is no share endpoint, and `--thinking` is a *request-side* knob this
+/// build does not have: what a model was asked to think is the provider's to
+/// decide, and what it did think this run already emits as
+/// `PartBody::ReasoningText` under `--format json` (deviation:
 /// run-carries-the-flags-ganja-can-honor). A flag that parsed and then did
 /// nothing would be worse than one that is absent. `--effort` left that list
 /// when catalog efforts landed: it now selects one for the turn, validated

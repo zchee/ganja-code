@@ -489,7 +489,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         Arc::new(Registry::new(vec![tool])),
         Permissions::default(),
     )
-    .with_system(Some("be brief".to_owned()));
+    .with_system_parts(Some("be brief".to_owned()), None);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine

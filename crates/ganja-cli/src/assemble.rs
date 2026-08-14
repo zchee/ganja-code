@@ -29,7 +29,8 @@ use crate::STORAGE;
 /// The engine either subcommand drives, and every handle a caller may need to
 /// keep: the MCP server handles whose processes a shutdown ends, the storage
 /// handle read-only routes answer from, and the paths and config the
-/// informational routes serve. `run` takes the first two and lets the rest go.
+/// informational routes serve. `run` takes the engine, the servers and the
+/// config; the paths and the storage handle go.
 pub(crate) struct Assembled {
     pub(crate) engine: Engine,
     pub(crate) servers: Arc<ganja_core::McpServers>,

@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Held as plain text rather than in a `SecretString`: this crate's dependency
 /// list is load-bearing (CI asserts the internal half, and the external half
-/// is six crates on purpose), and the credential lives for one process's
+/// is five crates on purpose), and the credential lives for one process's
 /// lifetime. What is *not* left to chance is rendering — [`Debug`] is written
 /// by hand here and in [`Client`] so no formatter can put a password in a log
 /// line.
