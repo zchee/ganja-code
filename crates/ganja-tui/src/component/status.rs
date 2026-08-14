@@ -348,32 +348,43 @@ impl Status {
         self.plans = plans;
     }
 
-    /// The plan budget that runs out first, among those still live.
+    /// The plan budget that runs out first, as the fraction it meters at.
     ///
-    /// [`Status::tightest_rate`]'s rule, over the sibling shape — with one
-    /// difference the shape itself carries: a plan window whose vendor sent no
-    /// reset is never expired, so it stays on the bar until a later response
-    /// replaces it. Nothing dated it, so nothing may date it stale.
-    fn tightest_plan(&self, now: SystemTime) -> Option<&PlanWindow> {
+    /// [`Status::tightest_rate`]'s rule, over the sibling shape — including
+    /// the refilled reading of a passed reset, and with one difference the
+    /// shape itself carries: a plan window whose vendor sent no reset is
+    /// never expired, so it keeps its figure until a later response replaces
+    /// it. Nothing dated it, so nothing may date it stale.
+    fn tightest_plan(&self, now: SystemTime) -> Option<f64> {
         self.plans
             .iter()
-            .filter(|plan| !plan.expired(now))
-            .max_by(|left, right| left.used().total_cmp(&right.used()))
+            .map(|plan| if plan.expired(now) { 0.0 } else { plan.used() })
+            .max_by(f64::total_cmp)
     }
 
-    /// The window that will stop a turn first: least remaining of the budget,
-    /// among those that have not already expired.
+    /// The fraction the window that will stop a turn first meters at: what
+    /// the vendor last said while its clock still runs, and **refilled** once
+    /// its reset has passed.
     ///
-    /// Expiry is checked here rather than at the engine because it is a
-    /// question about *now*, and now is whenever this bar is being drawn. A
-    /// set whose every window has expired yields [`None`], which is what makes
-    /// the element decay to empty instead of freezing at the last happy
-    /// number (P16 pre-mortem 4).
-    fn tightest_rate(&self, now: SystemTime) -> Option<&RateWindow> {
+    /// Expiry is read here rather than at the engine because it is a question
+    /// about *now*, and now is whenever this bar is being drawn. A passed
+    /// reset is the vendor's own promise that the bucket is full again, so an
+    /// expired window meters at zero rather than leaving the bar — request
+    /// buckets legally reset in milliseconds, and dropping the cell made the
+    /// element blink on and off with every response (2026-08-15, amending P16
+    /// pre-mortem 4's decay: to an empty *meter*, still never a freeze at the
+    /// last happy number).
+    fn tightest_rate(&self, now: SystemTime) -> Option<f64> {
         self.rates
             .iter()
-            .filter(|window| !window.expired(now))
-            .max_by(|left, right| left.used().total_cmp(&right.used()))
+            .map(|window| {
+                if window.expired(now) {
+                    0.0
+                } else {
+                    window.used()
+                }
+            })
+            .max_by(f64::total_cmp)
     }
 
     /// How many rows this bar wants: one, plus the git line above it and the
@@ -768,8 +779,9 @@ impl Status {
             }
             // The tightest live window as the context meter's own shape, so
             // the two things a person reads as "how much room is left" read
-            // alike (**D484**). No live window — none heard, or every one
-            // past its reset — is no cell at all.
+            // alike (**D484**). No cell only when nothing was ever heard; a
+            // window past its reset meters as refilled rather than leaving
+            // the bar (2026-08-15).
             //
             // Since P17 the element carries the tightest *plan* bucket beside
             // it when one was captured (**D485**), because the two answer
@@ -781,17 +793,16 @@ impl Status {
                 let now = SystemTime::now();
                 let mut spans = Vec::new();
 
-                if let Some(plan) = self.tightest_plan(now) {
-                    spans.extend(meter("plan", percent(plan.used()), theme));
+                if let Some(used) = self.tightest_plan(now) {
+                    spans.extend(meter("plan", percent(used), theme));
                 }
-                if let Some(window) = self.tightest_rate(now) {
+                if let Some(used) = self.tightest_rate(now) {
                     if !spans.is_empty() {
                         spans.push(Span::styled(HUD_SEPARATOR.to_owned(), theme.dim));
                     }
                     // Used, not remaining, so the bar fills and reddens the
                     // way `ctx` does as the room runs out.
-                    let spent = window.limit.saturating_sub(window.remaining);
-                    spans.extend(meter("rate", percent_of(spent, window.limit), theme));
+                    spans.extend(meter("rate", percent(used), theme));
                 }
 
                 (!spans.is_empty()).then_some(spans)
@@ -1508,19 +1519,22 @@ mod tests {
         );
     }
 
-    /// P16 pre-mortem 4: a window past its own reset decays to empty rather
-    /// than freezing at the last happy number.
+    /// P16 pre-mortem 4, amended 2026-08-15: a window past its own reset
+    /// decays to an empty **meter** rather than freezing at the last happy
+    /// number — and rather than leaving the bar, because request buckets
+    /// legally reset in milliseconds and a cell that comes and goes with
+    /// every response is a blink, not a reading. The passed reset is the
+    /// vendor's own promise the bucket refilled, which is what 0% says.
     #[test]
-    fn a_rate_window_past_its_reset_decays_to_an_empty_element() {
+    fn a_rate_window_past_its_reset_decays_to_an_empty_meter() {
         let mut status = roster(&[StatuslineElement::Rate, StatuslineElement::Activity]);
         status.set_rates(vec![window("requests", 1_000, 4, Some(-1))]);
 
         let line = rendered(&status, 60);
         assert_eq!(
-            line, "ready",
-            "an expired window renders nothing at all, never a stale meter"
+            line, "rate:[--------]0% | ready",
+            "an expired window meters as refilled, never as its stale figure"
         );
-        assert!(!line.contains("rate:"), "got {line:?}");
     }
 
     /// The other side of that decay, since P22 (`53v`): a window nothing dated
@@ -1587,17 +1601,19 @@ mod tests {
         assert_eq!(rendered(&status, 60), "plan:[#######-]88%");
     }
 
-    /// A dated one does decay, and its neighbour is unaffected — D484's
-    /// posture, per window, on the sibling shape.
+    /// A dated one does decay — to the refilled zero, its neighbour
+    /// unaffected — D484's posture, per window, on the sibling shape.
     #[test]
-    fn a_plan_window_past_its_reset_leaves_only_the_rate_meter() {
+    fn a_plan_window_past_its_reset_decays_beside_the_live_rate_meter() {
         let mut status = roster(&[StatuslineElement::Rate, StatuslineElement::Activity]);
         status.set_rates(vec![window("requests", 100, 50, Some(60))]);
         status.set_plans(vec![plan("primary", 99.0, Some(-1))]);
 
         let line = rendered(&status, 60);
-        assert_eq!(line, "rate:[####----]50% | ready");
-        assert!(!line.contains("plan:"), "got {line:?}");
+        assert_eq!(
+            line, "plan:[--------]0% | rate:[####----]50% | ready",
+            "the rolled-over plan meters at zero, never at its stale figure"
+        );
     }
 
     /// An expired window beside a live one leaves the live one showing: the
