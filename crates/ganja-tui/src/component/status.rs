@@ -501,58 +501,33 @@ impl Status {
             left.push_str(SEPARATOR);
         }
         left.push_str(&self.activity.label());
-        // What is waiting sits beside what is happening, because the two
-        // together are the answer to "where is my message": a queue with a
-        // depth and no visible strip row would otherwise be the one state
-        // nothing on screen accounts for.
-        if self.queued > 0 {
-            left.push_str(SEPARATOR);
-            left.push_str(&format!("{} queued", self.queued));
-        }
-        // Same reasoning, same place: a running background job is otherwise
-        // invisible until its own `bash_output` poll names it.
-        if self.running_jobs > 0 {
-            left.push_str(SEPARATOR);
-            left.push_str(&format!("{} bash running", self.running_jobs));
-        }
-        // Beside the background jobs, because both answer the same question —
-        // what else is happening besides the sentence being streamed.
+        // The tail is [`Self::hud_segment`]'s, walked in the order this bar
+        // has always drawn it: every one of these six appears only while it
+        // has something to say, and every one is a single accent span whose
+        // text is exactly what this loop used to spell by hand. The rules
+        // themselves — and the reasons for them — live there now, once.
         //
-        // **More than one, not more than none.** A lone delegation is already
-        // named by the activity segment (`tool: task`) and by its own inline
-        // row; a segment counting it to one would add width to every bar a
-        // single `task` call has ever drawn, and say nothing the bar was not
-        // already saying. What is new — and what nothing else on screen
-        // accounts for — is a *fan-out*.
-        if self.running_tasks > 1 {
+        // The head above is deliberately **not** on the walk. The spinner
+        // sits at the front of the whole bar here, where the roster hands it
+        // to `Activity`; and the agent and the effort precede the activity
+        // they are about, where a roster puts them wherever it was told to.
+        // A walk that reproduced this order would have to special-case both,
+        // which is more machinery than the four lines it would save.
+        for element in [
+            StatuslineElement::Queued,
+            StatuslineElement::Jobs,
+            StatuslineElement::Tasks,
+            StatuslineElement::Dialogs,
+            StatuslineElement::Tokens,
+            StatuslineElement::Notice,
+        ] {
+            let Some(segment) = self.hud_segment(element, theme) else {
+                continue;
+            };
             left.push_str(SEPARATOR);
-            left.push_str(&format!("{} tasks running", self.running_tasks));
-        }
-        // Last of the three, and the only one that is about the person rather
-        // than the machine: it says how many more questions there are once this
-        // dialog is answered. From none, because one waiting question is
-        // already something the dialog on screen does not mention.
-        if self.queued_dialogs > 0 {
-            left.push_str(SEPARATOR);
-            left.push_str(&format!(
-                "{} {} queued",
-                self.queued_dialogs,
-                if self.queued_dialogs == 1 {
-                    "dialog"
-                } else {
-                    "dialogs"
-                }
-            ));
-        }
-        // Spend sits beside the state, where its width is predictable; the
-        // notice is last because it is the one part with no length limit.
-        if let Some(totals) = &self.totals {
-            left.push_str(SEPARATOR);
-            left.push_str(&totals.segment());
-        }
-        if let Some(notice) = &self.notice {
-            left.push_str(SEPARATOR);
-            left.push_str(notice);
+            for span in segment {
+                left.push_str(&span.content);
+            }
         }
 
         // The one segment with a style of its own, and the one drawn ahead of
@@ -701,15 +676,36 @@ impl Status {
                 .effort
                 .as_ref()
                 .and_then(|(model, effort)| plain(format!("{model} ({effort})"))),
+            // What is waiting sits beside what is happening, because the
+            // two together are the answer to "where is my message": a queue
+            // with a depth and no visible strip row would otherwise be the
+            // one state nothing on screen accounts for.
             StatuslineElement::Queued => (self.queued > 0)
                 .then(|| plain(format!("{} queued", self.queued)))
                 .flatten(),
+            // Same reasoning, same place: a running background job is
+            // otherwise invisible until its own `bash_output` poll names it.
             StatuslineElement::Jobs => (self.running_jobs > 0)
                 .then(|| plain(format!("{} bash running", self.running_jobs)))
                 .flatten(),
+            // Beside the background jobs, because both answer the same
+            // question — what else is happening besides the sentence being
+            // streamed.
+            //
+            // **More than one, not more than none.** A lone delegation is
+            // already named by the activity segment (`tool: task`) and by its
+            // own inline row; a segment counting it to one would add width to
+            // every bar a single `task` call has ever drawn, and say nothing
+            // the bar was not already saying. What is new — and what nothing
+            // else on screen accounts for — is a *fan-out*.
             StatuslineElement::Tasks => (self.running_tasks > 1)
                 .then(|| plain(format!("{} tasks running", self.running_tasks)))
                 .flatten(),
+            // Last of the three, and the only one about the person rather
+            // than the machine: it says how many more questions there are
+            // once this dialog is answered. From none, because one waiting
+            // question is already something the dialog on screen does not
+            // mention.
             StatuslineElement::Dialogs => (self.queued_dialogs > 0)
                 .then(|| {
                     plain(format!(
@@ -723,6 +719,8 @@ impl Status {
                     ))
                 })
                 .flatten(),
+            // Spend where its width is predictable, and the notice after
+            // it: the notice is the one segment with no length limit.
             StatuslineElement::Tokens => self
                 .totals
                 .as_ref()

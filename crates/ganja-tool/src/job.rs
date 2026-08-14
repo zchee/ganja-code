@@ -57,6 +57,17 @@ pub struct JobRead {
     pub status: JobStatus,
 }
 
+/// What all three background tools say when the context they were called in
+/// carries no [`Jobs`] handle.
+///
+/// One sentence, spelled once: a person meeting this through `bash`,
+/// `bash_output` or `kill_shell` is meeting the same fact, and three copies
+/// of it were three sentences waiting to drift. Here rather than in any of
+/// the three because this is the module that owns the handle they all ask
+/// for. Not reachable through the engine, which wires one into every
+/// [`crate::ToolCtx`] it builds.
+pub(crate) const NO_JOBS: &str = "background shells are not available in this context";
+
 /// Why a call against a background job did not produce what it asked for.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum JobsError {

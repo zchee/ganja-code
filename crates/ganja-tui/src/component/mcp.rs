@@ -29,7 +29,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    component::{chat::clip, clamped, first_visible},
+    component::{body_rows, chat::clip, clamped, first_visible},
     theme::Theme,
 };
 
@@ -207,10 +207,7 @@ impl Mcp {
         let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
         let available = area.height.saturating_sub(2).clamp(1, MAX_HEIGHT);
         let inner_width = usize::from(width).saturating_sub(2);
-        let rows = usize::from(available)
-            .saturating_sub(2)
-            .saturating_sub(CHROME)
-            .max(1);
+        let rows = body_rows(available, CHROME);
 
         let mut lines = match self.step {
             Step::Servers => self.server_rows(inner_width, rows, theme),

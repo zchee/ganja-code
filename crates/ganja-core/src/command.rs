@@ -330,10 +330,13 @@ const FENCE: &str = "---";
 /// two because somebody put it there for *this* tool, and that placing is the
 /// opt-in.
 ///
-/// The two collapse into one for somebody whose worktree *is* the config home,
-/// for the same reason [`crate::config::default_skill_dirs`] collapses them:
-/// reading one directory twice would find every command twice and report each
-/// as shadowing itself.
+/// [`crate::config::home_dirs`] is the walk itself, shared with the skills and
+/// agents rosters, including the case where the two homes turn out to be one
+/// directory: reading it twice would find every command twice and report each
+/// as shadowing itself. The tier is decided here rather than there, because a
+/// tier is this module's vocabulary — and it is decided by *which* directory
+/// each one is rather than by its position, since a machine with no config
+/// home at all yields a single directory that is the project's.
 ///
 /// # Not recursive, on purpose for now
 ///
@@ -342,18 +345,20 @@ const FENCE: &str = "---";
 /// is a recorded follow-up rather than a decision against it, and leaving it
 /// out costs nothing a later build cannot add compatibly.
 fn command_dirs(worktree: &Path) -> Vec<(Tier, PathBuf)> {
-    let mut found = Vec::new();
-    if let Some(global) = crate::config::config_home() {
-        found.push((Tier::GlobalFile, global.join(COMMANDS_SUBDIR)));
-    }
-    let project = worktree
-        .join(crate::config::PROJECT_DIRECTORY)
-        .join(COMMANDS_SUBDIR);
-    if !found.iter().any(|(_, dir)| dir == &project) {
-        found.push((Tier::ProjectFile, project));
-    }
+    let global = crate::config::config_home().map(|home| home.join(COMMANDS_SUBDIR));
 
-    found
+    crate::config::home_dirs(worktree, COMMANDS_SUBDIR)
+        .into_iter()
+        .map(|dir| {
+            let tier = if Some(&dir) == global.as_ref() {
+                Tier::GlobalFile
+            } else {
+                Tier::ProjectFile
+            };
+
+            (tier, dir)
+        })
+        .collect()
 }
 
 /// Every command file in one directory, by file name, skipping — with a named

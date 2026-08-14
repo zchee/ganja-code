@@ -14,14 +14,14 @@
 
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Rect},
+    layout::Rect,
     text::{Line, Text},
     widgets::{Block, Clear, Paragraph, Widget as _},
 };
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    component::{chat::clip, clamped, first_visible},
+    component::{chat::clip, clamped, first_visible, modal},
     theme::Theme,
 };
 
@@ -43,6 +43,9 @@ const EMPTY: &str = "nothing to choose from";
 
 /// Widest the modal grows, whatever the terminal offers.
 const MAX_WIDTH: u16 = 72;
+
+/// Tallest the modal grows, whatever the terminal offers.
+const MAX_HEIGHT: u16 = 20;
 
 /// Gap between a row's label and its description.
 const GAP: usize = 2;
@@ -112,18 +115,9 @@ impl ListDialog {
             return;
         }
 
-        let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
-        let height = area.height.saturating_sub(2).clamp(1, 20);
-        let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
+        let (popup, inner_width, rows) = modal(area, MAX_WIDTH, MAX_HEIGHT, CHROME);
 
         Clear.render(popup, buffer);
-
-        // Inside the border on both axes.
-        let inner_width = usize::from(width).saturating_sub(2);
-        let rows = usize::from(height)
-            .saturating_sub(2)
-            .saturating_sub(CHROME)
-            .max(1);
 
         let mut lines = self.lines(inner_width, rows, theme);
         lines.push(Line::raw(""));

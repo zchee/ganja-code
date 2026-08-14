@@ -82,8 +82,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ganja_tool::frontmatter::{fields, split};
+
 use crate::{
-    config::{AgentConfig, AgentMode, Config, config_home},
+    config::{AgentConfig, AgentMode, Config},
     permission::{Action, EXTERNAL_DIRECTORY, MCP_PREFIX, Rule},
 };
 
@@ -698,29 +700,17 @@ fn file_tier(agents: &mut Vec<Agent>, config: &Config, directories: &[PathBuf]) 
 }
 
 /// Ganja's own two homes, in precedence order: `agents/` under
-/// [`config_home`], then `<project root>/.ganja/agents`.
+/// [`crate::config::config_home`], then `<project root>/.ganja/agents`.
 ///
-/// The global half is spelled through [`config_home`] rather than against the
-/// XDG path directly, for that function's own reason: `GANJA_CONFIG_HOME` — or
-/// a `~/.ganja` — moves this build's config, its global `AGENTS.md`, its
-/// skills and now its agents together, and a session cannot end up reading one
-/// of them out of a directory the others are not in.
+/// [`crate::config::home_dirs`] is the walk, shared with the skills and
+/// commands rosters — including what it does when the two homes turn out to be
+/// one directory. The global half being spelled through that function is
+/// that function's own reason: `GANJA_CONFIG_HOME` — or a `~/.ganja` — moves
+/// this build's config, its global `AGENTS.md`, its skills and its agents
+/// together, and a session cannot end up reading one of them out of a
+/// directory the others are not in.
 fn definition_dirs(root: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    if let Some(home) = config_home() {
-        found.push(home.join(AGENTS_SUBDIR));
-    }
-    let project = root
-        .join(crate::config::PROJECT_DIRECTORY)
-        .join(AGENTS_SUBDIR);
-    // The two collapse into one for somebody whose project root *is* the
-    // directory `config_home` landed on. Reading it twice would warn about
-    // every file as a duplicate of itself.
-    if !found.contains(&project) {
-        found.push(project);
-    }
-
-    found
+    crate::config::home_dirs(root, AGENTS_SUBDIR)
 }
 
 /// The definitions one directory holds, in file-name order, with the
@@ -830,6 +820,10 @@ impl Definition {
     /// session: a file somebody is halfway through writing must not be able to
     /// keep ganja from starting.
     fn parse(file: &Path, text: &str) -> Result<Self, String> {
+        // The same reader a `SKILL.md` is read with
+        // ([`ganja_tool::frontmatter`]): an agent file and a skill file open
+        // with the same fence, and a person who wrote one for another agent
+        // wrote it once.
         let (frontmatter, body) = split(text).unwrap_or(("", text));
         let fields = fields(frontmatter);
 
@@ -984,103 +978,6 @@ fn tool_rules(listed: &[String], agent: &str) -> Vec<Rule> {
     }
 
     rules
-}
-
-/// The frontmatter and the body of a markdown file that opens with one.
-///
-/// **Twin**: `ganja_tool::skill`'s own `split`/`fields`/`unquote`, which is
-/// where this parser was ported from, and which is private to that crate; W1's
-/// command files grow a third. One shared minimal-YAML reader is the right end
-/// state and is flagged for the consolidation pass — extracting it while three
-/// lanes are landing at once would mean editing files those lanes own.
-fn split(text: &str) -> Option<(&str, &str)> {
-    // A byte-order mark ahead of the fence is what an editor on another
-    // platform leaves behind, and it must not cost somebody their agent.
-    let text = text.trim_start_matches('\u{feff}');
-    let rest = text
-        .strip_prefix("---\n")
-        .or_else(|| text.strip_prefix("---\r\n"))?;
-
-    for (index, _) in rest.match_indices("\n---") {
-        let after = &rest[index + 4..];
-        // The closing fence owns its whole line: `---` inside a value is not
-        // the end of the block.
-        if after.is_empty() || after.starts_with('\n') || after.starts_with("\r\n") {
-            let frontmatter = &rest[..index];
-            let body = after
-                .strip_prefix("\r\n")
-                .or_else(|| after.strip_prefix('\n'));
-
-            return Some((frontmatter, body.unwrap_or(after)));
-        }
-    }
-
-    None
-}
-
-/// The scalar fields a frontmatter block names.
-///
-/// Everything this port asks of YAML: `key: value` at the top level, with
-/// quotes stripped, plus the block scalars (`|`, `|-`, `>`, `>-`) a long
-/// description is usually written as. Nested maps are skipped; no field read
-/// here is one, and a `tools:` written as a block list is read as the empty
-/// value it leaves on that line rather than guessed at.
-fn fields(frontmatter: &str) -> std::collections::BTreeMap<String, String> {
-    let mut fields = std::collections::BTreeMap::new();
-    let mut lines = frontmatter.lines().peekable();
-
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim_end_matches('\r');
-        if trimmed.trim().is_empty() || trimmed.trim_start().starts_with('#') {
-            continue;
-        }
-        // An indented line belongs to whatever came before it, and what came
-        // before it was either a block scalar this already consumed or a
-        // structure this does not read.
-        if trimmed.starts_with([' ', '\t']) {
-            continue;
-        }
-        let Some((key, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let (key, value) = (key.trim().to_owned(), value.trim());
-
-        if matches!(value, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
-            let folded = value.starts_with('>');
-            let mut block: Vec<String> = Vec::new();
-            while let Some(next) = lines.peek() {
-                let next = next.trim_end_matches('\r');
-                if !next.trim().is_empty() && !next.starts_with([' ', '\t']) {
-                    break;
-                }
-                block.push(next.trim().to_owned());
-                lines.next();
-            }
-            while block.last().is_some_and(String::is_empty) {
-                block.pop();
-            }
-            fields.insert(key, block.join(if folded { " " } else { "\n" }));
-            continue;
-        }
-
-        fields.insert(key, unquote(value).to_owned());
-    }
-
-    fields
-}
-
-/// `value` without the quotes it may be wrapped in.
-fn unquote(value: &str) -> &str {
-    for quote in ['"', '\''] {
-        if let Some(inner) = value
-            .strip_prefix(quote)
-            .and_then(|rest| rest.strip_suffix(quote))
-        {
-            return inner;
-        }
-    }
-
-    value
 }
 
 /// Which agent a session starts on.
@@ -1823,6 +1720,50 @@ mod tests {
         );
         assert!(reviewer.selectable(), "so a person may switch to it");
         assert!(reviewer.spawnable(), "and the task tool may spawn it");
+    }
+
+    /// A `description` written as a block scalar keeps every line of itself.
+    ///
+    /// The reader here handles `|`, `|-`, `>` and `>-` — seventeen lines of it
+    /// — and no fixture in this crate had ever fed it one, so the whole branch
+    /// could be deleted, or quietly swapped for `command.rs`'s simpler reader,
+    /// with a green suite. What that would change is what an agent file's
+    /// `description:` *means*, which is the roster line a person picks an
+    /// agent from and the sentence the task tool judges one by.
+    #[test]
+    fn a_definition_files_block_scalar_description_keeps_its_whole_text() {
+        let (_directory, registry) = with_files(
+            &Config::default(),
+            &[
+                (
+                    "literal.md",
+                    "---\ndescription: |\n  first\n  second\n---\nBe brief.\n",
+                ),
+                (
+                    "folded.md",
+                    "---\ndescription: >-\n  first\n  second\n---\nBe brief.\n",
+                ),
+            ],
+        );
+
+        assert_eq!(
+            registry
+                .get("literal")
+                .expect("the file defines an agent")
+                .description
+                .as_deref(),
+            Some("first\nsecond"),
+            "a literal block keeps its line breaks"
+        );
+        assert_eq!(
+            registry
+                .get("folded")
+                .expect("the file defines an agent")
+                .description
+                .as_deref(),
+            Some("first second"),
+            "and a folded one joins them with a space"
+        );
     }
 
     /// The frontmatter's own `name` outranks the file it is in, and the

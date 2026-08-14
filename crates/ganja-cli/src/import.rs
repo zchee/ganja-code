@@ -275,21 +275,6 @@ pub fn import_opencode(file: Option<PathBuf>, global: bool, dry_run: bool) -> Re
     Ok(())
 }
 
-/// How a config file is parsed: the JSONC dialect upstream accepts everywhere,
-/// including in files named `.json`, and nothing beyond it. Matches
-/// `ganja_core::config`, so a file that reads here reads there.
-fn parse_options() -> jsonc_parser::ParseOptions {
-    jsonc_parser::ParseOptions {
-        allow_comments: true,
-        allow_trailing_commas: true,
-        allow_loose_object_property_names: false,
-        allow_missing_commas: false,
-        allow_single_quoted_strings: false,
-        allow_hexadecimal_numbers: false,
-        allow_unary_plus_numbers: false,
-    }
-}
-
 /// A JSON document, with object keys in the order they were written.
 ///
 /// Order is why an object is a `Vec` and not a map. Permission rules are
@@ -2083,11 +2068,12 @@ fn section(name: &str, right: &str, rows: &[(String, String)], width: usize) {
 /// on a file its owner did not write. Decoding here turns that into an error at
 /// the moment it was caused, and makes a dry run mean something.
 fn validate(document: &str) -> Result<()> {
-    jsonc_parser::parse_to_serde_value::<Option<Config>>(document, &parse_options())
-        .map(|_| ())
-        .map_err(|error| {
-            anyhow!("the imported config is not one ganja can load: {error}\n{document}")
-        })
+    jsonc_parser::parse_to_serde_value::<Option<Config>>(
+        document,
+        &ganja_core::config::parse_options(),
+    )
+    .map(|_| ())
+    .map_err(|error| anyhow!("the imported config is not one ganja can load: {error}\n{document}"))
 }
 
 /// The opencode config to import, and where it was read from.
@@ -2200,7 +2186,7 @@ fn parse(text: &str) -> Result<Json> {
             comments: jsonc_parser::CommentCollectionStrategy::Off,
             tokens: false,
         },
-        &parse_options(),
+        &ganja_core::config::parse_options(),
     )?;
 
     match parsed.value.as_ref().map(Json::from_ast) {

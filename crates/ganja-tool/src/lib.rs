@@ -18,6 +18,10 @@
 mod anchor;
 pub mod bash_output;
 pub mod edit;
+/// The minimal-YAML frontmatter reader, public because `ganja-core`'s agent
+/// definition files open with the same fence a `SKILL.md` does and were being
+/// read by a second copy of this parser.
+pub mod frontmatter;
 pub mod glob;
 pub mod grep;
 pub mod job;
@@ -668,7 +672,10 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::{Credentials, FileTimes, Registry, ToolCtx, ToolError, is_same_file};
+    use super::{
+        Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, is_same_file,
+        skill::{Roots, SkillTool},
+    };
 
     /// A call whose credential store is `store`, which is the only thing the
     /// guard tests below vary.
@@ -684,6 +691,78 @@ mod tests {
             switch: None,
             jobs: None,
         }
+    }
+
+    /// Three tools refuse for one cause — a context with no jobs handle — and
+    /// a person meeting the refusal through any of them is meeting the same
+    /// fact, so they say the same sentence.
+    ///
+    /// Each tool's own test asserts only that its message contains "not
+    /// available", which three drifting sentences would all still pass. This
+    /// is the assertion that keeps them one sentence.
+    #[tokio::test]
+    async fn the_three_background_tools_refuse_a_jobless_context_in_the_same_words() {
+        let registry = Registry::with_builtins();
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let mut jobless = ctx(None);
+        jobless.cwd = dir.path().to_owned();
+
+        let mut refusals = Vec::new();
+        for (id, arguments) in [
+            (
+                "bash",
+                serde_json::json!({ "command": "true", "run_in_background": true }),
+            ),
+            ("bash_output", serde_json::json!({ "bash_id": "bash_1" })),
+            ("kill_shell", serde_json::json!({ "bash_id": "bash_1" })),
+        ] {
+            let refused = registry
+                .get(id)
+                .expect("every one of the three ships")
+                .run(arguments, &jobless)
+                .await
+                .expect_err("a context with no jobs handle can serve none of them");
+            let ToolError::Failed(message) = refused else {
+                panic!("{id} refused with something other than a failure: {refused:?}");
+            };
+            refusals.push((id, message));
+        }
+
+        let (first, said) = &refusals[0];
+        for (id, message) in &refusals[1..] {
+            assert_eq!(
+                message, said,
+                "{id} and {first} refuse the same cause and must say so identically"
+            );
+        }
+    }
+
+    /// `with_all`'s stated contract is that each tool *replaces* whatever was
+    /// registered under its id, and its two production callers cannot show
+    /// that: both pass MCP tools, whose `mcp__server__tool` ids can collide
+    /// with nothing. Rewritten as a plain append it would still serve them —
+    /// and would silently offer the model two tools of one name the first time
+    /// anything else used it.
+    #[test]
+    fn with_all_replaces_a_tool_of_the_same_id_rather_than_offering_it_twice() {
+        let registry = Registry::with_builtins();
+        let rooted: Arc<dyn Tool> = Arc::new(SkillTool::over(Roots::none()));
+
+        let after = registry.with_all([Arc::clone(&rooted)]);
+
+        let skills = after
+            .definitions()
+            .into_iter()
+            .filter(|definition| definition.name == "skill")
+            .count();
+        assert_eq!(skills, 1, "one `skill` is offered, not two");
+        assert!(
+            Arc::ptr_eq(
+                after.get("skill").expect("the roster still holds one"),
+                &rooted
+            ),
+            "and it is the one that was handed in"
+        );
     }
 
     #[test]

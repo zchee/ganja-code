@@ -2917,6 +2917,55 @@ mod tests {
         );
     }
 
+    /// A tree the conversion cannot carry whole keeps the tree.
+    ///
+    /// Two info files claiming one session id is what a hand-edited or
+    /// half-restored store looks like. `carry` inserts plainly where the
+    /// running store upserts, so the second one is a UNIQUE violation: that
+    /// session is counted lost, the warning says so, and the tree is left
+    /// exactly where it is — because the only copy of what did not make it is
+    /// in there. An upsert here would silently keep one of the two and then
+    /// rename the tree away, which is the one outcome nobody could undo.
+    #[test]
+    fn a_tree_holding_one_id_twice_is_left_where_it_is() {
+        let directory = temporary();
+        let root = directory.path().join("storage");
+
+        for (file, title) in [("ses_1.json", "first"), ("also-ses_1.json", "second")] {
+            write_json(
+                &root.join("session").join("info").join(file),
+                &SessionInfo {
+                    title: Some(title.to_owned()),
+                    ..info("ses_1", 5)
+                },
+            );
+        }
+
+        let storage = Storage::open(root.clone());
+        // Whichever of the two got there first is readable; which one it is is
+        // the directory's order to decide and not this test's.
+        assert!(
+            storage
+                .load_info(&session("ses_1"))
+                .expect("the database opens")
+                .is_some(),
+            "the session that did carry across is there"
+        );
+        assert!(
+            root.join("session")
+                .join("info")
+                .join("ses_1.json")
+                .is_file(),
+            "and the tree that holds the one that did not is untouched"
+        );
+        assert!(
+            !names(directory.path())
+                .into_iter()
+                .any(|name| name.starts_with("storage.migrated-")),
+            "a conversion that lost something sets nothing aside"
+        );
+    }
+
     #[test]
     fn a_second_open_does_not_convert_a_tree_that_appeared_after_the_first() {
         let directory = temporary();

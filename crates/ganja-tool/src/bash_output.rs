@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::{
-    Tool, ToolCtx, ToolError, ToolOutput,
+    Tool, ToolCtx, ToolError, ToolOutput, job,
     job::{JobsError, State},
 };
 
@@ -34,11 +34,6 @@ the bash tool's run_in_background parameter.
   finished — call this tool again to find out. There is no push, only poll.
 - bash_id is required, and is the id the original bash call reported when it \
   ran with run_in_background set to true.";
-
-/// What a call reads when this build offered the tool without anything
-/// behind it. Not reachable through the engine, which wires a jobs handle
-/// into every [`ToolCtx`] it builds.
-const NO_JOBS: &str = "background shells are not available in this context";
 
 /// What the model passes to `bash_output`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -81,7 +76,7 @@ impl Tool for BashOutputTool {
         let args: Args = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArgs(error.to_string()))?;
         let Some(jobs) = ctx.jobs.as_ref() else {
-            return Err(ToolError::Failed(NO_JOBS.to_owned()));
+            return Err(ToolError::Failed(job::NO_JOBS.to_owned()));
         };
 
         let read = jobs.output(&args.bash_id).await.map_err(describe_error)?;

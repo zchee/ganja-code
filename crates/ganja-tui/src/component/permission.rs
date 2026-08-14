@@ -13,7 +13,7 @@
 use ganja_protocol::PermissionId;
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Rect},
+    layout::Rect,
     style::Style,
     text::{Line, Text},
     widgets::{Block, Clear, Paragraph, Widget as _, Wrap},
@@ -21,10 +21,16 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use super::chat::split_at_width;
-use crate::theme::Theme;
+use crate::{component::modal, theme::Theme};
 
 /// Lines of pretty-printed JSON shown before the rest is clamped.
 const ARGS_PREVIEW_LINES: usize = 8;
+
+/// Widest the modal grows, whatever the terminal offers.
+const MAX_WIDTH: u16 = 76;
+
+/// Tallest the modal grows, whatever the terminal offers.
+const MAX_HEIGHT: u16 = 20;
 
 /// The keys that answer the dialog. Held apart from the rest of the text
 /// because the layout keeps them out of the body's budget: a modal whose
@@ -84,9 +90,10 @@ impl Permission {
             return;
         }
 
-        let width = area.width.saturating_sub(4).clamp(1, 76);
-        let height = area.height.saturating_sub(2).clamp(1, 20);
-        let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
+        // This dialog wraps its own text into the block rather than laying
+        // rows out itself, so the two sizes beside the box are not its
+        // business — the block's `inner` is.
+        let (popup, _, _) = modal(area, MAX_WIDTH, MAX_HEIGHT, 0);
 
         Clear.render(popup, buffer);
 

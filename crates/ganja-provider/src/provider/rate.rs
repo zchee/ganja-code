@@ -764,27 +764,13 @@ fn rfc3339(value: &str) -> Option<SystemTime> {
         return None;
     }
 
-    let seconds = days_from_civil(year, month, day).checked_mul(86_400)?
+    // `retry`'s, not a copy of it: the two modules read the same dates off
+    // the same responses, and one arithmetic is what keeps them agreeing.
+    let seconds = super::retry::days_from_civil(year, month, day).checked_mul(86_400)?
         + i64::try_from(hour * 3_600 + minute * 60 + second).ok()?
         - offset;
 
     UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(seconds).ok()?))
-}
-
-/// Days between 1970-01-01 and `year-month-day`, by Howard Hinnant's
-/// `days_from_civil` — the same arithmetic [`super::retry`] uses for HTTP
-/// dates, repeated rather than shared because that one is private to a module
-/// whose subject is refusals.
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let year = year - i64::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * i64::from(if month > 2 { month - 3 } else { month + 9 }) + 2) / 5
-        + i64::from(day)
-        - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-
-    era * 146_097 + day_of_era - 719_468
 }
 
 #[cfg(test)]

@@ -124,7 +124,16 @@ const FILES: [&str; 2] = ["ganja.jsonc", "ganja.json"];
 /// tolerate by default — single quotes, hexadecimal numbers, missing commas,
 /// unquoted keys — is refused, because a file that loads here and nowhere else
 /// is a file that has stopped being JSON.
-fn parse_options() -> jsonc_parser::ParseOptions {
+///
+/// Public because two more readers of the same files live outside this crate —
+/// `ganja config import-opencode`, which writes one, and `ganja mcp add`,
+/// which edits one in place — and the dialect has to agree in **both**
+/// directions: looser there and they would edit a file the next launch
+/// refuses; stricter and they would refuse to touch a file that loads
+/// perfectly well. They each kept a copy with a doc comment promising to track
+/// this one, which is a promise a compiler cannot keep.
+#[must_use]
+pub fn parse_options() -> jsonc_parser::ParseOptions {
     jsonc_parser::ParseOptions {
         allow_comments: true,
         allow_trailing_commas: true,
@@ -1504,19 +1513,35 @@ fn explicit_file(overrides: &Overrides) -> Option<PathBuf> {
 /// answers under. Nothing here invents a way to find a directory.
 #[must_use]
 pub fn default_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
+    // The `Project::resolve` step is this function's own: skills are asked for
+    // by working directory where agents and commands are asked for by worktree.
+    home_dirs(Project::resolve(cwd).root(), SKILLS_SUBDIR)
+}
+
+/// Ganja's own two homes narrowed to `subdir`: `<config home>/<subdir>` first,
+/// `<root>/.ganja/<subdir>` second, in the order every layered thing here
+/// resolves in.
+///
+/// One walk for the three rosters that keep files in ganja's homes — skills
+/// ([`default_skill_dirs`]), agent definitions and command files. They had a
+/// copy each, and the copies had to agree about three things: which two
+/// directories, in which order, and what to do when they turn out to be one
+/// directory.
+///
+/// **The two collapse into one** for somebody whose `<root>/.ganja` *is* the
+/// directory [`config_home`] landed on — running in `~` with a `~/.ganja`, or
+/// pointing `GANJA_CONFIG_HOME` at the checkout. Scanning it twice would find
+/// every file twice and warn about each as a duplicate claiming its own name,
+/// which is a warning about nothing. The comparison is textual, and `root` has
+/// usually been through `Project::resolve` (which resolves symbolic links)
+/// while a configured home has not, so two spellings of one directory do not
+/// collapse; `tests/two_homes_collapse.rs` pins the case that does.
+pub(crate) fn home_dirs(root: &Path, subdir: &str) -> Vec<PathBuf> {
     let mut found = Vec::new();
     if let Some(global) = config_home() {
-        found.push(global.join(SKILLS_SUBDIR));
+        found.push(global.join(subdir));
     }
-    let project = Project::resolve(cwd)
-        .root()
-        .join(PROJECT_DIRECTORY)
-        .join(SKILLS_SUBDIR);
-    // The two collapse into one for somebody whose project root *is* the
-    // directory `config_home` landed on — running in `~` with a `~/.ganja`, or
-    // pointing `GANJA_CONFIG_HOME` at the checkout. Scanning it twice would
-    // find every skill twice and warn about each as a duplicate claiming its
-    // own name, which is a warning about nothing.
+    let project = root.join(PROJECT_DIRECTORY).join(subdir);
     if !found.contains(&project) {
         found.push(project);
     }
