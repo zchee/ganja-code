@@ -179,6 +179,76 @@ async fn openrouter_answers_a_live_prompt() {
     smoke(&provider, &model).await;
 }
 
+/// The same gateway with an effort selected, which is the other half of what
+/// its ledger cannot settle offline.
+///
+/// **What it asserts is that the vendor accepts the field**, not that a model
+/// thinks out loud: `reasoning: {effort: …}` is documented for the surface and
+/// not per model, so a row that streams no thinking is that row's business and
+/// not a failure. What would be a failure is the request coming back refused —
+/// which is exactly what would happen if the effort map this build synthesizes
+/// were spelled the way the sibling vendor's is.
+///
+/// The thinking that did arrive is printed rather than asserted, so the run
+/// that first sees `response.reasoning.delta` on a real turn says so.
+#[tokio::test]
+#[ignore = "talks to OpenRouter; needs GANJA_LIVE_TEST=1 and OPENROUTER_API_KEY"]
+async fn openrouter_accepts_the_effort_its_reference_publishes() {
+    /// A reasoning row of that vendor's own spelling, cheap enough to run.
+    const REASONER: &str = "openai/o4-mini";
+
+    if key("OPENROUTER_API_KEY").is_none() {
+        return;
+    }
+    let provider = openrouter::from_env().expect("an exported key builds the provider");
+    let model = env::var("GANJA_MODEL")
+        .ok()
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| REASONER.to_owned());
+
+    let events: Vec<ProviderEvent> = provider
+        .stream(
+            ChatRequest {
+                // Exactly what `effort::roster` hands a session that picked
+                // `high` on one of this gateway's rows.
+                effort_options: serde_json::json!({"reasoning": {"effort": "high"}})
+                    .as_object()
+                    .cloned()
+                    .expect("an object"),
+                model: model.clone(),
+                system: Some("Answer with a single word.".to_owned()),
+                messages: vec![Message::user(PROMPT)],
+                tools: Vec::new(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the vendor accepted a request carrying an effort")
+        .collect()
+        .await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Failed(_))),
+        "the effort field was refused mid-stream: {events:?}"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&ProviderEvent::Finish(FinishReason::Completed)),
+        "a live turn under an effort should still end completed: {events:?}"
+    );
+
+    let thinking: String = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ReasoningDelta(delta) => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    eprintln!("{model} thought {thinking:?} under effort=high");
+}
+
 /// The OpenCode gateways, one turn per dialect.
 ///
 /// The only test here that drives **three wires through one provider**, which is

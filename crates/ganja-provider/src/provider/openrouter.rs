@@ -27,8 +27,40 @@
 //! | `previous_response_id` | never sent | rejected by the same sentence, and this build has never had a field for it: every request is rebuilt whole from ganja's own transcript |
 //! | `include: ["reasoning.encrypted_content"]` | **dropped** | the reference documents no `include` parameter at all, and its own reasoning example shows `encrypted_content` arriving without one. Sending an undocumented field to a gateway is a guess, and this one would be spent on every request |
 //! | a `reasoning` input item replayed | **dropped** | the reference documents no way to send sealed reasoning back, and its multi-turn example (`tool-calling`) carries none. The failure mode decides it: a replay this vendor refuses is a `400` on the *second* request of every reasoning turn, which is most agentic turns |
-//! | `reasoning.summary: "auto"` | **dropped** | both halves of that default are the other vendor's — [`super::responses::seals_reasoning`] is a rule about *its* model ids, and `"auto"` is what *its* CLI sends. A `reasoning` object is sent here only when a catalog effort put one there, and the reference does document `reasoning` with `minimal`/`low`/`medium`/`high` efforts |
+//! | `reasoning.summary: "auto"` | **dropped** | both halves of that default are the other vendor's — [`super::responses::seals_reasoning`] is a rule about *its* model ids, and `"auto"` is what *its* CLI sends. The reference documents no way to *ask* for a summary at all, and asks for none in its own examples — yet its settled response carries one, and its stream carries thinking regardless (see the reasoning rows below). A field nobody has to send is not one to invent a default for |
+//! | `reasoning: {effort: …}` | **sent, when an effort is selected** (P20) | the reference publishes the four levels `minimal`/`low`/`medium`/`high` in a table of its own, so this is the one reasoning field it documents. It rides the ordinary effort splice — `crate::effort`'s `Wire::OpenRouter` lane synthesizes exactly `{"reasoning": {"effort": …}}`, and deliberately not the sibling's map, whose `summary` and `include` are the two rows above. No effort selected is still no `reasoning` key |
+//! | `tool_choice: "auto"` | **sent, beside a non-empty roster** (P20) | every tool example in the reference spells it, and what the API assumes in its absence is the one thing that page does not say. The failure it would cause is the expensive kind — a roster advertised and never called — and `"auto"` is what an agent loop wants on every turn. Scoped to this backend: the other two send the Codex CLI's request, which carries no such field |
+//! | `strict` on a tool definition | **dropped** | the reference prints `strict: null` on every tool it defines, which is that field's absent value; it documents no behavior for a boolean, and this build's schemas are generated from the argument structs rather than written to the strict subset, so a `true` would be a promise the roster cannot keep |
 //! | the four subscription headers | never sent | they belong to a ChatGPT seat impersonating the Codex CLI; the reference asks for `Authorization` and `Content-Type` and nothing else |
+//!
+//! # What its stream says that the other vendor's does not
+//!
+//! Two readings, both P20, both about thinking a person can read — never about
+//! state to replay, which the rows above still refuse in both directions:
+//!
+//! - **`response.reasoning.delta`** is this vendor's own name for a fragment of
+//!   thinking (its reasoning page's streaming example). The dialect is
+//!   documented as a drop-in for OpenAI's, and then this one event is not:
+//!   unmapped, a reasoning turn here streamed a reply with nothing under it.
+//!   [`super::responses`] maps it beside OpenAI's spelling, and a stream
+//!   carrying both is one train of thought relayed twice — the first spelling to
+//!   say anything wins for the whole response.
+//! - **The settled item's `summary` array.** The reference's own response
+//!   example carries `{type: "reasoning", id, encrypted_content, summary:
+//!   [strings]}` on a request that asked for no summary, so on a turn that
+//!   streamed nothing readable the closing frame is the only place thinking
+//!   exists; it is read there when nothing was streamed, and never in addition
+//!   to what was.
+//!
+//! One thing about tool streaming is **assumed rather than measured**: a call is
+//! terminated on `response.output_item.done`, the OpenAI terminator this dialect
+//! inherits by being a documented drop-in. The reference's own streaming example
+//! watches `response.function_call_arguments.done` instead — for the finished
+//! arguments, which this build accumulates from the deltas. Both frames arriving
+//! produce exactly one call either way (pinned in
+//! [`super::responses`]'s tests); a live turn showing the gateway omitting
+//! `output_item.done` would be a one-arm fix, and is recorded here rather than
+//! guessed at.
 //!
 //! Every "dropped" row above is a *refusal to guess*, not a finding that the
 //! vendor refuses the field. The one thing that would settle them is a live

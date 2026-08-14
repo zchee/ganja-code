@@ -21,27 +21,30 @@
 //! cursor is uncataloged and has no rows to synthesize for; a row under any
 //! other provider id keeps only what the catalog declares.
 //!
-//! **The three gateways are the selectable providers deliberately left in that
-//! last group** — `openrouter`, `opencode` and `opencode-go`. They moved there
-//! rather than out of the list: each is cataloged and each is a wire ganja
-//! serves, so [`wire`] could name one. Two things say not yet.
-//!
-//! Upstream's branch for openrouter is keyed to `@openrouter/ai-sdk-provider`,
-//! a *chat-completions* transport, while ganja reaches that vendor over
-//! Responses (`crate::provider::openrouter`); and the fields a Responses map
-//! splices — [`INCLUDE_ENCRYPTED_REASONING`] above all — are exactly the ones
-//! that module refuses to send unasked, so synthesizing here would put them
-//! back through the effort door.
-//!
-//! The OpenCode gateways have the sharper version of the same problem: **one
-//! provider id serves three dialects**, so one [`Wire`] per provider cannot
-//! describe them at all. What would describe them is
+//! **Two of the three gateways are the selectable providers deliberately left
+//! in that last group** — `opencode` and `opencode-go`. They are there rather
+//! than out of the list: each is cataloged and each is a wire ganja serves, so
+//! [`wire`] could name one. What says not yet is that **one provider id serves
+//! three dialects**, so one [`Wire`] per provider cannot describe them at all.
+//! What would describe them is
 //! [`ModelInfo::npm`](crate::catalog::ModelInfo::npm) — the per-row transport
 //! `crate::provider::opencode` dispatches on, and which this module could key
 //! on instead of the provider id. A real road, and a deliberate follow-up
 //! rather than something to do while adding the providers. Until then a row
-//! under any of the three keeps only what the catalog declares, which is what
-//! every uncatalogued-wire row already does.
+//! under either keeps only what the catalog declares, which is what every
+//! uncatalogued-wire row already does.
+//!
+//! **`openrouter` left that group in P20** and has a lane of its own,
+//! [`Wire::OpenRouter`]. What kept it out was never the provider: upstream's
+//! branch for it is keyed to `@openrouter/ai-sdk-provider`, a
+//! *chat-completions* transport, while ganja reaches that vendor over Responses
+//! (`crate::provider::openrouter`) — so upstream's map is about a wire this
+//! build does not use, and [`responses_effort`]'s map splices exactly the
+//! fields — [`INCLUDE_ENCRYPTED_REASONING`] above all — that module refuses to
+//! send unasked. A *third* map settles it: that vendor's own reference
+//! publishes `reasoning: {effort: minimal|low|medium|high}` and nothing else
+//! about reasoning, so [`openrouter_effort`] carries that one field, the ledger
+//! keeps its drops, and neither map is the other's.
 //!
 //! Two translations ride every map. Upstream's option maps are AI-SDK
 //! provider options (`budgetTokens`, `reasoningEffort`) that the SDK re-spells
@@ -73,6 +76,11 @@ enum Wire {
     Messages,
     /// OpenAI's Responses API: `reasoning.effort`, summaries, sealed state.
     Responses,
+    /// OpenRouter's Responses surface: `reasoning.effort` and nothing beside
+    /// it. A lane of its own rather than [`Self::Responses`] because the two
+    /// vendors' bodies differ exactly where this module writes — see
+    /// [`openrouter_effort`].
+    OpenRouter,
     /// Chat completions as xAI serves it: `reasoning_effort`, nothing else.
     Grok,
     /// Chat completions as GitHub Copilot serves it: `reasoning_effort`, with
@@ -87,6 +95,7 @@ fn wire(provider_id: &str) -> Option<Wire> {
     match provider_id {
         "anthropic" => Some(Wire::Messages),
         "openai" => Some(Wire::Responses),
+        "openrouter" => Some(Wire::OpenRouter),
         "grok" => Some(Wire::Grok),
         "github-copilot" => Some(Wire::Copilot),
         _ => None,
@@ -95,6 +104,24 @@ fn wire(provider_id: &str) -> Option<Wire> {
 
 /// Upstream's `WIDELY_SUPPORTED_EFFORTS`, weakest to strongest.
 const WIDELY_SUPPORTED_EFFORTS: [&str; 3] = ["low", "medium", "high"];
+
+/// The efforts OpenRouter's own reference publishes, weakest to strongest
+/// (`openrouter.ai/docs/api_reference/responses/reasoning`, the "Reasoning
+/// Effort Levels" table, read 2026-08-14).
+///
+/// **Authored here rather than served by the catalog**, which is the one thing
+/// to know about it: `models.dev` publishes no `reasoning_options` for this
+/// gateway's rows today, so without this table `/effort` would offer nothing on
+/// a vendor whose reference documents the vocabulary in a table of four. The
+/// catalog still outranks it wherever it speaks — [`reasoning_efforts`] is
+/// consulted first and this is only the fall-through — so the day those rows
+/// carry efforts of their own, this stops being consulted for them without a
+/// line changing.
+///
+/// The vendor scopes reasoning to reasoning-capable models and publishes no
+/// per-model flag ganja can read; [`table`]'s own `model.reasoning` gate is
+/// what keeps this off a row that does not reason at all.
+const OPENROUTER_EFFORTS: [&str; 4] = ["minimal", "low", "medium", "high"];
 
 /// The day OpenAI rolled out the `none` reasoning tier; older models 400 on
 /// it, so it is only synthesized for models new enough to accept it.
@@ -209,6 +236,7 @@ fn effort_settings(model: &ModelInfo, effort: &str) -> Option<Map<String, Value>
             Some(anthropic_effort(model, effort).unwrap_or_else(|| bare_effort(effort)))
         }
         Wire::Responses => Some(responses_effort(effort)),
+        Wire::OpenRouter => Some(openrouter_effort(effort)),
         Wire::Grok => Some(chat_effort(effort)),
         // Copilot serves Gemini's thinking on no dial at all
         // (`transform.ts:1748`), so a published value has nowhere to go.
@@ -250,7 +278,7 @@ fn budget_efforts(model: &ModelInfo, min: Option<f64>, max: Option<f64>) -> Rost
 fn budget_settings(model: &ModelInfo, budget: f64) -> Option<Map<String, Value>> {
     match wire(&model.provider_id)? {
         Wire::Messages => Some(thinking_budget(budget)),
-        Wire::Responses | Wire::Grok | Wire::Copilot => None,
+        Wire::Responses | Wire::OpenRouter | Wire::Grok | Wire::Copilot => None,
     }
 }
 
@@ -273,6 +301,15 @@ fn table(model: &ModelInfo) -> Roster {
                 .map(|effort| (effort.to_owned(), responses_effort(effort)))
                 .collect()
         }
+        // No per-model gates, because the reference publishes none: the four
+        // levels are documented for the surface rather than for a family, and
+        // which of this gateway's 349 rows honours which is the vendor's own
+        // per-model variance — a model that refuses the field answers the
+        // ordinary status error naming the request.
+        Wire::OpenRouter => OPENROUTER_EFFORTS
+            .iter()
+            .map(|effort| ((*effort).to_owned(), openrouter_effort(effort)))
+            .collect(),
         Wire::Grok => {
             // The xAI doc branch (`transform.ts:787`): grok-3-mini takes
             // exactly two tiers; everything else that reasons takes the
@@ -397,6 +434,26 @@ fn responses_effort(effort: &str) -> Map<String, Value> {
         "include".to_owned(),
         Value::Array(vec![INCLUDE_ENCRYPTED_REASONING.into()]),
     );
+
+    map
+}
+
+/// The OpenRouter shape of one effort: `reasoning.effort`, alone.
+///
+/// **Deliberately not [`responses_effort`]**, although the two vendors serve
+/// the same dialect. The other two fields in that map are the other vendor's:
+/// `summary: "auto"` is what *its* CLI sends, and
+/// [`INCLUDE_ENCRYPTED_REASONING`] is half of a sealed-state pairing this
+/// gateway documents no way to complete — `crate::provider::openrouter`'s
+/// ledger drops both rather than guess, and an effort map is not the door to
+/// put them back through. What is left is the one field that vendor's own
+/// reference documents.
+fn openrouter_effort(effort: &str) -> Map<String, Value> {
+    let mut reasoning = Map::new();
+    reasoning.insert("effort".to_owned(), effort.into());
+
+    let mut map = Map::new();
+    map.insert("reasoning".to_owned(), Value::Object(reasoning));
 
     map
 }
@@ -871,6 +928,72 @@ mod tests {
                 "reasoning": {"effort": "high", "summary": "auto"},
                 "include": ["reasoning.encrypted_content"],
             }),
+        );
+    }
+
+    /// The gateway's own four levels, and the map each of them splices — which
+    /// is the whole of what its reference documents about reasoning and
+    /// deliberately none of what the sibling Responses map carries.
+    #[test]
+    fn an_openrouter_row_is_offered_the_four_efforts_its_reference_publishes() {
+        let routed = model("openrouter", "openai/o4-mini", 100_000);
+        let synthesized = roster(&routed);
+        let names: Vec<&str> = synthesized.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            ["high", "low", "medium", "minimal"],
+            "the reference's four, in the schema's sorted order"
+        );
+        assert_eq!(
+            serde_json::to_value(&synthesized["high"]).expect("an entry serializes"),
+            json!({"reasoning": {"effort": "high"}}),
+            "no `summary` and no `include`: both are the other vendor's fields, \
+             and the openrouter ledger drops them"
+        );
+
+        // The pre-mortem's non-reasoning row: the table's own gate answers it,
+        // so a chat-tuned gateway row is offered no effort to 400 over.
+        let mut plain = model("openrouter", "openai/gpt-5.2-chat", 100_000);
+        plain.reasoning = false;
+        assert!(roster(&plain).is_empty());
+    }
+
+    /// Catalog-first, the file's standing rule, on the one provider whose table
+    /// rows are authored here: a row that publishes its own effort values is
+    /// answered by them and never by the four.
+    #[test]
+    fn a_published_openrouter_row_outranks_the_authored_table() {
+        let mut published = model("openrouter", "anthropic/claude-sonnet-5", 64_000);
+        published.reasoning_options = Some(vec![efforts(&[Some("low"), Some("max")])]);
+
+        let synthesized = roster(&published);
+        let names: Vec<&str> = synthesized.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            ["low", "max"],
+            "the published values, including one the authored table never lists"
+        );
+        assert_eq!(
+            serde_json::to_value(&synthesized["max"]).expect("an entry serializes"),
+            json!({"reasoning": {"effort": "max"}}),
+            "still this gateway's own body shape, whoever named the effort"
+        );
+
+        // A budget-only row encodes nothing on this wire — there is no
+        // documented budget field — so it falls through to the table, exactly
+        // as a chat-wire row does.
+        let mut budgeted = model("openrouter", "anthropic/claude-sonnet-5", 64_000);
+        budgeted.reasoning_options = Some(vec![ReasoningOption::BudgetTokens {
+            min: Some(1024.0),
+            max: Some(32_000.0),
+        }]);
+        let fallen_through = roster(&budgeted);
+        assert_eq!(
+            fallen_through
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["high", "low", "medium", "minimal"],
         );
     }
 
