@@ -138,7 +138,7 @@ in this revision (2026-08-12).*
 | Feature | Notes | ganja |
 |---|---|---|
 | [MCP client](https://github.com/openai/codex/blob/main/docs/config.md) | stdio (`command`/`args`/`env`) + streamable HTTP (`url`/`bearer_token_env_var`), per-server enable + timeouts, OAuth credential store (keyring/file) | ✅ stdio + HTTP, per-server `enabled`/`timeout`/`output_limit`, static `headers` (a bearer goes there); OAuth now too (RFC 8414 discovery + RFC 7591 registration + PKCE, stored under a reserved `mcp:<server>` key, D466) |
-| [`codex mcp add/list/get/remove`](https://developers.openai.com/codex/cli) | CLI management writing `config.toml` | ✅ `ganja mcp add/list/get/remove` (D483): validated staged writes to `ganja.json`, `ganja.jsonc` refused by name, `get` reports the origin tier |
+| [`codex mcp add/list/get/remove`](https://developers.openai.com/codex/cli) | CLI management writing `config.toml` | ✅ `ganja mcp add/list/get/remove` (D483): validated staged writes to `ganja.json`, `ganja.jsonc` edited comment-preservingly (CST), `get` reports the origin tier |
 | [`codex mcp login`](https://developers.openai.com/codex/cli) | OAuth flow for a remote server | ✅ `ganja mcp login <server>` |
 | [Codex as an MCP server](https://developers.openai.com/codex/cli) | expose the engine over MCP | ❌ |
 | Language servers | none — Codex has no LSP subsystem | n/a — ganja-side advantage: config-declared LSP (rust/gopls builtins + custom entries), diagnostics appended to edit/write results |
