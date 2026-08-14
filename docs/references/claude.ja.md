@@ -151,9 +151,9 @@
 | [テンプレート内 `@path`](https://code.claude.com/docs/en/slash-commands) | ファイル埋込 | ✅(P8・mention 級添付として) |
 | [frontmatter: `allowed-tools`](https://code.claude.com/docs/en/slash-commands) | コマンド毎のツール制限 | ❌(コマンド毎 agent は✅) |
 | [frontmatter: `model`・`argument-hint`](https://code.claude.com/docs/en/slash-commands) | コマンド毎モデル+ヒント | ❌ |
-| [CLAUDE.md 階層](https://code.claude.com/docs/en/memory) | グローバル→ルート→サブディレクトリを連結 | ⚠️ グローバル+プロジェクトの AGENTS.md 族・サブディレクトリ歩き込みなし |
+| [CLAUDE.md 階層](https://code.claude.com/docs/en/memory) | グローバル→ルート→サブディレクトリを連結 | ✅ グローバル+プロジェクトの AGENTS.md 族に加え、ツールが実際に触れたサブツリーの AGENTS.md 族を lazy に次リクエストへ注入(touch 駆動・closest-last・clamp 付き、D480)— Claude の起動時連結とは方式が異なる |
 | [メモリー内 `@path` import](https://code.claude.com/docs/en/memory) | インポート元相対で解決するモジュール分割 | ❌ |
-| [自動メモリー](https://code.claude.com/docs/en/memory) | `~/.claude/projects/<hash>/memory/`(MEMORY.md 索引+トピックファイル)を自己保守 | ❌ |
+| [自動メモリー](https://code.claude.com/docs/en/memory) | `~/.claude/projects/<hash>/memory/`(MEMORY.md 索引+トピックファイル)を自己保守 | ✅ opt-in(config `memory: true`、既定 off は意図的相違): プロジェクト毎データディレクトリの `memory/`(MEMORY.md 索引+トピックファイル)を prompt に合成、維持指示ブロックは合成文で秘密の保存を明示的に禁止(D478) |
 
 ## 9. エージェント・スキル
 
@@ -236,7 +236,7 @@
 | [ストリーミング JSON 出力](https://code.claude.com/docs/en/cli-reference) | `--output-format stream-json` | ✅ `--format json`(nd-JSON) |
 | [セッション継続](https://code.claude.com/docs/en/cli-reference) | `--continue` / `--resume` | ✅ |
 | [セッション分岐](https://code.claude.com/docs/en/cli-reference) | `--fork-session` | ❌ |
-| [permission モード群](https://code.claude.com/docs/en/cli-reference) | dontAsk / acceptEdits / plan / bypass | ⚠️ `--auto` の一段のみ |
+| [permission モード群](https://code.claude.com/docs/en/cli-reference) | dontAsk / acceptEdits / plan / bypass | ⚠️ 一段のみだが対話 TUI・headless 双方に `--auto`(隠し別名 `--yolo`/`--dangerously-skip-permissions`): Ask で上がるダイアログを「1回許可」で自動応答、deny 不変・question は聞き続ける(D479) |
 | [呼出単位のツール許可](https://code.claude.com/docs/en/iam) | `--allowedTools` パターン | ❌ config rules のみ |
 | [system prompt フラグ](https://code.claude.com/docs/en/cli-reference) | append/replace × inline/file | ❌ |
 | [hermetic 実行](https://code.claude.com/docs/en/cli-reference) *(低確度)* | `--bare` | ❌ |

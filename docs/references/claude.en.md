@@ -153,9 +153,9 @@ docs unless marked otherwise.*
 | [`@path` in templates](https://code.claude.com/docs/en/slash-commands) | file embedding | ✅ (P8, as mention-grade attachment) |
 | [Command frontmatter: `allowed-tools`](https://code.claude.com/docs/en/slash-commands) | per-command tool restriction | ❌ (per-command agent ✅) |
 | [Command frontmatter: `model`, `argument-hint`](https://code.claude.com/docs/en/slash-commands) | per-command model + hint text | ❌ |
-| [CLAUDE.md hierarchy](https://code.claude.com/docs/en/memory) | global → project root → subdirectory files, walked and concatenated | ⚠️ global + project AGENTS.md family; no subdirectory walk-in |
+| [CLAUDE.md hierarchy](https://code.claude.com/docs/en/memory) | global → project root → subdirectory files, walked and concatenated | ✅ global + project AGENTS.md family, plus lazy injection of subtree AGENTS.md files as tools actually touch files beneath them (touch-driven, closest-last, clamped, D480) — a different mechanism than Claude's startup concatenation |
 | [`@path` imports in memory files](https://code.claude.com/docs/en/memory) | modular includes, resolved relative to the importer | ❌ |
-| [Auto memory](https://code.claude.com/docs/en/memory) | `~/.claude/projects/<hash>/memory/` with MEMORY.md index + topic files, self-maintained | ❌ |
+| [Auto memory](https://code.claude.com/docs/en/memory) | `~/.claude/projects/<hash>/memory/` with MEMORY.md index + topic files, self-maintained | ✅ opt-in (config `memory: true`; default-off is a deliberate divergence): the per-project data directory's `memory/` (MEMORY.md index + topic files) composed into the prompt, with a synthesized upkeep block that explicitly forbids storing secrets (D478) |
 
 ## 9. Agents and skills
 
@@ -238,7 +238,7 @@ docs unless marked otherwise.*
 | [Streaming JSON output](https://code.claude.com/docs/en/cli-reference) | `--output-format stream-json` | ✅ `--format json` (nd-JSON) |
 | [Session continuation](https://code.claude.com/docs/en/cli-reference) | `--continue` / `--resume` | ✅ |
 | [Session forking](https://code.claude.com/docs/en/cli-reference) | `--fork-session` | ❌ |
-| [Permission modes](https://code.claude.com/docs/en/cli-reference) | dontAsk / acceptEdits / plan / bypass | ⚠️ `--auto` single tier |
+| [Permission modes](https://code.claude.com/docs/en/cli-reference) | dontAsk / acceptEdits / plan / bypass | ⚠️ still a single tier, but on both the interactive TUI and headless run: `--auto` (hidden aliases `--yolo`/`--dangerously-skip-permissions`) answers Ask-raised dialogs "allow once"; deny is unchanged and question still asks (D479) |
 | [Per-invocation tool allowlists](https://code.claude.com/docs/en/iam) | `--allowedTools` patterns | ❌ config rules only |
 | [System prompt flags](https://code.claude.com/docs/en/cli-reference) | append/replace × inline/file | ❌ |
 | [Hermetic run](https://code.claude.com/docs/en/cli-reference) *(low confidence)* | `--bare` | ❌ |
