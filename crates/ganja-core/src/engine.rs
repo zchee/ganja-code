@@ -544,6 +544,30 @@ struct Active {
     previous_agent: Option<String>,
 }
 
+/// Which agent a pending switch leads to — the two plan doors, named as the
+/// directions they are (**D477**).
+///
+/// The cell below carries this rather than assuming build, because
+/// `plan_enter` records through the very same seam `plan_exit` does and the
+/// boundary has to know which agent to persist and announce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SwitchTo {
+    /// `plan_exit`'s direction: the plan agent handed the wheel to build.
+    Build,
+    /// `plan_enter`'s: the build agent asked to plan first.
+    Plan,
+}
+
+impl SwitchTo {
+    /// The agent this direction names.
+    pub(crate) fn agent(self) -> &'static str {
+        match self {
+            Self::Build => agent::BUILD,
+            Self::Plan => agent::PLAN,
+        }
+    }
+}
+
 /// Where a plan approval stands, from the tool's Yes to the prompt that
 /// finally reads the approval sentence.
 ///
@@ -551,7 +575,16 @@ struct Active {
 /// [`Engine::lock_entry`]: "switch applied, sentence still riding" is a real
 /// place a session stands after a shell turn or a model switch, and folding it
 /// into either neighbour would make one of them mean two things. The sentence
-/// itself is a constant ([`APPROVAL_SENTENCE`]), so no state carries payload.
+/// itself is a constant ([`APPROVAL_SENTENCE`]), so no state carries payload
+/// beyond the direction the live two carry.
+///
+/// Only the build direction has a sentence to ride: upstream writes a
+/// synthetic approval message for its exit door and has no enter door at all,
+/// so ganja's `plan_enter` lands with no message of its own (**D477**) — the
+/// plan agent's standing per-turn reminder is already what tells it what it
+/// is. An applied `Plan` switch therefore returns the cell straight to
+/// [`PendingSwitch::None`] where an applied `Build` one moves to
+/// [`PendingSwitch::SentencePending`].
 ///
 /// Two owned deviations live on this cell. **approval-persists-at-the-boundary**:
 /// upstream persists its synthetic approval message the moment the tool
@@ -573,12 +606,13 @@ pub(crate) enum PendingSwitch {
     /// The tool's Yes, recorded while its turn is still in flight. Only ever
     /// observable from inside that turn: the boundary moves it on before the
     /// slot is released.
-    Requested,
+    Requested(SwitchTo),
     /// The boundary persisted and announced the switch; the next engine entry
     /// still owes the in-memory half.
-    Announced,
+    Announced(SwitchTo),
     /// The switch is applied in memory; the approval sentence has not yet
-    /// reached a prompt that could deliver it.
+    /// reached a prompt that could deliver it. Build-only, for the reason
+    /// stated above.
     SentencePending,
 }
 
@@ -589,24 +623,35 @@ pub(crate) const APPROVAL_SENTENCE: &str =
     "The plan has been approved, you can now edit files. Execute the plan";
 
 /// The engine's side of the [`plan::Switcher`] seam: a Yes writes
-/// [`PendingSwitch::Requested`] and nothing else.
+/// [`PendingSwitch::Requested`] with its direction and nothing else.
 ///
 /// Synchronous and infallible because it records intent and waits for
 /// nothing — the boundary announces, the next entry applies. Wired into a
 /// [`crate::tool::ToolCtx`] only on a parent turn of an engine whose registry
-/// holds build, which is what makes the trait's presence-is-ability promise
-/// true.
+/// holds an agent a door leads to; which *direction* can actually be recorded
+/// is decided by which door [`Engine::install`] registered, and that is what
+/// makes the trait's presence-is-ability promise true per direction.
 #[derive(Debug)]
-pub(crate) struct SwitchToBuild {
+pub(crate) struct RecordSwitch {
     pub(crate) pending: Arc<std::sync::Mutex<PendingSwitch>>,
 }
 
-impl plan::Switcher for SwitchToBuild {
-    fn switch_to_build(&self) {
+impl RecordSwitch {
+    fn record(&self, target: SwitchTo) {
         *self
             .pending
             .lock()
-            .expect("the pending switch is never poisoned") = PendingSwitch::Requested;
+            .expect("the pending switch is never poisoned") = PendingSwitch::Requested(target);
+    }
+}
+
+impl plan::Switcher for RecordSwitch {
+    fn switch_to_build(&self) {
+        self.record(SwitchTo::Build);
+    }
+
+    fn switch_to_plan(&self) {
+        self.record(SwitchTo::Plan);
     }
 }
 
@@ -617,9 +662,9 @@ impl plan::Switcher for SwitchToBuild {
 enum PendingPolicy {
     /// `start_turn` and `switch_model`: an announced switch is applied before
     /// the entry's own work, so the task-roster rebuild, the reminder gates
-    /// and the entry's `remember_selection` all see build rather than the
-    /// stale plan selection. A riding sentence keeps riding; only the
-    /// reminder assembly consumes it.
+    /// and the entry's `remember_selection` all see the agent the boundary
+    /// announced rather than the stale one it replaced. A riding sentence
+    /// keeps riding; only the reminder assembly consumes it.
     Apply,
     /// `switch_agent`: the person's later explicit choice outranks the
     /// earlier Yes, so both the switch and the sentence are dropped
@@ -635,8 +680,9 @@ enum PendingPolicy {
     /// `undo`: the approval goes back with the plan it approved. An
     /// unapplied switch is revoked two-sidedly — cell cleared *and* the row
     /// re-asserted to the still-active selection, without which the row would
-    /// keep saying build for a session that continues as plan and a restart
-    /// would resume wrong. An already-applied switch survives, exactly as a
+    /// keep naming the agent the boundary wrote for a session that continues
+    /// as the other one, and a restart would resume wrong. An
+    /// already-applied switch survives, exactly as a
     /// manual switch survives an undo; only the sentence is dropped.
     Revoke,
 }
@@ -648,9 +694,9 @@ enum PendingPolicy {
 #[must_use]
 enum Owed {
     Nothing,
-    /// Apply the build switch in memory through the non-emitting
+    /// Apply the announced switch in memory through the non-emitting
     /// [`Engine::apply_agent`] — the boundary already announced.
-    ApplyBuild,
+    Apply(SwitchTo),
     /// Re-run [`Engine::remember_selection`] so the row returns to the
     /// selection that is actually active.
     ReassertRow,
@@ -672,7 +718,7 @@ enum Owed {
 /// the boundary in `run_turn` only ever writes [`None`] into it.
 ///
 /// **Race-freedom proof.** The cell is only ever
-/// [`PendingSwitch::Requested`] while the slot is occupied — the tool that
+/// [`PendingSwitch::Requested`] while the slot is occupied — the door that
 /// writes it runs inside a turn — and the boundary moves it to
 /// [`PendingSwitch::Announced`] before the slot is released. Every entry
 /// Busy-checks the slot first, through [`TurnSlot::entry`], which cannot be
@@ -712,20 +758,27 @@ impl TurnSlot {
         let owed = match (policy, *pending) {
             // By the proof on the type: `Requested` exists only while the
             // slot is occupied, and this entry just found it empty.
-            (_, PendingSwitch::Requested) => {
+            (_, PendingSwitch::Requested(_)) => {
                 unreachable!("a plan approval can only be Requested while a turn holds the slot")
             }
             (_, PendingSwitch::None) => Owed::Nothing,
-            (PendingPolicy::Apply, PendingSwitch::Announced) => {
+            // Only the build direction leaves a sentence riding; the enter
+            // door writes no message of its own, so applying it finishes it
+            // (**D477**).
+            (PendingPolicy::Apply, PendingSwitch::Announced(SwitchTo::Build)) => {
                 *pending = PendingSwitch::SentencePending;
-                Owed::ApplyBuild
+                Owed::Apply(SwitchTo::Build)
+            }
+            (PendingPolicy::Apply, PendingSwitch::Announced(SwitchTo::Plan)) => {
+                *pending = PendingSwitch::None;
+                Owed::Apply(SwitchTo::Plan)
             }
             (PendingPolicy::Apply, PendingSwitch::SentencePending) => Owed::Nothing,
             (PendingPolicy::Discard | PendingPolicy::Clear, _) => {
                 *pending = PendingSwitch::None;
                 Owed::Nothing
             }
-            (PendingPolicy::Revoke, PendingSwitch::Announced) => {
+            (PendingPolicy::Revoke, PendingSwitch::Announced(_)) => {
                 *pending = PendingSwitch::None;
                 Owed::ReassertRow
             }
@@ -2792,17 +2845,21 @@ impl Engine {
             .with(Arc::new(task::TaskTool::new(&subagent::roster(
                 agents, agent,
             ))));
-        // `plan_exit` rides the same rebuild the task tool does, and for the
-        // same doctrine: presence is ability, and the registry holding build
-        // is what makes "switch to the build agent" a promise the engine can
-        // keep. Registered here and nowhere else because `install` runs from
-        // five sites including the MCP-dial rebuild at every turn start — a
-        // tool added anywhere else is dropped on the first rebuild — and
-        // never in `with_builtins`, whose surface the golden differential
-        // pins. Every agent's model sees it (denied tools are not hidden);
-        // the rules refuse everyone but plan.
+        // Both plan doors ride the same rebuild the task tool does, and for
+        // the same doctrine: presence is ability, and the registry holding
+        // the agent a door leads to is what makes "switch to that agent" a
+        // promise the engine can keep. Registered here and nowhere else
+        // because `install` runs from five sites including the MCP-dial
+        // rebuild at every turn start — a tool added anywhere else is dropped
+        // on the first rebuild — and never in `with_builtins`, whose surface
+        // the golden differential pins. Every agent's model sees both (denied
+        // tools are not hidden); the rules refuse everyone but plan for the
+        // exit and everyone but build for the enter (**D477**).
         if agents.get(agent::BUILD).is_some() {
             rebuilt = rebuilt.with(Arc::new(plan::PlanExitTool));
+        }
+        if agents.get(agent::PLAN).is_some() {
+            rebuilt = rebuilt.with(Arc::new(plan::PlanEnterTool));
         }
         *self
             .tools
@@ -3214,20 +3271,23 @@ impl Engine {
         let (guard, owed) = self.turn.entry(policy).await?;
         match owed {
             Owed::Nothing => {}
-            Owed::ApplyBuild => {
-                // Presence is ability: the cell only reaches `Announced` on an
-                // engine whose registry holds build, because the cell is only
-                // threaded into turns of such an engine.
-                let build = self
+            Owed::Apply(target) => {
+                // Presence is ability: the cell only reaches `Announced` for a
+                // direction whose door was registered, and a door is
+                // registered only when the registry holds the agent it leads
+                // to.
+                let adopted = self
                     .agents
                     .as_ref()
-                    .and_then(|registry| registry.get(agent::BUILD))
-                    .expect("a plan approval is only ever pending where the registry holds build");
+                    .and_then(|registry| registry.get(target.agent()))
+                    .expect(
+                        "a plan switch is only ever pending where the registry holds its target",
+                    );
                 // The AgentChanged half of this boundary was already announced
-                // by the turn that moved the cell; an effort the build model
-                // cannot carry still owes its own frame, or a frontend keeps
-                // showing a selection the row no longer holds.
-                if self.apply_agent(build) {
+                // by the turn that moved the cell; an effort the adopted
+                // model cannot carry still owes its own frame, or a frontend
+                // keeps showing a selection the row no longer holds.
+                if self.apply_agent(adopted) {
                     let _ = self
                         .fanout
                         .send(Event::EffortChanged {
@@ -3243,13 +3303,19 @@ impl Engine {
         Ok(guard)
     }
 
-    /// The pending-approval cell, cloned for a root turn that could write or
-    /// announce it — which is a turn of an engine whose registry holds build,
-    /// and nothing else. [`None`] here is what makes `ToolCtx::switch` [`None`]
-    /// and phase one inert on every other engine, the same presence-is-ability
-    /// gate that decides whether `plan_exit` is registered at all.
+    /// The pending-switch cell, cloned for a root turn that could write or
+    /// announce it — which is a turn of an engine whose registry holds an
+    /// agent one of the two plan doors leads to, and nothing else. [`None`]
+    /// here is what makes `ToolCtx::switch` [`None`] and phase one inert on
+    /// every other engine, the same presence-is-ability gate that decides
+    /// whether either door is registered at all. Either agent suffices, since
+    /// the seam is one: which direction can actually be *recorded* is settled
+    /// by which door [`Engine::install`] put in the registry (**D477**).
     fn pending_for_turn(&self) -> Option<Arc<std::sync::Mutex<PendingSwitch>>> {
-        self.agents.as_ref()?.get(agent::BUILD)?;
+        let agents = self.agents.as_ref()?;
+        if agents.get(agent::BUILD).is_none() && agents.get(agent::PLAN).is_none() {
+            return None;
+        }
 
         Some(Arc::clone(&self.turn.pending))
     }

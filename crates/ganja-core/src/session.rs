@@ -42,8 +42,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    agent, catalog,
-    engine::{Fanout, PendingSwitch, SwitchToBuild},
+    catalog,
+    engine::{Fanout, PendingSwitch, RecordSwitch},
     permission::{Decision, Permissions},
     protocol::{
         Event, FinishReason, Message, Part, PartBody, PartId, PermissionId, PermissionReply,
@@ -792,13 +792,14 @@ pub(crate) struct Turn {
     /// read: a child's registry has no `task` tool, so it never assembles a
     /// batch to cap.
     pub(crate) concurrency: usize,
-    /// The engine's plan-approval cell, when this turn could write or
-    /// announce it: a `plan_exit` Yes records `Requested` here through
-    /// [`ToolCtx::switch`], and this turn's boundary moves it to `Announced`.
-    /// [`None`] on an engine whose registry holds no build agent — nothing to
-    /// switch to — and on every turn a subagent runs, with the same
-    /// discipline as `spawn: None`: a child's tail must never run phase one
-    /// against its private fanout and its own persist.
+    /// The engine's plan-switch cell, when this turn could write or announce
+    /// it: a `plan_exit` or `plan_enter` Yes records `Requested` here through
+    /// [`ToolCtx::switch`], and this turn's boundary moves it to `Announced`
+    /// in the direction it named. [`None`] on an engine whose registry holds
+    /// neither agent a plan door leads to — nothing to switch to — and on
+    /// every turn a subagent runs, with the same discipline as `spawn: None`:
+    /// a child's tail must never run phase one against its private fanout and
+    /// its own persist.
     pub(crate) pending_switch: Option<Arc<std::sync::Mutex<PendingSwitch>>>,
     /// What a call tracks a background job through — engine-owned and shared
     /// by every turn this session runs, root or subagent alike, because a
@@ -920,11 +921,11 @@ impl Turn {
             // states: a child assembles no batch, because it is offered no
             // tool that would make one.
             concurrency: host.concurrency,
-            // The approval cell is the parent engine's, and a child never
+            // The switch cell is the parent engine's, and a child never
             // holds it — same discipline as `spawn: None`. A child that did
             // would run phase one at its own tail, announcing on a private
             // fanout nobody subscribes to and persisting through a child
-            // session's row; and its rules already deny `plan_exit`, so
+            // session's row; and its rules already deny both plan doors, so
             // the belt has braces.
             pending_switch: None,
             // The parent's own registry, shared rather than withheld: a
@@ -1255,40 +1256,41 @@ pub(crate) async fn run_turn(turn: Turn) {
     }
 }
 
-/// Phase one of a plan approval, at the one boundary every turn ends
+/// Phase one of a plan switch, at the one boundary every turn ends
 /// through: if this turn's Yes is still `Requested`, persist the switch
 /// durably, announce it, and hand the in-memory half to the next engine
-/// entry by moving the cell to `Announced`.
+/// entry by moving the cell to `Announced` in the same direction.
 ///
 /// The durable write goes first — disk, then the announcement, like every
 /// other write-through point — and produces the same row `remember_selection`
-/// would: a restart between here and the next prompt resumes as build
-/// (deviation: approval-persists-at-the-boundary — upstream's window is
-/// zero, ganja's is the turn that just ended). On an engine with no
+/// would: a restart between here and the next prompt resumes as the agent the
+/// Yes named (deviation: approval-persists-at-the-boundary — upstream's
+/// window is zero, ganja's is the turn that just ended). On an engine with no
 /// persistence the write degrades to announce-only, correct by construction:
-/// there is no row for a restart to read. The event's model is exact because
-/// build prefers no model of its own, so the turn's model is the model the
-/// session keeps.
+/// there is no row for a restart to read. The event's model is exact in
+/// either direction because neither build nor plan prefers a model of its
+/// own, so the turn's model is the model the session keeps.
 async fn announce_pending_switch(turn: &Turn) {
     let Some(cell) = &turn.pending_switch else {
         return;
     };
-    {
+    let target = {
         let mut pending = cell.lock().expect("the pending switch is never poisoned");
-        if *pending != PendingSwitch::Requested {
+        let PendingSwitch::Requested(target) = *pending else {
             return;
-        }
-        *pending = PendingSwitch::Announced;
-    }
+        };
+        *pending = PendingSwitch::Announced(target);
+        target
+    };
 
     if let Some(persist) = &turn.persist {
-        persist.remember_agent(agent::BUILD, &turn.model);
+        persist.remember_agent(target.agent(), &turn.model);
     }
     let _ = turn
         .events
         .send(Event::AgentChanged {
             session_id: turn.session_id.clone(),
-            agent: agent::BUILD.to_owned(),
+            agent: target.agent().to_owned(),
             model: turn.model.clone(),
         })
         .await;
@@ -3305,12 +3307,12 @@ async fn start(
             },
             hooks: turn.hooks.clone(),
         }) as Arc<dyn question::Asker>),
-        // Present exactly where the approval cell was threaded: a parent
-        // turn of an engine whose registry holds build. A child turn
-        // carries no cell, so a subagent's call reads the no-build
-        // refusal even before its rules refuse it.
+        // Present exactly where the switch cell was threaded: a parent turn
+        // of an engine whose registry holds an agent a plan door leads to. A
+        // child turn carries no cell, so a subagent's call reads the
+        // no-such-agent refusal even before its rules refuse it.
         switch: turn.pending_switch.as_ref().map(|cell| {
-            Arc::new(SwitchToBuild {
+            Arc::new(RecordSwitch {
                 pending: Arc::clone(cell),
             }) as Arc<dyn crate::tool::plan::Switcher>
         }),
