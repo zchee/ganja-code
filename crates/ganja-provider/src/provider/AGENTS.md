@@ -58,6 +58,7 @@ Live vendor checks are opt-in (`GANJA_LIVE_TEST=1`, `-- --ignored`) and prove on
 
 - Environment variables are read through one helper so an unset variable, an empty variable and a non-UTF-8 variable behave the same everywhere.
 - `ProviderError` is transport-agnostic on purpose: the same taxonomy has to fit a provider that never leaves the process and one that speaks HTTP.
+- A server-run tool call arrives as an `openrouter:`-prefixed output item and becomes `ProviderEvent::ServerTool` — display-only, never a `ToolCall`, because OpenRouter already executed it (D489); the second reasoning-delta spelling (`response.reasoning.delta`, that vendor's own) maps beside OpenAI's with a response-scoped dedupe.
 - Reasoning arrives on two channels and they are not the same thing: `ReasoningDelta` is thinking a person could read (now a protocol part of its own, `PartBody::ReasoningText` — the engine streams it into the transcript and every frontend draws it, but **no wire sends it back**), `ReasoningState` is thinking only the provider can read (`PartBody::Reasoning`, kept and handed back). A wire encoding a request drops the readable half and sends the sealed one: replaying both would be sending the same thought twice, once in a form nothing asked for.
 
 ## Dependencies

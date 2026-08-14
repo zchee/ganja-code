@@ -66,7 +66,7 @@ Unit tests sit in `#[cfg(test)] mod tests` at the bottom of each module and cove
 - **Ids sort in creation order.** `MessageId`/`PartId`/`PermissionId`/`SessionId` are a millisecond timestamp plus a per-process counter, both fixed-width hex, so ids sort lexicographically by creation and cannot collide in one process. Storage reassembly (P4) leans on this.
 - **Every event names its session, filled from one slot.** The engine holds a single current-session id: minted at construction (an ephemeral engine's session has a name with no row), adopted by the first prompt's lazy create so turn-1 events and the stored row agree, replaced by `resume` before the resumed revert is announced, and re-minted by `NewSession` so the next conversation cannot upsert over the last one's row. A subagent's crossing permission dialogs are re-addressed to the parent's session — the child session is invisible to every frontend.
 - **Ids adopted from disk are taken verbatim.** The prefix is a convention, not an invariant.
-- New `PartBody` variants are additive — the tag travels as a `type` field beside the part's id — so adding one changes nothing already on the wire.
+- New `PartBody` variants are additive — the tag travels as a `type` field beside the part's id — so adding one changes nothing already on the wire; `ReasoningText` proved it and `ServerTool` (D489) repeated it.
 - Time is milliseconds since the Unix epoch via `protocol::now()`, saturating rather than failing when the clock is set before 1970.
 
 ## Dependencies
