@@ -32,6 +32,44 @@
 //! the run request went out on — so `ChatRequest.system` reaches the model
 //! on the one channel the server honors, and never through the member it
 //! demonstrably refuses.
+//!
+//! # Tool execs are refused, not run (**D486**, `cursor-exec-refusal`)
+//!
+//! Cursor's server does not only *ask for* context mid-turn; it asks the
+//! client to **run tools** for it — a shell command, a file read, an MCP
+//! call — as exec requests on the same channel, and it holds generation
+//! until each one is answered. The live-observed instance is
+//! `shell_stream_args` (the args oneof's field 14), which arrived on an
+//! ordinary turn and, until [`refusal_answer`], ended it: every exec kind
+//! but the context ask became a `ProviderEvent::Failed` naming the kind,
+//! because leaving it unanswered would have hung the turn instead.
+//!
+//! **What diverges.** There is no upstream counterpart to weigh this
+//! against — upstream opencode v1.18.13 has no cursor wire at all, so no
+//! ported behavior is being contradicted. The divergence is from *cursor's
+//! own shipped client*, which executes these asks: it registers handlers
+//! for shell, read, write, grep, MCP and the rest, runs them against the
+//! user's machine, and streams the results back. Ganja deliberately does
+//! not. Its tools run for *its* session, under [`crate`]'s permission
+//! engine, on the engine's agent loop — running a second, invisible tool
+//! loop on the provider's say-so would put a shell command outside every
+//! dialog, rule and transcript this build has, driven by a party the user
+//! is talking to rather than one they are running.
+//!
+//! **Why a refusal rather than a failure.** The same client shows what to
+//! send when it *won't* run an exec. Its dispatcher, on finding no handler
+//! for a server exec, writes two control messages and nothing else: a
+//! `throw` carrying the exec id and a reason string, then a `stream_close`
+//! carrying the id (`index.js@4272747` in the bundled
+//! `2026.07.23-e383d2b` agent — byte offsets, per `cursor.proto`'s
+//! citation note). That channel is keyed on the numeric id alone, naming
+//! neither kind nor `exec_id`, which is precisely what makes it a *general*
+//! refusal: `shell_stream_args`, a kind no table here knows, and an exec
+//! carrying nothing recognizable at all are all refusable through it, so no
+//! exec kind is left to fail a turn. The reason string names ganja and the
+//! kind, because it is read by the server's own agent loop — a refusal is
+//! information that loop can act on, the way a denied tool call is
+//! information ganja's own loop acts on, and the turn survives it.
 
 use std::{collections::HashMap, fmt::Write as _};
 
@@ -143,6 +181,67 @@ pub(super) fn context_answer(ask: decode::ContextAsk, system: Option<&str>) -> V
     .encode_to_vec()
 }
 
+/// The two messages refusing one tool exec (**D486**): the throw carrying
+/// the reason, then the stream close that ends the exchange — the pair the
+/// shipped client writes when no handler of its own claims a server exec
+/// (`index.js@4272747`), in that order, because the close is what tells the
+/// server the exec is over rather than still running.
+///
+/// Both echo the id the server minted and neither names the kind: the
+/// channel has no member for one, so the kind travels inside the reason
+/// string, which is where the server's agent loop reads it.
+pub(super) fn refusal_answer(ask: &decode::ExecRefusal) -> Vec<Vec<u8>> {
+    tracing::debug!(
+        provider = ID,
+        exec = ask.id,
+        kind = ask.kind,
+        "refusing an exec cursor asked this client to run"
+    );
+
+    let thrown = proto::ExecControl {
+        throw: buffa::MessageField::some(proto::ExecThrow {
+            id: ask.id,
+            error: Some(refusal_reason(&ask.kind)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let closed = proto::ExecControl {
+        stream_close: buffa::MessageField::some(proto::ExecStreamClose {
+            id: ask.id,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    [thrown, closed]
+        .into_iter()
+        .map(|control| {
+            proto::ClientMessage {
+                exec_control: buffa::MessageField::some(control),
+                ..Default::default()
+            }
+            .encode_to_vec()
+        })
+        .collect()
+}
+
+/// What the server's agent loop is told about a refused exec.
+///
+/// It names ganja, so the sentence reads as a client's policy rather than a
+/// malfunction, and it names the kind, so the loop can tell a refused shell
+/// from a refused file read and choose differently. The shipped client's own
+/// no-handler reason (`No handler found for server message of type <kind>`,
+/// `index.js@4272747`) is the shape being matched — a plain sentence, the
+/// kind in it, nothing machine-readable, because the channel offers no
+/// structured field for either.
+fn refusal_reason(kind: &str) -> String {
+    format!(
+        "ganja runs its tools itself and does not execute them for the server \
+         (no handler for {kind})"
+    )
+}
+
 /// The bytes answering one kv exchange, serviced against `blobs` — the
 /// turn's in-memory blob store — the way the plugin's `handleKvMessage`
 /// services its own (proxy.ts:1087-1120): a set stores the bytes and acks
@@ -244,7 +343,7 @@ mod tests {
 
     use super::{
         super::proto, ChatRequest, Message, context_answer, decode, fresh_id, kv_answer,
-        newest_user_text, run_message,
+        newest_user_text, refusal_answer, run_message,
     };
     use crate::protocol::Part;
 
@@ -382,6 +481,99 @@ mod tests {
                 "an absent prompt is absent, not empty"
             );
         }
+    }
+
+    /// The refusal's bytes decode back to the arms the shipped client's own
+    /// descriptor declares, in the order that client writes them: the throw
+    /// carrying the echoed id and a reason the server's agent loop can read,
+    /// then the stream close that ends the exchange.
+    #[test]
+    fn a_refused_exec_is_a_throw_naming_the_kind_and_then_a_stream_close() {
+        let refused = refusal_answer(&decode::ExecRefusal {
+            id: Some(5),
+            kind: "shell_stream_args".to_owned(),
+        });
+        assert_eq!(refused.len(), 2, "a throw, and the close that ends it");
+
+        let decoded: Vec<proto::ClientMessage> = refused
+            .iter()
+            .map(|message| {
+                proto::ClientMessage::decode_from_slice(message).expect("what was sent decodes")
+            })
+            .collect();
+
+        for message in &decoded {
+            assert!(
+                message.run_request.as_option().is_none()
+                    && message.exec_response.as_option().is_none()
+                    && message.kv_response.as_option().is_none(),
+                "a refusal travels the control channel and no other"
+            );
+        }
+
+        let thrown = decoded[0]
+            .exec_control
+            .as_option()
+            .and_then(|control| control.throw.as_option())
+            .expect("the throw first");
+        assert_eq!(thrown.id, Some(5), "the id the server minted comes back");
+        let reason = thrown
+            .error
+            .as_deref()
+            .expect("a reason, because the reason is the whole message");
+        assert!(
+            reason.contains("ganja") && reason.contains("shell_stream_args"),
+            "the refusal names who refused and what: {reason}"
+        );
+
+        let closed = decoded[1]
+            .exec_control
+            .as_option()
+            .expect("the control channel again");
+        assert!(
+            closed.throw.as_option().is_none(),
+            "the close is the exchange ending, not a second failure"
+        );
+        assert_eq!(
+            closed.stream_close.as_option().and_then(|close| close.id),
+            Some(5)
+        );
+
+        // The arm numbers themselves, on the wire: exec_control = 5 wraps
+        // the ClientMessage (tag 0x2a), stream_close = 1 (0x0a) and
+        // throw = 2 (0x12) are the arms inside it, and id = 1 (0x08) is the
+        // echo. The close carries nothing else, so its six bytes are the
+        // whole message.
+        assert_eq!(refused[1], b"\x2a\x04\x0a\x02\x08\x05");
+        // The throw's own length varies with the reason, so only its tags
+        // are fixed: byte 1 is that length.
+        assert_eq!(refused[0][0], 0x2a, "exec_control = 5, length-delimited");
+        assert_eq!(refused[0][2], 0x12, "throw = 2, length-delimited");
+    }
+
+    /// An id the server never sent is not invented on the refusal channel
+    /// either — the same discipline the context and kv answers hold.
+    #[test]
+    fn a_refusal_for_an_exec_without_an_id_invents_none() {
+        let refused = refusal_answer(&decode::ExecRefusal {
+            id: None,
+            kind: "no recognizable kind".to_owned(),
+        });
+
+        let decoded = proto::ClientMessage::decode_from_slice(&refused[0]).expect("decodes");
+        let thrown = decoded
+            .exec_control
+            .as_option()
+            .and_then(|control| control.throw.as_option())
+            .expect("the throw");
+        assert_eq!(thrown.id, None);
+        assert!(
+            thrown
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no recognizable kind")),
+            "an unnameable kind is still named as far as it can be: {thrown:?}"
+        );
     }
 
     /// The plugin's kv semantics, end to end: the set is stored and acked

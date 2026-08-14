@@ -43,8 +43,13 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// skipped it hung a real turn in silence (LIVE-OBSERVED 2026-08-10, one
 /// debug line then nothing until the process was killed). So [`frame`](Self::frame)
 /// hands the ask up as a [`ContextAsk`] for the stream layer to answer on
-/// the open request body, and an exec kind this build cannot answer fails
-/// the turn with the kind's name on it rather than reproduce the silence.
+/// the open request body. Every *other* exec kind — the tools cursor's
+/// server asks its own client to run — is handed up as an [`ExecRefusal`]
+/// instead, answered on the same body with a structured refusal rather than
+/// killing the turn (**D486**, declared in [`super::request`]): the server's
+/// agent loop reads a refusal the way it reads any other tool outcome and
+/// keeps generating, which is one more turn surviving than the failure this
+/// replaced.
 ///
 /// **The kv arm is never skipped either.** The server stores and reads
 /// conversation state mid-turn over the kv channel and waits on every
@@ -82,13 +87,16 @@ pub(super) struct Mapping {
 
 /// A mid-stream question the server waits on, carried up to the stream
 /// layer: the decode layer reads frames and holds no channel to answer one
-/// on, so the layer that owns the request body sends the reply. Two kinds,
-/// because the server waits on two channels — the exec channel's context
-/// ask and the kv channel's blob exchanges.
+/// on, so the layer that owns the request body sends the reply. Three kinds,
+/// because the server waits on two channels and one of them carries two
+/// different answers — the exec channel's context ask and its tool execs,
+/// and the kv channel's blob exchanges.
 #[derive(Debug, PartialEq)]
 pub(super) enum Ask {
     Context(ContextAsk),
     Kv(KvAsk),
+    /// A tool exec this build refuses to run for the server (**D486**).
+    Refuse(ExecRefusal),
 }
 
 /// The server's context ask, ids and nothing else — presence is the whole
@@ -99,6 +107,21 @@ pub(super) struct ContextAsk {
     /// answers are built that way (proxy.ts:1307-1310).
     pub(super) id: Option<u32>,
     pub(super) exec_id: Option<String>,
+}
+
+/// One tool exec the server asked this client to run, and this client will
+/// not (**D486**): the id the refusal must echo, and the kind's name, which
+/// travels into the refusal so the server's agent loop reads *what* was
+/// refused rather than that something was.
+///
+/// The exec id is deliberately absent. The shipped client's refusal channel
+/// carries the numeric id alone — no `exec_id`, no kind (`ExecClientThrow`,
+/// `index.js@6032526`) — so echoing one here would be inventing a field the
+/// answer has nowhere to put.
+#[derive(Debug, PartialEq)]
+pub(super) struct ExecRefusal {
+    pub(super) id: Option<u32>,
+    pub(super) kind: String,
 }
 
 /// One kv exchange the server opened: the id the answer must echo
@@ -160,16 +183,17 @@ impl Mapping {
                 }));
             }
 
-            // The server stops generating until an exec is answered, so a
-            // kind this build cannot answer ends the turn with its name on
-            // it — the alternative was the silent hang this arm's modelling
-            // exists to end.
-            events.push(ProviderEvent::Failed(ProviderError::Parse(format!(
-                "cursor made an exec request this build cannot answer ({}); \
-                 leaving it unanswered would hang the turn",
-                exec_kind(exec)
-            ))));
-            return None;
+            // Every other kind is a tool the server is asking this client
+            // to run for it, and this client runs its tools for its own
+            // session instead (**D486**). The server stops generating until
+            // an exec is answered either way, so the kind's name goes back
+            // as a refusal rather than as a turn-killing error: refused is
+            // an outcome the server's agent loop can act on, and unanswered
+            // is the silent hang this arm's modelling exists to end.
+            return Some(Ask::Refuse(ExecRefusal {
+                id: exec.id,
+                kind: exec_kind(exec),
+            }));
         }
 
         if let Some(kv) = message.kv_request.as_option() {
@@ -289,15 +313,17 @@ fn verdict(code: &str, message: &str) -> ProviderError {
     }
 }
 
-/// Names the kind an unanswerable exec request carried.
+/// Names the kind a refused exec request carried.
 ///
 /// The kinds this build does not model arrive as unknown fields, and the
 /// field number *is* the kind: the table is the plugin's args oneof
-/// (agent_pb.ts:6885-:6997), so the refusal names what the descriptor
-/// names. A number the table does not know is reported as itself — still
-/// enough to go derive — and span_context (= 19, agent_pb.ts:6875) rides
-/// beside the oneof without being a kind, so it is passed over rather than
-/// blamed.
+/// (agent_pb.ts:6885-:6997, re-confirmed field for field against the
+/// shipped client's own descriptor at `index.js@6039005`), so the refusal
+/// names what the descriptor names. A number the table does not know is
+/// reported as itself — still enough to go derive, and still refusable,
+/// because the refusal channel is keyed on the exec id rather than on the
+/// kind — and span_context (= 19, agent_pb.ts:6875) rides beside the oneof
+/// without being a kind, so it is passed over rather than blamed.
 fn exec_kind(exec: &proto::ExecRequest) -> String {
     let named = |number: u32| {
         Some(match number {
@@ -390,9 +416,22 @@ mod tests {
 
     use super::{
         super::{connect, proto},
-        Ask, ContextAsk, FinishReason, KvAsk, KvOp, Mapping, ProviderError, ProviderEvent,
-        model_list, verdict,
+        Ask, ContextAsk, ExecRefusal, FinishReason, KvAsk, KvOp, Mapping, ProviderError,
+        ProviderEvent, model_list, verdict,
     };
+
+    /// An exec request carrying one args arm by number, the way a kind this
+    /// build does not model arrives: the arm is an unknown field and the
+    /// field number is the kind.
+    fn exec_of_kind(id: u32, kind: u32) -> proto::ExecRequest {
+        let mut asked = proto::ExecRequest::default().with_id(id);
+        asked.__buffa_unknown_fields.push(buffa::UnknownField {
+            number: kind,
+            data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
+        });
+
+        asked
+    }
 
     /// A data frame holding one update, the way the server frames them.
     fn framed(update: proto::Update) -> Vec<u8> {
@@ -689,9 +728,6 @@ mod tests {
         );
     }
 
-    /// An exec kind this build does not model must end the turn with the
-    /// kind's name on it: the server waits on every exec, and the skipped
-    /// alternative was a silent hang.
     /// The plugin forwards thinking as thinking (proxy.ts:1059-1061), and
     /// so does this wire: a codex-family model reasons before it speaks,
     /// and calling that reply text would put it in the transcript's mouth.
@@ -812,62 +848,91 @@ mod tests {
         assert_eq!(super::update_arm(42), "field 42");
     }
 
+    /// The kind a live turn really died on: `shell_stream_args`, field 14 of
+    /// the args oneof — the server asking this client to run a shell for it.
+    /// It is a question to hand up with the kind named, never an event, and
+    /// no longer the failure that used to end the turn (**D486**).
     #[test]
-    fn an_exec_kind_this_build_cannot_answer_fails_the_turn_by_name() {
-        // The arm arrives as an unknown field; its number is the kind. The
-        // shell_args arm is field 2 of the plugin's oneof (agent_pb.ts:6885).
-        let mut asked = proto::ExecRequest::default().with_id(3);
-        asked.__buffa_unknown_fields.push(buffa::UnknownField {
-            number: 2,
-            data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
-        });
+    fn the_live_observed_shell_stream_exec_is_handed_up_as_a_refusal() {
+        let (events, asks) = mapped_asks(&exec_framed(exec_of_kind(5, 14)), false);
 
-        let (events, asks) = mapped_asks(&exec_framed(asked), false);
-        assert!(asks.is_empty(), "nothing to answer: {asks:?}");
         assert!(
-            matches!(
-                events.as_slice(),
-                [ProviderEvent::Failed(ProviderError::Parse(message))]
-                    if message.contains("shell_args")
-            ),
-            "{events:?}"
+            events.is_empty(),
+            "a refusal is an answer to send, not an event: {events:?}"
+        );
+        assert_eq!(
+            asks,
+            vec![Ask::Refuse(ExecRefusal {
+                id: Some(5),
+                kind: "shell_stream_args".to_owned(),
+            })]
         );
     }
 
-    /// A kind the table has never heard of is still named — by number —
-    /// and the span context riding beside the oneof is never mistaken for
-    /// one.
+    /// Every other named tool exec takes the same door, and the turn it
+    /// arrives on keeps going: the frames behind the refusal are still
+    /// mapped, and the stream still reaches its finish.
     #[test]
-    fn an_unheard_of_exec_kind_is_named_by_its_field_number() {
-        let mut asked = proto::ExecRequest::default();
+    fn a_named_tool_exec_is_refused_and_the_turn_carries_on_past_it() {
+        // shell_args is field 2 of the plugin's oneof (agent_pb.ts:6885).
+        let mut body = exec_framed(exec_of_kind(3, 2));
+        body.extend(framed(text("still generating")));
+        body.extend(framed(turn_ended()));
+        body.extend(end_stream("{}"));
+
+        let (events, asks) = mapped_asks(&body, false);
+        assert_eq!(
+            asks,
+            vec![Ask::Refuse(ExecRefusal {
+                id: Some(3),
+                kind: "shell_args".to_owned(),
+            })]
+        );
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta("still generating".to_owned()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ],
+            "a refused exec is not a dead turn"
+        );
+    }
+
+    /// The refusal channel is keyed on the exec id and names no kind, so a
+    /// kind no table has heard of is refusable too — named by number, which
+    /// is still enough to go derive. The span context riding beside the
+    /// oneof is never mistaken for a kind, and an exec carrying nothing
+    /// recognizable at all is refused rather than failed, because leaving
+    /// *it* unanswered would hang the turn just as surely.
+    #[test]
+    fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
+        let mut asked = exec_of_kind(4, 42);
         // span_context = 19 rides beside the args oneof (agent_pb.ts:6875).
         asked.__buffa_unknown_fields.push(buffa::UnknownField {
             number: 19,
             data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
         });
-        asked.__buffa_unknown_fields.push(buffa::UnknownField {
-            number: 42,
-            data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
-        });
 
-        let (events, _) = mapped_asks(&exec_framed(asked), false);
-        assert!(
-            matches!(
-                events.as_slice(),
-                [ProviderEvent::Failed(ProviderError::Parse(message))]
-                    if message.contains("field 42") && !message.contains("19")
-            ),
-            "{events:?}"
+        let (events, asks) = mapped_asks(&exec_framed(asked), false);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(
+            asks,
+            vec![Ask::Refuse(ExecRefusal {
+                id: Some(4),
+                kind: "field 42".to_owned(),
+            })],
+            "the span context is passed over rather than blamed"
         );
 
-        let (events, _) = mapped_asks(&exec_framed(proto::ExecRequest::default()), false);
-        assert!(
-            matches!(
-                events.as_slice(),
-                [ProviderEvent::Failed(ProviderError::Parse(message))]
-                    if message.contains("no recognizable kind")
-            ),
-            "{events:?}"
+        let (events, asks) = mapped_asks(&exec_framed(proto::ExecRequest::default()), false);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(
+            asks,
+            vec![Ask::Refuse(ExecRefusal {
+                id: None,
+                kind: "no recognizable kind".to_owned(),
+            })],
+            "an id the server never sent is not invented"
         );
     }
 
