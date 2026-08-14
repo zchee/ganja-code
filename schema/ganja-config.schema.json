@@ -18,7 +18,7 @@
     },
     "small_model": {
       "type": "string",
-      "description": "Cheaper model for the requests a session makes about itself — titles and summaries."
+      "description": "Cheaper model for the one request a session makes about itself: the title. Spelled `provider/model` like `model` and bound the same way — a spec naming another provider is left alone, and one the wire refuses falls back to the session's own model. Summaries are deliberately not included; they run on the turn's own model, as upstream's do."
     },
     "default_provider": {
       "type": "string",

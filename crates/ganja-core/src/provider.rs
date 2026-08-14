@@ -28,7 +28,7 @@ pub use ganja_provider::provider::*;
 
 use crate::{
     auth, catalog,
-    config::{Config, ProviderConfig, split_model},
+    config::{Config, ProviderConfig, model_bound_to, split_model},
 };
 
 /// A provider together with the model to ask, and anything the user should be
@@ -407,7 +407,10 @@ fn configured_provider(id: &str, entry: &ProviderConfig) -> Result<CompatProvide
 /// 1. `--model`, carried on [`Config::overrides`];
 /// 2. [`PROVIDER_ENV`] and [`MODEL_ENV`], where an empty [`MODEL_ENV`] counts
 ///    as unset and an empty [`PROVIDER_ENV`] is a provider nothing ships;
-/// 3. [`Config::model`], `"provider/model"`, split on its first slash;
+/// 3. [`Config::model`], `"provider/model"`, split on its first slash — and
+///    **bound** by that prefix: whichever tier above named the provider, this
+///    key's model half is consulted only when its own prefix names that same
+///    provider or names none at all ([`crate::config::model_bound_to`]);
 /// 4. [`Config::default_provider`], which names only a provider and is held
 ///    to the same two-tier lookup as everything above it;
 /// 5. the **oldest stored login** this build can run as — recorded when a
@@ -421,7 +424,10 @@ fn configured_provider(id: &str, entry: &ProviderConfig) -> Result<CompatProvide
 ///
 /// The model falls through its own tiers as before: the flag, [`MODEL_ENV`],
 /// the config's `model` key, then the catalog's default for whichever
-/// provider was chosen.
+/// provider was chosen. The first two are bare ids **for the provider the
+/// tiers above settled on**, exactly as their own docs say; only the config
+/// key carries a provider of its own, and only it can therefore be bound to
+/// another one and passed over.
 ///
 /// Whichever tier named the *provider*, the name is resolved against the
 /// builtins first and [`Config::provider`] second, so every route into this
@@ -473,10 +479,21 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
                 .clone()
                 .map(|provider| (provider, "the config's `default_provider` key"))
         });
-    let named_model = flag
+    // The two tiers that name a model and no provider, so neither can be
+    // bound to one: both are bare ids for whichever provider won above.
+    let overriding_model = flag
         .map(|(_, model)| model.to_owned())
-        .or_else(|| setting(MODEL_ENV))
-        .or_else(|| file.map(|(_, model)| model.to_owned()));
+        .or_else(|| setting(MODEL_ENV));
+    // And the tier that can: the config's key carries a provider of its own,
+    // and its model half is that provider's model rather than a name to hand
+    // to whoever was selected.
+    let configured_model = |provider_id: &str| {
+        config
+            .model
+            .as_deref()
+            .and_then(|spec| model_bound_to(spec, provider_id, "the config's `model` key"))
+            .map(str::to_owned)
+    };
 
     let (requested, named_by) = match requested {
         Some(named) => named,
@@ -488,7 +505,13 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
             None => {
                 return Ok(Selection {
                     provider: Arc::new(FakeProvider::default()),
-                    model: named_model.unwrap_or_else(|| fake::MODEL.to_owned()),
+                    // Reaching here means no tier named a provider at all, so
+                    // a config `model` that named one is not in this branch:
+                    // what the binding can pass over here is a spec naming
+                    // somebody else's model on a machine holding no logins.
+                    model: overriding_model
+                        .or_else(|| configured_model(fake::ID))
+                        .unwrap_or_else(|| fake::MODEL.to_owned()),
                     notice: Some(format!(
                         "{PROVIDER_ENV} is unset - replying from the built-in {} provider",
                         fake::ID
@@ -551,6 +574,10 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
             }
         },
     };
+
+    // Now that the provider is settled, the config key can be asked whether
+    // it was talking about this one.
+    let named_model = overriding_model.or_else(|| configured_model(&requested));
 
     // A model the tiers above *named* never reaches the defaulting at all: an
     // explicit choice is answered or refused, never substituted.

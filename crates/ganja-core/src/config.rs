@@ -618,16 +618,28 @@ pub struct Config {
     pub schema: Option<String>,
     /// Default model, `"provider/model"`, split on the **first** slash so that
     /// `openrouter/anthropic/claude-3` names the model `anthropic/claude-3`.
-    pub model: Option<String>,
-    /// Cheaper model for the requests a session makes about itself — titles
-    /// and summaries — as upstream means it.
     ///
-    /// **Accepted, and consulted by nothing.** A config carrying it is read
-    /// rather than refused, and `ganja config import-opencode` carries it
-    /// across, but no request here reads it: a title picks its model from the
-    /// catalog by price (`session.rs`'s `title_model`) and a summary reuses
-    /// the turn's own. Recorded the way every other honest absence here is,
-    /// because a key that is silently ignored is worse than one that says so.
+    /// The provider half **binds**: this key names a model of that provider's
+    /// and of nobody else's, so a session running as another one leaves it
+    /// alone rather than stripping the prefix and forwarding the rest — see
+    /// [`model_bound_to`].
+    pub model: Option<String>,
+    /// Cheaper model for the requests a session makes **about** itself, which
+    /// is exactly one request: the title.
+    ///
+    /// Spelled `"provider/model"` like [`model`](Self::model) and bound the
+    /// same way ([`model_bound_to`]): a spec naming the provider this session
+    /// runs as — or a bare one — is what the title request asks for, and one
+    /// naming another provider is left alone. A model the wire then refuses
+    /// costs one round trip and falls back to the session's own model through
+    /// the retry `session.rs`'s `request_title` already had; a config carrying
+    /// none leaves the pick to the catalog's cheapest chat-capable row.
+    ///
+    /// **Titles only, and summaries deliberately not**, which is upstream's
+    /// own division: `provider.ts`'s `getSmallModel` is read by `ensureTitle`
+    /// in `packages/opencode/src/session/prompt.ts:220` and by nothing else in
+    /// a session, while `compaction.create` is handed `lastUser.model` — the
+    /// turn's own. Upstream's `specs/v2/config.md:210` says the same in prose.
     pub small_model: Option<String>,
     /// Provider a session runs as when no other tier names one: a builtin id,
     /// or one of [`provider`](Self::provider)'s.
@@ -1366,6 +1378,46 @@ pub fn split_model(model: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// The model half of a `"provider/model"` config spec, when that spec belongs
+/// to the provider this session actually runs as.
+///
+/// A prefix is a claim about *whose* model this is, and the claim is honored
+/// in every direction:
+///
+/// - a spec naming the selected provider applies. The comparison is against
+///   whichever id was selected, so an entry from [`Config::provider`]'s own
+///   table binds exactly as a builtin's does — there is no list of names here
+///   to fall out of date;
+/// - a **bare** spec applies everywhere, because it claims nothing;
+/// - a spec naming somebody else is skipped, with one `tracing::info` naming
+///   both providers: the probe for "why was my model ignored".
+///
+/// Skipped rather than stripped, and skipped rather than refused. Stripping is
+/// the bug this exists to end — a config `model: "cursor/claude-x"` under
+/// `GANJA_PROVIDER=openai` sent openai a bare `claude-x` and earned a live 400
+/// — and refusing at load would let one standing config line break every
+/// session that runs on another provider, which is the same reason the
+/// [`effort`](Config::effort) key clears rather than refuses.
+///
+/// `named_by` is what the log line calls the spec, so the line says which key
+/// was passed over.
+#[must_use]
+pub fn model_bound_to<'a>(spec: &'a str, provider_id: &str, named_by: &str) -> Option<&'a str> {
+    match split_model(spec) {
+        (Some(named), _) if named != provider_id => {
+            tracing::info!(
+                key = named_by,
+                spec = spec,
+                names = named,
+                running_as = provider_id,
+                "the config names another provider's model; leaving it alone"
+            );
+            None
+        }
+        (_, model) => Some(model),
+    }
+}
+
 /// **The** directory ganja keeps its own things in, resolved once for
 /// everything that needs it: the global `ganja.jsonc`/`ganja.json`, the global
 /// `AGENTS.md`, and the `skills/` folder of [`default_skill_dirs`].
@@ -1873,7 +1925,7 @@ mod tests {
         AgentMode, AgentsConfig, Config, ConfigError, Dialect, HookCommand, HookHandler,
         HookMatcher, LspConfig, McpOauth, McpServer, NonZeroU64, NotificationEvent,
         NotificationMethod, Notifications, Overrides, StatuslineConfig, StatuslineElement,
-        ThemeMode, existing, merge_files, project_files, read, split_model,
+        ThemeMode, existing, merge_files, model_bound_to, project_files, read, split_model,
     };
     use crate::permission::{Action, Rule};
 
@@ -3173,6 +3225,55 @@ mod tests {
                 "splitting {spelled}"
             );
         }
+    }
+
+    /// The binding rule both config model keys ride, in every direction it has
+    /// (bead `s4w`): a prefix naming the selected provider applies, a bare
+    /// spec applies to whoever is running, and a prefix naming somebody else
+    /// yields nothing at all — never the stripped tail, which is what reached
+    /// a live openai request as a bare `claude-x` and came back a 400.
+    #[test]
+    fn a_prefixed_model_binds_to_the_provider_it_names_and_to_no_other() {
+        const KEY: &str = "the config's `model` key";
+
+        assert_eq!(
+            model_bound_to("anthropic/claude-sonnet-5", "anthropic", KEY),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            model_bound_to("cursor/claude-x", "openai", KEY),
+            None,
+            "the prefix names cursor, so openai is not asked for its tail"
+        );
+        assert_eq!(
+            model_bound_to("claude-sonnet-5", "openai", KEY),
+            Some("claude-sonnet-5"),
+            "a bare spec claims no provider, so it applies to whichever is running"
+        );
+
+        // Only the first slash separates, so a gateway's own two-part model id
+        // survives the rule intact.
+        assert_eq!(
+            model_bound_to("openrouter/anthropic/claude-3", "openrouter", KEY),
+            Some("anthropic/claude-3")
+        );
+
+        // A config-declared endpoint is compared exactly as a builtin is:
+        // there is no shipped list here to fall out of date, so an id this
+        // build has never heard of binds to itself and to nothing else.
+        assert_eq!(
+            model_bound_to("local-llama/tiny-instruct", "local-llama", KEY),
+            Some("tiny-instruct")
+        );
+        assert_eq!(
+            model_bound_to("local-llama/tiny-instruct", "anthropic", KEY),
+            None
+        );
+        assert_eq!(
+            model_bound_to("anthropic/claude-sonnet-5", "local-llama", KEY),
+            None,
+            "a builtin's spec does not travel to a config's endpoint either"
+        );
     }
 
     #[test]

@@ -1024,6 +1024,157 @@ async fn a_real_provider_titles_through_its_cheapest_stablemate() {
     assert_eq!(info.usage.input_tokens, 10);
 }
 
+/// The key that parsed, merged and did nothing (bead `4op`), now driven the
+/// whole way: through the engine, into the detached title task, and out as the
+/// model a real request names. The spelling is deliberately one no catalog
+/// carries — a table lookup on the way past would have swallowed it.
+#[tokio::test]
+async fn a_configured_small_model_is_what_the_title_request_asks_for() {
+    let (_dir, storage) = store();
+
+    let provider = LaneProvider::new(
+        "anthropic",
+        vec![
+            Ok(reply("sure thing", 10)),
+            Ok(reply("Titled by the small model", 5)),
+        ],
+    );
+    let engine = persistent(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        "claude-sonnet-5",
+        storage.clone(),
+    )
+    .with_small_model(Some("anthropic/claude-titler-9".to_owned()));
+
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine
+        .send(Command::SendPrompt {
+            text: "fix the flux capacitor please".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let sid = engine
+        .current_session()
+        .expect("the first prompt created a session")
+        .id;
+    let title_request =
+        eventually("the title request", || provider.requests().get(1).cloned()).await;
+    assert_eq!(
+        title_request.model, "claude-titler-9",
+        "the configured key decides the title model, and its provider prefix \
+         is not part of the id that travels"
+    );
+    assert_ne!(
+        title_request.model, "claude-haiku-4-5",
+        "the catalog's cheapest row is what this key exists to override"
+    );
+
+    let titled = eventually("the title write", || stored_info(&storage, &sid).title).await;
+    assert_eq!(titled, "Titled by the small model");
+}
+
+/// The binding rule at the title seam: a `small_model` belonging to another
+/// provider is left alone rather than stripped and asked for, and the session
+/// titles exactly as it would with no key at all.
+#[tokio::test]
+async fn a_small_model_naming_another_provider_leaves_the_title_alone() {
+    let (_dir, storage) = store();
+
+    let provider = LaneProvider::new(
+        "anthropic",
+        vec![
+            Ok(reply("sure thing", 10)),
+            Ok(reply("Fixing the flux capacitor", 5)),
+        ],
+    );
+    let engine = persistent(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        "claude-sonnet-5",
+        storage.clone(),
+    )
+    .with_small_model(Some("openai/gpt-5-nano".to_owned()));
+
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine
+        .send(Command::SendPrompt {
+            text: "fix the flux capacitor please".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let title_request =
+        eventually("the title request", || provider.requests().get(1).cloned()).await;
+    assert_eq!(
+        title_request.model, "claude-haiku-4-5",
+        "the key named openai's model, so this anthropic session picked the \
+         way it always did"
+    );
+}
+
+/// A `small_model` the wire will not serve costs one round trip and nothing
+/// else: the retry that exists for ChatGPT seats catches it and asks the
+/// session's own model, which is the one name already known to work here.
+#[tokio::test]
+async fn a_refused_small_model_falls_back_to_the_sessions_own_model() {
+    let (_dir, storage) = store();
+
+    let provider = LaneProvider::new(
+        "anthropic",
+        vec![
+            Ok(reply("sure thing", 10)),
+            Err(ProviderError::Transport(
+                "this model is not available".to_owned(),
+            )),
+            Ok(reply("Titled on the retry", 5)),
+        ],
+    );
+    let engine = persistent(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        "claude-sonnet-5",
+        storage.clone(),
+    )
+    .with_small_model(Some("claude-a-wire-refuses".to_owned()));
+
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine
+        .send(Command::SendPrompt {
+            text: "fix the flux capacitor please".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let sid = engine
+        .current_session()
+        .expect("the first prompt created a session")
+        .id;
+    let retry = eventually("the retried title request", || {
+        provider.requests().get(2).cloned()
+    })
+    .await;
+    assert_eq!(
+        provider.requests()[1].model,
+        "claude-a-wire-refuses",
+        "the bare key applies to whoever is running, and is taken at its word"
+    );
+    assert_eq!(
+        retry.model, "claude-sonnet-5",
+        "the refusal falls back to the session's own model, not to the catalog"
+    );
+
+    let titled = eventually("the title write", || stored_info(&storage, &sid).title).await;
+    assert_eq!(
+        titled, "Titled on the retry",
+        "a refused small model costs a round trip, not the title"
+    );
+}
+
 #[tokio::test]
 async fn a_failed_title_request_falls_back_to_the_prompt() {
     let (_dir, storage) = store();

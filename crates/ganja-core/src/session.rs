@@ -138,6 +138,10 @@ const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
 /// Characters a fallback title keeps of the first prompt.
 const FALLBACK_TITLE_CHARS: usize = 50;
 
+/// What a passed-over `small_model` is called in the one line that reports it,
+/// so the log names the key somebody wrote rather than this module's field.
+const SMALL_MODEL_KEY: &str = "the config's `small_model` key";
+
 /// The whole of the synthetic user message a `!` passthrough writes, ported
 /// verbatim from upstream `packages/opencode/src/session/prompt.ts`
 /// (`shellImpl`). The model reads it as the reason a `bash` call it never made
@@ -729,6 +733,14 @@ pub(crate) struct Turn {
     /// only the watcher ever reads it.
     pub(crate) session_id: SessionId,
     pub(crate) model: String,
+    /// The config's `small_model`, verbatim, for the one request that may ask
+    /// something other than [`Turn::model`]: the title.
+    ///
+    /// Unresolved on purpose — the spec carries a provider, and whether it
+    /// binds is a question about the provider *this* turn runs as, answered
+    /// where the title is asked. [`None`] is a config that named none, and
+    /// every scripted and golden run.
+    pub(crate) small_model: Option<String>,
     /// The option map of the catalog effort this turn runs under, resolved
     /// by the engine against [`Turn::model`] before the turn started. Rides
     /// the step and summarize requests — the two that ask this turn's model —
@@ -878,6 +890,11 @@ impl Turn {
             provider: Arc::clone(&host.provider),
             session_id: parts.session_id,
             model: parts.model,
+            // The session's, shared: a child's stored session is titled by the
+            // same path the parent's is, against the same provider instance,
+            // so a config key that decided one and not the other would be a
+            // key that works until you delegate.
+            small_model: host.small_model.clone(),
             // No effort: the selection is the session's and was validated
             // against the session's model, while a child may run a model of
             // the subagent's own choosing that the name was never checked
@@ -1394,11 +1411,19 @@ async fn spawn_title_if_untitled(turn: &Turn) {
 
     let provider = Arc::clone(&turn.provider);
     let model = turn.model.clone();
+    let small_model = turn.small_model.clone();
     let state = Arc::clone(&persist.state);
     let session = persist.session.clone();
 
     tokio::spawn(async move {
-        let title = match request_title(provider.as_ref(), &model, first_user).await {
+        let title = match request_title(
+            provider.as_ref(),
+            &model,
+            small_model.as_deref(),
+            first_user,
+        )
+        .await
+        {
             Some(title) => title,
             None => fallback,
         };
@@ -1409,14 +1434,16 @@ async fn spawn_title_if_untitled(turn: &Turn) {
     });
 }
 
-/// Asks the provider's cheapest chat-capable stablemate for a title, returning
-/// [`None`] for any failure — the caller owns the fallback.
+/// Asks the config's `small_model` — or, absent one, the provider's cheapest
+/// chat-capable stablemate — for a title, returning [`None`] for any failure:
+/// the caller owns the fallback.
 async fn request_title(
     provider: &dyn Provider,
     session_model: &str,
+    small_model: Option<&str>,
     first_user: Message,
 ) -> Option<String> {
-    let chosen = title_model(catalog::models(), provider.id(), session_model);
+    let chosen = title_model(catalog::models(), provider.id(), session_model, small_model);
 
     let mut events = match title_stream(provider, &chosen, first_user.clone()).await {
         Ok(events) => events,
@@ -1426,6 +1453,9 @@ async fn request_title(
         // (`responses.rs`'s `ALLOWED_MODELS`) and the openai catalog's cheapest
         // chat-capable row is none of them, so the capability filter alone
         // would still leave every subscription session titled by the fallback.
+        // It is also the whole of what checks a configured `small_model`: that
+        // key is taken at its word and asked for, and a wire that will not
+        // serve it lands exactly here.
         // The session's own model is the one candidate already validated by
         // construction — the turn that just earned this title ran on it — and
         // the guard keeps a provider that refused *that* from being asked
@@ -1505,8 +1535,18 @@ async fn title_stream(
     provider.stream(request, CancellationToken::new()).await
 }
 
-/// The model a title request asks for: `provider_id`'s cheapest **chat-capable**
-/// row, or `session_model` when the catalog offers none.
+/// The model a title request asks for: what the config's `small_model` named
+/// when it named one of `provider_id`'s, else `provider_id`'s cheapest
+/// **chat-capable** row, else `session_model` when the catalog offers none.
+///
+/// The config key wins outright rather than joining the ranking, which is
+/// upstream's own shape: `getSmallModel` returns a configured spec before it
+/// walks its family priorities at all. Nothing is validated against the
+/// catalog on the way past — a table that does not carry the row is not the
+/// same thing as a wire that will not serve it, and this build has whole
+/// providers (cursor, every config-declared endpoint) the catalog knows
+/// nothing about. The wire is the authority, and its refusal is caught one
+/// round trip later by [`request_title`]'s retry.
 ///
 /// Cheapest by fresh-input price is upstream's "small model" in spirit, and it
 /// was the whole of the rule until a ChatGPT-seat session was found asking
@@ -1533,7 +1573,20 @@ fn title_model(
     rows: impl Iterator<Item = Arc<catalog::ModelInfo>>,
     provider_id: &str,
     session_model: &str,
+    small_model: Option<&str>,
 ) -> String {
+    // A config that named one has answered the question, and the catalog is
+    // not asked a second opinion — upstream's own order, where a `small_model`
+    // returns before the family-priority walk runs at all
+    // (`provider.ts`'s `getSmallModel`). Bound to this provider first: the
+    // spec spells a provider, and one naming another's model is not this
+    // session's to ask for (`config::model_bound_to`).
+    if let Some(named) = small_model
+        .and_then(|spec| crate::config::model_bound_to(spec, provider_id, SMALL_MODEL_KEY))
+    {
+        return named.to_owned();
+    }
+
     rows.filter(|info| info.provider_id == provider_id && info.tool_call)
         .min_by(|a, b| a.pricing.input.total_cmp(&b.pricing.input))
         // A provider the catalog does not know — and one whose every row was
@@ -4468,6 +4521,7 @@ mod tests {
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
             session_id: SessionId::from("ses_fixture".to_owned()),
             model: fake::MODEL.to_owned(),
+            small_model: None,
             effort_options: serde_json::Map::new(),
             system: None,
             reminders: Vec::new(),
@@ -4879,6 +4933,7 @@ mod tests {
             provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
             model: fake::MODEL.to_owned(),
+            small_model: None,
             agents: Arc::new(
                 crate::agent::Registry::from_config(&crate::config::Config::default())
                     .expect("the default config resolves agents"),
@@ -5104,7 +5159,7 @@ mod tests {
 
     #[test]
     fn the_title_model_is_never_a_row_that_cannot_be_given_tools() {
-        let chosen = title_model(openai_rows().into_iter(), "openai", "gpt-5.4");
+        let chosen = title_model(openai_rows().into_iter(), "openai", "gpt-5.4", None);
 
         assert_eq!(
             chosen, "gpt-5-nano",
@@ -5116,7 +5171,7 @@ mod tests {
     /// a pick that read the price before the provider would take it.
     #[test]
     fn the_title_model_is_only_ever_one_the_session_provider_serves() {
-        let chosen = title_model(openai_rows().into_iter(), "openai", "gpt-5.4");
+        let chosen = title_model(openai_rows().into_iter(), "openai", "gpt-5.4", None);
 
         assert_ne!(chosen, "claude-haiku-4-5");
     }
@@ -5127,16 +5182,86 @@ mod tests {
     #[test]
     fn a_provider_with_no_chat_capable_row_keeps_the_sessions_own_model() {
         assert_eq!(
-            title_model(openai_rows().into_iter(), "cursor", "default"),
+            title_model(openai_rows().into_iter(), "cursor", "default", None),
             "default",
             "an uncataloged provider keeps its session model"
         );
 
         let embeddings_only = vec![row("openai", "text-embedding-3-small", 0.02, false)];
         assert_eq!(
-            title_model(embeddings_only.into_iter(), "openai", "gpt-5.4"),
+            title_model(embeddings_only.into_iter(), "openai", "gpt-5.4", None),
             "gpt-5.4",
             "a roster filtered to nothing must not leave the pick empty"
+        );
+    }
+
+    /// The key that parsed, merged and did nothing (bead `4op`): a configured
+    /// `small_model` is what the title asks for, whether it names this
+    /// provider explicitly or names nobody, and whether or not the catalog
+    /// carries the row at all — the wire is the authority on that, and its
+    /// refusal is caught by `request_title`'s retry.
+    #[test]
+    fn a_configured_small_model_is_what_the_title_asks_for() {
+        for spec in ["openai/gpt-5-nano", "gpt-5-nano"] {
+            assert_eq!(
+                title_model(openai_rows().into_iter(), "openai", "gpt-5.4", Some(spec)),
+                "gpt-5-nano",
+                "{spec} names this session's provider, so it decides the pick"
+            );
+        }
+
+        assert_eq!(
+            title_model(
+                openai_rows().into_iter(),
+                "openai",
+                "gpt-5.4",
+                Some("openai/a-row-no-table-carries")
+            ),
+            "a-row-no-table-carries",
+            "the catalog is not asked for a second opinion on a configured spec"
+        );
+
+        // And on a provider the catalog knows nothing about, which is where a
+        // key like this earns the most: there is no cheapest row to fall back
+        // to, so without it every cursor session titles on its own model.
+        assert_eq!(
+            title_model(
+                openai_rows().into_iter(),
+                "cursor",
+                "default",
+                Some("cursor/composer-1")
+            ),
+            "composer-1"
+        );
+    }
+
+    /// The other half of the binding rule at this seam: a spec belonging to
+    /// somebody else is passed over rather than stripped and asked for, and
+    /// the pick is the one the session would have made with no key at all.
+    #[test]
+    fn a_small_model_naming_another_provider_leaves_the_title_pick_alone() {
+        assert_eq!(
+            title_model(
+                openai_rows().into_iter(),
+                "openai",
+                "gpt-5.4",
+                Some("anthropic/claude-haiku-4-5")
+            ),
+            "gpt-5-nano",
+            "the anthropic row is in this table and is cheaper; binding is what \
+             keeps it out of an openai request"
+        );
+
+        // The same spec, now on the provider it names: the rule is about whose
+        // model it is, not about which id is special.
+        assert_eq!(
+            title_model(
+                openai_rows().into_iter(),
+                "anthropic",
+                "claude-sonnet-5",
+                Some("anthropic/claude-haiku-4-5")
+            ),
+            "claude-haiku-4-5"
         );
     }
 }
