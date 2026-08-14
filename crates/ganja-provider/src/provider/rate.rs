@@ -111,6 +111,13 @@ impl RateWindows {
     /// *does* say replaces the whole set, because the vendor sends its buckets
     /// together and a half-updated set would mix two moments.
     pub fn record(&self, headers: &HeaderMap, now: SystemTime) {
+        // The W-A1 probe, on the one seam every wire's response already passes
+        // through: names only, never values. See [`header_names`].
+        tracing::debug!(
+            names = ?header_names(headers),
+            "a provider response carried these header names"
+        );
+
         let windows = parse(headers, now);
         if windows.is_empty() {
             return;
@@ -167,6 +174,30 @@ const FAMILIES: [Family; 2] = [
 
 /// The three things a bucket needs, in the spelling both families use.
 const FIELDS: [&str; 3] = ["limit", "remaining", "reset"];
+
+/// The **names** of the headers a response carried, each once, in the map's
+/// own order — the W-A1 probe of
+/// `.omc/plans/2026-08-14-usage-meters-cursor-exec.md`.
+///
+/// **A value is never returned and never logged.** That is a hard rule rather
+/// than a style choice: a response header is a place auth-adjacent material
+/// arrives — a rotated token, a `set-cookie`, an id that names somebody's
+/// account — and the whole of this module's discipline is that a header value
+/// is a fact about somebody's account, said above [`parse`] and kept here.
+/// `crates/ganja-core/tests/secrets_env.rs`'s canary is only as good as the
+/// modules that hand it nothing to catch.
+///
+/// A name is also the whole of the question the probe asks. Whether the
+/// plan-limit meters D471 left unbuilt are implementable per credential
+/// (**D485**) is decided by *which spellings* a backend sends: [`FAMILIES`] is
+/// prefix-driven, so the next family row is chosen by a name, and how much of
+/// anybody's budget is left decides nothing about whether the row exists.
+fn header_names(headers: &HeaderMap) -> Vec<&str> {
+    // `keys`, not the `(name, value)` iteration `parse` uses: a multi-valued
+    // header would otherwise be listed once per value, which reads as a
+    // backend sending more than it did.
+    headers.keys().map(|name| name.as_str()).collect()
+}
 
 /// Every complete bucket `headers` describes, relative to `now`.
 ///
@@ -380,7 +411,7 @@ mod tests {
 
     use reqwest::header::{HeaderMap, HeaderValue};
 
-    use super::{RateWindow, RateWindows, parse, rfc3339};
+    use super::{RateWindow, RateWindows, header_names, parse, rfc3339};
 
     /// A fixed "now" so a duration-spelled reset lands somewhere a test can
     /// name, rather than wherever the clock happens to be.
@@ -619,6 +650,42 @@ mod tests {
         };
 
         assert!((window.used() - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// The W-A1 probe's own rule, pinned on the shape the log line renders:
+    /// what the instrument yields is names, and a value never rides along —
+    /// neither in the returned list nor in the `?`-formatted debug field
+    /// [`RateWindows::record`] logs it through.
+    #[test]
+    fn the_header_probe_yields_names_and_never_the_values_beside_them() {
+        // Header names a real backend sends beside material nobody wants in a
+        // log file, each paired with the value that must not appear.
+        let sensitive = [
+            ("set-cookie", "session=sk-live-do-not-log-me"),
+            ("authorization", "Bearer sk-ant-not-a-real-key"),
+            ("anthropic-organization-id", "org-0123456789abcdef"),
+            ("x-ratelimit-remaining-requests", "9"),
+        ];
+
+        let map = headers(&sensitive);
+        let names = header_names(&map);
+        let rendered = format!("{names:?}");
+
+        for (name, value) in sensitive {
+            assert!(
+                names.contains(&name),
+                "{name} is what the probe exists to report"
+            );
+            assert!(
+                !rendered.contains(value),
+                "{name}'s value must not reach a log line"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            sensitive.len(),
+            "each header is named once and nothing else is added"
+        );
     }
 
     /// The store keeps the newest complete set, and a response that said
