@@ -694,6 +694,22 @@ pub struct Config {
     /// [`SkillsConfig`] and [`default_skill_dirs`].
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Whether this session carries its project's own memory — the
+    /// `MEMORY.md` index and the topic files beside it, kept under the
+    /// project's data directory and maintained by the model itself
+    /// (**D478**, declared at [`crate::instruction::memory_dir`]).
+    ///
+    /// **Absent is off**, which is the deliberate divergence from Claude
+    /// Code's default-on: switching it on gives a session standing prompt
+    /// weight it did not have and a door to write files *outside* the
+    /// worktree, and neither is something a checkout should acquire by being
+    /// opened. [`Config::memory_enabled`] is what reads it.
+    ///
+    /// An [`Option`] rather than a bare `bool` for [`Config::snapshot`]'s
+    /// reason: a tier that says nothing has to leave the tier below it alone,
+    /// where a plain `bool` would have every tier assert a default and a
+    /// project file with no opinion would switch a global `true` back off.
+    pub memory: Option<bool>,
     /// Whether this session snapshots the working tree, which is what `/undo`
     /// restores from.
     ///
@@ -1050,6 +1066,17 @@ impl Config {
         self.snapshot != Some(false)
     }
 
+    /// Whether this session carries its project's memory; see
+    /// [`Config::memory`].
+    ///
+    /// The mirror image of [`Config::snapshots_enabled`], and deliberately
+    /// spelled the other way round: that one is on until a tier says `false`,
+    /// this one is off until a tier says `true`.
+    #[must_use]
+    pub fn memory_enabled(&self) -> bool {
+        self.memory == Some(true)
+    }
+
     /// Whether `webfetch` may reach a private address; see
     /// [`WebfetchConfig::allow_private`].
     #[must_use]
@@ -1123,6 +1150,7 @@ impl Config {
         overlay(&mut self.theme, other.theme);
         overlay(&mut self.theme_mode, other.theme_mode);
         overlay(&mut self.shell, other.shell);
+        overlay(&mut self.memory, other.memory);
         overlay(&mut self.snapshot, other.snapshot);
         overlay(&mut self.agents.concurrency, other.agents.concurrency);
         overlay(&mut self.tui.notifications, other.tui.notifications);
@@ -1831,6 +1859,28 @@ mod tests {
         merged.merge(parse(r#"{"snapshot": false}"#).expect("it parses"));
         assert_eq!(merged.snapshot, Some(false));
         assert!(!merged.snapshots_enabled());
+    }
+
+    /// And the key that reads the other way round: memory is **off** until a
+    /// config asks for it (**D478**), because switching it on adds standing
+    /// prompt weight and a door to write outside the worktree.
+    #[test]
+    fn memory_is_off_until_a_config_asks_for_it() {
+        let absent = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        assert_eq!(absent.memory, None);
+        assert!(!absent.memory_enabled());
+
+        let asked = parse(r#"{"memory": true}"#).expect("it parses");
+        assert_eq!(asked.memory, Some(true));
+        assert!(asked.memory_enabled());
+
+        // A tier that says nothing leaves the tier below it alone, and a
+        // closer `false` still wins — the reason the field is an `Option`.
+        let mut merged = asked;
+        merged.merge(parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses"));
+        assert!(merged.memory_enabled(), "silence is not a refusal");
+        merged.merge(parse(r#"{"memory": false}"#).expect("it parses"));
+        assert!(!merged.memory_enabled());
     }
 
     /// Claude's own block, pasted whole: the shape is kept so that it can be.

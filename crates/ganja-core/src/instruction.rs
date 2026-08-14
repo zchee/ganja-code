@@ -49,6 +49,11 @@
 //!   happens (`tool::skill`'s module docs); named here because this is the file
 //!   that decides what a model is *told* it can load, and a reader who only
 //!   ever opens this one would otherwise find no trace of the reason.
+//! - **D478** — a session whose config asks for it carries its project's own
+//!   memory: an index and the topic files beside it, kept outside the
+//!   repository and maintained by the model through the ordinary file tools.
+//!   Where it lives, what the block says and why the text is ganja's own
+//!   rather than ported are all declared at [`memory_dir`].
 //! - **D480** — instruction files **below** the project root are walked in
 //!   lazily as the session touches files under them; the walker, the carrier
 //!   and the honest alternatives are all declared at [`nested_files`].
@@ -100,6 +105,18 @@ const HEADER: &str = "Instructions from: ";
 /// splitter and the composer can never disagree about where the block starts.
 const SKILLS_HEAD: &str =
     "Skills provide specialized instructions and workflows for specific tasks.";
+
+/// Directory a project's memory lives in, under its own data directory.
+const MEMORY_DIR: &str = "memory";
+
+/// The index inside it: one line per topic file beside it.
+const MEMORY_INDEX: &str = "MEMORY.md";
+
+/// The first line of the memory section, shared with [`suffix_measure`] for
+/// [`SKILLS_HEAD`]'s reason: the splitter and the composer must not be able to
+/// disagree about where a block starts.
+const MEMORY_HEAD: &str =
+    "Project memory: durable facts about this project, kept outside the repository.";
 
 /// Days in each month of a non-leap year, for [`civil_date`].
 const MONTH_LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -285,6 +302,17 @@ fn suffix_from(
         prompt.push_str(&content);
     }
 
+    // After the instruction files and before the skills, which is where it
+    // belongs on both sides: memory is instruction text — facts the model is
+    // told, in the same voice as an `AGENTS.md` — and upstream's rule that the
+    // skills go last is not this feature's to bend (**D478**, at
+    // [`memory_dir`]).
+    if config.memory_enabled()
+        && let Some(directory) = memory_dir(cwd)
+    {
+        prompt.push_str(&memory_section(&directory));
+    }
+
     // Last, as upstream orders it, and only when there is something to list;
     // see the module's `skills-block-omitted-when-there-are-none`.
     if let Some(block) = skills_block(&skill::discover(roots)) {
@@ -306,15 +334,24 @@ fn suffix_from(
 pub(crate) struct SuffixMeasure {
     /// The environment block: everything before the first instruction file.
     pub environment: usize,
-    /// The instruction files, headers included.
+    /// The instruction files, headers included — and the memory section with
+    /// them, which is what makes `/context` price memory as instructions
+    /// rather than as weight nobody can see (**D478**).
     pub instructions: usize,
     /// The skills block, when one was composed.
     pub skills: usize,
 }
 
 /// Measures the composed `suffix` by the markers [`suffix_from`] wrote into
-/// it: the first [`HEADER`] line opens the instruction files, and
-/// [`SKILLS_HEAD`] opens the skills block, always last.
+/// it: the first [`HEADER`] line opens the instruction files, [`MEMORY_HEAD`]
+/// opens the memory section beside them, and [`SKILLS_HEAD`] opens the skills
+/// block, always last.
+///
+/// The **earliest** of the three openers ends the environment block, rather
+/// than the first one that exists: the memory section carries a [`HEADER`]
+/// line of its own for the index file it quotes, so a session with memory on
+/// and no instruction files of its own would otherwise have its memory
+/// heading counted as environment.
 ///
 /// A measurement of the string the request path already holds — never a
 /// second composition, which could disagree with what the wire carries — so
@@ -323,9 +360,14 @@ pub(crate) struct SuffixMeasure {
 /// categories and changes no total.
 pub(crate) fn suffix_measure(suffix: &str) -> SuffixMeasure {
     let files = suffix.find(&format!("\n{HEADER}"));
+    let memory = suffix.find(&format!("\n{MEMORY_HEAD}"));
     let skills = suffix.find(&format!("\n{SKILLS_HEAD}"));
 
-    let environment_end = files.or(skills).unwrap_or(suffix.len());
+    let environment_end = [files, memory, skills]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(suffix.len());
     let instructions_end = skills.unwrap_or(suffix.len());
 
     SuffixMeasure {
@@ -547,6 +589,144 @@ fn clamped(content: &str, named: &str) -> (String, bool) {
         ),
         true,
     )
+}
+
+/// Where this project's memory lives — `<data dir>/memory` — or nothing when
+/// this machine has no data directory to hang it off (**D478**).
+///
+/// # What the feature is
+///
+/// A session whose config says `memory: true` carries a small store of
+/// durable facts about the project it is working in: `MEMORY.md` is the
+/// index, and each topic is a file of its own beside it. The whole of it is
+/// read into every request's system prompt by [`memory_section`], and the
+/// whole of it is maintained by the **model** through the ordinary `read`,
+/// `write` and `edit` tools — there is no memory tool, and deliberately not:
+/// a file the model already knows how to write is one fewer thing to teach
+/// it, and a topic file is nothing but a file.
+///
+/// # Where it lives, and why not in the repository
+///
+/// [`Project::data_dir`], the same per-project home the permission answers
+/// and the session store already use — ganja's analogue of Claude Code's
+/// `~/.claude/projects/<hash>/memory/`. Inside the worktree was the obvious
+/// alternative and is wrong: memory is one person's accumulated notes about a
+/// checkout, and a checkout is shared. Nothing is created here; the first
+/// write creates what it needs, so a session that records nothing leaves no
+/// empty directory behind.
+///
+/// # The block is ganja's own text
+///
+/// Claude Code's real memory prompt is not public documentation, so the
+/// upkeep instructions in [`memory_section`] are **synthesized, not ported** —
+/// the same posture D477 took for the plan door upstream describes and does
+/// not implement. What is ported is the *shape* the feature has from the
+/// outside: an index, topic files beside it, and a model that keeps them.
+///
+/// # Off unless asked
+///
+/// [`Config::memory_enabled`] is false unless a config says otherwise, where
+/// Claude's is on. Two reasons, both recorded at the config key: a session
+/// with memory on writes files **outside** the worktree, and it carries a
+/// standing block of prompt weight for as long as it runs. Neither should
+/// arrive because somebody opened a checkout.
+///
+/// # The door
+///
+/// A write under this directory is a write outside the project, which the
+/// permission engine asks about by default — twice, once for the tool and
+/// once for the location gate. `crate::agent`'s shared defaults open exactly
+/// this directory and nothing else when memory is on; the reasoning, and what
+/// a subagent does and does not inherit of it, is written there.
+#[must_use]
+pub fn memory_dir(cwd: &Path) -> Option<PathBuf> {
+    match Project::resolve(cwd).data_dir() {
+        Ok(directory) => Some(directory.join(MEMORY_DIR)),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "project memory has nowhere to live on this machine and is off for this session"
+            );
+            None
+        }
+    }
+}
+
+/// How the model is told to keep the memory it was just shown.
+///
+/// Four questions, in the order somebody would ask them: how to write one
+/// down, what is worth writing down, what is not, and the one thing that
+/// never is. The last is the guard for this feature's own worst outcome — a
+/// credential recorded into a file that outlives the session that saw it —
+/// and it is stated as a prohibition rather than as advice because a model
+/// reading advice weighs it against whatever else it was told.
+const MEMORY_UPKEEP: &str = "\
+Keeping it: record a fact by writing a file named for its one topic in that \
+directory, then adding a one-line entry naming the file to MEMORY.md. Correct \
+a fact in place; delete a file that has stopped being true, and drop its line \
+from the index with it.
+Worth recording: a correction the user made, a preference they stated as \
+standing, a fact about this project that its own files do not say.
+Not worth recording: anything true only of this session, anything the \
+repository already carries — its files are read on every session — or a guess.
+Never record a secret. No API key, token, password or other credential belongs \
+in these files, whatever it was read from and whoever asks: say that you did \
+not record it instead.";
+
+/// The memory section of the system prompt for the project whose memory lives
+/// in `directory`.
+///
+/// Three parts, in this order: what memory is and where it is, the index as it
+/// stands now, then [`MEMORY_UPKEEP`]. The facts come before the upkeep rules
+/// because the facts are the point — the rules read as a footer to them, which
+/// is also how they read to a person.
+///
+/// **An absent index is not an empty section.** The upkeep block is emitted on
+/// its own, because a model that is never told how to start one can never
+/// write the first fact, and a feature that only works once it already works
+/// is no feature. An unreadable index is treated the same way as an absent
+/// one, for [`suffix_from`]'s reason: naming a file the model was not given
+/// is worse than silence.
+///
+/// The index is clamped by [`clamped`], the marker naming the **real path** so
+/// the model can open the rest itself — which it can, since these are its own
+/// files and the door is open.
+fn memory_section(directory: &Path) -> String {
+    let index = directory.join(MEMORY_INDEX);
+    let named = index.display().to_string();
+    let content = std::fs::read_to_string(&index)
+        .ok()
+        .filter(|content| !content.is_empty());
+
+    let (mut present, mut clamped_index) = (false, false);
+    let mut block = format!(
+        "\n{MEMORY_HEAD}\nThey live in {}. MEMORY.md there is the index, and each \
+         topic is a file of its own beside it; all of them are ordinary files, \
+         read and written with the usual tools.\n",
+        directory.display()
+    );
+    if let Some(content) = content {
+        let (body, was_clamped) = clamped(&content, &named);
+        (present, clamped_index) = (true, was_clamped);
+        block.push_str(HEADER);
+        block.push_str(&named);
+        block.push('\n');
+        block.push_str(&body);
+        block.push('\n');
+    }
+    block.push_str(MEMORY_UPKEEP);
+
+    // Paths and flags only. What memory holds is exactly the class of thing
+    // that must not be copied into a log — the prompt is where it belongs and
+    // the only place it goes.
+    tracing::debug!(
+        index = named.as_str(),
+        present,
+        clamped = clamped_index,
+        "the project's memory joined the prompt"
+    );
+
+    block
 }
 
 /// What the model is told about the skills it can load, or nothing when it can
@@ -1802,6 +1982,118 @@ mod tests {
             block.len() < long.len(),
             "a clamped file is shorter than the file"
         );
+    }
+
+    /// The memory section (**D478**): what it says, and in which order. The
+    /// facts first, the upkeep rules after them, and the index named by the
+    /// real path it sits at — the model's own file, which it can open.
+    #[test]
+    fn the_memory_section_carries_the_index_and_then_the_rules_for_keeping_it() {
+        let directory = temporary();
+        let memory = directory.path().join("memory");
+        plant(&memory.join("MEMORY.md"), "- style: prefers explicit types");
+
+        let section = super::memory_section(&memory);
+        let index = memory.join("MEMORY.md").display().to_string();
+
+        assert!(
+            section.starts_with(&format!("\n{}", super::MEMORY_HEAD)),
+            "{section}"
+        );
+        assert!(
+            section.contains(&format!("{HEADER}{index}\n- style: prefers explicit types")),
+            "{section}"
+        );
+        let facts = section
+            .find("prefers explicit types")
+            .expect("the index is quoted");
+        let upkeep = section
+            .find("Keeping it: record a fact")
+            .expect("the upkeep block follows it");
+        assert!(facts < upkeep, "the facts come before the rules: {section}");
+        assert!(
+            section.contains("Never record a secret."),
+            "the one prohibition this feature exists to carry: {section}"
+        );
+    }
+
+    /// A project with nothing recorded yet still gets the upkeep block, and
+    /// no header for a file that is not there. Bootstrapping is the whole
+    /// reason: a model never told how to start an index can never write the
+    /// first fact.
+    #[test]
+    fn a_project_with_no_memory_yet_is_told_how_to_start_one() {
+        let directory = temporary();
+        let memory = directory.path().join("memory");
+
+        let section = super::memory_section(&memory);
+
+        assert!(section.contains("Keeping it: record a fact"), "{section}");
+        assert!(
+            !section.contains(HEADER),
+            "nothing is quoted from a file that does not exist: {section}"
+        );
+        assert!(
+            !memory.exists(),
+            "and composing a prompt creates nothing on disk"
+        );
+    }
+
+    /// An index over the budget is cut with the marker pointing at the real
+    /// path, which is a path the model may open — its own file, behind the
+    /// door `agent::memory_door` holds for it.
+    #[test]
+    fn an_oversized_memory_index_says_how_much_was_cut_and_where_the_rest_is() {
+        let directory = temporary();
+        let memory = directory.path().join("memory");
+        plant(&memory.join("MEMORY.md"), &"x".repeat(NESTED_MAX * 2));
+
+        let section = super::memory_section(&memory);
+        let index = memory.join("MEMORY.md").display().to_string();
+
+        assert!(
+            section.contains(&format!("...{NESTED_MAX} bytes truncated...")),
+            "the clamp says how much it cut"
+        );
+        assert!(
+            section.contains(&format!("Read {index} for the rest.")),
+            "and where the rest is, by the path it is really at"
+        );
+    }
+
+    /// The honesty clause (**D478**, AC5): whatever memory adds to the prompt
+    /// is priced as *instructions*, both when the project has instruction
+    /// files of its own and when the memory section is the only thing between
+    /// the environment block and the skills.
+    #[test]
+    fn the_memory_section_is_measured_as_instructions_either_way() {
+        let directory = temporary();
+        let memory = directory.path().join("memory");
+        plant(&memory.join("MEMORY.md"), "- the API is deployed by hand");
+
+        let environment = super::environment(directory.path(), "fake-1");
+        let section = super::memory_section(&memory);
+
+        for files in ["", "\nInstructions from: /api/AGENTS.md\nrun the tests"] {
+            let suffix = format!("{environment}{files}{section}");
+            let measure = suffix_measure(&suffix);
+
+            assert_eq!(
+                measure.environment + measure.instructions + measure.skills,
+                suffix.chars().count(),
+                "the parts still partition the suffix"
+            );
+            assert_eq!(
+                measure.environment,
+                environment.chars().count(),
+                "the environment block ends where it ended: {suffix}"
+            );
+            assert_eq!(
+                measure.instructions,
+                files.chars().count() + section.chars().count(),
+                "and everything memory added is instruction weight: {suffix}"
+            );
+        }
     }
 
     #[test]

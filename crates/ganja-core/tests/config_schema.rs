@@ -153,6 +153,7 @@ const KITCHEN_SINK: &str = r#"{
   },
   "webfetch": { "allow_private": true },
   "skills": { "paths": ["~/.claude/skills"], "urls": ["https://example/skills"] },
+  "memory": true,
   "snapshot": false,
   "tui": {
     "notifications": ["turn-complete", "approval-requested"],

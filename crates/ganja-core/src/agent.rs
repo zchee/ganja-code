@@ -49,6 +49,8 @@
 //! refusal the model reads, which is the same outcome by the route this port
 //! already has for every other refusal.
 
+use std::path::Path;
+
 use crate::{
     config::{AgentConfig, AgentMode, Config},
     permission::{Action, EXTERNAL_DIRECTORY, Rule},
@@ -224,8 +226,15 @@ impl Registry {
 /// so there is nothing for an agent to add (**D7**).
 fn builtins(config: &Config) -> Vec<Agent> {
     let user = config.permission.rules();
-    let assemble = |own: Vec<Rule>| {
+    // `attended` is what decides whether the memory door is opened for an
+    // agent: a person is watching a primary agent's turn and nobody is
+    // watching a subagent's, and memory is written by whoever is being
+    // watched. See [`memory_door`].
+    let assemble = |attended: bool, own: Vec<Rule>| {
         let mut rules = defaults();
+        if attended {
+            rules.extend(memory_door(config));
+        }
         rules.extend(own);
         rules.extend(user.iter().cloned());
         rules
@@ -254,7 +263,7 @@ fn builtins(config: &Config) -> Vec<Agent> {
             // ask-by-default entry names, and `question` appears in neither.
             // Whether it should instead gain an explicit rule is a decision
             // deliberately not taken here.
-            rules: assemble(vec![rule("plan_enter", ANY, Action::Allow)]),
+            rules: assemble(true, vec![rule("plan_enter", ANY, Action::Allow)]),
         },
         Agent {
             name: PLAN.to_owned(),
@@ -265,25 +274,28 @@ fn builtins(config: &Config) -> Vec<Agent> {
             // plan is the reminder injected on every one of its turns.
             prompt: None,
             model: None,
-            rules: assemble(vec![
-                // Inert until the task tool exists, and kept anyway: the rule
-                // that stops a planning session delegating its way into an
-                // edit should already be there when the tool arrives.
-                rule("task", GENERAL, Action::Deny),
-                // Upstream denies `edit` and then carves two exceptions for
-                // the file a plan is written to. Ganja has no plans directory
-                // — a plan is prose in the transcript — so the deny stands
-                // alone. `write` is denied beside it because upstream's rule
-                // reaches it through an alias table (`edit|write|apply_patch`)
-                // that this port does not have (deviation: plan-denies-write).
-                rule("edit", ANY, Action::Deny),
-                rule("write", ANY, Action::Deny),
-                // The one agent whose finished plan has somewhere to go:
-                // upstream's `plan_exit: allow`, over the shared default deny.
-                // Subagents inherit refusals and never allows, so no child
-                // ever carries this one down.
-                rule("plan_exit", ANY, Action::Allow),
-            ]),
+            rules: assemble(
+                true,
+                vec![
+                    // Inert until the task tool exists, and kept anyway: the rule
+                    // that stops a planning session delegating its way into an
+                    // edit should already be there when the tool arrives.
+                    rule("task", GENERAL, Action::Deny),
+                    // Upstream denies `edit` and then carves two exceptions for
+                    // the file a plan is written to. Ganja has no plans directory
+                    // — a plan is prose in the transcript — so the deny stands
+                    // alone. `write` is denied beside it because upstream's rule
+                    // reaches it through an alias table (`edit|write|apply_patch`)
+                    // that this port does not have (deviation: plan-denies-write).
+                    rule("edit", ANY, Action::Deny),
+                    rule("write", ANY, Action::Deny),
+                    // The one agent whose finished plan has somewhere to go:
+                    // upstream's `plan_exit: allow`, over the shared default deny.
+                    // Subagents inherit refusals and never allows, so no child
+                    // ever carries this one down.
+                    rule("plan_exit", ANY, Action::Allow),
+                ],
+            ),
         },
         Agent {
             name: GENERAL.to_owned(),
@@ -296,7 +308,7 @@ fn builtins(config: &Config) -> Vec<Agent> {
             hidden: false,
             prompt: None,
             model: None,
-            rules: assemble(vec![rule("todowrite", ANY, Action::Deny)]),
+            rules: assemble(false, vec![rule("todowrite", ANY, Action::Deny)]),
         },
         Agent {
             name: EXPLORE.to_owned(),
@@ -314,39 +326,42 @@ fn builtins(config: &Config) -> Vec<Agent> {
             hidden: false,
             prompt: Some(EXPLORE_PROMPT.to_owned()),
             model: None,
-            rules: assemble(vec![
-                // An allow-list, spelled the way upstream spells it: deny
-                // everything, then name what is left. `list` is in upstream's
-                // list and has no tool here.
-                //
-                // **`skill` is not in that list**, and its absence is the
-                // whole point of the deny above: upstream allows this agent
-                // seven permissions and `skill` is not one of them
-                // (`agent/agent.ts:200-211`), so a search agent cannot load a
-                // skill and act on instructions nobody in this session read.
-                // The blanket deny is what enforces that, which is why no
-                // `skill` rule appears below — a rule saying `deny` here would
-                // read as the *only* thing stopping it.
-                rule(ANY, ANY, Action::Deny),
-                rule("grep", ANY, Action::Allow),
-                rule("glob", ANY, Action::Allow),
-                rule("read", ANY, Action::Allow),
-                rule("webfetch", ANY, Action::Allow),
-                rule("websearch", ANY, Action::Allow),
-                // Upstream writes `bash: "allow"`, which on top of its
-                // `"*": "allow"` default changes nothing there and would
-                // change a great deal here: it would hand a subagent
-                // unattended shell access that no other ganja agent has.
-                // What the rule has to do is undo the blanket deny above, and
-                // `ask` does that while leaving the gate exactly where every
-                // other agent has it (deviation: explore-bash-asks).
-                rule("bash", ANY, Action::Ask),
-                // Upstream's `readonlyExternalDirectory`, which is the shared
-                // default put back after the blanket deny; without it a
-                // command naming somewhere outside the project would be
-                // refused outright rather than asked about.
-                rule(EXTERNAL_DIRECTORY, ANY, Action::Ask),
-            ]),
+            rules: assemble(
+                false,
+                vec![
+                    // An allow-list, spelled the way upstream spells it: deny
+                    // everything, then name what is left. `list` is in upstream's
+                    // list and has no tool here.
+                    //
+                    // **`skill` is not in that list**, and its absence is the
+                    // whole point of the deny above: upstream allows this agent
+                    // seven permissions and `skill` is not one of them
+                    // (`agent/agent.ts:200-211`), so a search agent cannot load a
+                    // skill and act on instructions nobody in this session read.
+                    // The blanket deny is what enforces that, which is why no
+                    // `skill` rule appears below — a rule saying `deny` here would
+                    // read as the *only* thing stopping it.
+                    rule(ANY, ANY, Action::Deny),
+                    rule("grep", ANY, Action::Allow),
+                    rule("glob", ANY, Action::Allow),
+                    rule("read", ANY, Action::Allow),
+                    rule("webfetch", ANY, Action::Allow),
+                    rule("websearch", ANY, Action::Allow),
+                    // Upstream writes `bash: "allow"`, which on top of its
+                    // `"*": "allow"` default changes nothing there and would
+                    // change a great deal here: it would hand a subagent
+                    // unattended shell access that no other ganja agent has.
+                    // What the rule has to do is undo the blanket deny above, and
+                    // `ask` does that while leaving the gate exactly where every
+                    // other agent has it (deviation: explore-bash-asks).
+                    rule("bash", ANY, Action::Ask),
+                    // Upstream's `readonlyExternalDirectory`, which is the shared
+                    // default put back after the blanket deny; without it a
+                    // command naming somewhere outside the project would be
+                    // refused outright rather than asked about.
+                    rule(EXTERNAL_DIRECTORY, ANY, Action::Ask),
+                ],
+            ),
         },
     ]
 }
@@ -355,7 +370,10 @@ fn builtins(config: &Config) -> Vec<Agent> {
 ///
 /// Upstream's `"*": "allow"` is deliberately absent — see the module docs. So
 /// are its whitelisted directories: they name upstream's temporary, skill and
-/// reference directories, none of which this build has.
+/// reference directories, none of which this build has. The one directory
+/// this build ever whitelists is a session's own memory root, and it is not
+/// here but beside the agents that may reach it — [`memory_door`] is where
+/// that is argued.
 fn defaults() -> Vec<Rule> {
     vec![
         // Ganja already asks about this one by default; written out because
@@ -379,6 +397,101 @@ fn defaults() -> Vec<Rule> {
         rule("read", "*.env", Action::Ask),
         rule("read", "*.env.*", Action::Ask),
         rule("read", "*.env.example", Action::Allow),
+    ]
+}
+
+/// The rules that let a session keep its own memory, or none at all when the
+/// config never asked for memory (**D478**, declared at
+/// [`crate::instruction::memory_dir`]).
+///
+/// # Why any rule is needed
+///
+/// The memory root is outside the worktree, and this build asks about
+/// everything out there — twice over: the tool's own permission (`write` and
+/// `edit` are both in [`crate::permission::ASK_BY_DEFAULT`]) and the location
+/// gate raised beside it. That posture is right for the general case and
+/// exactly wrong for this one: the model is being *told*, in its own system
+/// prompt, to maintain files in a directory it would then have to interrupt
+/// the user about on every single fact it records.
+///
+/// # Why it is this narrow
+///
+/// Three rules, all patterned on the memory directory alone:
+///
+/// - the location gate for that directory, which is what `read` needs too —
+///   reading is otherwise free, but the gate is raised for a read outside the
+///   project like everything else;
+/// - `write` and `edit` under it, which is what recording a fact is.
+///
+/// Nothing else outside the worktree moves: a `write` one directory up from
+/// the memory root still asks exactly as it did before this feature existed.
+/// The alternative shapes were a dedicated memory tool (a second way to write
+/// a file, so that a permission rule could name it) and a blessed root on
+/// `ToolCtx` (a path the tools trust, which is a gate outside the gate).
+/// Both add a mechanism; this adds three rules to a table that already
+/// expresses exactly this.
+///
+/// # Who gets it: the attended agents, and only them
+///
+/// The door is added per agent rather than to [`defaults`], and only for the
+/// **primary** ones — the agents a person runs a session as. A subagent's
+/// ruleset is its *own* agent's rules, not the parent's, so a door written
+/// into the shared defaults would arrive at `general` and `explore` complete,
+/// and inheritance would never get a chance to withhold it. Two things then
+/// hold together: the location rule the parent carries still travels
+/// ([`crate::permission::Permissions::inherited_by_subagent`] passes every
+/// `external_directory` rule down), so a child may *read* the memory its
+/// prompt showed it, and the two tool rules reach no child at all, so its
+/// `write` falls back to asking. That is "a subagent inherits refusals and
+/// never allows", made true of this feature by construction.
+///
+/// A config-defined agent in mode `all` gets no door either, for the same
+/// reason: an agent that may be spawned may be spawned unwatched. Declaring
+/// one `primary` is what asks for the door, and writing the rule out by hand
+/// in a `permission` block is what asks for anything else.
+///
+/// # Where the directory comes from
+///
+/// The process's own working directory, resolved through the same
+/// [`crate::instruction::memory_dir`] the prompt is composed from, so the door
+/// and the block cannot name two different places. Threading a `cwd` into
+/// [`Registry::build`] was the tidier alternative and was not taken: three
+/// frontends call it, every one of them from the directory the process was
+/// started in, and the engine reads its own `cwd` from exactly there too.
+fn memory_door(config: &Config) -> Vec<Rule> {
+    if !config.memory_enabled() {
+        return Vec::new();
+    }
+
+    let Ok(cwd) = std::env::current_dir() else {
+        tracing::warn!("the working directory is unreadable, so project memory has no door");
+        return Vec::new();
+    };
+    let Some(directory) = crate::instruction::memory_dir(&cwd) else {
+        return Vec::new();
+    };
+
+    memory_rules(&directory)
+}
+
+/// The three rules themselves, over a directory handed in.
+///
+/// Split from [`memory_door`] so that what they say can be asserted without a
+/// test having to own the process's working directory to say it.
+fn memory_rules(directory: &Path) -> Vec<Rule> {
+    // Resolved and suffixed the way the gate spells a directory it is asked
+    // about (`permission`'s own `covering`), because a rule written in another
+    // spelling of the same place answers nothing. `*` spans separators here,
+    // so one pattern covers the topic files as well as the index.
+    let pattern = crate::permission::resolve(directory)
+        .join(ANY)
+        .to_string_lossy()
+        .into_owned();
+
+    vec![
+        rule(EXTERNAL_DIRECTORY, &pattern, Action::Allow),
+        rule("write", &pattern, Action::Allow),
+        rule("edit", &pattern, Action::Allow),
     ]
 }
 
@@ -610,6 +723,137 @@ mod tests {
             );
             assert_eq!(decides(rules, "read", "src/main.rs"), None, "{name}");
         }
+    }
+
+    /// The memory door (**D478**): three rules, all patterned on the one
+    /// directory, and each of them answering a question the memory root would
+    /// otherwise raise — the location gate, and the two tools that record a
+    /// fact. Asserted over a directory handed in, because what the rules say
+    /// is the behaviour and where the directory came from is not.
+    #[test]
+    fn the_memory_door_opens_that_one_directory_and_nothing_around_it() {
+        let directory = std::path::PathBuf::from("/data/ganja/project/api-1/memory");
+        let mut rules = super::defaults();
+        rules.extend(super::memory_rules(&directory));
+
+        let index = directory.join("MEMORY.md").display().to_string();
+        let topic = directory
+            .join("topics")
+            .join("style.md")
+            .display()
+            .to_string();
+        for pattern in [index.as_str(), topic.as_str()] {
+            assert_eq!(
+                decides(&rules, "write", pattern),
+                Some(Action::Allow),
+                "recording a fact must not interrupt anybody: {pattern}"
+            );
+            assert_eq!(decides(&rules, "edit", pattern), Some(Action::Allow));
+            assert_eq!(
+                decides(
+                    &rules,
+                    crate::permission::EXTERNAL_DIRECTORY,
+                    &format!("{pattern}/*")
+                ),
+                Some(Action::Allow),
+                "and neither must the location gate raised beside it"
+            );
+        }
+
+        // One directory up is still outside the worktree, and still asks.
+        let sibling = "/data/ganja/project/api-1/permissions.json";
+        assert_eq!(decides(&rules, "write", sibling), None, "{sibling}");
+        assert_eq!(
+            decides(
+                &rules,
+                crate::permission::EXTERNAL_DIRECTORY,
+                "/data/ganja/project/api-1/*"
+            ),
+            Some(Action::Ask),
+            "the shared default still governs everywhere else outside"
+        );
+    }
+
+    /// And a session that never asked for memory carries no trace of it: the
+    /// default-off divergence, asserted where the rules are minted rather than
+    /// only where the prompt is composed.
+    #[test]
+    fn a_config_that_says_nothing_about_memory_opens_no_door() {
+        let registry = registry(&Config::default());
+
+        for name in [BUILD, PLAN, GENERAL, EXPLORE] {
+            let rules = &registry.get(name).expect("a builtin").rules;
+            assert!(
+                !rules.iter().any(|rule| rule.pattern.contains("memory")),
+                "{name} carries a memory rule nobody asked for: {rules:?}"
+            );
+        }
+    }
+
+    /// Who the door is written for: the agents a person runs a session as. A
+    /// subagent's ruleset is its own agent's, so a door in the shared defaults
+    /// would reach `general` and `explore` before inheritance could withhold
+    /// it — which is why it is not there.
+    #[test]
+    fn only_the_agents_a_person_runs_carry_the_memory_door() {
+        let registry = registry(&Config {
+            memory: Some(true),
+            ..Config::default()
+        });
+        let holds_a_door = |name: &str| {
+            registry
+                .get(name)
+                .expect("a builtin")
+                .rules
+                .iter()
+                .any(|rule| rule.pattern.ends_with("memory/*"))
+        };
+
+        assert!(holds_a_door(BUILD), "the agent that acts keeps the memory");
+        assert!(
+            holds_a_door(PLAN),
+            "and so does the other primary one, whose own write-deny still refuses it"
+        );
+        for name in [GENERAL, EXPLORE] {
+            assert!(!holds_a_door(name), "{name} runs unwatched");
+        }
+    }
+
+    /// What a child gets of the door: the location gate travels, because every
+    /// `external_directory` rule does, and the two tool allows do not. So a
+    /// subagent may read the memory it was shown and cannot rewrite it
+    /// unwatched — "inherits refusals, never allows", stated over this
+    /// feature's own rules.
+    #[test]
+    fn a_subagent_does_not_inherit_the_door_that_lets_memory_be_written() {
+        let directory = std::path::PathBuf::from("/data/ganja/project/api-1/memory");
+        let mut parent = Permissions::default();
+        let mut rules = super::defaults();
+        rules.extend(super::memory_rules(&directory));
+        parent.set_baseline(rules);
+
+        let child = parent.inherited_by_subagent();
+        let index = directory.join("MEMORY.md").display().to_string();
+
+        assert_eq!(
+            decides(&child, "write", &index),
+            None,
+            "the write allow must not travel: {child:?}"
+        );
+        assert_eq!(
+            decides(&child, "edit", &index),
+            None,
+            "nor the edit allow: {child:?}"
+        );
+        assert_eq!(
+            decides(
+                &child,
+                crate::permission::EXTERNAL_DIRECTORY,
+                &format!("{index}/*")
+            ),
+            Some(Action::Allow),
+            "the location gate travels, which is what lets a child read it"
+        );
     }
 
     #[test]
