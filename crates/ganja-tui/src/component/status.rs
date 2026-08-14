@@ -43,6 +43,13 @@ const SEPARATOR: &str = " \u{b7} ";
 /// the elements read and the plumbing recedes.
 const HUD_SEPARATOR: &str = " | ";
 
+/// The standing marker a bypassed session carries (**D479**).
+///
+/// The flag's own spelling, not a sentence about it: the word somebody typed
+/// is the word that should be looking back at them, and a bar has room for
+/// four characters where it has none for an explanation.
+const YOLO: &str = "yolo";
+
 /// What a truncated line ends with. Three ASCII dots rather than U+2026
 /// because that is what OMC's `truncateLineToMaxWidth` appends, and the HUD
 /// rendering is a port of that behavior.
@@ -207,6 +214,15 @@ pub struct Status {
     /// one dialog with a second already queued has to be told there is a
     /// second.
     queued_dialogs: usize,
+    /// Whether this session answers its own permission dialogs (**D479**).
+    ///
+    /// Standing, not transient: every other segment here says what is
+    /// happening now, and this one says what will keep happening for the rest
+    /// of the run. A bypassed session that looked like a gated one is the
+    /// failure this marker exists to prevent, so it draws in the warning style
+    /// and it draws first — before the agent, which is otherwise the leftmost
+    /// thing on the bar.
+    yolo: bool,
     /// The roster a config asked for; absent renders the default bar, which
     /// is exactly the bar this build always drew (**D469**).
     elements: Option<Vec<StatuslineElement>>,
@@ -254,6 +270,7 @@ impl Status {
             running_jobs: 0,
             running_tasks: 0,
             queued_dialogs: 0,
+            yolo: false,
             elements: None,
             max_width: None,
             detail: false,
@@ -347,6 +364,11 @@ impl Status {
     /// Records how many delegated children the running turn has in flight.
     pub fn set_running_tasks(&mut self, running_tasks: usize) {
         self.running_tasks = running_tasks;
+    }
+
+    /// Records whether this session answers its own permission dialogs.
+    pub fn set_yolo(&mut self, yolo: bool) {
+        self.yolo = yolo;
     }
 
     /// Records how many permission dialogs are waiting behind the open one.
@@ -469,9 +491,21 @@ impl Status {
             left.push_str(notice);
         }
 
+        // The one segment with a style of its own, and the one drawn ahead of
+        // everything else (**D479**). Its own span rather than text prepended
+        // to `left`, because what makes it readable at a glance is that it is
+        // not the colour the rest of the bar is; and a session that did not
+        // ask for the bypass adds no span at all, so the default bar stays the
+        // bar this build always drew, cell for cell.
+        let marker = self.yolo.then(|| format!("{YOLO}{SEPARATOR}"));
         let hints = self.hints();
-        let gap = usize::from(area.width).saturating_sub(left.width() + hints.width());
-        let mut spans = vec![Span::styled(left, theme.accent)];
+        let used = marker.as_ref().map_or(0, |marker| marker.width()) + left.width();
+        let gap = usize::from(area.width).saturating_sub(used + hints.width());
+        let mut spans = Vec::new();
+        if let Some(marker) = marker {
+            spans.push(Span::styled(marker, theme.warning));
+        }
+        spans.push(Span::styled(left, theme.accent));
         if gap > 0 {
             spans.push(Span::raw(" ".repeat(gap)));
             spans.push(Span::styled(hints, theme.dim));
@@ -519,6 +553,14 @@ impl Status {
         // The elements, in the config's order. Git renders above and hints
         // render right-aligned, so neither takes a slot in the flow.
         let mut main: Vec<Span<'static>> = Vec::new();
+        // Ahead of the roster rather than inside it (**D479**): a marker that
+        // was an element name would be a marker a config could leave out, and
+        // whether this session asks before it runs things is not a layout
+        // preference. It costs no new config vocabulary and no new element —
+        // the roster below is untouched, and only its leading separator moves.
+        if self.yolo {
+            main.push(Span::styled(YOLO.to_owned(), theme.warning));
+        }
         for element in elements {
             if matches!(element, StatuslineElement::Git | StatuslineElement::Hints) {
                 continue;
@@ -965,6 +1007,54 @@ mod tests {
             rendered(&status, 100).starts_with("plan"),
             "got {:?}",
             rendered(&status, 100)
+        );
+    }
+
+    /// The bypass is standing, so its marker is too (**D479**) — and a
+    /// session that did not ask for it renders the bar this build always drew,
+    /// which is what the rest of this file's expectations are written against.
+    #[test]
+    fn the_bar_carries_the_yolo_marker_only_in_a_bypassed_session() {
+        let mut status = Status::new(None);
+        let gated = rendered(&status, 100);
+        assert!(!gated.contains("yolo"), "got {gated:?}");
+
+        status.set_yolo(true);
+
+        let bypassed = rendered(&status, 100);
+        assert!(
+            bypassed.starts_with("yolo"),
+            "the marker is the first thing on the bar: {bypassed:?}"
+        );
+        assert!(
+            bypassed.ends_with(HINTS),
+            "and it takes its width out of the gap rather than off the hints: \
+             {bypassed:?}"
+        );
+
+        status.set_yolo(false);
+        assert_eq!(
+            rendered(&status, 100),
+            gated,
+            "turning it off restores the bar cell for cell"
+        );
+    }
+
+    /// The marker is not a roster element, so it does not depend on a config
+    /// naming it: a `tui.statusline` table that leaves everything else out
+    /// still says this session is bypassed (**D479**).
+    #[test]
+    fn a_configured_roster_carries_the_marker_too() {
+        let mut status = roster(&[StatuslineElement::Activity]);
+        assert!(!rendered(&status, 100).contains("yolo"));
+
+        status.set_yolo(true);
+
+        let line = rendered(&status, 100);
+        assert!(line.starts_with("yolo"), "got {line:?}");
+        assert!(
+            line.contains("ready"),
+            "and the roster it was prepended to is untouched: {line:?}"
         );
     }
 

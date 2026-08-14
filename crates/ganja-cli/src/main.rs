@@ -59,6 +59,8 @@ struct Cli {
     resume: ResumeArgs,
     #[command(flatten)]
     select: SelectArgs,
+    #[command(flatten)]
+    bypass: BypassArgs,
     /// Write the log file at debug level instead of info.
     ///
     /// What that buys is the provider wires' own account of a turn — the model
@@ -139,6 +141,55 @@ impl SelectArgs {
             agent: self.agent,
             config_file: self.config,
         }
+    }
+}
+
+/// Whether the interactive session answers its own permission dialogs.
+///
+/// The same trio `ganja run` carries (`run.rs`), and deliberately the same
+/// three words: one entry point that took `--yolo` and another that took only
+/// `--auto` would be two flag languages for one decision, and whoever wrote
+/// the alias into a shell function does not think of the UI and the headless
+/// run as different products.
+///
+/// Not `global`: `args_conflicts_with_subcommands` negates every argument
+/// written before a subcommand, and there is nothing a subcommand could mean
+/// by this that it does not already carry itself — `run` has its own trio, and
+/// nothing else in the table opens a dialog at all.
+#[derive(Debug, Args)]
+struct BypassArgs {
+    /// Answer every permission dialog with "allow once" instead of asking.
+    ///
+    /// Dangerous, and the reason it is spelled out rather than hidden behind
+    /// the alias below: the session stops asking before it runs anything, so
+    /// an "allow" here is an allow for whatever the model decided to run.
+    /// Nothing is remembered — no answer reaches the project's stored rules —
+    /// so it lasts exactly this run and no longer (**D479**).
+    ///
+    /// A rule that already says *deny* still denies. This answers the dialogs
+    /// the rules raise, and a denial raises none: a standing "no" written in a
+    /// config is the user's own word, and a flag on one invocation does not
+    /// get to overrule it.
+    ///
+    /// `question` and the plan doors still ask. A person is sitting in front
+    /// of this session — which is exactly what `ganja run` does not have — so
+    /// what this bypasses is *permission*, never *conversation*.
+    #[arg(long)]
+    auto: bool,
+    // Two hidden spellings of `--auto`, carried for the reason `run`'s are
+    // (`run.rs:236-240`): upstream carries them and scripts written against it
+    // pass them. `--yolo` is also the spelling the other terminal agents use,
+    // and the one this build was asked for by name.
+    #[arg(long, hide = true)]
+    yolo: bool,
+    #[arg(long = "dangerously-skip-permissions", hide = true)]
+    dangerously_skip_permissions: bool,
+}
+
+impl BypassArgs {
+    /// Whether any of the three spellings was written.
+    fn wanted(self) -> bool {
+        self.auto || self.yolo || self.dangerously_skip_permissions
     }
 }
 
@@ -510,7 +561,14 @@ async fn main() -> Result<()> {
     let _logging = install_logging(cli.verbose);
 
     match cli.command {
-        None => ganja_tui::run(cli.resume.wanted(), cli.select.overrides()).await,
+        None => {
+            ganja_tui::run(
+                cli.resume.wanted(),
+                cli.select.overrides(),
+                cli.bypass.wanted(),
+            )
+            .await
+        }
         Some(Command::Auth { action }) => auth_command(action).await,
         Some(Command::Config { action }) => config_command(action),
         Some(Command::Mcp { action }) => mcp_command(action).await,
@@ -1565,6 +1623,24 @@ mod tests {
         assert_eq!(
             overrides.config_file.as_deref(),
             Some(std::path::Path::new("/tmp/override.jsonc"))
+        );
+    }
+
+    /// All three spellings mean one thing (**D479**), which is the whole
+    /// reason `ganja run` carries them too: a script that says `--yolo` and a
+    /// person who says `--auto` have asked for the same session.
+    #[test]
+    fn every_spelling_of_the_bypass_resolves_to_the_one_decision() {
+        for spelled in ["--auto", "--yolo", "--dangerously-skip-permissions"] {
+            let cli = Cli::try_parse_from(["ganja", spelled])
+                .unwrap_or_else(|error| panic!("{spelled} has to parse: {error}"));
+
+            assert!(cli.bypass.wanted(), "{spelled} asked for the bypass");
+        }
+
+        assert!(
+            !Cli::parse_from(["ganja"]).bypass.wanted(),
+            "a session that asked for nothing keeps every dialog it always had"
         );
     }
 

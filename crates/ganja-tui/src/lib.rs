@@ -70,7 +70,9 @@ pub enum Resume {
 ///
 /// `resume` opens a stored session instead of starting a fresh one, and
 /// `overrides` carries what the command line decided — the tier above every
-/// config file and above the environment between them.
+/// config file and above the environment between them. `yolo` is the bypass
+/// trio's one bool (**D479**): the session answers its own permission dialogs
+/// with "allow once" instead of raising them, and remembers none of it.
 ///
 /// Everything that can refuse does so *before* the terminal is taken over: a
 /// config file that will not parse, a key binding this build cannot read, a
@@ -89,7 +91,7 @@ pub enum Resume {
 ///
 /// Returns an error for any of the refusals above, and if the terminal cannot
 /// be initialized, drawn to, read from, or restored.
-pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
+pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = Config::load_with(&cwd, &overrides).context("failed to read the configuration")?;
     let keys =
@@ -258,6 +260,11 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides) -> Result<()> {
             // The `tui.statusline` roster, when the config wrote one; absent,
             // the bar keeps its fixed default layout (**D469**).
             .with_statusline(config.tui.statusline.as_ref())
+            // The bypass, from the command line and from nowhere else: no
+            // config key turns this on, because a flag is written once by
+            // somebody who meant it and a file is written once and forgotten
+            // (**D479**).
+            .with_yolo(yolo)
             // The one place the prompt history reaches the disk: the default
             // store is inert, so a test that does not opt in never touches the
             // machine's own history.

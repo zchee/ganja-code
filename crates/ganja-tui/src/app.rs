@@ -25,7 +25,7 @@ use ganja_core::{
     provider,
 };
 use ganja_protocol::{
-    Command, Event as CoreEvent, FinishReason, Mention, Message, MessageId, PartBody,
+    Command, Event as CoreEvent, FinishReason, Mention, Message, MessageId, PartBody, PermissionId,
     PermissionReply, RevertScope, Role, ToolState, Usage,
 };
 use ganja_tool::{Credentials, FileTimes, ToolCtx, job::Jobs as _};
@@ -384,6 +384,31 @@ pub struct App {
     /// one: a single call is a turn blocked inside it, which is what made the
     /// engine's own registry a single cell until this wave.
     queued_permissions: VecDeque<Permission>,
+    /// Whether this session answers its own permission dialogs (**D479**).
+    ///
+    /// `ganja --yolo`, and its two other spellings. What it changes is exactly
+    /// one thing: a request that would have opened a dialog is answered
+    /// [`PermissionReply::Once`] instead, immediately, for this request and
+    /// every one behind it — so the queue above never fills and no turn waits
+    /// on a dialog that will never be drawn.
+    ///
+    /// **Never [`PermissionReply::Always`]**: an "always" is a rule written
+    /// into the project's store, and a flag on one invocation may not leave
+    /// standing permissions behind on the machine.
+    ///
+    /// What this does *not* touch, and deliberately:
+    /// - A rule that resolves to **deny** raises no dialog at all, so there is
+    ///   nothing here to answer and the call stays refused. The engine remains
+    ///   the single gate; this only stands in for the person at it.
+    /// - `question`, and the two plan doors that ride it, arrive as
+    ///   [`CoreEvent::QuestionAsked`] rather than as a permission request and
+    ///   keep asking. A person is sitting here — the whole difference from
+    ///   `ganja run --auto`, which has nobody — so what is bypassed is
+    ///   permission, not conversation.
+    yolo: bool,
+    /// Requests a yolo session has to answer, filled by the synchronous
+    /// [`App::handle_core`] and drained by the one caller that may await.
+    auto_permissions: VecDeque<PermissionId>,
     /// The question currently waiting on the user's answer.
     question: Option<Question>,
     /// The stored sessions the user is choosing between, while the picker is
@@ -606,6 +631,8 @@ impl App {
             keys: Keybinds::defaults(),
             permission: None,
             queued_permissions: VecDeque::new(),
+            yolo: false,
+            auto_permissions: VecDeque::new(),
             question: None,
             sessions: None,
             theme_list: None,
@@ -736,6 +763,24 @@ impl App {
     #[must_use]
     pub fn with_statusline(mut self, statusline: Option<&StatuslineConfig>) -> Self {
         self.status.set_statusline(statusline);
+
+        self
+    }
+
+    /// Answers this session's own permission dialogs (**D479**).
+    ///
+    /// A builder because only the startup lane holds the command line that
+    /// asked for it: the default is a session that asks, so a test that does
+    /// not opt in raises every dialog it always raised. See [`App::yolo`] for
+    /// what the bypass covers and what it deliberately leaves alone.
+    #[must_use]
+    pub fn with_yolo(mut self, yolo: bool) -> Self {
+        self.yolo = yolo;
+        // The marker is set here rather than read by the bar, so that the one
+        // decision has one owner: a bar that could disagree with the app about
+        // whether this session is bypassed is the one bug this whole feature
+        // cannot afford.
+        self.status.set_yolo(yolo);
 
         self
     }
@@ -898,6 +943,11 @@ impl App {
             AppEvent::Core(event) => {
                 self.tee_event(&event);
                 self.handle_core(*event);
+                // Here rather than inside `handle_core`, which is synchronous
+                // and cannot reach the engine: a yolo session's answer is a
+                // command like any other, and this is the first point after
+                // the event where one can be sent (**D479**).
+                self.answer_for_the_absent().await?;
                 self.dirty = true;
                 // Run after every engine event, because the event that just
                 // landed may have been the one that ended the turn — and the
@@ -3642,6 +3692,33 @@ impl App {
         self.status.set_queued(self.queue.depth());
     }
 
+    /// Answers every permission request a yolo session took on itself
+    /// (**D479**).
+    ///
+    /// A loop rather than a single reply because a step that fanned children
+    /// out raises several at once, and each is answered by id: what a
+    /// non-bypassed session shows one at a time, this retires all of — which
+    /// is what stops a queued request from waiting on a dialog that will never
+    /// be drawn.
+    ///
+    /// # Errors
+    ///
+    /// Propagates an engine that would not take the reply, the same posture
+    /// the dialog's own keystroke has: a request nothing answers is a turn
+    /// stopped forever, and silence about it would be worse than the error.
+    async fn answer_for_the_absent(&mut self) -> Result<()> {
+        while let Some(id) = self.auto_permissions.pop_front() {
+            self.engine
+                .send(Command::ReplyPermission {
+                    id,
+                    reply: PermissionReply::Once,
+                })
+                .await?;
+        }
+
+        Ok(())
+    }
+
     /// Tells the bar how many dialogs are waiting behind the one on screen.
     fn sync_dialog_status(&mut self) {
         self.status
@@ -3813,6 +3890,21 @@ impl App {
                 directories,
                 ..
             } => {
+                // A yolo session stands in for the person before any of the
+                // rest happens (**D479**): nobody is about to be asked, so
+                // there is nothing to announce, nothing to show and nothing to
+                // queue. The id goes to the one caller that may await, and the
+                // reply is `Once` — never `Always`, which would write a rule
+                // into this project's store on the strength of a flag.
+                //
+                // Only an *Ask* ever reaches here: a denial refuses the call
+                // inside the engine and raises no request at all, which is
+                // what keeps a config's standing "no" standing.
+                if self.yolo {
+                    self.auto_permissions.push_back(id);
+
+                    return;
+                }
                 // A dialog raised is a person needed, shown now or queued
                 // behind the one already up — either way the turn is blocked
                 // on an answer, which is the moment **D468** announces.
@@ -4155,7 +4247,7 @@ mod tests {
     };
     use ganja_protocol::{
         Event as CoreEvent, FinishReason, Message, Part, PartBody, PartId, PermissionId,
-        PermissionReply, ToolState, Usage,
+        PermissionReply, QuestionId, QuestionInfo, QuestionOption, ToolState, Usage,
     };
     use ratatui::{
         Terminal,
@@ -5962,6 +6054,220 @@ mod tests {
             app.permission.as_ref().map(|open| open.id().as_str()),
             Some("perm_1"),
             "and the one on screen is untouched by it"
+        );
+    }
+
+    /// What the scripted shell call echoes, so "the tool ran" is a question
+    /// about the tool's own output rather than about the screen.
+    const ECHOED: &str = "yolo-ran-zarquon";
+
+    /// The scripted turn after the tool call. Its arrival is what says every
+    /// call before it was resolved without anything still waiting on a person.
+    const CLOSING: &str = "script-finished-zarquon";
+
+    /// An app whose scripted turn makes one `bash` call — a tool the builtin
+    /// defaults ask about (`ganja_permission::permission::ASK_BY_DEFAULT`) —
+    /// and then says [`CLOSING`].
+    ///
+    /// A real engine and a real tool rather than hand-built events, because
+    /// what **D479** is about is a turn that runs to its end with nobody
+    /// answering anything: a fixture that only replays a `PermissionRequested`
+    /// could not tell an answered request from a wedged one.
+    async fn shelling(
+        yolo: bool,
+        permissions: ganja_permission::Permissions,
+    ) -> (TempDir, App, BoxStream<'static, CoreEvent>) {
+        let directory = temporary();
+        let script = directory.path().join("shell.json");
+        fs::write(
+            &script,
+            format!(
+                r#"{{
+                    "cadence_ms": 0,
+                    "turns": [
+                        {{"tool_calls": [{{
+                            "name": "bash",
+                            "args": {{"command": "echo {ECHOED}"}}
+                        }}]}},
+                        {{"text": "{CLOSING}"}}
+                    ]
+                }}"#
+            ),
+        )
+        .expect("the fake-provider script writes");
+
+        let engine = Engine::new(
+            Arc::new(FakeProvider::new("", Duration::ZERO).with_script(&script)),
+            fake::MODEL,
+            Arc::new(ganja_tool::Registry::new(vec![Arc::new(
+                ganja_tool::shell::ShellTool::new(),
+            )])),
+            permissions,
+        );
+        let events = engine.subscribe().await.expect("the test subscribes first");
+        let app = App::new(engine, None, Themes::builtin()).with_yolo(yolo);
+        app.engine
+            .send(ganja_protocol::Command::SendPrompt {
+                text: "run it".to_owned(),
+                mentions: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts the prompt");
+
+        (directory, app, events)
+    }
+
+    /// Feeds the app every event of a two-turn script and hands back what it
+    /// was fed, asserting on the way that no dialog was ever on screen.
+    ///
+    /// The assertion is *inside* the loop on purpose: a dialog that opened and
+    /// closed again between two events would be invisible to a check made
+    /// after the turn, and a dialog nobody can see is exactly the failure a
+    /// bypass has to be checked for.
+    async fn pump_turn(
+        app: &mut App,
+        events: &mut BoxStream<'static, CoreEvent>,
+    ) -> Vec<CoreEvent> {
+        let mut seen = Vec::new();
+
+        for _ in 0..128 {
+            let event = next_event(events).await;
+            let finished = matches!(event, CoreEvent::MessageFinished { .. });
+            seen.push(event.clone());
+            app.handle(AppEvent::core(event))
+                .await
+                .expect("an engine event is handled");
+            assert!(
+                app.permission.is_none() && app.queued_permissions.is_empty(),
+                "no dialog may be raised in a bypassed session"
+            );
+            // One assistant message carries the whole turn — the step that
+            // made the call and the step that said the closing word — so its
+            // close is the end of everything this script had to play.
+            if finished {
+                return seen;
+            }
+        }
+
+        panic!("the scripted turn never ran to its end: {seen:#?}");
+    }
+
+    /// What a completed `bash` part carries, or [`None`] while nothing has
+    /// completed one.
+    fn completed_shell(events: &[CoreEvent]) -> Option<String> {
+        events.iter().find_map(|event| match event {
+            CoreEvent::PartUpdated { part, .. } => match &part.body {
+                PartBody::Tool {
+                    tool,
+                    state: ToolState::Completed { output, .. },
+                    ..
+                } if tool == "bash" => Some(output.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    /// The lead behavior of **D479**: the dialog the rules raised is answered
+    /// for the person who asked not to be asked, and the call runs.
+    #[tokio::test]
+    async fn a_yolo_session_answers_a_raised_dialog_once_and_never_draws_it() {
+        let (_directory, mut app, mut events) =
+            shelling(true, ganja_permission::Permissions::default()).await;
+
+        let seen = pump_turn(&mut app, &mut events).await;
+
+        let asked = seen
+            .iter()
+            .filter(|event| matches!(event, CoreEvent::PermissionRequested { .. }))
+            .count();
+        assert_eq!(asked, 1, "the rules still raised the request: {seen:#?}");
+
+        let replies: Vec<_> = seen
+            .iter()
+            .filter_map(|event| match event {
+                CoreEvent::PermissionReplied { reply, .. } => Some(*reply),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            vec![PermissionReply::Once],
+            "answered once, and never `Always` — nothing may be written to \
+             this project's rules on the strength of a flag"
+        );
+
+        assert!(
+            completed_shell(&seen).is_some_and(|output| output.contains(ECHOED)),
+            "the call the dialog was about actually ran: {seen:#?}"
+        );
+    }
+
+    /// The pre-mortem's first scenario, pinned: a bypass answers the dialogs
+    /// the rules *raise*, and a denial raises none.
+    #[tokio::test]
+    async fn a_denied_call_stays_denied_in_a_yolo_session() {
+        let mut permissions = ganja_permission::Permissions::default();
+        permissions.set_baseline(vec![ganja_permission::permission::Rule {
+            permission: "bash".to_owned(),
+            pattern: "*".to_owned(),
+            action: ganja_permission::Action::Deny,
+        }]);
+        let (_directory, mut app, mut events) = shelling(true, permissions).await;
+
+        let seen = pump_turn(&mut app, &mut events).await;
+
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, CoreEvent::PermissionRequested { .. })),
+            "a denial is decided inside the engine and asks nobody: {seen:#?}"
+        );
+        assert!(
+            completed_shell(&seen).is_none(),
+            "the denied command never ran: {seen:#?}"
+        );
+        // And the turn carried on regardless: a refusal is information the
+        // model reads, never a turn this frontend ended.
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                CoreEvent::PartUpdated { part, .. }
+                    if matches!(&part.body, PartBody::Tool { state: ToolState::Error { .. }, .. })
+            )),
+            "the refusal reached the model as an error result: {seen:#?}"
+        );
+    }
+
+    /// The other half of the bypass's boundary: what a *person* is asked is
+    /// not what a *rule* asks. `question` — and the two plan doors, which ride
+    /// the same seam (`ganja_tool::plan`, `ctx.ask`) — arrive as
+    /// [`CoreEvent::QuestionAsked`] and keep their dialog.
+    #[tokio::test]
+    async fn a_yolo_session_still_raises_its_questions() {
+        let mut app = app().with_yolo(true);
+
+        app.handle(AppEvent::core(CoreEvent::QuestionAsked {
+            session_id: session(),
+            id: QuestionId::from("qst_1".to_owned()),
+            questions: vec![QuestionInfo {
+                question: "Which database should the service use?".to_owned(),
+                header: "Database".to_owned(),
+                options: vec![QuestionOption {
+                    label: "Postgres".to_owned(),
+                    description: "Relational database".to_owned(),
+                }],
+                multiple: None,
+                custom: None,
+            }],
+            source: None,
+        }))
+        .await
+        .expect("the question is handled");
+
+        assert!(
+            app.question.is_some(),
+            "a bypass covers permission, never conversation"
         );
     }
 
