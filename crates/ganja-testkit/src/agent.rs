@@ -17,5 +17,5 @@ use ganja_core::{AgentRegistry, Config};
 /// assert!(registry.get("build").is_some(), "build is a builtin agent");
 /// ```
 pub fn agent_registry(config: &Config) -> Arc<AgentRegistry> {
-    Arc::new(AgentRegistry::build(config).expect("the fixture config resolves an agent"))
+    Arc::new(AgentRegistry::from_config(config).expect("the fixture config resolves an agent"))
 }

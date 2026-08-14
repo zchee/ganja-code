@@ -97,13 +97,17 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
     let keys =
         Keybinds::from_config(&config.keybinds).context("failed to read the key bindings")?;
     let selection = provider::select(&config).context("failed to select a provider")?;
-    let agents = Arc::new(AgentRegistry::build(&config).context("failed to resolve the agents")?);
     // Captured before the provider is handed to the engine: the model list is
     // narrowed to this provider, and `Selection` gives it up on the move.
     let provider_id = selection.provider.id().to_owned();
     // Sessions live per project, so opening `src/` and opening the repository
     // root reach the same history.
     let project = Project::resolve(&cwd);
+    // The **project root** again: an agent definition file under `.ganja/`
+    // belongs to the checkout, not to whichever subdirectory was opened.
+    let agents = Arc::new(
+        AgentRegistry::build(&config, project.root()).context("failed to resolve the agents")?,
+    );
     let storage = Storage::open(
         project
             .data_dir()
@@ -727,7 +731,7 @@ mod tests {
         }))
         .expect("the fixture is a config");
         let engine = engine_asking(&directory, LAUNCH).with_agents(Arc::new(
-            ganja_core::AgentRegistry::build(&config).expect("the fixture resolves an agent"),
+            ganja_core::AgentRegistry::from_config(&config).expect("the fixture resolves an agent"),
         ));
         assert_eq!(
             engine.model(),

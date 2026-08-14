@@ -5057,7 +5057,7 @@ mod tests {
         }))
         .expect("the fixture is a config");
         let engine = engine().with_agents(Arc::new(
-            ganja_core::AgentRegistry::build(&config).expect("the fixture resolves an agent"),
+            ganja_core::AgentRegistry::from_config(&config).expect("the fixture resolves an agent"),
         ));
         assert_ne!(
             engine.model(),
@@ -7129,7 +7129,7 @@ mod tests {
     /// list and Tab both read.
     fn agentic_app() -> App {
         let registry = Arc::new(
-            ganja_core::AgentRegistry::build(&ganja_core::config::Config::default())
+            ganja_core::AgentRegistry::from_config(&ganja_core::config::Config::default())
                 .expect("the builtin agents resolve"),
         );
         let engine = Engine::new(
