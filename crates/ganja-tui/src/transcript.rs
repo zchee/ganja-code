@@ -128,7 +128,13 @@ fn formatted(part: &Part) -> String {
             let mut rendered = format!("**Tool: {tool}**\n");
 
             match state {
-                ToolState::Pending => {}
+                // A waiting call whose arguments have settled prints them the
+                // way a running one does (2026-08-15); one still streaming
+                // has nothing parseable to print.
+                ToolState::Pending { input: Some(input) } => {
+                    rendered.push_str(&fenced("Input", "json", &pretty(input)));
+                }
+                ToolState::Pending { input: None } => {}
                 ToolState::Running {
                     input, metadata, ..
                 } => {

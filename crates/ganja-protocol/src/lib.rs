@@ -534,8 +534,17 @@ pub enum PartBody {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ToolState {
-    /// The model is still streaming the call's arguments.
-    Pending,
+    /// The call has not started: its arguments are still streaming, or —
+    /// once they ride here — complete while the call waits its turn behind
+    /// the step's earlier calls (2026-08-15).
+    Pending {
+        /// The parsed arguments, present from the moment the provider marked
+        /// them complete and absent while they still stream. Optional and
+        /// left off the wire when absent, so every `{"status":"pending"}`
+        /// written before this field existed still reads back.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<serde_json::Value>,
+    },
     /// The call is executing.
     Running {
         /// The parsed arguments it runs with.
@@ -612,7 +621,7 @@ impl Part {
             body: PartBody::Tool {
                 call_id: call_id.into(),
                 tool: tool.into(),
-                state: ToolState::Pending,
+                state: ToolState::Pending { input: None },
             },
         }
     }
@@ -2164,10 +2173,26 @@ mod tests {
                     body: PartBody::Tool {
                         call_id: "call_1".to_owned(),
                         tool: "read".to_owned(),
-                        state: ToolState::Pending,
+                        state: ToolState::Pending { input: None },
                     },
                 }),
+                // Streaming-era pending: the settled-arguments field stays off
+                // the wire entirely, which is also what keeps every row
+                // written before it existed reading back (2026-08-15).
                 r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"read","state":{"status":"pending"}}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::Tool {
+                        call_id: "call_1".to_owned(),
+                        tool: "read".to_owned(),
+                        state: ToolState::Pending {
+                            input: Some(serde_json::json!({"path": "a.rs"})),
+                        },
+                    },
+                }),
+                r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"read","state":{"status":"pending","input":{"path":"a.rs"}}}"#,
             ),
             (
                 serde_json::to_string(&pinned_tool_part()),

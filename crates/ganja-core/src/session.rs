@@ -2479,7 +2479,13 @@ fn serialize_message(message: &Message) -> String {
                 PartBody::Text { text } => vec![format!("[Assistant]: {text}")],
                 PartBody::Tool { tool, state, .. } => {
                     let (input, outcome) = match state {
-                        ToolState::Pending => (serde_json::json!({}).to_string(), None),
+                        ToolState::Pending { input } => (
+                            input
+                                .clone()
+                                .unwrap_or_else(|| serde_json::json!({}))
+                                .to_string(),
+                            None,
+                        ),
                         ToolState::Running { input, .. } => (input.to_string(), None),
                         ToolState::Completed { input, output, .. } => (
                             input.to_string(),
@@ -2899,10 +2905,51 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                     None => tracing::debug!(id, "argument fragment for an unknown call"),
                 }
             }
-            // Arrival order already decides execution order, and the
-            // arguments are only read once the stream ends, so the completion
-            // marker carries nothing the loop needs.
-            ProviderEvent::ToolCallEnd { .. } => {}
+            // Arrival order already decides execution order, so the marker
+            // changes nothing about *what runs* — but it is the moment the
+            // call's arguments are complete, and a part that can name them
+            // should (2026-08-15): the rows a person watches while the step's
+            // earlier calls run then say what will run, not a bare tool name.
+            // The state stays `Pending` — a part marked `Running` before it
+            // ran would be lying — and arguments that do not parse leave the
+            // part bare here for `prepare` to fail with the message the model
+            // reads.
+            ProviderEvent::ToolCallEnd { id } => {
+                let Some(call) = calls.iter().find(|call| call.id == id) else {
+                    tracing::debug!(id, "completion marker for an unknown call");
+                    continue;
+                };
+                let Ok(args) = parse_args(&call.json) else {
+                    continue;
+                };
+                let updated = match assistant
+                    .parts
+                    .iter_mut()
+                    .find(|part| part.id == call.part_id)
+                {
+                    Some(part) => {
+                        if let PartBody::Tool { state, .. } = &mut part.body {
+                            *state = ToolState::Pending { input: Some(args) };
+                        }
+                        part.clone()
+                    }
+                    None => continue,
+                };
+                turn.persist_part(assistant, &updated);
+
+                if let ControlFlow::Break(stop) = deliver(
+                    turn,
+                    Event::PartUpdated {
+                        session_id: turn.session_id.clone(),
+                        message_id: assistant.id.clone(),
+                        part: updated,
+                    },
+                )
+                .await
+                {
+                    interrupt!(stop, &ToolError::Cancelled.to_string());
+                }
+            }
             ProviderEvent::Usage(reported) => usage = Some(reported),
             // A provider that died mid-stream keeps whatever it already
             // streamed — the transcript is honest about how far it got — but

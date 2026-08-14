@@ -904,7 +904,7 @@ impl<'a> Reporter<'a> {
                     let _ = writeln!(self.err, "{}", printable(error));
                 }
             }
-            ToolState::Pending | ToolState::Running { .. } => {}
+            ToolState::Pending { .. } | ToolState::Running { .. } => {}
         }
     }
 

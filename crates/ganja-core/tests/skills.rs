@@ -97,7 +97,7 @@ fn results(events: &[ganja_core::protocol::Event]) -> (Vec<String>, Vec<String>)
         match state {
             ToolState::Completed { output, .. } => completed.push(output.clone()),
             ToolState::Error { error, .. } => errors.push(error.clone()),
-            ToolState::Pending | ToolState::Running { .. } => {}
+            ToolState::Pending { .. } | ToolState::Running { .. } => {}
         }
     }
 

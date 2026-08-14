@@ -3905,7 +3905,7 @@ fn message_chars(message: &Message) -> (usize, usize) {
             } => {
                 generated += call_id.chars().count() + tool.chars().count();
                 match state {
-                    ToolState::Pending => {}
+                    ToolState::Pending { .. } => {}
                     ToolState::Running { input, .. } => {
                         generated += input.to_string().chars().count();
                     }
@@ -4068,7 +4068,9 @@ fn close_interrupted(storage: &Storage, session: &SessionId, transcript: &mut [M
             let input = match state {
                 ToolState::Completed { .. } | ToolState::Error { .. } => continue,
                 ToolState::Running { input, .. } => input.clone(),
-                ToolState::Pending => serde_json::json!({}),
+                ToolState::Pending { input } => {
+                    input.clone().unwrap_or_else(|| serde_json::json!({}))
+                }
             };
 
             let stamp = now();

@@ -4085,9 +4085,11 @@ mod tests {
     #[test]
     fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
         let mut assistant = Message::assistant("gpt-test");
-        assistant
-            .parts
-            .push(tool_part("call_read", "read", ToolState::Pending));
+        assistant.parts.push(tool_part(
+            "call_read",
+            "read",
+            ToolState::Pending { input: None },
+        ));
 
         let request = ChatRequest {
             effort_options: Default::default(),
