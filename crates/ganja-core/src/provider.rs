@@ -510,6 +510,13 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         // of them, so `defaulted_model` falls through to the refusal that names
         // the three ways to name a model (`provider::openrouter`).
         openrouter::ID => Wire::catalog(openrouter::from_env()?),
+        // Two ids on one credential, each dispatching per model to one of the
+        // three wires this build already has — which one is the catalog's
+        // answer, not selection's. Uncataloged-model fallback and the
+        // refuse-by-name for a transport with no wire both live in that
+        // module; nothing about either is this dispatch's to decide.
+        opencode::ZEN_ID => Wire::catalog(OpencodeProvider::zen()?),
+        opencode::GO_ID => Wire::catalog(OpencodeProvider::go()?),
         grok::ID => Wire::catalog(GrokProvider::from_stored()?),
         // Selectable as a bare name: construction reads nothing — grok's
         // posture — and each request reads the stored login as it is needed,
@@ -640,7 +647,7 @@ mod tests {
 
     use super::{
         Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, adoptable_login,
-        cursor, defaulted_model, fake, grok, openai, openrouter, select, selectable,
+        cursor, defaulted_model, fake, grok, openai, opencode, openrouter, select, selectable,
         wire_model_listing,
     };
     use crate::catalog;
@@ -696,10 +703,10 @@ mod tests {
         assert!(!selectable(&Config::default(), "local-llama"));
     }
 
-    /// The gateway sits in a tier of its own, and both halves of that are
-    /// deliberate: it ships, so nothing has to be configured to reach it, and
-    /// it is pinned to no model, so a session has to say which of the vendors
-    /// it fronts it wants.
+    /// The gateways sit in a tier of their own, and both halves of that are
+    /// deliberate: they ship, so nothing has to be configured to reach them,
+    /// and they are pinned to no model, so a session has to say which of the
+    /// vendors they front it wants.
     ///
     /// The second half is the one worth a test of its own. Every other builtin
     /// either has a catalog pin or is uncataloged on purpose; this one is fully
@@ -707,26 +714,24 @@ mod tests {
     /// the actionable kind — see `ganja_provider::provider::openrouter` for the
     /// three reasons the pin is absent.
     #[test]
-    fn the_gateway_ships_selectable_and_pinned_to_none_of_the_vendors_it_fronts() {
-        assert!(
-            selectable(&Config::default(), openrouter::ID),
-            "a builtin needs no config entry to be reachable"
-        );
-        assert!(
-            PROVIDERS.contains(&openrouter::ID),
-            "and the roster every refusal prints is where somebody discovers it"
-        );
-
-        let refused = defaulted_model(openrouter::ID, None)
-            .expect_err("no pin, so nothing may be substituted for a choice");
-        let rendered = refused.to_string();
-        assert!(rendered.contains(openrouter::ID), "{rendered}");
-        for way in ["GANJA_MODEL", "--model", "`model`"] {
+    fn a_gateway_ships_selectable_and_pinned_to_none_of_the_vendors_it_fronts() {
+        for gateway in [openrouter::ID, opencode::ZEN_ID, opencode::GO_ID] {
             assert!(
-                rendered.contains(way),
-                "a refusal that does not say how to answer it is a dead end: \
-                 {way} missing from {rendered}"
+                selectable(&Config::default(), gateway) && PROVIDERS.contains(&gateway),
+                "{gateway} ships"
             );
+
+            let refused = defaulted_model(gateway, None)
+                .expect_err("no pin, so nothing may be substituted for a choice");
+            let rendered = refused.to_string();
+            assert!(rendered.contains(gateway), "{rendered}");
+            for way in ["GANJA_MODEL", "--model", "`model`"] {
+                assert!(
+                    rendered.contains(way),
+                    "a refusal that does not say how to answer it is a dead end: \
+                     {way} missing from {rendered}"
+                );
+            }
         }
 
         // Not the fake provider's arm, and not a wire default either: those two

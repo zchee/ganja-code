@@ -21,16 +21,27 @@
 //! cursor is uncataloged and has no rows to synthesize for; a row under any
 //! other provider id keeps only what the catalog declares.
 //!
-//! **openrouter is the one selectable provider deliberately left in that last
-//! group**, and it moved there rather than out of the list: it is cataloged and
-//! it is a wire ganja serves, so [`wire`] could name one. Two things say not
-//! yet. Upstream's branch for it is keyed to `@openrouter/ai-sdk-provider`, a
-//! *chat-completions* transport, while ganja reaches this vendor over Responses
-//! (`crate::provider::openrouter`); and the fields a Responses map splices —
-//! [`INCLUDE_ENCRYPTED_REASONING`] above all — are exactly the ones that module
-//! refuses to send this vendor unasked, so synthesizing here would put them
-//! back through the effort door. An openrouter row therefore keeps only what
-//! the catalog declares, until a live probe settles what that surface accepts.
+//! **The three gateways are the selectable providers deliberately left in that
+//! last group** — `openrouter`, `opencode` and `opencode-go`. They moved there
+//! rather than out of the list: each is cataloged and each is a wire ganja
+//! serves, so [`wire`] could name one. Two things say not yet.
+//!
+//! Upstream's branch for openrouter is keyed to `@openrouter/ai-sdk-provider`,
+//! a *chat-completions* transport, while ganja reaches that vendor over
+//! Responses (`crate::provider::openrouter`); and the fields a Responses map
+//! splices — [`INCLUDE_ENCRYPTED_REASONING`] above all — are exactly the ones
+//! that module refuses to send unasked, so synthesizing here would put them
+//! back through the effort door.
+//!
+//! The OpenCode gateways have the sharper version of the same problem: **one
+//! provider id serves three dialects**, so one [`Wire`] per provider cannot
+//! describe them at all. What would describe them is
+//! [`ModelInfo::npm`](crate::catalog::ModelInfo::npm) — the per-row transport
+//! `crate::provider::opencode` dispatches on, and which this module could key
+//! on instead of the provider id. A real road, and a deliberate follow-up
+//! rather than something to do while adding the providers. Until then a row
+//! under any of the three keeps only what the catalog declares, which is what
+//! every uncatalogued-wire row already does.
 //!
 //! Two translations ride every map. Upstream's option maps are AI-SDK
 //! provider options (`budgetTokens`, `reasoningEffort`) that the SDK re-spells
@@ -749,6 +760,7 @@ mod tests {
             status: ModelStatus::Active,
             reasoning: true,
             reasoning_options: None,
+            npm: None,
             variants: BTreeMap::new(),
         }
     }

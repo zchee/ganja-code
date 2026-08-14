@@ -166,6 +166,22 @@ pub struct ModelInfo {
     /// hardcoded table answer instead; the empty list is a published answer
     /// ("no efforts") that the table may not override.
     pub reasoning_options: Option<Vec<ReasoningOption>>,
+    /// Which SDK transport the catalog says serves this row — the schema's own
+    /// `npm`, kept under the schema's name for [`Self::variants`]'s reason.
+    ///
+    /// **The effective value, not the literal one.** A row may carry
+    /// `provider: {npm}` of its own; where it does not, the provider's
+    /// top-level `npm` answers, which is upstream's own `??` (`plugin/provider/
+    /// opencode.ts:127-136`, `:140`). Resolved once here so that every reader
+    /// gets one answer rather than re-deriving the fallback.
+    ///
+    /// Carried rather than acted on **by this module** — it is not sizing and
+    /// it is not price. One provider reads it, and it is the reason the field
+    /// exists: `provider::opencode`'s gateway serves three different dialects
+    /// off one base URL, and this hint is the only thing that says which. For
+    /// every other provider the dialect is fixed at the provider, so nothing
+    /// consults it and [`None`] costs nothing.
+    pub npm: Option<String>,
     /// The named variants a session may run this model under, each carrying
     /// the provider options its wire splices into the request body — upstream's
     /// `variants: Record<string, Record<string, any>>` (`provider.ts:1049`).
@@ -611,6 +627,10 @@ fn snapshot() -> Catalog {
                     // fetched catalog replaces the table.
                     reasoning: false,
                     reasoning_options: None,
+                    // The compiled-in tier is every provider whose dialect is
+                    // fixed at the provider, so there is nothing for a
+                    // per-row hint to say.
+                    npm: None,
                     variants: BTreeMap::new(),
                 })
             })
@@ -1002,13 +1022,16 @@ fn parse(body: &str) -> Result<Catalog, CatalogError> {
             continue;
         };
         let provider_id = crate::auth::provider_id_for_storage_key(&published_under);
+        // The provider's own transport, which every row it did not override
+        // inherits — read once here rather than per row.
+        let provider_npm = provider.get("npm").and_then(serde_json::Value::as_str);
 
         for (model_id, published) in published {
             let Ok(wire) = serde_json::from_value::<Wire>(published.clone()) else {
                 tracing::debug!(provider_id, model_id, "a catalog row was not readable");
                 continue;
             };
-            if let Some(info) = wire.into_info(provider_id, model_id) {
+            if let Some(info) = wire.into_info(provider_id, model_id, provider_npm) {
                 models.push(Arc::new(info));
             }
         }
@@ -1052,6 +1075,23 @@ struct Wire {
     /// default is what lets a cache written before variants existed — and
     /// every row that publishes none — parse unchanged.
     variants: Option<BTreeMap<String, serde_json::Map<String, serde_json::Value>>>,
+    /// The row's own transport override, `{"npm": …, "api": …}`. Absent — the
+    /// common case, and `null` on the wire — means the provider's own `npm`
+    /// answers for it.
+    provider: Option<WireTransport>,
+}
+
+/// The `provider` object a row may carry to override its provider's transport.
+///
+/// Only `npm` is read. The sibling `api` would name a per-model base URL, which
+/// no row this build has met uses and which nothing here would know what to do
+/// with — a row that needs a *different host* from its provider is a provider,
+/// so it is left undecoded rather than half-honoured.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct WireTransport {
+    /// The SDK package that serves this row.
+    npm: Option<String>,
 }
 
 /// The `cost` object.
@@ -1083,7 +1123,12 @@ struct WireLimit {
 impl Wire {
     /// Turns a published row into a table row, or [`None`] when it carries no
     /// usable sizes.
-    fn into_info(self, provider_id: &str, model_id: &str) -> Option<ModelInfo> {
+    fn into_info(
+        self,
+        provider_id: &str,
+        model_id: &str,
+        provider_npm: Option<&str>,
+    ) -> Option<ModelInfo> {
         let limit = self.limit.unwrap_or_default();
         let context_window = tokens(limit.context)?;
         let max_output = tokens(limit.output)?;
@@ -1108,6 +1153,12 @@ impl Wire {
             status: status(self.status.as_deref()),
             reasoning: self.reasoning.unwrap_or_default(),
             reasoning_options: self.reasoning_options,
+            // Upstream's `??`, resolved here: the row's own transport, else the
+            // one its provider declared for every row it did not override.
+            npm: self
+                .provider
+                .and_then(|transport| transport.npm)
+                .or_else(|| provider_npm.map(str::to_owned)),
             // Held as what the catalog declared just long enough for the
             // synthesis to read the whole row, then replaced with the merged
             // roster — capability data first, the declaration winning on top.
@@ -1302,6 +1353,11 @@ mod tests {
                 "id": "fixture-small",
                 "limit": { "context": 128000, "output": 8000 }
               },
+              "fixture-other-transport": {
+                "id": "fixture-other-transport",
+                "provider": { "npm": "@fixture/other", "api": "https://elsewhere.example" },
+                "limit": { "context": 128000, "output": 8000 }
+              },
               "fixture-unsized": {
                 "id": "fixture-unsized",
                 "cost": { "input": 1.0, "output": 2.0 }
@@ -1424,16 +1480,26 @@ mod tests {
     ///
     /// **And the obligation has an exception now, deliberately.** It was
     /// written for single-vendor rosters, where "cataloged" and "one obvious
-    /// default" arrive together. A *gateway* breaks that pairing: `openrouter`
-    /// is fully cataloged once a catalog is fetched — rows for every vendor it
-    /// fronts — and pins nothing, because no vendor and no upstream rule
-    /// supplies a default for it (`provider::openrouter` holds the three
-    /// reasons). It reaches the uncataloged arm below in *this* process only
-    /// because the compiled-in snapshot carries no rows for it, which is an
-    /// accident of the tier rather than the reason, so it is named for what it
-    /// is instead of passing by coincidence. `ganja-core`'s
-    /// `tests/catalog_openrouter.rs` is where both halves are asserted against
-    /// a real catalog: rows present, default absent.
+    /// default" arrive together. A *gateway* breaks that pairing: each of
+    /// [`GATEWAYS`] is fully cataloged once a catalog is fetched — rows for
+    /// every vendor it fronts — and pins nothing, because no vendor and no
+    /// upstream rule supplies a default for one (`provider::openrouter` holds
+    /// the three reasons; `provider::opencode` inherits them, and would have to
+    /// pick between two rosters besides). They reach the uncataloged arm below
+    /// in *this* process only because the compiled-in snapshot carries no rows
+    /// for them, which is an accident of the tier rather than the reason, so
+    /// they are named for what they are instead of passing by coincidence.
+    /// `ganja-core`'s `tests/catalog_openrouter.rs` and
+    /// `tests/opencode_dialects.rs` are where the rows are proved present
+    /// against a real catalog.
+    /// The providers that front other people's models, which is what makes
+    /// "cataloged" and "has a default" come apart for them.
+    const GATEWAYS: [&str; 3] = [
+        crate::provider::openrouter::ID,
+        crate::provider::opencode::ZEN_ID,
+        crate::provider::opencode::GO_ID,
+    ];
+
     #[test]
     fn every_selectable_provider_has_a_default_this_table_can_price() {
         for provider in crate::provider::PROVIDERS {
@@ -1450,15 +1516,15 @@ mod tests {
                 );
                 continue;
             }
-            // The gateway: cataloged wherever a catalog was fetched, pinned
+            // The gateways: cataloged wherever a catalog was fetched, pinned
             // nowhere, and asserted as *both* rather than left to whichever
             // tier this process happens to be holding.
-            if provider == crate::provider::openrouter::ID {
+            if GATEWAYS.contains(&provider) {
                 assert_eq!(
                     default_model(provider),
                     None,
                     "a gateway fronting many vendors pins none of them; see \
-                     `provider::openrouter` before adding one"
+                     `provider::{{openrouter,opencode}}` before adding one"
                 );
                 continue;
             }
@@ -1726,6 +1792,53 @@ mod tests {
     /// api.json — capability flags, `reasoning_options`, no declared
     /// `variants` — comes out of `parse` with a roster already assembled, in
     /// the splice shape of the wire that provider's rows ride.
+    /// The transport hint survives the way in, both halves of it.
+    ///
+    /// This field exists for exactly one caller — `provider::opencode`, whose
+    /// gateway serves three dialects off one base URL and has nothing but this
+    /// to tell them apart — so "the catalog kept it" is the whole feature. A
+    /// row that overrides its provider keeps its own; every row that does not
+    /// inherits the provider's, which is upstream's `??` and not a default
+    /// invented here.
+    #[test]
+    fn a_rows_transport_is_its_own_or_its_providers_and_never_nothing() {
+        let catalog = parse(&payload()).expect("the fixture is a catalog");
+        let npm = |id: &str| {
+            catalog
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the table"))
+                .npm
+                .clone()
+        };
+
+        assert_eq!(
+            npm("fixture-large"),
+            Some("@fixture/sdk".to_owned()),
+            "a row that overrides nothing is served by its provider's transport"
+        );
+        assert_eq!(
+            npm("fixture-small"),
+            Some("@fixture/sdk".to_owned()),
+            "including a row that carries almost nothing at all"
+        );
+        assert_eq!(
+            npm("fixture-other-transport"),
+            Some("@fixture/other".to_owned()),
+            "and a row that names its own wins, which is the case the whole \
+             field exists for"
+        );
+
+        // The snapshot is every provider whose dialect is fixed at the
+        // provider, so it has nothing to say and says nothing — rather than
+        // saying something that would then have to be ignored.
+        assert!(
+            snapshot().models.iter().all(|model| model.npm.is_none()),
+            "the compiled-in tier claims no transport for anybody"
+        );
+    }
+
     #[test]
     fn a_reasoning_row_synthesizes_its_roster_at_parse() {
         let body = r#"{
@@ -1927,7 +2040,17 @@ mod tests {
         };
         let catalog = read_cached(&source).expect("the cache holds a catalog");
 
-        assert_eq!(catalog.models.len(), 2);
+        // Against the parse of the same bytes rather than a number: what this
+        // test is about is the round trip, and a literal count would have to be
+        // edited every time the shared fixture grows a row.
+        assert_eq!(
+            catalog.models.len(),
+            parse(&payload())
+                .expect("the fixture is a catalog")
+                .models
+                .len(),
+            "reading the cache back yields the table the payload parses to"
+        );
     }
 
     /// A cache that cannot be read is the one thing a stale-tolerant reader

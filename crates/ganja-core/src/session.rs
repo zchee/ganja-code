@@ -5062,6 +5062,7 @@ mod tests {
             status: catalog::ModelStatus::Active,
             reasoning: false,
             reasoning_options: None,
+            npm: None,
             variants: std::collections::BTreeMap::new(),
         })
     }

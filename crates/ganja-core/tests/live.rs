@@ -19,8 +19,8 @@ use ganja_core::{
     catalog,
     protocol::{FinishReason, Message, Usage},
     provider::{
-        AnthropicProvider, ChatRequest, OpenAiProvider, Provider, ProviderEvent, openrouter,
-        retry::MAX_ATTEMPTS,
+        AnthropicProvider, ChatRequest, OpenAiProvider, OpencodeProvider, Provider, ProviderEvent,
+        opencode, openrouter, retry::MAX_ATTEMPTS,
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -177,6 +177,56 @@ async fn openrouter_answers_a_live_prompt() {
         .unwrap_or_else(|| FALLBACK.to_owned());
 
     smoke(&provider, &model).await;
+}
+
+/// The OpenCode gateways, one turn per dialect.
+///
+/// The only test here that drives **three wires through one provider**, which is
+/// the whole of what this vendor is: the catalog picks the dialect and the wire
+/// picks the header, and a live turn is the one thing that proves the gateway
+/// agrees with both choices. `tests/opencode_dialects.rs` already pins the
+/// request shape against a socket this build controls; what this adds is that
+/// the *vendor* accepts it.
+///
+/// Models are named rather than defaulted, for `provider::openrouter`'s reason
+/// — a gateway pins no default — and chosen as the cheapest row of each dialect
+/// the probe actually ran. `GANJA_MODEL` overrides the chat one; the other two
+/// are the dialects, so overriding them individually would defeat the point.
+#[tokio::test]
+#[ignore = "talks to OpenCode Zen; needs GANJA_LIVE_TEST=1 and OPENCODE_API_KEY"]
+async fn opencode_zen_answers_a_live_prompt_on_every_dialect_it_serves() {
+    if key(opencode::API_KEY_ENV).is_none() {
+        return;
+    }
+    let provider = OpencodeProvider::zen().expect("an exported key builds the provider");
+
+    // One per dialect: chat-completions (no transport of its own), Responses
+    // (`@ai-sdk/openai`), and Messages (`@ai-sdk/anthropic`) — the last being
+    // the one whose header the gateway refuses to accept as a bearer.
+    let chat = env::var("GANJA_MODEL")
+        .ok()
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| "glm-5".to_owned());
+    for model in [chat.as_str(), "gpt-5.6-luna", "qwen3.6-plus"] {
+        eprintln!("-- {} on {model}", opencode::ZEN_ID);
+        smoke(&provider, model).await;
+    }
+}
+
+/// Go, on the same credential and the one model that proves the dialect is per
+/// (provider, model): `minimax-m3` is chat on Zen and Messages here.
+#[tokio::test]
+#[ignore = "talks to OpenCode Go; needs GANJA_LIVE_TEST=1 and OPENCODE_API_KEY"]
+async fn opencode_go_answers_on_the_same_key_and_a_different_dialect() {
+    if key(opencode::API_KEY_ENV).is_none() {
+        return;
+    }
+
+    smoke(
+        &OpencodeProvider::go().expect("one key serves both gateways"),
+        "minimax-m3",
+    )
+    .await;
 }
 
 /// Not a network test: it pins the retry budget a live turn is willing to spend

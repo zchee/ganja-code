@@ -86,7 +86,7 @@ use crate::{
         ChatRequest, CredentialSource, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
         check_base_url, client, open,
         openai::{self, arguments, result},
-        openrouter, require_key, setting, shown_base_url, splice_effort,
+        opencode, openrouter, require_key, setting, shown_base_url, splice_effort,
         sse::Frame,
         steps,
     },
@@ -127,6 +127,11 @@ pub(super) enum Backend {
     Platform,
     /// OpenRouter's Responses surface, reached with that vendor's own API key.
     OpenRouter,
+    /// One of the OpenCode gateways' Responses rows, under the id the catalog
+    /// files them beneath — [`super::opencode::ZEN_ID`] or
+    /// [`super::opencode::GO_ID`]. Carries the id because *two* providers share
+    /// this arm and a turn must report which one it ran as.
+    Opencode(&'static str),
 }
 
 impl Backend {
@@ -141,6 +146,12 @@ impl Backend {
             Self::Codex => DEFAULT_BASE_URL,
             Self::Platform => openai::DEFAULT_BASE_URL,
             Self::OpenRouter => openrouter::DEFAULT_BASE_URL,
+            // Zen and Go do not share a base, so this arm cannot answer for
+            // both — and never has to: only `configured` reads this, and that
+            // is the `openai` environment override, which no gateway honours.
+            // `opencode::at` passes its base URL explicitly, like every
+            // caller that knows its own endpoint.
+            Self::Opencode(_) => opencode::ZEN_BASE_URL,
         }
     }
 
@@ -150,21 +161,25 @@ impl Backend {
     /// the catalog on it — so this is not cosmetic: an OpenRouter turn reporting
     /// itself as `openai` would be sized and billed against the wrong table, and
     /// its sealed reasoning would be handed to the wrong wire.
-    const fn provider_id(self) -> &'static str {
+    pub(super) const fn provider_id(self) -> &'static str {
         match self {
             Self::Codex | Self::Platform => ID,
             Self::OpenRouter => openrouter::ID,
+            Self::Opencode(id) => id,
         }
     }
 
     /// Whether this backend documents the sealed-reasoning pairing
     /// ([`Body::include`] out, a `reasoning` input item back).
     ///
-    /// OpenAI's two do; OpenRouter's does not, and nothing here guesses on its
-    /// behalf — the whole reasoning is in [`super::openrouter`]'s module doc.
-    /// One predicate rather than three sites, because asking for state and
-    /// replaying it are one feature and half of it is worse than neither.
-    const fn replays_reasoning(self) -> bool {
+    /// OpenAI's two do. Neither gateway does, and nothing here guesses on
+    /// their behalf — the whole reasoning is in [`super::openrouter`]'s module
+    /// doc, and [`super::opencode`] inherits it for the same reason: a vendor
+    /// that documents no way to hand sealed state back is not one to hand it
+    /// back to. One predicate rather than three sites, because asking for
+    /// state and replaying it are one feature and half of it is worse than
+    /// neither.
+    pub(super) const fn replays_reasoning(self) -> bool {
         matches!(self, Self::Codex | Self::Platform)
     }
 }
