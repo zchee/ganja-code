@@ -1234,8 +1234,19 @@ impl App {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let [transcript, prompt, status] = Layout::vertical([
+                // Sized before the split so the strip holds this frame's
+                // lines, and capped so a long checklist cannot squeeze the
+                // conversation itself off the screen.
+                let working_height = self
+                    .chat
+                    .lay_out_working(area.width, &self.theme)
+                    .min(area.height / 2);
+                let [transcript, working, prompt, status] = Layout::vertical([
                     Constraint::Min(1),
+                    // What the running turn is doing now, pinned above the
+                    // composer rather than scrolled with the transcript
+                    // (**D487**, amended by the 2026-08-15 screenshots).
+                    Constraint::Length(working_height),
                     Constraint::Length(editor::HEIGHT),
                     // A configured roster may earn a git line above the bar
                     // and a detail line below it; the default bar is the one
@@ -1252,11 +1263,16 @@ impl App {
                 // all — showing (upstream `context/theme.tsx:269`).
                 buffer.set_style(area, self.theme.background);
                 self.chat.render(transcript, buffer, &self.theme);
-                // What is waiting sits directly above the composer, under
-                // whichever inline menu is open: the strip is a standing
-                // account of messages the engine still owes, and a menu is a
-                // transient answer to what is being typed right now.
-                self.queue.render(prompt, buffer, &self.theme);
+                self.chat.render_working(working, buffer);
+                // What is waiting sits directly above the working strip,
+                // under whichever inline menu is open: the strip is a
+                // standing account of messages the engine still owes, and a
+                // menu is a transient answer to what is being typed right
+                // now. Anchored to the working block rather than the
+                // composer so a queued message never papers over what the
+                // turn is doing — when no turn runs, the anchor sits where
+                // the composer starts and nothing has moved.
+                self.queue.render(working, buffer, &self.theme);
                 // Anchored to the editor and drawn over the transcript, which
                 // is what makes it read as part of what is being typed rather
                 // than as another dialog.

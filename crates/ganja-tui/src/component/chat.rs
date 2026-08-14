@@ -38,14 +38,24 @@
 //! envelope it writes for the model, and a `todowrite` answers with the
 //! checklist itself — `\u{2610}`/`\u{2612}` a row each — drawn both on the call's
 //! own row and, while the turn is still running, under the working line.
+//!
+//! Three more screenshots (2026-08-15) pin the strip and the verdicts: the
+//! working line and the checklist under it sit in a strip **pinned above the
+//! composer** rather than riding the transcript's tail, the line is painted
+//! its own orange with a brighter band sweeping left to right, and a settled
+//! call's bullet answers "did it work" — green for a call that did, red for
+//! one that failed — while the heading beside it stays prose.
 
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
@@ -158,16 +168,16 @@ pub struct Chat {
     backtrack_unseen: bool,
     /// The turn that is running, while one is (**D487**).
     working: Option<Working>,
-    /// The lines [`Chat::working`] drew to on the last frame: the working line
-    /// itself, and under it this turn's checklist while the turn has one
-    /// (**D487**).
+    /// The lines [`Chat::lay_out_working`] built on the last call: the
+    /// working line itself, and under it this turn's checklist while the turn
+    /// has one (**D487**).
     ///
-    /// Rebuilt every render rather than cached on width and theme like every
-    /// other block here, because its text moves with the clock and there is
-    /// nothing for such a cache to key on. It is kept rather than returned
-    /// because [`Chat::visible`] hands out borrowed lines, and it costs one
-    /// short format per frame — on exactly the frames the status bar's spinner
-    /// is already redrawing for.
+    /// Rebuilt on every layout rather than cached on width and theme like
+    /// every other block here, because its text moves with the clock and its
+    /// paint with the shimmer — there is nothing for such a cache to key on,
+    /// and the frames are ones a running turn already forces. Kept between
+    /// the layout and [`Chat::render_working`] because the app sizes its
+    /// vertical split off the count before it has an area to draw into.
     working_lines: Vec<Line<'static>>,
 }
 
@@ -204,7 +214,8 @@ struct Entry {
     wrapped: Option<Wrapped>,
 }
 
-/// What a running turn leaves at the tail of the transcript (**D487**).
+/// What a running turn shows in the strip pinned above the composer
+/// (**D487**, its seam amended by the 2026-08-15 screenshots).
 ///
 /// Carries the turn's own facts and no clock of its own: the elapsed figure is
 /// read off `started` at every frame, exactly as `component::status`'s spinner
@@ -232,8 +243,8 @@ pub struct Working {
 }
 
 impl Working {
-    /// The one line this draws to.
-    fn line(&self, theme: &Theme) -> Line<'static> {
+    /// The one line this draws to, in the strip's own paint.
+    fn line(&self) -> Line<'static> {
         let verbs = u64::try_from(WORKING_VERBS.len()).unwrap_or(1);
         let verb = WORKING_VERBS[usize::try_from(self.turn % verbs).unwrap_or(0)];
         let mut text = format!(
@@ -248,8 +259,70 @@ impl Working {
         }
         text.push(')');
 
-        Line::styled(text, theme.accent)
+        shimmer(text, self.started.elapsed())
     }
+}
+
+/// The working line's own paint — orange, deliberately not a theme slot: the
+/// screenshot that pinned it (2026-08-15, Claude Code's own shimmer as the
+/// reference) named the color, not a role.
+const SHIMMER_BASE: (u8, u8, u8) = (0xe0, 0x80, 0x30);
+
+/// What the band brightens toward at its center.
+const SHIMMER_PEAK: (u8, u8, u8) = (0xff, 0xe4, 0xb4);
+
+/// Columns the band reaches to either side of its center.
+const SHIMMER_RADIUS: u64 = 3;
+
+/// Milliseconds the band takes to advance one column.
+const SHIMMER_STEP: u128 = 45;
+
+/// Lays `text` out in orange with a brighter band sweeping left to right.
+///
+/// Time-driven off the same elapsed clock as the figure inside the text, so
+/// the band advances on exactly the frames [`crate::app::App`] already
+/// redraws for a running turn: nothing here keeps a phase of its own, and the
+/// same instant read twice draws the same line twice.
+fn shimmer(text: String, elapsed: Duration) -> Line<'static> {
+    let characters: Vec<char> = text.chars().collect();
+    let count = u64::try_from(characters.len()).unwrap_or(u64::MAX);
+    // The band walks in from before the first column and all the way out past
+    // the last, so the sweep reads as a pass rather than a wrap.
+    let cycle = count + SHIMMER_RADIUS * 2 + 1;
+    let center = u64::try_from(elapsed.as_millis() / SHIMMER_STEP).unwrap_or(u64::MAX) % cycle;
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (index, character) in characters.into_iter().enumerate() {
+        let column = u64::try_from(index).unwrap_or(u64::MAX) + SHIMMER_RADIUS;
+        let reach = SHIMMER_RADIUS.saturating_sub(center.abs_diff(column));
+        let style = Style::default().fg(blend(SHIMMER_BASE, SHIMMER_PEAK, reach, SHIMMER_RADIUS));
+        match spans.last_mut() {
+            Some(span) if span.style == style => span.content.to_mut().push(character),
+            _ => spans.push(Span::styled(character.to_string(), style)),
+        }
+    }
+
+    Line::from(spans)
+}
+
+/// The color `numerator / denominator` of the way from `base` to `peak`.
+fn blend(base: (u8, u8, u8), peak: (u8, u8, u8), numerator: u64, denominator: u64) -> Color {
+    let channel = |base: u8, peak: u8| {
+        let (base, peak) = (u64::from(base), u64::from(peak));
+        let mixed = if peak >= base {
+            base + (peak - base) * numerator / denominator
+        } else {
+            base - (base - peak) * numerator / denominator
+        };
+
+        u8::try_from(mixed).unwrap_or(u8::MAX)
+    };
+
+    Color::Rgb(
+        channel(base.0, peak.0),
+        channel(base.1, peak.1),
+        channel(base.2, peak.2),
+    )
 }
 
 /// One line of a block before the viewport lays it out: what introduces it,
@@ -264,6 +337,11 @@ impl Working {
 #[derive(Debug)]
 struct Row {
     prefix: String,
+    /// The prefix's own paint, where it differs from the body's: a settled
+    /// call's bullet answers "did it work" — green for yes, red for no —
+    /// while the heading beside it stays prose (the 2026-08-15 screenshots,
+    /// matching Claude Code's own dots).
+    lead: Option<Style>,
     text: String,
     style: Style,
 }
@@ -272,8 +350,17 @@ impl Row {
     fn new(prefix: &str, text: impl Into<String>, style: Style) -> Self {
         Self {
             prefix: prefix.to_owned(),
+            lead: None,
             text: text.into(),
             style,
+        }
+    }
+
+    /// A row whose prefix is painted `lead` while its text keeps `style`.
+    fn led(prefix: &str, lead: Style, text: impl Into<String>, style: Style) -> Self {
+        Self {
+            lead: Some(lead),
+            ..Self::new(prefix, text, style)
         }
     }
 }
@@ -298,12 +385,18 @@ fn lay_out(rows: &[Row], width: usize) -> Vec<Line<'static>> {
             // A blank line inside a block stays blank — a row of spaces is an
             // indent nobody can see, and one the backtrack highlight would
             // have to treat as content.
-            let text = match (index, line.is_empty()) {
-                (0, _) => format!("{prefix}{line}", prefix = row.prefix),
-                (_, true) => String::new(),
-                (_, false) => format!("{hang}{line}"),
+            let line = match (index, line.is_empty(), row.lead) {
+                (0, _, Some(lead)) => Line::from(vec![
+                    Span::styled(row.prefix.clone(), lead),
+                    Span::styled(line, row.style),
+                ]),
+                (0, _, None) => {
+                    Line::styled(format!("{prefix}{line}", prefix = row.prefix), row.style)
+                }
+                (_, true, _) => Line::styled(String::new(), row.style),
+                (_, false, _) => Line::styled(format!("{hang}{line}"), row.style),
             };
-            lines.push(Line::styled(text, row.style));
+            lines.push(line);
         }
     }
 
@@ -665,20 +758,6 @@ impl Chat {
         if let Some(revert) = &mut self.revert {
             revert.wrap(hidden, area.width, theme);
         }
-        // Before the offset math below, so the lines it adds are ones the
-        // viewport already knows about — the marker row's own arrangement.
-        // The checklist under the line is laid out here rather than cached
-        // because the line above it is: the pair is one block, rebuilt on the
-        // frames the clock already forces (**D487**).
-        let working = self.working.map(|working| {
-            let mut lines = vec![working.line(theme)];
-            let todos = result_rows(self.working_todos(theme), false);
-            lines.extend(lay_out(&todos, usize::from(area.width)));
-
-            lines
-        });
-        self.working_lines = working.unwrap_or_default();
-
         // The highlight span exists only after the wrap above, which is why
         // the walk into view happens here rather than in the setter: the
         // setter runs before anybody knows how many lines anything takes.
@@ -759,7 +838,6 @@ impl Chat {
                 .revert
                 .as_ref()
                 .map_or(0, |revert| revert.lines().len())
-            + self.working_lines.len()
     }
 
     /// Widths the entries are currently cached at, which is how a test tells
@@ -810,26 +888,64 @@ impl Chat {
             .unwrap_or_default()
     }
 
+    /// Lays this frame's working block out at `width` and says how tall it
+    /// is: the working line, and under it this turn's checklist while the
+    /// turn has one.
+    ///
+    /// The block is **pinned above the composer** rather than ridden at the
+    /// transcript's tail (the 2026-08-15 screenshots, pinning Claude Code's
+    /// own arrangement over **D487**'s seam): what a turn is doing now is a
+    /// status, not a message, and a status that scrolls with the history is
+    /// lost exactly when the history gets long. The app calls this before its
+    /// vertical split so the strip is sized on this frame's lines, then
+    /// [`Chat::render_working`] draws what was built here.
+    pub fn lay_out_working(&mut self, width: u16, theme: &Theme) -> u16 {
+        let lines = match self.working {
+            Some(working) => {
+                let mut lines = vec![working.line()];
+                let todos = result_rows(self.working_todos(theme), false);
+                lines.extend(lay_out(&todos, usize::from(width)));
+
+                lines
+            }
+            None => Vec::new(),
+        };
+        self.working_lines = lines;
+
+        u16::try_from(self.working_lines.len()).unwrap_or(u16::MAX)
+    }
+
+    /// Draws what [`Chat::lay_out_working`] built into `area`, top-aligned so
+    /// a strip the terminal cut short keeps the working line itself.
+    pub fn render_working(&self, area: Rect, buffer: &mut Buffer) {
+        for (row, line) in self.working_lines.iter().enumerate() {
+            let Ok(row) = u16::try_from(row) else {
+                break;
+            };
+            if row >= area.height {
+                break;
+            }
+            buffer.set_line(area.x, area.y + row, line, area.width);
+        }
+    }
+
     /// Yields the lines the viewport shows, skipping whole entries rather than
     /// stepping over every line above the offset.
     ///
     /// The marker row rides along as one more block at the end, which is where
     /// it belongs: the entries a revert hides are always the tail of the
     /// transcript, so what it stands in for is always below everything shown.
-    /// The working line rides the same seam, one block further down still —
-    /// what a turn is doing now is below everything it has already said — and
-    /// the checklist it carries rides with it, as lines of that same block
-    /// (**D487**).
+    /// The working line used to ride the same seam and no longer does: what a
+    /// turn is doing now lives outside the scroll entirely, in the strip
+    /// [`Chat::lay_out_working`] builds (**D487**, amended 2026-08-15).
     fn visible(&self, offset: usize) -> impl Iterator<Item = &Line<'static>> {
         let mut left_to_skip = offset;
         let marker: &[Line<'static>] = self.revert.as_ref().map_or(&[], Revert::lines);
-        let working: &[Line<'static>] = self.working_lines.as_slice();
 
         self.shown()
             .iter()
             .map(Entry::lines)
             .chain(std::iter::once(marker))
-            .chain(std::iter::once(working))
             .flat_map(move |lines| {
                 let skip = left_to_skip.min(lines.len());
                 left_to_skip -= skip;
@@ -1448,7 +1564,14 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
             metadata,
             ..
         } => {
-            let mut rows = vec![Row::new(BULLET, tool_heading(tool, Some(input)), theme.fg)];
+            // The bullet alone answers "did it work" (2026-08-15): green
+            // here, red on a failed call, while the heading stays prose.
+            let mut rows = vec![Row::led(
+                BULLET,
+                theme.success,
+                tool_heading(tool, Some(input)),
+                theme.fg,
+            )];
             // A read answers with a count and stops there; see [`READ_TOOL`].
             if tool == READ_TOOL
                 && let Some(summary) = read_summary(metadata)
@@ -1510,10 +1633,11 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
             rows
         }
         ToolState::Error { input, error, .. } => {
-            let mut rows = vec![Row::new(
+            let mut rows = vec![Row::led(
                 BULLET,
-                tool_heading(tool, Some(input)),
                 theme.error,
+                tool_heading(tool, Some(input)),
+                theme.fg,
             )];
             if let Some(first) = error.lines().next().filter(|line| !line.is_empty()) {
                 rows.push(Row::new(RESULT, format!("[error] {first}"), theme.error));
@@ -1570,7 +1694,12 @@ fn task_lines(state: &ToolState, theme: &Theme) -> Vec<Row> {
             let description = field(input, "description").or(Some(title.as_str()));
 
             vec![
-                Row::new(BULLET, task_heading(agent, description), theme.fg),
+                Row::led(
+                    BULLET,
+                    theme.success,
+                    task_heading(agent, description),
+                    theme.fg,
+                ),
                 Row::new(
                     RESULT,
                     format!(
@@ -1814,6 +1943,25 @@ mod tests {
     fn rendered(chat: &mut Chat, area: Rect) -> Vec<String> {
         let mut buffer = Buffer::empty(area);
         chat.render(area, &mut buffer, &Theme::default());
+
+        (0..area.height)
+            .map(|row| {
+                (0..area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The working strip as [`crate::app::App`] composes it: laid out at
+    /// `width`, drawn into exactly the rows it asked for.
+    fn strip(chat: &mut Chat, width: u16) -> Vec<String> {
+        let height = chat.lay_out_working(width, &Theme::default());
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        chat.render_working(area, &mut buffer);
 
         (0..area.height)
             .map(|row| {
@@ -2476,8 +2624,9 @@ mod tests {
     }
 
     /// **The checklist screenshot's other half.** While a turn runs, its newest
-    /// list hangs under the working line; when the turn settles the copy goes
-    /// with the line, and the call's own rows stay where they are.
+    /// list hangs under the working line in the strip pinned above the
+    /// composer; when the turn settles the strip goes, and the call's own rows
+    /// stay where they are.
     #[test]
     fn the_working_line_carries_this_turns_checklist_and_drops_it_on_settle() {
         let mut chat = Chat::default();
@@ -2505,38 +2654,45 @@ mod tests {
                 .count()
         };
         let area = Rect::new(0, 0, 60, 24);
-        let running = rendered(&mut chat, area);
+        let transcript = rendered(&mut chat, area);
+        let running = strip(&mut chat, 60);
 
         assert!(
-            running.iter().any(|line| line.starts_with("\u{273b} ")),
-            "a turn is running, got {running:?}"
+            !transcript.iter().any(|line| line.starts_with("\u{273b} ")),
+            "the transcript itself no longer carries the line: {transcript:?}"
+        );
+        assert_eq!(
+            boxes(&transcript),
+            4,
+            "the call's own rows stay in the transcript: {transcript:?}"
+        );
+        assert!(
+            running
+                .first()
+                .is_some_and(|line| line.starts_with("\u{273b} ")),
+            "the strip opens on the working line, got {running:?}"
         );
         assert_eq!(
             boxes(&running),
-            8,
-            "the list is on the call's row and under the working line: {running:?}"
+            4,
+            "and carries this turn's list: {running:?}"
         );
-        let working = running
-            .iter()
-            .position(|line| line.starts_with("\u{273b} "))
-            .expect("the working line is on screen");
         assert_eq!(
-            running[working + 1],
-            "  \u{23bf} \u{2612} port cell.slang",
+            running[1], "  \u{23bf} \u{2612} port cell.slang",
             "the copy hangs off the working line's own elbow: {running:?}"
         );
 
         chat.set_working(None);
-        let settled = rendered(&mut chat, area);
+        let settled = strip(&mut chat, 60);
 
         assert!(
-            !settled.iter().any(|line| line.starts_with("\u{273b} ")),
-            "a settled turn leaves no working line: {settled:?}"
+            settled.is_empty(),
+            "a settled turn leaves no strip: {settled:?}"
         );
         assert_eq!(
-            boxes(&settled),
+            boxes(&rendered(&mut chat, area)),
             4,
-            "and the transcript keeps the rows it already drew: {settled:?}"
+            "and the transcript keeps the rows it already drew"
         );
     }
 
@@ -2564,14 +2720,17 @@ mod tests {
             output_tokens: 0,
         }));
 
-        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 24));
-        let working = lines
-            .iter()
-            .position(|line| line.starts_with("\u{273b} "))
-            .expect("the working line is on screen");
+        let lines = strip(&mut chat, 60);
 
         assert!(
-            lines[working + 1..].iter().all(|line| line.is_empty()),
+            lines
+                .first()
+                .is_some_and(|line| line.starts_with("\u{273b} ")),
+            "the strip opens on the working line: {lines:?}"
+        );
+        assert_eq!(
+            lines.len(),
+            1,
             "the new turn has written no list, so nothing hangs under it: {lines:?}"
         );
     }
@@ -3602,11 +3761,11 @@ mod tests {
         }
     }
 
-    /// **AC4.** While a turn runs the tail says so, with what it has spent;
-    /// when the turn settles the line is gone and nothing of it is left in the
-    /// count the viewport scrolls by.
+    /// **AC4.** While a turn runs the strip says so, with what it has spent;
+    /// when the turn settles the strip is gone — and the viewport's own count
+    /// never counted it, because the strip is not the transcript's to scroll.
     #[test]
-    fn the_tail_says_a_turn_is_working_and_takes_it_back_when_the_turn_settles() {
+    fn the_strip_says_a_turn_is_working_and_takes_it_back_when_the_turn_settles() {
         let mut chat = Chat::default();
         chat.start_message(Message::user("go on then"));
         let area = Rect::new(0, 0, 60, 10);
@@ -3614,7 +3773,7 @@ mod tests {
         let settled = chat.line_count();
 
         chat.set_working(Some(working(1, 12, 431)));
-        let lines = rendered(&mut chat, area);
+        let lines = strip(&mut chat, 60);
 
         assert!(
             lines
@@ -3622,14 +3781,17 @@ mod tests {
                 .any(|line| line == "\u{273b} Thinking\u{2026} (12s \u{b7} \u{2191} 431 tokens)"),
             "got {lines:?}"
         );
-        assert_eq!(chat.line_count(), settled + 1, "one line, and only one");
+        assert_eq!(
+            chat.line_count(),
+            settled,
+            "the strip is not the transcript's to scroll"
+        );
 
         chat.set_working(None);
-        let lines = rendered(&mut chat, area);
 
         assert!(
-            !lines.iter().any(|line| line.contains('\u{273b}')),
-            "a settled turn leaves no working line, got {lines:?}"
+            strip(&mut chat, 60).is_empty(),
+            "a settled turn leaves no strip"
         );
         assert_eq!(chat.line_count(), settled);
     }
@@ -3641,7 +3803,7 @@ mod tests {
         let mut chat = Chat::default();
         chat.set_working(Some(working(1, 3, 0)));
 
-        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 6));
+        let lines = strip(&mut chat, 60);
 
         assert!(
             lines
@@ -3658,7 +3820,7 @@ mod tests {
         let verb = |turn: u64| {
             let mut chat = Chat::default();
             chat.set_working(Some(working(turn, 0, 0)));
-            rendered(&mut chat, Rect::new(0, 0, 40, 4))
+            strip(&mut chat, 40)
                 .into_iter()
                 .find(|line| !line.is_empty())
                 .unwrap_or_default()
@@ -3674,22 +3836,24 @@ mod tests {
         );
     }
 
-    /// **Pre-mortem 2.** The working line rides the marker row's seam, so it
-    /// neither breaks the tail-follow nor moves a viewport somebody pinned.
+    /// **Pre-mortem 2.** The working block lives outside the scroll entirely
+    /// (2026-08-15): it can neither break the tail-follow nor move a viewport
+    /// somebody pinned, because the transcript's own lines are the same with
+    /// and without it.
     #[test]
     fn the_working_line_disturbs_neither_the_tail_nor_a_pinned_viewport() {
         let mut chat = Chat::default();
         transcript(&mut chat, 20);
-        rendered(&mut chat, VIEWPORT);
+        let tail = rendered(&mut chat, VIEWPORT);
         assert!(chat.is_following_tail());
 
         chat.set_working(Some(working(1, 5, 0)));
-        let lines = rendered(&mut chat, VIEWPORT);
-        assert!(chat.is_following_tail(), "the tail is still followed");
-        assert!(
-            lines.last().is_some_and(|line| line.contains('\u{273b}')),
-            "and the working line is what the tail now ends on, got {lines:?}"
+        assert_eq!(
+            rendered(&mut chat, VIEWPORT),
+            tail,
+            "the strip is not the viewport's to show"
         );
+        assert!(chat.is_following_tail(), "the tail is still followed");
 
         chat.set_working(None);
         chat.scroll_lines(-9);
@@ -3701,7 +3865,7 @@ mod tests {
         assert_eq!(
             rendered(&mut chat, VIEWPORT),
             pinned,
-            "a line arriving at the bottom must not move a reader who is not there"
+            "a strip appearing at the bottom must not move a reader who is not there"
         );
     }
 
