@@ -53,7 +53,7 @@ status-line rows moved here from §1, the rest is researched.*
 | [Write-mode network cutoff](https://github.com/openai/codex/blob/main/docs/sandbox.md) | `network_access = false` under workspace-write | ❌ no such concept |
 | [Project trust levels](https://github.com/openai/codex/blob/main/docs/config.md) | `[projects."path"] trust_level`, prompt on untrusted dirs | ❌ |
 | [`shell_environment_policy`](https://github.com/openai/codex/blob/main/docs/config.md) | inherit all/core/none + include/exclude patterns for subshell env | ❌ tools inherit the process env |
-| [`--yolo` bypass](https://github.com/openai/codex/blob/main/docs/sandbox.md) | skip sandbox + approvals | ⚠️ `--auto` is allow-unless-denied; no sandbox to bypass |
+| [`--yolo` bypass](https://github.com/openai/codex/blob/main/docs/sandbox.md) | skip sandbox + approvals | ✅ both the interactive TUI and `run` carry `--auto` + hidden `--yolo`/`--dangerously-skip-permissions` (D479): Ask-raised dialogs answered "allow once", deny unchanged — still no sandbox to bypass |
 | [Container posture](https://github.com/openai/codex/blob/main/docs/sandbox.md) | degraded-sandbox flags for Docker/devcontainers | ❌ |
 
 ## 4. Slash commands
@@ -114,7 +114,7 @@ mode-level posture lives in §3.*
 | Feature | Notes | ganja |
 |---|---|---|
 | [AGENTS.md, project + global](https://agents.md) | `~/.codex/AGENTS.md` + repo root | ✅ ganja reads the family plus its global tier |
-| [Nested AGENTS.md](https://agents.md) | per-subdirectory instruction files, scoped recursively | ❌ no subdirectory walk-in |
+| [Nested AGENTS.md](https://agents.md) | per-subdirectory instruction files, scoped recursively | ✅ lazy walk-in (D480): the AGENTS.md family on a touched file's parent chain joins the next request, closest-last; a listing (glob/grep) is not a touch |
 | [Custom prompts](https://developers.openai.com/codex/cli) | `~/.codex/prompts/*.md` + project scope, argument interpolation | ⚠️ config-declared commands with `$ARGUMENTS`/`!`/`@` expansion |
 
 ## 9. Agents and skills

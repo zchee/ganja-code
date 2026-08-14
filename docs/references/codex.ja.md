@@ -53,7 +53,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | [書込モードのネットワーク遮断](https://github.com/openai/codex/blob/main/docs/sandbox.md) | workspace-write 中は既定で `network_access = false` | ❌ 概念なし |
 | [プロジェクト trust レベル](https://github.com/openai/codex/blob/main/docs/config.md) | `[projects."path"] trust_level`・未信頼ディレクトリで確認 | ❌ |
 | [`shell_environment_policy`](https://github.com/openai/codex/blob/main/docs/config.md) | サブシェル環境の all/core/none 継承+include/exclude パターン | ❌ ツールはプロセス環境をそのまま継承 |
-| [`--yolo` バイパス](https://github.com/openai/codex/blob/main/docs/sandbox.md) | sandbox+承認の全スキップ | ⚠️ `--auto` は deny 以外許可・バイパスすべき sandbox が無い |
+| [`--yolo` バイパス](https://github.com/openai/codex/blob/main/docs/sandbox.md) | sandbox+承認の全スキップ | ✅ 対話 TUI・`run` 双方が `--auto`+隠し `--yolo`/`--dangerously-skip-permissions` を持つ(D479): Ask ダイアログを「1回許可」で自動応答、deny は不変 — バイパスすべき sandbox が無い点は変わらず |
 | [コンテナ姿勢](https://github.com/openai/codex/blob/main/docs/sandbox.md) | Docker/devcontainer 用の縮退フラグ | ❌ |
 
 ## 4. スラッシュコマンド
@@ -113,7 +113,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | 機能 | 補足 | ganja |
 |---|---|---|
 | [AGENTS.md(プロジェクト+グローバル)](https://agents.md) | `~/.codex/AGENTS.md` + repo ルート | ✅ ganja も家族+グローバル層を読む |
-| [ネストした AGENTS.md](https://agents.md) | サブディレクトリ毎の指示・再帰スコープ | ❌ サブディレクトリ歩き込みなし |
+| [ネストした AGENTS.md](https://agents.md) | サブディレクトリ毎の指示・再帰スコープ | ✅ lazy 歩き込み(D480): ツールが触れたファイルの親チェーン上の AGENTS.md 族を次リクエストへ closest-last で注入;listing(glob/grep)は touch ではない |
 | [カスタムプロンプト](https://developers.openai.com/codex/cli) | `~/.codex/prompts/*.md` + プロジェクトスコープ・引数補間 | ⚠️ config 宣言コマンド(`$ARGUMENTS`/`!`/`@` 展開)が最も近い |
 
 ## 9. エージェント・スキル
