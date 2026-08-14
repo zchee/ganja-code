@@ -131,7 +131,7 @@ its agents, and this section says so in the shared outline's slot.*
 
 | Tool | Notes | ganja |
 |---|---|---|
-| [`plan_enter`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/plan.ts) | enter plan mode | ❌ a name with nothing behind it |
+| [`plan_enter`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/plan.ts) | enter plan mode | ✅ synthesized — upstream ships the description and the permission vocabulary and wires no tool (D477) |
 | [`plan_exit`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/plan.ts) | hand the wheel to build | ✅ |
 | [`lsp`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/lsp.ts) | hover/symbols exposed to the model | ❌ deviation `lsp-tool-unported` |
 | [`apply_patch`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/apply_patch.ts) | OpenAI-model-gated patch editing | ❌ named in the permission table only |

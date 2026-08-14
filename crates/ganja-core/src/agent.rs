@@ -30,16 +30,18 @@
 //! the two agree everywhere except on the tools ganja deliberately gates.
 //!
 //! Upstream rules naming permissions this build has no tool for — `list`,
-//! `question`, `doom_loop`, `plan_enter`, `lsp` — are not ported.
+//! `question`, `doom_loop`, `lsp` — are not ported.
 //! A rule about a tool that cannot be called decides nothing, and carrying it
 //! would suggest the tool exists. The one exception is `task`, kept on [`PLAN`]
 //! so that the agent whose point is "do not act" already denies the subagent
 //! that would act for it, the day the task tool lands. `websearch` came off
 //! that list with the tool: [`EXPLORE`] allows it, exactly as upstream's does
-//! — and `plan_exit` came off it with the plan tool: the shared defaults deny
-//! it and [`PLAN`] alone allows it. Denied tools are still not hidden, so
-//! build's model sees `plan_exit` in its schema and a call comes back as
-//! refusal text it reads.
+//! — and both plan doors came off it with the tools behind them: the shared
+//! defaults deny `plan_exit` and `plan_enter`, [`PLAN`] alone allows the exit
+//! and [`BUILD`] alone the enter, which is exactly upstream's own pair of
+//! deltas. Denied tools are still not hidden, so build's model sees
+//! `plan_exit` in its schema — and plan's sees `plan_enter` — and a call comes
+//! back as refusal text it reads.
 //!
 //! Upstream also *hides* a tool from the model's schema when the last rule
 //! matching it is `"*": "deny"` (`permission/index.ts`, `disabled`). That is
@@ -240,14 +242,19 @@ fn builtins(config: &Config) -> Vec<Agent> {
             prompt: None,
             model: None,
             // Upstream's delta is `question: allow` and `plan_enter: allow`.
-            // Neither is adopted, and neither would change anything:
-            // `plan_enter` still names nothing, and `question`'s un-ruled
-            // baseline is already *allow* — `decide()` falls through to allow
-            // for a tool no rule and no ask-by-default entry names, and
-            // `question` appears in neither. Whether `question` should
-            // instead gain an explicit rule is a decision deliberately not
-            // taken here.
-            rules: assemble(Vec::new()),
+            // The second is adopted now that the door exists (**D477**): the
+            // one agent that could usefully stop and plan is the one that
+            // would otherwise start implementing, and the shared default
+            // denies it to everybody else. Subagents inherit refusals and
+            // never allows, so no child ever carries this one down.
+            //
+            // `question: allow` is still not adopted, and would change
+            // nothing: its un-ruled baseline is already *allow* — `decide()`
+            // falls through to allow for a tool no rule and no
+            // ask-by-default entry names, and `question` appears in neither.
+            // Whether it should instead gain an explicit rule is a decision
+            // deliberately not taken here.
+            rules: assemble(vec![rule("plan_enter", ANY, Action::Allow)]),
         },
         Agent {
             name: PLAN.to_owned(),
@@ -361,6 +368,11 @@ fn defaults() -> Vec<Rule> {
         // through `decide()` to *allow* and build could leave a mode it was
         // never in, unasked.
         rule("plan_exit", ANY, Action::Deny),
+        // And the mirror, upstream's `plan_enter: "deny"` (agent.ts:127),
+        // allowed on build alone (**D477**). Written out for exactly the
+        // reason above: not hidden, just refused — and the fallthrough is
+        // allow, so an implied deny would be no deny at all.
+        rule("plan_enter", ANY, Action::Deny),
         // Upstream's comment: mirrors github/gitignore's Node.gitignore
         // patterns for .env files. Reading is otherwise free, so this is the
         // one place a read stops to ask.
@@ -699,6 +711,42 @@ mod tests {
         );
     }
 
+    /// The mirror delta, on the agent upstream's `agent.ts:147-150` gives it
+    /// to: build alone may ask to stop and plan (**D477**).
+    #[test]
+    fn the_build_agent_alone_may_ask_to_start_planning() {
+        let registry = registry(&Config::default());
+
+        assert_eq!(
+            decides(
+                &registry.get(BUILD).expect("build is builtin").rules,
+                "plan_enter",
+                ANY_CALL
+            ),
+            Some(Action::Allow)
+        );
+    }
+
+    /// The shared default, which is what makes the delta above mean
+    /// something: every other agent is refused the door, including the one
+    /// already standing behind it.
+    #[test]
+    fn the_planning_agent_is_refused_the_entrance_it_is_already_through() {
+        let registry = registry(&Config::default());
+
+        for name in [PLAN, GENERAL, EXPLORE] {
+            assert_eq!(
+                decides(
+                    &registry.get(name).expect("a builtin").rules,
+                    "plan_enter",
+                    ANY_CALL
+                ),
+                Some(Action::Deny),
+                "{name}"
+            );
+        }
+    }
+
     /// A subagent's ruleset is its own rules plus what the parent session
     /// insists on — and only refusals travel down, so a child spawned from a
     /// *planning* session still may not call the exit its parent is allowed.
@@ -718,6 +766,32 @@ mod tests {
 
             assert_eq!(
                 decides(&child, "plan_exit", ANY_CALL),
+                Some(Action::Deny),
+                "{name}"
+            );
+        }
+    }
+
+    /// And the mirror: a child spawned from a *building* session may not walk
+    /// through the door its parent is allowed either (**D477**). Nobody is
+    /// watching a subagent's turn, so nothing a subagent does may put a
+    /// question in front of a person or move the session it belongs to.
+    #[test]
+    fn a_subagent_inherits_the_refusal_and_not_the_build_agents_allow() {
+        let registry = registry(&Config::default());
+        let mut parent = Permissions::default();
+        parent.set_baseline(registry.get(BUILD).expect("build is builtin").rules.clone());
+
+        for name in [GENERAL, EXPLORE] {
+            let mut child = registry
+                .get(name)
+                .expect("a builtin subagent")
+                .rules
+                .clone();
+            child.extend(parent.inherited_by_subagent());
+
+            assert_eq!(
+                decides(&child, "plan_enter", ANY_CALL),
                 Some(Action::Deny),
                 "{name}"
             );

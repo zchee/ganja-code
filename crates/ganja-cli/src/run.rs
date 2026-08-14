@@ -116,9 +116,14 @@ impl Kind {
 ///
 /// Upstream's non-interactive ruleset (`run.ts:430-448`), ported verbatim —
 /// originally ahead of the tools it names, so that `question` would be safe
-/// in `run` by construction rather than by whoever added it remembering.
-/// `question` and `plan_exit` have since landed and the construction held for
-/// both; `plan_enter` alone is still a name with nothing behind it.
+/// in `run` by construction rather than by whoever added it remembering. All
+/// three have since landed — `question`, then `plan_exit`, and now
+/// `plan_enter` (**D477**) — and the construction held for every one of them:
+/// this list needed no edit as each arrived, which is the whole argument for
+/// writing a refusal ahead of the thing it refuses. The set is still
+/// upstream's own, `plan_enter` included: `run.ts:439` denies it headless
+/// there too, so ganja's synthesized door inherits the same posture as the
+/// ported one.
 ///
 /// Two consumers, because a run reaches its engine two ways:
 /// [`refuse_interactive_permissions`] installs them as standing rules on an
@@ -789,9 +794,9 @@ impl<'a> Reporter<'a> {
 
                 return true;
             }
-            // `run` has no mid-turn agent switch and refuses `plan_exit` even
-            // under `--auto`, so an adoption announcement is unreachable in
-            // its own turn; the arm keeps the protocol match honest without
+            // `run` has no mid-turn agent switch and refuses both plan doors
+            // even under `--auto`, so an adoption announcement is unreachable
+            // in its own turn; the arm keeps the protocol match honest without
             // inventing a seventh JSON kind for an event it cannot receive.
             Event::AgentChanged { .. } => {}
             Event::PermissionRequested { .. }
@@ -897,8 +902,8 @@ impl<'a> Reporter<'a> {
     /// Upstream accumulates the same way (`run.ts:783`) and reports each
     /// failure to stderr where it happened; here the caller reports it once,
     /// on its way to the exit code. The two are the same account in the same
-    /// order. In `run`'s world `MessageFinished` is still last because
-    /// `plan_exit` is refused here, so no trailing `AgentChanged` can
+    /// order. In `run`'s world `MessageFinished` is still last because both
+    /// plan doors are refused here, so no trailing `AgentChanged` can
     /// interleave with a failure; it is one line rather than the same sentence
     /// twice.
     fn failed(&mut self, error: &str) {

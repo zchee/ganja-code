@@ -130,7 +130,7 @@ ganja が仕様として読むピン済みタグ(`anomalyco/opencode@v1.18.13`)�
 
 | ツール | 補足 | ganja |
 |---|---|---|
-| [`plan_enter`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/plan.ts) | plan モード入場 | ❌ 名前だけで実体なし |
+| [`plan_enter`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/plan.ts) | plan モード入場 | ✅ 合成実装 — 上流は説明文と権限語彙のみでツール本体を持たない (D477) |
 | [`plan_exit`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/plan.ts) | build へのハンドオフ | ✅ |
 | [`lsp`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/lsp.ts) | hover/シンボルをモデルへ公開 | ❌ deviation `lsp-tool-unported` |
 | [`apply_patch`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/apply_patch.ts) | OpenAI 系モデル限定のパッチ編集 | ❌ 権限表に名前のみ |

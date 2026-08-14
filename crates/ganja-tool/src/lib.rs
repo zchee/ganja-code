@@ -117,12 +117,16 @@ pub struct ToolCtx {
     /// every pattern, so the refusal is a rule somebody can see rather than a
     /// field somebody remembered to leave empty.
     pub ask: Option<Arc<dyn question::Asker>>,
-    /// What a call switches the session to the build agent through, which only
-    /// [`plan::PlanExitTool`] does.
+    /// What a call switches the session to another agent through, which only
+    /// the two plan doors — [`plan::PlanExitTool`] and [`plan::PlanEnterTool`]
+    /// — do.
     ///
     /// [`None`] on every child turn, every fixture, and the `!` shell
     /// passthrough — the same depth guard as [`ToolCtx::spawn`]. [`Some`] only
-    /// when the engine's registry holds a build agent: presence is ability.
+    /// when the engine's registry holds an agent one of those doors leads to:
+    /// presence is ability. Which *direction* is possible is decided a step
+    /// further in, by which door the engine registered, since one seam now
+    /// carries both.
     pub switch: Option<Arc<dyn plan::Switcher>>,
     /// What a call tracks a background job through, which
     /// [`shell::ShellTool`]'s `run_in_background` path, [`bash_output`] and
