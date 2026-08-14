@@ -101,6 +101,7 @@ const KITCHEN_SINK: &str = r#"{
   "small_model": "anthropic/claude-haiku-4.5",
   "default_provider": "anthropic",
   "default_agent": "build",
+  "effort": "high",
   "agent": {
     "plan": { "description": "plans", "mode": "primary" }
   },

@@ -259,3 +259,163 @@ async fn the_stored_effort_survives_a_resume() {
         "the row carried the effort across the restart"
     );
 }
+
+/// The config key's happy path: a name this model serves is adopted before the
+/// first turn and announced, so a frontend's indicator carries it without
+/// anybody having picked it.
+#[tokio::test]
+async fn a_configured_effort_is_adopted_and_announced_before_the_first_turn() {
+    fixture_catalog();
+    let provider = FakeProvider::new("one two", std::time::Duration::from_millis(1));
+    let recorder = provider.clone();
+    let engine = engine_over(provider);
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.seed_effort(Some("max".to_owned())).await;
+    assert_eq!(engine.effort().as_deref(), Some("max"));
+
+    engine
+        .send(Command::SendPrompt {
+            text: "hi".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    let seen = until_finished(&mut events).await;
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            Event::EffortChanged { effort: Some(name), .. } if name == "max"
+        )),
+        "the seed was announced like any other adoption: {seen:?}"
+    );
+    assert_eq!(
+        recorder.recorded()[0].effort_options,
+        max_options(),
+        "and it reaches the request the same way a picked one does"
+    );
+}
+
+/// A standing config line is read before anybody knows which model a session
+/// will settle on, so a name this one does not serve clears rather than
+/// refusing to start — the posture a model switch already holds.
+#[tokio::test]
+async fn a_configured_effort_the_model_does_not_serve_clears_instead_of_refusing() {
+    fixture_catalog();
+    let provider = FakeProvider::new("one two", std::time::Duration::from_millis(1));
+    let recorder = provider.clone();
+    let engine = engine_over(provider);
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.seed_effort(Some("nope".to_owned())).await;
+    assert_eq!(
+        engine.effort(),
+        None,
+        "the session starts in the state it always starts in"
+    );
+
+    engine
+        .send(Command::SendPrompt {
+            text: "hi".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("the session still starts");
+    let seen = until_finished(&mut events).await;
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, Event::EffortChanged { .. })),
+        "nothing was adopted, so nothing was announced: {seen:?}"
+    );
+    assert!(
+        recorder.recorded()[0].effort_options.is_empty(),
+        "and no option map rides a turn nobody selected an effort for"
+    );
+}
+
+/// The binding half of the semantics: the config is a default for fresh
+/// sessions, and a resumed one runs under the effort it was left under.
+#[tokio::test]
+async fn a_resumed_session_keeps_its_stored_effort_over_the_configured_one() {
+    fixture_catalog();
+    let directory = TempDir::new().expect("a temporary directory");
+    let storage = || ganja_core::Storage::open(directory.path().join("storage"));
+    let persistent = || {
+        Engine::persistent(
+            Arc::new(FakeProvider::new(
+                "hello",
+                std::time::Duration::from_millis(1),
+            )),
+            fake::MODEL,
+            Arc::new(Registry::new(Vec::new())),
+            Permissions::default(),
+            storage(),
+        )
+    };
+
+    let first = persistent();
+    let mut events = first.subscribe().await.expect("the first subscriber wins");
+    first
+        .send(Command::SwitchEffort {
+            effort: Some("mini".to_owned()),
+        })
+        .await
+        .expect("the fixture catalog carries mini");
+    first
+        .send(Command::SendPrompt {
+            text: "hi".to_owned(),
+            mentions: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    until_finished(&mut events).await;
+    let chosen = first
+        .current_session()
+        .expect("the prompt minted a session")
+        .id;
+    drop(events);
+    drop(first);
+
+    // A second session in the same storage that never picked one: the config
+    // seed is what it has, which is the case the key exists for.
+    let bare = persistent();
+    let mut events = bare.subscribe().await.expect("the first subscriber wins");
+    bare.send(Command::SendPrompt {
+        text: "hi".to_owned(),
+        mentions: Vec::new(),
+    })
+    .await
+    .expect("an idle engine accepts a prompt");
+    until_finished(&mut events).await;
+    let unchosen = bare
+        .current_session()
+        .expect("the prompt minted a session")
+        .id;
+    drop(events);
+    drop(bare);
+
+    let resumed = persistent();
+    resumed
+        .resume(&chosen)
+        .await
+        .expect("the stored session resumes");
+    resumed.seed_effort(Some("max".to_owned())).await;
+    assert_eq!(
+        resumed.effort().as_deref(),
+        Some("mini"),
+        "the row's own effort outranks the config's default"
+    );
+
+    let seeded = persistent();
+    seeded
+        .resume(&unchosen)
+        .await
+        .expect("the stored session resumes");
+    seeded.seed_effort(Some("max".to_owned())).await;
+    assert_eq!(
+        seeded.effort().as_deref(),
+        Some("max"),
+        "and a row carrying none falls back to it"
+    );
+}

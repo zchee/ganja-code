@@ -3261,6 +3261,54 @@ impl Engine {
         Ok(())
     }
 
+    /// Adopts a configured effort for a session that has not chosen one.
+    ///
+    /// A **default, not an override**, which is the whole difference from
+    /// [`Self::switch_effort`]: a resume has already restored whatever the
+    /// stored row carried by the time a frontend calls this, and a session
+    /// that arrived holding an effort keeps it. Only a session still on the
+    /// state every session starts in takes the config's.
+    ///
+    /// The other difference is that a name this model does not serve is not an
+    /// error. A wrong `--effort` flag or `/effort` pick is a person asking for
+    /// something now, and the refusal is the answer; a config key is a
+    /// standing wish read before anybody knows which model a session will
+    /// settle on, and refusing to start over it would make one line in a
+    /// global file break every project whose model happens to be cataloged
+    /// differently. So it clears, through the same [`Self::reconcile_effort`]
+    /// a model switch clears through, and says why in the log.
+    ///
+    /// Announced like every other path that moves the selection, so a
+    /// frontend's indicator shows a seeded effort without having asked for it.
+    pub async fn seed_effort(&self, effort: Option<String>) {
+        let Some(name) = effort else {
+            return;
+        };
+        if self.active().effort.is_some() {
+            return;
+        }
+
+        self.active().effort = Some(name.clone());
+        if self.reconcile_effort() {
+            tracing::warn!(
+                effort = name.as_str(),
+                model = self.active().model.as_str(),
+                "the configured effort is not one this model carries; \
+                 starting without one"
+            );
+            return;
+        }
+
+        self.remember_selection();
+        let _ = self
+            .fanout
+            .send(Event::EffortChanged {
+                session_id: self.session_id(),
+                effort: Some(name),
+            })
+            .await;
+    }
+
     /// Clears the selected effort when the active model's catalog row no
     /// longer carries its name, returning whether it did — upstream clears at
     /// the same boundary (`prompt.ts:654`). The caller owns announcing a

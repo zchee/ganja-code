@@ -225,6 +225,11 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
         Some(resume) => stored_transcript(&engine, resume).await?,
         None => Vec::new(),
     };
+    // After the resume, because the config is the default and the stored row
+    // is the choice: a continued session runs under the effort it was left
+    // under, and only a session carrying none takes the configured one. The
+    // frame this announces into is the first one the app draws.
+    engine.seed_effort(config.effort.clone()).await;
 
     // The builtins, the user's own themes, and the theme they last picked —
     // then whatever the config asks for on top, because a `theme` written in a
