@@ -32,7 +32,13 @@
 //! deterministic. A persistence failure is a warning, never a dead turn:
 //! losing the disk must not kill the conversation.
 
-use std::{collections::HashMap, ops::ControlFlow, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    ops::ControlFlow,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use futures::{StreamExt as _, stream::BoxStream};
 use tokio::{
@@ -2480,6 +2486,85 @@ struct Step {
     usage: Option<Usage>,
 }
 
+/// The tools whose completed calls count as **touching** a file, for the
+/// nested instruction walk (**D480**).
+///
+/// The three that open or write an actual path. `glob` and `grep` are
+/// deliberately absent: a listing names files nobody asked to work in, and one
+/// unanchored glob over a vendored tree would otherwise walk that whole tree's
+/// instruction files into the prompt.
+const FILE_TOUCHING: [&str; 3] = ["read", "edit", "write"];
+
+/// Every file the conversation in `messages` has opened or written, resolved
+/// against `cwd`.
+///
+/// # Where the signal comes from
+///
+/// The **transcript's own tool parts**, not the turn's bookkeeping: a
+/// `PartBody::Tool` in [`ToolState::Completed`] whose tool is one of
+/// [`FILE_TOUCHING`], read off the raw `input` the same way the language
+/// server's seam does (`lsp::file_argument`) — `filePath`, which is what all
+/// three spell it on the wire because their argument structs are
+/// `rename_all = "camelCase"`.
+///
+/// Reading it here rather than recording touches as they happen is the point.
+/// A side map would have to be rebuilt on resume, truncated on revert and
+/// merged across subagents; a derivation cannot drift from the transcript
+/// because it *is* the transcript. `Completed` only: a refused or failed call
+/// never opened anything.
+pub(crate) fn touched_files(messages: &[Message], cwd: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for message in messages {
+        for part in &message.parts {
+            let PartBody::Tool {
+                tool,
+                state: ToolState::Completed { input, .. },
+                ..
+            } = &part.body
+            else {
+                continue;
+            };
+            if !FILE_TOUCHING.contains(&tool.as_str()) {
+                continue;
+            }
+            let Some(named) = input.get("filePath").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+
+            let path = Path::new(named);
+            found.push(if path.is_absolute() {
+                path.to_owned()
+            } else {
+                cwd.join(path)
+            });
+        }
+    }
+
+    found
+}
+
+/// This turn's system prompt with whatever nested instruction files the
+/// conversation in `messages` has walked past appended (**D480**).
+///
+/// Appended after the whole composed suffix, skills block included, rather
+/// than spliced in beside the up-walk tier: splicing would mean re-parsing a
+/// string the engine composed, and these files arrive *later* than everything
+/// else in the prompt, which is what the position says.
+fn nested_system(turn: &Turn, messages: &[Message]) -> Option<String> {
+    let touched = touched_files(messages, &turn.cwd);
+    let block = crate::instruction::nested_suffix(&turn.root, &turn.cwd, &touched);
+    if block.is_empty() {
+        return turn.system.clone();
+    }
+
+    Some(match &turn.system {
+        Some(system) => format!("{system}{block}"),
+        // Every real session has a prompt; a scripted one that does not gets
+        // the block without the separator it would have followed.
+        None => block.trim_start().to_owned(),
+    })
+}
+
 /// Runs one model request: step marker, stream, step-finish marker.
 async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     // Every request opens with a step marker, upstream's `step-start` part,
@@ -2547,9 +2632,16 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             turn.provider.accepts_attachment(mime)
         });
 
+        // Last, over the messages this request actually carries: the
+        // instruction files below the root that the work so far has walked
+        // past (**D480**, declared at `instruction::nested_files`). Derived
+        // here rather than tracked, so a resume rebuilds it and a revert
+        // forgets it — see `instruction::nested_suffix` on the carrier.
+        let system = nested_system(turn, &messages);
+
         ChatRequest {
             model: turn.model.clone(),
-            system: turn.system.clone(),
+            system,
             messages,
             tools: turn.tools.definitions(),
             effort_options: turn.effort_options.clone(),

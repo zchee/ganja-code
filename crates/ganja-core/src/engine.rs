@@ -107,7 +107,8 @@ pub struct ContextBreakdown {
     /// The system prompt's fixed half: the agent's own prompt (or the model
     /// family's base prompt), plus the environment block.
     pub system_prompt: u64,
-    /// The instruction files — the `AGENTS.md` family — headers included.
+    /// The instruction files — the `AGENTS.md` family — headers included,
+    /// the ones a session walked in from below the root (**D480**) among them.
     pub instructions: u64,
     /// The builtin tools' schemas, names and descriptions.
     pub tools_builtin: u64,
@@ -1873,6 +1874,10 @@ impl Engine {
         // count messages the request will never carry.
         let hidden_from = self.reverted().map(|state| state.message_id);
         let (mut user, mut assistant) = (0_u64, 0_u64);
+        // The messages the next request would carry, so the nested-instruction
+        // walk below sees exactly what the request assembly will
+        // (`session::nested_system`).
+        let mut carried = Vec::new();
         {
             let history = self.history.lock().await;
             for message in history.iter() {
@@ -1882,6 +1887,7 @@ impl Engine {
                 {
                     continue;
                 }
+                carried.push(message.clone());
                 let (generated, tool_results) = message_chars(message);
                 let tokens = match (&message.role, message.usage) {
                     (Role::Assistant, Some(usage)) => usage
@@ -1896,13 +1902,28 @@ impl Engine {
             }
         }
 
+        // The lazily walked-in instruction files below the root (**D480**).
+        // They join the request's system prompt after the composed suffix, so
+        // `suffix_measure` never sees them — but they are instruction files,
+        // and the whole point of D480's honesty clause is that their weight is
+        // read here rather than felt later. Composed through the same function
+        // the request assembly uses, over the same messages, so the two cannot
+        // price different text.
+        let nested = crate::instruction::nested_suffix(
+            &self.root,
+            &self.cwd,
+            &crate::session::touched_files(&carried, &self.cwd),
+        )
+        .chars()
+        .count();
+
         let model = self.model();
         let window = catalog::model(&model).map(|model| model.context_window);
 
         ContextBreakdown {
             model,
             system_prompt: estimate_tokens(head_chars + measure.environment),
-            instructions: estimate_tokens(measure.instructions),
+            instructions: estimate_tokens(measure.instructions + nested),
             tools_builtin: estimate_tokens(builtin_chars),
             tools_mcp: estimate_tokens(mcp_chars),
             tools_builtin_count: builtin_count,
