@@ -549,7 +549,7 @@ const DIRECTORY: &str = "ganja";
 /// has something worth writing down.
 const LOGS: &str = "log";
 
-/// What every log file is named before the appender's date, and the extension
+/// What every log file is named before the **local** date, and the extension
 /// after it: `ganja.2026-08-04.log`.
 const LOG_NAME: &str = "ganja";
 const LOG_EXTENSION: &str = "log";
@@ -668,20 +668,7 @@ fn install_logging(verbose: bool) -> Option<WorkerGuard> {
         ));
     }
 
-    let appender = match tracing_appender::rolling::Builder::new()
-        .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix(LOG_NAME)
-        .filename_suffix(LOG_EXTENSION)
-        .max_log_files(LOG_FILES)
-        .build(&directory)
-    {
-        Ok(appender) => appender,
-        Err(error) => {
-            return declined(&format!("{} is not writable: {error}", directory.display()));
-        }
-    };
-
-    let (writer, guard) = tracing_appender::non_blocking(appender);
+    let (writer, guard) = tracing_appender::non_blocking(LocalDaily::new(directory));
     let filter = resolve_filter(
         std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV)
             .ok()
@@ -702,6 +689,150 @@ fn install_logging(verbose: bool) -> Option<WorkerGuard> {
         Ok(()) => Some(guard),
         Err(error) => declined(&format!("a subscriber is already installed: {error}")),
     }
+}
+
+/// A daily-rolling log file named by the **local** date.
+///
+/// `tracing-appender`'s own roller stamps files with the UTC date
+/// (`Rotation::DAILY` reads a UTC clock), which east of Greenwich has the
+/// morning's log still landing under yesterday's name — the 2026-08-15
+/// report, from JST, where the roll would only have come at 09:00. This
+/// writer asks libc for the local civil date instead and otherwise keeps the
+/// appender's shape: `ganja.<date>.log` under one directory, [`LOG_FILES`]
+/// kept, the oldest pruned on each roll. It sits behind
+/// `tracing_appender::non_blocking` exactly as the stock appender did, so
+/// nothing about the subscriber changes.
+struct LocalDaily {
+    directory: PathBuf,
+    /// The date the open handle is named for, and the handle itself.
+    open: Option<(Date, std::fs::File)>,
+}
+
+/// A civil date, `(year, month, day)`.
+type Date = (i32, u32, u32);
+
+impl LocalDaily {
+    fn new(directory: PathBuf) -> Self {
+        Self {
+            directory,
+            open: None,
+        }
+    }
+
+    /// The file for today, rolled — and the directory pruned — when the date
+    /// has moved since the last write.
+    fn today(&mut self) -> io::Result<&mut std::fs::File> {
+        let date = local_date();
+        if self.open.as_ref().is_none_or(|(open, _)| *open != date) {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.directory.join(log_name(date)))?;
+            self.open = Some((date, file));
+            self.prune();
+        }
+
+        Ok(&mut self.open.as_mut().expect("the file was just opened").1)
+    }
+
+    /// Deletes the oldest logs beyond [`LOG_FILES`]. The names sort by date
+    /// because the date is zero-padded ISO; anything else in the directory is
+    /// left alone, exactly as the stock appender's pruning left it.
+    fn prune(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.directory) else {
+            return;
+        };
+        let mut logs: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(LOG_NAME) && name.ends_with(LOG_EXTENSION))
+            })
+            .collect();
+        logs.sort();
+        for old in logs.iter().rev().skip(LOG_FILES) {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+}
+
+impl io::Write for LocalDaily {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.today()?.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.open.as_mut() {
+            Some((_, file)) => file.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+/// `ganja.2026-08-15.log`, for the given date.
+fn log_name((year, month, day): Date) -> String {
+    format!("{LOG_NAME}.{year:04}-{month:02}-{day:02}.{LOG_EXTENSION}")
+}
+
+/// Today, in this machine's own timezone.
+///
+/// libc's `localtime_r` on unix — reentrant by contract, reading the same
+/// timezone database every other local timestamp on this machine reads.
+/// Elsewhere, and on the call failing, the UTC civil date stands in, which is
+/// exactly what the stock appender always used.
+fn local_date() -> Date {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+
+    #[cfg(unix)]
+    {
+        let time = libc::time_t::try_from(seconds).unwrap_or(0);
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        // SAFETY: `localtime_r` writes only into the `tm` this call owns and
+        // reads only the timestamp beside it; it is the reentrant variant by
+        // contract.
+        if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+            return civil_from_days(seconds / 86_400);
+        }
+
+        (
+            1900 + tm.tm_year,
+            u32::try_from(tm.tm_mon + 1).unwrap_or(1),
+            u32::try_from(tm.tm_mday).unwrap_or(1),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        civil_from_days(seconds / 86_400)
+    }
+}
+
+/// The civil date `days` days after 1970-01-01 — Howard Hinnant's
+/// `civil_from_days`, the epoch shifted.
+fn civil_from_days(days: u64) -> Date {
+    let days = i64::try_from(days).unwrap_or(0) + 719_468;
+    let era = days.div_euclid(146_097);
+    let of_era = days.rem_euclid(146_097);
+    let of_year = (of_era - of_era / 1_460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let year = of_year + era * 400;
+    let year_days = of_era - (365 * of_year + of_year / 4 - of_year / 100);
+    let month_index = (5 * year_days + 2) / 153;
+    let day = year_days - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+
+    (
+        i32::try_from(year).unwrap_or(1970),
+        u32::try_from(month).unwrap_or(1),
+        u32::try_from(day).unwrap_or(1),
+    )
 }
 
 /// What the run traces, given whatever `RUST_LOG` said and whether `-v` was
@@ -1651,6 +1782,24 @@ mod tests {
         Cli, Command, UNTITLED, age, billed_tokens, matching, per_mtok, providers, resolve_filter,
         title,
     };
+
+    /// The log's name carries the machine's own civil date, zero-padded so
+    /// the directory sorts by age (2026-08-15, retiring the stock appender's
+    /// UTC stamp).
+    #[test]
+    fn a_log_is_named_by_the_zero_padded_date() {
+        assert_eq!(super::log_name((2026, 8, 15)), "ganja.2026-08-15.log");
+        assert_eq!(super::log_name((2026, 1, 2)), "ganja.2026-01-02.log");
+    }
+
+    /// The UTC fallback's date arithmetic, against dates a calendar can
+    /// check — the epoch itself, a leap-adjacent day, and the report's own.
+    #[test]
+    fn civil_from_days_matches_the_calendar() {
+        assert_eq!(super::civil_from_days(0), (1970, 1, 1));
+        assert_eq!(super::civil_from_days(11_017), (2000, 3, 1));
+        assert_eq!(super::civil_from_days(20_680), (2026, 8, 15));
+    }
 
     #[test]
     fn the_ui_flags_map_onto_the_override_tier() {
