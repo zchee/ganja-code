@@ -121,6 +121,12 @@ impl ProviderId {
             // account, and it is a recorded follow-up rather than something
             // guessed at here (`provider::openrouter`).
             Self::OpenRouter => &[Method::Api],
+            // A key pasted from the vendor's console, for both. There *is* an
+            // OAuth device flow in that vendor's client, and it authenticates
+            // the **console** rather than the model path — the gateway takes a
+            // plain key — so cloning it here would be a login that buys a
+            // session nothing.
+            Self::Opencode | Self::OpencodeGo => &[Method::Api],
             Self::OpenAi => &[Method::Browser, Method::Device, Method::Api],
             // Upstream's own order for xAI too (`xai.ts:551`, `:594`, `:619`):
             // the loopback method first, because somebody sitting in front of a
@@ -155,7 +161,9 @@ impl ProviderId {
     /// (upstream skips the prompt at `providers.ts:47` for the same reason).
     fn only_login(self) -> Option<Method> {
         match self {
-            Self::Anthropic | Self::OpenRouter => Some(Method::Api),
+            Self::Anthropic | Self::OpenRouter | Self::Opencode | Self::OpencodeGo => {
+                Some(Method::Api)
+            }
             Self::GithubCopilot => Some(Method::Device),
             Self::Grok | Self::OpenAi => None,
             // One login worth offering, like Copilot's: a menu with one item

@@ -330,8 +330,9 @@ enum Auth {
     /// separate question, and a login that succeeded is not an answer to it.
     Login {
         /// Provider the credential belongs to: one this build ships
-        /// (anthropic, openai, openrouter, grok, github-copilot), or an id this
-        /// project's config declares under `provider`.
+        /// (anthropic, openai, openrouter, opencode, opencode-go, grok,
+        /// github-copilot), or an id this project's config declares under
+        /// `provider`.
         #[arg(
             long,
             value_parser = named_provider,
@@ -491,6 +492,14 @@ pub(crate) enum ProviderId {
     // one word.
     #[value(name = "openrouter")]
     OpenRouter,
+    // The vendor's gateway, under the vendor's own ids. `opencode` naming a
+    // provider *inside an opencode port* is confusing and deliberate: it is
+    // what the catalog files the rows under, and any other spelling would cost
+    // them their sizing and pricing.
+    #[value(name = "opencode")]
+    Opencode,
+    #[value(name = "opencode-go")]
+    OpencodeGo,
     Grok,
     GithubCopilot,
     // Parses so its refusal can name the deferral; a name clap rejected would
@@ -515,6 +524,8 @@ impl ProviderId {
             Self::Anthropic => "anthropic",
             Self::OpenAi => auth::openai::PROVIDER_ID,
             Self::OpenRouter => ganja_core::provider::openrouter::ID,
+            Self::Opencode => ganja_core::provider::opencode::ZEN_ID,
+            Self::OpencodeGo => ganja_core::provider::opencode::GO_ID,
             Self::Grok => auth::grok::PROVIDER_ID,
             Self::GithubCopilot => auth::copilot::PROVIDER_ID,
             Self::Cursor => ganja_core::provider::cursor::ID,
@@ -1811,6 +1822,7 @@ mod tests {
             status: ModelStatus::Active,
             reasoning: false,
             reasoning_options: None,
+            npm: None,
             variants: Default::default(),
         })
     }

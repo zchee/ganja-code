@@ -96,6 +96,7 @@ pub mod cursor;
 pub mod fake;
 pub mod grok;
 pub mod openai;
+pub mod opencode;
 pub mod openrouter;
 pub mod rate;
 pub mod responses;
@@ -147,6 +148,7 @@ pub use cursor::CursorProvider;
 pub use fake::FakeProvider;
 pub use grok::GrokProvider;
 pub use openai::OpenAiProvider;
+pub use opencode::OpencodeProvider;
 pub use responses::ResponsesProvider;
 
 /// Environment variable naming the provider a session talks to.
@@ -174,10 +176,14 @@ pub const MODEL_ENV: &str = "GANJA_MODEL";
 /// every one of the vendors it fronts and a default for none of them, so it is
 /// the first builtin that is fully sized and priced and still asks a session to
 /// name its model. See that module for why.
-pub const PROVIDERS: [&str; 7] = [
+pub const PROVIDERS: [&str; 9] = [
     anthropic::ID,
     openai::ID,
     openrouter::ID,
+    // Two ids, one vendor, one credential — and two rosters, which is why they
+    // are two entries rather than one with a flag. See [`opencode`].
+    opencode::ZEN_ID,
+    opencode::GO_ID,
     grok::ID,
     copilot::ID,
     fake::ID,

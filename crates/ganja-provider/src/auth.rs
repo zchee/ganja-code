@@ -170,6 +170,14 @@ pub const KEY_VARS: &[(&str, &str)] = &[
     // catalog's `env` for it all name. `provider::openrouter` pins the two
     // spellings against each other.
     ("openrouter", "OPENROUTER_API_KEY"),
+    // **Two providers, one variable**, and that is the vendor's own
+    // arrangement rather than a shortcut: the catalog names `OPENCODE_API_KEY`
+    // in the `env` of both, and one key was measured answering on both hosts.
+    // They still store separately, under their own ids — nothing here aliases
+    // one to the other, because the vendor's client keys credentials by
+    // provider id and a shared `auth.json` is its territory too.
+    ("opencode", "OPENCODE_API_KEY"),
+    ("opencode-go", "OPENCODE_API_KEY"),
 ];
 
 /// The environment variable an API key for `provider_id` may be passed in.
@@ -3738,6 +3746,72 @@ mod tests {
             key_of(credential_for(provider).expect("the stored key reads")),
             Some("sk-or-stored-0001".to_owned()),
             "an empty variable must not shadow a stored key"
+        );
+
+        clear_keys();
+        set_env("XDG_DATA_HOME", None);
+    }
+
+    /// **Two providers, one variable, two stores** — the gateway pair's whole
+    /// credential arrangement, and every part of it is a thing that could
+    /// plausibly have been done the other way.
+    ///
+    /// The variable is shared because the catalog names it in the `env` of both
+    /// and one key was measured answering on both hosts. The *storage* is not,
+    /// because the vendor's own client keys credentials by provider id — so a
+    /// key stored for Zen must not silently answer for Go, or logging out of
+    /// one would leave the other working and nobody could say why.
+    #[test]
+    fn the_gateway_pair_shares_a_variable_and_shares_no_stored_credential() {
+        let _guard = environment();
+        let directory = temporary();
+
+        clear_keys();
+        set_env("XDG_DATA_HOME", Some(&directory.path().to_string_lossy()));
+
+        let zen = crate::provider::opencode::ZEN_ID;
+        let go = crate::provider::opencode::GO_ID;
+        let variable = crate::provider::opencode::API_KEY_ENV;
+
+        assert_eq!(key_var(zen), Some(variable), "one variable…");
+        assert_eq!(key_var(go), Some(variable), "…named by both");
+        assert_eq!(storage_key(zen), zen, "and stored under their own ids,");
+        assert_eq!(storage_key(go), go, "with no alias between them");
+
+        // Stored for one is not stored for the other.
+        set_credential(zen, "sk-zen-stored-0001").expect("the key stores");
+        assert_eq!(
+            key_of(credential_for(zen).expect("the stored key reads")),
+            Some("sk-zen-stored-0001".to_owned())
+        );
+        assert_eq!(
+            key_of(credential_for(go).expect("an empty slot is fine")),
+            None,
+            "a Zen login is not a Go login: the vendor keys them apart and so \
+             does this"
+        );
+
+        // The one export answers for both, which is what makes the shared
+        // variable worth having.
+        set_env(variable, Some(CANARY));
+        for id in [zen, go] {
+            assert_eq!(
+                key_of(credential_for(id).expect("the environment reads")),
+                Some(CANARY.to_owned()),
+                "{id} reads the shared variable"
+            );
+        }
+
+        set_env(variable, Some("   "));
+        assert_eq!(
+            key_of(credential_for(zen).expect("the stored key reads")),
+            Some("sk-zen-stored-0001".to_owned()),
+            "an empty variable must not shadow a stored key"
+        );
+        assert_eq!(
+            key_of(credential_for(go).expect("an empty slot is fine")),
+            None,
+            "and must not conjure one that was never stored"
         );
 
         clear_keys();
