@@ -32,8 +32,9 @@
 //!   that asks a question nobody can see is a subagent that hangs, and the
 //!   reply routes back through the *parent's* pending slot, which is free
 //!   precisely because the parent is blocked in the call;
-//! - progress on the parent's own tool part: `{current_tool, toolcalls}` in
-//!   [`ToolState::Running::metadata`], which is what lets a frontend render
+//! - progress on the parent's own tool part: `{current_tool, toolcalls,
+//!   calls}` in [`ToolState::Running::metadata`], which is what lets a
+//!   frontend render
 //!   upstream's single inline row without a single new event variant.
 //!
 //! # Depth
@@ -237,6 +238,7 @@ impl Subagents for Spawn {
                 model: child.model,
                 text: outcome.text,
                 toolcalls: outcome.toolcalls,
+                calls: outcome.calls,
             }),
         }
     }
@@ -546,9 +548,20 @@ struct Outcome {
     stop: ChildStop,
     /// How many tools it called, which the parent's inline row shows.
     toolcalls: usize,
+    /// The calls it made, in order, each named the way the running row named
+    /// it — capped at [`CALL_LOG`], with `toolcalls` the true total.
+    calls: Vec<String>,
     /// What it spent.
     usage: Usage,
 }
+
+/// Calls the log keeps: the newest, the oldest dropped.
+///
+/// The log rides every Running republish and the settled part both, so it is
+/// capped. The row shows the last few and the transcript expansion the kept
+/// hundred, while `toolcalls` stays the true total — both surfaces admit
+/// exactly what the cap cost (2026-08-15).
+const CALL_LOG: usize = 100;
 
 /// Why a child loop stopped.
 #[derive(Default)]
@@ -636,7 +649,7 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                 }
                 PartBody::Tool { .. } => {
                     outcome.toolcalls += 1;
-                    report(&watched, current.as_deref(), outcome.toolcalls).await;
+                    report(&watched, current.as_deref(), &outcome).await;
                 }
                 // A child's thinking is emphatically not a child's answer:
                 // leaving `open` where it is keeps the deltas below
@@ -662,8 +675,19 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                 if let PartBody::Tool { tool, state, .. } = &part.body
                     && let ToolState::Running { input, .. } = state
                 {
-                    current = Some(name_of(&watched, tool, input));
-                    report(&watched, current.as_deref(), outcome.toolcalls).await;
+                    let name = name_of(&watched, tool, input);
+                    // A call republishes its Running part as it streams, so
+                    // only a *new* name joins the log; two genuinely identical
+                    // calls back to back collapse into one row, which the true
+                    // count still admits.
+                    if outcome.calls.last() != Some(&name) {
+                        if outcome.calls.len() == CALL_LOG {
+                            outcome.calls.remove(0);
+                        }
+                        outcome.calls.push(name.clone());
+                    }
+                    current = Some(name);
+                    report(&watched, current.as_deref(), &outcome).await;
                 }
             }
             Event::MessageStarted {
@@ -726,13 +750,18 @@ fn name_of(watched: &Watched, tool: &str, input: &serde_json::Value) -> String {
         .map_or_else(|| tool.to_owned(), |found| found.describe(input))
 }
 
-/// Rewrites the parent's tool part with what the child is doing now.
+/// Rewrites the parent's tool part with what the child is doing now — and the
+/// log of what it has already done, which is what the task row expands
+/// (2026-08-15).
 ///
 /// The part travels whole, as every [`Event::PartUpdated`] does. The parent's
 /// own copy is deliberately not touched: this is progress, not transcript, and
 /// what reaches the disk is the completed call.
-async fn report(watched: &Watched, current: Option<&str>, toolcalls: usize) {
-    let mut metadata = serde_json::json!({ "toolcalls": toolcalls });
+async fn report(watched: &Watched, current: Option<&str>, outcome: &Outcome) {
+    let mut metadata = serde_json::json!({
+        "toolcalls": outcome.toolcalls,
+        "calls": outcome.calls,
+    });
     if let Some(current) = current {
         metadata["current_tool"] = serde_json::json!(current);
     }
@@ -772,7 +801,7 @@ mod tests {
         config::Config,
         engine::Fanout,
         permission::{Action, Permissions, Rule},
-        protocol::{Event, MessageId, Part, PartId, SessionId},
+        protocol::{Event, MessageId, Part, PartBody, PartId, SessionId, ToolState},
         tool::{
             Tool as _,
             task::{DESCRIPTION, ROSTER_HEADER, TaskTool},
@@ -851,6 +880,88 @@ mod tests {
             !outcome.text.contains(THOUGHT) && !outcome.text.contains("second-thought"),
             "the child's thinking reached the parent's tool result: {}",
             outcome.text
+        );
+    }
+
+    /// The log under the row (2026-08-15): every distinct call the child
+    /// makes joins `calls` in order, a call republishing its running part as
+    /// it streams joins once, the cap keeps the newest, and the finished
+    /// outcome carries the log out to the completed part's metadata.
+    #[tokio::test]
+    async fn the_watcher_logs_the_childs_calls_in_order_and_keeps_the_newest() {
+        let (events, received) = mpsc::channel(2048);
+        let (parent, parent_reader) = mpsc::channel(64);
+        // The reports the watcher publishes are nobody's to read here, and an
+        // undrained lossless subscriber would park the watcher at the
+        // channel's cap — dropping it makes every report a cheap refusal.
+        drop(parent_reader);
+        let watched = Watched {
+            events: Arc::new(Fanout::new(parent)),
+            session_id: SessionId::from("ses_parent".to_owned()),
+            tools: Arc::new(crate::tool::Registry::new(Vec::new())),
+            message_id: MessageId::ascending(),
+            part_id: PartId::ascending(),
+            command: "map it".to_owned(),
+        };
+
+        let message_id = MessageId::ascending();
+        let session_id = SessionId::from("ses_child".to_owned());
+        let call = |index: usize, state: ToolState| Part {
+            id: PartId::from(format!("prt_{index}")),
+            body: PartBody::Tool {
+                call_id: format!("call_{index}"),
+                tool: format!("tool-{index}"),
+                state,
+            },
+        };
+        for index in 0..105 {
+            events
+                .send(Event::PartStarted {
+                    session_id: session_id.clone(),
+                    message_id: message_id.clone(),
+                    part: call(index, ToolState::Pending),
+                })
+                .await
+                .expect("the watcher is listening");
+            // The same running part twice, the way a streaming call
+            // republishes: one row in the log, not two.
+            for _ in 0..2 {
+                events
+                    .send(Event::PartUpdated {
+                        session_id: session_id.clone(),
+                        message_id: message_id.clone(),
+                        part: call(
+                            index,
+                            ToolState::Running {
+                                input: serde_json::Value::Null,
+                                metadata: serde_json::Value::Null,
+                                started: 0,
+                            },
+                        ),
+                    })
+                    .await
+                    .expect("the watcher is listening");
+            }
+        }
+        drop(events);
+
+        let outcome = watch(received, watched).await;
+
+        assert_eq!(outcome.toolcalls, 105, "the count is the true total");
+        assert_eq!(
+            outcome.calls.len(),
+            super::CALL_LOG,
+            "the log holds exactly the cap"
+        );
+        assert_eq!(
+            outcome.calls.first().map(String::as_str),
+            Some("tool-5"),
+            "the oldest five fell off the cap"
+        );
+        assert_eq!(
+            outcome.calls.last().map(String::as_str),
+            Some("tool-104"),
+            "the newest call ends the log"
         );
     }
 

@@ -58,6 +58,7 @@ fn finished() -> Delegated {
         model: "some-model".to_owned(),
         text: "the thing is in src/main.rs".to_owned(),
         toolcalls: 2,
+        calls: vec!["grep the thing".to_owned(), "read src/main.rs".to_owned()],
     }
 }
 
@@ -114,6 +115,7 @@ async fn a_finished_delegation_becomes_upstreams_xml_and_the_parts_metadata() {
             "agent": "general",
             "model": "some-model",
             "toolcalls": 2,
+            "calls": ["grep the thing", "read src/main.rs"],
         })
     );
 }
