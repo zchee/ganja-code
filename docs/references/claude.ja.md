@@ -50,6 +50,9 @@
 
 | 機能 | 補足 | ganja |
 |---|---|---|
+| トランスクリプト文法 *(スクリーンショット由来。文書化されていない)* | 返答ブロックとツール呼出しに `●`、結果マーカーに `⎿`(プレビューはその下に字下げ)、ユーザー自身のメッセージに `>`、thinking に `✻` | ✅ そのまま移植(D487): 同じ4字形、引数要約はヘッダ1行に凝縮(`● Tool(key: "value", …)`、上限付きで切り詰めを明示)、状態は角括弧の語ではなく色で示す、クランプしたプレビューは ganja 自身の展開手段を指す(`… +N lines (ctrl+t to expand)` — Claude は ctrl+o を指す)。`read` は件数のみでプレビューを一切出さない(`● Read(/abs/path · lines A-B)` + `⎿ Read N lines`);`/copy` は意図的に upstream opencode の markdown 形状を維持する — 画面とクリップボードは読み手が違う |
+| 作業中の行 *(スクリーンショット由来)* | ターン実行中、トランスクリプト末尾に `✻ <verb>… (Ns · ↑ N tokens)` | ⚠️ 形状は同じ、動詞は ganja 独自(Claude の語彙はあちらの声である);トークン値はセッション累計の出力トークン — provider は1ターンに一度しか usage を報告せず、ターン内の実測値を読む経路が無いため。値が無いときはゼロを示さずセグメントごと落とす |
+| thinking のストリーム表示 | 到着した thinking ブロックをトランスクリプトに描画 | ✅ `✻` マーカー・dim italic・ストリーム中は新しい側からクランプ;**表示専用** — どの wire も送り返さず、要約にも載らず、context メーターは 0 と数え、クリップボードにも出ない。upstream opencode は可読部と封緘部を1つの part に融合してリクエストに載せ返すが、ganja は分割し封緘側だけを送る |
 | [verbose トランスクリプトビューア](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O オーバーレイ: 全履歴・ツールペイロード・thinking ブロック | ✅ Ctrl+T インスペクタ — フルターミナル占有・3タブ(展開トランスクリプト・生イベントログ・ターン毎トークン表);表現は Codex CLI 自身のオーバーレイと Claude Code の Ctrl+O フッター文言を合成 |
 | [Todo チェックリストパネル](https://code.claude.com/docs/en/interactive-mode) | Ctrl+T でタスクのサイドパネルを開閉 | ⚠️ todo はチャット内描画のみ;ganja の Ctrl+T はインスペクタに割当済み |
 | [permission ダイアログ](https://code.claude.com/docs/en/iam) | ツール呼出しのプレビュー・承認/拒否・ダイアログ内モード切替 | ✅ upstream 由来のダイアログセマンティクス(`a`/`A`/`d`)、複数の子が同時に尋ねるとキュー化;ダイアログ内モード切替はなし(モード概念自体がない) |
