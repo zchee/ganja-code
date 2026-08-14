@@ -98,7 +98,8 @@ pub(crate) fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
     .with_commands(commands)
     .with_mcp(Arc::clone(&servers))
     .with_snapshots(snapshots)
-    .with_concurrency(config.agents.concurrency());
+    .with_concurrency(config.agents.concurrency())
+    .with_small_model(config.small_model.clone());
     if let Some(lsp) = lsp {
         engine = engine.with_lsp(lsp);
     }

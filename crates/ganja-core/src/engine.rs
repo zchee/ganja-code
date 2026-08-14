@@ -989,6 +989,15 @@ pub struct Engine {
     /// ([`crate::config::AgentsConfig::concurrency`]) and an engine nobody
     /// configured still has to have an answer.
     concurrency: usize,
+    /// The config's `small_model`, handed to every turn this engine starts so
+    /// that the title request can prefer it over the catalog's cheapest row.
+    ///
+    /// Held verbatim, prefix and all: whether the spec binds is a question
+    /// about the provider, and this engine's provider is fixed while its
+    /// *model* is not — so the answer is taken where the request is built
+    /// rather than cached here. [`None`] is a config that named none, which is
+    /// the default and every scripted and golden run.
+    small_model: Option<String>,
 }
 
 impl Engine {
@@ -1096,6 +1105,7 @@ impl Engine {
             hooks: None,
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
+            small_model: None,
         }
     }
 
@@ -1290,6 +1300,22 @@ impl Engine {
     #[must_use]
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency.max(1);
+
+        self
+    }
+
+    /// Sets the config's `small_model` — the model this session's title
+    /// request prefers over the catalog's cheapest chat-capable row.
+    ///
+    /// Taken as written, including its `provider/` prefix: a spec naming
+    /// another provider's model is passed over at the request, with a line
+    /// saying so ([`crate::config::model_bound_to`]). Nothing is refused here
+    /// and nothing is validated — a title is the one request in a session that
+    /// may name a model this build never checked, and the wire's refusal is
+    /// already caught by the retry that asks the session's own model.
+    #[must_use]
+    pub fn with_small_model(mut self, small_model: Option<String>) -> Self {
+        self.small_model = small_model;
 
         self
     }
@@ -3060,6 +3086,7 @@ impl Engine {
         Some(Arc::new(subagent::Host {
             provider: Arc::clone(&self.provider),
             model,
+            small_model: self.small_model.clone(),
             agents: Arc::clone(self.agents.as_ref()?),
             // A subagent is offered this build's tools minus the one that
             // spawns subagents, which is the whole of the depth limit (D9).
@@ -3666,6 +3693,7 @@ impl Engine {
             concurrency: self.concurrency,
             session_id: self.session_id(),
             model,
+            small_model: self.small_model.clone(),
             effort_options,
             system,
             reminders,

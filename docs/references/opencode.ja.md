@@ -211,7 +211,7 @@ ganja が仕様として読むピン済みタグ(`anomalyco/opencode@v1.18.13`)�
 | [モデル毎のカタログ上書き](https://opencode.ai/docs/providers) | `models.<id>.name` / `limit.context` / `limit.output` | ❌ config プロバイダは uncataloged のまま |
 | [モデル毎の options](https://opencode.ai/docs/models) | `reasoningEffort`・`textVerbosity`・`thinking.budgetTokens` の素通し | ⚠️ effort roster が reasoning options を合成(budget 演算含む)。`textVerbosity` と素通しは ❌ |
 | [Variants](https://opencode.ai/docs/models) | カタログ宣言 + プロバイダ毎のハードコード。`--variant`・`variant_cycle` ctrl+t | ⚠️ 同じ合成 roster を `/effort` として提供。CLI フラグと巡回キーはなし |
-| [`small_model`](https://opencode.ai/docs/config) | タイトルと要約 | ✅ |
+| [`small_model`](https://opencode.ai/docs/config) | タイトル生成のみ（上流の `getSmallModel` を読むのは `ensureTitle` だけで、要約はターン自身のモデルを使う） | ✅ プレフィックスが指すプロバイダにのみ束縛 |
 | Anthropic subscription OAuth(Pro/Max) | upstream は Anthropic の規約遵守のため削除。コミュニティプラグインは自己責任で存在 | n/a — ganja は最初から持たず、ピン時点に仕様もなかった |
 | xAI device-code ログイン | [v1.18.14](https://github.com/anomalyco/opencode/releases/tag/v1.18.14) から単一フロー | ✅ ganja の grok ログインは元から device flow — 両者が収斂 |
 | MCP OAuth | リモート MCP 認証 | ✅ P13 の追加、upstream に対応物なし — v1.18.13 チェックアウトは今も `oauth` キーを明示拒否: RFC 8414 発見+RFC 7591 登録+PKCE/loopback+401 時の refresh-then-redial を `mcp:<server>` 予約キーに保存(D466) |
@@ -234,7 +234,7 @@ ganja が仕様として読むピン済みタグ(`anomalyco/opencode@v1.18.13`)�
 | トップレベルキー | 補足 | ganja |
 |---|---|---|
 | [`model`](https://opencode.ai/docs/config) | `provider/model` 既定 | ✅ |
-| [`small_model`](https://opencode.ai/docs/config) | タイトル・要約用の安価なモデル | ✅ |
+| [`small_model`](https://opencode.ai/docs/config) | タイトル生成用の安価なモデル | ✅ |
 | [`username`](https://opencode.ai/docs/config) | 表示名 | ❌ |
 | [`autoupdate`](https://opencode.ai/docs/config) | `true` / `false` / `"notify"` | ❌ 自己更新機構ごと不在 |
 | [`share`](https://opencode.ai/docs/share) | `manual` / `auto` / `disabled` | ❌ share サブシステムなし |

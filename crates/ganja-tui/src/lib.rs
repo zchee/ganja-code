@@ -173,7 +173,8 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
     // The screen's copy of the headless assembly's line: this frontend builds
     // its own engine, so a knob wired into `ganja-cli`'s `assemble` alone
     // would be a knob every interactive session still ignored.
-    .with_concurrency(config.agents.concurrency());
+    .with_concurrency(config.agents.concurrency())
+    .with_small_model(config.small_model.clone());
     if let Some(lsp) = lsp {
         engine = engine.with_lsp(lsp);
     }

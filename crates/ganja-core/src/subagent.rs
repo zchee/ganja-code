@@ -104,6 +104,9 @@ pub(crate) struct Host {
     /// What the parent is asking, which a subagent naming no model of its own
     /// inherits.
     pub(crate) model: String,
+    /// The config's `small_model`, carried so a child's own stored session is
+    /// titled by the key that titles the parent's.
+    pub(crate) small_model: Option<String>,
     /// Agents the parent may spawn.
     pub(crate) agents: Arc<agent::Registry>,
     /// Tools the **child** is offered: this build's registry without the task

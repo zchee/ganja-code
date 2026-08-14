@@ -213,7 +213,7 @@ upstream lacks.*
 | [Per-model catalog overrides](https://opencode.ai/docs/providers) | `models.<id>.name` / `limit.context` / `limit.output` | ❌ a config provider stays uncataloged |
 | [Per-model options](https://opencode.ai/docs/models) | `reasoningEffort`, `textVerbosity`, `thinking.budgetTokens` passthrough | ⚠️ effort roster synthesizes the reasoning options (incl. the budget arithmetic); `textVerbosity` and raw passthrough ❌ |
 | [Variants](https://opencode.ai/docs/models) | catalog-declared + hardcoded per provider; `--variant`, `variant_cycle` ctrl+t | ⚠️ surfaced as `/effort` with the same synthesized roster; no CLI flag, no cycle key |
-| [`small_model`](https://opencode.ai/docs/config) | titles and summaries | ✅ |
+| [`small_model`](https://opencode.ai/docs/config) | the title request (upstream's `getSmallModel` is read by `ensureTitle` and by nothing else; summaries run on the turn's own model) | ✅ bound to the provider its prefix names |
 | Anthropic subscription OAuth (Pro/Max) | upstream removed it to comply with Anthropic's terms; community plugins exist at users' own risk | n/a — ganja never carried it, and no spec existed at the pin |
 | xAI device-code login | single-flow since [v1.18.14](https://github.com/anomalyco/opencode/releases/tag/v1.18.14) | ✅ ganja's grok login is already a device flow |
 | MCP OAuth | remote MCP auth | ✅ P13 addition, no upstream counterpart — the v1.18.13 checkout still refuses the `oauth` key by name: RFC 8414 discovery + RFC 7591 registration + PKCE/loopback + refresh-then-redial on 401, stored under a reserved `mcp:<server>` key (D466) |
@@ -236,7 +236,7 @@ Mechanics first, then the top-level keys of `opencode.json(c)`.
 | Top-level key | Notes | ganja |
 |---|---|---|
 | [`model`](https://opencode.ai/docs/config) | `provider/model` default | ✅ |
-| [`small_model`](https://opencode.ai/docs/config) | cheap model for titles/summaries | ✅ |
+| [`small_model`](https://opencode.ai/docs/config) | cheap model for the title request | ✅ |
 | [`username`](https://opencode.ai/docs/config) | display name | ❌ |
 | [`autoupdate`](https://opencode.ai/docs/config) | `true` / `false` / `"notify"` | ❌ no self-updater at all |
 | [`share`](https://opencode.ai/docs/share) | `manual` / `auto` / `disabled` | ❌ no share subsystem |
