@@ -1453,6 +1453,28 @@ impl Engine {
         self.provider.rate_windows()
     }
 
+    /// What the vendor last said is left of this account's **plan** — the 5h
+    /// and weekly analogues D471 could not draw and the W-A1 probe found in
+    /// headers after all (**D485**, declared in
+    /// [`crate::provider::rate`]).
+    ///
+    /// Additive beside [`Engine::rate_windows`], never a widening of it: that
+    /// accessor's shape and every caller of it are untouched, because a plan
+    /// bucket is a different measurement rather than a fuller one. Everything
+    /// its neighbour's doc says about *how* it is held — on the wire, per
+    /// credential, read through rather than cached, surviving a resume — holds
+    /// here for the same reasons.
+    ///
+    /// A window past its own reset is still returned for that neighbour's
+    /// reason; a window whose vendor sent no reset is returned too, and means
+    /// exactly that.
+    ///
+    /// [`Provider::plan_windows`]: crate::provider::Provider::plan_windows
+    #[must_use]
+    pub fn plan_windows(&self) -> Vec<crate::provider::PlanWindow> {
+        self.provider.plan_windows()
+    }
+
     /// Ends every background job's whole process group. Mirrors
     /// [`Engine::shutdown_mcp`]/[`Engine::shutdown_lsp`]: idempotent, and
     /// safe to call on an engine that started none.

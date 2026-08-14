@@ -265,6 +265,11 @@ impl Provider for CopilotProvider {
     fn rate_windows(&self) -> Vec<super::RateWindow> {
         self.0.rate_windows()
     }
+
+    /// Delegated for the same reason, to the same wire (**D485**).
+    fn plan_windows(&self) -> Vec<super::PlanWindow> {
+        self.0.plan_windows()
+    }
 }
 
 #[cfg(test)]

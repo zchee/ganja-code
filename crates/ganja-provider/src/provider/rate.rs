@@ -22,6 +22,53 @@
 //!   `reset` a *duration from now* the platform spells Go-style (`6m0s`,
 //!   `500ms`) and other endpoints spell as bare seconds (`60`).
 //!
+//! # The other kind of budget: plan limits (**D485**)
+//!
+//! [`RateWindow`] is a *rate* limit — the tokens-per-minute a request is
+//! throttled against. What P14 left unbuilt (**D471**) is the other thing a
+//! subscription meters: the plan's own 5h and weekly buckets, which no vendor
+//! serves ganja through a usage API it holds a credential tier for. The W-A1
+//! probe of 2026-08-14 (`.omc/plans/2026-08-14-usage-meters-cursor-exec.md`)
+//! read the header *names* every credential's own responses carry and found
+//! two backends saying it in headers after all, so [`PlanWindow`] is that
+//! answer's shape — a **sibling** of [`RateWindow`], never a widening of it,
+//! because the two measure different things and spell them incompatibly: a
+//! rate window is `limit`/`remaining` counts against a clock, a plan window is
+//! a percentage against a rolling window that may carry no clock at all.
+//!
+//! Two families, sourced from the vendors' own public clients rather than
+//! guessed from the names the probe saw:
+//!
+//! - **codex** — `x-codex-{primary,secondary}-{used-percent,window-minutes,
+//!   reset-at}`, plus `x-codex-limit-name`, and the same shape under any
+//!   `x-<limit-id>-` infix (the probe observed `x-codex-bengalfox-…`). Spec:
+//!   `openai/codex`, `codex-rs/codex-api/src/rate_limits.rs`
+//!   (`parse_rate_limit_for_limit`, `parse_rate_limit_window`,
+//!   `header_name_to_limit_id`) and `codex-rs/protocol/src/protocol.rs`
+//!   (`struct RateLimitWindow`), read at tag `rust-v0.148.0-alpha.15`. That
+//!   source fixes every value type: `used-percent` is an `f64` **0–100 of the
+//!   window consumed** ("Percentage (0-100) of the window that has been
+//!   consumed"), `window-minutes` an `i64` of minutes, `reset-at` an `i64` of
+//!   **unix seconds** — not RFC 3339 — and `limit-name` a trimmed string.
+//! - **github-copilot** — `x-quota-snapshot-<kind>`, whose value is a URL
+//!   query string (`&`-joined, `=` between key and value), *not* the
+//!   `;`-joined list its shape suggests. Spec:
+//!   `microsoft/vscode-copilot-chat`,
+//!   `src/platform/chat/common/chatQuotaServiceImpl.ts`
+//!   (`ChatQuotaService.processQuotaHeaders`), which reads `ent` (int
+//!   entitlement, `-1` meaning unlimited), `ov` (float overage used), `ovPerm`
+//!   (`"true"`/`"false"`), `rem` (**float 0–100 of the entitlement
+//!   remaining**) and `rst` (a percent-encoded RFC 3339 instant); corroborated
+//!   byte-for-byte by captured live responses in `CaddyGlow/ccproxy-api`,
+//!   `tests/data/endpoint_samples/copilot_chat_completions*.json`
+//!   (`ent=-1&ov=0.0&ovPerm=false&rem=100.0&rst=2025-10-01T00%3A00%3A00Z`).
+//!   GitHub documents none of this; the grammar is only as good as those
+//!   sources, which is why a snapshot that does not parse is dropped whole.
+//!
+//! The two disagree about which direction the percentage runs — codex sends
+//! *used*, copilot sends *remaining* — so [`PlanWindow::used_percent`] is
+//! normalized here, once, and no rendering site ever flips a sign.
+//!
 //! # What is not invented
 //!
 //! A backend that sends nothing yields nothing — the D470 rule, restated here
@@ -31,6 +78,15 @@
 //! frozen live-looking meter the P16 pre-mortem names. Anything short of three
 //! is dropped with a debug log naming the bucket and nothing else — a header
 //! value is a fact about somebody's account.
+//!
+//! A [`PlanWindow`] keeps that rule where its vendor gives it the material and
+//! says so where it does not: codex sends a reset and the window decays past
+//! it exactly as a rate bucket does, while a copilot snapshot's `rst` is
+//! optional and one that arrives without it has **no clock at all**. Such a
+//! window is kept until a later response replaces the set — which
+//! [`RateWindows::record`] does wholesale — and every surface that draws it
+//! says the vendor reported no reset rather than inventing one. What is never
+//! done is manufacturing an expiry so the shape looks uniform.
 //!
 //! # Per-wire, not per-session
 //!
@@ -90,15 +146,72 @@ impl RateWindow {
     }
 }
 
+/// One plan bucket: how much of a *subscription's* own budget is spent, and
+/// when — if ever — it refills (**D485**).
+///
+/// A sibling of [`RateWindow`], not a variant of it: the module docs say why.
+/// The fields are the four the two vendor families agree on, each [`Option`]
+/// exactly where its vendor may say nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanWindow {
+    /// What this bucket is, in the vendor's own words: codex's `primary` and
+    /// `secondary` (its 5h and weekly analogues), an infixed family's
+    /// `<family> primary`, or a copilot snapshot's kind (`chat`,
+    /// `premium_interactions`).
+    pub name: String,
+    /// How much of the budget is gone, 0 through 100 — **always used**,
+    /// whichever direction its vendor sent (see the module docs). Not clamped
+    /// at parse, because a vendor saying 103 has said something true about an
+    /// account in overage; [`PlanWindow::used`] is what meters it.
+    pub used_percent: f64,
+    /// How long the rolling window is, when the vendor said. Copilot says
+    /// nothing here, so a quota snapshot carries [`None`] rather than a
+    /// guessed month.
+    pub window_minutes: Option<u64>,
+    /// When the window refills, when the vendor said. [`None`] is a real
+    /// answer — a copilot snapshot may carry no `rst` — and means this window
+    /// has no clock rather than that it refills now.
+    pub resets_at: Option<SystemTime>,
+    /// The vendor's own label for the limit this window belongs to, when it
+    /// sent one (codex's `-limit-name`, e.g. a model family).
+    pub limit_name: Option<String>,
+}
+
+impl PlanWindow {
+    /// Whether `now` is past the moment this window said it would refill.
+    ///
+    /// A window with no reset is **never** expired: nothing said it would end,
+    /// so nothing may say it has. It is replaced by the next response that
+    /// speaks, which is the whole of its staleness story.
+    #[must_use]
+    pub fn expired(&self, now: SystemTime) -> bool {
+        self.resets_at.is_some_and(|reset| reset <= now)
+    }
+
+    /// How much of the budget is gone, 0.0 through 1.0 — [`RateWindow::used`]'s
+    /// shape, so both kinds of budget meter through one rendering path.
+    #[must_use]
+    pub fn used(&self) -> f64 {
+        (self.used_percent / 100.0).clamp(0.0, 1.0)
+    }
+}
+
 /// The latest buckets one wire has seen, shared with whoever polls it.
 ///
 /// A wire holds one and hands it to [`super::open`]; the engine reads it back
-/// through [`super::Provider::rate_windows`]. Cheap to clone — every clone is
-/// the same store — so a wire's constructor can hand copies out without
-/// thinking about it.
+/// through [`super::Provider::rate_windows`] and
+/// [`super::Provider::plan_windows`]. Cheap to clone — every clone is the same
+/// store — so a wire's constructor can hand copies out without thinking about
+/// it.
+///
+/// The two sets are held apart because they are refreshed apart: a response
+/// carrying rate headers and no plan headers is a vendor saying one thing and
+/// not the other, and one lock over both would make the quieter family's
+/// answer depend on the louder one's.
 #[derive(Clone, Debug, Default)]
 pub struct RateWindows {
     latest: Arc<Mutex<Vec<RateWindow>>>,
+    plans: Arc<Mutex<Vec<PlanWindow>>>,
 }
 
 impl RateWindows {
@@ -119,20 +232,37 @@ impl RateWindows {
         );
 
         let windows = parse(headers, now);
-        if windows.is_empty() {
-            return;
+        if !windows.is_empty() {
+            *self
+                .latest
+                .lock()
+                .expect("a rate-window store is never poisoned") = windows;
         }
 
-        *self
-            .latest
-            .lock()
-            .expect("a rate-window store is never poisoned") = windows;
+        // Per family, for [`RateWindows`]'s own reason: a backend that sends
+        // rate headers and no plan headers has said nothing about the plan.
+        let plans = parse_plans(headers, now);
+        if !plans.is_empty() {
+            *self
+                .plans
+                .lock()
+                .expect("a rate-window store is never poisoned") = plans;
+        }
     }
 
     /// What the wire last heard, newest set first-hand.
     #[must_use]
     pub fn latest(&self) -> Vec<RateWindow> {
         self.latest
+            .lock()
+            .expect("a rate-window store is never poisoned")
+            .clone()
+    }
+
+    /// The plan buckets the wire last heard (**D485**), the same way.
+    #[must_use]
+    pub fn latest_plans(&self) -> Vec<PlanWindow> {
+        self.plans
             .lock()
             .expect("a rate-window store is never poisoned")
             .clone()
@@ -276,6 +406,258 @@ fn window(kind: String, fields: [Option<&str>; 3], now: SystemTime) -> Option<Ra
     })
 }
 
+/// Every plan bucket `headers` describes, relative to `now` (**D485**).
+///
+/// The codex families first, in their limit ids' own order, then the copilot
+/// snapshots in theirs — both stable, so two responses carrying the same
+/// buckets render in the same order.
+#[must_use]
+pub fn parse_plans(headers: &HeaderMap, now: SystemTime) -> Vec<PlanWindow> {
+    let mut plans = codex_plans(headers, now);
+    plans.extend(copilot_plans(headers));
+
+    plans
+}
+
+/// What every codex header in a family sits under, for the family the account
+/// itself is metered by.
+const CODEX_PREFIX: &str = "x-codex";
+
+/// The suffix that names a codex limit family, and the whole of how one is
+/// discovered — `openai/codex`'s own `header_name_to_limit_id`, which strips
+/// exactly this and takes what is left as the family's id. Mirrored rather
+/// than narrowed to a known list, because the shadow family the probe saw
+/// (`x-codex-bengalfox-…`) is precisely the case a known list would miss.
+const CODEX_FAMILY_SUFFIX: &str = "-primary-used-percent";
+
+/// The two windows a codex family carries: the account's short rolling budget
+/// and its long one — Claude's 5h and weekly meters, in this vendor's words.
+const CODEX_WINDOWS: [&str; 2] = ["primary", "secondary"];
+
+/// Every codex-family plan window `headers` carries.
+fn codex_plans(headers: &HeaderMap, now: SystemTime) -> Vec<PlanWindow> {
+    // The default family is always tried, exactly as the vendor's client
+    // tries it; the rest are whatever the response named. `BTreeSet` for the
+    // stable order, and because a family named twice is one family.
+    let mut families: std::collections::BTreeSet<&str> =
+        std::collections::BTreeSet::from([CODEX_PREFIX]);
+    for name in headers.keys() {
+        if let Some(family) = name.as_str().strip_suffix(CODEX_FAMILY_SUFFIX)
+            && family.len() > "x-".len()
+            && family.starts_with("x-")
+        {
+            families.insert(family);
+        }
+    }
+
+    let mut plans = Vec::new();
+    for family in families {
+        let limit_name = header(headers, &format!("{family}-limit-name"))
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+
+        for window in CODEX_WINDOWS {
+            let Some(used_percent) = header(headers, &format!("{family}-{window}-used-percent"))
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|percent| percent.is_finite())
+            else {
+                continue;
+            };
+            let window_minutes = header(headers, &format!("{family}-{window}-window-minutes"))
+                .and_then(|value| value.parse::<i64>().ok())
+                .and_then(|minutes| u64::try_from(minutes).ok());
+            let resets_at = codex_reset(headers, family, window, now);
+
+            // The vendor's own `has_data` rule: a window that is zero percent
+            // spent, over no window, resetting never is a placeholder rather
+            // than a budget, and metering it would draw an empty bar for an
+            // account nobody has told us anything about.
+            if used_percent <= 0.0 && window_minutes.unwrap_or(0) == 0 && resets_at.is_none() {
+                tracing::debug!(family, window, "a plan window carried no data");
+                continue;
+            }
+
+            plans.push(PlanWindow {
+                name: codex_name(family, window),
+                used_percent,
+                window_minutes,
+                resets_at,
+                limit_name: limit_name.clone(),
+            });
+        }
+    }
+
+    plans
+}
+
+/// When a codex window refills.
+///
+/// `-reset-at` first, which the vendor's own client reads as unix seconds —
+/// with RFC 3339 accepted beside it, since the two spellings cannot be
+/// mistaken for one another and a backend that switched would otherwise go
+/// quiet. `-reset-after-seconds` is the fallback: the probe saw that header on
+/// the wire and the vendor's client never reads it, so its grammar is taken
+/// from the field of that name in the backend's own OpenAPI model
+/// (`openai/codex`,
+/// `codex-rs/codex-backend-openapi-models/src/models/rate_limit_window_snapshot.rs`,
+/// `reset_after_seconds: i32`) — a count of seconds from now.
+fn codex_reset(
+    headers: &HeaderMap,
+    family: &str,
+    window: &str,
+    now: SystemTime,
+) -> Option<SystemTime> {
+    if let Some(at) = header(headers, &format!("{family}-{window}-reset-at")) {
+        if let Ok(seconds) = at.parse::<i64>() {
+            return u64::try_from(seconds)
+                .ok()
+                .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)));
+        }
+        if let Some(absolute) = rfc3339(at) {
+            return Some(absolute);
+        }
+    }
+
+    header(headers, &format!("{family}-{window}-reset-after-seconds"))
+        .and_then(|after| after.parse::<u64>().ok())
+        .and_then(|seconds| now.checked_add(Duration::from_secs(seconds)))
+}
+
+/// What to call a codex window on screen.
+///
+/// The default family is the account's own plan, so its windows are named by
+/// the window alone: `codex primary` would name the vendor twice on a bar that
+/// already knows which provider it is talking to. Any other family keeps its
+/// own id, minus the `codex-` the vendor prefixes it with.
+fn codex_name(family: &str, window: &str) -> String {
+    let family = family.strip_prefix("x-").unwrap_or(family);
+    let family = if family == "codex" {
+        ""
+    } else {
+        family.strip_prefix("codex-").unwrap_or(family)
+    };
+
+    if family.is_empty() {
+        window.to_owned()
+    } else {
+        format!("{family} {window}")
+    }
+}
+
+/// What every copilot quota header starts with; what follows is the kind of
+/// quota the snapshot is about (`chat`, `premium_interactions`).
+const QUOTA_SNAPSHOT_PREFIX: &str = "x-quota-snapshot-";
+
+/// Every copilot quota snapshot `headers` carries, in their kinds' own order.
+fn copilot_plans(headers: &HeaderMap) -> Vec<PlanWindow> {
+    let mut plans: std::collections::BTreeMap<&str, PlanWindow> = std::collections::BTreeMap::new();
+
+    for (name, value) in headers {
+        let Some(kind) = name.as_str().strip_prefix(QUOTA_SNAPSHOT_PREFIX) else {
+            continue;
+        };
+        let Ok(value) = value.to_str() else {
+            tracing::debug!(bucket = kind, "a quota snapshot was not text");
+            continue;
+        };
+
+        match quota_snapshot(kind, value) {
+            Some(plan) => {
+                plans.insert(kind, plan);
+            }
+            // Dropped whole rather than read halfway: this grammar is
+            // documented nowhere GitHub publishes, so a value that does not
+            // fit the sourced shape is a value this build cannot claim to
+            // understand.
+            None => tracing::debug!(bucket = kind, "a quota snapshot could not be read"),
+        }
+    }
+
+    plans.into_values().collect()
+}
+
+/// One `x-quota-snapshot-<kind>` value, in the query-string grammar the module
+/// docs cite.
+///
+/// `rem` is the whole of what makes a bucket: without a percentage there is
+/// nothing to meter. `ent`'s `-1` is the vendor's own "unlimited" (VS Code
+/// derives its `unlimited` flag as exactly `ent === -1`), and an unlimited
+/// entitlement is not a budget — it would meter as permanently empty, which is
+/// the same lie in the other direction. `ov`/`ovPerm` are read by that client
+/// for an overage display this build does not have, and are left alone rather
+/// than parsed into a field nothing renders.
+fn quota_snapshot(kind: &str, value: &str) -> Option<PlanWindow> {
+    let mut remaining_percent = None;
+    let mut entitlement = None;
+    let mut resets_at = None;
+
+    for field in value.split('&') {
+        let Some((key, raw)) = field.split_once('=') else {
+            continue;
+        };
+        match key {
+            "rem" => remaining_percent = raw.parse::<f64>().ok().filter(|value| value.is_finite()),
+            "ent" => entitlement = raw.parse::<i64>().ok(),
+            "rst" => resets_at = rfc3339(&percent_decode(raw)),
+            _ => {}
+        }
+    }
+
+    let remaining_percent = remaining_percent?;
+    if entitlement.is_some_and(|entitlement| entitlement < 0) {
+        tracing::debug!(bucket = kind, "a quota snapshot is unlimited, so unmetered");
+        return None;
+    }
+
+    Some(PlanWindow {
+        name: kind.to_owned(),
+        // The one place the two families' opposite conventions meet.
+        used_percent: 100.0 - remaining_percent,
+        // This vendor sends no window length and no name for the limit.
+        window_minutes: None,
+        resets_at,
+        limit_name: None,
+    })
+}
+
+/// A query-string value with its `%XX` escapes resolved.
+///
+/// Deliberately *not* a full `application/x-www-form-urlencoded` decode: a
+/// `+` stays a `+`, because the only field this build decodes is an RFC 3339
+/// instant, whose offset is spelled with one and whose grammar has nowhere to
+/// put a space. An escape that is not two hex digits is left as written rather
+/// than guessed at.
+fn percent_decode(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+
+    while let Some(index) = rest.find('%') {
+        decoded.push_str(&rest[..index]);
+        match rest
+            .get(index + 1..index + 3)
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            Some(byte) => {
+                decoded.push(char::from(byte));
+                rest = &rest[index + 3..];
+            }
+            None => {
+                decoded.push('%');
+                rest = &rest[index + 1..];
+            }
+        }
+    }
+    decoded.push_str(rest);
+
+    decoded
+}
+
+/// One header's value as trimmed text, or [`None`] when it is absent or is not
+/// text at all.
+fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name)?.to_str().ok().map(str::trim)
+}
+
 /// Reads a `reset` value in whichever spelling its vendor uses.
 ///
 /// Three are accepted because three are sent: an RFC 3339 instant (Anthropic),
@@ -411,7 +793,7 @@ mod tests {
 
     use reqwest::header::{HeaderMap, HeaderValue};
 
-    use super::{RateWindow, RateWindows, header_names, parse, rfc3339};
+    use super::{PlanWindow, RateWindow, RateWindows, header_names, parse, parse_plans, rfc3339};
 
     /// A fixed "now" so a duration-spelled reset lands somewhere a test can
     /// name, rather than wherever the clock happens to be.
@@ -720,6 +1102,309 @@ mod tests {
             store.latest()[0].remaining,
             8,
             "a response with no rate headers leaves the last real answer alone"
+        );
+    }
+
+    /// Every value below is manufactured. A real captured percentage is a fact
+    /// about the owner's own account and belongs in no repository.
+    ///
+    /// The codex family, in the shape `openai/codex`'s own client reads: a
+    /// percentage of the window *consumed*, a window length in minutes, and a
+    /// reset spelled as unix seconds.
+    #[test]
+    fn the_codex_family_reads_both_its_windows_and_dates_them_from_unix_seconds() {
+        let plans = parse_plans(
+            &headers(&[
+                ("x-codex-primary-used-percent", "12.5"),
+                ("x-codex-primary-window-minutes", "300"),
+                ("x-codex-primary-reset-at", "3600"),
+                ("x-codex-secondary-used-percent", "40"),
+                ("x-codex-secondary-window-minutes", "10080"),
+                ("x-codex-secondary-reset-at", "86400"),
+            ]),
+            NOW,
+        );
+
+        assert_eq!(
+            plans,
+            vec![
+                PlanWindow {
+                    name: "primary".to_owned(),
+                    used_percent: 12.5,
+                    window_minutes: Some(300),
+                    resets_at: Some(UNIX_EPOCH + Duration::from_secs(3_600)),
+                    limit_name: None,
+                },
+                PlanWindow {
+                    name: "secondary".to_owned(),
+                    used_percent: 40.0,
+                    window_minutes: Some(10_080),
+                    resets_at: Some(UNIX_EPOCH + Duration::from_secs(86_400)),
+                    limit_name: None,
+                },
+            ],
+            "the account's short and long budgets, in the vendor's own words"
+        );
+    }
+
+    /// The shadow family the probe saw: discovered by its own
+    /// `-primary-used-percent`, named by what the vendor infixed, and carrying
+    /// the family's `-limit-name` on every window of it.
+    #[test]
+    fn an_infixed_codex_family_is_discovered_by_its_own_primary_header() {
+        let plans = parse_plans(
+            &headers(&[
+                ("x-codex-primary-used-percent", "10"),
+                ("x-codex-bengalfox-primary-used-percent", "80"),
+                ("x-codex-bengalfox-limit-name", "  a-model-family  "),
+            ]),
+            NOW,
+        );
+
+        assert_eq!(plans.len(), 2, "both families are read; got {plans:?}");
+        assert_eq!(
+            plans[1],
+            PlanWindow {
+                name: "bengalfox primary".to_owned(),
+                used_percent: 80.0,
+                window_minutes: None,
+                resets_at: None,
+                limit_name: Some("a-model-family".to_owned()),
+            },
+            "the infixed family keeps its own id and its trimmed limit name"
+        );
+        assert_eq!(
+            plans[0].name, "primary",
+            "and the default family is still named by its window alone"
+        );
+    }
+
+    /// The header the vendor's client never reads and the wire sends anyway:
+    /// seconds from now, tried only once `-reset-at` has said nothing.
+    #[test]
+    fn a_codex_window_dates_itself_from_reset_after_seconds_when_no_reset_at_arrives() {
+        let plans = parse_plans(
+            &headers(&[
+                ("x-codex-primary-used-percent", "5"),
+                ("x-codex-primary-reset-after-seconds", "1800"),
+            ]),
+            NOW,
+        );
+
+        assert_eq!(plans[0].resets_at, Some(NOW + Duration::from_secs(1_800)));
+    }
+
+    /// A window that is zero percent spent, over no window, resetting never is
+    /// a placeholder — and an empty bar drawn for an account nobody said
+    /// anything about is exactly what this module refuses.
+    #[test]
+    fn a_codex_window_of_nothing_but_zeroes_is_a_placeholder_rather_than_a_budget() {
+        assert!(
+            parse_plans(
+                &headers(&[
+                    ("x-codex-primary-used-percent", "0"),
+                    ("x-codex-primary-window-minutes", "0"),
+                ]),
+                NOW,
+            )
+            .is_empty()
+        );
+    }
+
+    /// Copilot says how much is *left*; this module stores how much is *gone*,
+    /// so no rendering site ever flips a sign. Its reset arrives
+    /// percent-encoded.
+    #[test]
+    fn a_copilot_snapshot_is_read_as_used_where_the_vendor_said_remaining() {
+        let plans = parse_plans(
+            &headers(&[(
+                "x-quota-snapshot-premium_interactions",
+                "ent=300&ov=0.0&ovPerm=false&rem=88.5&rst=1970-01-02T00%3A00%3A00Z",
+            )]),
+            NOW,
+        );
+
+        assert_eq!(plans.len(), 1, "got {plans:?}");
+        assert_eq!(plans[0].name, "premium_interactions");
+        assert!(
+            (plans[0].used_percent - 11.5).abs() < 1e-9,
+            "88.5 remaining is 11.5 used; got {}",
+            plans[0].used_percent
+        );
+        assert_eq!(
+            plans[0].resets_at,
+            Some(UNIX_EPOCH + Duration::from_secs(86_400)),
+            "the `%3A`-escaped instant is decoded before it is read"
+        );
+        assert_eq!(
+            plans[0].window_minutes, None,
+            "this vendor sends no window length, so none is invented"
+        );
+    }
+
+    /// `rst` is optional in the sourced grammar. A snapshot without it has no
+    /// clock — which is a real answer, not a reason to drop the numbers or to
+    /// guess a month the way the vendor's own UI does.
+    #[test]
+    fn a_copilot_snapshot_without_a_reset_keeps_its_numbers_and_no_clock() {
+        let plans = parse_plans(
+            &headers(&[("x-quota-snapshot-chat", "ent=1000&ov=0.0&rem=25.0")]),
+            NOW,
+        );
+
+        assert_eq!(plans[0].resets_at, None);
+        assert!((plans[0].used_percent - 75.0).abs() < 1e-9);
+        assert!(
+            !plans[0].expired(NOW + Duration::from_secs(86_400 * 365)),
+            "a window nothing dated cannot go stale on its own"
+        );
+    }
+
+    /// Half a grammar is not half a bucket: a value that does not fit the
+    /// sourced shape is dropped whole rather than read as far as it goes.
+    #[test]
+    fn a_copilot_snapshot_whose_grammar_does_not_parse_is_dropped_whole() {
+        for value in [
+            // No `rem` at all: nothing to meter.
+            "ent=300&ov=0.0&ovPerm=false",
+            // `rem` present and unreadable.
+            "ent=300&rem=most-of-it",
+            // Not this grammar at all — the `;`-joined shape it is not.
+            "ent=300;rem=50.0",
+            "",
+        ] {
+            let mut map = HeaderMap::new();
+            map.insert(
+                "x-quota-snapshot-chat",
+                HeaderValue::from_str(value).expect("a header value"),
+            );
+
+            assert!(
+                parse_plans(&map, NOW).is_empty(),
+                "{value:?} is not a snapshot this build claims to understand"
+            );
+        }
+    }
+
+    /// The vendor's own `-1` sentinel: an unlimited entitlement is not a
+    /// budget, and metering one would draw a permanently empty bar.
+    #[test]
+    fn an_unlimited_copilot_entitlement_meters_nothing() {
+        assert!(
+            parse_plans(
+                &headers(&[(
+                    "x-quota-snapshot-chat",
+                    "ent=-1&ov=0.0&ovPerm=false&rem=100.0",
+                )]),
+                NOW,
+            )
+            .is_empty()
+        );
+    }
+
+    /// D484's decay posture, on the sibling shape: a dated window expires on
+    /// its own clock, and an undated one is replaced rather than expiring.
+    #[test]
+    fn a_plan_window_past_its_reset_reports_itself_expired() {
+        let dated = PlanWindow {
+            name: "primary".to_owned(),
+            used_percent: 90.0,
+            window_minutes: Some(300),
+            resets_at: Some(NOW + Duration::from_secs(60)),
+            limit_name: None,
+        };
+
+        assert!(!dated.expired(NOW), "before its reset it is live");
+        assert!(dated.expired(NOW + Duration::from_secs(61)));
+        assert!(
+            (dated.used() - 0.9).abs() < 1e-9,
+            "the meter reads the fraction spent"
+        );
+    }
+
+    /// A percentage past the end of the scale is a vendor talking about an
+    /// account in overage; the number is kept and the *meter* is what clamps.
+    #[test]
+    fn a_plan_window_over_a_hundred_percent_meters_full_without_losing_the_figure() {
+        let overage = PlanWindow {
+            name: "chat".to_owned(),
+            used_percent: 103.0,
+            window_minutes: None,
+            resets_at: None,
+            limit_name: None,
+        };
+
+        assert!((overage.used() - 1.0).abs() < f64::EPSILON);
+        assert!((overage.used_percent - 103.0).abs() < f64::EPSILON);
+    }
+
+    /// The D470 rule on the new family: the backends the probe found silent
+    /// meter nothing, and the rate family alone is not a plan family.
+    #[test]
+    fn a_response_carrying_no_plan_headers_yields_no_plan_windows() {
+        assert!(
+            parse_plans(
+                &headers(&[
+                    ("content-type", "text/event-stream"),
+                    ("anthropic-ratelimit-requests-limit", "1000"),
+                    ("anthropic-ratelimit-requests-remaining", "999"),
+                    ("anthropic-ratelimit-requests-reset", "1970-01-01T00:01:00Z"),
+                ]),
+                NOW,
+            )
+            .is_empty(),
+            "a rate-limit header is not a plan meter"
+        );
+    }
+
+    /// The two sets are refreshed apart: a response that spoke about one says
+    /// nothing about the other, and must not clear it.
+    #[test]
+    fn the_store_holds_the_two_families_apart() {
+        let store = RateWindows::default();
+        assert!(
+            store.latest_plans().is_empty(),
+            "a fresh store holds nothing"
+        );
+
+        store.record(
+            &headers(&[
+                ("x-codex-primary-used-percent", "20"),
+                ("x-codex-primary-reset-at", "3600"),
+            ]),
+            NOW,
+        );
+        assert_eq!(store.latest_plans().len(), 1);
+        assert!(
+            store.latest().is_empty(),
+            "a plan-only response invents no rate bucket"
+        );
+
+        store.record(
+            &headers(&[
+                ("x-ratelimit-limit-requests", "10"),
+                ("x-ratelimit-remaining-requests", "9"),
+                ("x-ratelimit-reset-requests", "60"),
+            ]),
+            NOW,
+        );
+        assert_eq!(
+            store.latest_plans().len(),
+            1,
+            "a rate-only response leaves the plan set alone"
+        );
+        assert_eq!(store.latest().len(), 1, "and lands its own buckets");
+
+        store.record(
+            &headers(&[
+                ("x-codex-primary-used-percent", "35"),
+                ("x-codex-primary-reset-at", "3600"),
+            ]),
+            NOW,
+        );
+        assert!(
+            (store.latest_plans()[0].used_percent - 35.0).abs() < f64::EPSILON,
+            "the newer plan set wins"
         );
     }
 }

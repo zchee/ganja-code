@@ -173,6 +173,15 @@ impl Provider for CompatProvider {
             Wire::Messages(wire) => wire.rate_windows(),
         }
     }
+
+    /// The plan buckets of whichever wire this endpoint turned out to be
+    /// (**D485**) — an endpoint that sends neither family meters neither.
+    fn plan_windows(&self) -> Vec<super::PlanWindow> {
+        match &self.wire {
+            Wire::ChatCompletions(wire) => wire.plan_windows(),
+            Wire::Messages(wire) => wire.plan_windows(),
+        }
+    }
 }
 
 #[cfg(test)]

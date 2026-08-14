@@ -15,18 +15,27 @@
 //! now, this one by the screenshot, that one by its own frozen test.
 //!
 //! Claude's panel leads with subscription plan-limit meters — the 5h and
-//! weekly buckets — which ride a vendor usage API ganja does not speak;
-//! those rows are **explicitly absent**, with one honest line naming why,
-//! rather than drawn empty or faked (the plan's honest-degradation rule,
-//! ruled sufficient in Open question 2).
+//! weekly buckets — which P14 could reach only through a vendor usage API
+//! ganja does not speak; those rows were **explicitly absent**, with one
+//! honest line naming why, rather than drawn empty or faked (the plan's
+//! honest-degradation rule, ruled sufficient in Open question 2). Two
+//! narrowings since have left that rule intact and moved what it applies to:
 //!
 //! P16 narrowed that absence rather than filling it (**D484**): the vendor's
 //! *rate-limit* windows — which every response's headers already carry, and
 //! which need no usage API — get a `Current window` section of their own, in
-//! the same block-bar shape, tightest budget first. What the honest line now
-//! names is only the plan meters, which still have no source. A backend that
+//! the same block-bar shape, tightest budget first. A backend that
 //! sends no such headers renders no section at all, and a window past its own
 //! reset renders as expired rather than as a live figure.
+//!
+//! P17 narrowed it again, and this time on the plan meters themselves
+//! (**D485**): the W-A1 probe found two backends spelling the 5h/weekly
+//! budgets in *headers* rather than behind the usage API D471 ruled out, so a
+//! `Plan limits` section renders them — from windows this session's own
+//! credential really served, never from a shape. The honest line consequently
+//! became a *conditional* one: it is drawn only when no plan window was
+//! captured, and it now names which credentials are still silent and why,
+//! citing the probe rather than claiming the meters are unbuildable anywhere.
 //!
 //! Its `Total duration` row renders
 //! when the opener hands one in (W7: the app's own wall clock since it was
@@ -48,7 +57,7 @@
 
 use ganja_core::{
     catalog::{self, compact_tokens},
-    provider::RateWindow,
+    provider::{PlanWindow, RateWindow},
 };
 use ganja_protocol::Usage as TokenUsage;
 use ratatui::{
@@ -82,7 +91,13 @@ const MAX_WIDTH: u16 = 96;
 /// section costs at [`RATE_ROWS`] (**D484**). Grown rather than left to push
 /// the honest-absence line and the key hints off the bottom: a section added
 /// at the cost of the footer that explains the panel would be a poor trade.
-const MAX_HEIGHT: u16 = 26;
+///
+/// Four taller again for P17's `Plan limits` section (**D485**), by the same
+/// trade. The two additions never both cost their maximum: the section and the
+/// honest-absence tail are mutually exclusive — a session that captured plan
+/// windows draws the section and no tail, and one that captured none draws the
+/// tail and no section.
+const MAX_HEIGHT: u16 = 30;
 
 /// How many rate windows the `Current window` section draws before it starts
 /// counting the rest.
@@ -99,15 +114,32 @@ const METER_WIDTH: usize = 20;
 /// The key hint at the dialog's foot.
 const HINTS: &str = "[Esc] close";
 
-/// The one honest line where Claude Code draws its plan-limit meters: ganja
-/// speaks no vendor usage API, so there is nothing true to draw (D471).
+/// How many plan windows the `Plan limits` section draws before it starts
+/// counting the rest — [`RATE_ROWS`]'s number, for [`RATE_ROWS`]'s reason.
 ///
-/// **Narrowed in P16** (**D484**): it used to stand for every window this panel
-/// could not show. The vendor's own rate-limit windows *are* now shown, in
-/// [`Usage::render`]'s `Current window` section, so this line names only what
-/// is still genuinely absent — the subscription plan's meters, which need the
-/// usage API D471 ruled out.
-const NO_PLAN_LIMITS: &str = "plan limits (5h/weekly) unavailable: no vendor usage API";
+/// Two is also exactly what the codex family sends per limit (its 5h and
+/// weekly windows), so the common case is never truncated at all.
+const PLAN_ROWS: usize = 2;
+
+/// The honest lines where Claude Code draws its plan-limit meters and this
+/// session's credential served none.
+///
+/// **Narrowed twice.** P16 (**D484**) took the rate-limit windows out of its
+/// scope; P17 (**D485**) took the plan meters themselves out of it for the
+/// credentials that *do* serve them, leaving this to say what the W-A1 probe
+/// of 2026-08-14 found still silent, and why — one sentence per reason, with
+/// the vendor's own documentation named where the reason is a credential tier
+/// rather than an absent feature. Rendered only when no plan window was
+/// captured: a panel that drew a real meter and then denied having one would
+/// be less honest than either half alone.
+///
+/// Kept under seventy columns a line, because the panel is as narrow as the
+/// terminal is and a clipped URL is not a shorter URL — it is a wrong one.
+const NO_PLAN_LIMITS: [&str; 3] = [
+    "plan limits unavailable on this credential (probed 2026-08-14):",
+    "  an openai API key's backend sends none; anthropic's needs an",
+    "  Admin key \u{2014} platform.claude.com/docs/en/manage-claude/usage-cost-api",
+];
 
 /// What the `Current window` section says when a bucket's own reset has
 /// passed. The vendor said a true thing at a moment that is over; renaming it
@@ -144,6 +176,11 @@ pub struct Data {
     /// the D470 rule, which is why this panel can carry the section and the
     /// honest-absence line side by side without either becoming a lie.
     pub rates: Vec<RateWindow>,
+    /// The vendor's own plan buckets, as `Engine::plan_windows` last answered
+    /// (**D485**). Empty renders no `Plan limits` section and the honest
+    /// [`NO_PLAN_LIMITS`] tail instead; non-empty renders the section and no
+    /// tail. Never both, and never a section over nothing.
+    pub plans: Vec<PlanWindow>,
     /// What "now" the section's expiry is judged against. Its own field rather
     /// than a [`SystemTime::now`] inside the renderer so a test can manufacture
     /// an already-expired bucket without waiting for a clock.
@@ -324,6 +361,39 @@ impl Usage {
         }
         lines.push(Line::raw(""));
 
+        // Plan limits: the meters Claude's panel leads with, over the header
+        // families the W-A1 probe confirmed (**D485**). Absent entirely when
+        // this credential served none, for the `Current window` section's own
+        // reason — and the honest tail at the foot is what speaks instead.
+        if !self.data.plans.is_empty() {
+            let now = self.data.now.unwrap_or_else(std::time::SystemTime::now);
+            // Tightest first, as below: the budget that runs out first is the
+            // one somebody opening this panel is asking about.
+            let mut plans: Vec<_> = self.data.plans.iter().collect();
+            plans.sort_by(|left, right| right.used().total_cmp(&left.used()));
+
+            lines.push(Line::styled(clip("Plan limits", inner_width), header));
+            for plan in plans.iter().take(PLAN_ROWS) {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(Self::bar(plan.used(), theme));
+                spans.push(Span::styled(
+                    format!(" {}", plan_label(plan, now)),
+                    theme.fg,
+                ));
+                lines.push(Line::from(spans));
+            }
+            if let Some(rest) = plans.len().checked_sub(PLAN_ROWS).filter(|rest| *rest > 0) {
+                lines.push(Line::styled(
+                    clip(
+                        &format!("  ({rest} roomier plan windows not shown)"),
+                        inner_width,
+                    ),
+                    theme.dim,
+                ));
+            }
+            lines.push(Line::raw(""));
+        }
+
         // Current window: the vendor's own rate-limit buckets, in the same
         // block-bar shape as everything above (**D484**). Absent entirely
         // when the wire has heard none — a section header over "none" would
@@ -414,8 +484,10 @@ impl Usage {
                 ),
                 theme.dim,
             ));
-            // Header lines above plus the honest-absence tail and hints below.
-            let fixed = lines.len() + 4;
+            // Header lines above plus the honest-absence tail and hints
+            // below — measured rather than assumed, since P17 made the tail's
+            // own height depend on whether a plan meter was drawn (**D485**).
+            let fixed = lines.len() + 2 + tail_height(&self.data.plans);
             let visible = room.saturating_sub(fixed).max(1);
             let skipped = self.data.turns.len().saturating_sub(visible);
             for row in self.data.turns.iter().skip(skipped) {
@@ -447,8 +519,15 @@ impl Usage {
             }
         }
         lines.push(Line::raw(""));
-        lines.push(Line::styled(clip(NO_PLAN_LIMITS, inner_width), theme.dim));
-        lines.push(Line::raw(""));
+        // No blank between the tail and the hints, where P16 had one: three
+        // lines where there was one would otherwise cost this modal two rows,
+        // and on a terminal that caps it the row it loses is the footer
+        // explaining the panel — the trade [`MAX_HEIGHT`]'s doc refuses.
+        if self.data.plans.is_empty() {
+            for line in NO_PLAN_LIMITS {
+                lines.push(Line::styled(clip(line, inner_width), theme.dim));
+            }
+        }
         lines.push(Line::styled(clip(HINTS, inner_width), theme.dim));
 
         let height = u16::try_from(lines.len().saturating_add(2))
@@ -461,6 +540,64 @@ impl Usage {
             .block(Block::bordered().title(" usage "))
             .style(theme.fg.patch(theme.background_panel))
             .render(popup, buffer);
+    }
+}
+
+/// How many rows the panel's foot costs: the blank before it, the hints, and
+/// the honest-absence tail when it is drawn at all (**D485**).
+fn tail_height(plans: &[PlanWindow]) -> usize {
+    if plans.is_empty() {
+        NO_PLAN_LIMITS.len()
+    } else {
+        0
+    }
+}
+
+/// What one plan window says after its bar: what it is, how long its window
+/// runs, and when it comes back.
+///
+/// Every clause is conditional because every one of them is optional on the
+/// wire. A window whose vendor sent no reset says exactly that rather than
+/// borrowing the expired phrasing — nothing dated it, so nothing has gone
+/// stale (**D485**).
+fn plan_label(plan: &PlanWindow, now: std::time::SystemTime) -> String {
+    let mut label = plan.name.clone();
+    if let Some(limit) = &plan.limit_name {
+        label.push_str(&format!(" ({limit})"));
+    }
+
+    let mut clauses = Vec::new();
+    if let Some(minutes) = plan.window_minutes {
+        clauses.push(format!("{} window", compact_minutes(minutes)));
+    }
+    clauses.push(match plan.resets_at {
+        Some(_) if plan.expired(now) => EXPIRED.to_owned(),
+        Some(reset) => format!(
+            "resets in {}",
+            compact_duration(reset.duration_since(now).unwrap_or_default())
+        ),
+        None => "no reset reported".to_owned(),
+    });
+
+    format!("{label} \u{b7} {}", clauses.join(", "))
+}
+
+/// A rolling window's length in the unit a person thinks about it in: `5h` for
+/// the short bucket, `7d` for the weekly one, plain minutes under an hour.
+///
+/// Its own spelling rather than [`compact_duration`]'s, which is pinned to the
+/// session row's `3h 9m` shape and would render a weekly window as `168h 0m`.
+fn compact_minutes(minutes: u64) -> String {
+    match minutes {
+        0..60 => format!("{minutes}m"),
+        60..1_440 => match (minutes / 60, minutes % 60) {
+            (hours, 0) => format!("{hours}h"),
+            (hours, rest) => format!("{hours}h {rest}m"),
+        },
+        _ => match (minutes / 1_440, (minutes % 1_440) / 60) {
+            (days, 0) => format!("{days}d"),
+            (days, hours) => format!("{days}d {hours}h"),
+        },
     }
 }
 
@@ -487,15 +624,18 @@ mod tests {
     use ganja_protocol::Message;
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    use super::{Data, RateWindow, TokenUsage, TurnUsage, Usage};
+    use super::{Data, PlanWindow, RateWindow, TokenUsage, TurnUsage, Usage, compact_minutes};
     use crate::{component::status::Totals, theme::Theme};
 
-    /// Wide enough for the pinned per-model line to render whole.
+    /// Wide enough for the pinned per-model line to render whole, and two
+    /// taller than [`super::MAX_HEIGHT`] so the modal is never the terminal's
+    /// prisoner: what these tests assert is what the panel *chose* to draw,
+    /// not what a short terminal cut off. Grown with that constant in P17.
     const AREA: Rect = Rect {
         x: 0,
         y: 0,
         width: 100,
-        height: 28,
+        height: 32,
     };
 
     fn data() -> Data {
@@ -530,7 +670,35 @@ mod tests {
             // a fake-provider session renders exactly what it always did
             // (**D484**, AC7's last clause).
             rates: Vec::new(),
+            // The same pin for the plan meters (**D485**): a credential that
+            // served none renders the honest tail and no section.
+            plans: Vec::new(),
             now: None,
+        }
+    }
+
+    /// One plan window, `used_percent` spent, over a `minutes`-long window,
+    /// refilling `in_secs` from [`NOW`] — negative for one already past its
+    /// reset, and [`None`] for a vendor that dated it not at all.
+    fn plan(
+        name: &str,
+        used_percent: f64,
+        minutes: Option<u64>,
+        in_secs: Option<i64>,
+    ) -> PlanWindow {
+        PlanWindow {
+            name: name.to_owned(),
+            used_percent,
+            window_minutes: minutes,
+            resets_at: in_secs.map(|seconds| {
+                let offset = Duration::from_secs(seconds.unsigned_abs());
+                if seconds < 0 {
+                    NOW - offset
+                } else {
+                    NOW + offset
+                }
+            }),
+            limit_name: None,
         }
     }
 
@@ -700,30 +868,177 @@ mod tests {
         );
     }
 
-    /// The plan-limit meters Claude Code leads with are explicitly absent,
-    /// with the one honest line naming why — never drawn empty, never faked.
+    /// The plan-limit meters Claude Code leads with are explicitly absent on a
+    /// credential that served none, with the honest lines naming which
+    /// credentials are silent and why — never drawn empty, never faked.
     #[test]
     fn plan_limits_are_absent_with_the_honest_line() {
         let screen = rendered(&Usage::new(data()), AREA);
 
         assert!(
-            screen.contains("plan limits (5h/weekly) unavailable: no vendor usage API"),
+            screen.contains("plan limits unavailable on this credential (probed 2026-08-14):"),
             "got:\n{screen}"
         );
+        // The P17 narrowing (**D485**): the line no longer says the meters are
+        // unbuildable — it names who is still quiet and cites where that was
+        // established, the vendor's own documentation included.
         assert!(
-            !screen.contains("5h:["),
-            "no plan-limit meter may be drawn:\n{screen}"
+            screen.contains("an openai API key's backend sends none")
+                && screen.contains("anthropic's needs an"),
+            "the still-silent credentials are named:\n{screen}"
         );
         assert!(
-            !screen.contains("wk:["),
-            "no weekly meter may be drawn:\n{screen}"
+            screen.contains("platform.claude.com/docs/en/manage-claude/usage-cost-api"),
+            "and the vendor's own page is kept:\n{screen}"
         );
-        // The P16 narrowing (**D484**): with no windows heard, the section is
+        assert!(
+            !screen.contains("Plan limits"),
+            "no plan-limit meter may be drawn over nothing:\n{screen}"
+        );
+        // The P16 narrowing (**D484**): with no windows heard, that section is
         // absent too — the honest-absence line is not standing in for it.
         assert!(
             !screen.contains("Current window"),
             "a vendor that said nothing gets no section:\n{screen}"
         );
+    }
+
+    /// The `Plan limits` section renders what the credential really served,
+    /// in the panel's own block-bar shape (**D485**).
+    #[test]
+    fn the_plan_limits_section_meters_each_bucket_the_credential_served() {
+        let screen = rendered(
+            &Usage::new(Data {
+                plans: vec![
+                    plan("primary", 12.0, Some(300), Some(90)),
+                    plan("secondary", 40.0, Some(10_080), Some(86_400)),
+                ],
+                now: Some(NOW),
+                ..data()
+            }),
+            AREA,
+        );
+
+        assert!(screen.contains("Plan limits"), "got:\n{screen}");
+        assert!(
+            screen.contains("secondary \u{b7} 7d window, resets in 24h 0m"),
+            "the weekly bucket names its window and its countdown:\n{screen}"
+        );
+        assert!(
+            screen.contains("primary \u{b7} 5h window, resets in 1m"),
+            "and so does the short one:\n{screen}"
+        );
+        assert!(
+            screen.contains("40%") && screen.contains("12%"),
+            "each bar carries its own percentage:\n{screen}"
+        );
+    }
+
+    /// The panel never says both things: a session that drew a real meter does
+    /// not also print the line saying it could not (**D485**).
+    #[test]
+    fn a_drawn_plan_meter_replaces_the_absence_line_rather_than_joining_it() {
+        let screen = rendered(
+            &Usage::new(Data {
+                plans: vec![plan("primary", 12.0, Some(300), Some(90))],
+                now: Some(NOW),
+                ..data()
+            }),
+            AREA,
+        );
+
+        assert!(screen.contains("Plan limits"), "got:\n{screen}");
+        assert!(
+            !screen.contains("plan limits unavailable"),
+            "a panel that drew one may not deny having one:\n{screen}"
+        );
+        assert!(
+            screen.contains("[Esc] close"),
+            "and the footer still fits:\n{screen}"
+        );
+    }
+
+    /// A copilot snapshot arrives with no window length and may arrive with no
+    /// reset at all. Both absences are said plainly rather than filled in.
+    #[test]
+    fn a_plan_window_the_vendor_never_dated_says_so_instead_of_counting_down() {
+        let screen = rendered(
+            &Usage::new(Data {
+                plans: vec![plan("premium_interactions", 11.5, None, None)],
+                now: Some(NOW),
+                ..data()
+            }),
+            AREA,
+        );
+
+        assert!(
+            screen.contains("premium_interactions \u{b7} no reset reported"),
+            "got:\n{screen}"
+        );
+        assert!(
+            !screen.contains("resets in") && !screen.contains("window,"),
+            "nothing may invent a clock or a window length:\n{screen}"
+        );
+    }
+
+    /// The staleness guard on the sibling shape: a dated plan window past its
+    /// reset says so, exactly as a rate bucket does.
+    #[test]
+    fn a_plan_window_past_its_reset_renders_as_expired() {
+        let screen = rendered(
+            &Usage::new(Data {
+                plans: vec![plan("primary", 99.0, Some(300), Some(-1))],
+                now: Some(NOW),
+                ..data()
+            }),
+            AREA,
+        );
+
+        assert!(
+            screen.contains("expired \u{2014} refreshes on the next request"),
+            "got:\n{screen}"
+        );
+    }
+
+    /// More plan windows than the section draws are counted, never dropped in
+    /// silence — and the ones kept are the tightest.
+    #[test]
+    fn plan_windows_past_the_sections_cap_are_counted_and_the_tightest_are_kept() {
+        let screen = rendered(
+            &Usage::new(Data {
+                plans: vec![
+                    plan("primary", 5.0, Some(300), Some(60)),
+                    plan("secondary", 80.0, Some(10_080), Some(60)),
+                    plan("bengalfox primary", 50.0, None, Some(60)),
+                ],
+                now: Some(NOW),
+                ..data()
+            }),
+            AREA,
+        );
+
+        assert!(
+            screen.contains("secondary \u{b7}") && screen.contains("bengalfox primary \u{b7}"),
+            "the two tightest are the ones drawn:\n{screen}"
+        );
+        assert!(
+            screen.contains("(1 roomier plan windows not shown)"),
+            "the rest is counted rather than dropped:\n{screen}"
+        );
+    }
+
+    /// A window's own length reads in the unit a person thinks about it in.
+    #[test]
+    fn a_rolling_windows_length_reads_as_hours_or_days_rather_than_minutes() {
+        for (minutes, spelled) in [
+            (45, "45m"),
+            (300, "5h"),
+            (90, "1h 30m"),
+            (10_080, "7d"),
+            (1_500, "1d 1h"),
+        ] {
+            assert_eq!(compact_minutes(minutes), spelled, "for {minutes} minutes");
+        }
     }
 
     /// The `Current window` section renders what the vendor really said, in
@@ -751,10 +1066,10 @@ mod tests {
             screen.contains("input-tokens \u{b7} 20.0k of 80.0k left, resets in 30s"),
             "and so does the token bucket:\n{screen}"
         );
-        // The narrowed absence line still stands beside it: what is missing is
-        // the plan meters, and only those.
+        // The honest tail still stands beside it: this fixture served no plan
+        // window, so what is missing is the plan meters and only those.
         assert!(
-            screen.contains("plan limits (5h/weekly) unavailable: no vendor usage API"),
+            screen.contains("plan limits unavailable on this credential"),
             "got:\n{screen}"
         );
     }
@@ -813,7 +1128,7 @@ mod tests {
             "the rest are counted rather than dropped:\n{screen}"
         );
         assert!(
-            screen.contains("plan limits (5h/weekly) unavailable"),
+            screen.contains("plan limits unavailable on this credential"),
             "and the footer still fits:\n{screen}"
         );
     }

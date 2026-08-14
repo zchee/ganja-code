@@ -286,6 +286,11 @@ impl Provider for AnthropicProvider {
     fn rate_windows(&self) -> Vec<super::RateWindow> {
         self.rates.latest()
     }
+
+    /// The plan half of the same store (**D485**).
+    fn plan_windows(&self) -> Vec<super::PlanWindow> {
+        self.rates.latest_plans()
+    }
 }
 
 /// The JSON a request carries.

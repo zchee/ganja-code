@@ -101,7 +101,7 @@ pub mod responses;
 pub mod retry;
 pub mod sse;
 
-pub use rate::{RateWindow, RateWindows};
+pub use rate::{PlanWindow, RateWindow, RateWindows};
 
 /// What a call that never produced one reports as its result.
 ///
@@ -495,6 +495,18 @@ pub trait Provider: Send + Sync {
     /// provider — and the D470 rule restated at the trait: a surface renders
     /// what a vendor said, and nothing at all otherwise.
     fn rate_windows(&self) -> Vec<RateWindow> {
+        Vec::new()
+    }
+
+    /// What this wire's account has left of its **plan**, as the vendor last
+    /// said it (**D485**, declared in [`rate`]).
+    ///
+    /// Beside [`Provider::rate_windows`] and read the same way — polled off the
+    /// same per-credential store, filled from the same response headers, empty
+    /// for every wire whose vendor says nothing. A second method rather than a
+    /// widened return type: a plan bucket and a rate bucket measure different
+    /// things, and a caller that wants one has no use for the other.
+    fn plan_windows(&self) -> Vec<PlanWindow> {
         Vec::new()
     }
 }

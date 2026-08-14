@@ -563,6 +563,9 @@ pub struct App {
     /// newly expired does redraw, because an expired window is gone from this
     /// list (**D484**).
     rates: Vec<ganja_core::provider::RateWindow>,
+    /// The **live** plan buckets the bar last showed, kept for
+    /// [`App::poll_rates`]'s reason on the sibling set (**D485**).
+    plans: Vec<ganja_core::provider::PlanWindow>,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
     /// stored mid-session is picked up by a restart, not by a later fetch.
@@ -689,6 +692,7 @@ impl App {
             running_jobs: 0,
             context: None,
             rates: Vec::new(),
+            plans: Vec::new(),
             wire_models: None,
             wire_fetch: None,
             tools: ganja_tool::Registry::with_builtins(),
@@ -965,6 +969,7 @@ impl App {
                 self.poll_jobs();
                 self.poll_context();
                 self.poll_rates();
+                self.poll_plans();
                 self.poll_mcp_dialog();
                 self.poll_wire_models().await;
                 // The other door into the same lane: a replay that lost a race
@@ -1090,6 +1095,29 @@ impl App {
 
         self.rates = live.clone();
         self.status.set_rates(live);
+        self.dirty = true;
+    }
+
+    /// Feeds the same element the vendor's own plan buckets (**D485**).
+    ///
+    /// [`App::poll_rates`]'s shape, on the sibling set, with the one
+    /// difference the shape carries: a plan window whose vendor sent no reset
+    /// never expires, so the filter here drops only what really went stale and
+    /// keeps a clockless bucket on the bar until a later response replaces it.
+    fn poll_plans(&mut self) {
+        let now = std::time::SystemTime::now();
+        let live: Vec<_> = self
+            .engine
+            .plan_windows()
+            .into_iter()
+            .filter(|plan| !plan.expired(now))
+            .collect();
+        if live == self.plans {
+            return;
+        }
+
+        self.plans = live.clone();
+        self.status.set_plans(live);
         self.dirty = true;
     }
 
@@ -3115,6 +3143,11 @@ impl App {
             // snapshot, not a view. Empty for a wire that has heard no such
             // headers, which renders no section at all (**D484**).
             rates: self.engine.rate_windows(),
+            // The plan buckets beside them, read at the same moment
+            // (**D485**). Empty renders no section and the honest tail
+            // instead, which is the panel's own rule rather than this
+            // caller's.
+            plans: self.engine.plan_windows(),
             // The panel judges expiry against the moment it was opened.
             now: Some(std::time::SystemTime::now()),
         }));
@@ -10870,11 +10903,18 @@ mod tests {
         let screen = screen(&terminal);
 
         assert!(
-            screen.contains("plan limits (5h/weekly) unavailable: no vendor usage API"),
+            screen.contains("plan limits unavailable on this credential (probed 2026-08-14):"),
             "got:\n{screen}"
         );
+        // P17 (**D485**): the fake provider serves no plan header, so the
+        // panel says which credentials are silent and why — and still draws
+        // no meter over nothing.
         assert!(
-            !screen.contains("5h:[") && !screen.contains("wk:["),
+            screen.contains("platform.claude.com/docs/en/manage-claude/usage-cost-api"),
+            "the reason names the vendor's own page, whole:\n{screen}"
+        );
+        assert!(
+            !screen.contains("Plan limits"),
             "no plan-limit meter may be drawn:\n{screen}"
         );
     }

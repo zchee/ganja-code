@@ -9,6 +9,11 @@
 //! is the whole claim of holding them per credential rather than per
 //! conversation.
 //!
+//! Since P17 (**D485**) the same three claims are pinned for the *plan*
+//! buckets that ride the same seam: `Engine::plan_windows` over a real socket,
+//! the used/remaining normalization landing in one direction, and a snapshot
+//! carrying no reset staying undated rather than borrowing one.
+//!
 //! Its own binary, `http.rs`'s posture: the response bytes are canned but the
 //! socket is not, so a header only counts once it has survived being written,
 //! read and parsed by the same client a real turn uses.
@@ -287,5 +292,97 @@ fn a_wire_that_has_answered_nothing_reports_no_windows() {
     assert!(
         provider.rate_windows().is_empty(),
         "nothing is known until a response says something"
+    );
+}
+
+/// The plan half, over the same socket (**D485**): a codex-shaped response's
+/// headers reach `Engine::plan_windows`, in the normalized direction — the
+/// vendor sends how much is *used* and this side keeps it that way.
+///
+/// The wire under test is the Anthropic one, as everywhere else in this file:
+/// what is pinned here is the seam, and the seam is every wire's, because
+/// `RateWindows::record` runs on the one response path they share. A codex
+/// header on an anthropic response is not a thing that happens; a parser that
+/// only worked on one wire's responses is.
+#[tokio::test]
+async fn a_response_carrying_plan_headers_lands_on_the_engines_polled_state() {
+    let endpoint = serve(vec![pairs(&[
+        ("x-codex-primary-used-percent", "37.5"),
+        ("x-codex-primary-window-minutes", "300"),
+        ("x-codex-primary-reset-at", "4070908800"),
+        ("x-codex-secondary-used-percent", "12"),
+        ("x-codex-secondary-window-minutes", "10080"),
+        ("x-codex-secondary-reset-at", "4070908800"),
+    ])])
+    .await;
+    let engine = engine(&endpoint);
+
+    assert!(
+        engine.plan_windows().is_empty(),
+        "before any request there is nothing the vendor has said"
+    );
+
+    turn(&engine, "hi").await;
+
+    let plans = engine.plan_windows();
+    assert_eq!(plans.len(), 2, "got {plans:?}");
+    assert_eq!(plans[0].name, "primary");
+    assert!((plans[0].used_percent - 37.5).abs() < f64::EPSILON);
+    assert_eq!(plans[0].window_minutes, Some(300));
+    assert!(
+        !plans[0].expired(SystemTime::now()),
+        "a window resetting in 2099 is not expired today"
+    );
+    assert_eq!(plans[1].name, "secondary");
+
+    assert!(
+        engine.rate_windows().is_empty(),
+        "a plan header is not a rate bucket, and neither invents the other"
+    );
+}
+
+/// The copilot half, and the shape that has no clock: a quota snapshot lands
+/// with its percentage flipped to used, and — carrying no `rst` — dates itself
+/// not at all rather than borrowing an expiry (**D485**).
+#[tokio::test]
+async fn a_quota_snapshot_lands_with_its_percentage_flipped_and_no_invented_clock() {
+    let endpoint = serve(vec![pairs(&[(
+        "x-quota-snapshot-premium_interactions",
+        "ent=300&ov=0.0&ovPerm=false&rem=88.5",
+    )])])
+    .await;
+    let engine = engine(&endpoint);
+
+    turn(&engine, "hi").await;
+
+    let plans = engine.plan_windows();
+    assert_eq!(plans.len(), 1, "got {plans:?}");
+    assert_eq!(plans[0].name, "premium_interactions");
+    assert!((plans[0].used_percent - 11.5).abs() < 1e-9);
+    assert_eq!(plans[0].resets_at, None);
+    assert!(
+        !plans[0].expired(SystemTime::now()),
+        "nothing dated it, so nothing may date it stale"
+    );
+}
+
+/// The D470 rule on the new family, end to end: the credentials the W-A1 probe
+/// found silent meter nothing here either.
+#[tokio::test]
+async fn a_backend_that_sends_no_plan_headers_leaves_the_plan_state_empty() {
+    let endpoint = serve(vec![pairs(&[
+        ("anthropic-ratelimit-requests-limit", "1000"),
+        ("anthropic-ratelimit-requests-remaining", "997"),
+        ("anthropic-ratelimit-requests-reset", "2099-01-01T00:00:00Z"),
+    ])])
+    .await;
+    let engine = engine(&endpoint);
+
+    turn(&engine, "hi").await;
+
+    assert_eq!(engine.rate_windows().len(), 1, "the rate half still lands");
+    assert!(
+        engine.plan_windows().is_empty(),
+        "a backend with no plan headers meters no plan"
     );
 }

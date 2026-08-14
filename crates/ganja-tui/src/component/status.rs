@@ -14,10 +14,13 @@
 //! also shows waiting for a data source rather than inventing one; **P16 found
 //! one** (**D484**) that is not the missing usage API — the rate-limit headers
 //! every response already carries — and the `rate` element draws the tightest
-//! of them through the same [`meter`] the `ctx` element uses. What is still
-//! absent is what still has no source: the subscription plan's 5h/weekly
-//! meters and any account-wide spend figure. `rate` yields no cell at all when
-//! the wire has heard nothing, or when everything it heard has expired.
+//! of them through the same [`meter`] the `ctx` element uses. **P17 found the
+//! rest of it** (**D485**): two backends spell the plan's own 5h/weekly
+//! budgets in headers too, so `rate` draws that bucket beside the throttling
+//! one for a credential that serves it. What is still absent is what still has
+//! no source anywhere: an account-wide spend figure. `rate` yields no cell at
+//! all when the wire has heard nothing, or when everything it heard has
+//! expired.
 
 use std::{
     cell::RefCell,
@@ -29,7 +32,7 @@ use std::{
 use ganja_core::{
     catalog::compact_tokens,
     config::{StatuslineConfig, StatuslineElement},
-    provider::RateWindow,
+    provider::{PlanWindow, RateWindow},
 };
 use ratatui::{
     buffer::Buffer,
@@ -252,6 +255,11 @@ pub struct Status {
     /// backend that never sends them, which is what makes the element vanish
     /// rather than draw a zero.
     rates: Vec<RateWindow>,
+    /// The vendor's own plan buckets for the same element (**D485**), polled
+    /// off `Engine::plan_windows`. Empty for every credential whose backend
+    /// says nothing about a plan, which is most of them — and the reason the
+    /// element still renders exactly the one meter it always did there.
+    plans: Vec<PlanWindow>,
     /// When this bar was built — the `session` element's zero. Not `since`,
     /// which every activity change resets.
     started: Instant,
@@ -289,6 +297,7 @@ impl Status {
             context: None,
             todos: None,
             rates: Vec::new(),
+            plans: Vec::new(),
             started: Instant::now(),
             cwd: workdir
                 .as_deref()
@@ -331,6 +340,25 @@ impl Status {
     /// rather than an instruction to keep the previous numbers on screen.
     pub fn set_rates(&mut self, rates: Vec<RateWindow>) {
         self.rates = rates;
+    }
+
+    /// Records the vendor's plan buckets for the same element (**D485**), the
+    /// same whole-set way and for the same reason.
+    pub fn set_plans(&mut self, plans: Vec<PlanWindow>) {
+        self.plans = plans;
+    }
+
+    /// The plan budget that runs out first, among those still live.
+    ///
+    /// [`Status::tightest_rate`]'s rule, over the sibling shape — with one
+    /// difference the shape itself carries: a plan window whose vendor sent no
+    /// reset is never expired, so it stays on the bar until a later response
+    /// replaces it. Nothing dated it, so nothing may date it stale.
+    fn tightest_plan(&self, now: SystemTime) -> Option<&PlanWindow> {
+        self.plans
+            .iter()
+            .filter(|plan| !plan.expired(now))
+            .max_by(|left, right| left.used().total_cmp(&right.used()))
     }
 
     /// The window that will stop a turn first: least remaining of the budget,
@@ -736,12 +764,32 @@ impl Status {
             // the two things a person reads as "how much room is left" read
             // alike (**D484**). No live window — none heard, or every one
             // past its reset — is no cell at all.
-            StatuslineElement::Rate => self.tightest_rate(SystemTime::now()).map(|window| {
-                // Used, not remaining, so the bar fills and reddens the
-                // way `ctx` does as the room runs out.
-                let spent = window.limit.saturating_sub(window.remaining);
-                meter("rate", percent_of(spent, window.limit), theme)
-            }),
+            //
+            // Since P17 the element carries the tightest *plan* bucket beside
+            // it when one was captured (**D485**), because the two answer
+            // different questions — what throttles the next request, and what
+            // runs out for the rest of the week. Beside rather than instead:
+            // a bar too narrow for both is `truncate_spans`'s business, the
+            // same width discipline every other element here already keeps.
+            StatuslineElement::Rate => {
+                let now = SystemTime::now();
+                let mut spans = Vec::new();
+
+                if let Some(plan) = self.tightest_plan(now) {
+                    spans.extend(meter("plan", percent(plan.used()), theme));
+                }
+                if let Some(window) = self.tightest_rate(now) {
+                    if !spans.is_empty() {
+                        spans.push(Span::styled(HUD_SEPARATOR.to_owned(), theme.dim));
+                    }
+                    // Used, not remaining, so the bar fills and reddens the
+                    // way `ctx` does as the room runs out.
+                    let spent = window.limit.saturating_sub(window.remaining);
+                    spans.extend(meter("rate", percent_of(spent, window.limit), theme));
+                }
+
+                (!spans.is_empty()).then_some(spans)
+            }
             // Rendered above the bar and at its right edge respectively;
             // `render_roster` owns both placements.
             StatuslineElement::Git | StatuslineElement::Hints => None,
@@ -908,6 +956,19 @@ fn meter_severity(percent: u64) -> Severity {
 
 /// `tokens` as a whole percentage of `window`, clamped to 100 — the display
 /// never claims more than full, whatever the estimate says.
+/// A fraction already computed elsewhere as a meter's whole percent — the
+/// plan windows' own `used()`, which is a ratio rather than the two counts
+/// [`percent_of`] divides (**D485**).
+fn percent(fraction: f64) -> u64 {
+    // Clamped before the cast, not after: a NaN would otherwise cast to zero
+    // and meter an unknown budget as an empty one.
+    if !fraction.is_finite() {
+        return 0;
+    }
+
+    (fraction * 100.0).round().clamp(0.0, 100.0) as u64
+}
+
 fn percent_of(tokens: u64, window: u64) -> u64 {
     if window == 0 {
         return 100;
@@ -977,8 +1038,8 @@ mod tests {
     use unicode_width::UnicodeWidthStr as _;
 
     use super::{
-        Activity, Duration, HINTS, RateWindow, SHELL_HINTS, Severity, Status, SystemTime, Todos,
-        Totals, discover_git, head_name, meter_fill, meter_severity,
+        Activity, Duration, HINTS, PlanWindow, RateWindow, SHELL_HINTS, Severity, Status,
+        SystemTime, Todos, Totals, discover_git, head_name, meter_fill, meter_severity,
     };
     use crate::theme::Theme;
 
@@ -1034,6 +1095,28 @@ mod tests {
             } else {
                 now + offset
             },
+        }
+    }
+
+    /// One plan window, `used_percent` spent, refilling `in_secs` from now —
+    /// negative for one already past its reset, and [`None`] for a vendor that
+    /// dated it not at all (**D485**).
+    fn plan(name: &str, used_percent: f64, in_secs: Option<i64>) -> PlanWindow {
+        let now = SystemTime::now();
+
+        PlanWindow {
+            name: name.to_owned(),
+            used_percent,
+            window_minutes: None,
+            resets_at: in_secs.map(|seconds| {
+                let offset = Duration::from_secs(seconds.unsigned_abs());
+                if seconds < 0 {
+                    now - offset
+                } else {
+                    now + offset
+                }
+            }),
+            limit_name: None,
         }
     }
 
@@ -1425,6 +1508,67 @@ mod tests {
             "an expired window renders nothing at all, never a stale meter"
         );
         assert!(!line.contains("rate:"), "got {line:?}");
+    }
+
+    /// The plan bucket rides beside the throttling one, so the two questions —
+    /// what stops this request, what runs out this week — are both answerable
+    /// off one element (**D485**).
+    #[test]
+    fn the_rate_element_meters_the_plan_bucket_beside_the_throttling_one() {
+        let mut status = roster(&[StatuslineElement::Rate]);
+        status.set_rates(vec![window("requests", 1_000, 900, 60)]);
+        status.set_plans(vec![plan("primary", 62.0, Some(3_600))]);
+
+        assert_eq!(
+            rendered(&status, 60),
+            "plan:[#####---]62% | rate:[#-------]10%",
+            "the plan meter leads, the rate meter follows"
+        );
+    }
+
+    /// Either half alone is a whole cell: a credential that serves plan
+    /// headers and no rate headers still meters.
+    #[test]
+    fn the_rate_element_draws_a_plan_bucket_alone_when_no_rate_window_was_heard() {
+        let mut status = roster(&[StatuslineElement::Rate]);
+        status.set_plans(vec![plan("primary", 40.0, Some(3_600))]);
+
+        assert_eq!(rendered(&status, 60), "plan:[###-----]40%");
+    }
+
+    /// The tightest of several, exactly as the rate half picks its own.
+    #[test]
+    fn the_plan_bucket_shown_is_the_one_that_runs_out_first() {
+        let mut status = roster(&[StatuslineElement::Rate]);
+        status.set_plans(vec![
+            plan("primary", 12.0, Some(3_600)),
+            plan("secondary", 75.0, Some(86_400)),
+        ]);
+
+        assert_eq!(rendered(&status, 60), "plan:[######--]75%");
+    }
+
+    /// A plan window whose vendor sent no reset has no clock, so nothing may
+    /// decay it — it stays until a later response replaces it.
+    #[test]
+    fn a_plan_window_the_vendor_never_dated_stays_on_the_bar() {
+        let mut status = roster(&[StatuslineElement::Rate]);
+        status.set_plans(vec![plan("premium_interactions", 88.0, None)]);
+
+        assert_eq!(rendered(&status, 60), "plan:[#######-]88%");
+    }
+
+    /// A dated one does decay, and its neighbour is unaffected — D484's
+    /// posture, per window, on the sibling shape.
+    #[test]
+    fn a_plan_window_past_its_reset_leaves_only_the_rate_meter() {
+        let mut status = roster(&[StatuslineElement::Rate, StatuslineElement::Activity]);
+        status.set_rates(vec![window("requests", 100, 50, 60)]);
+        status.set_plans(vec![plan("primary", 99.0, Some(-1))]);
+
+        let line = rendered(&status, 60);
+        assert_eq!(line, "rate:[####----]50% | ready");
+        assert!(!line.contains("plan:"), "got {line:?}");
     }
 
     /// An expired window beside a live one leaves the live one showing: the
