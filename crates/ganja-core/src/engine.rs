@@ -1301,6 +1301,19 @@ impl Engine {
         self
     }
 
+    /// How many `task` calls from one assistant step may run at once.
+    ///
+    /// The read side of [`with_concurrency`](Self::with_concurrency), and the
+    /// only one: nothing in the engine asks an engine what its cap is. It is
+    /// here so an assembly seam's own test can see whether the config's cap
+    /// reached the engine a real session runs on — the runtime half is pinned
+    /// over a hand-built engine in `tests/parallel_subagents.rs`, which cannot
+    /// see how a frontend built one.
+    #[must_use]
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+
     /// Sets the MCP servers this session may use.
     ///
     /// Installing them connects nothing: [`Engine::connect_mcp`] is what

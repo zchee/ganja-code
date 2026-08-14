@@ -169,7 +169,11 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
     .with_agents(agents)
     .with_commands(commands)
     .with_mcp(Arc::clone(&servers))
-    .with_snapshots(snapshots);
+    .with_snapshots(snapshots)
+    // The screen's copy of the headless assembly's line: this frontend builds
+    // its own engine, so a knob wired into `ganja-cli`'s `assemble` alone
+    // would be a knob every interactive session still ignored.
+    .with_concurrency(config.agents.concurrency());
     if let Some(lsp) = lsp {
         engine = engine.with_lsp(lsp);
     }
