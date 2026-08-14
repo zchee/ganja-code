@@ -1,6 +1,5 @@
 ---
 source: crates/ganja-tui/src/app.rs
-assertion_line: 10462
 expression: screen(&terminal)
 ---
                                                                                 
@@ -38,4 +37,4 @@ expression: screen(&terminal)
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-ready                  Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit
+ready

@@ -25,4 +25,4 @@ ganja
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-tool: task             Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit
+tool: task

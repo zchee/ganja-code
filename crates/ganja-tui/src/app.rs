@@ -8372,7 +8372,9 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
         let closed = screen(&terminal);
         assert!(closed.contains("Ask ganja something"), "{closed}");
-        assert!(closed.contains("Ctrl-C quit"), "{closed}");
+        // The idle footer carries no key reminders, so the state label is what
+        // says the status bar is drawn at all.
+        assert!(closed.contains("ready"), "{closed}");
 
         app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
             .await
@@ -8384,7 +8386,7 @@ mod tests {
             "the composer should be covered while the overlay is open:\n{open}"
         );
         assert!(
-            !open.contains("Ctrl-C quit"),
+            !open.contains("ready"),
             "the status bar should be covered too:\n{open}"
         );
 

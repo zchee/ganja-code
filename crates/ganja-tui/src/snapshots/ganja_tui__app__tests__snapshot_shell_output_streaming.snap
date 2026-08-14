@@ -25,4 +25,4 @@ PASS [ 0.019s] ganja-cli import
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-tool: bash             Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit
+tool: bash

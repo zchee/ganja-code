@@ -1,5 +1,5 @@
-//! The status bar: what the engine is doing, what it has spent, plus the keys
-//! that matter.
+//! The status bar: what the engine is doing, what it has spent, and — in the
+//! one mode whose way out is not guessable — the key that leaves it.
 //!
 //! Two renderings share one set of named elements (**D469**,
 //! `hud-statusline`, no upstream counterpart — opencode's footer is fixed).
@@ -75,13 +75,13 @@ const SPINNER: [&str; 8] = [
 /// How long each spinner phase is shown.
 const SPINNER_PERIOD: Duration = Duration::from_millis(80);
 
-/// Key reminders, dropped whole when the terminal is too narrow for them.
-const HINTS: &str = "Enter send \u{b7} Alt+Enter newline \u{b7} Esc cancel \u{b7} Ctrl-C quit";
-
-/// The same reminders while the composer is running shell commands. Upstream
-/// replaces its whole footer too (`component/prompt/index.tsx:1680-1682`):
-/// half of what the normal one offers does not apply, and the one key a user
-/// needs here is the way out.
+/// The key reminders a shell line earns, dropped whole when the terminal is
+/// too narrow for them. The *idle* footer carries none: Enter, Esc and Ctrl-C
+/// do at an empty composer what they do in every terminal program, and a
+/// standing line spelling that out is width spent on what the first minute of
+/// use already taught. Shell mode is the exception because it is the one mode
+/// whose way *out* is not guessable — which is why upstream replaces its whole
+/// footer here too (`component/prompt/index.tsx:1680-1682`).
 const SHELL_HINTS: &str = "Enter run \u{b7} Esc exit shell mode \u{b7} Ctrl-C quit";
 
 /// What the engine is doing.
@@ -562,17 +562,21 @@ impl Status {
         // ask for the bypass adds no span at all, so the default bar stays the
         // bar this build always drew, cell for cell.
         let marker = self.yolo.then(|| format!("{YOLO}{SEPARATOR}"));
-        let hints = self.hints();
         let used = marker.as_ref().map_or(0, |marker| marker.width()) + left.width();
-        let gap = usize::from(area.width).saturating_sub(used + hints.width());
         let mut spans = Vec::new();
         if let Some(marker) = marker {
             spans.push(Span::styled(marker, theme.warning));
         }
         spans.push(Span::styled(left, theme.accent));
-        if gap > 0 {
-            spans.push(Span::raw(" ".repeat(gap)));
-            spans.push(Span::styled(hints, theme.dim));
+        // Only a mode that has something to remind about pays for the gap: an
+        // idle bar ends at its own last segment rather than padding out to an
+        // empty right edge.
+        if let Some(hints) = self.hints() {
+            let gap = usize::from(area.width).saturating_sub(used + hints.width());
+            if gap > 0 {
+                spans.push(Span::raw(" ".repeat(gap)));
+                spans.push(Span::styled(hints, theme.dim));
+            }
         }
 
         buffer.set_line(area.x, area.y, &Line::from(spans), area.width);
@@ -640,9 +644,13 @@ impl Status {
         let mut main = truncate_spans(main, limit, theme);
 
         // The hints keep their right edge, exactly as the default bar draws
-        // them — inside the width cap, so a capped bar stays one block.
-        if elements.contains(&StatuslineElement::Hints) {
-            let hints = self.hints();
+        // them — inside the width cap, so a capped bar stays one block. A
+        // roster may name the element in every mode; it yields a cell only in
+        // the mode that has a reminder, the same appear-only-while-there-is-one
+        // posture every other element here holds.
+        if elements.contains(&StatuslineElement::Hints)
+            && let Some(hints) = self.hints()
+        {
             let used: usize = main.iter().map(|span| span.content.width()).sum();
             let gap = limit.saturating_sub(used + hints.width());
             if gap > 0 {
@@ -840,9 +848,10 @@ impl Status {
             .and_then(|todos| todos.current.clone())
     }
 
-    /// The reminders this mode is worth showing.
-    fn hints(&self) -> &'static str {
-        if self.shell { SHELL_HINTS } else { HINTS }
+    /// The reminders this mode is worth showing, and [`None`] for every mode
+    /// worth showing none — which is all of them but shell.
+    fn hints(&self) -> Option<&'static str> {
+        self.shell.then_some(SHELL_HINTS)
     }
 
     fn spinner(&self) -> &'static str {
@@ -1038,8 +1047,8 @@ mod tests {
     use unicode_width::UnicodeWidthStr as _;
 
     use super::{
-        Activity, Duration, HINTS, PlanWindow, RateWindow, SHELL_HINTS, Severity, Status,
-        SystemTime, Todos, Totals, discover_git, head_name, meter_fill, meter_severity,
+        Activity, Duration, PlanWindow, RateWindow, SHELL_HINTS, Severity, Status, SystemTime,
+        Todos, Totals, discover_git, head_name, meter_fill, meter_severity,
     };
     use crate::theme::Theme;
 
@@ -1120,12 +1129,14 @@ mod tests {
         }
     }
 
+    /// The idle bar is its left-hand segments and nothing else: no key
+    /// reminders, and therefore no padding out to a right edge that would hold
+    /// them.
     #[test]
-    fn an_idle_bar_shows_the_state_and_the_hints() {
+    fn an_idle_bar_shows_the_state_and_no_key_hints() {
         let line = rendered(&Status::new(None), 100);
 
-        assert!(line.starts_with("ready"), "got {line:?}");
-        assert!(line.ends_with(HINTS), "got {line:?}");
+        assert_eq!(line, "ready");
     }
 
     #[test]
@@ -1172,11 +1183,6 @@ mod tests {
         assert!(
             bypassed.starts_with("yolo"),
             "the marker is the first thing on the bar: {bypassed:?}"
-        );
-        assert!(
-            bypassed.ends_with(HINTS),
-            "and it takes its width out of the gap rather than off the hints: \
-             {bypassed:?}"
         );
 
         status.set_yolo(false);
@@ -1296,11 +1302,16 @@ mod tests {
         );
     }
 
+    /// The state is what a bar too narrow for everything keeps — with the
+    /// idle footer that is all there was, and shell mode still gives its
+    /// reminder up rather than the state.
     #[test]
     fn a_narrow_bar_drops_the_hints_rather_than_the_state() {
-        let line = rendered(&Status::new(None), 12);
+        let mut status = Status::new(None);
+        assert_eq!(rendered(&status, 12), "ready");
 
-        assert_eq!(line, "ready");
+        status.set_shell(true);
+        assert_eq!(rendered(&status, 12), "ready");
     }
 
     #[test]
@@ -1418,22 +1429,22 @@ mod tests {
         assert!(rendered(&status, 100).contains("waiting on permission"));
     }
 
-    /// Half of what the normal footer offers does not apply while the buffer
-    /// is a shell command, and the one key that does — the way out — is not on
-    /// it at all.
+    /// Shell mode is the one mode whose way out is not guessable, so it is the
+    /// one mode that still spends bar width saying it — and it stops the
+    /// moment the buffer stops being a shell command.
     #[test]
-    fn shell_mode_reminds_the_user_of_the_way_out_instead() {
+    fn shell_mode_reminds_the_user_of_the_way_out() {
         let mut status = Status::new(None);
-        assert!(rendered(&status, 120).contains(HINTS));
+        assert_eq!(rendered(&status, 120), "ready");
 
         status.set_shell(true);
 
         let line = rendered(&status, 120);
         assert!(line.contains(SHELL_HINTS), "got {line:?}");
-        assert!(!line.contains("Enter send"), "got {line:?}");
+        assert!(line.ends_with(SHELL_HINTS), "got {line:?}");
 
         status.set_shell(false);
-        assert!(rendered(&status, 120).contains(HINTS));
+        assert_eq!(rendered(&status, 120), "ready");
     }
 
     /// The acceptance shape for the roster (**D469**): what the config names,
@@ -1809,13 +1820,18 @@ mod tests {
         assert_eq!(rendered(&status, 40), "session:0m");
     }
 
-    /// The `hints` element keeps the right edge the default bar gave it.
+    /// The `hints` element keeps the right edge the default bar gave it — and
+    /// yields no cell at all in the modes that now have nothing to remind
+    /// about, which is every mode but shell.
     #[test]
     fn a_roster_with_hints_keeps_them_right_aligned() {
-        let status = roster(&[StatuslineElement::Activity, StatuslineElement::Hints]);
+        let mut status = roster(&[StatuslineElement::Activity, StatuslineElement::Hints]);
+        assert_eq!(rendered(&status, 100), "ready");
+
+        status.set_shell(true);
 
         let line = rendered(&status, 100);
         assert!(line.starts_with("ready"), "got {line:?}");
-        assert!(line.ends_with(HINTS), "got {line:?}");
+        assert!(line.ends_with(SHELL_HINTS), "got {line:?}");
     }
 }

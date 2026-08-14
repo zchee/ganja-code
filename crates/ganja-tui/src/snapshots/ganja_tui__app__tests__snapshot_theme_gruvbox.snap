@@ -25,4 +25,4 @@ expression: styled_screen(&terminal)
 20 ["│                                                                              │" Rgb(146, 131, 116) on Rgb(40, 40, 40)]
 21 ["│                                                                              │" Rgb(146, 131, 116) on Rgb(40, 40, 40)]
 22 ["└──────────────────────────────────────────────────────────────────────────────┘" Rgb(146, 131, 116) on Rgb(40, 40, 40)]
-23 ["ready" Rgb(142, 192, 124) on Rgb(40, 40, 40)] ["                  " Reset on Rgb(40, 40, 40)] ["Enter send · Alt+Enter newline · Esc cancel · Ctrl-C quit" Rgb(146, 131, 116) on Rgb(40, 40, 40)]
+23 ["ready" Rgb(142, 192, 124) on Rgb(40, 40, 40)] ["                                                                           " Reset on Rgb(40, 40, 40)]
