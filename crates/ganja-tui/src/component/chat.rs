@@ -253,7 +253,7 @@ impl Working {
         );
         if self.output_tokens > 0 {
             text.push_str(&format!(
-                " \u{b7} \u{2191} {tokens} tokens",
+                " \u{b7} \u{2193} {tokens} tokens",
                 tokens = self.output_tokens
             ));
         }
@@ -381,20 +381,32 @@ fn lay_out(rows: &[Row], width: usize) -> Vec<Line<'static>> {
         // buffer.
         let body = width.saturating_sub(indent).max(1);
 
+        // Decoration never reaches the margin: a struck todo strikes its
+        // words, not the elbow and the blank columns leading up to them —
+        // ink drawn across an indent reads as a rule floating out to the
+        // left of the row (2026-08-15).
+        let margin = row
+            .lead
+            .unwrap_or_else(|| row.style.remove_modifier(Modifier::CROSSED_OUT));
+
         for (index, line) in wrap(&row.text, body).into_iter().enumerate() {
             // A blank line inside a block stays blank — a row of spaces is an
             // indent nobody can see, and one the backtrack highlight would
             // have to treat as content.
-            let line = match (index, line.is_empty(), row.lead) {
-                (0, _, Some(lead)) => Line::from(vec![
-                    Span::styled(row.prefix.clone(), lead),
+            let line = match (index, line.is_empty(), margin == row.style) {
+                (0, _, false) => Line::from(vec![
+                    Span::styled(row.prefix.clone(), margin),
                     Span::styled(line, row.style),
                 ]),
-                (0, _, None) => {
+                (0, _, true) => {
                     Line::styled(format!("{prefix}{line}", prefix = row.prefix), row.style)
                 }
                 (_, true, _) => Line::styled(String::new(), row.style),
-                (_, false, _) => Line::styled(format!("{hang}{line}"), row.style),
+                (_, false, false) => Line::from(vec![
+                    Span::styled(hang.clone(), margin),
+                    Span::styled(line, row.style),
+                ]),
+                (_, false, true) => Line::styled(format!("{hang}{line}"), row.style),
             };
             lines.push(line);
         }
@@ -2576,16 +2588,25 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         chat.render(area, &mut buffer, &theme);
 
-        // Row 0 is the header, so the four tasks follow in the order written.
-        let done = buffer[(0, 1)].style();
-        let in_hand = buffer[(0, 2)].style();
-        let pending = buffer[(0, 3)].style();
-        let cancelled = buffer[(0, 4)].style();
+        // Row 0 is the header, so the four tasks follow in the order written;
+        // column 6 is the first column of each row's own words, past the
+        // marker columns and the box.
+        let done = buffer[(6, 1)].style();
+        let in_hand = buffer[(6, 2)].style();
+        let pending = buffer[(6, 3)].style();
+        let cancelled = buffer[(6, 4)].style();
 
         assert!(
             done.add_modifier.contains(Modifier::CROSSED_OUT)
                 && cancelled.add_modifier.contains(Modifier::CROSSED_OUT),
             "a finished task is struck through, got {done:?} and {cancelled:?}"
+        );
+        assert!(
+            !buffer[(0, 1)]
+                .style()
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT),
+            "the strike stays off the margin rather than ruling a line out to the left"
         );
         assert!(
             in_hand.add_modifier.contains(Modifier::BOLD) && in_hand.fg == theme.accent.fg,
@@ -3778,7 +3799,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{273b} Thinking\u{2026} (12s \u{b7} \u{2191} 431 tokens)"),
+                .any(|line| line == "\u{273b} Thinking\u{2026} (12s \u{b7} \u{2193} 431 tokens)"),
             "got {lines:?}"
         );
         assert_eq!(
