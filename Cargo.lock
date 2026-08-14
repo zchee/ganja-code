@@ -1271,6 +1271,7 @@ dependencies = [
  "ganja-serve",
  "ganja-tui",
  "jsonc-parser",
+ "libc",
  "predicates",
  "ratatui",
  "secrecy",
