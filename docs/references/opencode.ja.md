@@ -205,7 +205,7 @@ ganja が仕様として読むピン済みタグ(`anomalyco/opencode@v1.18.13`)�
 | 機能 | 補足 | ganja |
 |---|---|---|
 | [models.dev プロバイダカタログ](https://opencode.ai/docs/providers) | 75+ プロバイダを id 解決 | ❌ ビルトイン 6 + compat 2 dialect |
-| [OpenCode Zen](https://opencode.ai/docs/zen) | ホスト型ゲートウェイ。`opencode/` プレフィクス・単一キー・無料モデルのローテーション | ❌ 対象外 |
+| [OpenCode Zen](https://opencode.ai/docs/zen) | ホスト型ゲートウェイ。`opencode/` プレフィクス・単一キー・無料モデルのローテーション | ✅ `opencode`・`opencode-go` の 2 id(D488): 単一の OPENCODE_API_KEY、カタログ行の npm ヒントでモデル毎に chat/Responses/Messages の 3 wire へディスパッチ(Messages はゲートウェイが要求する x-api-key)。google 行は名前付きで拒否 — ベンダー自身のクライアントと同じ回答 |
 | [npm `@ai-sdk/*` プロバイダローダ](https://opencode.ai/docs/providers) | 任意の Vercel AI SDK パッケージをプロバイダ化 | ❌ ganja の `compat` は固定 2 dialect を話す |
 | [プロバイダ options](https://opencode.ai/docs/providers) | `baseURL`・`apiKey`・`headers` | ✅ `base_url`・`key_env`・`headers` として |
 | [モデル毎のカタログ上書き](https://opencode.ai/docs/providers) | `models.<id>.name` / `limit.context` / `limit.output` | ❌ config プロバイダは uncataloged のまま |
