@@ -1,9 +1,7 @@
 ---
 source: crates/ganja-tui/src/app.rs
-assertion_line: 10504
 expression: screen(&terminal)
 ---
-                                                                                
                                                                                 
   ┌ usage ───────────────────────────────────────────────────────────────────┐  
   │Session                                                                   │  
@@ -22,8 +20,9 @@ expression: screen(&terminal)
   │  turn             in      out   reason  cache-r  cache-w     cost        │  
   │  _fixture       1200       34        5      600      100        -        │  
   │                                                                          │  
-  │plan limits (5h/weekly) unavailable: no vendor usage API                  │  
-  │                                                                          │  
+  │plan limits unavailable on this credential (probed 2026-08-14):           │  
+  │  an openai API key's backend sends none; anthropic's needs an            │  
+  │  Admin key — platform.claude.com/docs/en/manage-claude/usage-cost-api    │  
   │[Esc] close                                                               │  
   └──────────────────────────────────────────────────────────────────────────┘  
                                                                                 
