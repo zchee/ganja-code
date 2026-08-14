@@ -66,11 +66,15 @@ message ModelEntry {
 // the client's exec answers — exec_client_message = 2 (agent_pb.ts:3603).
 // The kv channel's answers ride the same stream — kv_client_message = 3
 // (agent_pb.ts:3617). The other arms of that oneof belong to flows this
-// build does not speak yet, so only these three are modelled.
+// build does not speak yet, so only these four are modelled.
+// The exec channel's *control* half — the one an exec is refused on rather
+// than answered — rides the same stream as exec_client_control_message = 5
+// (index.js@5927250; ExecControl below carries the citation convention).
 message ClientMessage {
   RunRequest run_request = 1;
   ExecResponse exec_response = 2;
   KvResponse kv_response = 3;
+  ExecControl exec_control = 5;
 }
 
 // One turn's opening request, the minimal subset of the plugin's
@@ -181,10 +185,11 @@ message TurnEnded {}
 // minimal subset of the plugin's ExecServerMessage (agent_pb.ts:6859) an
 // answered turn needs. id = 1 (:6861) and exec_id = 15 (:6868) are the echo
 // every answer must carry (proxy.ts:1307-1310); request_context_args = 10
-// (:6934) is the one kind this build answers. The other arms of the args
-// oneof (:6885-:6997) are tools this build does not run for the server; they
-// survive decoding as unknown fields, whose numbers decode.rs names when it
-// refuses the turn — an unanswered exec is a hang, never an outcome.
+// (:6934) is the one kind this build answers with a *result*. The other arms
+// of the args oneof (:6885-:6997) are tools this build does not run for the
+// server; they survive decoding as unknown fields, whose numbers decode.rs
+// names in the refusal it sends back on the ExecControl channel below (D486)
+// — an unanswered exec is a hang, never an outcome.
 message ExecRequest {
   uint32 id = 1;
   ContextArgs request_context_args = 10;
@@ -227,6 +232,52 @@ message ContextSuccess {
 // one field is the whole message a bare turn needs.
 message RequestContext {
   string cloud_rule = 16;
+}
+
+// The client's control half of the exec exchange: the channel an exec is
+// *refused* on rather than answered, and the one this build refuses every
+// tool exec through (D486, declared in cursor/request.rs).
+//
+// Derived from the shipped cursor client itself — the bundled agent at
+// ~/.local/share/cursor-agent/versions/2026.07.23-e383d2b, whose webpack
+// bundle `index.js` carries the @bufbuild/protobuf descriptors with every
+// field name, number and oneof membership intact. That bundle is minified
+// onto a handful of enormous lines, so a line number would say nothing:
+// citations here are **byte offsets** into `index.js`, reproducible with
+// `grep -b -o -F '<anchor>' index.js`. This is the same role
+// `agent_pb.ts:<line>` plays above, against a source that ships no
+// unminified descriptor.
+//
+// The wrapper is the client's ExecClientControlMessage (index.js@6033532),
+// whose whole oneof is stream_close = 1, throw = 2 and heartbeat = 3.
+// The heartbeat is a 3-second liveness ping for an exec that is *running*
+// (index.js@4272747), which is a state this build never enters, so it is not
+// modelled.
+message ExecControl {
+  ExecStreamClose stream_close = 1;
+  ExecThrow throw = 2;
+}
+
+// The client's ExecClientThrow (index.js@6032526): id = 1 and error = 2,
+// beside a stack_trace = 3 and error_code = 4 the client fills only when one
+// of its own handlers panicked mid-run — never on the no-handler path this
+// build's refusal is modelled on, so neither is modelled.
+//
+// Note what is *absent*: the throw carries no exec_id and names no kind. It
+// is keyed on the numeric id alone, which is exactly why it can answer any
+// exec kind, including one newer than any table here.
+message ExecThrow {
+  uint32 id = 1;
+  string error = 2;
+}
+
+// The client's ExecClientStreamClose (index.js@6032083): id = 1, and nothing
+// else. It terminates *every* exec, successful or thrown — the client writes
+// it after a handler's last result frame and again after a no-handler throw
+// (index.js@4272747) — so it is the second half of a refusal, not a second
+// way of failing.
+message ExecStreamClose {
+  uint32 id = 1;
 }
 
 // A kv exchange the server opens mid-stream and waits on: the plugin's

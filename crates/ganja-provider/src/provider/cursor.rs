@@ -36,11 +36,14 @@
 //! replies (the 2026-08-10 live turn hung in silence on exactly that,
 //! skipped). The reply ([`request::context_answer`]) echoes the exec ids
 //! and carries `ChatRequest.system` on `RequestContext.cloud_rule`, the one
-//! prompt channel cursor's agent honors; an exec kind this build cannot
-//! answer fails the turn naming the kind, never hangs it. What is still
-//! deliberately not here is the conversation-state machinery that carries
-//! history and tool calls on cursor's content-addressed blob channel;
-//! [`request`]'s module docs say why.
+//! prompt channel cursor's agent honors. The server's *other* execs are the
+//! tools it asks a client to run for it; ganja runs its tools for its own
+//! session, so those are answered with a structured refusal naming the kind
+//! ([`request::refusal_answer`], **D486**) — never run, and never left to
+//! hang the turn. What is still deliberately not here is the
+//! conversation-state machinery that carries history and tool calls on
+//! cursor's content-addressed blob channel; [`request`]'s module docs say
+//! why.
 //!
 //! The provider rides the uncataloged tier, so a session must be told which
 //! model to ask for; [`CursorWire::usable_models`] is the listing that says
@@ -500,21 +503,33 @@ where
                                     // that one channel in frame order, so a
                                     // kv answer can never overtake the
                                     // context answer ahead of it.
-                                    let (answer, asked) = match ask {
+                                    // A refusal is two messages where the
+                                    // other two asks are one, so every arm
+                                    // hands over a list: the throw and the
+                                    // stream close must reach the body in
+                                    // that order and with nothing between
+                                    // them.
+                                    let (answers, asked) = match ask {
                                         decode::Ask::Context(ask) => (
-                                            request::context_answer(
+                                            vec![request::context_answer(
                                                 ask,
                                                 state.duplex.system.as_deref(),
-                                            ),
+                                            )],
                                             "context ask",
                                         ),
                                         decode::Ask::Kv(ask) => (
-                                            request::kv_answer(ask, &mut state.duplex.blobs),
+                                            vec![request::kv_answer(ask, &mut state.duplex.blobs)],
                                             "kv ask",
                                         ),
+                                        decode::Ask::Refuse(ask) => {
+                                            (request::refusal_answer(&ask), "tool exec")
+                                        }
                                     };
-                                    let enveloped = connect::envelope(&answer);
-                                    if state.duplex.answers.unbounded_send(Ok(enveloped)).is_err() {
+                                    let closed = answers.into_iter().any(|answer| {
+                                        let enveloped = connect::envelope(&answer);
+                                        state.duplex.answers.unbounded_send(Ok(enveloped)).is_err()
+                                    });
+                                    if closed {
                                         // A body nothing holds open cannot
                                         // carry the answer, and an
                                         // unanswered ask is a hang — so
@@ -651,6 +666,25 @@ mod tests {
                 .with_id(id)
                 .with_exec_id(exec_id),
             ),
+            ..Default::default()
+        };
+
+        connect::envelope(&message.encode_to_vec())
+    }
+
+    /// A data frame holding the exec the live turn died on: the server
+    /// asking this client to run a shell for it. The kind arrives as the
+    /// args oneof's field 14, which this build models by number rather than
+    /// by shape, because it never runs one.
+    fn shell_stream_framed(id: u32) -> Vec<u8> {
+        let mut exec = proto::ExecRequest::default().with_id(id);
+        exec.__buffa_unknown_fields.push(buffa::UnknownField {
+            number: 14,
+            data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
+        });
+
+        let message = proto::ServerMessage {
+            exec_request: buffa::MessageField::some(exec),
             ..Default::default()
         };
 
@@ -983,6 +1017,92 @@ mod tests {
                 .and_then(|result| result.blob_data.as_deref()),
             None,
             "a blob nobody stored is answered not-found, not failed"
+        );
+    }
+
+    /// The turn the live `shell_stream_args` exec used to kill (**D486**):
+    /// the server asks this client to run a shell mid-stream, the refusal
+    /// rides out on the held-open body as the pair the shipped client
+    /// writes, and the turn generates past it to a clean finish. Nothing in
+    /// the event stream says a word about it — a refusal is an answer, and
+    /// the session sees the reply it asked for.
+    #[tokio::test]
+    async fn a_tool_exec_is_refused_on_the_open_body_and_the_turn_survives() {
+        let (sender, receiver) =
+            futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+        let (answers, answered) = futures::channel::mpsc::unbounded();
+        let stream = super::events(
+            receiver,
+            CancellationToken::new(),
+            super::Duplex {
+                answers,
+                system: None,
+                blobs: std::collections::HashMap::new(),
+            },
+        );
+
+        let mut body = shell_stream_framed(5);
+        body.extend(framed(text("Hello")));
+        body.extend(framed(turn_ended()));
+        body.extend(end_stream("{}"));
+        sender.unbounded_send(Ok(body)).expect("the body is open");
+        drop(sender);
+
+        let events: Vec<ProviderEvent> =
+            tokio::time::timeout(Duration::from_secs(10), stream.collect())
+                .await
+                .expect("a refused exec ends the exchange rather than hanging it");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Failed(_))),
+            "a refused tool exec is not a failed turn: {events:?}"
+        );
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta("Hello".to_owned()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ],
+            "the exec is a question, never an event"
+        );
+
+        let sent: Vec<Vec<u8>> = answered
+            .map(|answer| answer.expect("the channel's error type is infallible"))
+            .collect()
+            .await;
+        assert_eq!(sent.len(), 2, "the throw, and the close that ends it");
+
+        let decoded: Vec<proto::ClientMessage> = sent
+            .iter()
+            .map(|answer| {
+                assert_eq!(answer[0], 0, "an ordinary data frame");
+                proto::ClientMessage::decode_from_slice(&answer[5..])
+                    .expect("the answered bytes are client messages")
+            })
+            .collect();
+
+        let thrown = decoded[0]
+            .exec_control
+            .as_option()
+            .and_then(|control| control.throw.as_option())
+            .expect("the throw went out first");
+        assert_eq!(thrown.id, Some(5), "the id the server minted comes back");
+        assert!(
+            thrown
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("shell_stream_args")),
+            "the server's agent loop is told what was refused: {thrown:?}"
+        );
+        assert_eq!(
+            decoded[1]
+                .exec_control
+                .as_option()
+                .and_then(|control| control.stream_close.as_option())
+                .and_then(|close| close.id),
+            Some(5),
+            "and then the exchange is closed, the way the shipped client closes one"
         );
     }
 
