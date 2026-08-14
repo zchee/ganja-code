@@ -579,14 +579,16 @@ pub struct App {
     /// The `(tokens, window)` pair the context meter last showed, so a tick
     /// that finds the estimate unmoved touches nothing (**D469**).
     context: Option<(u64, u64)>,
-    /// The **live** rate-limit windows the bar last showed, so a tick that
-    /// finds them unmoved touches nothing — and a tick that finds one of them
-    /// newly expired does redraw, because an expired window is gone from this
-    /// list (**D484**).
-    rates: Vec<ganja_core::provider::RateWindow>,
-    /// The **live** plan buckets the bar last showed, kept for
+    /// The rate-limit windows the bar last showed, each beside whether it had
+    /// passed its reset when last polled, so a tick that finds the set and
+    /// every flag unmoved touches nothing — and the tick that finds a window
+    /// newly expired still redraws once, which is what decays its meter to
+    /// the refilled zero on an otherwise idle screen (**D484**, amended
+    /// 2026-08-15: the bar is handed the raw set and reads expiry itself).
+    rates: Vec<(ganja_core::provider::RateWindow, bool)>,
+    /// The plan buckets the bar last showed, kept the same way for
     /// [`App::poll_rates`]'s reason on the sibling set (**D485**).
-    plans: Vec<ganja_core::provider::PlanWindow>,
+    plans: Vec<(ganja_core::provider::PlanWindow, bool)>,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
     /// stored mid-session is picked up by a restart, not by a later fetch.
@@ -1104,50 +1106,61 @@ impl App {
     /// credential keeps the same windows, which is what they were about all
     /// along.
     ///
-    /// What the bar is handed is the **live** windows, not every window the
-    /// wire holds: a set that has not changed but has since passed its own
-    /// reset is a *different* answer to "what is left", and comparing the raw
-    /// sets would leave the last happy number frozen on an idle screen with no
-    /// redraw to clear it (P16 pre-mortem 4). `/usage` is handed the raw set
-    /// instead, because a panel has the room to say "expired" where a bar can
-    /// only say nothing.
+    /// What the bar is handed is the **raw** set, expiry read again at every
+    /// draw by the bar itself: a bucket past its reset meters as refilled
+    /// rather than leaving the bar, because request buckets legally reset in
+    /// milliseconds and a liveness filter here made the element blink on and
+    /// off with every response (2026-08-15, amending P16 pre-mortem 4's
+    /// filter). The liveness flag survives in the comparison snapshot alone,
+    /// so the tick on which a window crosses its reset still redraws once —
+    /// the meter decays to zero on an idle screen instead of freezing at the
+    /// last happy number. `/usage` reads the same raw set, with the room to
+    /// say "expired" in words.
     fn poll_rates(&mut self) {
         let now = std::time::SystemTime::now();
-        let live: Vec<_> = self
+        let snapshot: Vec<_> = self
             .engine
             .rate_windows()
             .into_iter()
-            .filter(|window| !window.expired(now))
+            .map(|window| {
+                let expired = window.expired(now);
+                (window, expired)
+            })
             .collect();
-        if live == self.rates {
+        if snapshot == self.rates {
             return;
         }
 
-        self.rates = live.clone();
-        self.status.set_rates(live);
+        self.rates = snapshot.clone();
+        self.status
+            .set_rates(snapshot.into_iter().map(|(window, _)| window).collect());
         self.dirty = true;
     }
 
     /// Feeds the same element the vendor's own plan buckets (**D485**).
     ///
-    /// [`App::poll_rates`]'s shape, on the sibling set, with the one
-    /// difference the shape carries: a plan window whose vendor sent no reset
-    /// never expires, so the filter here drops only what really went stale and
-    /// keeps a clockless bucket on the bar until a later response replaces it.
+    /// [`App::poll_rates`]'s shape and posture, on the sibling set: the raw
+    /// buckets go to the bar, which reads expiry itself and meters a
+    /// rolled-over window as refilled; the liveness flag is kept only so the
+    /// reset-crossing tick still redraws.
     fn poll_plans(&mut self) {
         let now = std::time::SystemTime::now();
-        let live: Vec<_> = self
+        let snapshot: Vec<_> = self
             .engine
             .plan_windows()
             .into_iter()
-            .filter(|plan| !plan.expired(now))
+            .map(|plan| {
+                let expired = plan.expired(now);
+                (plan, expired)
+            })
             .collect();
-        if live == self.plans {
+        if snapshot == self.plans {
             return;
         }
 
-        self.plans = live.clone();
-        self.status.set_plans(live);
+        self.plans = snapshot.clone();
+        self.status
+            .set_plans(snapshot.into_iter().map(|(plan, _)| plan).collect());
         self.dirty = true;
     }
 
