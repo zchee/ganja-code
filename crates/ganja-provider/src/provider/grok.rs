@@ -150,6 +150,14 @@ impl Provider for GrokProvider {
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
         self.0.stream(request, cancel).await
     }
+
+    /// Delegated, not defaulted: the wire underneath is what received xAI's
+    /// headers, and a wrapper answering "nothing" over a wire that really
+    /// captured buckets would be the invented-absence twin of an invented
+    /// number (**D484**).
+    fn rate_windows(&self) -> Vec<super::RateWindow> {
+        self.0.rate_windows()
+    }
 }
 
 #[cfg(test)]

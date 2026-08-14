@@ -159,7 +159,7 @@ const KITCHEN_SINK: &str = r#"{
     "notifications": ["turn-complete", "approval-requested"],
     "notification_method": "bel",
     "statusline": {
-      "elements": ["git", "model", "context", "tokens", "session", "cwd", "todos"],
+      "elements": ["git", "model", "context", "rate", "tokens", "session", "cwd", "todos"],
       "max_width": 160,
       "detail": true
     }
@@ -398,6 +398,20 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
         "an element name nothing renders is refused by the loader naming it; the \
          schema's closed StatuslineElement enum should refuse it too"
     );
+
+    // The near-misses of the one element P16 added (**D484**). `rate` itself
+    // rides the kitchen sink above; these pin that widening the enum by one
+    // name widened it by exactly one.
+    for near_miss in ["ratelimit", "rate-limit", "rates"] {
+        let mut sink: Value =
+            serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+        sink["tui"]["statusline"]["elements"] = json!([near_miss]);
+        assert!(
+            !validator.is_valid(&sink),
+            "{near_miss:?} is not the name the loader accepts, and the schema must \
+             not accept it either"
+        );
+    }
 }
 
 /// The `tui.notifications` key takes either spelling, and the kitchen sink

@@ -1429,6 +1429,30 @@ impl Engine {
         &self.jobs
     }
 
+    /// What the vendor last said is left of this account's budget — the
+    /// rate-limit headers its responses carry (**D484**,
+    /// `rate-limit-visibility`), for a status display to poll on its tick
+    /// exactly as [`Engine::jobs`] and [`Engine::context_estimate`] are.
+    ///
+    /// Deliberately not a protocol event, and deliberately not engine-held
+    /// state: the buckets live on the wire that received them
+    /// ([`Provider::rate_windows`]) because what they measure is the
+    /// *credential's* budget, not a conversation's. So this reads through
+    /// rather than caching, a resume neither clears nor rebuilds anything —
+    /// the account did not change when the session did — and a wire that
+    /// receives no such headers answers with an empty set that every surface
+    /// renders as nothing.
+    ///
+    /// A bucket past its own reset is still returned, carrying that reset:
+    /// deciding what an expired window looks like belongs to whoever draws it,
+    /// and dropping it here would hide the fact that the vendor once spoke.
+    ///
+    /// [`Provider::rate_windows`]: crate::provider::Provider::rate_windows
+    #[must_use]
+    pub fn rate_windows(&self) -> Vec<crate::provider::RateWindow> {
+        self.provider.rate_windows()
+    }
+
     /// Ends every background job's whole process group. Mirrors
     /// [`Engine::shutdown_mcp`]/[`Engine::shutdown_lsp`]: idempotent, and
     /// safe to call on an engine that started none.

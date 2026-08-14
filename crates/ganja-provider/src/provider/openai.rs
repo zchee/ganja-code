@@ -68,6 +68,11 @@ pub struct OpenAiProvider {
     /// endpoint, which is fixed when the provider is built, and never the
     /// credential, which is not.
     headers: reqwest::header::HeaderMap,
+    /// What this endpoint last said was left of the account's budget
+    /// (**D484**), parsed by the shared table in [`super::rate`] — every
+    /// endpoint riding this wire spells its buckets the same `x-ratelimit-*`
+    /// way, and one that spells them no way at all simply meters nothing.
+    rates: super::RateWindows,
 }
 
 impl fmt::Debug for OpenAiProvider {
@@ -138,6 +143,7 @@ impl OpenAiProvider {
             credential,
             base_url: base_url.into(),
             headers: reqwest::header::HeaderMap::new(),
+            rates: super::RateWindows::default(),
         })
     }
 
@@ -217,7 +223,11 @@ impl Provider for OpenAiProvider {
             "requesting a turn"
         );
 
-        open::<Mapping>(&self.client, built, &presented, cancel).await
+        open::<Mapping>(&self.client, built, &presented, &self.rates, cancel).await
+    }
+
+    fn rate_windows(&self) -> Vec<super::RateWindow> {
+        self.rates.latest()
     }
 }
 

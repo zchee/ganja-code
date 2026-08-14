@@ -558,6 +558,11 @@ pub struct App {
     /// The `(tokens, window)` pair the context meter last showed, so a tick
     /// that finds the estimate unmoved touches nothing (**D469**).
     context: Option<(u64, u64)>,
+    /// The **live** rate-limit windows the bar last showed, so a tick that
+    /// finds them unmoved touches nothing — and a tick that finds one of them
+    /// newly expired does redraw, because an expired window is gone from this
+    /// list (**D484**).
+    rates: Vec<ganja_core::provider::RateWindow>,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
     /// stored mid-session is picked up by a restart, not by a later fetch.
@@ -683,6 +688,7 @@ impl App {
             mcp_resolved: 0,
             running_jobs: 0,
             context: None,
+            rates: Vec::new(),
             wire_models: None,
             wire_fetch: None,
             tools: ganja_tool::Registry::with_builtins(),
@@ -958,6 +964,7 @@ impl App {
                 self.poll_mcp();
                 self.poll_jobs();
                 self.poll_context();
+                self.poll_rates();
                 self.poll_mcp_dialog();
                 self.poll_wire_models().await;
                 // The other door into the same lane: a replay that lost a race
@@ -1049,6 +1056,40 @@ impl App {
 
         self.context = context;
         self.status.set_context(context);
+        self.dirty = true;
+    }
+
+    /// Feeds the `rate` element the vendor's own rate-limit windows
+    /// (**D484**).
+    ///
+    /// Beside [`App::poll_context`] and for its reasons: the numbers move only
+    /// when a request finishes, there is no event for them, and a set that has
+    /// not changed redraws nothing. Read through `Engine::rate_windows`, which
+    /// reads through to the wire — so a session that resumes onto the same
+    /// credential keeps the same windows, which is what they were about all
+    /// along.
+    ///
+    /// What the bar is handed is the **live** windows, not every window the
+    /// wire holds: a set that has not changed but has since passed its own
+    /// reset is a *different* answer to "what is left", and comparing the raw
+    /// sets would leave the last happy number frozen on an idle screen with no
+    /// redraw to clear it (P16 pre-mortem 4). `/usage` is handed the raw set
+    /// instead, because a panel has the room to say "expired" where a bar can
+    /// only say nothing.
+    fn poll_rates(&mut self) {
+        let now = std::time::SystemTime::now();
+        let live: Vec<_> = self
+            .engine
+            .rate_windows()
+            .into_iter()
+            .filter(|window| !window.expired(now))
+            .collect();
+        if live == self.rates {
+            return;
+        }
+
+        self.rates = live.clone();
+        self.status.set_rates(live);
         self.dirty = true;
     }
 
@@ -3070,6 +3111,12 @@ impl App {
             // clock behind, so this is honestly the app's lifetime, not the
             // stored session's.
             duration: Some(self.session_start.elapsed()),
+            // Read at open time like everything else on this panel — a
+            // snapshot, not a view. Empty for a wire that has heard no such
+            // headers, which renders no section at all (**D484**).
+            rates: self.engine.rate_windows(),
+            // The panel judges expiry against the moment it was opened.
+            now: Some(std::time::SystemTime::now()),
         }));
     }
 

@@ -96,9 +96,12 @@ pub mod cursor;
 pub mod fake;
 pub mod grok;
 pub mod openai;
+pub mod rate;
 pub mod responses;
 pub mod retry;
 pub mod sse;
+
+pub use rate::{RateWindow, RateWindows};
 
 /// What a call that never produced one reports as its result.
 ///
@@ -471,6 +474,29 @@ pub trait Provider: Send + Sync {
         let _ = mime;
         false
     }
+
+    /// What this wire's account has left, as the vendor last said it
+    /// (**D484**, `rate-limit-visibility`).
+    ///
+    /// **Polled, never pushed**: the engine exposes it through
+    /// `Engine::rate_windows` and a status display reads it on its tick, the
+    /// same arrangement `Engine::jobs` and `Engine::context_estimate` already
+    /// have. A protocol event would have been a second copy of a fact that
+    /// only moves when a request finishes.
+    ///
+    /// The store lives on the *wire* rather than in the engine because that is
+    /// what these headers measure: a credential's budget, shared by every
+    /// session that credential opens, which is why nothing here is keyed by a
+    /// session and why a resume neither clears nor rebuilds it. Staleness is
+    /// [`RateWindow::expired`]'s job instead.
+    ///
+    /// The default is **nothing**, which is the honest answer for every wire
+    /// that receives no such headers — cursor's Connect wire, the fake
+    /// provider — and the D470 rule restated at the trait: a surface renders
+    /// what a vendor said, and nothing at all otherwise.
+    fn rate_windows(&self) -> Vec<RateWindow> {
+        Vec::new()
+    }
 }
 
 /// The credential one request presents, whatever kind of credential it is.
@@ -821,6 +847,7 @@ async fn open<M: Mapper + Default>(
     client: &reqwest::Client,
     request: reqwest::Request,
     presented: &Presented,
+    rates: &RateWindows,
     cancel: CancellationToken,
 ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
     // Taken before the request is moved into the send, so the answer can be
@@ -836,6 +863,7 @@ async fn open<M: Mapper + Default>(
             Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
             Err(error) => return Err(error),
         };
+        rates.record(response.headers(), std::time::SystemTime::now());
 
         return Ok(shielded(
             events(response.bytes_stream().boxed(), cancel, M::default()),
@@ -861,6 +889,12 @@ async fn open<M: Mapper + Default>(
             endpoint,
             "the provider answered"
         );
+        // Beside the status log for the reason that log is here: this is the
+        // one seam holding a response's headers before its body becomes a
+        // stream, and the buckets it carries are the same fact for every wire
+        // (**D484**). A retried attempt overwrites the dead attempt's set,
+        // which is right — the later answer is the newer truth.
+        rates.record(response.headers(), std::time::SystemTime::now());
 
         // A fresh mapper per attempt: a retried turn starts over, and a
         // mapper that remembered the dead attempt's half-open state would
