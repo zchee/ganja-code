@@ -627,6 +627,17 @@ pub struct Config {
     pub default_provider: Option<String>,
     /// Agent a session starts on.
     pub default_agent: Option<String>,
+    /// Catalog effort a *fresh* session starts under, as `/effort` and
+    /// `run --effort` name them.
+    ///
+    /// A **default, not an override**: a resumed session runs under the effort
+    /// its own row stored, and this seeds only the sessions that carry none.
+    /// Nothing is validated here — which names exist depends on the model the
+    /// tiers below settle on, and a name that model's catalog row does not
+    /// carry is cleared at adoption exactly as a model switch clears one,
+    /// never refused. Not a key upstream has; upstream pins efforts per agent,
+    /// where ganja makes them a property of the session.
+    pub effort: Option<String>,
     /// Agent definitions, by name.
     #[serde(default)]
     pub agent: BTreeMap<String, AgentConfig>,
@@ -1165,6 +1176,7 @@ impl Config {
         overlay(&mut self.small_model, other.small_model);
         overlay(&mut self.default_provider, other.default_provider);
         overlay(&mut self.default_agent, other.default_agent);
+        overlay(&mut self.effort, other.effort);
         overlay(&mut self.theme, other.theme);
         overlay(&mut self.theme_mode, other.theme_mode);
         overlay(&mut self.shell, other.shell);
@@ -2978,6 +2990,34 @@ mod tests {
 
         merged.merge(parse(r#"{"default_provider": "openai"}"#).expect("it parses"));
         assert_eq!(merged.default_provider.as_deref(), Some("openai"));
+    }
+
+    /// The seeded effort is a scalar too, and merges like every other one —
+    /// which is what lets a global file set the house default and one project
+    /// run hotter without restating anything else.
+    #[test]
+    fn a_closer_tier_decides_the_effort_only_when_it_names_one() {
+        let mut merged = parse(r#"{"effort": "high"}"#).expect("it parses");
+        assert_eq!(merged.effort.as_deref(), Some("high"));
+
+        merged.merge(parse(r#"{"model": "openai/gpt-5.6"}"#).expect("it parses"));
+        assert_eq!(merged.effort.as_deref(), Some("high"));
+
+        merged.merge(parse(r#"{"effort": "max"}"#).expect("it parses"));
+        assert_eq!(merged.effort.as_deref(), Some("max"));
+    }
+
+    /// Nothing about an effort is checked here: which names exist depends on
+    /// the model the other tiers settle on, so the loader carries whatever was
+    /// written and adoption decides. What is still refused is a *sibling* the
+    /// struct has no field for — the discipline every key here holds.
+    #[test]
+    fn an_effort_name_is_carried_unvalidated_and_its_neighbours_still_are_not() {
+        let config = parse(r#"{"effort": "wildly-not-an-effort"}"#).expect("it parses");
+        assert_eq!(config.effort.as_deref(), Some("wildly-not-an-effort"));
+
+        let error = parse(r#"{"efort": "high"}"#).expect_err("a typo is refused");
+        assert!(format!("{error}").contains("efort"), "got {error}");
     }
 
     #[test]

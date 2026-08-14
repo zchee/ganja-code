@@ -3,7 +3,7 @@
   "$id": "ganja-config",
   "title": "ganja configuration",
   "description": "A ganja.jsonc / ganja.json file. Both names are read in three tiers — the global config home, the one file GANJA_CONFIG or --config names, then every directory from the working directory up to the project root — and later beats earlier. Both extensions are parsed as JSONC: line and block comments and trailing commas are accepted, while single-quoted strings, unquoted keys, hexadecimal numbers and missing commas are not. This schema describes the resulting JSON value; the comment and trailing-comma syntax is a property of the reader, not of the value. Every top-level key this build understands is listed here, and any other key is a hard load error naming it.",
-  "$comment": "Derived from crates/ganja-core/src/config.rs:602-726 (struct Config, #[serde(deny_unknown_fields)]). Audited against config.rs and crates/ganja-core/tests/config_schema.rs, which catches drift in both directions.",
+  "$comment": "Derived from crates/ganja-core/src/config.rs:602-740 (struct Config, #[serde(deny_unknown_fields)]). Audited against config.rs and crates/ganja-core/tests/config_schema.rs, which catches drift in both directions.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -29,6 +29,11 @@
       "type": "string",
       "description": "Agent a session starts on.",
       "examples": ["build", "plan", "general", "explore"]
+    },
+    "effort": {
+      "type": "string",
+      "description": "Catalog effort a fresh session starts under, as `/effort` and `run --effort` name them. A default and not an override: a resumed session runs under the effort its own row stored. A name the selected model's catalog row does not carry is cleared at adoption, never refused at load — which names exist depends on the model the other tiers settle on.",
+      "examples": ["low", "medium", "high", "xhigh", "max"]
     },
     "agent": {
       "type": "object",

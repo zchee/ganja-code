@@ -302,7 +302,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
         },
     )?;
     let Assembled {
-        engine, servers, ..
+        engine,
+        servers,
+        config,
+        ..
     } = assembled;
     refuse_interactive_permissions(&engine);
     // Dialled in the background, exactly as the UI dials them: a server that
@@ -318,6 +321,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
     engine.session_start().await;
 
     let session = select_session(&engine, args.r#continue, args.session.as_deref()).await?;
+    // After the session for the same reason the flag is, and before it because
+    // it yields to both: a resumed row's own effort is already on the engine
+    // here, and this seeds only a session that carries none.
+    engine.seed_effort(config.effort).await;
     // After the session, so the flag outranks whatever effort a resumed row
     // restored; before the turn, so a bad name is this refusal — listing the
     // model's real names — and never a request built around it.

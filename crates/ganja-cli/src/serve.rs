@@ -60,6 +60,13 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     assembled.engine.connect_mcp();
     // A listener is a session too, and its hooks open it the same way.
     assembled.engine.session_start().await;
+    // And it starts under the configured effort the same way, for the session
+    // this process minted; a route that resumes another one restores that
+    // row's own effort and this yields to it.
+    assembled
+        .engine
+        .seed_effort(assembled.config.effort.clone())
+        .await;
 
     let credentials = ganja_serve::Credentials::from_env();
     if credentials.is_none() {
