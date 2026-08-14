@@ -579,16 +579,14 @@ pub struct App {
     /// The `(tokens, window)` pair the context meter last showed, so a tick
     /// that finds the estimate unmoved touches nothing (**D469**).
     context: Option<(u64, u64)>,
-    /// The rate-limit windows the bar last showed, each beside whether it had
-    /// passed its reset when last polled, so a tick that finds the set and
-    /// every flag unmoved touches nothing — and the tick that finds a window
-    /// newly expired still redraws once, which is what decays its meter to
-    /// the refilled zero on an otherwise idle screen (**D484**, amended
-    /// 2026-08-15: the bar is handed the raw set and reads expiry itself).
-    rates: Vec<(ganja_core::provider::RateWindow, bool)>,
-    /// The plan buckets the bar last showed, kept the same way for
-    /// [`App::poll_rates`]'s reason on the sibling set (**D485**).
-    plans: Vec<(ganja_core::provider::PlanWindow, bool)>,
+    /// The rate-limit windows the bar last showed, so a tick that finds the
+    /// set unmoved touches nothing (**D484**; since 2026-08-15 the bar meters
+    /// the newest set as heard, no clock consulted, so the raw set is the
+    /// whole of what the redraw depends on).
+    rates: Vec<ganja_core::provider::RateWindow>,
+    /// The plan buckets the bar last showed, kept for [`App::poll_rates`]'s
+    /// reason on the sibling set (**D485**).
+    plans: Vec<ganja_core::provider::PlanWindow>,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
     /// stored mid-session is picked up by a restart, not by a later fetch.
@@ -1106,61 +1104,36 @@ impl App {
     /// credential keeps the same windows, which is what they were about all
     /// along.
     ///
-    /// What the bar is handed is the **raw** set, expiry read again at every
-    /// draw by the bar itself: a bucket past its reset meters as refilled
-    /// rather than leaving the bar, because request buckets legally reset in
-    /// milliseconds and a liveness filter here made the element blink on and
-    /// off with every response (2026-08-15, amending P16 pre-mortem 4's
-    /// filter). The liveness flag survives in the comparison snapshot alone,
-    /// so the tick on which a window crosses its reset still redraws once —
-    /// the meter decays to zero on an idle screen instead of freezing at the
-    /// last happy number. `/usage` reads the same raw set, with the room to
-    /// say "expired" in words.
+    /// What the bar is handed is the **raw** set, metered as heard: since
+    /// 2026-08-15 the bar consults no reset clock — request buckets legally
+    /// reset in milliseconds, so a clock-honoring meter either blinked with
+    /// every response or pinned itself at zero — and the newest figures
+    /// simply stand until a later response replaces the set. `/usage` reads
+    /// the same raw set, with the room to say "expired" in words.
     fn poll_rates(&mut self) {
-        let now = std::time::SystemTime::now();
-        let snapshot: Vec<_> = self
-            .engine
-            .rate_windows()
-            .into_iter()
-            .map(|window| {
-                let expired = window.expired(now);
-                (window, expired)
-            })
-            .collect();
-        if snapshot == self.rates {
+        let live = self.engine.rate_windows();
+        if live == self.rates {
             return;
         }
 
-        self.rates = snapshot.clone();
-        self.status
-            .set_rates(snapshot.into_iter().map(|(window, _)| window).collect());
+        self.rates = live.clone();
+        self.status.set_rates(live);
         self.dirty = true;
     }
 
     /// Feeds the same element the vendor's own plan buckets (**D485**).
     ///
     /// [`App::poll_rates`]'s shape and posture, on the sibling set: the raw
-    /// buckets go to the bar, which reads expiry itself and meters a
-    /// rolled-over window as refilled; the liveness flag is kept only so the
-    /// reset-crossing tick still redraws.
+    /// buckets go to the bar, metered as heard until a later response
+    /// replaces them.
     fn poll_plans(&mut self) {
-        let now = std::time::SystemTime::now();
-        let snapshot: Vec<_> = self
-            .engine
-            .plan_windows()
-            .into_iter()
-            .map(|plan| {
-                let expired = plan.expired(now);
-                (plan, expired)
-            })
-            .collect();
-        if snapshot == self.plans {
+        let live = self.engine.plan_windows();
+        if live == self.plans {
             return;
         }
 
-        self.plans = snapshot.clone();
-        self.status
-            .set_plans(snapshot.into_iter().map(|(plan, _)| plan).collect());
+        self.plans = live.clone();
+        self.status.set_plans(live);
         self.dirty = true;
     }
 
