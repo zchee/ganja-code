@@ -74,13 +74,17 @@ use crate::{
 /// Every `type` an nd-JSON object may carry: upstream's six and no seventh
 /// (`run.ts:720`, `:741`, `:745`, `:749`, `:762`, `:784`).
 ///
-/// `reasoning` is named here and never emitted. Ganja's protocol has no
-/// reasoning part — the engine logs a provider's thinking deltas and drops
-/// them (`session.rs`, `ProviderEvent::ReasoningDelta`) rather than pasting
-/// them into the reply — so this build has five sources for six names
-/// (deviation: run-emits-no-reasoning). The name stays in the set because the
-/// set is what a consumer parses against: a build that later grows the part
-/// must fill this slot rather than invent a seventh.
+/// All six have a source. `reasoning` was the one that did not: this build had
+/// no readable-thinking part, and the slot was held open against the day it
+/// grew one, "a build that later grows the part must fill this slot rather
+/// than invent a seventh". `PartBody::ReasoningText` is that part and this is
+/// that filling, so the `run-emits-no-reasoning` deviation is retired.
+///
+/// **`--format json` only.** The readable stream is the answer a person asked
+/// for; thinking is the model's way to it and stays out of that stream, where
+/// it would run together with the reply it precedes. A consumer parsing types
+/// is told the difference and a reader watching stdout is not, so only the one
+/// that can tell them apart is given both.
 const TYPES: [&str; 6] = [
     "tool_use",
     "step_start",
@@ -90,18 +94,15 @@ const TYPES: [&str; 6] = [
     "error",
 ];
 
-/// The five entries of [`TYPES`] this build has something to emit for.
-///
-/// The discriminants are indexes into [`TYPES`], and the gap at 4 is
-/// `reasoning`: a variant nothing can construct would be a lie about what this
-/// build can produce, and dropping the name from `TYPES` would be a lie about
-/// what a consumer must handle.
+/// The entries of [`TYPES`] this build emits, discriminants being indexes into
+/// it. There is no gap left: every name in the set has a source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     ToolUse = 0,
     StepStart = 1,
     StepFinish = 2,
     Text = 3,
+    Reasoning = 4,
     Error = 5,
 }
 
@@ -722,7 +723,7 @@ struct Reporter<'a> {
     /// closes it (`session.rs`, "writing it also flushes the step's text
     /// part") — so the text is accumulated here and written when the step
     /// ends.
-    open: Vec<(PartId, String)>,
+    open: Vec<(PartId, String, Kind)>,
     /// What the turn failed with, if it did.
     failure: Option<String>,
 }
@@ -764,8 +765,16 @@ impl<'a> Reporter<'a> {
                 message,
             } => self.announce(message, agent),
             Event::PartStarted { part, .. } => match &part.body {
-                // Opened empty and grown by the deltas below.
-                PartBody::Text { text } => self.open.push((part.id.clone(), text.clone())),
+                // Both are opened empty and grown by the deltas below, and
+                // both are written when the step closes; which of the two a
+                // row is decides the name it is emitted under.
+                PartBody::Text { text } => {
+                    self.open.push((part.id.clone(), text.clone(), Kind::Text));
+                }
+                PartBody::ReasoningText { text } => {
+                    self.open
+                        .push((part.id.clone(), text.clone(), Kind::Reasoning));
+                }
                 PartBody::StepStart => self.emit(Kind::StepStart, "part", part),
                 // The marker that closes the step, so the step's text is
                 // written first and this second.
@@ -773,18 +782,16 @@ impl<'a> Reporter<'a> {
                     self.flush();
                     self.emit(Kind::StepFinish, "part", part);
                 }
-                // `reasoning` in [`TYPES`] names a reasoning *text* part,
-                // which this build still does not have. A sealed blob is not
-                // that: there is nothing in it a reader could be shown, and
-                // emitting it under that name would tell a consumer the model
-                // said something it can print. The slot stays unfilled.
+                // A sealed blob is not thinking a reader could be shown, so it
+                // is emitted under no name at all: saying `reasoning` of it
+                // would tell a consumer the model said something printable.
                 PartBody::Tool { .. }
                 | PartBody::File { .. }
                 | PartBody::Patch { .. }
                 | PartBody::Reasoning { .. } => {}
             },
             Event::PartDelta { part_id, delta, .. } => {
-                if let Some((_, text)) = self.open.iter_mut().find(|(id, _)| id == part_id) {
+                if let Some((_, text, _)) = self.open.iter_mut().find(|(id, ..)| id == part_id) {
                     text.push_str(delta);
                 }
             }
@@ -886,13 +893,20 @@ impl<'a> Reporter<'a> {
 
     /// Writes every text part that has finished streaming.
     fn flush(&mut self) {
-        for (id, text) in std::mem::take(&mut self.open) {
+        for (id, text, kind) in std::mem::take(&mut self.open) {
             if self.format == Format::Json {
-                let part = Part {
-                    id,
-                    body: PartBody::Text { text },
+                let body = if kind == Kind::Reasoning {
+                    PartBody::ReasoningText { text }
+                } else {
+                    PartBody::Text { text }
                 };
-                self.emit(Kind::Text, "part", &part);
+                self.emit(kind, "part", &Part { id, body });
+                continue;
+            }
+
+            // The readable stream carries the answer and not the way to it;
+            // see [`TYPES`].
+            if kind == Kind::Reasoning {
                 continue;
             }
 

@@ -2327,6 +2327,35 @@ mod tests {
         );
     }
 
+    /// Readable thinking is a normal versioned row: it is written, it is read
+    /// back word for word, and a session resumed tomorrow still shows what the
+    /// model was working through — which is the whole of what persisting it
+    /// buys, since no wire ever carries it.
+    #[test]
+    fn readable_thinking_is_stored_and_reads_back_as_itself() {
+        let directory = temporary();
+        let storage = storage(&directory);
+        let id = session("ses_1");
+
+        let mut reply = Message::assistant("canned");
+        reply
+            .parts
+            .push(Part::reasoning_text("weighing a greeting"));
+        reply.parts.push(Part::text("hello"));
+        store_message(&storage, &id, &reply);
+
+        let loaded = storage.load_transcript(&id).expect("the transcript loads");
+
+        assert_eq!(
+            loaded[0].parts[0].body,
+            PartBody::ReasoningText {
+                text: "weighing a greeting".to_owned()
+            },
+            "a stored thought comes back whole, not as a marker"
+        );
+        assert_eq!(loaded[0].parts[1].as_text(), Some("hello"));
+    }
+
     /// The other half of the ruling: only request-affecting state earns a
     /// marker. A text row that will not decode is still dropped whole, because
     /// a marker for it would put a reasoning part where the model never

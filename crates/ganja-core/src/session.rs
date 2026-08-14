@@ -2394,6 +2394,7 @@ fn serialize_message(message: &Message) -> String {
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
                 | PartBody::Patch { .. }
+                | PartBody::ReasoningText { .. }
                 | PartBody::Reasoning { .. } => None,
             })
             .collect(),
@@ -2422,11 +2423,15 @@ fn serialize_message(message: &Message) -> String {
                 }
                 // Sealed thinking says nothing a summary could carry: it is
                 // bytes for the provider, and the conversation it summarizes
-                // is what the model said and did.
+                // is what the model said and did. Readable thinking is left
+                // out for the harder reason — a summary *is* what the next
+                // request carries, and thinking that was never sent must not
+                // reach the model by being summarized into the history.
                 PartBody::File { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
                 | PartBody::Patch { .. }
+                | PartBody::ReasoningText { .. }
                 | PartBody::Reasoning { .. } => Vec::new(),
             })
             .collect(),
@@ -2662,6 +2667,10 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     // Steps do not share one: text after a tool round is a new thought, and
     // upstream gives it a new part.
     let mut open: Option<PartId> = None;
+    // The same, for thinking a person can read. Its own slot rather than a
+    // shared one: a model that thinks, answers, then thinks again is writing
+    // into two different parts, and one slot would splice them together.
+    let mut open_reasoning: Option<PartId> = None;
     // What this one request cost. The last report wins, which is also how the
     // engine treated usage before the loop existed: providers accumulate
     // internally and report complete counts.
@@ -2822,11 +2831,64 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 interrupt!(Some(Outcome::failed(error.to_string())), STRANDED);
             }
             ProviderEvent::Finish(reason) => break reason,
-            // Reasoning a person could read has no protocol part yet. Dropping
-            // it keeps the transcript honest instead of pasting thinking into
-            // the reply.
-            ProviderEvent::ReasoningDelta(_) => {
-                tracing::debug!("reasoning has no rendered part yet");
+            // Reasoning a person could read, which is a part of its own — not
+            // pasted into the reply, and not sent anywhere. It is written
+            // through and delivered for the same reason a text delta is: a
+            // frontend that applies every event has to end up holding what the
+            // transcript holds, and this is now part of that.
+            ProviderEvent::ReasoningDelta(delta) => {
+                let part_id = match &open_reasoning {
+                    Some(part_id) => part_id.clone(),
+                    None => {
+                        let part = Part::reasoning_text(String::new());
+                        let part_id = part.id.clone();
+                        assistant.parts.push(part.clone());
+                        open_reasoning = Some(part_id.clone());
+                        turn.persist_part(assistant, &part);
+
+                        if let ControlFlow::Break(stop) = deliver(
+                            turn,
+                            Event::PartStarted {
+                                session_id: turn.session_id.clone(),
+                                message_id: assistant.id.clone(),
+                                part,
+                            },
+                        )
+                        .await
+                        {
+                            interrupt!(stop, &ToolError::Cancelled.to_string());
+                        }
+
+                        part_id
+                    }
+                };
+
+                if let Some(text) = assistant
+                    .parts
+                    .iter_mut()
+                    .find(|part| part.id == part_id)
+                    .and_then(Part::streamed_mut)
+                {
+                    text.push_str(&delta);
+                }
+                // The debounce is keyed on the part, and flushes the old one
+                // when a different part goes dirty — so interleaved thinking
+                // and reply need nothing of their own here.
+                turn.persist_text_delta(assistant, &part_id);
+
+                if let ControlFlow::Break(stop) = deliver(
+                    turn,
+                    Event::PartDelta {
+                        session_id: turn.session_id.clone(),
+                        message_id: assistant.id.clone(),
+                        part_id,
+                        delta,
+                    },
+                )
+                .await
+                {
+                    interrupt!(stop, &ToolError::Cancelled.to_string());
+                }
             }
             // Reasoning the *provider* will read does have one, and it is
             // written through like any other part for one reason: the next

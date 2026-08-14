@@ -41,7 +41,7 @@ use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
@@ -92,8 +92,15 @@ const RESULT: &str = "  \u{23bf} ";
 /// every message with.
 const PROMPT: &str = "> ";
 
-/// What leads the line a running turn leaves at the tail of the transcript.
-const WORKING: &str = "\u{273b} ";
+/// What leads thinking a person can read, and the line a running turn leaves
+/// at the tail of the transcript.
+///
+/// One glyph for both because they are one thing seen twice: the tail says a
+/// turn is thinking, and this is what it thought.
+const THINKING: &str = "\u{273b} ";
+
+/// See [`THINKING`].
+const WORKING: &str = THINKING;
 
 /// The words a working line runs under, one per turn in order.
 ///
@@ -548,7 +555,11 @@ impl Chat {
         }
     }
 
-    /// Extends a part, which is how a streamed reply grows.
+    /// Extends a part, which is how a streamed reply — or the thinking on its
+    /// way to one — grows.
+    ///
+    /// Through [`Part::streamed_mut`] rather than `as_text_mut`, because the
+    /// event says an id and a fragment and never which of the two this is.
     pub fn append_delta(&mut self, message_id: &MessageId, part_id: &PartId, delta: &str) {
         let Some(entry) = self.entry_mut(message_id) else {
             return;
@@ -558,7 +569,7 @@ impl Chat {
             .parts
             .iter_mut()
             .find(|part| part.id == *part_id)
-            .and_then(Part::as_text_mut)
+            .and_then(Part::streamed_mut)
         {
             text.push_str(delta);
             entry.wrapped = None;
@@ -918,6 +929,34 @@ impl Entry {
                     };
                     lines.extend(lay_out(&[Row::new(&prefix, label, theme.dim)], columns));
                 }
+                // Thinking a person can read, behind its own marker and dimmed
+                // into italics so it never competes with the answer it is on
+                // the way to. Clamped from the **tail** while it arrives, for
+                // the reason a streaming command's output is: a long think
+                // would otherwise push the reply off the screen, and the
+                // newest lines are the ones worth the rows. The whole of it is
+                // one Ctrl+T away, which is what the hint says.
+                PartBody::ReasoningText { text } if !text.is_empty() => {
+                    let (tail, hidden) = clamp_tail(text);
+                    let style = theme.dim.add_modifier(Modifier::ITALIC);
+                    let hang = " ".repeat(THINKING.width());
+                    let mut rows: Vec<Row> = Vec::new();
+                    if hidden > 0 {
+                        rows.push(Row::new(THINKING, clamp_hint(hidden), style));
+                    }
+                    rows.extend(tail.into_iter().enumerate().map(|(index, line)| {
+                        let lead = if index == 0 && hidden == 0 {
+                            THINKING
+                        } else {
+                            hang.as_str()
+                        };
+                        Row::new(lead, line, style)
+                    }));
+                    lines.extend(lay_out(&rows, columns));
+                }
+                // An empty one is a part the provider opened and has not
+                // filled yet; a marker alone would be a claim about nothing.
+                PartBody::ReasoningText { .. } => {}
                 // Sealed reasoning has no rendering: what it holds is opaque
                 // to everything but the provider, so a line about it would be
                 // a line about a blob.
@@ -1452,7 +1491,7 @@ mod tests {
     use std::time::Duration;
 
     use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, ToolState};
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
 
     use super::{Chat, Instant, Working, elapsed, split_at_width, wrap};
     use crate::theme::{Theme, Themes};
@@ -2904,6 +2943,107 @@ mod tests {
             rendered(&mut chat, VIEWPORT),
             pinned,
             "a line arriving at the bottom must not move a reader who is not there"
+        );
+    }
+
+    /// **AC3.** Thinking a person can read renders behind its own marker, dim
+    /// and italic so it never competes with the answer it is on the way to,
+    /// and hangs its continuation under the marker's own columns.
+    #[test]
+    fn readable_thinking_renders_dim_and_italic_behind_its_own_marker() {
+        let theme = Theme::default();
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part::reasoning_text(
+            "A greeting is enough, so keep it short",
+        ));
+        reply.parts.push(Part::text("Hello, world!"));
+        chat.start_message(reply);
+
+        let area = Rect::new(0, 0, 24, 10);
+        let lines = rendered(&mut chat, area);
+        let drawn: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec![
+                "\u{273b} A greeting is enough,",
+                "  so keep it short",
+                "\u{25cf} Hello, world!",
+            ],
+            "got {lines:?}"
+        );
+
+        let mut buffer = Buffer::empty(area);
+        chat.render(area, &mut buffer, &theme);
+        let marker = buffer[(0u16, 0u16)].style();
+        assert_eq!(marker.fg, theme.dim.fg, "thinking recedes");
+        assert!(
+            marker.add_modifier.contains(Modifier::ITALIC),
+            "and is set apart from the reply by more than its color"
+        );
+    }
+
+    /// **Pre-mortem 3.** A long think is clamped from the tail while it
+    /// arrives — the newest lines are the ones worth the rows — and the cut
+    /// says where the whole of it went.
+    #[test]
+    fn a_long_think_is_clamped_from_its_newest_end() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part::reasoning_text(
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+        ));
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 12));
+        let drawn: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec![
+                "\u{273b} \u{2026} +3 lines (ctrl+t to expand)",
+                "  four",
+                "  five",
+                "  six",
+                "  seven",
+            ],
+            "got {lines:?}"
+        );
+    }
+
+    /// A part the provider opened and has not filled is not a thought yet, so
+    /// it draws no marker standing on its own.
+    #[test]
+    fn an_empty_thinking_part_draws_nothing_at_all() {
+        let mut chat = Chat::default();
+        let reply = Message::assistant("canned");
+        let part = Part::reasoning_text(String::new());
+        chat.start_message(reply.clone());
+        chat.start_part(&reply.id, part.clone());
+
+        assert!(
+            rendered(&mut chat, Rect::new(0, 0, 40, 6))
+                .iter()
+                .all(String::is_empty),
+            "an unfilled part is a marker about nothing"
+        );
+
+        // And the same part grows on a delta, which is how it arrives at all:
+        // the event names an id and a fragment, never which kind of text.
+        chat.append_delta(&reply.id, &part.id, "now there is a thought");
+        let screen = rendered(&mut chat, Rect::new(0, 0, 40, 6)).join("\n");
+        assert!(
+            screen.contains("\u{273b} now there is a thought"),
+            "got:\n{screen}"
         );
     }
 

@@ -577,10 +577,17 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
             // own equivalent is a `thinking` block with a signature, which
             // this build does not port — and handing an opaque blob to the
             // provider that did not seal it is not a thing to attempt.
+            //
+            // `ReasoningText` is thinking this build renders rather than
+            // replays: the sealed half above is what a provider asked to have
+            // handed back, and sending the readable half beside it would be
+            // sending the same thought twice, once in a form nothing asked
+            // for.
             PartBody::File { content: None, .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
+            | PartBody::ReasoningText { .. }
             | PartBody::Reasoning { .. } => {}
         }
     }

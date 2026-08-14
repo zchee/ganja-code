@@ -1073,10 +1073,13 @@ fn split(
             // block before a request is built (`session::resolve_mentions`);
             // see the same arm in `openai.rs`. `StepFinish` carries a step's
             // bill rather than content, and `StepStart` was consumed as the
-            // boundary this step was cut at.
+            // boundary this step was cut at. `ReasoningText` is thinking this
+            // build renders rather than replays — what this API asked to have
+            // handed back is the sealed item, which the arm above sends.
             PartBody::File { content: None, .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
+            | PartBody::ReasoningText { .. }
             | PartBody::Patch { .. } => {}
         }
     }
