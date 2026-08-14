@@ -99,7 +99,7 @@ pub enum Direction {
 pub struct Recalled {
     /// What was submitted.
     pub prompt: PromptInfo,
-    /// Milliseconds since the Unix epoch it is dated to, [`now_ms`]'s
+    /// Milliseconds since the Unix epoch it is dated to, `now_ms`'s
     /// convention.
     pub at: u64,
 }

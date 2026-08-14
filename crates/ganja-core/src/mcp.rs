@@ -23,7 +23,7 @@
 //! (`docs/references/claude.ja.md:168`) — and a person watching a long
 //! session is in a better position to say "try that one again" than a
 //! transport that only ever closes once is to say it for them. Three doors,
-//! all riding the same [`Servers::connect`] a startup uses:
+//! all riding the same `Servers::connect` a startup uses:
 //!
 //! - [`Servers::reconnect`] — the `/mcp` dialog's Reconnect action and
 //!   [`crate::engine::Engine::reconnect_mcp`], for a server the dialog shows
@@ -55,7 +55,7 @@
 //! Claude's `MAX_MCP_OUTPUT_TOKENS` names the same worry a server's own result
 //! can raise that any other tool's can — flooding the context window — and
 //! this build spells the budget in bytes rather than tokens, matching every
-//! other clamp in the tree ([`ganja_tool::truncate`]). [`render`] clamps
+//! other clamp in the tree ([`ganja_tool::truncate`]). `render` clamps
 //! through [`ganja_tool::truncate::clamp_bytes`], the spill-file posture every
 //! one-shot tool here already uses (`clamp_with`'s: the full result is
 //! written to a file and the model is told where), at the budget
@@ -84,7 +84,7 @@
 //! wholesale rather than forked. What lands here is the two seams that
 //! module's own doc names as somebody else's job:
 //!
-//! - **Dial-time bearer.** [`Servers::dial`]'s Remote branch, for an entry
+//! - **Dial-time bearer.** `Servers::dial`'s Remote branch, for an entry
 //!   with `oauth` set, asks [`ganja_provider::auth::Refresher::shared`] for a
 //!   usable access token — refreshed first if the stored deadline says it is
 //!   due — and sends it as `Authorization: Bearer …`, layered onto whatever
@@ -95,7 +95,7 @@
 //!   refresh — bypassing the stored deadline's own due-check, because the
 //!   server's answer is what said the token was bad — and retries the dial
 //!   exactly once. Static-headers-at-dial is the transport's shape
-//!   ([`rmcp::transport::StreamableHttpClientTransportConfig`] carries no
+//!   ([`rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig`] carries no
 //!   per-request hook), so this is the honest v1; per-request reactive
 //!   re-authorization is a named follow-up, not an oversight. **`rmcp` itself
 //!   only recognizes the challenge on a `401` that also carries a
@@ -108,7 +108,7 @@
 //!   registration inline and returns once the browser URL is ready —
 //!   [`Servers::login_url`] is how a caller shows it — then finishes the wait
 //!   for the callback in the background; a successful login stores under
-//!   `mcp:<name>` and re-dials through [`Servers::connect`]. The `/mcp`
+//!   `mcp:<name>` and re-dials through `Servers::connect`. The `/mcp`
 //!   dialog's Login action and `ganja mcp login <server>` are both this one
 //!   function.
 //!
@@ -699,7 +699,7 @@ impl Servers {
         self.generation.fetch_add(1, Ordering::Release);
     }
 
-    /// Re-dials `name` through the same [`Servers::connect`] a startup uses,
+    /// Re-dials `name` through the same `Servers::connect` a startup uses,
     /// naming why when reconnect does not mean anything for this server
     /// (**D463**): not configured at all, `enabled: false`, already
     /// [`Status::Connected`], or still on its very first dial (absent from
@@ -707,12 +707,11 @@ impl Servers {
     /// [`Status::Failed`] — reached by a dial that never succeeded, or by
     /// [`Servers::reap`] noticing a transport that closed.
     ///
-    /// `Ok(())` means the attempt ran, not that it succeeded: [`connect`]
+    /// `Ok(())` means the attempt ran, not that it succeeded: `connect`
     /// itself never fails outward, so the outcome — connected again, or
     /// failed again with a fresh reason — is read back through
     /// [`Servers::status`], exactly as a first connect is.
     ///
-    /// [`connect`]: Servers::connect
     pub async fn reconnect(self: &Arc<Self>, name: &str) -> Result<(), String> {
         let Some(server) = self.config.get(name) else {
             return Err(format!("mcp server \"{name}\" is not configured"));
@@ -747,7 +746,7 @@ impl Servers {
     /// turn.
     ///
     /// A server that *did* connect once and later closed is not "the first
-    /// dial" any more ([`Server::ever_connected`]) and is left for
+    /// dial" any more (`Server::ever_connected`) and is left for
     /// [`Servers::reconnect`] to revive on request. Bookkept per server, not
     /// per call: once spent, a server's one automatic retry never fires again
     /// this session, however many more times its status reads

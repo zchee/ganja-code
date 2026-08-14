@@ -41,7 +41,7 @@
 //! # The one collision this cannot resolve
 //!
 //! Two originals longer than the cap can never alias equal: the truncation
-//! carries [`HASH`] hex digits of the original's SHA-256. What is *not* ruled
+//! carries `HASH` hex digits of the original's SHA-256. What is *not* ruled
 //! out is a roster holding both `a_b` and `a:b`, where the second scrubs onto
 //! the first's own name. Upstream's `sanitize` has exactly that property, and
 //! resolving it would mean renaming one of two tools a person deliberately
@@ -81,7 +81,7 @@ const fn conforming(byte: u8) -> bool {
 /// A name that does not conform has every character outside `[A-Za-z0-9_-]`
 /// replaced by `_` — one underscore per character, so the result is ASCII and
 /// can be cut on any byte — and, if that is still longer than `cap`, is cut to
-/// leave room for `_` and [`HASH`] hex digits of the **original** name's
+/// leave room for `_` and `HASH` hex digits of the **original** name's
 /// SHA-256. The result is then exactly `cap` bytes.
 ///
 /// # Panics

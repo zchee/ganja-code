@@ -1483,6 +1483,13 @@ impl Engine {
     /// A bucket past its own reset is still returned, carrying that reset:
     /// deciding what an expired window looks like belongs to whoever draws it,
     /// and dropping it here would hide the fact that the vendor once spoke.
+    /// Since P22 a bucket may carry **no** reset at all — grok sends the two
+    /// counts and no `-reset-` field — and such a window is never expired,
+    /// because there is no clock against which it could be: it lives until the
+    /// next response replaces the whole set. A surface that draws a reset must
+    /// therefore render its absence rather than assume one
+    /// ([`crate::provider::RateWindow::reset`] is an [`Option`], and that is
+    /// the amendment recorded at the field).
     ///
     /// [`Provider::rate_windows`]: crate::provider::Provider::rate_windows
     #[must_use]
@@ -3316,7 +3323,7 @@ impl Engine {
     /// Adopts a configured effort for a session that has not chosen one.
     ///
     /// A **default, not an override**, which is the whole difference from
-    /// [`Self::switch_effort`]: a resume has already restored whatever the
+    /// `Self::switch_effort`: a resume has already restored whatever the
     /// stored row carried by the time a frontend calls this, and a session
     /// that arrived holding an effort keeps it. Only a session still on the
     /// state every session starts in takes the config's.
@@ -3327,7 +3334,7 @@ impl Engine {
     /// standing wish read before anybody knows which model a session will
     /// settle on, and refusing to start over it would make one line in a
     /// global file break every project whose model happens to be cataloged
-    /// differently. So it clears, through the same [`Self::reconcile_effort`]
+    /// differently. So it clears, through the same `Self::reconcile_effort`
     /// a model switch clears through, and says why in the log.
     ///
     /// Announced like every other path that moves the selection, so a

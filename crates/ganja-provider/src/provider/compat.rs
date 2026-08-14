@@ -17,7 +17,7 @@
 //!
 //! **This is not a third wire.** Both dialects are the two providers that
 //! already ship, built through the seams they publish for exactly this —
-//! [`OpenAiProvider::with_credential`] and its two siblings, and the set
+//! `OpenAiProvider::with_credential` and its two siblings, and the set
 //! [`AnthropicProvider`] gained to match. Nothing here encodes a message or
 //! decodes a frame, and a change that starts to is a sign the endpoint stopped
 //! being compatible, which is a new provider rather than a bigger version of

@@ -6,7 +6,7 @@
 //! is why an API key session belongs here too and not on chat completions. The
 //! same file disables `gpt-5-chat-latest` at `:164-171` with the consequence
 //! written on it — that alias is chat-completions-only, so a Responses-only
-//! vendor cannot serve it — and [`CHAT_COMPLETIONS_ONLY`] is that arm ported.
+//! vendor cannot serve it — and `CHAT_COMPLETIONS_ONLY` is that arm ported.
 //! What such a request looks like on the wire is
 //! `packages/opencode/src/plugin/openai/codex.ts:341-426`, the fetch override
 //! that authenticates it and decides where it goes, cross-checked against
@@ -22,16 +22,16 @@
 //!
 //! # Two backends, and what differs between them
 //!
-//! One mapping, one encoder, two places a request can go — [`Backend`] is the
+//! One mapping, one encoder, two places a request can go — `Backend` is the
 //! whole of the difference, and it is fixed when the provider is built because
 //! it follows the credential the session resolved:
 //!
-//! | | [`Backend::Codex`] | [`Backend::Platform`] |
+//! | | `Backend::Codex` | `Backend::Platform` |
 //! |---|---|---|
 //! | credential | a stored ChatGPT login | an API key |
 //! | base URL | [`DEFAULT_BASE_URL`] | [`openai::DEFAULT_BASE_URL`] |
-//! | extra headers | [`ACCOUNT_HEADER`], [`ORIGINATOR_HEADER`], [`BETA_HEADER`] | none |
-//! | model gate | [`serves`] | whatever the platform serves |
+//! | extra headers | `ACCOUNT_HEADER`, `ORIGINATOR_HEADER`, `BETA_HEADER` | none |
+//! | model gate | `serves` | whatever the platform serves |
 //! | default model | [`SUBSCRIPTION_DEFAULT`] | the catalog's |
 //!
 //! Every one of those rows is upstream's, and all of them come off the same
@@ -233,11 +233,11 @@ const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", 
 /// (**D476**, `seat-roster-pinned`).
 ///
 /// No upstream counterpart: `codex.ts` filters the vendor's catalog through
-/// [`serves`] and offers whatever survives, so the roster a seat browses drifts
+/// `serves` and offers whatever survives, so the roster a seat browses drifts
 /// with `models.dev`. This is the owner's own pin instead — five ids, this
 /// order, decided once and answered from the binary.
 ///
-/// **Offered is not servable, and the split is the whole point.** [`serves`]
+/// **Offered is not servable, and the split is the whole point.** `serves`
 /// stays the `codex.ts:281-292` port it always was, so a session that names
 /// `--model openai/gpt-5.4` explicitly still takes its turn; what this narrows
 /// is only what a listing *volunteers*. `gpt-5.4` and `gpt-5.4-mini` are
@@ -251,7 +251,7 @@ const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", 
 /// catalog row is consulted for one thing only, a human-readable name, and its
 /// absence costs nothing — the id stands in.
 ///
-/// Every id here has to satisfy [`serves`]: an offer this backend would then
+/// Every id here has to satisfy `serves`: an offer this backend would then
 /// refuse is a lie the listing tells, and the test below is what keeps it
 /// honest.
 pub const SEAT_ROSTER: [&str; 5] = [
@@ -271,10 +271,10 @@ pub const SEAT_ROSTER: [&str; 5] = [
 /// `gpt-5.6` is — and handing it to a subscription session produces a seat that
 /// cannot take a turn at all. A model named explicitly is never substituted:
 /// somebody who asked for `gpt-5.6` on a ChatGPT login is told what the seat
-/// serves ([`unsupported`]) rather than quietly answered by something else.
+/// serves (`unsupported`) rather than quietly answered by something else.
 ///
 /// The one this names is the model the P8 live pass measured taking a whole
-/// tool-calling turn on this backend, and it has to satisfy [`serves`] — pinned
+/// tool-calling turn on this backend, and it has to satisfy `serves` — pinned
 /// below, because a default this backend refuses is the bug this constant
 /// exists to prevent.
 pub const SUBSCRIPTION_DEFAULT: &str = "gpt-5.4";
@@ -432,7 +432,7 @@ pub struct ResponsesProvider {
 
 impl fmt::Debug for ResponsesProvider {
     /// Renders without the credential, the way every provider here does. The
-    /// base URL goes through [`shown_base_url`] for the same reason the
+    /// base URL goes through `shown_base_url` for the same reason the
     /// sibling's does: it is overridable configuration, and configuration is
     /// allowed to carry a secret in its userinfo.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -671,7 +671,7 @@ fn configured(backend: Backend) -> String {
 #[async_trait]
 impl Provider for ResponsesProvider {
     /// The backend's, not the module's: two of the three are this vendor and
-    /// one is not — see [`Backend::provider_id`] for what rides on the answer.
+    /// one is not — see `Backend::provider_id` for what rides on the answer.
     fn id(&self) -> &str {
         self.backend.provider_id()
     }

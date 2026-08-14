@@ -92,7 +92,7 @@ sixteen milliseconds.
 Press Esc while this is streaming and the turn stops inside a tenth of a second. \
 Scroll with the wheel, PageUp, or PageDown; press End to follow the tail again.";
 
-/// Streams [`REPLY`] one word at a time, or plays the script it was given.
+/// Streams `REPLY` one word at a time, or plays the script it was given.
 #[derive(Clone, Debug)]
 pub struct FakeProvider {
     chunks: Vec<String>,
@@ -112,7 +112,7 @@ pub struct FakeProvider {
 }
 
 impl Default for FakeProvider {
-    /// Plays the script [`SCRIPT_ENV`] names, or [`REPLY`] when it names none.
+    /// Plays the script [`SCRIPT_ENV`] names, or `REPLY` when it names none.
     fn default() -> Self {
         Self {
             script: setting(SCRIPT_ENV).map(PathBuf::from),

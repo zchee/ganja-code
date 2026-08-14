@@ -12,7 +12,7 @@
 //! # Two families, one table
 //!
 //! The two families spell the same three facts in opposite orders, which is
-//! the whole reason [`FAMILIES`] is a table rather than two parsers:
+//! the whole reason `FAMILIES` is a table rather than two parsers:
 //!
 //! - Anthropic Messages — `anthropic-ratelimit-<kind>-<field>`, e.g.
 //!   `anthropic-ratelimit-input-tokens-remaining`, with `reset` an RFC 3339
@@ -225,7 +225,7 @@ impl PlanWindow {
 
 /// The latest buckets one wire has seen, shared with whoever polls it.
 ///
-/// A wire holds one and hands it to [`super::open`]; the engine reads it back
+/// A wire holds one and hands it to `super::open`; the engine reads it back
 /// through [`super::Provider::rate_windows`] and
 /// [`super::Provider::plan_windows`]. Cheap to clone — every clone is the same
 /// store — so a wire's constructor can hand copies out without thinking about

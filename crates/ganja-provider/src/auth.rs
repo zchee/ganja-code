@@ -35,12 +35,12 @@
 //! That same filtering write is why the one thing ganja records *about* a
 //! credential — when its login first landed, so that selection can default to
 //! the oldest one — lives in a sidecar of its own rather than inside the
-//! entries: see [`STAMPS_FILE`], which carries the evidence.
+//! entries: see `STAMPS_FILE`, which carries the evidence.
 //!
 //! Secrets never reach a log. Key material is held in a [`SecretString`], whose
 //! own [`Debug`] is a placeholder and whose contents are wiped when the last
 //! handle drops; [`Credential`] and [`OauthCredential`] render as the last four
-//! characters of their tokens through both [`Debug`] and [`Display`], and
+//! characters of their tokens through both [`Debug`] and [`std::fmt::Display`], and
 //! nothing in this module formats a whole secret. [`OauthCredential`]'s `Debug`
 //! is hand-written for that reason: the unmodelled extras are exactly where a
 //! third party's token would land, so their *keys* are shown and their values
@@ -204,7 +204,7 @@ const STORAGE_ALIASES: &[(&str, &str)] = &[("grok", "xai")];
 /// The key `provider_id`'s credential is stored under.
 ///
 /// The identity for every provider whose name ganja and upstream agree on,
-/// which is all but the ones in [`STORAGE_ALIASES`].
+/// which is all but the ones in `STORAGE_ALIASES`.
 #[must_use]
 pub fn storage_key(provider_id: &str) -> &str {
     STORAGE_ALIASES
@@ -290,7 +290,7 @@ const ZERO_EXPIRY_NEVER: &[&str] = &[copilot::PROVIDER_ID];
 ///
 /// Either spelling of a provider lands on the same rule — ganja's name and the
 /// file's must not disagree about the same credential, which is the one way
-/// [`STORAGE_ALIASES`] could turn into a bug here.
+/// `STORAGE_ALIASES` could turn into a bug here.
 #[must_use]
 pub fn zero_expiry(provider_id: &str) -> ZeroExpiry {
     if ZERO_EXPIRY_NEVER.contains(&provider_id_for_storage_key(provider_id)) {
@@ -361,7 +361,7 @@ fn token_deadline_ms(access: &SecretString) -> Option<u64> {
 pub struct RedactedTail(String);
 
 impl RedactedTail {
-    /// Renders `secret` as a mask followed by its last [`TAIL`] characters.
+    /// Renders `secret` as a mask followed by its last `TAIL` characters.
     ///
     /// Public so that nothing outside this module has to invent its own idea of
     /// how much of a key may be shown.
@@ -404,7 +404,7 @@ impl fmt::Display for RedactedTail {
 }
 
 impl fmt::Debug for RedactedTail {
-    /// Same as [`Display`]: a redacted value that grows quotes in a debug dump
+    /// Same as [`std::fmt::Display`]: a redacted value that grows quotes in a debug dump
     /// is still redacted, and one that grows the key back is a leak.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
@@ -420,8 +420,8 @@ fn is_blank(secret: &SecretString) -> bool {
 ///
 /// The key is held in a [`SecretString`], so reading it back takes an explicit
 /// `expose_secret` — this module has four: [`RedactedTail::of_secret`],
-/// [`is_blank`] and [`token_deadline_ms`], which read a secret in order to say
-/// something *about* it rather than to use it, and [`Store::set`], which has to
+/// `is_blank` and `token_deadline_ms`, which read a secret in order to say
+/// something *about* it rather than to use it, and `Store::set`, which has to
 /// hand the plaintext to the serializer that writes it to disk — and the
 /// material is wiped when the last handle drops
 /// along every path this module controls. There is deliberately no `PartialEq`:
@@ -590,7 +590,7 @@ impl OauthCredential {
     ///   `expires_in` to compute one from.
     ///
     /// The token's own claim is **only ever a reason to renew**. Nothing here
-    /// is a trust decision — see [`token_deadline_ms`], which checks no
+    /// is a trust decision — see `token_deadline_ms`, which checks no
     /// signature — and [`needs_refresh`](Self::needs_refresh), the reading of
     /// the stored record alone, deliberately does not consult it: a forged
     /// `exp` must not be able to make a credential the store calls live look
@@ -2187,7 +2187,7 @@ pub fn store_path() -> Result<PathBuf, AuthError> {
     Ok(Store::open()?.path)
 }
 
-/// Where the login stamps live: [`STAMPS_FILE`], beside the store. Public for
+/// Where the login stamps live: `STAMPS_FILE`, beside the store. Public for
 /// the same reason [`store_path`] is — somebody clearing ganja's state, or a
 /// test arranging one, should not have to guess the name.
 ///
@@ -2204,8 +2204,8 @@ pub fn stamps_path() -> Result<PathBuf, AuthError> {
 /// named a provider.
 ///
 /// Stamped logins come first, oldest stamp leading. Logins with no stamp —
-/// stored before [`STAMPS_FILE`] existed, or by opencode, which will never
-/// write one — follow in [`UNSTAMPED_PRIORITY`]'s fixed order, and anything
+/// stored before `STAMPS_FILE` existed, or by opencode, which will never
+/// write one — follow in `UNSTAMPED_PRIORITY`'s fixed order, and anything
 /// outside that list comes last in the store's own order. Environment keys are
 /// deliberately not consulted: an exported variable is a one-shot override,
 /// not a login, and [`credential_for`]'s precedence still applies once a
@@ -2228,7 +2228,7 @@ pub fn stored_logins_oldest_first() -> Result<Vec<String>, AuthError> {
 ///
 /// Returns [`AuthError`] when the stored file exists but cannot be read,
 /// cannot be understood, or is readable by other users. A provider with no
-/// credential at all is [`Ok(None)`], not an error: choosing what to say about
+/// credential at all is `Ok(None)`, not an error: choosing what to say about
 /// it belongs to the caller.
 pub fn credential_for(provider_id: &str) -> Result<Option<Credential>, AuthError> {
     if let Some(api_key) = key_from_env(provider_id) {

@@ -8,7 +8,7 @@
 //! one wrap per entry that actually changed plus a walk over the entries the
 //! viewport crosses — never a reflow of the whole transcript. P6 fills the
 //! stage this doc reserved: an assistant text part is parsed into styled,
-//! width-independent markdown blocks by [`crate::markdown`] first, and only
+//! width-independent markdown blocks by `crate::markdown` first, and only
 //! then wrapped here. The two caches invalidate on different things — stage 1
 //! on the part's source and the theme, stage 2 on the width and the theme —
 //! which is what keeps a resize off the markdown parser and a streamed delta
@@ -332,7 +332,7 @@ impl Chat {
     /// The same append a live `MessageStarted` performs, plus the one thing a
     /// stored message can say that a live one cannot: an assistant message the
     /// store never saw finish was cut off by a crash. Both routes end in
-    /// [`Chat::push`], so a resumed transcript and a streamed one are the same
+    /// `Chat::push`, so a resumed transcript and a streamed one are the same
     /// entries built the same way — which is what lets the two replay
     /// identically.
     pub fn restore_message(&mut self, message: Message) {

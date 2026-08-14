@@ -64,7 +64,7 @@
 //! Three things are decided here rather than borrowed:
 //!
 //! - **A `tools:` list compiles to permission rules**, which is the only
-//!   tool-enable mechanism this build has ([`tool_rules`]). Claude *hides* the
+//!   tool-enable mechanism this build has (`tool_rules`). Claude *hides* the
 //!   tools an agent may not use; ganja **refuses** them — the schema still
 //!   carries them and the call comes back as refusal text the model reads,
 //!   which is the same route every other refusal here takes.

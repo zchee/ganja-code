@@ -25,7 +25,7 @@
 //!
 //! # Where plugins merge, and how
 //!
-//! [`apply`] is called from exactly one point in the config load path
+//! `apply` is called from exactly one point in the config load path
 //! (`Config::load_with`, after the file tiers merge), and merges per surface
 //! rather than feeding plugins through `Config::merge` as a fourth tier —
 //! that merge replaces a closer tier's `hooks` lists per event key, which
@@ -380,12 +380,12 @@ pub struct Contribution {
     /// Hook groups by event name, already filtered to events this build
     /// fires and handlers it can run.
     pub hooks: BTreeMap<String, Vec<HookMatcher>>,
-    /// MCP servers by their **plugin-local** name; [`apply`] namespaces them.
+    /// MCP servers by their **plugin-local** name; `apply` namespaces them.
     pub mcp: BTreeMap<String, McpServer>,
     /// The plugin's `skills/` directory, when it has one.
     pub skills_root: Option<PathBuf>,
     /// Slash commands by their **plugin-local** name, from `commands/*.md`;
-    /// [`apply`] namespaces them.
+    /// `apply` namespaces them.
     pub commands: BTreeMap<String, CommandConfig>,
     /// Agents by name, from `agents/*.md`.
     pub agents: BTreeMap<String, AgentConfig>,

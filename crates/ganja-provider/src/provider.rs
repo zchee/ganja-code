@@ -40,10 +40,10 @@
 //! mapping lives here. [`cursor`] is the exception, and says so three times
 //! over: it splits Connect envelopes rather than SSE frames, runs its own
 //! retry loop around a body that cannot be replayed, and folds events with a
-//! copy of [`events`]'s scaffolding because its duplex answers the server
+//! copy of `events`'s scaffolding because its duplex answers the server
 //! mid-body. What it does **not** exempt itself from is the credential's
-//! bounds: it sends through [`client`] and [`retry`], and its stream crosses
-//! [`shielded`] like every other wire's.
+//! bounds: it sends through `client` and [`retry`], and its stream crosses
+//! `shielded` like every other wire's.
 //!
 //! Failures are reported in one of two ways, and never as a completed turn. A
 //! request that never starts streaming fails the call to [`Provider::stream`];
@@ -56,11 +56,11 @@
 //! takes is a party that sees the key. Three things bound that set, and all
 //! three are here rather than in the individual providers:
 //!
-//! - Redirects are not followed ([`client`]). `reqwest` strips `Authorization`
+//! - Redirects are not followed (`client`). `reqwest` strips `Authorization`
 //!   across hosts but knows nothing about Anthropic's `x-api-key`, so a 3xx
 //!   from a hijacked endpoint would hand the key to whatever it names. These
 //!   are one-shot `POST`s that never legitimately redirect.
-//! - The endpoint must be `https`, or loopback ([`check_base_url`]). The base
+//! - The endpoint must be `https`, or loopback (`check_base_url`). The base
 //!   URL is environment-controlled, and plain HTTP to anywhere else puts the
 //!   key on the wire in the clear.
 //! - `reqwest` is built with its `system-proxy` feature, so `HTTPS_PROXY`,
@@ -214,7 +214,7 @@ pub struct ChatRequest {
     /// model is not offered any.
     pub tools: Vec<ToolDefinition>,
     /// The option map of the catalog effort this turn runs under, spliced
-    /// into the wire's request body by [`splice_effort`]. Empty — the shape
+    /// into the wire's request body by `splice_effort`. Empty — the shape
     /// every request had before efforts existed — means no effort, and the
     /// body is exactly the wire's own.
     pub effort_options: serde_json::Map<String, serde_json::Value>,
@@ -309,7 +309,7 @@ pub enum ProviderEvent {
     /// read, this is thinking only the wire that sealed it can, handed over so
     /// the next request can hand it back
     /// (`packages/llm/test/tool-runtime.test.ts:596-605`). It becomes a
-    /// [`PartBody::Reasoning`](crate::protocol::PartBody::Reasoning) and
+    /// [`PartBody::Reasoning`] and
     /// nothing else: no frontend renders it, and the engine never opens it.
     ///
     /// Reported only when the provider actually sent state. An item that
@@ -347,7 +347,7 @@ pub enum ProviderEvent {
     /// Deliberately not one of the three above, and the difference is the whole
     /// point: those three are a call this side has to make, and this is a report
     /// of one already made somewhere else. It becomes a
-    /// [`PartBody::ServerTool`](crate::protocol::PartBody::ServerTool) — a row a
+    /// [`PartBody::ServerTool`] — a row a
     /// person reads — and never a call the loop executes, a rule it asks
     /// permission for, or an item any request replays.
     ///
@@ -509,7 +509,7 @@ pub trait Provider: Send + Sync {
     ///
     /// The engine asks before it builds a request: a mime the wire carries is
     /// read and base64-encoded into the request's
-    /// [`PartBody::File`](crate::protocol::PartBody::File), and one it does not
+    /// [`PartBody::File`], and one it does not
     /// is degraded to the file's name in text — never sent as a block the API
     /// would refuse, never dropped, never a failed turn.
     ///
@@ -566,7 +566,7 @@ pub trait Provider: Send + Sync {
 /// they come from*, and that is [`CredentialSource`]'s business rather than this
 /// type's.
 ///
-/// The only way to read one is [`Presented::expose`], which is the single place
+/// The only way to read one is `Presented::expose`, which is the single place
 /// in this crate's provider code that calls `expose_secret`, so that a grep for
 /// either finds every place a credential leaves the type. Everything else —
 /// [`fmt::Debug`], and therefore every `tracing` field that renders a provider
@@ -1272,7 +1272,7 @@ fn replay<M: Mapper>(
 /// [`CredentialSource::Oauth`] instead, which is a different lookup because it is a
 /// different thing to look up.
 ///
-/// A store that could not be read is [`Err`], not [`Ok(None)`]: "you have no
+/// A store that could not be read is [`Err`], not `Ok(None)`: "you have no
 /// credential" and "you have one and it was refused" need different things
 /// from the person reading the message, and only the second can say what to
 /// fix. Reporting it here rather than logging it is what gets the reason in
@@ -1344,7 +1344,7 @@ pub fn configured_key(id: &str, key_env: Option<&str>) -> Result<Presented, Prov
 /// A name or a value the HTTP layer cannot encode fails at startup rather than
 /// at the first prompt. The message names the **header** and never its value:
 /// `headers` is exactly where a configured endpoint's token goes, which is
-/// also why [`check_base_url`]'s rule covers an entry that declares one.
+/// also why `check_base_url`'s rule covers an entry that declares one.
 pub fn configured_headers(
     id: &str,
     declared: &BTreeMap<String, String>,

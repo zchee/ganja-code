@@ -125,7 +125,7 @@ pub enum LoginError {
         #[source]
         source: reqwest::Error,
     },
-    /// The poll endpoint failed [`HARD_ERROR_LIMIT`] times in a row.
+    /// The poll endpoint failed `HARD_ERROR_LIMIT` times in a row.
     ///
     /// `reason` is a status or a transport report and never a response body:
     /// what a failing endpoint echoes back is nobody's to repeat, least of
@@ -317,7 +317,7 @@ impl Login {
     }
 
     /// Polls until the tokens arrive, the budget runs out, the endpoint fails
-    /// [`HARD_ERROR_LIMIT`] times in a row, or `cancel` fires.
+    /// `HARD_ERROR_LIMIT` times in a row, or `cancel` fires.
     ///
     /// The schedule is the one the constants above describe: 1s doubling to
     /// 8s, every wait clamped to what is left of the five-minute budget so

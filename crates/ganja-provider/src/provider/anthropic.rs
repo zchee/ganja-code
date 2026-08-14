@@ -10,8 +10,8 @@
 //! every future addition a breaking change.
 //!
 //! Three things a wrapper may declare about itself and nothing else may —
-//! [`AnthropicProvider::with_credential`], [`AnthropicProvider::with_base_url`]
-//! and [`AnthropicProvider::with_headers`] — so an endpoint speaking this API
+//! `AnthropicProvider::with_credential`, [`AnthropicProvider::with_base_url`]
+//! and `AnthropicProvider::with_headers` — so an endpoint speaking this API
 //! under a name a config chose is a wrapper rather than a fork. That is
 //! [`super::openai`]'s seam set, completed here for [`super::compat`]'s sake.
 
@@ -63,7 +63,7 @@ pub const API_VERSION: &str = "2023-06-01";
 /// is deliberately below what the current models will generate — their own
 /// limits are 64k and up. A ceiling that far under the model's is what keeps a
 /// single runaway reply from spending a context window, and
-/// [`AnthropicProvider::max_tokens`] lowers it further for any model whose own
+/// `AnthropicProvider::max_tokens` lowers it further for any model whose own
 /// limit is smaller.
 pub const DEFAULT_MAX_TOKENS: u32 = 32_000;
 
@@ -106,7 +106,7 @@ impl fmt::Debug for AnthropicProvider {
     ///
     /// That includes the base URL, which is allowed to carry a credential in
     /// its userinfo and is not exempt from the rule just because the credential
-    /// arrived as configuration — and [`headers`](Self::headers), which is
+    /// arrived as configuration — and `headers`, which is
     /// somewhere a configured endpoint's token fits and which is therefore
     /// rendered no more than the key is.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

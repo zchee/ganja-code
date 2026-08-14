@@ -8,7 +8,7 @@
 //! `application/connect+proto` on streaming ones), the failure of a stream
 //! arrives as an in-body EndStream frame rather than HTTP/2 trailers, and
 //! bare gRPC never reaches the application at all. The framing is
-//! hand-written in [`connect`] over the same `reqwest`/rustls stack every
+//! hand-written in `connect` over the same `reqwest`/rustls stack every
 //! other wire sends with — small enough to own, and the unary path needs no
 //! framing at all.
 //!
@@ -20,8 +20,8 @@
 //! regenerated and diffed by a drift test.
 //!
 //! **Streamed as it arrives.** The Run body is cut into Connect frames the
-//! moment the transport hands bytes over ([`connect::Splitter`]), each frame
-//! mapped onto events ([`decode::Mapping`]) and handed to the session while
+//! moment the transport hands bytes over (`connect::Splitter`), each frame
+//! mapped onto events (`decode::Mapping`) and handed to the session while
 //! the server is still talking. The request that opens the exchange retries
 //! before the first byte only — a fresh body per attempt around the shared
 //! driver, because a streamed body cannot be replayed — and a cancel
@@ -34,15 +34,15 @@
 //! waits, because the server answers a bare turn by *asking* — a mid-stream
 //! `requestContextArgs` exec it will not generate past until the client
 //! replies (the 2026-08-10 live turn hung in silence on exactly that,
-//! skipped). The reply ([`request::context_answer`]) echoes the exec ids
+//! skipped). The reply (`request::context_answer`) echoes the exec ids
 //! and carries `ChatRequest.system` on `RequestContext.cloud_rule`, the one
 //! prompt channel cursor's agent honors. The server's *other* execs are the
 //! tools it asks a client to run for it; ganja runs its tools for its own
 //! session, so those are answered with a structured refusal naming the kind
-//! ([`request::refusal_answer`], **D486**) — never run, and never left to
+//! (`request::refusal_answer`, **D486**) — never run, and never left to
 //! hang the turn. What is still deliberately not here is the
 //! conversation-state machinery that carries history and tool calls on
-//! cursor's content-addressed blob channel; [`request`]'s module docs say
+//! cursor's content-addressed blob channel; `request`'s module docs say
 //! why.
 //!
 //! The provider rides the uncataloged tier, so a session must be told which

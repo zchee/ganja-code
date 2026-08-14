@@ -41,7 +41,7 @@ pub const BUILTIN_IDS: &[&str] = &[GOPLS, RUST];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Root {
     /// The crate the file belongs to, raised to the workspace that owns the
-    /// crate when there is one. See [`rust_root`].
+    /// crate when there is one. See `rust_root`.
     Rust,
     /// The nearest `go.work`, else the nearest `go.mod`/`go.sum`, else the
     /// project directory.

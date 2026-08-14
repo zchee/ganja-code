@@ -171,7 +171,7 @@ const SEAT_NOTICE: &str =
 /// A surface that must choose between the catalog and the wire *before* it
 /// spawns anything needs this synchronously — the TUI's `/model` opens one
 /// dialog or spawns one fetch, and cannot await to find out which. Both arms
-/// are local: a name comparison, or [`openai_seat`]'s read of the environment
+/// are local: a name comparison, or `openai_seat`'s read of the environment
 /// and the credential store.
 ///
 /// A store that cannot be read answers `false` here, which sends the caller to

@@ -34,7 +34,7 @@ use super::{
 pub const DEFAULT_THEME: &str = "opencode";
 
 /// The built-in that defers to the terminal's own palette. See
-/// [`Theme::terminal`].
+/// `Theme::terminal`.
 pub const TERMINAL_THEME: &str = "terminal";
 
 /// Directory under ganja's config home holding a user's own themes.

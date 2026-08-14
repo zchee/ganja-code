@@ -17,13 +17,13 @@
 //!   `Stdio::null()` for stdin, on purpose, because nothing is ever typed at a
 //!   tool call).
 //! - Every hook matching one event runs **concurrently**, and every one of
-//!   them is awaited, each under a timeout of its own ([`DEFAULT_TIMEOUT`], or
+//!   them is awaited, each under a timeout of its own ([`crate::hook::DEFAULT_TIMEOUT`], or
 //!   whatever the entry asked for).
 //! - Exit **0** passes, and its stdout is read: a JSON object is the documented
 //!   envelope, anything else is plain text — which is context for the two
 //!   events that take it and nothing at all for the rest. Unparseable stdout
 //!   never fails a hook.
-//! - Exit **2** blocks, where blocking means something ([`HookEvent::blocking`]
+//! - Exit **2** blocks, where blocking means something ([`crate::hook::HookEvent::blocking`]
 //!   is the whole list), and its **stderr** is the sentence the model or the
 //!   person then reads.
 //! - Any other exit, a spawn that failed, and a hook killed for running too
@@ -66,7 +66,7 @@
 //!   made in the same config file, and letting one key in it silently repeal
 //!   another is not a thing this build will do.
 //! - **D459** (`hook-failures-travel-the-log`): a non-blocking failure is
-//!   reported through `tracing` and through the [`Outcome`] a fire site reads,
+//!   reported through `tracing` and through the [`crate::hook::Outcome`] a fire site reads,
 //!   not through a new protocol event — P13 defers `Event` growth by name, and
 //!   a hook that failed must not be able to fail a turn.
 

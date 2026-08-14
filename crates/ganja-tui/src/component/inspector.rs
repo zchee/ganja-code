@@ -175,7 +175,7 @@ impl Inspector {
         }
     }
 
-    /// Jumps straight to the tab at `index` in [`Tab::ALL`], the digit-key
+    /// Jumps straight to the tab at `index` in `Tab::ALL`, the digit-key
     /// shortcut. Out of range does nothing, rather than panicking on a stray
     /// key this build never binds to a fourth tab.
     pub fn select_index(&mut self, index: usize) {
