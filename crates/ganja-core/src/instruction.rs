@@ -49,6 +49,9 @@
 //!   happens (`tool::skill`'s module docs); named here because this is the file
 //!   that decides what a model is *told* it can load, and a reader who only
 //!   ever opens this one would otherwise find no trace of the reason.
+//! - **D480** — instruction files **below** the project root are walked in
+//!   lazily as the session touches files under them; the walker, the carrier
+//!   and the honest alternatives are all declared at [`nested_files`].
 //! - **`skills-block-omitted-when-there-are-none`** — upstream emits the
 //!   heading and the sentence "No skills are currently available." for a
 //!   session that has none (`skill/index.ts:321-323`). Here the whole block is
@@ -330,6 +333,220 @@ pub(crate) fn suffix_measure(suffix: &str) -> SuffixMeasure {
         instructions: suffix[environment_end..instructions_end].chars().count(),
         skills: suffix[instructions_end..].chars().count(),
     }
+}
+
+/// Upper bound on the bytes one nested instruction file may put in a prompt.
+///
+/// [`ganja_tool::truncate::MAX_CHARS`], the budget every one-shot tool result
+/// in this build is already held to, rather than a number invented here: the
+/// question "how much text may one file drop into the context window" is the
+/// same question, and answering it twice with two constants is how the two
+/// answers start to disagree.
+const NESTED_MAX: usize = crate::tool::truncate::MAX_CHARS;
+
+/// Every instruction file **below** `root` that this session's touched paths
+/// have walked past, ordered shallowest-first — closest-last, the same way the
+/// up-walk tier stacks at [`discover`] (**D480**).
+///
+/// # What a touch is, and why the walk is lazy
+///
+/// `touched` is the file paths the session has actually **opened or written**:
+/// `read`, `edit` and `write` calls that completed. A `glob` or `grep` listing
+/// is deliberately not one — it names files nobody asked to work in, and a
+/// single unanchored glob over a vendored tree would otherwise walk that whole
+/// tree's `AGENTS.md` files into the prompt. Where the signal is read from is
+/// [`crate::session::touched_files`]'s to state; this function only takes the
+/// paths.
+///
+/// Laziness is the whole design. The rejected alternative — glob `**/AGENTS.md`
+/// at startup and concatenate — costs unbounded prompt weight in a monorepo and
+/// reads a tree the user never asked about, which is the plan's third principle
+/// stated as a defect.
+///
+/// # The rules the walk keeps, and the one it bends
+///
+/// - **Below the root only.** The walk climbs from a touched file's own
+///   directory and stops *before* `root`: the root's own file, and every file
+///   between `cwd` and the root, is the up-walk tier's already
+///   ([`find_up`]), and a directory on `cwd`'s own ancestor chain is skipped
+///   for the same reason. A touched path outside the project contributes
+///   nothing at all.
+/// - **The project vocabulary.** [`PROJECT`] names, first existing name wins —
+///   so a subdirectory carrying only `CLAUDE.md` is honoured.
+/// - **The bent rule**: upstream's tier rule is that the first *name* with any
+///   match takes the whole tier, so a checkout holding both never sends both.
+///   Here the choice is made **per directory** instead. A directory below the
+///   root is its own scope, reached because work happened inside it; a
+///   tier-wide rule would let one subtree's `AGENTS.md` silently mute another
+///   subtree that spells its file `CLAUDE.md`, which is a rule about a
+///   checkout's style applied to a question about a subtree's contents.
+///
+/// Deduplicated by directory, so however many files under `sub/` are touched,
+/// `sub/AGENTS.md` is named once.
+pub(crate) fn nested_files(root: &Path, cwd: &Path, touched: &[PathBuf]) -> Vec<PathBuf> {
+    let root = resolved(root);
+    // The directories the up-walk tier already reached. Canonical, because
+    // that is what the walk below compares against.
+    let covered: BTreeSet<PathBuf> = resolved(cwd)
+        .ancestors()
+        .map(Path::to_path_buf)
+        .collect::<BTreeSet<_>>();
+
+    let mut directories = BTreeSet::new();
+    for path in touched {
+        // The *parent* is canonicalized rather than the file: a `write` names
+        // a path that may not exist yet, and a canonicalization that fails
+        // would leave an uncanonical path that never recognises the root.
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let parent = resolved(parent);
+        if !parent.starts_with(&root) {
+            continue;
+        }
+
+        for directory in parent.ancestors() {
+            if directory == root {
+                break;
+            }
+            if !covered.contains(directory) {
+                directories.insert(directory.to_path_buf());
+            }
+        }
+    }
+
+    let mut found: Vec<PathBuf> = directories
+        .iter()
+        .filter_map(|directory| {
+            PROJECT
+                .iter()
+                .map(|name| directory.join(name))
+                .find(|candidate| candidate.is_file())
+        })
+        .collect();
+
+    // Depth first, path second: a deeper file is more specific and is read
+    // last, and the tie-break keeps two unrelated subtrees in one stable order
+    // rather than in whatever order they were touched.
+    found.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+
+    found
+}
+
+/// What [`nested_files`] adds to the next request's system prompt: each file
+/// under the [`HEADER`] the up-walk tier already uses, clamped, closest-last.
+///
+/// Empty when nothing was found, which is every session that never touched a
+/// file below a directory carrying instructions of its own.
+///
+/// # The carrier, and why it is this one
+///
+/// This is appended to the **request's** system prompt at assembly time, and
+/// is not a part of the transcript. Two pins decide that:
+///
+/// - The loaded set must be **transcript-derived**, never a side map that can
+///   drift. It is derived here in the strongest possible sense: there is no
+///   set. Every request recomputes the walk from the tool calls the transcript
+///   carries, so a resumed session rebuilds it exactly, a revert that drops
+///   the touch drops the injection with it, and a re-touch brings it back.
+/// - "The event stream is complete" — a frontend applying every event holds
+///   what the next request will carry. It holds the **reference** here, which
+///   is the shape this build already uses for content resolved at send time:
+///   an `@` mention's stored part carries a path and the request carries the
+///   bytes (`PartBody::File`), and the whole `AGENTS.md` family has never been
+///   a transcript part at all — instruction files live in the system prompt,
+///   and this is an instruction file.
+///
+/// A synthetic transcript part was the alternative. It would have put
+/// instruction text into the conversation, where `/context` prices it as
+/// conversation rather than as instructions — the honesty AC the feature is
+/// held to — and where a frontend would render the file's contents as
+/// something somebody said.
+pub(crate) fn nested_suffix(root: &Path, cwd: &Path, touched: &[PathBuf]) -> String {
+    let root = resolved(root);
+
+    let mut block = String::new();
+    for path in nested_files(&root, cwd, touched) {
+        // Unreadable and empty both contribute nothing, for `suffix_from`'s
+        // reason: naming a file the model was never given is worse than
+        // silence.
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if content.is_empty() {
+            continue;
+        }
+
+        let named = relative(&root, &path);
+        let (body, clamped) = clamped(&content, &named);
+        // File names only, never content: this line exists so a prompt-weight
+        // surprise is diagnosable from a `-v` log, not so a log becomes a
+        // second copy of the repository.
+        tracing::debug!(
+            file = named.as_str(),
+            clamped,
+            "a nested instruction file joined the prompt"
+        );
+
+        block.push('\n');
+        block.push_str(HEADER);
+        block.push_str(&named);
+        block.push('\n');
+        block.push_str(&body);
+    }
+
+    block
+}
+
+/// `path` named the way a nested [`HEADER`] spells it: relative to the project
+/// root, always with `/`.
+///
+/// The up-walk tier spells its own files absolutely, because those paths are
+/// whatever route reached them. These are generated from the root every
+/// request, so naming them relatively keeps one repository's prompt the same
+/// text on every machine it is checked out on — and keeps the header short
+/// enough to read.
+fn relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// `content` held to [`NESTED_MAX`], and whether anything was cut.
+///
+/// The marker is `truncate::clamp`'s own wording — `...N bytes truncated...` —
+/// and deliberately **not** that function: a clamp there spills the full text
+/// to a file so the model can read it back, and a system prompt is recomposed
+/// on every single request, so reusing it would write one identical overflow
+/// file per request forever. The rest is already on disk at a path the header
+/// just named, so this points at that instead, which is the more honest
+/// answer anyway.
+fn clamped(content: &str, named: &str) -> (String, bool) {
+    if content.len() <= NESTED_MAX {
+        return (content.to_owned(), false);
+    }
+
+    // Back off to a character boundary rather than slicing blind: a budget in
+    // bytes must not be allowed to split a code point.
+    let mut end = NESTED_MAX;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let removed = content.len() - end;
+
+    (
+        format!(
+            "{}\n\n...{removed} bytes truncated...\nRead {named} for the rest.",
+            &content[..end]
+        ),
+        true,
+    )
 }
 
 /// What the model is told about the skills it can load, or nothing when it can
@@ -663,13 +880,17 @@ fn leap(year: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use tempfile::TempDir;
 
     use super::{
-        ANTHROPIC, DEFAULT, GPT, base_prompt, civil_date, compose, discover, environment, find_up,
-        glob, resolve_entry, skill, skills_block, suffix_from, suffix_measure, today,
+        ANTHROPIC, DEFAULT, GPT, HEADER, NESTED_MAX, base_prompt, civil_date, compose, discover,
+        environment, find_up, glob, nested_files, nested_suffix, resolve_entry, resolved, skill,
+        skills_block, suffix_from, suffix_measure, today,
     };
     use crate::config::{Config, SkillsConfig};
 
@@ -1419,5 +1640,180 @@ mod tests {
         assert_eq!(measure.environment, suffix.chars().count());
         assert_eq!(measure.instructions, 0);
         assert_eq!(measure.skills, 0);
+    }
+
+    /// The nested walk (**D480**), named the way the assertions below read it:
+    /// what a session working at `root` walks in after touching `touched`.
+    fn walked(root: &Path, touched: &[PathBuf]) -> Vec<String> {
+        nested_files(root, root, touched)
+            .iter()
+            .map(|path| under(&resolved(root), path))
+            .collect()
+    }
+
+    #[test]
+    fn touching_a_file_walks_in_every_instruction_file_between_it_and_the_root() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        let deep = root.join("sub").join("nested");
+        fs::create_dir_all(&deep).expect("the fixture tree is creatable");
+        checkout(&root);
+        plant(&root.join("AGENTS.md"), "root rules");
+        plant(&root.join("sub").join("AGENTS.md"), "sub rules");
+        plant(&deep.join("AGENTS.md"), "nested rules");
+        plant(&deep.join("file.rs"), "fn main() {}");
+
+        // Closest-last: the shallower file is read first, the deepest one
+        // last, so the most specific instructions are the freshest.
+        assert_eq!(
+            walked(&root, &[deep.join("file.rs")]),
+            vec!["sub/AGENTS.md", "sub/nested/AGENTS.md"],
+        );
+    }
+
+    /// The root's own file, and everything between the root and the working
+    /// directory, is the up-walk tier's — this walk must never name it twice.
+    #[test]
+    fn a_touch_at_the_root_walks_in_nothing() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        fs::create_dir_all(&root).expect("the fixture tree is creatable");
+        checkout(&root);
+        plant(&root.join("AGENTS.md"), "root rules");
+        plant(&root.join("main.rs"), "fn main() {}");
+
+        assert!(walked(&root, &[root.join("main.rs")]).is_empty());
+    }
+
+    #[test]
+    fn several_touches_under_one_directory_name_its_instruction_file_once() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("the fixture tree is creatable");
+        checkout(&root);
+        plant(&sub.join("AGENTS.md"), "sub rules");
+
+        assert_eq!(
+            walked(&root, &[sub.join("one.rs"), sub.join("two.rs")]),
+            vec!["sub/AGENTS.md"],
+        );
+    }
+
+    /// The bent rule, pinned: the tier-wide "first name with any match takes
+    /// everything" would let one subtree's `AGENTS.md` mute another subtree
+    /// that spells its file `CLAUDE.md`. The choice is per directory.
+    #[test]
+    fn each_directory_below_the_root_picks_its_own_first_existing_name() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        let agents = root.join("agents");
+        let claude = root.join("claude");
+        let both = root.join("both");
+        for path in [&agents, &claude, &both] {
+            fs::create_dir_all(path).expect("the fixture tree is creatable");
+        }
+        checkout(&root);
+        plant(&agents.join("AGENTS.md"), "agents rules");
+        plant(&claude.join("CLAUDE.md"), "claude rules");
+        plant(&both.join("AGENTS.md"), "both, preferred");
+        plant(&both.join("CLAUDE.md"), "both, never sent");
+
+        assert_eq!(
+            walked(
+                &root,
+                &[
+                    agents.join("a.rs"),
+                    claude.join("b.rs"),
+                    both.join("c.rs"),
+                    // A directory with no instruction file of its own
+                    // contributes nothing rather than an entry.
+                    root.join("plain").join("d.rs"),
+                ],
+            ),
+            vec!["agents/AGENTS.md", "both/AGENTS.md", "claude/CLAUDE.md"],
+        );
+    }
+
+    #[test]
+    fn a_touch_outside_the_project_walks_in_nothing() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        let outside = directory.path().join("elsewhere");
+        fs::create_dir_all(&root).expect("the fixture tree is creatable");
+        fs::create_dir_all(&outside).expect("the fixture tree is creatable");
+        checkout(&root);
+        plant(&outside.join("AGENTS.md"), "somebody else's rules");
+
+        assert!(walked(&root, &[outside.join("file.rs")]).is_empty());
+    }
+
+    /// A file the session opened before it existed — a `write` — still walks
+    /// its parents in: the walk canonicalizes the directory, never the file.
+    #[test]
+    fn a_written_path_that_does_not_exist_yet_still_walks_its_parents_in() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("the fixture tree is creatable");
+        checkout(&root);
+        plant(&sub.join("AGENTS.md"), "sub rules");
+
+        assert_eq!(
+            walked(&root, &[sub.join("brand-new.rs")]),
+            vec!["sub/AGENTS.md"],
+        );
+    }
+
+    #[test]
+    fn the_walked_in_files_are_rendered_under_the_same_header_the_up_walk_uses() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("the fixture tree is creatable");
+        checkout(&root);
+        plant(&sub.join("AGENTS.md"), "sub rules");
+
+        let block = nested_suffix(&root, &root, &[sub.join("file.rs")]);
+        assert_eq!(block, format!("\n{HEADER}sub/AGENTS.md\nsub rules"));
+    }
+
+    #[test]
+    fn a_nested_file_over_the_budget_says_how_much_was_cut_and_where_the_rest_is() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("the fixture tree is creatable");
+        checkout(&root);
+        let long = "x".repeat(NESTED_MAX * 2);
+        plant(&sub.join("AGENTS.md"), &long);
+
+        let block = nested_suffix(&root, &root, &[sub.join("file.rs")]);
+        assert!(
+            block.contains(&format!("...{NESTED_MAX} bytes truncated...")),
+            "the clamp says how much it cut"
+        );
+        assert!(
+            block.contains("Read sub/AGENTS.md for the rest."),
+            "and where the rest is: {}",
+            &block[block.len() - 120..]
+        );
+        assert!(
+            block.len() < long.len(),
+            "a clamped file is shorter than the file"
+        );
+    }
+
+    #[test]
+    fn an_unclamped_nested_file_carries_no_marker() {
+        let directory = temporary();
+        let root = directory.path().join("api");
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("the fixture tree is creatable");
+        checkout(&root);
+        plant(&sub.join("AGENTS.md"), "short enough");
+
+        let block = nested_suffix(&root, &root, &[sub.join("file.rs")]);
+        assert!(!block.contains("truncated"), "{block}");
     }
 }
