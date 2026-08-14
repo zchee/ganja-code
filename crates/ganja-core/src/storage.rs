@@ -568,12 +568,6 @@ impl Storage {
         }
     }
 
-    /// The directory this store is anchored on.
-    #[must_use]
-    pub fn root(&self) -> &PathBuf {
-        &self.inner.root
-    }
-
     /// The database file this store reads and writes.
     ///
     /// Named rather than derived by callers so the debug suffix is decided in

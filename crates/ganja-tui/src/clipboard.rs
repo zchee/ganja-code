@@ -57,7 +57,7 @@ pub enum Error {
 /// `width * height * 4` bytes.
 ///
 /// [`arboard::ImageData`]'s own shape, copied rather than reused in this
-/// trait's signature — a [`Recording`] double has no `arboard` handle to
+/// trait's signature — a `Recording` double has no `arboard` handle to
 /// borrow pixels from, so the seam needs a type independent of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image {

@@ -4277,14 +4277,6 @@ async fn flush_after(deadline: Option<Instant>) {
     }
 }
 
-/// Queues `event` for every subscriber, or breaks with the turn's report.
-///
-/// Waiting on a full lossless queue must not outlive a cancel, hence the
-/// race. A cancel that lands mid-delivery abandons it wherever it stood, so
-/// subscribers of a *cancelled* turn may differ by the one event that was in
-/// flight — and by nothing else, because the terminal events that follow
-/// travel plain sends that are never raced. A completed turn is delivered
-/// whole to everyone.
 /// Records a call's terminal state and delivers the part update — the shape
 /// the completed and failed arms share. The cancelled arm stays written out
 /// at its match site: its update travels the terminal path as a plain send,
@@ -4311,6 +4303,14 @@ async fn emit_tool_state(
     ControlFlow::Continue(())
 }
 
+/// Queues `event` for every subscriber, or breaks with the turn's report.
+///
+/// Waiting on a full lossless queue must not outlive a cancel, hence the
+/// race. A cancel that lands mid-delivery abandons it wherever it stood, so
+/// subscribers of a *cancelled* turn may differ by the one event that was in
+/// flight — and by nothing else, because the terminal events that follow
+/// travel plain sends that are never raced. A completed turn is delivered
+/// whole to everyone.
 async fn deliver(turn: &Turn, event: Event) -> ControlFlow<Option<Outcome>> {
     tokio::select! {
         biased;

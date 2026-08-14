@@ -478,8 +478,11 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
         env_roots.dirs()
     );
 
-    let env_prompt = instruction::system_prompt(&Config::default(), &cwd, "fake-1")
-        .expect("a prompt is composed");
+    // The suffix rather than the whole prompt: the base half is chosen by the
+    // model's family and says nothing about where a home is, so everything
+    // this case is about lands here.
+    let env_prompt =
+        instruction::suffix(&Config::default(), &cwd, "fake-1").expect("a prompt is composed");
     assert!(
         env_prompt.contains("the named home's instructions")
             && env_prompt.contains("<name>from-env-home</name>"),

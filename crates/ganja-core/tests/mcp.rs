@@ -249,7 +249,7 @@ async fn engine_and_servers(
         Arc::new(Registry::with_builtins()),
         permissions,
     )
-    .with_system(Some("you are a fixture".to_owned()))
+    .with_system_parts(Some("you are a fixture".to_owned()), None)
     .with_mcp(servers);
     engine.connect_mcp();
 

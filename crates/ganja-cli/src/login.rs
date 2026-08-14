@@ -595,10 +595,10 @@ fn issuer() -> Result<Option<String>> {
 
 /// `value` when it is `http://<loopback host>:<port>` and nothing else.
 ///
-/// Deliberately a shape check rather than a URL parse, and not only because
-/// this crate has no URL parser: what has to be true is that the *whole* value
-/// is an origin, so userinfo, a path, a query and a fragment are all refused by
-/// there being nowhere for them to go. A prefix match alone would accept
+/// Deliberately a shape check rather than a URL parse: what has to be true is
+/// that the *whole* value is an origin, so userinfo, a path, a query and a
+/// fragment are all refused by there being nowhere for them to go. A prefix
+/// match alone would accept
 /// `http://127.0.0.1:80@elsewhere.example`, which resolves to `elsewhere`.
 fn loopback_origin(value: &str) -> Option<&str> {
     let (host, port) = value.strip_prefix("http://")?.rsplit_once(':')?;

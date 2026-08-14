@@ -131,12 +131,6 @@ impl Deployment {
         }
     }
 
-    /// Where this deployment's requests go.
-    #[must_use]
-    pub fn api_base(&self) -> String {
-        api_base_for(self.domain())
-    }
-
     /// What gets stored as `enterpriseUrl`, which is nothing for the public
     /// deployment (`copilot.ts:301-303`).
     #[must_use]
@@ -216,8 +210,8 @@ mod tests {
                 harness::{Reply, TestClock, serve},
             },
         },
-        API_VERSION, CLIENT_ID, DEFAULT_API_BASE, Deployment, PROVIDER_ID, api_base_for,
-        credential_from, device_flow, device_flow_at, normalize_domain,
+        API_VERSION, CLIENT_ID, DEFAULT_API_BASE, Deployment, api_base_for, credential_from,
+        device_flow, device_flow_at, normalize_domain,
     };
 
     /// A token that must never render whole.
@@ -240,7 +234,7 @@ mod tests {
                 "{spelling} names company.ghe.com"
             );
             assert_eq!(
-                Deployment::enterprise(spelling).api_base(),
+                api_base_for(Deployment::enterprise(spelling).domain()),
                 "https://copilot-api.company.ghe.com",
                 "{spelling} should reach the enterprise API base"
             );
@@ -255,7 +249,7 @@ mod tests {
     #[test]
     fn the_public_deployment_reaches_githubs_own_api_base() {
         assert_eq!(Deployment::Public.domain(), "github.com");
-        assert_eq!(Deployment::Public.api_base(), DEFAULT_API_BASE);
+        assert_eq!(api_base_for(Deployment::Public.domain()), DEFAULT_API_BASE);
         assert_eq!(
             Deployment::Public.enterprise_url(),
             None,
@@ -431,8 +425,8 @@ mod tests {
             );
         }
         assert!(
-            credential.usable_access(PROVIDER_ID, u64::MAX).is_ok(),
-            "and it must stay usable at any clock, for the same reason"
+            !credential.needs_refresh(u64::MAX, 0),
+            "and at no margin at all either, for the same reason"
         );
     }
 }

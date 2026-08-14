@@ -80,9 +80,13 @@ use crate::{
     },
 };
 
-/// The permission a subagent's ruleset gets denied unless it says otherwise, so
-/// that a subagent cannot delegate its way past the depth limit even if the
-/// registry it was handed did offer the tool.
+/// The second permission a subagent's ruleset gets denied unless it says
+/// otherwise: an unattended child keeps no todo list, because nobody is
+/// reading one.
+///
+/// [`subagent_rules`] owns why both denials are appended and how an agent
+/// takes one back; the delegation half is [`TASK`], imported rather than
+/// spelled here.
 const TODOWRITE: &str = "todowrite";
 
 /// The pattern that covers every call to a permission.

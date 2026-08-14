@@ -64,14 +64,6 @@ struct Args {
 #[derive(Debug, Default)]
 pub struct TodoWriteTool;
 
-impl TodoWriteTool {
-    /// Builds the tool.
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 #[async_trait]
 impl Tool for TodoWriteTool {
     fn id(&self) -> &str {
@@ -170,7 +162,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_write_reports_the_work_that_is_left_and_hands_back_the_list() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool;
 
         let out = tool.run(todos(), &ctx()).await.expect("a list is written");
 
@@ -193,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_write_carries_only_its_own_list() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool;
 
         tool.run(todos(), &ctx()).await.expect("a list is written");
 
@@ -220,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_list_is_a_legitimate_write() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool;
         tool.run(todos(), &ctx()).await.expect("a list is written");
 
         let out = tool
@@ -238,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_status_outside_the_schema_is_refused() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool;
 
         let refused = tool
             .run(
@@ -258,7 +250,7 @@ mod tests {
 
     #[test]
     fn the_one_line_description_counts_the_work_left_in_the_call() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool;
 
         assert_eq!(tool.describe(&todos()), "3 todos");
         assert_eq!(tool.describe(&serde_json::json!({})), "0 todos");
@@ -266,7 +258,7 @@ mod tests {
 
     #[test]
     fn the_prompt_and_schema_are_what_the_model_is_given() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool;
         let schema = serde_json::to_value(tool.schema()).expect("a schema is JSON");
 
         assert_eq!(tool.id(), "todowrite");

@@ -11,7 +11,7 @@
 //! wire type, and a control frame pretending to be one would be a lie a
 //! deserializer trips over (deviation: control-frames-are-named-sse-events).
 //!
-//! The subscription is [`Engine::subscribe_droppable`], claimed in the
+//! The subscription is [`ganja_core::Engine::subscribe_droppable`], claimed in the
 //! handler **before** the response exists: registration is the atomic point
 //! after which nothing published is lost, so a client that reads the
 //! connected frame knows every later engine event is either in its stream or

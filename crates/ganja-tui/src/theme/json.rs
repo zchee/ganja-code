@@ -1,7 +1,7 @@
 //! Upstream's theme file, parsed and resolved into colors.
 //!
 //! Spec: upstream `packages/tui/src/theme/index.ts` — `ThemeJson`,
-//! `resolveTheme` and `ansiToRgba`. The dispatch in [`resolve_value`] is
+//! `resolveTheme` and `ansiToRgba`. The dispatch in [`ThemeJson::resolve_value`] is
 //! upstream's, arm for arm and in the same order, because a theme written
 //! against opencode's schema has to mean the same thing here; the port's own
 //! judgement is confined to what a *failure* does, which upstream defers to

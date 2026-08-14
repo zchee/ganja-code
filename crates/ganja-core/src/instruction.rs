@@ -3,7 +3,9 @@
 //! Spec: upstream `packages/opencode/src/session/instruction.ts` and
 //! `packages/opencode/src/session/system.ts`.
 //!
-//! Three things are concatenated, joined by a bare newline, in this order:
+//! Four things are concatenated, joined by a bare newline, in this order —
+//! five in a project that opted into memory (**D478**), whose section
+//! `suffix_from` appends last of all:
 //!
 //! 1. the base prompt for the model's family, ported verbatim from upstream's
 //!    `session/prompt/*.txt`;
@@ -14,7 +16,7 @@
 //! 4. the skills this session can load, when there are any — last, where
 //!    upstream puts them (`session/prompt.ts:1257-1268`).
 //!
-//! Which files apply is [`paths`], and the order is upstream's: the one global
+//! Which files apply is [`discover`], and the order is upstream's: the one global
 //! file, then the project's own, then whatever `instructions` in the config
 //! named. A file appears once however many routes reach it, at the position the
 //! first route put it.
@@ -152,24 +154,6 @@ pub fn base_prompt(model_id: &str) -> &'static str {
     }
 }
 
-/// The whole system prompt for a session working in `cwd` and asking
-/// `model_id`.
-///
-/// [`None`] only when the composition is empty, which it cannot be while a base
-/// prompt is compiled in — the type matches
-/// [`ChatRequest::system`](crate::provider::ChatRequest::system) so a caller
-/// does not have to know that.
-#[must_use]
-pub fn system_prompt(config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
-    compose(
-        &global_files(),
-        &skill_roots(config, cwd),
-        config,
-        cwd,
-        model_id,
-    )
-}
-
 /// Where this session's skills are looked for: ganja's own two homes, then
 /// whatever `skills.paths` named.
 ///
@@ -244,33 +228,13 @@ pub(crate) fn joined(head: Option<&str>, suffix: Option<&str>) -> Option<String>
     }
 }
 
-/// [`system_prompt`], with the global instruction candidates handed in.
+/// [`suffix`], with the global instruction candidates and the skill roots
+/// handed in.
 ///
 /// The split is what lets the tests below prove the composition without the
-/// machine running them contributing an `AGENTS.md` of its own — and the global
-/// candidates really are an input to discovery rather than something it knows.
-fn compose(
-    global: &[PathBuf],
-    roots: &skill::Roots,
-    config: &Config,
-    cwd: &Path,
-    model_id: &str,
-) -> Option<String> {
-    let base = base_prompt(model_id);
-    let tail = suffix_from(global, roots, config, cwd, model_id).unwrap_or_default();
-
-    let mut prompt = String::with_capacity(base.len() + tail.len() + 1);
-    prompt.push_str(base);
-    prompt.push('\n');
-    prompt.push_str(&tail);
-
-    (!prompt.is_empty()).then_some(prompt)
-}
-
-/// [`suffix`], with the global instruction candidates and the skill roots
-/// handed in — the same test seam [`compose`] has, for the same reason.
-///
-/// The roots are an input for a second reason the instruction candidates share:
+/// machine running them contributing an `AGENTS.md` of its own — and the
+/// global candidates really are an input to discovery rather than something it
+/// knows. The roots are an input for a second reason the candidates share:
 /// they name directories on the machine running this, so a test that composed a
 /// prompt without being able to say *which* directories would be a test whose
 /// answer depended on whose laptop it ran on.
@@ -1068,9 +1032,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ANTHROPIC, DEFAULT, GPT, HEADER, NESTED_MAX, base_prompt, civil_date, compose, discover,
-        environment, find_up, glob, nested_files, nested_suffix, resolve_entry, resolved, skill,
-        skills_block, suffix_from, suffix_measure, today,
+        ANTHROPIC, DEFAULT, GPT, HEADER, NESTED_MAX, base_prompt, civil_date, discover,
+        environment, find_up, glob, joined, nested_files, nested_suffix, resolve_entry, resolved,
+        skill, skills_block, suffix_from, suffix_measure, today,
     };
     use crate::config::{Config, SkillsConfig};
 
@@ -1341,12 +1305,19 @@ mod tests {
             instructions: vec!["docs/*.md".to_owned()],
             ..Config::default()
         };
-        let prompt = compose(
-            &[],
-            &skill::Roots::none(),
-            &config,
-            &root,
-            "claude-sonnet-5",
+        // The two halves through the joiner the engine composes with, which is
+        // what makes "the base comes first" a fact about the real seam rather
+        // than about this test's own concatenation.
+        let prompt = joined(
+            Some(base_prompt("claude-sonnet-5")),
+            suffix_from(
+                &[],
+                &skill::Roots::none(),
+                &config,
+                &root,
+                "claude-sonnet-5",
+            )
+            .as_deref(),
         )
         .expect("a prompt is composed");
 
@@ -1386,8 +1357,8 @@ mod tests {
             instructions: vec!["docs/*.md".to_owned()],
             ..Config::default()
         };
-        let prompt = compose(&[], &skill::Roots::none(), &config, &root, "fake-1")
-            .expect("a prompt is composed");
+        let prompt = suffix_from(&[], &skill::Roots::none(), &config, &root, "fake-1")
+            .expect("a prompt suffix is composed");
 
         assert!(prompt.contains("kept"));
         assert!(!prompt.contains("gone.md"), "{prompt}");

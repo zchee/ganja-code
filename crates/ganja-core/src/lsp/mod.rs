@@ -134,8 +134,12 @@ impl Lsp {
     /// Shows `path` to every server that claims it, and waits for what they
     /// then say when `wait` is set.
     ///
-    /// Never fails, and never takes longer than
-    /// [`client::DOCUMENT_WAIT_TIMEOUT`] to give up waiting.
+    /// Never fails. Two budgets bound it, and only the second is the wait:
+    /// the **first** touch of a session starts the server it needs and its
+    /// handshake is bounded by [`client::INITIALIZE_TIMEOUT`], after which
+    /// waiting for what the server says is bounded by
+    /// [`client::DOCUMENT_WAIT_TIMEOUT`]. An `edit` whose annotation awaits
+    /// this inline can therefore sit for both.
     pub async fn touch(&self, path: &Path, wait: bool) {
         if !self.contains(path) {
             return;

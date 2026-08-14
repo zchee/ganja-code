@@ -561,19 +561,6 @@ impl PermissionConfig {
             .collect()
     }
 
-    /// Whether the config asked for no rules at all.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// The parsed entries in document order, for whoever needs to see what
-    /// was written without being able to rewrite it.
-    #[must_use]
-    pub fn entries(&self) -> &[(String, RuleSet)] {
-        &self.entries
-    }
-
     /// Overlays `other`, replicating upstream's `mergeDeep` at both levels: a
     /// re-specified tool keeps its position and merges, a tool that is new is
     /// appended, and a bare action on either side replaces rather than merges.

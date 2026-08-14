@@ -187,7 +187,7 @@ fn engine(provider: Arc<ScriptedProvider>) -> Engine {
         Arc::new(Registry::with_builtins()),
         permissive(),
     )
-    .with_system(Some("the composed prompt".to_owned()))
+    .with_system_parts(Some("the composed prompt".to_owned()), None)
 }
 
 /// A script that reads `path` and then says it is done: two requests, the
@@ -477,7 +477,7 @@ async fn a_resumed_session_walks_the_same_files_in_from_the_transcript_alone() {
             permissive(),
             Storage::open(store.clone()),
         )
-        .with_system(Some("the composed prompt".to_owned()));
+        .with_system_parts(Some("the composed prompt".to_owned()), None);
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
         ask(&engine, &mut events, "look at sub/file.rs").await;
 
@@ -493,7 +493,7 @@ async fn a_resumed_session_walks_the_same_files_in_from_the_transcript_alone() {
         permissive(),
         Storage::open(store.clone()),
     )
-    .with_system(Some("the composed prompt".to_owned()));
+    .with_system_parts(Some("the composed prompt".to_owned()), None);
     engine.resume(&session).await.expect("the session resumes");
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 

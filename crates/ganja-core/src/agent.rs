@@ -30,11 +30,12 @@
 //! the two agree everywhere except on the tools ganja deliberately gates.
 //!
 //! Upstream rules naming permissions this build has no tool for — `list`,
-//! `question`, `doom_loop`, `lsp` — are not ported.
+//! `doom_loop`, `lsp` — are not ported.
 //! A rule about a tool that cannot be called decides nothing, and carrying it
-//! would suggest the tool exists. The one exception is `task`, kept on [`PLAN`]
-//! so that the agent whose point is "do not act" already denies the subagent
-//! that would act for it, the day the task tool lands. `websearch` came off
+//! would suggest the tool exists. `task` is on [`PLAN`] for the opposite
+//! reason: the agent whose point is "do not act" denies the subagent that
+//! would act for it, and `subagent.rs`'s `denies_task` reads exactly that
+//! rule. `websearch` came off
 //! that list with the tool: [`EXPLORE`] allows it, exactly as upstream's does
 //! — and both plan doors came off it with the tools behind them: the shared
 //! defaults deny `plan_exit` and `plan_enter`, [`PLAN`] alone allows the exit
@@ -104,15 +105,6 @@ pub const EXPLORE: &str = "explore";
 
 /// The subdirectory of each home an agent definition file lives in (**D482**).
 const AGENTS_SUBDIR: &str = "agents";
-
-/// The project half of ganja's own two homes, `<project root>/.ganja`.
-///
-/// Spelled here because `config`'s own constant is private to that module.
-/// Its twin is [`crate::config::default_skill_dirs`], which resolves the same
-/// pair for skills; a single shared helper is the tidier end state and is
-/// flagged for the consolidation pass rather than taken while the file tiers
-/// are landing in parallel.
-const PROJECT_HOME: &str = ".ganja";
 
 /// Every tool this build registers, which is the roster a `tools:` list is
 /// judged against.
@@ -300,22 +292,6 @@ impl Registry {
         Ok(Self { agents, default })
     }
 
-    /// A registry holding exactly `agents`, starting on the first selectable
-    /// one.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AgentError::NoneVisible`] when none of them is selectable.
-    pub fn new(agents: Vec<Agent>) -> Result<Self, AgentError> {
-        let default = agents
-            .iter()
-            .find(|agent| agent.selectable())
-            .map(|agent| agent.name.clone())
-            .ok_or(AgentError::NoneVisible)?;
-
-        Ok(Self { agents, default })
-    }
-
     /// The agent named `name`, or nothing.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Agent> {
@@ -394,9 +370,9 @@ fn builtins(config: &Config) -> Vec<Agent> {
             rules: assemble(
                 true,
                 vec![
-                    // Inert until the task tool exists, and kept anyway: the rule
-                    // that stops a planning session delegating its way into an
-                    // edit should already be there when the tool arrives.
+                    // The rule that stops a planning session delegating its way
+                    // into an edit. `subagent.rs`'s `denies_task` is what reads
+                    // it, before a child is ever spawned.
                     rule("task", GENERAL, Action::Deny),
                     // Upstream denies `edit` and then carves two exceptions for
                     // the file a plan is written to. Ganja has no plans directory
@@ -734,7 +710,9 @@ fn definition_dirs(root: &Path) -> Vec<PathBuf> {
     if let Some(home) = config_home() {
         found.push(home.join(AGENTS_SUBDIR));
     }
-    let project = root.join(PROJECT_HOME).join(AGENTS_SUBDIR);
+    let project = root
+        .join(crate::config::PROJECT_DIRECTORY)
+        .join(AGENTS_SUBDIR);
     // The two collapse into one for somebody whose project root *is* the
     // directory `config_home` landed on. Reading it twice would warn about
     // every file as a duplicate of itself.
@@ -1151,7 +1129,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Agent, AgentError, BUILD, EXPLORE, EXPLORE_PROMPT, GENERAL, PLAN, Registry};
+    use super::{AgentError, BUILD, EXPLORE, EXPLORE_PROMPT, GENERAL, PLAN, Registry};
     use crate::{
         config::{AgentConfig, AgentMode, Config, Overrides},
         permission::{Action, PermissionConfig, Permissions, Rule},
@@ -1784,23 +1762,6 @@ mod tests {
             Registry::from_dirs(&config, &[]).err(),
             Some(AgentError::NoneVisible)
         );
-    }
-
-    #[test]
-    fn a_registry_can_be_built_from_agents_alone() {
-        let agents = vec![Agent {
-            name: "solo".to_owned(),
-            description: None,
-            mode: AgentMode::Primary,
-            hidden: false,
-            prompt: Some("be brief".to_owned()),
-            model: None,
-            rules: Vec::new(),
-        }];
-
-        let registry = Registry::new(agents).expect("one selectable agent is enough");
-        assert_eq!(registry.default_agent(), "solo");
-        assert!(Registry::new(Vec::new()).is_err());
     }
 
     // ---- Agent definition files (**D482**) ------------------------------

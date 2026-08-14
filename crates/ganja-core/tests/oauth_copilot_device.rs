@@ -199,7 +199,7 @@ async fn an_enterprise_copilot_login_stores_one_token_that_never_needs_renewing(
     let deployment = copilot::Deployment::enterprise("https://company.ghe.com/");
     assert_eq!(deployment.domain(), "company.ghe.com");
     assert_eq!(
-        deployment.api_base(),
+        copilot::api_base_for(deployment.domain()),
         "https://copilot-api.company.ghe.com",
         "an enterprise deployment's requests do not go to api.githubcopilot.com"
     );
@@ -280,10 +280,8 @@ async fn an_enterprise_copilot_login_stores_one_token_that_never_needs_renewing(
             "a stored Copilot credential must never be due, and was at {now_ms}"
         );
         assert!(
-            read_back
-                .usable_access(copilot::PROVIDER_ID, now_ms)
-                .is_ok(),
-            "and must stay usable, for the same reason"
+            !read_back.needs_refresh(now_ms, 0),
+            "and must not be due at no margin either, for the same reason"
         );
     }
     assert!(

@@ -12,8 +12,9 @@
 //! **One crate, not three.** Auth and the catalog fold in here rather than
 //! standing on their own, and the reason is the direction of the traffic
 //! between them. The auth→provider edge is a single function
-//! ([`provider::reachable_in_the_clear`], consumed by the OpenAI login's
-//! redirect check), while the provider→auth edge is some forty-odd references
+//! ([`provider::reachable_in_the_clear`], consumed by both browser logins'
+//! endpoint checks — `auth/openai.rs`'s redirect check and `auth/mcp_oauth.rs`
+//! at two of its own), while the provider→auth edge is some forty-odd references
 //! reaching per-provider submodule internals — every wire resolves its
 //! credential through [`auth::Refresher`], and three of them implement
 //! [`auth::RefreshOauth`] against their vendor's token endpoint. The catalog
@@ -25,10 +26,11 @@
 //!
 //! Three modules, each documented where it lives:
 //!
-//! - [`provider`] — the [`Provider`](provider::Provider) trait, the four wires
-//!   behind it (Anthropic Messages, OpenAI Responses, the chat-completions
-//!   endpoint grok and Copilot ride, and the fake one), the SSE splitter they
-//!   share, the retry driver, and the credential seam
+//! - [`provider`] — the [`Provider`](provider::Provider) trait, the five
+//!   request/response mappings behind it (Anthropic Messages, OpenAI
+//!   Responses, the chat-completions endpoint grok and Copilot ride, the
+//!   Connect wire cursor's agent backend speaks, and the fake one), the SSE
+//!   splitter the first three share, the retry driver, and the credential seam
 //!   ([`Presented`](provider::Presented),
 //!   [`CredentialSource`](provider::CredentialSource), and the `Resolved` a
 //!   request carries, which stays inside).

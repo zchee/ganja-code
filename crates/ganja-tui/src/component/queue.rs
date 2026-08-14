@@ -57,6 +57,7 @@ pub struct Entry {
 impl Entry {
     /// Whether this entry is waiting on the engine rather than on the next
     /// idle moment.
+    #[cfg(test)]
     #[must_use]
     pub fn is_steered(&self) -> bool {
         self.steered
