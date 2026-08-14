@@ -66,7 +66,7 @@ use crate::{
     auth::{self, RefreshOauth},
     provider::{
         ChatRequest, CredentialSource, Presented, Provider, ProviderError, ProviderEvent,
-        check_base_url, client, is_terminal, retry, shown_base_url,
+        check_base_url, client, endpoint, is_terminal, retry, shielded, shown_base_url,
     },
 };
 
@@ -316,14 +316,29 @@ impl CursorWire {
             }
         };
 
-        Ok(events(
-            response.bytes_stream().boxed(),
-            cancel,
-            Duplex {
-                answers,
-                system: request.system.clone(),
-                blobs: HashMap::new(),
-            },
+        // Read before the body is taken, so the failures below are logged
+        // against the endpoint they came from. No redirect was followed to
+        // get here — the client refuses them — so this is the URL the
+        // request was built with.
+        let endpoint = endpoint(response.url());
+
+        // This wire opens its own request rather than riding the shared
+        // `open`, so it has to join `shielded` by hand: every failure it
+        // reports arrives in-body, mapped by a decoder that holds no
+        // `Presented`, and a server that echoes the token it rejected
+        // would otherwise put it on the screen and in the log.
+        Ok(shielded(
+            events(
+                response.bytes_stream().boxed(),
+                cancel,
+                Duplex {
+                    answers,
+                    system: request.system.clone(),
+                    blobs: HashMap::new(),
+                },
+            ),
+            presented,
+            endpoint,
         ))
     }
 

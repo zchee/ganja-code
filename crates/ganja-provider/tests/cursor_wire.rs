@@ -860,6 +860,41 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         "the echo is masked rather than dropped: {rendered}"
     );
 
+    // ── An in-body verdict echoing the credential ────────────────────────
+    // The same echo, arriving the way this wire's failures actually arrive:
+    // inside a 200, as an EndStream verdict carrying the server's own text
+    // verbatim. The HTTP refusal above is masked by `retry::refusal`, which
+    // never sees this frame — so the mid-stream seam has to mask it too, or
+    // the one wire whose failures are all in-body is the one wire that
+    // reports a credential back to the screen.
+    endpoint.forget();
+    endpoint.answers_with(Reply::ok(
+        "application/connect+proto",
+        frame(
+            END_STREAM,
+            format!(
+                r#"{{"error":{{"code":"unauthenticated","message":"bad token {ACCESS}, go away"}}}}"#
+            )
+            .as_bytes(),
+        ),
+    ));
+
+    let events: Vec<ProviderEvent> = wire
+        .stream(request(), CancellationToken::new())
+        .await
+        .expect("the exchange opens on a 200")
+        .collect()
+        .await;
+    let [ProviderEvent::Failed(echoed)] = events.as_slice() else {
+        panic!("an in-body verdict fails the turn in-stream: {events:?}");
+    };
+    let rendered = format!("{echoed} / {echoed:?}");
+    assert!(!rendered.contains(ACCESS), "{rendered}");
+    assert!(
+        rendered.contains("[redacted]"),
+        "the echo is masked rather than dropped: {rendered}"
+    );
+
     // ── A redirect is refused where it stands ────────────────────────────
     // A 3xx is an instruction to send the request — and its bearer token —
     // somewhere else. `.invalid` never resolves, so a followed redirect
