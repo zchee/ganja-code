@@ -20,6 +20,15 @@
 //! pair and separate `4% —` counter. Ganja keeps its three tabs rather than
 //! Codex's single view — the divergence the paragraph above already named.
 //!
+//! The overlay's **paint** is Codex's too, pinned by a third screenshot
+//! (2026-08-15): monochrome — body and banner in the theme's own text color
+//! on the terminal's own background, the active tab and the token table's
+//! head told by bold against dim, never by the accent. The accent and panel
+//! slots retired from this surface on purpose: a theme whose accent is a
+//! color (claude.json's purple) or whose panel is a gray was repainting an
+//! overlay whose whole reference is white-on-black, and no theme schema slot
+//! exists that could scope a choice to this surface alone.
+//!
 //! A view, not a mode: nothing here pauses a running turn, and every
 //! [`Inspector::render`] call re-reads what `App` hands it rather than a
 //! snapshot taken when the overlay opened — the state itself (the raw-log
@@ -33,6 +42,7 @@ use ganja_protocol::{Event as CoreEvent, MessageId, Usage};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Modifier,
     text::{Line, Span, Text},
     widgets::{Clear, Paragraph, Widget as _},
 };
@@ -264,7 +274,7 @@ impl Inspector {
         ));
 
         Paragraph::new(Text::from(lines))
-            .style(theme.fg.patch(theme.background_panel))
+            .style(theme.fg.patch(theme.background))
             .render(area, buffer);
     }
 }
@@ -309,7 +319,7 @@ fn banner_line(active: Tab, theme: &Theme, width: usize) -> Line<'static> {
         banner.push_str(" /");
     }
 
-    Line::styled(clip(&banner, width), theme.accent)
+    Line::styled(clip(&banner, width), theme.fg)
 }
 
 /// The strip naming all three tabs, the active one picked out.
@@ -320,7 +330,7 @@ fn tab_strip(active: Tab, theme: &Theme) -> Line<'static> {
             spans.push(Span::raw("   "));
         }
         let style = if *tab == active {
-            theme.accent
+            theme.fg.add_modifier(Modifier::BOLD)
         } else {
             theme.dim
         };
@@ -399,7 +409,7 @@ fn token_lines(usages: &VecDeque<TurnUsage>, totals: Totals, theme: &Theme) -> V
             "{:<ID_WIDTH$} {:<MODEL_WIDTH$} {:>COUNT_WIDTH$} {:>COUNT_WIDTH$} {:>COUNT_WIDTH$} {:>COUNT_WIDTH$} {:>COUNT_WIDTH$} {:>COST_WIDTH$}",
             "turn", "model", "in", "out", "reasoning", "cache-r", "cache-w", "cost",
         ),
-        theme.accent,
+        theme.fg.add_modifier(Modifier::BOLD),
     )];
 
     for row in usages {
@@ -422,7 +432,7 @@ fn token_lines(usages: &VecDeque<TurnUsage>, totals: Totals, theme: &Theme) -> V
     lines.push(Line::raw(String::new()));
     lines.push(Line::styled(
         format!("{:<ID_WIDTH$} {}", "totals", totals.segment()),
-        theme.accent,
+        theme.fg.add_modifier(Modifier::BOLD),
     ));
 
     lines
