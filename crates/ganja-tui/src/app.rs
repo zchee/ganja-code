@@ -6624,6 +6624,50 @@ mod tests {
         insta::assert_snapshot!(screen(&terminal));
     }
 
+    /// The read row the user pinned by screenshot: the path and the range it
+    /// asked for on the header, a count as the whole of the result, and none
+    /// of the envelope the tool writes for the model.
+    #[test]
+    fn snapshot_read_row() {
+        let mut app = app();
+        let mut message = Message::assistant("canned");
+        message.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "read".to_owned(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({
+                        "filePath": "/repo/crates/ganja-tui/src/component/chat.rs",
+                        "offset": 1158,
+                        "limit": 60,
+                    }),
+                    output: "<path>/repo/crates/ganja-tui/src/component/chat.rs</path>\n\
+                             <type>file</type>\n<content>\n1158: fn wrap() {}\n</content>"
+                        .to_owned(),
+                    title: "crates/ganja-tui/src/component/chat.rs".to_owned(),
+                    metadata: serde_json::json!({
+                        "display": {
+                            "type": "file",
+                            "path": "/repo/crates/ganja-tui/src/component/chat.rs",
+                            "lineStart": 1158,
+                            "lineEnd": 1217,
+                            "totalLines": 2500,
+                        },
+                    }),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        app.chat.start_message(message);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
     #[test]
     fn snapshot_tool_pending() {
         let mut app = app();

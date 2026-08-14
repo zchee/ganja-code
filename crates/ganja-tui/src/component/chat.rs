@@ -1020,6 +1020,17 @@ const TOOL_PREVIEW_LINES: usize = 4;
 /// inline row rather than as a block of output.
 const TASK_TOOL: &str = "task";
 
+/// The tool whose result is a count rather than a preview (**D487**, pinned by
+/// the user's screenshot).
+///
+/// Every other settled call shows some of what it produced. A read shows how
+/// much of the file it took and nothing else: the content is what the *model*
+/// asked for, and a person reading the transcript does not need the file read
+/// back to them through a four-line window — least of all wrapped in the
+/// envelope the tool writes for the model's benefit. The whole of it is one
+/// Ctrl+T away, which is where a reader who wants it goes.
+const READ_TOOL: &str = "read";
+
 /// A call's arguments, condensed to the one line its header has room for:
 /// `key: "value"` pairs, the recognizable fields first, capped at
 /// [`HEADER_ARGS`] of them.
@@ -1093,10 +1104,64 @@ fn quoted(text: &str) -> String {
 /// is a name rather than a heading.
 fn tool_heading(tool: &str, input: Option<&serde_json::Value>) -> String {
     let name = titlecase(tool);
-    match input.and_then(derive_args) {
+    let args = match tool {
+        READ_TOOL => input.and_then(read_args),
+        _ => input.and_then(derive_args),
+    };
+
+    match args {
         Some(args) => format!("{name}({args})"),
         None => name,
     }
+}
+
+/// A read call's arguments as the screenshot draws them: the path bare rather
+/// than as a `key: "value"` pair, and the lines it asked for beside it.
+///
+/// Read off the **input** and never off a settled call's metadata, which is
+/// what keeps a running read and the same read once it lands on one line: the
+/// header is a statement about what was asked, and what was asked does not
+/// change when the answer arrives.
+///
+/// The range wants both ends to be one. An `offset` with no `limit` is a read
+/// from a line to wherever the file stops, which nothing here can name before
+/// the file is read and which is not a range in the sense the row means.
+fn read_args(input: &serde_json::Value) -> Option<String> {
+    let path = field(input, "filePath")?;
+    let offset = input.get("offset").and_then(serde_json::Value::as_u64);
+    let limit = input
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|limit| *limit > 0);
+
+    match (offset, limit) {
+        (Some(offset), Some(limit)) => Some(format!(
+            "{path} \u{b7} lines {offset}-{last}",
+            last = offset.saturating_add(limit).saturating_sub(1)
+        )),
+        _ => Some(path.to_owned()),
+    }
+}
+
+/// How many lines a settled read actually took, as its own `display` block
+/// recorded them.
+///
+/// [`None`] for everything that is not a read **of a file** — a directory
+/// listing, a PDF, a refusal — each of which keeps the rendering every other
+/// tool's result has, because a count of lines is not what any of them did.
+fn lines_read(metadata: &serde_json::Value) -> Option<u64> {
+    let display = metadata.get("display")?;
+    if field(display, "type") != Some("file") {
+        return None;
+    }
+
+    let start = display
+        .get("lineStart")
+        .and_then(serde_json::Value::as_u64)?;
+    let end = display.get("lineEnd").and_then(serde_json::Value::as_u64)?;
+
+    // An empty file reports an end before its start, and read nothing.
+    Some(if end < start { 0 } else { end - start + 1 })
 }
 
 /// The rows a result lays out as: the first behind the `⎿` when nothing has
@@ -1223,6 +1288,22 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
             ..
         } => {
             let mut rows = vec![Row::new(BULLET, tool_heading(tool, Some(input)), theme.fg)];
+            // A read answers with a count and stops there; see [`READ_TOOL`].
+            if tool == READ_TOOL
+                && let Some(read) = lines_read(metadata)
+            {
+                rows.push(Row::new(
+                    RESULT,
+                    format!(
+                        "Read {read} line{plural}",
+                        plural = if read == 1 { "" } else { "s" }
+                    ),
+                    theme.dim,
+                ));
+
+                return rows;
+            }
+
             // What the tool itself called the work it did. A tool that named
             // nothing leaves the marker to the preview rather than drawing an
             // empty row above it.
@@ -1782,11 +1863,11 @@ mod tests {
             id: PartId::from("prt_1".to_owned()),
             body: PartBody::Tool {
                 call_id: "call_1".to_owned(),
-                tool: "read".to_owned(),
+                tool: "grep".to_owned(),
                 state: ToolState::Completed {
-                    input: serde_json::json!({"filePath": "a.rs"}),
+                    input: serde_json::json!({"pattern": "fn main"}),
                     output: "one\ntwo\nthree\nfour\nfive\nsix".to_owned(),
-                    title: "a.rs".to_owned(),
+                    title: "6 matches".to_owned(),
                     metadata: serde_json::json!({}),
                     started: 0,
                     completed: 1,
@@ -1805,8 +1886,8 @@ mod tests {
         assert_eq!(
             drawn,
             vec![
-                "\u{25cf} Read(filePath: \"a.rs\")",
-                "  \u{23bf} a.rs",
+                "\u{25cf} Grep(pattern: \"fn main\")",
+                "  \u{23bf} 6 matches",
                 "    one",
                 "    two",
                 "    three",
@@ -1814,6 +1895,169 @@ mod tests {
                 "    \u{2026} +2 lines (ctrl+t to expand)",
             ],
             "got {lines:?}"
+        );
+    }
+
+    /// A settled `read`, as the screenshot pins it: the path bare and absolute
+    /// on the header, and a count as the whole of the result — no preview, and
+    /// none of the envelope the tool writes for the model.
+    #[test]
+    fn a_settled_read_is_a_path_and_a_count_and_nothing_else() {
+        let lines = tool_call(
+            "read",
+            ToolState::Completed {
+                input: serde_json::json!({"filePath": "/repo/src/lib.rs"}),
+                output: "<path>/repo/src/lib.rs</path>\n<content>\n1: fn main() {}\n</content>"
+                    .to_owned(),
+                title: "src/lib.rs".to_owned(),
+                metadata: serde_json::json!({
+                    "display": {
+                        "type": "file",
+                        "path": "/repo/src/lib.rs",
+                        "lineStart": 1,
+                        "lineEnd": 77,
+                        "totalLines": 77,
+                    },
+                }),
+                started: 0,
+                completed: 1,
+            },
+        );
+        let drawn: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec![
+                "\u{25cf} Read(/repo/src/lib.rs)",
+                "  \u{23bf} Read 77 lines"
+            ],
+            "got {lines:?}"
+        );
+    }
+
+    /// A read that asked for a range says so, and says it the same way before
+    /// and after the answer arrives — the header is about what was asked.
+    #[test]
+    fn a_read_of_a_range_names_it_and_names_it_the_same_while_running() {
+        let input = serde_json::json!({
+            "filePath": "/repo/src/lib.rs",
+            "offset": 1158,
+            "limit": 60,
+        });
+        let running = tool_call(
+            "read",
+            ToolState::Running {
+                input: input.clone(),
+                metadata: serde_json::Value::Null,
+                started: 0,
+            },
+        );
+        let settled = tool_call(
+            "read",
+            ToolState::Completed {
+                input,
+                output: "the envelope".to_owned(),
+                title: "src/lib.rs".to_owned(),
+                metadata: serde_json::json!({
+                    "display": {
+                        "type": "file",
+                        "path": "/repo/src/lib.rs",
+                        "lineStart": 1158,
+                        "lineEnd": 1217,
+                    },
+                }),
+                started: 0,
+                completed: 1,
+            },
+        );
+
+        let header = |lines: &[String]| {
+            lines
+                .iter()
+                .find(|line| !line.is_empty())
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            header(&running),
+            "\u{25cf} Read(/repo/src/lib.rs \u{b7} lines 1158-1217)"
+        );
+        assert_eq!(header(&running), header(&settled));
+        assert!(
+            settled
+                .iter()
+                .any(|line| line == "  \u{23bf} Read 60 lines"),
+            "got {settled:?}"
+        );
+        assert!(
+            !settled.iter().any(|line| line.contains("envelope")),
+            "the tool's output is the model's, not the transcript's: {settled:?}"
+        );
+    }
+
+    /// An open-ended read is not a range: an `offset` with no `limit` stops
+    /// wherever the file does, which nothing can name before it is read.
+    #[test]
+    fn a_read_from_a_line_to_the_end_of_the_file_claims_no_range() {
+        let lines = tool_call(
+            "read",
+            ToolState::Running {
+                input: serde_json::json!({"filePath": "/repo/a.rs", "offset": 40}),
+                metadata: serde_json::Value::Null,
+                started: 0,
+            },
+        );
+
+        assert!(
+            lines.iter().any(|line| line == "\u{25cf} Read(/repo/a.rs)"),
+            "got {lines:?}"
+        );
+    }
+
+    /// The count is of what was read, so an empty file reports none — and a
+    /// read that is not of a file at all keeps the rendering every other tool
+    /// has, because a line count is not what it did.
+    #[test]
+    fn a_read_that_is_not_of_a_files_lines_keeps_the_ordinary_shape() {
+        let empty = tool_call(
+            "read",
+            ToolState::Completed {
+                input: serde_json::json!({"filePath": "/repo/empty.rs"}),
+                output: String::new(),
+                title: "empty.rs".to_owned(),
+                metadata: serde_json::json!({
+                    "display": {"type": "file", "lineStart": 1, "lineEnd": 0},
+                }),
+                started: 0,
+                completed: 1,
+            },
+        );
+        assert!(
+            empty.iter().any(|line| line == "  \u{23bf} Read 0 lines"),
+            "got {empty:?}"
+        );
+
+        let listing = tool_call(
+            "read",
+            ToolState::Completed {
+                input: serde_json::json!({"filePath": "/repo/src"}),
+                output: "lib.rs\nmain.rs".to_owned(),
+                title: "src".to_owned(),
+                metadata: serde_json::json!({
+                    "display": {"type": "directory", "path": "/repo/src"},
+                }),
+                started: 0,
+                completed: 1,
+            },
+        );
+        assert!(
+            listing.iter().any(|line| line == "  \u{23bf} src")
+                && listing.iter().any(|line| line == "    lib.rs"),
+            "a directory listing is still shown, got {listing:?}"
         );
     }
 
@@ -1986,11 +2230,11 @@ mod tests {
             id: PartId::from("prt_1".to_owned()),
             body: PartBody::Tool {
                 call_id: "call_1".to_owned(),
-                tool: "read".to_owned(),
+                tool: "grep".to_owned(),
                 state: ToolState::Completed {
-                    input: serde_json::json!({"filePath": "a.rs"}),
+                    input: serde_json::json!({"pattern": "fn main"}),
                     output: "one\ntwo\nthree\nfour\nfive".to_owned(),
-                    title: "a.rs".to_owned(),
+                    title: "5 matches".to_owned(),
                     metadata: serde_json::json!({}),
                     started: 0,
                     completed: 1,
@@ -2004,7 +2248,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("\u{25cf} Read(filePath: \"a.rs\")")),
+                .any(|line| line.contains("\u{25cf} Grep(pattern: \"fn main\")")),
             "got {lines:?}"
         );
         assert!(
@@ -2322,7 +2566,7 @@ mod tests {
 
         assert_eq!(
             drawn,
-            vec![&"\u{25cf} Read(filePath: \"a.rs\")".to_owned()],
+            vec![&"\u{25cf} Read(a.rs)".to_owned()],
             "got {lines:?}"
         );
     }
