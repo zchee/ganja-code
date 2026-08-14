@@ -451,12 +451,13 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
             // `StepStart` was consumed as the boundary this step was cut at.
             //
             // Sealed reasoning belongs to the wire that sealed it, and chat
-            // completions has no item for one; see the same arm in
-            // `anthropic.rs`.
+            // completions has no item for one; readable thinking is rendered
+            // rather than replayed. See the same arm in `anthropic.rs`.
             PartBody::File { .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
+            | PartBody::ReasoningText { .. }
             | PartBody::Reasoning { .. } => {}
         }
     }

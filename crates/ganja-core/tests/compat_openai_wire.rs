@@ -24,7 +24,7 @@ use ganja_core::{
     Engine,
     config::{Config, ProviderConfig},
     permission::Permissions,
-    protocol::{Command, Event, FinishReason},
+    protocol::{Command, Event, FinishReason, PartBody, PartId},
     provider::{self, Dialect},
     tool::Registry,
 };
@@ -154,11 +154,27 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
         .await
         .expect("an idle engine accepts a prompt");
 
+    // Told apart by the part each fragment grows: this endpoint streams a
+    // thought beside the reply, and the two reach the frontend as two parts
+    // rather than as one run-together string.
     let mut streamed = String::new();
+    let mut thought = String::new();
+    let mut thoughts: Vec<PartId> = Vec::new();
     let mut finish = None;
     while let Some(event) = events.next().await {
         match event {
-            Event::PartDelta { delta, .. } => streamed.push_str(&delta),
+            Event::PartStarted { part, .. } => {
+                if matches!(part.body, PartBody::ReasoningText { .. }) {
+                    thoughts.push(part.id);
+                }
+            }
+            Event::PartDelta { part_id, delta, .. } => {
+                if thoughts.contains(&part_id) {
+                    thought.push_str(&delta);
+                } else {
+                    streamed.push_str(&delta);
+                }
+            }
             Event::MessageFinished { reason, error, .. } => {
                 finish = Some((reason, error));
                 break;
@@ -172,6 +188,10 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
         "a configured endpoint takes a whole turn like any other"
     );
     assert_eq!(streamed, "Hello, world!");
+    assert_eq!(
+        thought, "A greeting is enough.",
+        "the thought arrives as its own part rather than run into the reply"
+    );
 
     let request = seen.await.expect("the endpoint answered");
     let head = request

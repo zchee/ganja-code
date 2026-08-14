@@ -114,6 +114,9 @@ fn shape(event: &Event) -> String {
             // provider's sealed bytes is unreadable, and this file's whole
             // output is meant to be read.
             PartBody::Reasoning { item, .. } => format!("part:reasoning:{item}"),
+            // Opened empty and grown by deltas, the way a text part is, so the
+            // line names the kind and the deltas carry the words.
+            PartBody::ReasoningText { .. } => "part:reasoning_text".to_owned(),
         },
         Event::PartDelta { delta, .. } => format!("delta:{delta}"),
         Event::PartUpdated { part, .. } => match &part.body {

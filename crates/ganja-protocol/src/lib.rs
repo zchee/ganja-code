@@ -361,6 +361,45 @@ pub enum PartBody {
         /// What this request cost, as the provider reported it.
         usage: Usage,
     },
+    /// The model's own thinking, in words a person can read.
+    ///
+    /// Spec: upstream `session/message-v2.ts:362-376`, where a `reasoning` part
+    /// carries `text` beside the provider metadata that signs it. **Ganja
+    /// splits what upstream fuses**: the readable half is this variant, the
+    /// sealed half is [`PartBody::Reasoning`]. The split is what makes the next
+    /// rule expressible.
+    ///
+    /// # Display-only, and why the split buys that
+    ///
+    /// This part is **never request-affecting**. Upstream replays its reasoning
+    /// part into the next request; ganja replays the sealed blob instead, which
+    /// is the half a provider actually asked to have handed back. So every wire
+    /// drops one of these when it encodes a request, and losing one costs a
+    /// reader some lines on a screen and costs the model nothing — the ordinary
+    /// shape of loss that every variant but [`PartBody::Reasoning`] has.
+    ///
+    /// It is deliberately **outside [`Part::as_text`]**, which means the reply
+    /// text and only the reply text: that accessor titles a rewind checkpoint
+    /// and answers `/copy --message`, and thinking doing either would be the
+    /// model's scratch paper standing in for its answer. [`Part::as_reasoning`]
+    /// is how a caller that wants this asks for it, by name.
+    ///
+    /// # What an older build does with one
+    ///
+    /// The tag is `reasoning_text`, which keeps the [`REASONING_TAG`] prefix
+    /// the variant below makes a contract of. A build too old to decode it
+    /// therefore takes that contract's reader arm — `ganja-core`'s storage puts
+    /// a stateless [`PartBody::Reasoning`] in its place and warns — which is
+    /// that contract working as designed rather than a fault: the marker is
+    /// never sent, so nothing downstream is harmed. The one imprecision is that
+    /// the old build's warning says the next request lost reasoning for that
+    /// step, where in truth only a rendered line was lost. Nothing in a newer
+    /// build can reword a message an older one prints; it is recorded here
+    /// because the row that provokes it is defined here.
+    ReasoningText {
+        /// Everything accumulated so far, grown by the deltas that stream it.
+        text: String,
+    },
     /// The model's own thinking, as the provider sealed it, kept so the next
     /// request can hand it back.
     ///
@@ -368,8 +407,10 @@ pub enum PartBody {
     /// asked to keep no state of its own (`store: false`) is handed its
     /// previous thinking as an opaque blob the client returns verbatim; the
     /// blob is the provider's, and this part is the envelope it travels in.
-    /// Nothing renders it — there is no reasoning *text* part in this build —
-    /// so a frontend meeting one has nothing to draw.
+    /// Nothing renders it: a frontend meeting one has nothing to draw, because
+    /// what is *in* it is bytes only the sealing wire can open. Thinking a
+    /// person can read travels beside it as [`PartBody::ReasoningText`], and
+    /// the two are independent — a wire may send either, both or neither.
     ///
     /// # The opacity contract, and what a build that cannot read one must do
     ///
@@ -554,6 +595,18 @@ impl Part {
         }
     }
 
+    /// Builds a readable-thinking part with a fresh id.
+    ///
+    /// Opened empty and grown by the deltas that stream it, the way a reply's
+    /// own text part is.
+    #[must_use]
+    pub fn reasoning_text(text: impl Into<String>) -> Self {
+        Self {
+            id: PartId::ascending(),
+            body: PartBody::ReasoningText { text: text.into() },
+        }
+    }
+
     /// Builds a reasoning part with a fresh id, carrying the state `provider`
     /// sealed under its own `item` id.
     ///
@@ -576,7 +629,12 @@ impl Part {
         }
     }
 
-    /// The text this part carries, or [`None`] when it carries something else.
+    /// The **reply** text this part carries, or [`None`] when it carries
+    /// something else.
+    ///
+    /// Deliberately not thinking: this is what titles a rewind checkpoint and
+    /// what the copy surfaces read, and the model's scratch paper is not its
+    /// answer. [`Part::as_reasoning`] is the door to the other one.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match &self.body {
@@ -586,14 +644,52 @@ impl Part {
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
+            | PartBody::ReasoningText { .. }
             | PartBody::Reasoning { .. } => None,
         }
     }
 
-    /// The text this part carries, for accumulating streamed fragments.
+    /// The reply text this part carries, for accumulating streamed fragments.
     pub fn as_text_mut(&mut self) -> Option<&mut String> {
         match &mut self.body {
             PartBody::Text { text } => Some(text),
+            PartBody::Tool { .. }
+            | PartBody::File { .. }
+            | PartBody::StepStart
+            | PartBody::StepFinish { .. }
+            | PartBody::Patch { .. }
+            | PartBody::ReasoningText { .. }
+            | PartBody::Reasoning { .. } => None,
+        }
+    }
+
+    /// The **thinking** this part carries in the clear, or [`None`] when it
+    /// carries something else — sealed reasoning included, which is bytes
+    /// rather than words.
+    #[must_use]
+    pub fn as_reasoning(&self) -> Option<&str> {
+        match &self.body {
+            PartBody::ReasoningText { text } => Some(text),
+            PartBody::Text { .. }
+            | PartBody::Tool { .. }
+            | PartBody::File { .. }
+            | PartBody::StepStart
+            | PartBody::StepFinish { .. }
+            | PartBody::Patch { .. }
+            | PartBody::Reasoning { .. } => None,
+        }
+    }
+
+    /// The text an [`Event::PartDelta`] for this part appends to, whichever
+    /// kind of text it is.
+    ///
+    /// The one accessor that spans both, because the one caller that needs it —
+    /// a frontend applying an event stream — is told a part's id and a fragment
+    /// and is not told which of the two it is growing. Everything that *does*
+    /// know reaches for the accessor that names what it means.
+    pub fn streamed_mut(&mut self) -> Option<&mut String> {
+        match &mut self.body {
+            PartBody::Text { text } | PartBody::ReasoningText { text } => Some(text),
             PartBody::Tool { .. }
             | PartBody::File { .. }
             | PartBody::StepStart
@@ -691,6 +787,12 @@ impl Message {
     /// would otherwise enter the history as a message whose only content is
     /// state the model cannot be shown, and every later request would carry
     /// it.
+    ///
+    /// [`PartBody::ReasoningText`] is out for the same reason arrived at from
+    /// the other side: no wire sends it, so a message holding nothing else is
+    /// one every later request would carry as an assistant turn that said
+    /// nothing at all. That it is readable on screen does not make it
+    /// something the model was told.
     #[must_use]
     pub fn has_content(&self) -> bool {
         self.parts.iter().any(|part| match &part.body {
@@ -699,6 +801,7 @@ impl Message {
             PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
+            | PartBody::ReasoningText { .. }
             | PartBody::Reasoning { .. } => false,
         })
     }
@@ -2494,6 +2597,74 @@ mod tests {
             "the reserved prefix is what a decoder that cannot read the rest \
              still matches on: {encoded}"
         );
+    }
+
+    /// The readable half honors the same contract, which is the whole of what
+    /// makes it safe to add: a build too old to decode one still recognizes
+    /// the record as reasoning and leaves storage's marker in its place rather
+    /// than dropping the row without a word.
+    #[test]
+    fn readable_thinking_keeps_the_reserved_prefix_too() {
+        let part = Part::reasoning_text("weighing a greeting");
+        let encoded = serde_json::to_value(&part).expect("a part serializes");
+
+        assert_eq!(encoded["type"], serde_json::json!("reasoning_text"));
+        assert!(
+            encoded["type"]
+                .as_str()
+                .is_some_and(|tag| tag.starts_with(REASONING_TAG)),
+            "an older reader matches this record on the prefix alone: {encoded}"
+        );
+
+        let decoded: Part =
+            serde_json::from_value(encoded).expect("what it wrote is what it reads");
+        assert_eq!(decoded.body, part.body, "round trip changed the part");
+    }
+
+    /// Thinking is not the reply, and the accessors are where that is
+    /// enforced: `as_text` is what titles a checkpoint and what the copy
+    /// surfaces read, and thinking answering it would put the model's scratch
+    /// paper where its answer belongs.
+    #[test]
+    fn thinking_is_reachable_by_its_own_name_and_never_as_reply_text() {
+        let mut thinking = Part::reasoning_text("weighing a greeting");
+        let mut reply = Part::text("hello");
+
+        assert_eq!(thinking.as_reasoning(), Some("weighing a greeting"));
+        assert_eq!(thinking.as_text(), None, "thinking is not the reply");
+        assert!(thinking.as_text_mut().is_none());
+        assert_eq!(reply.as_reasoning(), None, "and the reply is not thinking");
+
+        // The one accessor that spans both, because a delta names an id and a
+        // fragment and never which of the two it is growing.
+        for part in [&mut thinking, &mut reply] {
+            part.streamed_mut()
+                .expect("both kinds of text grow by delta")
+                .push('!');
+        }
+        assert_eq!(thinking.as_reasoning(), Some("weighing a greeting!"));
+        assert_eq!(reply.as_text(), Some("hello!"));
+
+        assert!(
+            Part::reasoning("openai", "rs_1", Some("sealed".to_owned()))
+                .streamed_mut()
+                .is_none(),
+            "a sealed blob is bytes, not text a fragment could be appended to"
+        );
+    }
+
+    /// A turn that thought and then died said nothing: no wire carries
+    /// thinking, so a message holding only that would enter the history as an
+    /// assistant turn with no content at all.
+    #[test]
+    fn a_message_holding_only_thinking_has_no_content() {
+        let mut message = Message::assistant("canned");
+        message.parts.push(Part::reasoning_text("weighing it"));
+
+        assert!(!message.has_content());
+
+        message.parts.push(Part::text("hello"));
+        assert!(message.has_content(), "the reply beside it is content");
     }
 
     /// The two shapes a reader has to accept, and the one it must never

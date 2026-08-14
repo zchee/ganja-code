@@ -3865,7 +3865,14 @@ fn message_chars(message: &Message) -> (usize, usize) {
             PartBody::Reasoning { encrypted, .. } => {
                 generated += encrypted.as_deref().map_or(0, |blob| blob.chars().count());
             }
-            PartBody::StepStart | PartBody::StepFinish { .. } | PartBody::Patch { .. } => {}
+            // Readable thinking counts nothing for the bookkeeping parts'
+            // reason: no wire carries it. It is on the screen, not in the
+            // request, and a meter that counted it would report a window
+            // filling with words the model is never sent.
+            PartBody::ReasoningText { .. }
+            | PartBody::StepStart
+            | PartBody::StepFinish { .. }
+            | PartBody::Patch { .. } => {}
         }
     }
 

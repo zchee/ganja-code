@@ -11,7 +11,12 @@
 //! and diverges on the other two, in both cases because ganja has nothing to
 //! print:
 //!
-//! - `thinking` is moot — [`PartBody`] carries no reasoning variant.
+//! - `thinking` is **off** here, and now by choice rather than by absence:
+//!   [`PartBody::ReasoningText`] carries thinking a person can read, and the
+//!   chat pane draws it. This surface is the clipboard, where what somebody
+//!   means by "copy this conversation" is the conversation — so the model's
+//!   way to an answer stays out of it, upstream's own default
+//!   notwithstanding (deviation: `transcript-thinking-omitted`).
 //! - `assistantMetadata` would print `## Assistant (Agent · model · duration)`
 //!   (deviation: transcript-assistant-metadata-omitted). The transcript this
 //!   renders from holds a role and its parts, and the agent a message ran as
@@ -142,11 +147,17 @@ fn formatted(part: &Part) -> String {
         }
         // Sealed reasoning renders as nothing on purpose: it is bytes only the
         // provider can read, so the honest rendering of it is the one upstream
-        // gives a part it has no arm for.
+        // gives a part it has no arm for. Readable thinking renders as nothing
+        // for a different reason, and a deliberate one: this is the clipboard,
+        // and what a person means by "copy this conversation" is the
+        // conversation, not the model's scratch paper. The pane draws it
+        // behind a `✻`; the two surfaces are allowed to disagree, and the
+        // output of this function is unchanged by its arriving here.
         PartBody::File { .. }
         | PartBody::StepStart
         | PartBody::StepFinish { .. }
         | PartBody::Patch { .. }
+        | PartBody::ReasoningText { .. }
         | PartBody::Reasoning { .. } => String::new(),
     }
 }
@@ -374,6 +385,29 @@ mod tests {
         let rendered = format(&session(None), &[(Role::User, &parts[..])]);
 
         assert!(rendered.ends_with("## User\n\n---\n\n"), "got: {rendered}");
+    }
+
+    /// **AC5.** The pane draws thinking behind a `✻`; the clipboard does not
+    /// carry it. What a person means by "copy this conversation" is the
+    /// conversation, and the model's way to an answer is not the answer —
+    /// which is also why `last_reply` cannot be answered by one.
+    #[test]
+    fn thinking_is_on_the_screen_and_never_on_the_clipboard() {
+        let parts = [
+            Part::reasoning_text("weighing a greeting"),
+            Part::text("Hello, world!"),
+        ];
+
+        let rendered = format(&session(None), &[(Role::Assistant, &parts[..])]);
+
+        assert!(!rendered.contains("weighing a greeting"), "got: {rendered}");
+        assert!(rendered.contains("Hello, world!"), "got: {rendered}");
+
+        let thinking = [Part::reasoning_text("weighing a greeting")];
+        assert!(
+            last_reply(&[(Role::Assistant, &thinking[..])]).is_err(),
+            "a turn that only thought has no reply to hand over"
+        );
     }
 
     #[test]

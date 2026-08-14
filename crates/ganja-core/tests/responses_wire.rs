@@ -68,7 +68,7 @@ use ganja_core::{
     catalog,
     config::Config,
     permission::Permissions,
-    protocol::{Command, Event, PartBody, Role},
+    protocol::{Command, Event, PartBody, PartId, Role},
     provider::{
         ChatRequest, Provider as _, ProviderError, ProviderEvent, ResponsesProvider, openai, select,
     },
@@ -568,20 +568,43 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         "the transcript calls nothing, so nothing should have run"
     );
 
-    // The turn as the frontend saw it: the reply text, and the bill with the
-    // cached half taken back out of the prompt.
-    let text: String = seen
+    // The turn as the frontend saw it, told apart by which part each fragment
+    // grew: the reply is the text part's, and the summarized thought this API
+    // streams beside it now has a part of its own rather than being dropped.
+    let thoughts: Vec<&PartId> = seen
         .iter()
         .filter_map(|event| match event {
-            Event::PartDelta { delta, .. } => Some(delta.as_str()),
+            Event::PartStarted { part, .. }
+                if matches!(part.body, PartBody::ReasoningText { .. }) =>
+            {
+                Some(&part.id)
+            }
             _ => None,
         })
         .collect();
+    let streamed = |thinking: bool| -> String {
+        seen.iter()
+            .filter_map(|event| match event {
+                Event::PartDelta { part_id, delta, .. }
+                    if thoughts.contains(&part_id) == thinking =>
+                {
+                    Some(delta.as_str())
+                }
+                _ => None,
+            })
+            .collect()
+    };
     assert_eq!(
-        text, "Hello, world!",
-        "the reply, and only the reply — the transcript also streams a \
-         summarized thought, which no protocol part renders yet, so the engine \
-         drops it rather than mixing it into the answer: got {seen:?}"
+        streamed(false),
+        "Hello, world!",
+        "the reply, and only the reply — the thought is beside it, not mixed \
+         into it: got {seen:?}"
+    );
+    assert_eq!(
+        streamed(true),
+        "Short is right.",
+        "and the thought reaches the frontend rather than dying in the loop: \
+         got {seen:?}"
     );
 
     let billed = seen.iter().find_map(|event| match event {

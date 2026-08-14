@@ -6603,6 +6603,27 @@ mod tests {
         );
     }
 
+    /// **AC3.** A reply that thought before it answered, as the pane draws it:
+    /// the thinking behind its own marker and dimmed into italics, the answer
+    /// behind the bullet every reply block has.
+    #[test]
+    fn snapshot_thinking() {
+        let mut app = app();
+        app.chat.start_message(Message::user("say hello"));
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part::reasoning_text(
+            "The user wants a greeting and nothing more, so a short one is \
+             the whole of the job here.",
+        ));
+        reply.parts.push(Part::text("Hello, world!"));
+        app.chat.start_message(reply);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
     #[test]
     fn snapshot_tool_pending() {
         let mut app = app();

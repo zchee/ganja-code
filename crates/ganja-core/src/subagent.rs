@@ -631,10 +631,15 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                     outcome.toolcalls += 1;
                     report(&watched, current.as_deref(), outcome.toolcalls).await;
                 }
+                // A child's thinking is emphatically not a child's answer:
+                // leaving `open` where it is keeps the deltas below
+                // accumulating the reply, which is the whole of what the
+                // parent's tool result carries.
                 PartBody::File { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
                 | PartBody::Patch { .. }
+                | PartBody::ReasoningText { .. }
                 | PartBody::Reasoning { .. } => {}
             },
             Event::PartDelta { part_id, delta, .. } => {
