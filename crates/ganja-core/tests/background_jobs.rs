@@ -43,6 +43,21 @@ const ASK_BUDGET: Duration = Duration::from_secs(10);
 /// to prove it.
 const WITNESS_BUDGET: Duration = Duration::from_secs(5);
 
+/// How long `bash_output`'s polls are given to deliver a line and an exit.
+/// Generous on purpose: what those assertions are about is *which poll* a line
+/// lands in, never how quickly it gets there, and a machine running this whole
+/// workspace's suite in parallel can starve a child process — or the task
+/// polling it — for seconds at a time.
+const OUTPUT_BUDGET: Duration = Duration::from_secs(15);
+
+/// How many 50ms spins the gated fixture below gives its gate before it gives
+/// up. A safety net a passing run never reaches — it exists so a panicking run
+/// cannot leave a shell spinning forever — and long enough (30s) that
+/// [`OUTPUT_BUDGET`] is always the deadline that fires first, so a failure
+/// reads as "the line never arrived" rather than as a shell that decided on
+/// its own to stop waiting.
+const GATE_SPINS: u32 = 600;
+
 /// Between polls of a witness file.
 const TICK: Duration = Duration::from_millis(20);
 
@@ -216,23 +231,42 @@ async fn a_turns_cancel_leaves_a_background_job_running() {
 /// Acceptance criterion 2: `bash_output`'s own registry answers only what is
 /// new since the last poll and reports status, against a real process the
 /// `bash` tool spawned — not a test double.
+///
+/// Every assertion here is about **content**: which poll a line is delivered
+/// in, and that no line is delivered twice. Nothing asserts how long anything
+/// took. Two properties of the seam under test make that harder than it looks,
+/// and both are what the shape below is for:
+///
+/// 1. The second line is released by a *gate file this test writes*, not by a
+///    `sleep` the fixture runs. A wall-clock gap only separates the two polls
+///    while the machine is idle; a gate separates them by causality, so "the
+///    first poll cannot contain `two`" is true by construction rather than by
+///    luck. (This is what starved twice under full workspace parallelism —
+///    `ganja-code-j1m`.)
+/// 2. `Jobs::output` **drains**: every call takes what has arrived since the
+///    last one. So the second phase accumulates across polls instead of
+///    trusting whichever single read happens to observe the exit — a poll that
+///    sees `two` while the state is still `Running` would otherwise throw that
+///    line away, and the next poll would report an empty chunk beside the exit.
 #[tokio::test]
 async fn output_is_delivered_once_and_then_only_whats_new() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    // The pause between the two lines is comfortably longer than
-    // `WITNESS_BUDGET`'s poll interval, so the first poll below is certain to
-    // land inside the gap rather than after both lines already printed.
-    let command = "echo one; sleep 1; echo two";
-    let engine = engine_for(command, dir.path());
+    let gate = dir.path().join("gate");
+    let command = format!(
+        "echo one; \
+         i=0; while [ $i -lt {GATE_SPINS} ] && [ ! -f \"{gate}\" ]; \
+         do i=$((i+1)); sleep 0.05; done; \
+         echo two",
+        gate = posix(&gate),
+    );
+    let engine = engine_for(&command, dir.path());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     let bash_id = run_prompt_and_await_bash_id(&engine, &mut events).await;
 
     // Polled rather than slept for: the child process still has to actually
-    // start before "one" can appear, and a fixed sleep races that startup on
-    // a loaded machine. The negative assertion right after is what makes this
-    // poll prove something — it fails loudly if the poll landed too late to
-    // mean anything.
-    let deadline = Instant::now() + WITNESS_BUDGET;
+    // start before "one" can appear, and a fixed sleep races that startup on a
+    // loaded machine.
+    let deadline = Instant::now() + OUTPUT_BUDGET;
     let first = loop {
         let read = engine
             .jobs()
@@ -244,39 +278,46 @@ async fn output_is_delivered_once_and_then_only_whats_new() {
         }
         assert!(
             Instant::now() < deadline,
-            "the job never produced any output within {WITNESS_BUDGET:?}"
+            "the job never produced any output within {OUTPUT_BUDGET:?}"
         );
         tokio::time::sleep(TICK).await;
     };
     assert!(first.chunk.contains("one"), "got {:?}", first.chunk);
+    // The gate is still on disk-absent here, so the fixture physically cannot
+    // have printed its second line yet: this holds however starved the machine
+    // was between the spawn and the poll above.
     assert!(!first.chunk.contains("two"), "got {:?}", first.chunk);
 
-    let deadline = Instant::now() + WITNESS_BUDGET;
-    let second = loop {
+    std::fs::write(&gate, "go").expect("the gate is writable");
+
+    let deadline = Instant::now() + OUTPUT_BUDGET;
+    let mut delivered = String::new();
+    let mut exit = None;
+    loop {
         let read = engine
             .jobs()
             .output(&bash_id)
             .await
             .expect("a known id answers");
-        if matches!(read.status.state, State::Exited { .. }) {
-            break read;
+        delivered.push_str(&read.chunk);
+        if let State::Exited { code } = read.status.state {
+            exit = Some(code);
+        }
+        if delivered.contains("two") && exit.is_some() {
+            break;
         }
         assert!(
             Instant::now() < deadline,
-            "the job never exited within {WITNESS_BUDGET:?}"
+            "the job never delivered its second line and exited within \
+             {OUTPUT_BUDGET:?}; everything since the first poll was {delivered:?}"
         );
         tokio::time::sleep(TICK).await;
-    };
-    assert!(second.chunk.contains("two"), "got {:?}", second.chunk);
+    }
     assert!(
-        !second.chunk.contains("one"),
-        "the first poll already delivered it: {:?}",
-        second.chunk
+        !delivered.contains("one"),
+        "the first poll already delivered it: {delivered:?}"
     );
-    assert!(matches!(
-        second.status.state,
-        State::Exited { code: Some(0) }
-    ));
+    assert_eq!(exit, Some(Some(0)));
 
     engine.shutdown_jobs().await;
 }

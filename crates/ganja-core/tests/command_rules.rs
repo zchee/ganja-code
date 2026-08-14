@@ -14,14 +14,18 @@
 //! It is a recorder here, so "the refusal decided" and "the tool never ran"
 //! are two separate observations rather than one.
 //!
-//! Nothing here stores anything: an in-memory engine over
-//! [`Permissions::default`] has no store to write an answer to, so there is no
-//! user state to redirect away from.
+//! Nothing here *writes* anything: an in-memory engine over
+//! [`Permissions::default`] has no store to put an answer in. One thing is read
+//! from outside the fixture, and [`pin_config_home`] is what moves it.
 
-use std::sync::Arc;
+use std::{
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+};
 
 use ganja_core::{
     Config, Engine,
+    config::CONFIG_HOME_ENV,
     permission::{Action, Permissions, Rule},
     protocol::{Command, Event, FinishReason, PartBody, ToolState},
     provider::ProviderEvent,
@@ -29,6 +33,37 @@ use ganja_core::{
 };
 use ganja_testkit::{RecorderTool, ScriptedProvider, agent_registry, drain, says};
 use serde_json::json;
+
+/// Points the global command tier (**D481**) at a home this binary owns,
+/// before anything builds a command registry.
+///
+/// That tier is `<config home>/commands`, resolved through [`CONFIG_HOME_ENV`]
+/// on every build, so without this the `/review` under test would run beside
+/// whatever `*.md` files the developer running the suite keeps in their own
+/// home — one of which could take the fixture's own name. Green only while
+/// nobody has that directory (`ganja-code-qh1`).
+///
+/// The home named is a path this binary never creates: `config_home()` returns
+/// the variable as written, and `commands/` under a directory that is not there
+/// is the empty tier these tests want, with nothing left behind to clean up.
+///
+/// Forced from a `LazyLock` rather than written into each test because this
+/// binary's tests share one process and run on parallel threads under a plain
+/// `cargo test`: routing every build through here means the one `set_var`
+/// happens before the first read of that variable, with any other builder
+/// parked on the lock while it does.
+fn pin_config_home() {
+    static HOME: LazyLock<PathBuf> = LazyLock::new(|| {
+        let home =
+            std::env::temp_dir().join(format!("ganja-no-global-commands-{}", std::process::id()));
+        // SAFETY: this binary's only write to the environment, run exactly
+        // once, under the lock every reader of that variable here goes
+        // through.
+        unsafe { std::env::set_var(CONFIG_HOME_ENV, &home) };
+        home
+    });
+    LazyLock::force(&HOME);
+}
 
 /// What a headless frontend imposes: the tool that would ask a question,
 /// refused at every pattern.
@@ -109,6 +144,10 @@ fn engine(config: &Config, script: Vec<Vec<ProviderEvent>>) -> (Engine, Calls, C
     let (provider, _) = ScriptedProvider::new(script);
     let (question, questions) = RecorderTool::new("question", "question", "answered");
     let (edit, edits) = RecorderTool::new("edit", "edit", "edited");
+    // Before the registry below is built. `/repo` does not exist, which empties
+    // the project tier (`<worktree>/.ganja/commands`) the way the pinned home
+    // empties the global one.
+    pin_config_home();
     let engine = Engine::new(
         provider,
         "recorder-model",
