@@ -31,6 +31,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 mod assemble;
 mod import;
 mod login;
+mod mcp;
 mod plugin;
 mod run;
 mod serve;
@@ -207,6 +208,10 @@ enum Command {
     },
     /// Show the configured MCP servers and the tools they lend, or manage one.
     ///
+    /// `add`, `get` and `remove` edit the `mcp` table of a config file;
+    /// `list` (also the bare word) connects every enabled server and reports
+    /// what it found; `login` runs an OAuth flow for one remote server.
+    ///
     /// With no further word: every enabled server is connected, so the
     /// standing reported is one this build actually reached rather than one
     /// the config merely asked for, and every connection is closed again
@@ -253,6 +258,26 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum McpAction {
+    /// Write one server into a config file's `mcp` table.
+    ///
+    /// `--url` makes a remote server and a trailing `-- <cmd> [args…]` makes
+    /// a local one; exactly one of the two. The entry is refused before
+    /// anything is written if this build could not read it back, and a
+    /// `ganja.jsonc` at the target tier is refused by name rather than
+    /// rewritten without its comments.
+    Add(mcp::AddArgs),
+    /// Show the configured servers and the tools they lend.
+    ///
+    /// The bare `ganja mcp` does exactly this; the word exists so the surface
+    /// reads add/list/get/remove.
+    List,
+    /// Show one server as it resolved, and which file it came from.
+    Get {
+        /// The server's name, as `ganja mcp list` shows it.
+        name: String,
+    },
+    /// Delete one server from a config file's `mcp` table.
+    Remove(mcp::RemoveArgs),
     /// Start an OAuth login for one remote server configured with `oauth`.
     ///
     /// Discovery, registration and the browser wait all run here — the same
@@ -739,8 +764,16 @@ fn log_directory() -> Result<PathBuf> {
 /// Closing a connection takes its client and clears its definitions, so a
 /// listing that shut down first would report every server as lending nothing.
 async fn mcp_command(action: Option<McpAction>) -> Result<()> {
-    if let Some(McpAction::Login { server }) = action {
-        return mcp_login_command(&server).await;
+    // The three file-editing actions and the login return before anything is
+    // dialled: writing a config file has nothing to learn from connecting,
+    // and `get` reports what the loader resolved rather than what a server
+    // answered. Only `list` — the word, and the bare `ganja mcp` — connects.
+    match action {
+        Some(McpAction::Add(args)) => return mcp::add(&args),
+        Some(McpAction::Get { name }) => return mcp::get(&name),
+        Some(McpAction::Remove(args)) => return mcp::remove(&args),
+        Some(McpAction::Login { server }) => return mcp_login_command(&server).await,
+        Some(McpAction::List) | None => {}
     }
 
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
