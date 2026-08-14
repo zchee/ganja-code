@@ -287,7 +287,11 @@ fn steps(parts: &[Part]) -> impl Iterator<Item = &[Part]> {
 ///
 /// The tool variants let a wire report calls without reshaping the trait; the
 /// engine folds them into tool parts and executes them when the request ends.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Eq` stops at [`ProviderEvent::ServerTool`], for the reason
+/// [`crate::protocol::PartBody`]'s own does: a provider-run tool's arguments are
+/// arbitrary JSON, and `serde_json::Value` holds floats.
+#[derive(Clone, Debug, PartialEq)]
 pub enum ProviderEvent {
     /// The next fragment of the reply.
     TextDelta(String),
@@ -330,6 +334,29 @@ pub enum ProviderEvent {
     ToolCallEnd {
         /// Call that is now complete.
         id: String,
+    },
+    /// A tool the **provider** ran on its own side, already finished
+    /// (**D489**).
+    ///
+    /// Deliberately not one of the three above, and the difference is the whole
+    /// point: those three are a call this side has to make, and this is a report
+    /// of one already made somewhere else. It becomes a
+    /// [`PartBody::ServerTool`](crate::protocol::PartBody::ServerTool) — a row a
+    /// person reads — and never a call the loop executes, a rule it asks
+    /// permission for, or an item any request replays.
+    ///
+    /// One event per finished item: the vendor that serves these streams the
+    /// item's opening frame before there is anything in it, exactly as it does
+    /// for reasoning, so what a transcript records arrives when the item closes.
+    ServerTool {
+        /// What the provider called it, verbatim — `openrouter:web_search` and
+        /// the like. Never mapped onto a registry name, because it is not one.
+        tool: String,
+        /// The arguments the model called it with, as the item carried them.
+        input: serde_json::Value,
+        /// What the provider reported it produced, rendered as text. Empty
+        /// where the item reported nothing.
+        output: String,
     },
     /// What the turn cost.
     Usage(Usage),
@@ -985,7 +1012,11 @@ fn matters(event: &ProviderEvent) -> bool {
         | ProviderEvent::ReasoningState { .. }
         | ProviderEvent::ToolCallStart { .. }
         | ProviderEvent::ToolCallDelta { .. }
-        | ProviderEvent::ToolCallEnd { .. } => true,
+        | ProviderEvent::ToolCallEnd { .. }
+        // A row a person can already see, which is exactly what this predicate
+        // asks about — a retry that replayed the stream would show the
+        // provider's own tool run twice.
+        | ProviderEvent::ServerTool { .. } => true,
         ProviderEvent::Usage(_) | ProviderEvent::Finish(_) | ProviderEvent::Failed(_) => false,
     }
 }

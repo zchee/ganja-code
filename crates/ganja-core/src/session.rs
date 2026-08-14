@@ -1472,6 +1472,9 @@ async fn request_title(
             | ProviderEvent::ToolCallStart { .. }
             | ProviderEvent::ToolCallDelta { .. }
             | ProviderEvent::ToolCallEnd { .. }
+            // A title request offers no tools of its own and asks for no
+            // gateway ones, so a row here would belong to no transcript.
+            | ProviderEvent::ServerTool { .. }
             | ProviderEvent::Usage(_) => {}
         }
     }
@@ -2341,7 +2344,8 @@ async fn summarize(
             ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningState { .. } => {}
             ProviderEvent::ToolCallStart { .. }
             | ProviderEvent::ToolCallDelta { .. }
-            | ProviderEvent::ToolCallEnd { .. } => {
+            | ProviderEvent::ToolCallEnd { .. }
+            | ProviderEvent::ServerTool { .. } => {
                 tracing::debug!("the summarize request offered no tools; dropping a call");
             }
         }
@@ -2395,6 +2399,7 @@ fn serialize_message(message: &Message) -> String {
                 | PartBody::StepFinish { .. }
                 | PartBody::Patch { .. }
                 | PartBody::ReasoningText { .. }
+                | PartBody::ServerTool { .. }
                 | PartBody::Reasoning { .. } => None,
             })
             .collect(),
@@ -2427,11 +2432,19 @@ fn serialize_message(message: &Message) -> String {
                 // out for the harder reason — a summary *is* what the next
                 // request carries, and thinking that was never sent must not
                 // reach the model by being summarized into the history.
+                // A gateway's own tool run is left out for a third reason,
+                // and the plainest: nothing this build sends has ever carried
+                // it. The summary is what the *next request* will say the
+                // conversation was, and it is composed of what the requests
+                // before it actually said — the model was told this tool's
+                // result by the gateway, inside a turn, and what it made of
+                // that is in the reply text above.
                 PartBody::File { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
                 | PartBody::Patch { .. }
                 | PartBody::ReasoningText { .. }
+                | PartBody::ServerTool { .. }
                 | PartBody::Reasoning { .. } => Vec::new(),
             })
             .collect(),
@@ -2831,6 +2844,34 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 interrupt!(Some(Outcome::failed(error.to_string())), STRANDED);
             }
             ProviderEvent::Finish(reason) => break reason,
+            // A tool the provider ran on its own side (**D489**). It is
+            // written through as a finished part and delivered like any
+            // other, and it is deliberately **not** routed anywhere near
+            // `calls`: there is nothing to execute, nothing to ask permission
+            // for, and nothing for the next request to carry. What it changes
+            // is what a person sees.
+            ProviderEvent::ServerTool {
+                tool,
+                input,
+                output,
+            } => {
+                let part = Part::server_tool(tool, input, output);
+                assistant.parts.push(part.clone());
+                turn.persist_part(assistant, &part);
+
+                if let ControlFlow::Break(stop) = deliver(
+                    turn,
+                    Event::PartStarted {
+                        session_id: turn.session_id.clone(),
+                        message_id: assistant.id.clone(),
+                        part,
+                    },
+                )
+                .await
+                {
+                    interrupt!(stop, &ToolError::Cancelled.to_string());
+                }
+            }
             // Reasoning a person could read, which is a part of its own — not
             // pasted into the reply, and not sent anywhere. It is written
             // through and delivered for the same reason a text delta is: a

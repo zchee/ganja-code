@@ -665,6 +665,16 @@ pub struct Config {
     /// set lives here, even though only the TUI acts on the value.
     #[serde(default)]
     pub tui: TuiConfig,
+    /// What one gateway is asked to run on its own side; see
+    /// [`OpenRouterConfig`] (**D489**).
+    ///
+    /// A provider-specific top-level key, which `tui` is the precedent for: a
+    /// curated table exists where the thing it configures has exactly one
+    /// consumer and no other table can honestly hold it. The `provider` table
+    /// below is *not* that place — it declares compat endpoints, and the
+    /// builtin this configures is not one of its entries.
+    #[serde(default)]
+    pub openrouter: OpenRouterConfig,
     /// Shell the `bash` tool runs commands in.
     pub shell: Option<String>,
     /// Custom commands, by name.
@@ -782,6 +792,34 @@ impl AgentsConfig {
     pub fn concurrency(&self) -> usize {
         self.concurrency.unwrap_or(Self::DEFAULT_CONCURRENCY)
     }
+}
+
+/// What OpenRouter is asked to run on its own side (**D489**).
+///
+/// Spec: that vendor's `docs/guides/features/server-tools`, read 2026-08-14 —
+/// tools the *model* decides to call and the *gateway* executes, zero to N
+/// times per request, asked for as `{"type": "openrouter:<name>"}` rows in the
+/// same `tools` array a session's own tools ride in. No upstream counterpart:
+/// opencode has no server tools at all.
+///
+/// **Opt-in, because they spend.** Each call bills — a web search is a search
+/// somebody pays for — and each changes what the model does with a turn. A
+/// session that names none sends none, which is every session that has not
+/// asked.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenRouterConfig {
+    /// Which of that vendor's own tools the model may call, by the name after
+    /// the `openrouter:` prefix.
+    ///
+    /// Validated against
+    /// [`openrouter::SERVER_TOOLS`](crate::provider::openrouter::SERVER_TOOLS)
+    /// at load and **refused by name**: a misspelling forwarded verbatim is a
+    /// 400 in the middle of a turn, where the same typo caught here is a line
+    /// somebody can read. Replaced rather than concatenated across tiers, like
+    /// every list here but `instructions`.
+    #[serde(default)]
+    pub server_tools: Vec<String>,
 }
 
 /// What the terminal frontend does beyond drawing frames.
@@ -1556,6 +1594,10 @@ fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
         path: path.to_owned(),
         message,
     })?;
+    check_openrouter(&config.openrouter).map_err(|message| ConfigError::Parse {
+        path: path.to_owned(),
+        message,
+    })?;
 
     Ok(Some(config))
 }
@@ -1762,6 +1804,26 @@ fn check_agents(agents: &AgentsConfig) -> Result<(), String> {
              delegation waits forever"
                 .to_owned(),
         );
+    }
+
+    Ok(())
+}
+
+/// Refuses a server tool the gateway does not publish (**D489**).
+///
+/// By name and with the roster beside it, because the two ways to get this
+/// wrong are a typo and a tool read about somewhere else — and the answer to
+/// both is the list. Checked per file for [`check_mcp`]'s reason: whoever has
+/// to fix it is told which file said it.
+fn check_openrouter(config: &OpenRouterConfig) -> Result<(), String> {
+    for name in &config.server_tools {
+        if !crate::provider::openrouter::serves_server_tool(name) {
+            return Err(format!(
+                "openrouter.server_tools names \"{name}\", which is not one this gateway \
+                 serves; the roster is {}",
+                crate::provider::openrouter::SERVER_TOOLS.join(", ")
+            ));
+        }
     }
 
     Ok(())
@@ -2123,6 +2185,44 @@ mod tests {
         let error = parse(r#"{"tui": {"zzz_probe": 1}}"#)
             .expect_err("an unknown key inside tui is refused");
 
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("zzz_probe"), "{message}");
+    }
+
+    /// The gateway's own tools, opted into by name (**D489**) — and the two
+    /// ways to get the key wrong, both refused where somebody can read the
+    /// refusal instead of a mid-turn 400.
+    #[test]
+    fn the_openrouter_table_takes_a_roster_and_refuses_a_name_outside_it() {
+        let config = parse(r#"{"openrouter": {"server_tools": ["web_search", "datetime"]}}"#)
+            .expect("a roster of published names parses");
+        assert_eq!(config.openrouter.server_tools, ["web_search", "datetime"]);
+
+        // Absent is empty, which is the whole opt-in: they bill per call.
+        assert!(
+            parse("{}")
+                .expect("an empty config parses")
+                .openrouter
+                .server_tools
+                .is_empty()
+        );
+
+        let error = parse(r#"{"openrouter": {"server_tools": ["web_serach"]}}"#)
+            .expect_err("a name this gateway does not serve is refused");
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("web_serach"), "{message}");
+        assert!(
+            message.contains("web_search") && message.contains("experimental__search_models"),
+            "and the refusal lists what would have worked: {message}"
+        );
+
+        // The table is curated like every other one here.
+        let error = parse(r#"{"openrouter": {"zzz_probe": 1}}"#)
+            .expect_err("an unknown key inside openrouter is refused");
         let ConfigError::Parse { message, .. } = &error else {
             panic!("expected a parse failure, got {error:?}");
         };

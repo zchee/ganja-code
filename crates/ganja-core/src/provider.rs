@@ -509,7 +509,13 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         // catalog has rows for every vendor this one fronts and a pin for none
         // of them, so `defaulted_model` falls through to the refusal that names
         // the three ways to name a model (`provider::openrouter`).
-        openrouter::ID => Wire::catalog(openrouter::from_env()?),
+        // `serving` is the one place a config key reaches a wire here, and it
+        // reaches this wire only: the tools it names are that gateway's own,
+        // and they were refused by name at load if they are not
+        // (`config::check_openrouter`), so what arrives is a roster or nothing.
+        openrouter::ID => {
+            Wire::catalog(openrouter::from_env()?.serving(config.openrouter.server_tools.clone()))
+        }
         // Two ids on one credential, each dispatching per model to one of the
         // three wires this build already has — which one is the catalog's
         // answer, not selection's. Uncataloged-model fallback and the

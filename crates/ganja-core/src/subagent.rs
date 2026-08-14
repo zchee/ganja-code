@@ -635,11 +635,15 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                 // leaving `open` where it is keeps the deltas below
                 // accumulating the reply, which is the whole of what the
                 // parent's tool result carries.
+                // A gateway's own tool run is not a call this child made
+                // either — the parent's tool result reports what the child
+                // *did*, and this is something a vendor did for it.
                 PartBody::File { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
                 | PartBody::Patch { .. }
                 | PartBody::ReasoningText { .. }
+                | PartBody::ServerTool { .. }
                 | PartBody::Reasoning { .. } => {}
             },
             Event::PartDelta { part_id, delta, .. } => {

@@ -400,6 +400,57 @@ pub enum PartBody {
         /// Everything accumulated so far, grown by the deltas that stream it.
         text: String,
     },
+    /// A tool the **provider** ran on its own side, recorded so a person can
+    /// see what happened (**D489**).
+    ///
+    /// No upstream counterpart: opencode has no gateway server tools at all.
+    /// The one vendor that serves them today is OpenRouter, whose `tools` array
+    /// takes `{"type": "openrouter:<name>"}` rows the model may call and *that
+    /// vendor* executes, returning the result to the model before the reply
+    /// continues (`docs/guides/features/server-tools`, read 2026-08-14).
+    ///
+    /// # Display-only, and why that is the whole design
+    ///
+    /// Three things this part is deliberately not, each of them a bug it exists
+    /// to prevent:
+    ///
+    /// - **Not a call to execute.** The work is already done by the time the
+    ///   item arrives; a wire that reported one as a tool-call *event* would
+    ///   wedge the turn on a tool no registry has.
+    /// - **Not a call to gate.** A permission dialog asks whether *this* machine
+    ///   may do something. Nothing here runs on it, and a dialog whose only
+    ///   honest answer is "it already happened" is worse than none.
+    /// - **Not request-affecting.** It is never replayed — the vendor keeps the
+    ///   record of its own tools, and sending one back as a `function_call`
+    ///   naming a function the roster never advertised is the guess this build
+    ///   does not make. Every wire drops it when it encodes a request, exactly
+    ///   as it drops [`PartBody::ReasoningText`], and losing one costs a reader
+    ///   some lines and costs the model nothing.
+    ///
+    /// A frontend renders it in the ordinary tool grammar (`● tool(args)` and
+    /// its `⎿` result), because what a person wants to know — *something
+    /// searched the web, and this is what it found* — is the same question a
+    /// local call's row answers.
+    ServerTool {
+        /// What the provider called it, verbatim: the item's own type, which
+        /// for this vendor is `openrouter:<name>`.
+        ///
+        /// Deliberately un-prefixed and un-tidied. The namespace is the one
+        /// thing that says this row is not a local call, and a registry name it
+        /// could be confused with is exactly what it must not look like.
+        tool: String,
+        /// The arguments the model called it with, as the item carried them.
+        ///
+        /// [`Value::Null`](serde_json::Value::Null) where the item named none —
+        /// the vendor documents a different argument shape per tool, so what is
+        /// recorded is what arrived rather than a shape assumed for it.
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        input: serde_json::Value,
+        /// What the provider reported it produced, already rendered as the text
+        /// a row previews. Empty where the item reported nothing.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        output: String,
+    },
     /// The model's own thinking, as the provider sealed it, kept so the next
     /// request can hand it back.
     ///
@@ -607,6 +658,27 @@ impl Part {
         }
     }
 
+    /// Builds a provider-run tool row with a fresh id (**D489**).
+    ///
+    /// Complete when it is minted, unlike a local call's part: the work was
+    /// done on the provider's side before the item that reports it arrived, so
+    /// there is no pending state for this one to pass through.
+    #[must_use]
+    pub fn server_tool(
+        tool: impl Into<String>,
+        input: serde_json::Value,
+        output: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: PartId::ascending(),
+            body: PartBody::ServerTool {
+                tool: tool.into(),
+                input,
+                output: output.into(),
+            },
+        }
+    }
+
     /// Builds a reasoning part with a fresh id, carrying the state `provider`
     /// sealed under its own `item` id.
     ///
@@ -645,6 +717,7 @@ impl Part {
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
+            | PartBody::ServerTool { .. }
             | PartBody::Reasoning { .. } => None,
         }
     }
@@ -659,6 +732,7 @@ impl Part {
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
+            | PartBody::ServerTool { .. }
             | PartBody::Reasoning { .. } => None,
         }
     }
@@ -676,6 +750,7 @@ impl Part {
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
+            | PartBody::ServerTool { .. }
             | PartBody::Reasoning { .. } => None,
         }
     }
@@ -695,6 +770,7 @@ impl Part {
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
+            | PartBody::ServerTool { .. }
             | PartBody::Reasoning { .. } => None,
         }
     }
@@ -802,6 +878,7 @@ impl Message {
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
+            | PartBody::ServerTool { .. }
             | PartBody::Reasoning { .. } => false,
         })
     }

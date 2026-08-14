@@ -947,6 +947,32 @@ impl Entry {
                 PartBody::Tool { tool, state, .. } => {
                     lines.extend(lay_out(&tool_lines(tool, state, theme), columns));
                 }
+                // A tool the provider ran on its own side (**D489**), drawn in
+                // the same grammar a local call is: the question a person is
+                // asking — *what did it do, and what came back* — is the same
+                // one, and a second presentation for it would be a second
+                // thing to learn. The state is synthesized rather than stored
+                // because the row is finished when it arrives: the gateway
+                // reports no timings, and the grammar shows none for a settled
+                // call anyway.
+                PartBody::ServerTool {
+                    tool,
+                    input,
+                    output,
+                } => {
+                    let state = ToolState::Completed {
+                        input: input.clone(),
+                        output: output.clone(),
+                        // The vendor names its work in neither field, so the
+                        // marker leads straight to the preview rather than to
+                        // a summary line this side made up.
+                        title: String::new(),
+                        metadata: serde_json::Value::Object(serde_json::Map::new()),
+                        started: 0,
+                        completed: 0,
+                    };
+                    lines.extend(lay_out(&tool_lines(tool, &state, theme), columns));
+                }
                 // A file the user attached, rendered as the token they typed
                 // — `@path`, with its `#line-range` when one was named —
                 // rather than as its contents: the engine reads the file when
@@ -1711,7 +1737,7 @@ mod tests {
     use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, ToolState};
     use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
 
-    use super::{Chat, Instant, Working, elapsed, split_at_width, wrap};
+    use super::{BULLET, Chat, Instant, RESULT, Working, elapsed, split_at_width, wrap};
     use crate::theme::{Theme, Themes};
 
     /// A reply carrying one tool part in `state`, rendered wide enough that
@@ -1730,6 +1756,43 @@ mod tests {
         chat.start_message(reply);
 
         rendered(&mut chat, Rect::new(0, 0, 80, 20))
+    }
+
+    /// A tool the gateway ran on its own side, drawn in the same grammar a
+    /// local call is (**D489**): the marker, the name it came under, the
+    /// arguments condensed onto that line, and the result under `⎿`.
+    ///
+    /// The name is deliberately the namespaced one — a row a reader could
+    /// mistake for a call this machine made would be the one wrong thing to
+    /// draw.
+    #[test]
+    fn a_provider_run_tool_draws_in_the_same_grammar_a_local_call_does() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::ServerTool {
+                tool: "openrouter:web_search".to_owned(),
+                input: serde_json::json!({"query": "rust 2024"}),
+                output: "3 results".to_owned(),
+            },
+        });
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 80, 20));
+        assert_eq!(
+            &lines[..2],
+            [
+                // The leading capital is the grammar's own titlecase, which
+                // every tool name on this pane gets — an `mcp__…` row reads
+                // `Mcp__…` today. What matters is that the *namespace*
+                // survives it: nobody should read this row as a call the
+                // machine in front of them made.
+                format!("{BULLET}Openrouter:web_search(query: \"rust 2024\")"),
+                format!("{RESULT}3 results"),
+            ],
+            "got {lines:?}"
+        );
     }
 
     const VIEWPORT: Rect = Rect {
