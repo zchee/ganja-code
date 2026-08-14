@@ -10,18 +10,29 @@
 //! Three rules decide everything below, and none of them is a matter of
 //! taste:
 //!
-//! * **A `.jsonc` at the target tier is refused by name.** Comments are the
-//!   reason somebody writes one, and the only way to edit it here would be to
-//!   parse it and print it back — which deletes every comment in it. The
-//!   refusal names the file and says to edit it by hand. That check runs at
-//!   *both* ends of a write, because `ganja.jsonc` also *beats* `ganja.json`
-//!   at load: writing the `.json` beside it would look like it did nothing.
-//! * **Only the one entry is touched.** The file is read as a
-//!   [`serde_json::Value`], not as a typed `Config`: this build's key set is
-//!   not the one whoever wrote the file was working from, and a typed
-//!   round trip would silently drop every key that arrived from a newer one.
-//!   A file that does not parse refuses with the parse error and is never
-//!   overwritten.
+//! * **The file's own bytes survive the edit.** This shipped refusing a
+//!   `ganja.jsonc` at the target tier by name, on the reasoning that editing
+//!   one meant parsing it and printing it back and so deleting every comment
+//!   somebody wrote it for. The premise was wrong, and the field found it
+//!   immediately: a commented `ganja.jsonc` is what a person who configures
+//!   anything *has*, so refusing it refused the feature exactly where it was
+//!   wanted. What the refusal assumed ganja did not have —
+//!   an editor that rewrites one property and leaves the rest of the file
+//!   alone — was already in the tree, as `jsonc-parser`'s `cst` feature. The
+//!   target file is parsed into a concrete syntax tree, one property is
+//!   inserted, replaced or removed, and the tree is printed back: comments,
+//!   key order, indentation and blank lines everywhere else are the same
+//!   bytes they were. A `.jsonc` at the tier is now the *edit target* rather
+//!   than a refusal, because it is also the file that **beats** a
+//!   `ganja.json` beside it at load — writing the loser would look like the
+//!   command did nothing.
+//! * **Only the one entry is touched.** The document is never decoded into a
+//!   typed `Config`: this build's key set is not the one whoever wrote the
+//!   file was working from, and a typed round trip would silently drop every
+//!   key that arrived from a newer one. The CST goes further than the
+//!   [`serde_json::Value`] this used to read — an untouched key keeps not
+//!   just its meaning but its spelling. A file that does not parse refuses
+//!   with the parse error and is never overwritten.
 //! * **What is written is what the loader would accept.** The entry is
 //!   constructed as JSON and then *deserialized into the real
 //!   [`McpServer`]* before anything is written, so a shape this build could
@@ -30,7 +41,10 @@
 //!   after decoding — an empty command, a URL nothing may send headers to,
 //!   an `output_limit` of zero — are made here too, for the same reason
 //!   `import.rs` repeats them: a file this wrote that the next launch will
-//!   not read is the failure a writer exists to prevent.
+//!   not read is the failure a writer exists to prevent. The document is read
+//!   through the loader's own dialect too, so a file only a looser parser
+//!   accepts is refused here rather than rewritten into something that still
+//!   will not load.
 //!
 //! Nothing here connects to anything. An entry lands in a file, and the note
 //! printed on success says exactly when it takes effect — `/mcp` Reconnect,
@@ -47,16 +61,17 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Args;
 use ganja_core::config::{Config, McpServer};
 use ganja_permission::Project;
+use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 use serde_json::{Map, Value};
 use url::Url;
 
-/// What this writes. The `.jsonc` spelling is deliberately never written:
-/// nothing generated here has a comment to justify one.
+/// What this *creates*. The `.jsonc` spelling is deliberately never created:
+/// a file this wrote has no comment in it to justify the name.
 const CONFIG_FILE: &str = "ganja.json";
 
-/// The other name ganja reads, and the one that would *beat* [`CONFIG_FILE`]
-/// in the same directory — so a tier holding it is a tier this refuses to
-/// edit rather than one it writes beside.
+/// The other name ganja reads, and the one that *beats* [`CONFIG_FILE`] in the
+/// same directory — so a tier holding it is the file this edits, and the
+/// `ganja.json` beside it is the one that would have been ignored.
 const CONFIG_ALTERNATE: &str = "ganja.jsonc";
 
 /// The table an entry lives under, in every tier.
@@ -181,17 +196,30 @@ pub(crate) fn add(args: &AddArgs) -> Result<()> {
 
     let tier = Tier::of(args.global);
     let path = writable(tier, &cwd)?;
-    let mut document = document(&path)?;
-    let table = table_mut(&mut document, &path)?;
+    let document = document(&path)?;
+    let table = table(&document, &path)?;
 
-    if table.contains_key(&args.name) && !args.force {
+    let existing = table.get(&args.name);
+    if existing.is_some() && !args.force {
         bail!(
             "mcp server \"{}\" is already in {}; pass --force to replace it",
             args.name,
             path.display()
         );
     }
-    let replaced = table.insert(args.name.clone(), entry).is_some();
+    // Replacing sets the existing property's value rather than removing and
+    // appending it, so an entry keeps the position — and the comment above it —
+    // that whoever wrote the file gave it.
+    let replaced = match existing {
+        Some(property) => {
+            property.set_value(input(&entry));
+            true
+        }
+        None => {
+            table.append(&args.name, input(&entry));
+            false
+        }
+    };
     write(&path, &document)?;
 
     println!(
@@ -200,7 +228,7 @@ pub(crate) fn add(args: &AddArgs) -> Result<()> {
         args.name,
         path.display()
     );
-    shadow(tier, &args.name, &cwd);
+    shadow(tier, &path, &args.name, &cwd);
     println!("a running session picks this up with `/mcp` → Reconnect, or at its next start");
 
     Ok(())
@@ -229,12 +257,13 @@ pub(crate) fn remove(args: &RemoveArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
     let tier = Tier::of(args.global);
     let path = writable(tier, &cwd)?;
-    let mut document = document(&path)?;
-    let table = table_mut(&mut document, &path)?;
+    let document = document(&path)?;
+    let table = table(&document, &path)?;
 
-    if table.remove(&args.name).is_none() {
+    let Some(property) = table.get(&args.name) else {
         bail!("mcp server \"{}\" is not in {}", args.name, path.display());
-    }
+    };
+    property.remove();
     write(&path, &document)?;
 
     println!(
@@ -242,8 +271,14 @@ pub(crate) fn remove(args: &RemoveArgs) -> Result<()> {
         args.name,
         path.display()
     );
-    for file in tier_files(tier.other(), &cwd) {
-        if holds(&file, &args.name) {
+    // Both tiers, and both names within each — a `ganja.json` beside the
+    // `ganja.jsonc` this just edited is a file whose entry was already being
+    // ignored, and saying nothing about it would read as "it is gone now".
+    for file in tier_files(tier, &cwd)
+        .into_iter()
+        .chain(tier_files(tier.other(), &cwd))
+    {
+        if file != path && holds(&file, &args.name) {
             println!("still configured in {}", file.display());
         }
     }
@@ -255,67 +290,98 @@ pub(crate) fn remove(args: &RemoveArgs) -> Result<()> {
     Ok(())
 }
 
-/// The file a write to `tier` lands in, refusing a tier this may not rewrite.
+/// The file a write to `tier` lands in.
 ///
-/// The `.jsonc` check is the whole reason this is a function and not a join:
-/// that file both carries the comments a rewrite would delete *and* beats the
-/// `.json` this would otherwise write, so either failure mode alone would be
-/// enough to refuse.
+/// A `ganja.jsonc` at the tier is the answer whenever one is there, because
+/// that is the file the *loader* prefers where both names sit in one
+/// directory: writing the `ganja.json` beside it would land the entry in the
+/// file that loses. Only when there is no `.jsonc` is the `.json` the target,
+/// and only then is a file ever created.
 fn writable(tier: Tier, cwd: &Path) -> Result<PathBuf> {
     let directory = tier.directory(cwd)?;
-    let alternate = directory.join(CONFIG_ALTERNATE);
-    if alternate.exists() {
-        bail!(
-            "{} is a JSONC file, and rewriting it would delete its comments; \
-             edit its `{TABLE}` table by hand",
-            alternate.display()
-        );
+    let commented = directory.join(CONFIG_ALTERNATE);
+    if commented.is_file() {
+        return Ok(commented);
     }
 
     Ok(directory.join(CONFIG_FILE))
 }
 
-/// Reads the target file as a JSON object, or an empty one when it is absent.
+/// The dialect a config file is read in, spelled to match `config.rs`'s own
+/// `parse_options`, which is private to that module.
 ///
-/// Deliberately not `Config`: this build's key set is not necessarily the one
-/// the file was written against, and decoding through the typed config would
-/// drop — silently, on the way back out — every key it does not know. A file
-/// that does not parse is an error and never an empty document, because the
-/// alternative is a rewrite that deletes whatever was in it.
-fn document(path: &Path) -> Result<Map<String, Value>> {
+/// It matters that these two agree in *both* directions. Looser here and this
+/// would happily edit a file the next launch refuses; stricter here and it
+/// would refuse to touch a file that loads perfectly well.
+fn parse_options() -> jsonc_parser::ParseOptions {
+    jsonc_parser::ParseOptions {
+        allow_comments: true,
+        allow_trailing_commas: true,
+        allow_loose_object_property_names: false,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: false,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+    }
+}
+
+/// Reads the target file as a syntax tree, or an empty document when it is
+/// absent.
+///
+/// A concrete syntax tree and deliberately not a `Config`, nor even a
+/// [`serde_json::Value`]: this build's key set is not necessarily the one the
+/// file was written against, and both of those round trips print the document
+/// back from what they understood of it — the typed one dropping unknown keys
+/// outright, the value one dropping every comment and every choice of
+/// formatting. The tree holds the bytes, so everything this does not touch is
+/// returned unchanged rather than re-rendered. A file that does not parse is
+/// an error and never an empty document, because the alternative is a write
+/// that deletes whatever was in it.
+fn document(path: &Path) -> Result<CstRootNode> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
         Err(error) => {
             return Err(error).with_context(|| format!("{} could not be read", path.display()));
         }
     };
-    if text.trim().is_empty() {
-        return Ok(Map::new());
-    }
 
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|error| anyhow!("{} could not be parsed: {error}", path.display()))?;
-    match value {
-        Value::Object(map) => Ok(map),
-        _ => bail!("{} has to hold a JSON object", path.display()),
-    }
+    CstRootNode::parse(&text, &parse_options())
+        .map_err(|error| anyhow!("{} could not be parsed: {error}", path.display()))
 }
 
 /// The document's `mcp` table, created empty when the file has none.
 ///
-/// An `mcp` key holding something that is not an object is refused rather
-/// than replaced: whatever it is, it is not this command's to throw away.
-fn table_mut<'a>(
-    document: &'a mut Map<String, Value>,
-    path: &Path,
-) -> Result<&'a mut Map<String, Value>> {
-    let entry = document
-        .entry(TABLE.to_owned())
-        .or_insert_with(|| Value::Object(Map::new()));
-    match entry {
-        Value::Object(map) => Ok(map),
-        _ => bail!("{}'s `{TABLE}` is not an object", path.display()),
+/// Either an `mcp` key or a root holding something that is not an object is
+/// refused rather than replaced: whatever it is, it is not this command's to
+/// throw away. That is why both steps take the `_or_create` spelling and not
+/// the `_or_set` one — the latter overwrites what it finds.
+fn table(document: &CstRootNode, path: &Path) -> Result<CstObject> {
+    let root = document
+        .object_value_or_create()
+        .ok_or_else(|| anyhow!("{} has to hold a JSON object", path.display()))?;
+
+    root.object_value_or_create(TABLE)
+        .ok_or_else(|| anyhow!("{}'s `{TABLE}` is not an object", path.display()))
+}
+
+/// The value as this tree's editor takes it — the one translation between the
+/// JSON [`entry`] built and validated and the document it is inserted into.
+fn input(value: &Value) -> CstInputValue {
+    match value {
+        Value::Null => CstInputValue::Null,
+        Value::Bool(yes) => CstInputValue::Bool(*yes),
+        // Through the number's own text rather than an `f64`: a config may
+        // carry an integer no double holds exactly, and this is a writer with
+        // no business rounding one.
+        Value::Number(number) => CstInputValue::Number(number.to_string()),
+        Value::String(text) => CstInputValue::String(text.clone()),
+        Value::Array(items) => CstInputValue::Array(items.iter().map(input).collect()),
+        Value::Object(map) => CstInputValue::Object(
+            map.iter()
+                .map(|(key, it)| (key.clone(), input(it)))
+                .collect(),
+        ),
     }
 }
 
@@ -326,15 +392,19 @@ fn table_mut<'a>(
 /// interrupted halfway leaves a truncated config, and a rename within one
 /// directory is the one step that cannot. `import.rs` writes with
 /// `create_new` for the same reason inverted — it only ever creates.
-fn write(path: &Path, document: &Map<String, Value>) -> Result<()> {
+fn write(path: &Path, document: &CstRootNode) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("{} could not be created", parent.display()))?;
     }
 
-    let mut text = serde_json::to_string_pretty(document)
-        .context("the config could not be rendered as JSON")?;
-    text.push('\n');
+    // The tree prints back exactly what it read, so a file that ended in a
+    // newline still does. One is added only where there was none to keep —
+    // a document this created, or one somebody saved without a final newline.
+    let mut text = document.to_string();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
 
     let staged = stage(path, text.as_bytes())?;
     fs::rename(&staged, path).map_err(|error| {
@@ -503,13 +573,32 @@ fn validate(name: &str, entry: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Says so when the *other* tier holds this name too, naming which one wins.
+/// Says so when another config file holds this name too, naming which one
+/// wins.
 ///
 /// A warning and not a refusal: two tiers naming one server is how somebody
 /// overrides a global entry for one project, and the failure worth preventing
 /// is only the silent one — an `add` that appears to do nothing because the
-/// tier that wins was not the tier written.
-fn shadow(written: Tier, name: &str, cwd: &Path) {
+/// file that wins was not the file written.
+///
+/// Two shapes of that, and they read differently. Across tiers the answer is a
+/// *tier*, which is what somebody thinks in when they type `--global`. Within
+/// one tier it is a file: `ganja.jsonc` beats `ganja.json` in a directory, and
+/// naming the tier would say nothing at all.
+fn shadow(written: Tier, path: &Path, name: &str, cwd: &Path) {
+    for file in tier_files(written, cwd) {
+        if file == path || !holds(&file, name) {
+            continue;
+        }
+        // Only ever the losing name: `writable` targets the `.jsonc` wherever
+        // there is one, and that is the one the loader merges last.
+        eprintln!(
+            "warning: mcp server \"{name}\" is also in {}; {} wins at load",
+            file.display(),
+            path.display()
+        );
+    }
+
     let other = written.other();
     for file in tier_files(other, cwd) {
         if !holds(&file, name) {
@@ -577,9 +666,10 @@ fn tier_files(tier: Tier, cwd: &Path) -> Vec<PathBuf> {
 
 /// Whether `path` declares an `mcp` entry called `name`.
 ///
-/// Read through the JSONC parser, which reads plain JSON too: this is the one
-/// place a `.jsonc` is looked *into* rather than refused, and looking is
-/// exactly what refusing to rewrite it leaves available.
+/// Read through the JSONC parser, which reads plain JSON too — the same reason
+/// the loader reads both names with one reader. A question about content and
+/// nothing more, so it goes through the value parser rather than the tree the
+/// write path builds.
 fn holds(path: &Path, name: &str) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
@@ -662,9 +752,10 @@ fn unknown(name: &str, config: &Config) -> String {
 mod tests {
     use std::path::Path;
 
-    use serde_json::{Map, Value, json};
+    use jsonc_parser::cst::CstInputValue;
+    use serde_json::{Value, json};
 
-    use super::{AddArgs, Tier, check_name, document, entry, pairs, table_mut, validate};
+    use super::{AddArgs, Tier, check_name, document, entry, input, pairs, table, validate};
 
     /// The shape a test asks for, with every optional flag unset.
     fn args(name: &str) -> AddArgs {
@@ -858,10 +949,10 @@ mod tests {
     #[test]
     fn an_absent_file_reads_as_an_empty_document_and_a_broken_one_refuses() {
         let missing = Path::new("/nonexistent-ganja-mcp-test/ganja.json");
-        assert!(
-            document(missing)
-                .expect("an absent file is nothing to merge")
-                .is_empty(),
+        let empty = document(missing).expect("an absent file is nothing to merge");
+        assert_eq!(
+            empty.to_string(),
+            "",
             "an absent file is an empty document, not an error"
         );
 
@@ -875,25 +966,61 @@ mod tests {
     }
 
     #[test]
+    fn a_file_only_a_looser_parser_reads_is_refused_rather_than_edited() {
+        let directory = tempfile::tempdir().expect("a temporary directory is creatable");
+        let path = directory.path().join(super::CONFIG_FILE);
+        // Every one of these is something `jsonc_parser` would take by
+        // default and the loader refuses — so editing it would produce a file
+        // that still does not load.
+        for refused in ["{'theme': 'ganja'}", "{theme: \"ganja\"}", "{\"n\": 0xFF}"] {
+            std::fs::write(&path, refused).expect("the fixture is writable");
+            assert!(document(&path).is_err(), "{refused} is not the dialect");
+        }
+
+        // And what the loader *does* take, this takes too.
+        std::fs::write(&path, "{\n  // a note\n  \"theme\": \"ganja\",\n}\n")
+            .expect("the fixture is writable");
+        document(&path).expect("comments and trailing commas are the dialect");
+    }
+
+    #[test]
     fn the_table_is_created_empty_and_a_non_object_mcp_key_is_refused() {
-        let mut document = Map::new();
-        table_mut(&mut document, Path::new("ganja.json"))
+        let path = Path::new("ganja.json");
+        let missing = Path::new("/nonexistent-ganja-mcp-test/ganja.json");
+
+        let document = document(missing).expect("an absent file is an empty document");
+        table(&document, path)
             .expect("an absent table is created")
-            .insert(
-                "docs".to_owned(),
-                json!({"type": "local", "command": ["bun"]}),
-            );
+            .append("docs", input(&json!({"type": "local", "command": ["bun"]})));
         assert_eq!(
-            Value::Object(document),
-            json!({"mcp": {"docs": {"type": "local", "command": ["bun"]}}})
+            jsonc_parser::parse_to_serde_value::<Option<Value>>(
+                &document.to_string(),
+                &super::parse_options()
+            )
+            .expect("what this printed is readable"),
+            Some(json!({"mcp": {"docs": {"type": "local", "command": ["bun"]}}})),
+            "the entry lands under a table this created"
         );
 
-        let Value::Object(mut hostile) = json!({"mcp": ["not", "a", "table"]}) else {
-            unreachable!("the fixture is an object")
+        for hostile in ["{\"mcp\": [\"not\", \"a\", \"table\"]}", "[1, 2, 3]"] {
+            let document = super::CstRootNode::parse(hostile, &super::parse_options())
+                .expect("the fixture parses");
+            assert!(
+                table(&document, path).is_err(),
+                "whatever {hostile} is, it is not this command's to throw away"
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_reaches_the_document_as_the_digits_it_arrived_as() {
+        // `entry` never builds one this large, but the converter is what
+        // stands between a config's own numbers and an `f64` round trip, and
+        // 2^53 + 1 is where that round trip starts lying.
+        let CstInputValue::Number(rendered) = input(&json!(9_007_199_254_740_993_u64)) else {
+            panic!("a JSON number converts to a number")
         };
-        assert!(
-            table_mut(&mut hostile, Path::new("ganja.json")).is_err(),
-            "whatever that is, it is not this command's to throw away"
-        );
+
+        assert_eq!(rendered, "9007199254740993");
     }
 }

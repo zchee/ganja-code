@@ -49,8 +49,8 @@ cargo run -- models cursor      # cursor's live roster from the wire itself — 
 cargo run -- mcp                # the configured MCP servers, dialled, with the tools they lend
 cargo run -- mcp login <server> # OAuth login for a remote server configured with `oauth: {}`
 cargo run -- mcp add local -- npx some-server   # also: add remote --url https://…, get <name>,
-                                #   remove <name>; --global targets the config home file, a
-                                #   ganja.jsonc target is refused by name (D483)
+                                #   remove <name>; --global targets the config home file; a
+                                #   ganja.jsonc target is edited comment-preservingly (D483)
 cargo run -- plugin list        # the installed plugins and what each contributes; also:
                                 #   marketplace add <git-url|path>, install <plugin>@<marketplace>,
                                 #   enable, disable, remove — the `/plugin` dialog's own actions

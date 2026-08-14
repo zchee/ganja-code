@@ -112,8 +112,13 @@ grep-searcher = "0.1.17"
 htmd = "0.5.5"
 ignore = "0.4.31"
 # Config files take comments and trailing commas, the way upstream's do; this
-# parses that dialect into a value `serde` can then decode strictly.
-jsonc-parser = "0.33.1"
+# parses that dialect into a value `serde` can then decode strictly. `cst` is
+# the concrete syntax tree — the same document with its comments, its key order
+# and its whitespace still in it, plus the methods to edit one property and
+# leave the rest of the bytes alone. `ganja mcp add` is why it is on: without
+# it, editing a commented `ganja.jsonc` means printing a parsed value back and
+# deleting every comment somebody wrote it for.
+jsonc-parser = { version = "0.33.1", features = ["cst"] }
 # Compiles and validates the in-repo config schema against Draft 2020-12, both
 # in the drift test (crates/ganja-core/tests/config_schema.rs) and nowhere
 # else — dev-only. Default features add a `reqwest`-backed resolver for

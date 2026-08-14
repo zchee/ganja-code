@@ -54,7 +54,10 @@ ganja-tui.workspace = true
 # extension says, and it has to see the keys in document order — permission
 # rules are evaluated last-match-wins, so a reader that sorted them would change
 # which rule decides. The AST preserves that order; `serde` is what then proves
-# the file this writes is one `ganja_core::config::Config` can read back.
+# the file this writes is one `ganja_core::config::Config` can read back. The
+# workspace entry's `cst` feature is the other half of the same need: `ganja mcp
+# add` edits one property of a file somebody wrote by hand, and the CST is what
+# puts the entry back without printing that file's comments away.
 jsonc-parser = { workspace = true, features = ["serde"] }
 # Only for the raw-mode read that keeps a typed API key off the screen, through
 # the same crossterm instance the UI drives so the two cannot disagree about
