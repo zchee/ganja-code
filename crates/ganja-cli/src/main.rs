@@ -330,8 +330,8 @@ enum Auth {
     /// separate question, and a login that succeeded is not an answer to it.
     Login {
         /// Provider the credential belongs to: one this build ships
-        /// (anthropic, openai, grok, github-copilot), or an id this project's
-        /// config declares under `provider`.
+        /// (anthropic, openai, openrouter, grok, github-copilot), or an id this
+        /// project's config declares under `provider`.
         #[arg(
             long,
             value_parser = named_provider,
@@ -486,6 +486,11 @@ pub(crate) enum ProviderId {
     // The two below derive the names their providers already have.
     #[value(name = "openai")]
     OpenAi,
+    // And this one would derive `open-router`, which is nobody's name for it
+    // either — the vendor, the catalog and the credential file all spell it as
+    // one word.
+    #[value(name = "openrouter")]
+    OpenRouter,
     Grok,
     GithubCopilot,
     // Parses so its refusal can name the deferral; a name clap rejected would
@@ -509,6 +514,7 @@ impl ProviderId {
         match self {
             Self::Anthropic => "anthropic",
             Self::OpenAi => auth::openai::PROVIDER_ID,
+            Self::OpenRouter => ganja_core::provider::openrouter::ID,
             Self::Grok => auth::grok::PROVIDER_ID,
             Self::GithubCopilot => auth::copilot::PROVIDER_ID,
             Self::Cursor => ganja_core::provider::cursor::ID,

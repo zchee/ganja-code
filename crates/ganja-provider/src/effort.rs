@@ -13,13 +13,24 @@
 //! the wire ganja would serve it through, so the table here is keyed on that —
 //! and **only the branches reachable through ganja's own providers are
 //! ported**: anthropic (the Messages wire), openai (Responses), grok and
-//! github-copilot (chat completions). Everything else in upstream's table —
-//! openrouter, the gateways, bedrock, google/vertex, azure, sap, groq, the
-//! alibaba/cohere toggle shapes, and the minimax/glm/kimi/deepseek/qwen
-//! early-outs — belongs to transports ganja cannot select, and is deliberately
-//! not here. A compat endpoint reuses a builtin id's rows and therefore its
-//! wire's encoding; cursor is uncataloged and has no rows to synthesize for; a
-//! row under any other provider id keeps only what the catalog declares.
+//! github-copilot (chat completions). Everything else in upstream's table — the
+//! gateways, bedrock, google/vertex, azure, sap, groq, the alibaba/cohere
+//! toggle shapes, and the minimax/glm/kimi/deepseek/qwen early-outs — belongs
+//! to transports ganja cannot select, and is deliberately not here. A compat
+//! endpoint reuses a builtin id's rows and therefore its wire's encoding;
+//! cursor is uncataloged and has no rows to synthesize for; a row under any
+//! other provider id keeps only what the catalog declares.
+//!
+//! **openrouter is the one selectable provider deliberately left in that last
+//! group**, and it moved there rather than out of the list: it is cataloged and
+//! it is a wire ganja serves, so [`wire`] could name one. Two things say not
+//! yet. Upstream's branch for it is keyed to `@openrouter/ai-sdk-provider`, a
+//! *chat-completions* transport, while ganja reaches this vendor over Responses
+//! (`crate::provider::openrouter`); and the fields a Responses map splices —
+//! [`INCLUDE_ENCRYPTED_REASONING`] above all — are exactly the ones that module
+//! refuses to send this vendor unasked, so synthesizing here would put them
+//! back through the effort door. An openrouter row therefore keeps only what
+//! the catalog declares, until a live probe settles what that surface accepts.
 //!
 //! Two translations ride every map. Upstream's option maps are AI-SDK
 //! provider options (`budgetTokens`, `reasoningEffort`) that the SDK re-spells

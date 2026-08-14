@@ -19,7 +19,7 @@ use ganja_core::{
     catalog,
     protocol::{FinishReason, Message, Usage},
     provider::{
-        AnthropicProvider, ChatRequest, OpenAiProvider, Provider, ProviderEvent,
+        AnthropicProvider, ChatRequest, OpenAiProvider, Provider, ProviderEvent, openrouter,
         retry::MAX_ATTEMPTS,
     },
 };
@@ -142,6 +142,39 @@ async fn openai_answers_a_live_prompt() {
             .with_base_url(base),
         _ => OpenAiProvider::new(key).expect("a client builds"),
     };
+
+    smoke(&provider, &model).await;
+}
+
+/// The gateway, over the Responses dialect it publishes.
+///
+/// This is the test that would settle what `provider::openrouter`'s ledger
+/// refuses to guess at. It proves the floor — the request this build sends is
+/// one the vendor accepts, on a model of its own namespaced spelling — and a
+/// turn that ever needs to prove the *sealed-reasoning* rows should be a second
+/// test with a tool call in it, not a wider assertion bolted onto this one.
+///
+/// The model is named rather than defaulted because this provider has no
+/// catalog pin, which is the decision `provider::openrouter` documents:
+/// `GANJA_MODEL` names one, and the constant below is the cheap fallback so the
+/// opt-in needs one variable rather than two.
+#[tokio::test]
+#[ignore = "talks to OpenRouter; needs GANJA_LIVE_TEST=1 and OPENROUTER_API_KEY"]
+async fn openrouter_answers_a_live_prompt() {
+    /// Cheap, tool-capable, and in every published catalog vintage so far.
+    const FALLBACK: &str = "openai/gpt-5-nano";
+
+    if key("OPENROUTER_API_KEY").is_none() {
+        return;
+    }
+    // Built from the environment rather than from the key this returned: that
+    // constructor is the one a session actually takes, so the credential
+    // precedence and the endpoint check are under test with it.
+    let provider = openrouter::from_env().expect("an exported key builds the provider");
+    let model = env::var("GANJA_MODEL")
+        .ok()
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| FALLBACK.to_owned());
 
     smoke(&provider, &model).await;
 }

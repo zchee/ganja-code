@@ -1421,6 +1421,19 @@ mod tests {
     /// and `a_*_session_that_names_no_model_gets_one_the_catalog_can_price` in
     /// `provider/{anthropic,grok,copilot}.rs` — so a forgotten row still
     /// reddens something that names the provider it belongs to.
+    ///
+    /// **And the obligation has an exception now, deliberately.** It was
+    /// written for single-vendor rosters, where "cataloged" and "one obvious
+    /// default" arrive together. A *gateway* breaks that pairing: `openrouter`
+    /// is fully cataloged once a catalog is fetched — rows for every vendor it
+    /// fronts — and pins nothing, because no vendor and no upstream rule
+    /// supplies a default for it (`provider::openrouter` holds the three
+    /// reasons). It reaches the uncataloged arm below in *this* process only
+    /// because the compiled-in snapshot carries no rows for it, which is an
+    /// accident of the tier rather than the reason, so it is named for what it
+    /// is instead of passing by coincidence. `ganja-core`'s
+    /// `tests/catalog_openrouter.rs` is where both halves are asserted against
+    /// a real catalog: rows present, default absent.
     #[test]
     fn every_selectable_provider_has_a_default_this_table_can_price() {
         for provider in crate::provider::PROVIDERS {
@@ -1434,6 +1447,18 @@ mod tests {
                     default_model(provider),
                     Some("default"),
                     "cursor's pin is the wire's own Auto id, nothing else"
+                );
+                continue;
+            }
+            // The gateway: cataloged wherever a catalog was fetched, pinned
+            // nowhere, and asserted as *both* rather than left to whichever
+            // tier this process happens to be holding.
+            if provider == crate::provider::openrouter::ID {
+                assert_eq!(
+                    default_model(provider),
+                    None,
+                    "a gateway fronting many vendors pins none of them; see \
+                     `provider::openrouter` before adding one"
                 );
                 continue;
             }

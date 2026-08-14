@@ -502,6 +502,14 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         fake::ID => Wire::catalog(FakeProvider::default()),
         anthropic::ID => Wire::catalog(AnthropicProvider::from_env()?),
         openai::ID => openai_provider()?,
+        // Anthropic's construction shape — a key read at startup, so a session
+        // with none dies where the message is readable — over the Responses
+        // wire, which is this vendor's own surface rather than the compat
+        // endpoint a config could already have named. No wire default: the
+        // catalog has rows for every vendor this one fronts and a pin for none
+        // of them, so `defaulted_model` falls through to the refusal that names
+        // the three ways to name a model (`provider::openrouter`).
+        openrouter::ID => Wire::catalog(openrouter::from_env()?),
         grok::ID => Wire::catalog(GrokProvider::from_stored()?),
         // Selectable as a bare name: construction reads nothing — grok's
         // posture — and each request reads the stored login as it is needed,
@@ -632,7 +640,8 @@ mod tests {
 
     use super::{
         Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, adoptable_login,
-        cursor, defaulted_model, fake, grok, openai, select, selectable, wire_model_listing,
+        cursor, defaulted_model, fake, grok, openai, openrouter, select, selectable,
+        wire_model_listing,
     };
     use crate::catalog;
 
@@ -685,6 +694,50 @@ mod tests {
 
         assert!(!selectable(&config, "gemini"));
         assert!(!selectable(&Config::default(), "local-llama"));
+    }
+
+    /// The gateway sits in a tier of its own, and both halves of that are
+    /// deliberate: it ships, so nothing has to be configured to reach it, and
+    /// it is pinned to no model, so a session has to say which of the vendors
+    /// it fronts it wants.
+    ///
+    /// The second half is the one worth a test of its own. Every other builtin
+    /// either has a catalog pin or is uncataloged on purpose; this one is fully
+    /// sized and priced and still refuses to guess, so the refusal has to be
+    /// the actionable kind — see `ganja_provider::provider::openrouter` for the
+    /// three reasons the pin is absent.
+    #[test]
+    fn the_gateway_ships_selectable_and_pinned_to_none_of_the_vendors_it_fronts() {
+        assert!(
+            selectable(&Config::default(), openrouter::ID),
+            "a builtin needs no config entry to be reachable"
+        );
+        assert!(
+            PROVIDERS.contains(&openrouter::ID),
+            "and the roster every refusal prints is where somebody discovers it"
+        );
+
+        let refused = defaulted_model(openrouter::ID, None)
+            .expect_err("no pin, so nothing may be substituted for a choice");
+        let rendered = refused.to_string();
+        assert!(rendered.contains(openrouter::ID), "{rendered}");
+        for way in ["GANJA_MODEL", "--model", "`model`"] {
+            assert!(
+                rendered.contains(way),
+                "a refusal that does not say how to answer it is a dead end: \
+                 {way} missing from {rendered}"
+            );
+        }
+
+        // Not the fake provider's arm, and not a wire default either: those two
+        // are what `defaulted_model` answers *before* it asks the catalog, and
+        // the whole point here is that it asked and the catalog had nothing.
+        assert_eq!(
+            defaulted_model(openrouter::ID, Some("openai/gpt-5.4"))
+                .expect("a wire that names its own default is answered"),
+            "openai/gpt-5.4",
+            "the seam is still there for a backend that ever grows one"
+        );
     }
 
     /// A refusal that listed only the shipped providers would tell somebody

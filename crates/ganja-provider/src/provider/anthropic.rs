@@ -280,7 +280,15 @@ impl Provider for AnthropicProvider {
             "requesting a turn"
         );
 
-        open::<Mapping>(&self.client, built, &presented, &self.rates, cancel).await
+        open(
+            Mapping::default,
+            &self.client,
+            built,
+            &presented,
+            &self.rates,
+            cancel,
+        )
+        .await
     }
 
     fn rate_windows(&self) -> Vec<super::RateWindow> {

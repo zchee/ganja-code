@@ -129,6 +129,7 @@ fn sealed(command: &mut Command, project: &Path, data: &Path, config: &Path) {
         .env_remove("GANJA_SERVER_USERNAME")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
         // A closed pipe rather than the harness's stdin: `run` reads it whole
         // when it is not a terminal.
         .write_stdin("");
@@ -224,6 +225,7 @@ impl Server {
             .env_remove("GANJA_SERVER_USERNAME")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENROUTER_API_KEY")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

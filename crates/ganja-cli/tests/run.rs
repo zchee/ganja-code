@@ -91,6 +91,7 @@ impl Run {
             .env_remove("GANJA_CONFIG")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENROUTER_API_KEY")
             // A closed pipe rather than the harness's stdin: `run` reads it
             // whole when it is not a terminal.
             .write_stdin("");

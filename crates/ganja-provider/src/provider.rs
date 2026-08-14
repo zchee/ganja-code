@@ -96,6 +96,7 @@ pub mod cursor;
 pub mod fake;
 pub mod grok;
 pub mod openai;
+pub mod openrouter;
 pub mod rate;
 pub mod responses;
 pub mod retry;
@@ -168,9 +169,15 @@ pub const MODEL_ENV: &str = "GANJA_MODEL";
 /// [`catalog::carries`] is that second tier, and a provider outside it runs on
 /// the degradation path — no auto-compaction, no cost, a title from its own
 /// model.
-pub const PROVIDERS: [&str; 6] = [
+///
+/// Cataloged is also not the same as **pinned**: [`openrouter`] has rows for
+/// every one of the vendors it fronts and a default for none of them, so it is
+/// the first builtin that is fully sized and priced and still asks a session to
+/// name its model. See that module for why.
+pub const PROVIDERS: [&str; 7] = [
     anthropic::ID,
     openai::ID,
+    openrouter::ID,
     grok::ID,
     copilot::ID,
     fake::ID,
@@ -855,7 +862,8 @@ fn is_terminal(event: &ProviderEvent) -> bool {
 /// A cancelled turn is not one of those: it yields an empty stream, because
 /// the engine reads a stream that ends after a cancel as `Cancelled`, and a
 /// user who pressed Esc has not hit an error.
-async fn open<M: Mapper + Default>(
+async fn open<M: Mapper>(
+    mapper: impl Fn() -> M,
     client: &reqwest::Client,
     request: reqwest::Request,
     presented: &Presented,
@@ -878,7 +886,7 @@ async fn open<M: Mapper + Default>(
         rates.record(response.headers(), std::time::SystemTime::now());
 
         return Ok(shielded(
-            events(response.bytes_stream().boxed(), cancel, M::default()),
+            events(response.bytes_stream().boxed(), cancel, mapper()),
             presented.clone(),
             endpoint,
         ));
@@ -908,13 +916,13 @@ async fn open<M: Mapper + Default>(
         // which is right — the later answer is the newer truth.
         rates.record(response.headers(), std::time::SystemTime::now());
 
-        // A fresh mapper per attempt: a retried turn starts over, and a
-        // mapper that remembered the dead attempt's half-open state would
-        // splice two turns together.
+        // A fresh mapper per attempt — which is why this is a factory rather
+        // than a mapper: a retried turn starts over, and one that remembered
+        // the dead attempt's half-open state would splice two turns together.
         match peeked(events(
             response.bytes_stream().boxed(),
             cancel.clone(),
-            M::default(),
+            mapper(),
         ))
         .await
         {
