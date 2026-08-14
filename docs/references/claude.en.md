@@ -93,7 +93,7 @@ docs unless marked otherwise.*
 | [`/output-style`](https://code.claude.com/docs/en/output-styles) | response styles | ❌ |
 | [`/context`](https://code.claude.com/docs/en/costs) | context usage grid | ✅ per-category grid + legend over the compaction estimator's breakdown (D470); an unsized model degrades to totals with an honest notice, never an invented denominator |
 | [`/todos`](https://code.claude.com/docs/en/interactive-mode) | task checklist view | ⚠️ todos render in-chat only |
-| [`/usage`](https://code.claude.com/docs/en/costs) | usage/cost breakdown | ⚠️ session totals, cache/reasoning splits, context % and the per-turn table (D471); no plan-limit meters — ganja speaks no vendor usage API, and the panel says so instead of drawing one |
+| [`/usage`](https://code.claude.com/docs/en/costs) | usage/cost breakdown | ⚠️ session totals, cache/reasoning splits, context % and the per-turn table (D471), plus a Current window section mirroring the vendor's rate windows from response headers (D484, expired buckets decay); no plan-limit meters — those alone need the usage API, and the panel says so instead of drawing one |
 | [`/doctor`](https://code.claude.com/docs/en/troubleshooting) | self-diagnostics | ❌ |
 | [`/export`](https://code.claude.com/docs/en/slash-commands) | export conversation | ⚠️ `/copy` only |
 | [`/cd`](https://code.claude.com/docs/en/slash-commands) *(low confidence)* | change directory | ❌ launch-directory-only is a design stance |
@@ -147,7 +147,7 @@ docs unless marked otherwise.*
 
 | Feature | Notes | ganja |
 |---|---|---|
-| [Command files](https://code.claude.com/docs/en/slash-commands) | `.claude/commands/*.md` + `~/.claude/commands` | ✅ config-declared commands |
+| [Command files](https://code.claude.com/docs/en/slash-commands) | `.claude/commands/*.md` + `~/.claude/commands` | ✅ config-declared commands + a file tier (D481): `<config home>/commands/*.md` and `<project root>/.ganja/commands/*.md` (frontmatter description/agent/model/argument-hint, body as template, builtin < global < project < config) |
 | [`$ARGUMENTS` / `$1`, `$2`](https://code.claude.com/docs/en/slash-commands) | argument expansion | ✅ |
 | [`` !`cmd` `` in templates](https://code.claude.com/docs/en/slash-commands) | dynamic shell output at invocation | ✅ (P8) |
 | [`@path` in templates](https://code.claude.com/docs/en/slash-commands) | file embedding | ✅ (P8, as mention-grade attachment) |
@@ -161,7 +161,7 @@ docs unless marked otherwise.*
 
 | Feature | Notes | ganja |
 |---|---|---|
-| [Agent definition files](https://code.claude.com/docs/en/sub-agents) | `.claude/agents/*.md` with name/description/model/tools frontmatter | ⚠️ config-declared agents with model + rules; no per-agent tool grants |
+| [Agent definition files](https://code.claude.com/docs/en/sub-agents) | `.claude/agents/*.md` with name/description/model/tools frontmatter | ✅ config-declared agents plus a file tier (D482): `<config home>/agents/*.md` + `.ganja/agents/*.md` (name/description/model/tools frontmatter, body as prompt); `tools:` compiles to permission rules — unlisted tools are refused, never hidden (a deliberate divergence from Claude's roster-hiding); model takes full `provider/model` ids only | |
 | [Auto-delegation by description](https://code.claude.com/docs/en/sub-agents) | the model picks the agent | ⚠️ the task tool offers the roster with descriptions |
 | [Parallel subagents](https://code.claude.com/docs/en/sub-agents) | concurrent execution | ✅ consecutive `task` calls in one assistant step fan out concurrently (capped by `agents.concurrency`, default 4) and fan back in on completion order; root turns still stay serial (D462) |
 | [`isolation: worktree`](https://code.claude.com/docs/en/sub-agents) | subagent in its own git worktree | ❌ |
@@ -179,7 +179,7 @@ docs unless marked otherwise.*
 |---|---|---|
 | [Transports](https://code.claude.com/docs/en/mcp) | stdio, streamable HTTP, SSE | ✅ stdio + streamable HTTP; legacy SSE ❌ |
 | [Config scopes](https://code.claude.com/docs/en/mcp) | local (`~/.claude.json`) / project (`.mcp.json`) / user, with precedence | ⚠️ global + project config tiers; no per-user-per-repo local scope |
-| [CLI management](https://code.claude.com/docs/en/mcp) | `claude mcp add/list --scope --transport` | ⚠️ `ganja mcp` lists; adding is config-file only |
+| [CLI management](https://code.claude.com/docs/en/mcp) | `claude mcp add/list --scope --transport` | ✅ `ganja mcp add/list/get/remove` (D483): entries validated with the loader's own predicates, staged writes to `ganja.json` preserving unknown keys, `ganja.jsonc` refused by name, `get` reports origin and overrides honestly | |
 | [OAuth](https://code.claude.com/docs/en/mcp) | PKCE flows, metadata discovery, token refresh | ✅ RFC 8414 discovery + RFC 7591 registration (fallback client id) + PKCE/loopback + refresh-then-redial on 401; deliberately minimal — no resource-metadata discovery, no per-request reactive re-auth mid-call (D466) |
 | [Project-scope first-use approval](https://code.claude.com/docs/en/mcp) | guard against repo-injected servers | ✅ stronger: every MCP tool asks by default |
 | [Timeout/output knobs](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `MAX_MCP_OUTPUT_TOKENS` | ⚠️ per-server `timeout`/`output_limit` config keys (bytes, not tokens); no global env-var knobs |

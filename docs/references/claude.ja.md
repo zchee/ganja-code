@@ -91,7 +91,7 @@
 | [`/output-style`](https://code.claude.com/docs/en/output-styles) | 応答スタイル | ❌ |
 | [`/context`](https://code.claude.com/docs/en/costs) | 文脈使用量の可視化グリッド | ✅ 圧縮見積もり器と同じ内訳でカテゴリ別グリッド+凡例を描画(D470);ウィンドウ未収載モデルは正直に合計表示へ縮退し、分母を発明しない |
 | [`/todos`](https://code.claude.com/docs/en/interactive-mode) | タスクチェックリスト表示 | ⚠️ チャット内描画のみ |
-| [`/usage`](https://code.claude.com/docs/en/costs) | 使用量・コスト内訳 | ⚠️ セッション合計・キャッシュ/推論の内訳・文脈 %・ターン別テーブル(D471);プラン上限メーターは無し — ganja はベンダーの usage API を話さず、パネルはそれを描かずに明言する |
+| [`/usage`](https://code.claude.com/docs/en/costs) | 使用量・コスト内訳 | ⚠️ セッション合計・キャッシュ/推論の内訳・文脈 %・ターン別テーブル(D471)+ ベンダーのレート窓を映す「Current window」セクション(D484、応答ヘッダ由来・期限切れは decay);プラン上限メーターは無し — それだけが usage API を要し、パネルはそれを描かずに明言する |
 | [`/doctor`](https://code.claude.com/docs/en/troubleshooting) | 自己診断 | ❌ |
 | [`/export`](https://code.claude.com/docs/en/slash-commands) | 会話のエクスポート | ⚠️ `/copy` のみ |
 | [`/cd`](https://code.claude.com/docs/en/slash-commands) *(低確度)* | 作業ディレクトリ変更 | ❌ 起動ディレクトリ固定は設計判断 |
@@ -145,7 +145,7 @@
 
 | 機能 | 補足 | ganja |
 |---|---|---|
-| [コマンドファイル](https://code.claude.com/docs/en/slash-commands) | `.claude/commands/*.md` + グローバル | ✅ config 宣言コマンド |
+| [コマンドファイル](https://code.claude.com/docs/en/slash-commands) | `.claude/commands/*.md` + グローバル | ✅ config 宣言コマンド + ファイル tier(D481): `<config home>/commands/*.md` と `<project root>/.ganja/commands/*.md`(frontmatter description/agent/model/argument-hint、本文がテンプレート、builtin < global < project < config の後勝ち) |
 | [`$ARGUMENTS` / `$1`・`$2`](https://code.claude.com/docs/en/slash-commands) | 引数展開 | ✅ |
 | [テンプレート内 `` !`cmd` ``](https://code.claude.com/docs/en/slash-commands) | 起動時のシェル出力埋込 | ✅(P8) |
 | [テンプレート内 `@path`](https://code.claude.com/docs/en/slash-commands) | ファイル埋込 | ✅(P8・mention 級添付として) |
@@ -159,7 +159,7 @@
 
 | 機能 | 補足 | ganja |
 |---|---|---|
-| [エージェント定義ファイル](https://code.claude.com/docs/en/sub-agents) | `.claude/agents/*.md`(name/description/model/tools) | ⚠️ config 宣言 agent(model+rules)・エージェント毎ツール許可なし |
+| [エージェント定義ファイル](https://code.claude.com/docs/en/sub-agents) | `.claude/agents/*.md`(name/description/model/tools) | ✅ config 宣言 agent に加えファイル tier(D482): `<config home>/agents/*.md` + `.ganja/agents/*.md`(name/description/model/tools、本文がプロンプト);`tools:` は permission ルールへ写像され未掲載ツールは隠されず拒否される — Claude の roster 隠しとの意図的相違。model はフル `provider/model` のみ(エイリアスは名指し拒否) | |
 | [記述による自動委譲](https://code.claude.com/docs/en/sub-agents) | モデルがエージェントを選ぶ | ⚠️ task ツールが記述付き roster を提示 |
 | [並列サブエージェント](https://code.claude.com/docs/en/sub-agents) | 同時実行 | ✅ 1アシスタントステップ内で連続する `task` 呼出しが並行 fan-out(`agents.concurrency` 上限、既定4)し完了順に fan-in;root ターンは引き続き直列(D462) |
 | [`isolation: worktree`](https://code.claude.com/docs/en/sub-agents) | worktree 内で実行 | ❌ |
@@ -177,7 +177,7 @@
 |---|---|---|
 | [transport](https://code.claude.com/docs/en/mcp) | stdio・streamable HTTP・SSE | ✅ stdio+streamable HTTP・legacy SSE ❌ |
 | [設定スコープ](https://code.claude.com/docs/en/mcp) | local(`~/.claude.json`)/ project(`.mcp.json`)/ user+優先順位 | ⚠️ グローバル+プロジェクト config・repo 毎 local スコープなし |
-| [CLI 管理](https://code.claude.com/docs/en/mcp) | `claude mcp add/list --scope --transport` | ⚠️ `ganja mcp` は一覧のみ・追加は config 直書き |
+| [CLI 管理](https://code.claude.com/docs/en/mcp) | `claude mcp add/list --scope --transport` | ✅ `ganja mcp add/list/get/remove`(D483): ローダー自身の述語で検証してから `ganja.json` へ staged 書込み(未知キーはバイト意味不変に保存)、`ganja.jsonc` は名指しで拒否(コメントを壊さない)、`get` は由来ファイルと override を正直に報告 | |
 | [OAuth](https://code.claude.com/docs/en/mcp) | PKCE・メタデータ発見・トークン更新 | ✅ RFC 8414 発見+RFC 7591 登録(フォールバック client id)+PKCE/loopback+401 時の refresh-then-redial;意図的に最小構成 — resource-metadata discovery なし・呼出し中の reactive re-auth なし(D466) |
 | [project スコープの初回承認](https://code.claude.com/docs/en/mcp) | repo 注入サーバー対策 | ✅ より強い: 全 MCP ツールが既定で ask |
 | [タイムアウト・出力上限](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`・`MCP_TOOL_TIMEOUT`・`MAX_MCP_OUTPUT_TOKENS` | ⚠️ サーバー毎 `timeout`/`output_limit` config キー(バイト単位・トークンではない);グローバルな env var ノブはなし |
