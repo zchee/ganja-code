@@ -2,12 +2,12 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-ganja                                                                           
-[done] edit: a.rs                                                               
-@@ -1,2 +1,2 @@                                                                 
--old line                                                                       
-+new line                                                                       
-context line                                                                    
+● Edit(filePath: "a.rs")                                                        
+  ⎿ a.rs                                                                        
+    @@ -1,2 +1,2 @@                                                             
+    -old line                                                                   
+    +new line                                                                   
+    context line                                                                
                                                                                 
                                                                                 
                                                                                 

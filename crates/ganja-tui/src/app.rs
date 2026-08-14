@@ -5863,7 +5863,7 @@ mod tests {
         let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");
         assert!(
-            screen(&terminal).contains("[running] shell"),
+            screen(&terminal).contains("\u{25cf} Shell"),
             "got:\n{}",
             screen(&terminal)
         );
@@ -5916,7 +5916,14 @@ mod tests {
         .expect("a completed update is handled");
         app.draw(&mut terminal).expect("a frame draws");
         let screen_text = screen(&terminal);
-        assert!(screen_text.contains("[done] shell"), "got:\n{screen_text}");
+        assert!(
+            screen_text.contains("\u{25cf} Shell(command: \"cargo test\")"),
+            "got:\n{screen_text}"
+        );
+        assert!(
+            screen_text.contains("\u{23bf} cargo test"),
+            "got:\n{screen_text}"
+        );
         assert!(screen_text.contains("ok"), "got:\n{screen_text}");
     }
 

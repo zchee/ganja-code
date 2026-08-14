@@ -2,17 +2,17 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-you                                                                             
-th┌ rewind ──────────────────────────────────────────────────────────────────┐  
-  │> (Current)                                                               │  
-ga│  the question that is taken back                        ⚠ No code restore│  
-th│  the question that stands                               ⚠ No code restore│  
+> the question that stands                                                      
+  ┌ rewind ──────────────────────────────────────────────────────────────────┐  
+● │> (Current)                                                               │  
+  │  the question that is taken back                        ⚠ No code restore│  
+> │  the question that stands                               ⚠ No code restore│  
   │                                                                          │  
-yo│[j/k] [up/down] move   [Enter] continue   [Esc] cancel                    │  
-th│                                                                          │  
+● │[j/k] [up/down] move   [Enter] continue   [Esc] cancel                    │  
   │                                                                          │  
-ga│                                                                          │  
-th│                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
   │                                                                          │  
   └──────────────────────────────────────────────────────────────────────────┘  
                                                                                 
