@@ -809,6 +809,19 @@ struct Body<'a> {
     /// registry.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ToolSpec<'a>>,
+    /// Whether the model may decide to call one of them.
+    ///
+    /// **[`Backend::OpenRouter`] only, and only beside a non-empty roster.**
+    /// `"auto"` is the value the agent loop always wants and the one that
+    /// vendor's reference spells in every tool example it publishes
+    /// (`api_reference/responses/tool-calling`); what its API defaults to when
+    /// the field is absent, that reference does not say, and a gateway
+    /// defaulting to `none` would be a session whose tools are advertised and
+    /// never called. The other two backends are unchanged because their request
+    /// is the Codex CLI's, which sends no `tool_choice` and has been answered by
+    /// that endpoint on every turn this build has taken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
 }
 
 /// One tool as the Responses API advertises it.
@@ -1047,6 +1060,17 @@ impl<'a> Body<'a> {
             }
         }
 
+        let tools: Vec<ToolSpec<'a>> = request
+            .tools
+            .iter()
+            .map(|tool: &ToolDefinition| ToolSpec {
+                kind: "function",
+                name: alias(&tool.name, OPENAI_CAP),
+                description: &tool.description,
+                parameters: &tool.schema,
+            })
+            .collect();
+
         Self {
             model: &request.model,
             stream: true,
@@ -1055,16 +1079,9 @@ impl<'a> Body<'a> {
                 .then_some([REASONING_INCLUDE]),
             instructions: request.system.as_deref(),
             input,
-            tools: request
-                .tools
-                .iter()
-                .map(|tool: &ToolDefinition| ToolSpec {
-                    kind: "function",
-                    name: alias(&tool.name, OPENAI_CAP),
-                    description: &tool.description,
-                    parameters: &tool.schema,
-                })
-                .collect(),
+            tool_choice: (backend == Backend::OpenRouter && !tools.is_empty())
+                .then_some(TOOL_CHOICE_AUTO),
+            tools,
         }
     }
 }
@@ -1197,6 +1214,19 @@ struct Mapping {
     /// What this request's advertised names map back to, empty for the
     /// ordinary roster whose names this API already accepts.
     aliases: Aliases,
+    /// Which spelling of the reasoning-delta event first delivered readable
+    /// thinking on this stream, and [`None`] until one has.
+    ///
+    /// Two vendors name the same event differently — [`REASONING_SUMMARY_DELTA`]
+    /// is OpenAI's and [`REASONING_DELTA`] is OpenRouter's — and a gateway
+    /// relaying one vendor's stream through its own normalization can carry
+    /// both. **First spelling wins for the whole response**, which is stricter
+    /// than keying the latch on the item id and deliberately so: what the pane
+    /// must never do is render one train of thought twice, and an item id is a
+    /// correlation the two spellings are not guaranteed to agree on. The cost
+    /// is a summary dropped on a stream that also streamed raw thinking, which
+    /// is the richer of the two.
+    thinking: Option<&'static str>,
 }
 
 impl Default for Mapping {
@@ -1206,6 +1236,7 @@ impl Default for Mapping {
             usage: Usage::default(),
             calls: HashMap::new(),
             aliases: Aliases::default(),
+            thinking: None,
         }
     }
 }
@@ -1255,9 +1286,14 @@ impl Mapper for Mapping {
         // re-serializes the stream produces.
         match chunk["type"].as_str().unwrap_or_default() {
             "response.output_text.delta" => self.delta(&chunk, events, ProviderEvent::TextDelta),
-            "response.reasoning_summary_text.delta" => {
-                self.delta(&chunk, events, ProviderEvent::ReasoningDelta);
-            }
+            REASONING_SUMMARY_DELTA => self.thought(&chunk, events, REASONING_SUMMARY_DELTA),
+            // OpenRouter's own spelling of the same thing, which is what makes
+            // it worth a second arm: that vendor serves a dialect it documents
+            // as a drop-in for this one and then names this one event itself
+            // (`api_reference/responses/reasoning`, the streaming example, read
+            // 2026-08-14). Unmapped, a gateway turn's thinking reached the
+            // debug log and the pane stayed empty.
+            REASONING_DELTA => self.thought(&chunk, events, REASONING_DELTA),
             "response.output_item.added" => self.opened(&chunk["item"], events),
             "response.function_call_arguments.delta" => self.filled(&chunk, events),
             "response.output_item.done" => self.closed(&chunk["item"], events),
@@ -1314,6 +1350,72 @@ impl Mapping {
         {
             events.push(make(delta.to_owned()));
         }
+    }
+
+    /// Maps one fragment of readable thinking, whichever of the two spellings
+    /// carried it.
+    ///
+    /// The latch is applied to a fragment that has something to say, never to
+    /// an empty one: a stream that opened with an empty delta under the spelling
+    /// it then abandoned would otherwise lock the other one out for good.
+    fn thought(&mut self, chunk: &Value, events: &mut Vec<ProviderEvent>, spelling: &'static str) {
+        let Some(delta) = chunk["delta"].as_str().filter(|delta| !delta.is_empty()) else {
+            return;
+        };
+        if let Some(first) = self.thinking
+            && first != spelling
+        {
+            tracing::debug!(
+                first,
+                dropped = spelling,
+                "a second reasoning-delta spelling on one stream is one train of \
+                 thought relayed twice"
+            );
+            return;
+        }
+
+        self.thinking = Some(spelling);
+        events.push(ProviderEvent::ReasoningDelta(delta.to_owned()));
+    }
+
+    /// The thinking a settled reasoning item carries, for a stream that streamed
+    /// none.
+    ///
+    /// OpenRouter's reference shows the summary arriving on the response's own
+    /// `reasoning` output item as an array of strings, and documents no
+    /// parameter to ask for it — so on that vendor it can arrive on a turn that
+    /// streamed nothing readable at all, and the closing frame is the only place
+    /// it exists. Guarded on [`Mapping::thinking`] rather than per item, because
+    /// what must not happen is the same thinking rendered twice; a stream that
+    /// streamed anything readable is already served.
+    ///
+    /// The latch is deliberately *not* set here. Each reasoning item closes with
+    /// its own summary, and a stream where the first item was summarized and the
+    /// second streams its thinking must keep both.
+    fn settled(&self, item: &Value, events: &mut Vec<ProviderEvent>) {
+        if self.thinking.is_some() {
+            return;
+        }
+        let Some(summary) = item["summary"].as_array() else {
+            return;
+        };
+
+        let text = summary
+            .iter()
+            // Two documented shapes for one field: OpenRouter publishes bare
+            // strings (`api_reference/responses/reasoning`, "Response with
+            // Reasoning") and OpenAI publishes `{type, text}` blocks. Reading
+            // both is two references rather than a guess, and an entry in
+            // neither shape is skipped rather than rendered as JSON.
+            .filter_map(|entry| entry.as_str().or_else(|| entry["text"].as_str()))
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if text.is_empty() {
+            return;
+        }
+
+        events.push(ProviderEvent::ReasoningDelta(text));
     }
 
     /// Opens a call the model started making.
@@ -1383,7 +1485,15 @@ impl Mapping {
                     events.push(ProviderEvent::ToolCallEnd { id });
                 }
             }
-            REASONING if self.seals => sealed(item, events),
+            REASONING => {
+                if self.seals {
+                    sealed(item, events);
+                }
+                // Unconditional, unlike the sealing half: what a person reads
+                // is nobody's replay, so a backend that documents no way to
+                // hand state back still has thinking to show.
+                self.settled(item, events);
+            }
             _ => {}
         }
     }
@@ -1460,8 +1570,26 @@ fn sealed(item: &Value, events: &mut Vec<ProviderEvent>) {
 /// The item kind a tool call arrives as.
 const FUNCTION_CALL: &str = "function_call";
 
+/// "Call one if you decide to", the only one of this API's three tool-choice
+/// values an agent loop ever wants: `"none"` would advertise a roster nothing
+/// may call, and naming one tool is a decision the *model* is being asked to
+/// make. See [`Body::tool_choice`] for which backend is sent it, and why only
+/// that one.
+const TOOL_CHOICE_AUTO: &str = "auto";
+
 /// The item kind sealed thinking arrives as, and goes back as.
 const REASONING: &str = "reasoning";
+
+/// OpenAI's name for a fragment of readable thinking, which only exists
+/// downstream of a `reasoning.summary` in the request ([`summarized`]).
+const REASONING_SUMMARY_DELTA: &str = "response.reasoning_summary_text.delta";
+
+/// OpenRouter's name for the same fragment, published in that vendor's own
+/// streaming example and carried in the same `delta` field
+/// (`api_reference/responses/reasoning`, read 2026-08-14). It arrives on a
+/// request that asked for no summary at all, which is why the gateway sends
+/// none: see [`super::openrouter`]'s ledger.
+const REASONING_DELTA: &str = "response.reasoning.delta";
 
 /// The one thing this build asks the backend to include beside the reply.
 const REASONING_INCLUDE: &str = "reasoning.encrypted_content";
@@ -1609,6 +1737,29 @@ mod tests {
         replay(transcript, CancellationToken::new(), Mapping::default())
             .collect()
             .await
+    }
+
+    /// The same, read by the mapper a gateway turn installs: nothing sealed,
+    /// and this vendor's own event spellings.
+    async fn gateway_events(transcript: &'static str) -> Vec<ProviderEvent> {
+        replay(
+            transcript,
+            CancellationToken::new(),
+            Mapping::for_backend(Backend::OpenRouter, Aliases::default()),
+        )
+        .collect()
+        .await
+    }
+
+    /// The thinking a transcript streams, which is what the ✻ pane renders.
+    fn thinking(events: &[ProviderEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ReasoningDelta(delta) => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The reply text a transcript streams.
@@ -1983,6 +2134,78 @@ mod tests {
             json!({"effort": "high"}),
             "the effort's own object, and not a summary nobody asked for"
         );
+    }
+
+    /// A gateway row as the catalog holds it once [`crate::effort::roster`] has
+    /// run over it, which is what `/effort`, `run --effort` and the config seed
+    /// all read.
+    fn gateway_row() -> catalog::ModelInfo {
+        let mut row = catalog::ModelInfo {
+            id: GATEWAY_MODEL.to_owned(),
+            provider_id: openrouter::ID.to_owned(),
+            name: "GPT-5.4".to_owned(),
+            context_window: 1_050_000,
+            max_output: 128_000,
+            input_limit: None,
+            pricing: catalog::Pricing {
+                input: 2.5,
+                output: 15.0,
+                cache_read: 0.25,
+                cache_write: None,
+            },
+            family: None,
+            release_date: None,
+            tool_call: true,
+            status: catalog::ModelStatus::Active,
+            reasoning: true,
+            reasoning_options: None,
+            npm: None,
+            variants: std::collections::BTreeMap::new(),
+        };
+        row.variants = crate::effort::roster(&row);
+
+        row
+    }
+
+    /// The whole of R1, end to end on the one seam that matters: the roster the
+    /// catalog row carries is what a person is offered, and the option map each
+    /// entry holds is what the request body ends up carrying — exactly
+    /// `reasoning.effort`, and none of the two fields this vendor's ledger
+    /// drops.
+    #[test]
+    fn every_effort_this_gateway_offers_travels_as_the_one_field_it_documents() {
+        let row = gateway_row();
+        assert_eq!(
+            row.variants.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["high", "low", "medium", "minimal"],
+            "the reference's own four levels reach the chooser"
+        );
+
+        for (name, options) in &row.variants {
+            let mut request = gateway_ask();
+            request.effort_options = options.clone();
+
+            let own = Body::new(&request, Backend::OpenRouter);
+            let spliced = summarized(&request.effort_options, &request.model, Backend::OpenRouter);
+            let body = serde_json::to_value(splice_effort(&spliced, &own))
+                .expect("a spliced body serializes");
+
+            assert_eq!(
+                body["reasoning"],
+                json!({"effort": name}),
+                "`{name}` has to reach the wire as the reference's own object"
+            );
+            assert!(
+                body.get("include").is_none() && body["reasoning"].get("summary").is_none(),
+                "the effort door is not the way the dropped fields come back: {body}"
+            );
+        }
+
+        // The standing posture, re-pinned beside them: no effort selected is no
+        // `reasoning` key at all.
+        let bare = serde_json::to_value(Body::new(&gateway_ask(), Backend::OpenRouter))
+            .expect("the body serializes");
+        assert!(bare.get("reasoning").is_none(), "got {bare}");
     }
 
     /// The splice order at this wire's send site: an effort adds what the body
@@ -2516,6 +2739,128 @@ mod tests {
         );
     }
 
+    /// The gateway's own event name reaches the pane the vendor's does.
+    ///
+    /// Unmapped it reached the debug log instead, so a reasoning turn over
+    /// OpenRouter streamed a reply with no thinking under it — the one symptom
+    /// this arm exists to remove.
+    #[tokio::test]
+    async fn a_gateways_reasoning_delta_is_read_as_thinking() {
+        let seen = gateway_events(concat!(
+            r#"data: {"type":"response.reasoning.delta","item_id":"rs_1","delta":"First, the year. "}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning.delta","item_id":"rs_1","delta":"Then the difference."}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"Yes."}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        assert_eq!(thinking(&seen), "First, the year. Then the difference.");
+        assert_eq!(text(&seen), "Yes.");
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ReasoningState { .. })),
+            "readable thinking is not sealed state, and this backend records \
+             none of the latter: {seen:?}"
+        );
+    }
+
+    /// Pre-mortem 1: a gateway relaying one vendor's stream through its own
+    /// normalization can carry both spellings of the same event. The first one
+    /// to say anything wins for the whole response, because a pane that renders
+    /// one train of thought twice is worse than one that renders the shorter of
+    /// the two.
+    #[tokio::test]
+    async fn both_reasoning_spellings_on_one_stream_render_one_train_of_thought() {
+        let seen = gateway_events(concat!(
+            r#"data: {"type":"response.reasoning.delta","item_id":"rs_1","delta":"Thinking"}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Thinking"}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning.delta","item_id":"rs_1","delta":" it through."}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        assert_eq!(thinking(&seen), "Thinking it through.");
+        assert_eq!(
+            seen.iter()
+                .filter(|event| matches!(event, ProviderEvent::ReasoningDelta(_)))
+                .count(),
+            2,
+            "the relayed copy is dropped rather than appended: {seen:?}"
+        );
+
+        // The latch is about *content*: an empty fragment under a spelling the
+        // stream then abandons must not lock the other one out.
+        let recovered = gateway_events(concat!(
+            r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":""}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning.delta","item_id":"rs_1","delta":"Still heard."}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+        assert_eq!(thinking(&recovered), "Still heard.");
+    }
+
+    /// The vendor documents a `summary` array on the settled reasoning item and
+    /// no parameter to ask for one, so on a turn that streamed nothing readable
+    /// the closing frame is the only place thinking exists.
+    #[tokio::test]
+    async fn a_summary_that_was_never_streamed_still_reaches_the_pane() {
+        let seen = gateway_events(concat!(
+            r#"data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","#,
+            r#""encrypted_content":"sealed","summary":["First the year","Then the difference"]}}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        assert_eq!(thinking(&seen), "First the year\n\nThen the difference");
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ReasoningState { .. })),
+            "a summary is not state, and this backend still seals nothing: {seen:?}"
+        );
+
+        // A stream that streamed its thinking is already served: the same item
+        // closing with the same words must not say them again.
+        let streamed = gateway_events(concat!(
+            r#"data: {"type":"response.reasoning.delta","item_id":"rs_1","delta":"First the year"}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","#,
+            r#""summary":["First the year"]}}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+        assert_eq!(thinking(&streamed), "First the year");
+
+        // And the other vendor's shape of the same field, which arrives as
+        // blocks rather than as strings, is read too — a summary that closed a
+        // turn nobody asked a summary of is thinking either way.
+        let blocked = events(concat!(
+            r#"data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","#,
+            r#""encrypted_content":"sealed","summary":[{"type":"summary_text","text":"Blocked."}]}}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+        assert_eq!(thinking(&blocked), "Blocked.");
+    }
+
     /// An item with nothing to replay produces no part at all: there is no
     /// sending it back, and a row that can never do anything on every turn is
     /// worse than none (deviation:
@@ -2898,6 +3243,245 @@ mod tests {
                 },
             }]),
             "got {body}"
+        );
+    }
+
+    /// Every tool-calling shape OpenRouter's reference publishes, held against
+    /// what this encoder sends (`api_reference/responses/tool-calling`, read
+    /// 2026-08-14).
+    ///
+    /// Two fields in that reference are worth naming for what ganja does *not*
+    /// do with them:
+    ///
+    /// - **`strict: null`** rides every tool definition it prints. `null` is
+    ///   that field's absent value — the reference never sets it to a boolean
+    ///   and documents no behavior for one — and ganja's schemas are generated
+    ///   from the argument structs rather than written to the strict subset, so
+    ///   a `true` would be a promise the roster cannot keep and a `null` is the
+    ///   request that is already being sent. Omitted, deliberately.
+    /// - **`tool_choice: "auto"`** rides every one of its tool examples, and
+    ///   *that* one ganja now sends — on this backend only, because the value
+    ///   the API assumes in its absence is the one thing the reference does not
+    ///   say, and the failure it would cause is a roster nothing ever calls.
+    #[test]
+    fn an_openrouter_tool_roster_is_the_shape_that_vendors_reference_documents() {
+        let request = ChatRequest {
+            tools: vec![a_tool()],
+            ..gateway_ask()
+        };
+        let body = serde_json::to_value(Body::new(&request, Backend::OpenRouter))
+            .expect("the body serializes");
+
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "type": "function",
+                "name": "read",
+                "description": "Reads a file from disk.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"filePath": {"type": "string"}},
+                    "required": ["filePath"],
+                },
+            }]),
+            "the reference's own flat shape, minus the `strict: null` it prints: {body}"
+        );
+        assert!(
+            body["tools"][0].get("strict").is_none(),
+            "a null-valued field is an absent field, and a true one is a promise \
+             a generated schema cannot keep: {body}"
+        );
+        assert_eq!(
+            body["tool_choice"],
+            json!("auto"),
+            "the value every tool example in that reference sends: {body}"
+        );
+
+        // A turn with nothing to offer sends neither key: `tool_choice` beside
+        // an absent roster is a choice about nothing.
+        let bare = serde_json::to_value(Body::new(&gateway_ask(), Backend::OpenRouter))
+            .expect("the body serializes");
+        assert!(
+            bare.get("tools").is_none() && bare.get("tool_choice").is_none(),
+            "got {bare}"
+        );
+
+        // And the two OpenAI backends are untouched: their request is the Codex
+        // CLI's, which sends no `tool_choice` and has been served without one on
+        // every turn this build has taken.
+        for backend in [Backend::Codex, Backend::Platform] {
+            let owned = serde_json::to_value(Body::new(
+                &ChatRequest {
+                    tools: vec![a_tool()],
+                    ..ask()
+                },
+                backend,
+            ))
+            .expect("the body serializes");
+            assert!(
+                owned.get("tool_choice").is_none(),
+                "{backend:?} gained a field its vendor never asked for: {owned}"
+            );
+        }
+    }
+
+    /// The round trip the reference's multi-turn example shows: a
+    /// `function_call` item and a `function_call_output` that quotes its
+    /// `call_id`.
+    ///
+    /// The reference's own note is what this pins — "Only `type`, `call_id`, and
+    /// `output` are required — `call_id` is what pairs the output with its
+    /// originating function_call" — so the optional `id` is absent here by
+    /// agreement rather than by omission.
+    #[test]
+    fn a_gateway_turn_replays_a_call_and_its_output_in_the_documented_pair() {
+        let mut assistant = Message::assistant(GATEWAY_MODEL);
+        assistant.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::StepStart,
+        });
+        assistant.parts.push(tool_part(
+            "call_xyz789",
+            "read",
+            completed(json!({"filePath": "src/main.rs"}), "fn main() {}"),
+        ));
+
+        let request = ChatRequest {
+            messages: vec![Message::user("read src/main.rs"), assistant],
+            tools: vec![a_tool()],
+            ..gateway_ask()
+        };
+        let body = serde_json::to_value(Body::new(&request, Backend::OpenRouter))
+            .expect("the body serializes");
+
+        assert_eq!(
+            body["input"],
+            json!([
+                {"role": "user", "content": [{"type": "input_text", "text": "read src/main.rs"}]},
+                {
+                    "type": "function_call",
+                    "call_id": "call_xyz789",
+                    "name": "read",
+                    "arguments": r#"{"filePath":"src/main.rs"}"#,
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_xyz789",
+                    "output": "fn main() {}",
+                },
+            ]),
+            "got {body}"
+        );
+    }
+
+    /// The streaming sequence that reference prints, frame for frame — including
+    /// the `response.function_call_arguments.done` its own example watches for
+    /// the finished arguments.
+    ///
+    /// **Ganja terminates a call on `response.output_item.done`** and treats
+    /// that `.done` frame as the announcement it is: the arguments were already
+    /// accumulated from the deltas, and reading them again there would send the
+    /// model's JSON twice. The two frames arriving together must therefore
+    /// produce exactly one of each event, which is what this holds. If a live
+    /// turn ever shows this gateway ending a call *without* an
+    /// `output_item.done`, the fix is one arm here — recorded in
+    /// [`super::openrouter`]'s ledger rather than guessed at now.
+    #[tokio::test]
+    async fn the_references_own_streaming_tool_sequence_opens_fills_and_closes_once() {
+        let seen = gateway_events(concat!(
+            r#"data: {"type":"response.output_item.added","output_index":0,"item":{"#,
+            r#""type":"function_call","id":"fc_abc123","call_id":"call_xyz789","#,
+            r#""name":"read","arguments":""}}"#,
+            "\n\n",
+            r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_abc123","#,
+            r#""delta":"{\"filePath\":\"src/main.rs\"}"}"#,
+            "\n\n",
+            r#"data: {"type":"response.function_call_arguments.done","item_id":"fc_abc123","#,
+            r#""arguments":"{\"filePath\":\"src/main.rs\"}"}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+            r#""type":"function_call","id":"fc_abc123","call_id":"call_xyz789","#,
+            r#""name":"read","arguments":"{\"filePath\":\"src/main.rs\"}"}}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{"usage":{"#,
+            r#""input_tokens":45,"output_tokens":25}}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        assert_eq!(
+            seen.iter()
+                .filter(|event| !matches!(event, ProviderEvent::Usage(_)))
+                .collect::<Vec<_>>(),
+            vec![
+                &ProviderEvent::ToolCallStart {
+                    id: "call_xyz789".to_owned(),
+                    name: "read".to_owned(),
+                },
+                &ProviderEvent::ToolCallDelta {
+                    id: "call_xyz789".to_owned(),
+                    json: r#"{"filePath":"src/main.rs"}"#.to_owned(),
+                },
+                &ProviderEvent::ToolCallEnd {
+                    id: "call_xyz789".to_owned(),
+                },
+                &ProviderEvent::Finish(FinishReason::Completed),
+            ],
+            "got {seen:?}"
+        );
+    }
+
+    /// Parallel calls, which that reference has a section of its own for: two
+    /// items open in one response, their argument fragments interleave, and each
+    /// is answered under its own `call_id`.
+    #[tokio::test]
+    async fn parallel_calls_in_one_response_keep_their_own_identities() {
+        let seen = gateway_events(concat!(
+            r#"data: {"type":"response.output_item.added","output_index":0,"item":{"#,
+            r#""type":"function_call","id":"fc_1","call_id":"call_read","name":"read","arguments":""}}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_item.added","output_index":1,"item":{"#,
+            r#""type":"function_call","id":"fc_2","call_id":"call_glob","name":"glob","arguments":""}}"#,
+            "\n\n",
+            r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_2","delta":"{\"pattern\":"}"#,
+            "\n\n",
+            r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"filePath\":\"a.rs\"}"}"#,
+            "\n\n",
+            r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_2","delta":"\"**/*.rs\"}"}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+            r#""type":"function_call","id":"fc_1","call_id":"call_read","name":"read","arguments":"{}"}}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_item.done","output_index":1,"item":{"#,
+            r#""type":"function_call","id":"fc_2","call_id":"call_glob","name":"glob","arguments":"{}"}}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        let arguments = |call: &str| {
+            seen.iter()
+                .filter_map(|event| match event {
+                    ProviderEvent::ToolCallDelta { id, json } if id == call => Some(json.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+
+        assert_eq!(arguments("call_read"), r#"{"filePath":"a.rs"}"#);
+        assert_eq!(
+            arguments("call_glob"),
+            r#"{"pattern":"**/*.rs"}"#,
+            "a fragment keyed by the *item* id has to reach the call that item \
+             opened, or two concurrent calls trade arguments: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter()
+                .filter(|event| matches!(event, ProviderEvent::ToolCallEnd { .. }))
+                .count(),
+            2,
+            "each call ends once and on its own frame: {seen:?}"
         );
     }
 
