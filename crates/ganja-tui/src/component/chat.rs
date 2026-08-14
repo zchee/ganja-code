@@ -931,27 +931,22 @@ impl Entry {
                 }
                 // Thinking a person can read, behind its own marker and dimmed
                 // into italics so it never competes with the answer it is on
-                // the way to. Clamped from the **tail** while it arrives, for
-                // the reason a streaming command's output is: a long think
-                // would otherwise push the reply off the screen, and the
-                // newest lines are the ones worth the rows. The whole of it is
-                // one Ctrl+T away, which is what the hint says.
+                // the way to. Rendered **whole**, paragraph breaks included —
+                // the shape the user's screenshot pinned (2026-08-14,
+                // retiring the plan's pre-mortem-3 tail clamp): a long think
+                // scrolls back the way a long reply does, and hiding the
+                // start of a thought was the one cut the clamp could make.
                 PartBody::ReasoningText { text } if !text.is_empty() => {
-                    let (tail, hidden) = clamp_tail(text);
                     let style = theme.dim.add_modifier(Modifier::ITALIC);
                     let hang = " ".repeat(THINKING.width());
-                    let mut rows: Vec<Row> = Vec::new();
-                    if hidden > 0 {
-                        rows.push(Row::new(THINKING, clamp_hint(hidden), style));
-                    }
-                    rows.extend(tail.into_iter().enumerate().map(|(index, line)| {
-                        let lead = if index == 0 && hidden == 0 {
-                            THINKING
-                        } else {
-                            hang.as_str()
-                        };
-                        Row::new(lead, line, style)
-                    }));
+                    let rows: Vec<Row> = text
+                        .lines()
+                        .enumerate()
+                        .map(|(index, line)| {
+                            let lead = if index == 0 { THINKING } else { hang.as_str() };
+                            Row::new(lead, line.to_owned(), style)
+                        })
+                        .collect();
                     lines.extend(lay_out(&rows, columns));
                 }
                 // An empty one is a part the provider opened and has not
@@ -3232,30 +3227,30 @@ mod tests {
         );
     }
 
-    /// **Pre-mortem 3.** A long think is clamped from the tail while it
-    /// arrives — the newest lines are the ones worth the rows — and the cut
-    /// says where the whole of it went.
+    /// A think renders whole, first line to last, with its paragraph breaks
+    /// kept — the user's screenshot ruling (2026-08-14) that retired the tail
+    /// clamp: a long thought scrolls back the way a long reply does, and no
+    /// hint row stands where its opening lines used to be cut away.
     #[test]
-    fn a_long_think_is_clamped_from_its_newest_end() {
+    fn a_long_think_renders_whole_with_its_paragraphs() {
         let mut chat = Chat::default();
         let mut reply = Message::assistant("canned");
         reply.parts.push(Part::reasoning_text(
-            "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+            "one\ntwo\nthree\nfour\n\nfive\nsix\nseven",
         ));
         chat.start_message(reply);
 
-        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 12));
-        let drawn: Vec<&str> = lines
-            .iter()
-            .map(String::as_str)
-            .filter(|line| !line.is_empty())
-            .collect();
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 14));
+        let think_and_gap = &lines[..8];
 
         assert_eq!(
-            drawn,
-            vec![
-                "\u{273b} \u{2026} +3 lines (ctrl+t to expand)",
+            think_and_gap,
+            [
+                "\u{273b} one",
+                "  two",
+                "  three",
                 "  four",
+                "",
                 "  five",
                 "  six",
                 "  seven",
