@@ -4,10 +4,14 @@
 //! special-cased in code, so what proves it works is a scripted loop that
 //! actually writes `AGENTS.md` with the ordinary `write` tool.
 
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock},
+};
 
 use ganja_core::{
     Config, Engine, EngineError, SessionId, Storage, command,
+    config::CONFIG_HOME_ENV,
     permission::Permissions,
     protocol::{Command, Event, FinishReason, Message, PartBody, Role, ToolState},
     provider::ChatRequest,
@@ -15,6 +19,42 @@ use ganja_core::{
 };
 use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
 use serde_json::json;
+
+/// [`command::Registry::build`] against a config home this binary owns.
+///
+/// The global command tier (**D481**) is `<config home>/commands`, resolved
+/// through [`CONFIG_HOME_ENV`] on every build — so a bare `Registry::build`
+/// here reads whatever `*.md` files the developer running the suite keeps in
+/// their own home, and the roster assertions below would be describing that
+/// machine rather than the fixture. The suite was green only while nobody had
+/// such a directory (`ganja-code-qh1`).
+///
+/// The home named is a path this binary never creates: [`config_home`] returns
+/// the variable as written, and `commands/` under a directory that is not there
+/// is exactly the empty tier these tests want — with nothing left behind to
+/// clean up. The `/repo` worktree empties the project tier the same way.
+///
+/// The redirect is forced from a `LazyLock` rather than written into each test
+/// because this binary's tests share one process and run on parallel threads
+/// under a plain `cargo test`: routing every build through here means the one
+/// `set_var` happens before the first read of that variable, with any other
+/// builder parked on the lock while it does.
+///
+/// [`config_home`]: ganja_core::config::config_home
+fn command_registry(config: &Config) -> command::Registry {
+    static HOME: LazyLock<PathBuf> = LazyLock::new(|| {
+        let home =
+            std::env::temp_dir().join(format!("ganja-no-global-commands-{}", std::process::id()));
+        // SAFETY: this binary's only write to the environment, run exactly
+        // once, under the lock every reader of that variable here goes
+        // through.
+        unsafe { std::env::set_var(CONFIG_HOME_ENV, &home) };
+        home
+    });
+    LazyLock::force(&HOME);
+
+    command::Registry::build(config, Path::new("/repo"))
+}
 
 /// What the user message of `request` said.
 fn prompt_of(request: &ChatRequest) -> String {
@@ -156,10 +196,7 @@ async fn a_configured_command_runs_like_a_builtin() {
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
     )
-    .with_commands(Arc::new(command::Registry::build(
-        &config,
-        std::path::Path::new("/repo"),
-    )));
+    .with_commands(Arc::new(command_registry(&config)));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     assert_eq!(
@@ -203,10 +240,7 @@ async fn a_command_that_names_an_agent_runs_as_it_for_one_turn() {
     .with_agents(Arc::new(
         ganja_core::AgentRegistry::from_config(&config).expect("the fixture resolves an agent"),
     ))
-    .with_commands(Arc::new(command::Registry::build(
-        &config,
-        std::path::Path::new("/repo"),
-    )));
+    .with_commands(Arc::new(command_registry(&config)));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine

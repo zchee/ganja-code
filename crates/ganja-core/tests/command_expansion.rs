@@ -4,10 +4,15 @@
 //! keeps the shell-facing contract isolated under the integration-suite rule
 //! in `tests/AGENTS.md` while the assertions observe the public engine seam.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+};
 
 use ganja_core::{
     CommandConfig, Config, Engine, command,
+    config::CONFIG_HOME_ENV,
     permission::Permissions,
     project::Project,
     protocol::{Command, Event, FinishReason, Role},
@@ -17,6 +22,36 @@ use ganja_core::{
 use ganja_testkit::{ScriptedProvider, drain_allowing, says, temp_dir};
 
 const COMMAND: &str = "fixture";
+
+/// Points the global command tier (**D481**) at a home this binary owns,
+/// before anything builds a [`command::Registry`].
+///
+/// That tier is `<config home>/commands`, resolved through [`CONFIG_HOME_ENV`]
+/// on every build, so without this the expansion under test would run beside
+/// whatever `*.md` files the developer running the suite keeps in their own
+/// home — green only while nobody has that directory (`ganja-code-qh1`).
+///
+/// The home named is a path this binary never creates: `config_home()` returns
+/// the variable as written, and `commands/` under a directory that is not there
+/// is the empty tier these tests want, with nothing left behind to clean up.
+///
+/// Forced from a `LazyLock` rather than written into each test because this
+/// binary's tests share one process and run on parallel threads under a plain
+/// `cargo test`: routing every build through here means the one `set_var`
+/// happens before the first read of that variable, with any other builder
+/// parked on the lock while it does.
+fn pin_config_home() {
+    static HOME: LazyLock<PathBuf> = LazyLock::new(|| {
+        let home =
+            std::env::temp_dir().join(format!("ganja-no-global-commands-{}", std::process::id()));
+        // SAFETY: this binary's only write to the environment, run exactly
+        // once, under the lock every reader of that variable here goes
+        // through.
+        unsafe { std::env::set_var(CONFIG_HOME_ENV, &home) };
+        home
+    });
+    LazyLock::force(&HOME);
+}
 
 /// Includes resolved file blocks so attachment assertions inspect exactly what
 /// the model received rather than the transcript's unresolved reference.
@@ -45,6 +80,7 @@ fn configured_engine(
             model: None,
         },
     );
+    pin_config_home();
     let registry = command::Registry::build(
         &Config {
             command,

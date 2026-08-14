@@ -329,7 +329,15 @@ fn ganja(project: &TempDir, data: &TempDir, arguments: &[&str]) -> Ganja {
         // Sessions land under the data home, so a drill with its own keeps it
         // from reading what another stored — or from writing into a
         // developer's real one.
-        .env("XDG_DATA_HOME", data.path());
+        .env("XDG_DATA_HOME", data.path())
+        // The global config home moves with it, exactly as `rewind_drill`
+        // moves it: a developer's real `ganja.jsonc` can pick a provider or
+        // rebind a key, and their `commands/*.md` (**D481**) join the roster
+        // this drill's keystrokes drive — either of which would change what
+        // those keystrokes mean.
+        .env("HOME", data.path())
+        .env("XDG_CONFIG_HOME", data.path().join("config"))
+        .env_remove("GANJA_CONFIG_HOME");
 
     Ganja::spawn(command)
 }
