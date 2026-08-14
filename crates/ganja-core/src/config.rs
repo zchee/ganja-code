@@ -98,8 +98,11 @@ const HOME_DIRECTORY: &str = ".ganja";
 ///
 /// Namespaced on purpose: a bare `skills/` at a repository root is a name
 /// somebody else's project may already be using for something else, where
-/// `.ganja/` says whose it is. See [`default_skill_dirs`].
-const PROJECT_DIRECTORY: &str = HOME_DIRECTORY;
+/// `.ganja/` says whose it is. See [`default_skill_dirs`] — and
+/// [`crate::command`], which reads the same pair of homes for its command
+/// files, which is why this name is visible to the crate rather than spelled a
+/// second time there.
+pub(crate) const PROJECT_DIRECTORY: &str = HOME_DIRECTORY;
 
 /// What both of ganja's own homes call the folder skills live in. One
 /// spelling, not the two upstream accepts — a second name to remember buys

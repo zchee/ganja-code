@@ -18,8 +18,17 @@
 //! load-bearing: arguments may themselves name a command to run or a file to
 //! attach, and both mean exactly what they would in text the person composed
 //! without a slash command.
+//!
+//! Beside the builtins and the `command` table a config declares, a command may
+//! also arrive as a **Markdown file** in one of ganja's own two homes — see
+//! [`command_dirs`], where that tier and its ledger number are declared.
 
-use std::{collections::BTreeMap, ops::Range, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs, io,
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 use crate::config::{CommandConfig, Config};
 
@@ -152,23 +161,56 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The builtins plus whatever `config.command` describes, resolved for a
-    /// session working in `worktree`.
+    /// The builtins, the Markdown command files in ganja's own two homes, and
+    /// whatever `config.command` describes, resolved for a session working in
+    /// `worktree`.
+    ///
+    /// Four tiers, layered so the later one wins the name:
+    ///
+    /// ```text
+    /// builtin  <  <config home>/commands  <  <worktree>/.ganja/commands  <  config `command`
+    /// ```
     ///
     /// A config command that reuses a builtin's name replaces it: upstream's
-    /// `mergeDeep` gives the user's own definition the last word.
+    /// `mergeDeep` gives the user's own definition the last word, and a file
+    /// tier changes nothing about that. A *file* that reuses a builtin's name
+    /// is refused instead of layered — see [`file_commands`] — so `/init` is
+    /// one thing everywhere until somebody says otherwise in the config file
+    /// that this build refuses unknown keys in.
+    ///
+    /// Every collision involving a file is logged by name, because a command
+    /// that quietly is not the file you are looking at is worse than one that
+    /// says which of the two the session took.
     #[must_use]
     pub fn build(config: &Config, worktree: &Path) -> Self {
-        let mut commands: BTreeMap<String, Definition> = BTreeMap::new();
+        let mut commands: BTreeMap<String, (Tier, Definition)> = BTreeMap::new();
         for command in builtins(worktree) {
-            commands.insert(command.name.clone(), command);
+            commands.insert(command.name.clone(), (Tier::Builtin, command));
         }
+
+        for (tier, dir) in command_dirs(worktree) {
+            for command in file_commands(&dir) {
+                if matches!(commands.get(&command.name), Some((Tier::Builtin, _))) {
+                    tracing::warn!(
+                        command = %command.name,
+                        directory = %dir.display(),
+                        "a command file names a builtin command and was skipped"
+                    );
+                    continue;
+                }
+                insert(&mut commands, tier, command);
+            }
+        }
+
         for (name, definition) in &config.command {
-            commands.insert(name.clone(), configured(name, definition));
+            insert(&mut commands, Tier::Config, configured(name, definition));
         }
 
         Self {
-            commands: commands.into_values().collect(),
+            commands: commands
+                .into_values()
+                .map(|(_, definition)| definition)
+                .collect(),
         }
     }
 
@@ -201,6 +243,387 @@ impl Registry {
             .map(|command| command.name.clone())
             .collect()
     }
+}
+
+/// Where a command in the roster came from, in precedence order.
+///
+/// Kept beside each definition only so a collision can say which two things
+/// collided. Nothing downstream reads it: a command is a command once it is in
+/// the registry, whichever tier wrote it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tier {
+    /// Shipped with this build.
+    Builtin,
+    /// A Markdown file under `<config home>/commands`.
+    GlobalFile,
+    /// A Markdown file under `<worktree>/.ganja/commands`.
+    ProjectFile,
+    /// An entry in a config file's `command` table.
+    Config,
+}
+
+impl Tier {
+    /// What a log line calls this tier.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::GlobalFile => "the global commands directory",
+            Self::ProjectFile => "the project commands directory",
+            Self::Config => "the config file",
+        }
+    }
+}
+
+/// Lays `command` over whatever already holds its name, reporting the
+/// collision when a command *file* is on either side of it.
+///
+/// A config entry replacing a builtin is the one shadowing this build has
+/// always done deliberately and documented as such, so it stays silent; every
+/// other pair involves a file somebody is looking at right now.
+fn insert(commands: &mut BTreeMap<String, (Tier, Definition)>, tier: Tier, command: Definition) {
+    if let Some((shadowed, _)) = commands.get(&command.name)
+        && (*shadowed != Tier::Builtin || tier != Tier::Config)
+    {
+        tracing::warn!(
+            command = %command.name,
+            shadowed = shadowed.label(),
+            winner = tier.label(),
+            "two command definitions claim one name; the later tier wins"
+        );
+    }
+    commands.insert(command.name.clone(), (tier, command));
+}
+
+/// The directory, under each of ganja's own two homes, that command files live
+/// in.
+const COMMANDS_SUBDIR: &str = "commands";
+
+/// The largest command file this build will read.
+///
+/// A command file is a prompt somebody typed, so a quarter of a megabyte is
+/// already far past generous; the cap exists so that a directory somebody
+/// pointed at a video does not turn into a read of it. A file over the cap is
+/// skipped by name, never truncated — half a template is a template that means
+/// something else.
+const MAX_COMMAND_FILE_BYTES: u64 = 256 * 1024;
+
+/// The line that opens and closes a frontmatter block.
+const FENCE: &str = "---";
+
+/// Ganja's own two homes, in precedence order, as places a session reads
+/// Markdown command files from without being told to (**D481**).
+///
+/// Claude Code's `.claude/commands/*.md` shape, over ganja's own pair of homes:
+/// `<config home>/commands` and `<worktree>/.ganja/commands`. Upstream opencode
+/// has no counterpart at all — its commands are config entries — so this is a
+/// synthesis rather than a port, and the *shape* being Claude's is the whole
+/// point: somebody moving a repository between the two tools moves a directory.
+///
+/// The global half is spelled through [`crate::config::config_home`] rather
+/// than against XDG directly, which is what keeps `GANJA_CONFIG_HOME` (or a
+/// `~/.ganja`) moving this build's config, its `AGENTS.md`, its skills and now
+/// its commands **together**. The project half is `worktree`'s own `.ganja`,
+/// the namespaced directory [`crate::config::PROJECT_DIRECTORY`] names.
+///
+/// The standing "nothing foreign is discovered" ruling holds: `.claude/commands`
+/// is not read, here or walked up from anywhere. A file arrives in one of these
+/// two because somebody put it there for *this* tool, and that placing is the
+/// opt-in.
+///
+/// The two collapse into one for somebody whose worktree *is* the config home,
+/// for the same reason [`crate::config::default_skill_dirs`] collapses them:
+/// reading one directory twice would find every command twice and report each
+/// as shadowing itself.
+///
+/// # Not recursive, on purpose for now
+///
+/// Only the flat `*.md` in each directory is read. Claude namespaces a
+/// subdirectory into the command name (`git/commit.md` → `/git:commit`); that
+/// is a recorded follow-up rather than a decision against it, and leaving it
+/// out costs nothing a later build cannot add compatibly.
+fn command_dirs(worktree: &Path) -> Vec<(Tier, PathBuf)> {
+    let mut found = Vec::new();
+    if let Some(global) = crate::config::config_home() {
+        found.push((Tier::GlobalFile, global.join(COMMANDS_SUBDIR)));
+    }
+    let project = worktree
+        .join(crate::config::PROJECT_DIRECTORY)
+        .join(COMMANDS_SUBDIR);
+    if !found.iter().any(|(_, dir)| dir == &project) {
+        found.push((Tier::ProjectFile, project));
+    }
+
+    found
+}
+
+/// Every command file in one directory, by file name, skipping — with a named
+/// warning — each file this build will not read.
+///
+/// A directory that is not there is the common case and says nothing; any other
+/// failure to read it is reported, because somebody who made a `commands/` is
+/// owed a reason it produced nothing.
+fn file_commands(dir: &Path) -> Vec<Definition> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            if error.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(
+                    directory = %dir.display(),
+                    %error,
+                    "a commands directory could not be read; no command files from it"
+                );
+            }
+            return Vec::new();
+        }
+    };
+
+    // Sorted so that the order warnings arrive in — and, on a filesystem where
+    // two names differ only by case, which of the pair a session ends up with
+    // — is the same on every machine rather than the directory's own order.
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry.path()),
+            Err(error) => {
+                tracing::warn!(
+                    directory = %dir.display(),
+                    %error,
+                    "a command directory entry could not be read and was skipped"
+                );
+                None
+            }
+        })
+        .filter(|path| {
+            // A subdirectory is not a command yet (see `command_dirs`), and a
+            // file that is not Markdown was not meant for this directory.
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        })
+        .collect();
+    paths.sort();
+
+    paths.iter().filter_map(|path| read_command(path)).collect()
+}
+
+/// One command file, or nothing and a warning saying which file and why.
+///
+/// Every refusal here is the same shape on purpose: the file is absent from
+/// the roster, named in the log, and nothing half-parsed reaches a session. A
+/// command that silently became something other than what the file says is the
+/// outcome this whole function exists to prevent.
+fn read_command(path: &Path) -> Option<Definition> {
+    let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        tracing::warn!(
+            file = %path.display(),
+            "a command file's name is not valid UTF-8 and was skipped"
+        );
+        return None;
+    };
+    // `read_dir` cannot hand back a separator in a file name, but a name is a
+    // name a person types after a slash: checking here is what makes that true
+    // rather than assumed.
+    if name.is_empty() || name.contains(['/', '\\']) {
+        tracing::warn!(
+            file = %path.display(),
+            "a command file's name is not a command name and was skipped"
+        );
+        return None;
+    }
+
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.len() > MAX_COMMAND_FILE_BYTES => {
+            tracing::warn!(
+                file = %path.display(),
+                bytes = metadata.len(),
+                limit = MAX_COMMAND_FILE_BYTES,
+                "a command file is too large to be a prompt and was skipped"
+            );
+            return None;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                file = %path.display(),
+                %error,
+                "a command file could not be measured and was skipped"
+            );
+            return None;
+        }
+    }
+
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                file = %path.display(),
+                %error,
+                "a command file could not be read and was skipped"
+            );
+            return None;
+        }
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        tracing::warn!(
+            file = %path.display(),
+            "a command file is not UTF-8 text and was skipped"
+        );
+        return None;
+    };
+
+    parse_command(name, &text).or_else(|| {
+        tracing::warn!(
+            file = %path.display(),
+            "a command file opens a frontmatter block it never closes and was skipped"
+        );
+        None
+    })
+}
+
+/// The command `text` describes under `name`, or nothing when its frontmatter
+/// block is never closed.
+///
+/// The body is the template **verbatim**, which is what makes every expansion
+/// [`Definition::expand`] already does — `$ARGUMENTS`, `$1`..`$N`,
+/// ``!`command` ``, `@path` — mean in a file exactly what it means in a config
+/// entry. There is no second expansion path and no file-only vocabulary.
+fn parse_command(name: &str, text: &str) -> Option<Definition> {
+    // A file written by an editor that stamps a byte-order mark still opens
+    // with `---` as far as its author is concerned.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let (front, body) = split_frontmatter(text)?;
+    let Frontmatter {
+        description,
+        agent,
+        model,
+        argument_hint,
+    } = front;
+
+    Some(Definition {
+        name: name.to_owned(),
+        description: palette_line(description, argument_hint),
+        template: body.to_owned(),
+        agent,
+        model,
+    })
+}
+
+/// What a command file's frontmatter may say.
+///
+/// Claude's own four keys, minus `allowed-tools`: per-command tool scoping has
+/// no seam in this build — an agent's rules are the tool-enable mechanism — and
+/// accepting the key would promise something nothing enforces.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Frontmatter {
+    /// One line for a palette.
+    description: Option<String>,
+    /// The agent this command runs as.
+    agent: Option<String>,
+    /// The model it asks for.
+    model: Option<String>,
+    /// A display-only hint about what to type after the name.
+    argument_hint: Option<String>,
+}
+
+/// The one line a palette shows for a command file.
+///
+/// [`Definition`] carries no slot of its own for `argument-hint`, and adding
+/// one would put the hint in a struct no frontend renders — every surface that
+/// lists commands shows `description` and nothing else. Folding the hint into
+/// that line is therefore what actually reaches the person the hint is for:
+/// `review the diff — <path>`, or the hint alone when the file gave no
+/// description, which still beats a nameless row.
+fn palette_line(description: Option<String>, hint: Option<String>) -> Option<String> {
+    match (description, hint) {
+        (Some(description), Some(hint)) => Some(format!("{description} — {hint}")),
+        (description, None) => description,
+        (None, hint) => hint,
+    }
+}
+
+/// Splits an optional leading frontmatter block off `text`, or reports that the
+/// block is never closed.
+///
+/// Hand-rolled rather than reached through a YAML dependency: four string keys
+/// do not justify a parser for a language with nine ways to write a string, and
+/// the workspace has no YAML crate to borrow. The grammar is exactly what a
+/// Claude command file uses — a `---` line, `key: value` lines, a closing `---`
+/// line — and everything outside it is *tolerated*, not interpreted: unknown
+/// keys, comments and blank lines are skipped, because this is somebody else's
+/// file shape and a build that refused what it did not recognise would refuse
+/// files that work in the tool they were written for (the D472 posture).
+///
+/// A missing block is not an error: the whole file is then the template.
+fn split_frontmatter(text: &str) -> Option<(Frontmatter, &str)> {
+    let Some(rest) = fence(text) else {
+        return Some((Frontmatter::default(), text));
+    };
+
+    let mut front = Frontmatter::default();
+    let mut rest = rest;
+    loop {
+        if let Some(body) = fence(rest) {
+            return Some((front, body));
+        }
+        // No closing fence anywhere: the file is refused rather than read as a
+        // template whose first half is a header nobody meant to send.
+        let (line, tail) = rest.split_once('\n')?;
+        rest = tail;
+
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = unquote_scalar(value.trim());
+        if value.is_empty() {
+            // `description:` with nothing after it says nothing; treating it as
+            // an empty description would put a blank line in a palette.
+            continue;
+        }
+        let value = Some(value.to_owned());
+
+        match key.trim().to_ascii_lowercase().as_str() {
+            "description" => front.description = value,
+            "agent" => front.agent = value,
+            "model" => front.model = value,
+            "argument-hint" => front.argument_hint = value,
+            // Tolerated: a file may carry keys for the tool it was written for.
+            _ => {}
+        }
+    }
+}
+
+/// What follows the fence when `text` opens with one, allowing the trailing
+/// `\r` a file written on another platform carries.
+fn fence(text: &str) -> Option<&str> {
+    let (line, rest) = match text.split_once('\n') {
+        Some((line, rest)) => (line, rest),
+        // A file that is nothing but a fence has no body and no closing fence
+        // either; the caller's own rules decide, and both read it as unclosed.
+        None => (text, ""),
+    };
+
+    (line.trim_end() == FENCE).then_some(rest)
+}
+
+/// Strips one matched pair of surrounding quotes from a frontmatter value.
+///
+/// Only a *matched* pair, unlike [`unquote`], which strips one of either at
+/// each end: an argument token comes from a shell-ish grammar where that is the
+/// rule, and a `description: "he said 'hi'"` does not.
+fn unquote_scalar(value: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = value.strip_prefix(quote)
+            && let Some(inner) = inner.strip_suffix(quote)
+        {
+            return inner;
+        }
+    }
+
+    value
 }
 
 /// The commands this build ships, with `${path}` already pointing at the
@@ -501,18 +924,22 @@ fn unquote(token: &str) -> &str {
     trimmed.strip_suffix(['"', '\'']).unwrap_or(trimmed)
 }
 
+/// Nothing here calls [`Registry::build`]: since **D481** that function reads
+/// the environment-resolved config home, and a test in this binary cannot
+/// redirect it without mutating process-wide state that every other test in the
+/// binary shares. The whole registry — every tier, and the precedence between
+/// them — is therefore pinned by `tests/command_files.rs`, one test in one
+/// binary with the home redirected. What is left here is what a directory and a
+/// file alone decide.
 #[cfg(test)]
 mod tests {
     use std::{path::Path, sync::Arc};
 
     use super::{
-        Definition, INIT, INIT_TEMPLATE, PATH_PLACEHOLDER, Registry, fill_template, mentions,
-        shell_substitutions, split_range, tokenize,
+        Definition, INIT, INIT_TEMPLATE, MAX_COMMAND_FILE_BYTES, PATH_PLACEHOLDER, Registry,
+        file_commands, fill_template, mentions, shell_substitutions, split_range, tokenize,
     };
-    use crate::{
-        config::{CommandConfig, Config},
-        tool::{Credentials, FileTimes, ToolCtx},
-    };
+    use crate::tool::{Credentials, FileTimes, ToolCtx};
 
     #[test]
     fn the_init_template_is_upstreams_verbatim_with_the_worktree_filled_in() {
@@ -742,45 +1169,178 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_config_command_joins_the_roster_and_may_replace_a_builtin() {
-        let mut command = std::collections::BTreeMap::new();
-        command.insert(
-            "review".to_owned(),
-            CommandConfig {
-                template: "review $ARGUMENTS".to_owned(),
-                description: Some("review the diff".to_owned()),
-                agent: Some("plan".to_owned()),
-                model: None,
-            },
-        );
-        command.insert(
-            INIT.to_owned(),
-            CommandConfig {
-                template: "mine instead".to_owned(),
-                description: None,
-                agent: None,
-                model: None,
-            },
-        );
-        let config = Config {
-            command,
-            ..Config::default()
-        };
-        let registry = Registry::build(&config, Path::new("/repo"));
+    /// A commands directory a test owns outright, so nothing here reads — or
+    /// depends on the absence of — whatever the machine running the suite keeps
+    /// in its own config home. The tier that *does* resolve that home is
+    /// exercised in `tests/command_files.rs`, which redirects it.
+    fn commands_dir(files: &[(&str, &[u8])]) -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().expect("a temporary directory is creatable");
+        for (name, contents) in files {
+            std::fs::write(dir.path().join(name), contents).expect("the fixture is writable");
+        }
 
+        dir
+    }
+
+    #[test]
+    fn a_command_file_is_its_frontmatter_and_its_body() {
+        let dir = commands_dir(&[(
+            "review.md",
+            b"---\n\
+              description: review the diff\n\
+              agent: plan\n\
+              model: anthropic/claude-sonnet-4-5\n\
+              argument-hint: <path>\n\
+              ---\n\
+              review $ARGUMENTS\n",
+        )]);
+
+        let commands = file_commands(dir.path());
+        assert_eq!(commands.len(), 1, "{commands:?}");
+        let review = &commands[0];
+        assert_eq!(review.name, "review", "the name is the file's stem");
         assert_eq!(
-            registry.names(),
-            vec!["init".to_owned(), "review".to_owned()]
+            review.description.as_deref(),
+            Some("review the diff — <path>"),
+            "the hint rides the line a palette already shows"
         );
-        assert_eq!(
-            registry.get(INIT).expect("init is still there").template,
-            "mine instead",
-            "a config command replaces the builtin it names"
-        );
-        let review = registry.get("review").expect("the config command is there");
         assert_eq!(review.agent.as_deref(), Some("plan"));
-        assert_eq!(fill_template(&review.template, "src/"), "review src/");
-        assert!(registry.get("nope").is_none());
+        assert_eq!(review.model.as_deref(), Some("anthropic/claude-sonnet-4-5"));
+        assert_eq!(
+            review.template, "review $ARGUMENTS\n",
+            "the body is the template verbatim"
+        );
+        assert_eq!(
+            fill_template(&review.template, "src/"),
+            "review src/",
+            "so the expansion a config command gets is the expansion this gets"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_frontmatter_is_all_template() {
+        let dir = commands_dir(&[("hello.md", b"say hello to $1\n")]);
+
+        let commands = file_commands(dir.path());
+        assert_eq!(commands.len(), 1, "{commands:?}");
+        assert_eq!(commands[0].name, "hello");
+        assert_eq!(commands[0].description, None);
+        assert_eq!(commands[0].template, "say hello to $1\n");
+    }
+
+    #[test]
+    fn frontmatter_tolerates_what_it_does_not_understand() {
+        let dir = commands_dir(&[
+            (
+                "kept.md",
+                b"---\n\
+                  # a comment somebody left\n\
+                  allowed-tools: Bash(git status:*)\n\
+                  not a key-value line at all\n\
+                  Description: \"quoted, and capitalised\"\n\
+                  agent:\n\
+                  ---\n\
+                  body\n",
+            ),
+            // A hint with no description of its own still says something.
+            ("hint.md", b"---\nargument-hint: <issue>\n---\nfix it\n"),
+        ]);
+
+        let commands = file_commands(dir.path());
+        let described: Vec<(&str, Option<&str>)> = commands
+            .iter()
+            .map(|command| (command.name.as_str(), command.description.as_deref()))
+            .collect();
+        assert_eq!(
+            described,
+            vec![
+                ("hint", Some("<issue>")),
+                ("kept", Some("quoted, and capitalised")),
+            ],
+            "unknown keys, comments and stray lines are skipped, not fatal"
+        );
+        let kept = commands
+            .iter()
+            .find(|command| command.name == "kept")
+            .expect("the tolerated file is a command");
+        assert_eq!(
+            kept.agent, None,
+            "a key with nothing after it says nothing at all"
+        );
+        assert_eq!(kept.template, "body\n");
+    }
+
+    #[test]
+    fn a_file_this_build_will_not_read_is_skipped_rather_than_half_parsed() {
+        let oversized = vec![b'x'; usize::try_from(MAX_COMMAND_FILE_BYTES).expect("a usize") + 1];
+        let dir = commands_dir(&[
+            // A block that opens and never closes: the header is not a prompt.
+            (
+                "unterminated.md",
+                b"---\ndescription: half a header\nand then a body\n",
+            ),
+            ("binary.md", &[0xff, 0xfe, b'n', 0x00, b'o']),
+            ("huge.md", &oversized),
+            // Not Markdown, so not meant for this directory.
+            ("notes.txt", b"just notes"),
+            ("good.md", b"this one is fine\n"),
+        ]);
+        std::fs::create_dir(dir.path().join("nested")).expect("a subdirectory is creatable");
+        std::fs::write(dir.path().join("nested").join("deep.md"), b"not read yet")
+            .expect("the nested fixture is writable");
+
+        let commands = file_commands(dir.path());
+        let names: Vec<&str> = commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["good"],
+            "every hostile file is absent from the roster: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_commands_directory_is_the_common_case_and_not_an_error() {
+        let dir = tempfile::TempDir::new().expect("a temporary directory is creatable");
+
+        assert!(file_commands(&dir.path().join("commands")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_file_command_expands_through_the_one_expansion_path() {
+        let root = tempfile::TempDir::new().expect("a temporary project is creatable");
+        std::fs::write(root.path().join("present.md"), "present")
+            .expect("the mentioned fixture is writable");
+        let dir = commands_dir(&[(
+            "brief.md",
+            b"---\ndescription: brief me\n---\n!`printf hi` about $ARGUMENTS beside @present.md\n",
+        )]);
+        let ctx = ToolCtx {
+            cwd: root.path().to_owned(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            call_id: String::new(),
+            files: Arc::new(FileTimes::default()),
+            credentials: Credentials::Unguarded,
+            spawn: None,
+            ask: None,
+            switch: None,
+            jobs: None,
+        };
+
+        let commands = file_commands(dir.path());
+        let expanded = commands[0].expand("the port", &ctx).await;
+
+        assert_eq!(expanded.prompt, "hi about the port beside @present.md");
+        assert_eq!(
+            expanded.mentions,
+            vec![crate::protocol::Mention {
+                path: "present.md".to_owned(),
+                start: None,
+                end: None,
+            }],
+            "a file command attaches what a config command's template would"
+        );
     }
 }
