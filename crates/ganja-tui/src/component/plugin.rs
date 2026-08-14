@@ -30,7 +30,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    component::{chat::clip, clamped, first_visible},
+    component::{body_rows, chat::clip, clamped, first_visible},
     theme::Theme,
 };
 
@@ -339,13 +339,9 @@ impl Plugin {
         let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
         let available = area.height.saturating_sub(2).clamp(1, MAX_HEIGHT);
         let inner_width = usize::from(width).saturating_sub(2);
-        let rows = usize::from(available)
-            .saturating_sub(2)
-            .saturating_sub(CHROME)
-            // The notice takes a row of the list's budget when it has
-            // something to say.
-            .saturating_sub(usize::from(self.notice.is_some()))
-            .max(1);
+        // The notice takes a row of the list's budget when it has something
+        // to say.
+        let rows = body_rows(available, CHROME + usize::from(self.notice.is_some()));
 
         let mut lines = match &self.step {
             Step::List => self.list_rows(inner_width, rows, theme),

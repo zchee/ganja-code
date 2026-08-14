@@ -310,7 +310,14 @@ fn http_date(value: &str) -> Option<SystemTime> {
 /// Days between 1970-01-01 and `year-month-day`, by Howard Hinnant's
 /// `days_from_civil`. Proleptic Gregorian, valid for any year the parser can
 /// produce.
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+///
+/// Visible to the module above because [`super::rate`] parses the same HTTP
+/// dates off the same responses and needs the same arithmetic. It kept a copy
+/// with a comment saying the copy was deliberate — the reason it gave was that
+/// this one is private to a module about refusals, which is a visibility fact
+/// rather than a boundary, and `pub(super)` is the seam that answers it. The
+/// two modules' own date tests hold it from both sides.
+pub(super) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let year = year - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;

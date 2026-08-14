@@ -30,16 +30,11 @@ use tokio::{
     sync::mpsc,
 };
 
-use crate::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, job, truncate};
 
 /// How long a command runs before it is killed, when the call names no
 /// timeout. Upstream's `2 * 60 * 1000`.
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(2 * 60 * 1000);
-
-/// What a call reads when it asked to run in the background but this build
-/// offered the tool without anywhere to track one. Not reachable through the
-/// engine, which wires a jobs handle into every [`ToolCtx`] it builds.
-const NO_BACKGROUND: &str = "background shells are not available in this context";
 
 /// How long the tree is given to wind itself up after `SIGTERM` before it is
 /// killed outright. Upstream's `SIGKILL_TIMEOUT_MS`. Only a process group can
@@ -389,7 +384,7 @@ impl ShellTool {
         ctx: &ToolCtx,
     ) -> Result<ToolOutput, ToolError> {
         let Some(jobs) = ctx.jobs.as_ref() else {
-            return Err(ToolError::Failed(NO_BACKGROUND.to_owned()));
+            return Err(ToolError::Failed(job::NO_JOBS.to_owned()));
         };
 
         let child = self.spawn(&command, cwd)?;

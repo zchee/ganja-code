@@ -312,24 +312,6 @@ fn writable(tier: Tier, cwd: &Path) -> Result<PathBuf> {
     Ok(directory.join(CONFIG_FILE))
 }
 
-/// The dialect a config file is read in, spelled to match `config.rs`'s own
-/// `parse_options`, which is private to that module.
-///
-/// It matters that these two agree in *both* directions. Looser here and this
-/// would happily edit a file the next launch refuses; stricter here and it
-/// would refuse to touch a file that loads perfectly well.
-fn parse_options() -> jsonc_parser::ParseOptions {
-    jsonc_parser::ParseOptions {
-        allow_comments: true,
-        allow_trailing_commas: true,
-        allow_loose_object_property_names: false,
-        allow_missing_commas: false,
-        allow_single_quoted_strings: false,
-        allow_hexadecimal_numbers: false,
-        allow_unary_plus_numbers: false,
-    }
-}
-
 /// Reads the target file as a syntax tree, or an empty document when it is
 /// absent.
 ///
@@ -351,7 +333,7 @@ fn document(path: &Path) -> Result<CstRootNode> {
         }
     };
 
-    CstRootNode::parse(&text, &parse_options())
+    CstRootNode::parse(&text, &ganja_core::config::parse_options())
         .map_err(|error| anyhow!("{} could not be parsed: {error}", path.display()))
 }
 
@@ -1029,7 +1011,7 @@ mod tests {
         assert_eq!(
             jsonc_parser::parse_to_serde_value::<Option<Value>>(
                 &document.to_string(),
-                &super::parse_options()
+                &ganja_core::config::parse_options()
             )
             .expect("what this printed is readable"),
             Some(json!({"mcp": {"docs": {"type": "local", "command": ["bun"]}}})),
@@ -1037,7 +1019,7 @@ mod tests {
         );
 
         for hostile in ["{\"mcp\": [\"not\", \"a\", \"table\"]}", "[1, 2, 3]"] {
-            let document = super::CstRootNode::parse(hostile, &super::parse_options())
+            let document = super::CstRootNode::parse(hostile, &ganja_core::config::parse_options())
                 .expect("the fixture parses");
             assert!(
                 table(&document, path).is_err(),

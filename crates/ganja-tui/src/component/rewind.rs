@@ -35,7 +35,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    component::{chat::clip, clamped, first_visible},
+    component::{body_rows, chat::clip, clamped, first_visible},
     theme::Theme,
 };
 
@@ -203,10 +203,7 @@ impl Rewind {
 
         // Inside the border on both axes.
         let inner_width = usize::from(width).saturating_sub(2);
-        let rows = usize::from(available)
-            .saturating_sub(2)
-            .saturating_sub(CHROME)
-            .max(1);
+        let rows = body_rows(available, CHROME);
 
         let mut lines = match self.step {
             Step::Checkpoints => self.checkpoint_rows(inner_width, rows, theme),

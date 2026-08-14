@@ -9,6 +9,8 @@
 //! raises — one on a leading slash, one on an `@` — plus the two read-only
 //! panels `/context` and `/usage` raise over the same chrome.
 
+use ratatui::layout::{Constraint, Rect};
+
 pub mod chat;
 pub mod context;
 pub mod dropdown;
@@ -30,6 +32,48 @@ pub mod sessions;
 pub mod status;
 pub mod themes;
 pub mod usage;
+
+/// The box a dialog draws itself in, and the two sizes it lays text out
+/// against: the popup rectangle, the columns inside its border, and the body
+/// rows left once `chrome` — whatever fixed lines that dialog always draws
+/// under its list — is taken out.
+///
+/// Two margins are baked in because every dialog here has always used them:
+/// four columns and two rows of the screen stay outside the box, and the
+/// border takes one of each on both sides. What differs per dialog is only
+/// how wide and tall it is willing to grow and how much chrome it carries, so
+/// those are the arguments.
+///
+/// The dialogs whose height depends on what they are about — `rewind`, `mcp`,
+/// `plugin`, `help`, `context`, `usage` — size their own box and take
+/// [`body_rows`] alone; `search` splits its rows between a list and a preview
+/// and keeps its own floor.
+pub(crate) fn modal(
+    area: Rect,
+    max_width: u16,
+    max_height: u16,
+    chrome: usize,
+) -> (Rect, usize, usize) {
+    let width = area.width.saturating_sub(4).clamp(1, max_width);
+    let height = area.height.saturating_sub(2).clamp(1, max_height);
+    let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
+
+    (
+        popup,
+        usize::from(width).saturating_sub(2),
+        body_rows(height, chrome),
+    )
+}
+
+/// The body rows a box `height` rows tall has room for: its border takes two,
+/// its own `chrome` takes the rest, and at least one row survives whatever is
+/// left — a list with nowhere to draw is a dialog that shows nothing at all.
+pub(crate) fn body_rows(height: u16, chrome: usize) -> usize {
+    usize::from(height)
+        .saturating_sub(2)
+        .saturating_sub(chrome)
+        .max(1)
+}
 
 /// The first row on screen: far enough down to keep the selected one visible,
 /// and no further. Every scrolling list here answers it the same way.

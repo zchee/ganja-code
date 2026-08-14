@@ -135,7 +135,7 @@ pub fn write(path: &Path, theme: &str) -> Result<(), SelectionError> {
     json.push(b'\n');
 
     let temporary = temporary_beside(path);
-    write_new(&temporary, &json).map_err(|source| SelectionError::Io {
+    ganja_permission::write_new(&temporary, &json).map_err(|source| SelectionError::Io {
         path: temporary.clone(),
         source,
     })?;
@@ -163,36 +163,6 @@ fn temporary_beside(path: &Path) -> PathBuf {
         std::process::id(),
         WRITES.fetch_add(1, Ordering::Relaxed)
     ))
-}
-
-/// Writes `bytes` to a newly created file.
-///
-/// `create_new` is `O_CREAT | O_EXCL`, which does not follow a symbolic link at
-/// the final component: the name is predictable enough for someone sharing the
-/// machine to plant one, and an open that followed it would write through to
-/// wherever it led.
-fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
-
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        // Either a write that died before its rename, or something planted to
-        // catch this one. Unlinking the name and creating it again exclusively
-        // settles both.
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            fs::remove_file(path)?;
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?
-        }
-        result => result?,
-    };
-
-    file.write_all(bytes)
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolCtx, ToolError, ToolOutput, bash_output::state_word, job::JobsError};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, bash_output::state_word, job, job::JobsError};
 
 /// The tool id, and the permission key.
 pub const ID: &str = "kill_shell";
@@ -24,11 +24,6 @@ Kills a running background shell by its ID.
   error.
 - Use this tool when a background shell is no longer needed, or has run \
   longer than expected.";
-
-/// What a call reads when this build offered the tool without anything
-/// behind it. Not reachable through the engine, which wires a jobs handle
-/// into every [`ToolCtx`] it builds.
-const NO_JOBS: &str = "background shells are not available in this context";
 
 /// What the model passes to `kill_shell`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -67,7 +62,7 @@ impl Tool for KillShellTool {
         let args: Args = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArgs(error.to_string()))?;
         let Some(jobs) = ctx.jobs.as_ref() else {
-            return Err(ToolError::Failed(NO_JOBS.to_owned()));
+            return Err(ToolError::Failed(job::NO_JOBS.to_owned()));
         };
 
         let status = jobs

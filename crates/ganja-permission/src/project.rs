@@ -28,7 +28,7 @@
 //! it needs on the way.
 
 use std::{
-    io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -149,6 +149,53 @@ pub fn data_home() -> Result<PathBuf, ProjectError> {
     })?;
 
     Ok(base.data_dir().join(DIRECTORY))
+}
+
+/// Writes `bytes` to a newly created file, and does not return until they are
+/// on the disk.
+///
+/// `create_new` is `O_CREAT | O_EXCL`, which does not follow a symbolic link
+/// at the final component: these names are predictable enough for somebody
+/// sharing the machine to plant one, and an open that followed it would write
+/// through to wherever it led — and then have that file renamed over the real
+/// one by the caller's own rename-into-place.
+///
+/// Here rather than beside either caller because both write the same shape of
+/// small file into a directory this module already owns the idea of — the
+/// stored permission answers and the stored theme choice — and the two had a
+/// copy each. The copies had already drifted on the question this one settles:
+/// [`std::fs::File::sync_all`] before the rename, so a machine that loses
+/// power between the write and the rename finds either the old file or the new
+/// one and never an empty one. That costs a flush on a file somebody's
+/// keystroke produced, which is the direction to be wrong in.
+///
+/// # Errors
+///
+/// Returns whatever the create, the write or the flush returned. A name that
+/// already exists is not one of them: that is either a write that died before
+/// its rename or something planted to catch this one, and unlinking the *name*
+/// — never whatever it pointed at — and creating it again exclusively settles
+/// both, with a link planted in between failing the retry outright.
+pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            fs::remove_file(path)?;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?
+        }
+        result => result?,
+    };
+    file.write_all(bytes)?;
+
+    file.sync_all()
 }
 
 /// The working tree `cwd` sits in, or `cwd` itself when it sits in none.

@@ -25,4 +25,4 @@ pub mod project;
 // `Action` belongs here with its siblings because rules are the crate's
 // primary vocabulary.
 pub use permission::{Action, CallDecision, Decision, PermissionConfig, Permissions};
-pub use project::{Project, ProjectError};
+pub use project::{Project, ProjectError, write_new};

@@ -8,14 +8,14 @@
 use ganja_protocol::{QuestionId, QuestionInfo};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Rect},
+    layout::Rect,
     text::{Line, Text},
     widgets::{Block, Clear, Paragraph, Widget as _},
 };
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    component::{chat::clip, clamped},
+    component::{chat::clip, clamped, modal},
     theme::Theme,
 };
 
@@ -39,6 +39,9 @@ const CUSTOM_LABEL: &str = "Type your own answer";
 
 /// Widest the modal grows, whatever the terminal offers.
 const MAX_WIDTH: u16 = 72;
+
+/// Tallest the modal grows, whatever the terminal offers.
+const MAX_HEIGHT: u16 = 20;
 
 /// Gap between an answer's label and its detail.
 const GAP: usize = 2;
@@ -175,17 +178,9 @@ impl Question {
             return;
         }
 
-        let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
-        let height = area.height.saturating_sub(2).clamp(1, 20);
-        let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
+        let (popup, inner_width, rows) = modal(area, MAX_WIDTH, MAX_HEIGHT, CHROME);
 
         Clear.render(popup, buffer);
-
-        let inner_width = usize::from(width).saturating_sub(2);
-        let rows = usize::from(height)
-            .saturating_sub(2)
-            .saturating_sub(CHROME)
-            .max(1);
         let mut lines = vec![Line::styled(clip(&self.question, inner_width), theme.fg)];
         lines.push(Line::raw(""));
         lines.extend(self.answer_lines(inner_width, rows, theme));

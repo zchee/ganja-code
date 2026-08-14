@@ -3436,7 +3436,8 @@ async fn start(
     prepared: Prepared,
 ) -> ControlFlow<Option<Outcome>, Started> {
     let at = now();
-    if let Some(part) = set_tool_state(
+    emit_tool_state(
+        turn,
         assistant,
         &prepared.call.part_id,
         ToolState::Running {
@@ -3446,18 +3447,8 @@ async fn start(
             metadata: serde_json::Value::Null,
             started: at,
         },
-    ) {
-        turn.persist_part(assistant, &part);
-        deliver(
-            turn,
-            Event::PartUpdated {
-                session_id: turn.session_id.clone(),
-                message_id: assistant.id.clone(),
-                part,
-            },
-        )
-        .await?;
-    }
+    )
+    .await?;
 
     let ctx = ToolCtx {
         cwd: turn.cwd.clone(),
@@ -4143,7 +4134,8 @@ async fn fail_call(
     error: &str,
 ) -> ControlFlow<Option<Outcome>> {
     let stamp = now();
-    let Some(part) = set_tool_state(
+    emit_tool_state(
+        turn,
         assistant,
         &call.part_id,
         ToolState::Error {
@@ -4151,18 +4143,6 @@ async fn fail_call(
             error: error.to_owned(),
             started: stamp,
             completed: stamp,
-        },
-    ) else {
-        return ControlFlow::Continue(());
-    };
-
-    turn.persist_part(assistant, &part);
-    deliver(
-        turn,
-        Event::PartUpdated {
-            session_id: turn.session_id.clone(),
-            message_id: assistant.id.clone(),
-            part,
         },
     )
     .await
@@ -4277,8 +4257,9 @@ async fn flush_after(deadline: Option<Instant>) {
     }
 }
 
-/// Records a call's terminal state and delivers the part update — the shape
-/// the completed and failed arms share. The cancelled arm stays written out
+/// Records a call's state and delivers the part update — the shape every arm
+/// that announces one shares: the `Running` a started call opens with, and
+/// the `Completed` and `Error` it ends on. The cancelled arm stays written out
 /// at its match site: its update travels the terminal path as a plain send,
 /// because racing it against the cancel that caused it would drop it.
 async fn emit_tool_state(
