@@ -590,6 +590,21 @@ impl Persist {
 
     fn note_input_tokens(&self, tokens: u64) {
         self.locked().last_input = Some(tokens);
+        // Written through to the live record in memory as well, because the
+        // context meter polls `Engine::context_estimate` off it *while* the
+        // turn runs — a measure only moved at finish left the gauge frozen
+        // for the whole of a long turn (2026-08-15). The disk write stays at
+        // [`Persist::finish`]; a gauge does not need durability.
+        let mut live = self
+            .state
+            .live
+            .lock()
+            .expect("the live session is never poisoned");
+        if let Some(info) = live.info.as_mut()
+            && info.id == self.session
+        {
+            info.context_tokens = tokens;
+        }
     }
 
     fn note_summary_usage(&self, usage: Option<Usage>) {
