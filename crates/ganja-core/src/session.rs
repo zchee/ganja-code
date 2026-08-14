@@ -1783,7 +1783,7 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
             // Each request replaces the measure: `context_tokens` is what the
             // most recent request carried, not a running sum.
             if let Some(persist) = &turn.persist {
-                persist.note_input_tokens(usage.input_tokens);
+                persist.note_input_tokens(context_carried(&usage));
             }
         }
 
@@ -4367,6 +4367,21 @@ fn parse_args(json: &str) -> Result<serde_json::Value, String> {
     }
 }
 
+/// The whole prompt a request carried into the window: the fresh tokens plus
+/// what the cache read back and wrote.
+///
+/// Every wire here reports `input_tokens` net of caching, and a cached token
+/// still occupies the window it was read back into. Counting only the fresh
+/// tail left the context measure near zero on any provider whose cache works
+/// — the meter pinned at 0%, and auto-compaction's trigger unable to ever
+/// fire (2026-08-15).
+fn context_carried(usage: &Usage) -> u64 {
+    usage
+        .input_tokens
+        .saturating_add(usage.cache_read_tokens)
+        .saturating_add(usage.cache_write_tokens)
+}
+
 /// Sums what two requests spent.
 fn add_usage(a: Usage, b: Usage) -> Usage {
     Usage {
@@ -4443,7 +4458,8 @@ mod tests {
 
     use super::{
         Answered, BufferedCall, ChildParts, PendingReplies, Turn, TurnKind, add_usage, attached,
-        parse_args, resolve, resolve_mentions, serialize_message, sliced, title_model,
+        context_carried, parse_args, resolve, resolve_mentions, serialize_message, sliced,
+        title_model,
     };
     use crate::{
         catalog,
@@ -4464,6 +4480,22 @@ mod tests {
     /// The single cell this replaced could not hold the second without dropping
     /// the first's channel — the deadlock the pre-mortem named, in its smallest
     /// form.
+    /// The context measure counts what the cache carried too: every wire
+    /// reports `input_tokens` net of caching, and a meter that read only the
+    /// fresh tail sat at zero the moment a provider's cache warmed up
+    /// (2026-08-15) — with auto-compaction's trigger frozen beside it.
+    #[test]
+    fn the_context_measure_counts_cached_tokens_as_carried() {
+        let usage = Usage {
+            input_tokens: 1_200,
+            cache_read_tokens: 88_000,
+            cache_write_tokens: 700,
+            ..Usage::default()
+        };
+
+        assert_eq!(context_carried(&usage), 89_900);
+    }
+
     #[test]
     fn two_open_permission_requests_are_each_answered_by_their_own_id() {
         let mut pending = PendingReplies::default();
