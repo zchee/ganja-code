@@ -7,8 +7,8 @@
 //! opencode v1.18.13 has no plugin system at all, so the whole surface is a
 //! named divergence, **D472** (`claude-plugin-spec`): the manifest and
 //! marketplace shapes are Claude's verbatim, and what an installed plugin
-//! contributes maps onto the five config surfaces ganja already owns —
-//! `hooks`, `mcp`, `skills`, `agent`, `lsp`.
+//! contributes maps onto the six config surfaces ganja already owns —
+//! `hooks`, `mcp`, `skills`, `command`, `agent`, `lsp`.
 //!
 //! # Foreign files are tolerated; ganja's own names are not
 //!
@@ -31,10 +31,10 @@
 //! that merge replaces a closer tier's `hooks` lists per event key, which
 //! would silently kill every plugin hook for any user with hooks of their
 //! own. The per-surface semantics are **D473** (`plugin-component-merge`),
-//! spelled at each merge site below: hooks append, MCP servers arrive under a
-//! namespaced key, skills roots concatenate, agents and LSP entries merge
-//! per key with the explicit config winning and the collision reported by
-//! name.
+//! spelled at each merge site below: hooks append, MCP servers and commands
+//! arrive under a namespaced key, skills roots concatenate, agents and LSP
+//! entries merge per key with the explicit config winning and the collision
+//! reported by name.
 //!
 //! # Component files that do not parse
 //!
@@ -58,8 +58,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{
-    AgentConfig, AgentMode, Config, HookCommand, HookHandler, HookMatcher, LspConfig, LspEntry,
-    McpLocal, McpRemote, McpServer, config_home,
+    AgentConfig, AgentMode, CommandConfig, Config, HookCommand, HookHandler, HookMatcher,
+    LspConfig, LspEntry, McpLocal, McpRemote, McpServer, config_home,
 };
 
 /// The directory a plugin (or a marketplace) keeps its own manifest in, at
@@ -384,6 +384,9 @@ pub struct Contribution {
     pub mcp: BTreeMap<String, McpServer>,
     /// The plugin's `skills/` directory, when it has one.
     pub skills_root: Option<PathBuf>,
+    /// Slash commands by their **plugin-local** name, from `commands/*.md`;
+    /// [`apply`] namespaces them.
+    pub commands: BTreeMap<String, CommandConfig>,
     /// Agents by name, from `agents/*.md`.
     pub agents: BTreeMap<String, AgentConfig>,
     /// Language servers by name, from `.lsp.json`.
@@ -392,7 +395,7 @@ pub struct Contribution {
 
 impl Contribution {
     /// One line per component, for listings: `hook PreToolUse`,
-    /// `mcp db`, `skills`, `agent reviewer`, `lsp go`.
+    /// `mcp db`, `skills`, `command review`, `agent reviewer`, `lsp go`.
     #[must_use]
     pub fn described(&self) -> Vec<String> {
         let mut lines = Vec::new();
@@ -404,6 +407,13 @@ impl Contribution {
         }
         if self.skills_root.is_some() {
             lines.push("skills".to_owned());
+        }
+        // The plugin-local name, like every other row here: what the listing
+        // shows is what the plugin's own directory holds, and the `<plugin>:`
+        // prefix `apply` adds is a property of the merged config rather than
+        // of the component.
+        for command in self.commands.keys() {
+            lines.push(format!("command {command}"));
         }
         for agent in self.agents.keys() {
             lines.push(format!("agent {agent}"));
@@ -873,7 +883,7 @@ fn replace_dir(from: &Path, to: &Path) -> Result<(), PluginError> {
 
 /// What one installed plugin contributes, collected from the spec's default
 /// component locations: `hooks/hooks.json`, `.mcp.json`, `skills/`,
-/// `agents/*.md`, `.lsp.json`.
+/// `commands/*.md`, `agents/*.md`, `.lsp.json`.
 ///
 /// A component file that does not parse is skipped with a warning naming the
 /// plugin and the file — the module doc says why — and a manifest that names
@@ -894,6 +904,7 @@ pub fn collect(root: &Path, plugin: &str) -> Contribution {
     if skills.is_dir() {
         found.skills_root = Some(skills);
     }
+    found.commands = collect_commands(root, &root_text);
     found.agents = collect_agents(root, plugin);
     found.lsp = collect_lsp(root, plugin, &root_text);
 
@@ -1098,6 +1109,37 @@ fn collect_mcp(root: &Path, plugin: &str, plugin_root: &str) -> BTreeMap<String,
     }
 
     servers
+}
+
+/// Reads `commands/*.md` — Claude's markdown-with-frontmatter command files —
+/// into the `command` table's own shape.
+///
+/// Not a parser of its own: the walk, the frontmatter grammar, the size cap
+/// and every named refusal are [`crate::command::file_commands`], the same
+/// function that reads a project's `.ganja/commands`. A plugin's command file
+/// and a project's are therefore one file format read once, which is the whole
+/// reason this surface waited for that loader to exist rather than growing a
+/// second command system beside it.
+///
+/// What is added here is the placeholder substitution every other component
+/// gets: a template is where a plugin reaches for a script it shipped, so
+/// `${CLAUDE_PLUGIN_ROOT}` means the installed root in a `` !`command` `` or an
+/// `@path` exactly as it does in a hook's command line.
+fn collect_commands(root: &Path, plugin_root: &str) -> BTreeMap<String, CommandConfig> {
+    crate::command::file_commands(&root.join("commands"))
+        .into_iter()
+        .map(|command| {
+            (
+                command.name,
+                CommandConfig {
+                    template: command.template.replace(PLUGIN_ROOT_VAR, plugin_root),
+                    description: command.description,
+                    agent: command.agent,
+                    model: command.model,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Reads `agents/*.md` — Claude's markdown-with-frontmatter agent files —
@@ -1357,6 +1399,35 @@ pub(crate) fn apply(store: &Store, config: &mut Config) -> Result<(), PluginErro
             config.skills.paths.push(skills.display().to_string());
         }
 
+        // Commands join the `command` table under `<plugin>:<name>` — Claude
+        // Code's own spelling for a plugin-provided command, so `/review` from
+        // a plugin is typed `/<plugin>:review` in either tool. The prefix is
+        // also what keeps this surface collision-free against the builtins and
+        // against a project's own `commands/` files, neither of which can
+        // carry a `:` they did not ask for. As everywhere else here, a config
+        // that spelled the namespaced key anyway wins it, reported by name.
+        for (command, entry) in contribution.commands {
+            let key = format!("{name}:{command}");
+            match config.command.entry(key.clone()) {
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    tracing::warn!(
+                        plugin = name,
+                        command = key,
+                        "the config already declares this command; the config's entry wins"
+                    );
+                }
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    tracing::info!(
+                        plugin = name,
+                        surface = "command",
+                        component = command,
+                        "plugin contributed"
+                    );
+                    slot.insert(entry);
+                }
+            }
+        }
+
         // Agents merge per key with the explicit config winning, and the
         // collision reported by name — a config that defines `reviewer` has
         // said what `reviewer` is, and a plugin quietly rewriting it would
@@ -1596,7 +1667,7 @@ mod tests {
     /// The collector is one function on purpose — `ganja plugin list` and the
     /// load path both call it, which is what keeps their answers identical.
     #[test]
-    fn a_full_plugin_directory_yields_all_five_surfaces() {
+    fn a_full_plugin_directory_yields_all_six_surfaces() {
         let plugin = TempDir::new().expect("a temporary directory");
         let root = plugin.path();
         plant(
@@ -1623,6 +1694,15 @@ mod tests {
             }}"#,
         );
         plant(root, "skills/reviewer/SKILL.md", "# a skill\n");
+        plant(
+            root,
+            "commands/brief.md",
+            "---\ndescription: brief me\nargument-hint: <topic>\nagent: plan\n---\n\
+             read !`${CLAUDE_PLUGIN_ROOT}/summarize` about $ARGUMENTS\n",
+        );
+        // Not Markdown, so not a command — the file loader's own rule, which
+        // this surface inherits rather than restates.
+        plant(root, "commands/notes.txt", "just notes\n");
         plant(
             root,
             "agents/reviewer.md",
@@ -1669,6 +1749,20 @@ mod tests {
         assert_eq!(
             found.skills_root.as_deref(),
             Some(root.join("skills").as_path())
+        );
+
+        assert_eq!(
+            found.commands.keys().collect::<Vec<_>>(),
+            vec!["brief"],
+            "the command loader's own rules decide what is a command file"
+        );
+        let brief = &found.commands["brief"];
+        assert_eq!(brief.description.as_deref(), Some("brief me — <topic>"));
+        assert_eq!(brief.agent.as_deref(), Some("plan"));
+        assert_eq!(
+            brief.template,
+            format!("read !`{}/summarize` about $ARGUMENTS\n", root.display()),
+            "the plugin-root placeholder is substituted in a template too"
         );
 
         let reviewer = &found.agents["reviewer"];

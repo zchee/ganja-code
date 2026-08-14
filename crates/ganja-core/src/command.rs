@@ -75,6 +75,15 @@ pub struct Definition {
     pub agent: Option<String>,
     /// Model the command asks for, when it should not ask the session's.
     pub model: Option<String>,
+    /// The Markdown file this command was read from, when it came from one.
+    ///
+    /// [`None`] for a builtin and for a `command` table entry — neither is a
+    /// file somebody is looking at. Carried so that a refusal made after the
+    /// roster is built can name the file that has to be edited, which is the
+    /// only thing that distinguishes "your `plan` is misspelled" from a
+    /// command that quietly is not there
+    /// ([`Registry::refusing_unknown_agents`]).
+    pub source: Option<PathBuf>,
 }
 
 impl Definition {
@@ -243,6 +252,51 @@ impl Registry {
             .map(|command| command.name.clone())
             .collect()
     }
+
+    /// Drops every command **file** whose `agent:` names nobody `agents`
+    /// holds, saying which file and which agent.
+    ///
+    /// The dispatch-time check ([`crate::engine::EngineError::UnknownAgent`])
+    /// is what a `command` table entry gets, and it stays: a config file is a
+    /// curated key set whose author is told by name that a value is wrong, and
+    /// silently dropping an entry out of one would be the opposite of how
+    /// every other key in it behaves. A command *file* is the other posture,
+    /// the one `read_command` applies to every other way a file can be
+    /// wrong: absent from the roster, named in the log, nothing half-parsed
+    /// reaching a session. `agent:` naming an agent that does not exist is
+    /// exactly that kind of wrong — the file is unusable, and the person who
+    /// can fix it is the person who wrote it.
+    ///
+    /// Called by [`crate::engine::Engine::with_commands`] rather than by
+    /// [`Registry::build`], because the roster of agents is not something this
+    /// module can resolve: `agent::Registry` is built from the config *and* a
+    /// file tier of its own, and reconstructing it here would refuse command
+    /// files naming a perfectly real file-declared agent. The engine is the
+    /// first place both rosters exist, and it is still well before a turn.
+    #[must_use]
+    pub fn refusing_unknown_agents(mut self, agents: &crate::agent::Registry) -> Self {
+        self.commands.retain(|command| {
+            let Some(file) = &command.source else {
+                return true;
+            };
+            let Some(agent) = &command.agent else {
+                return true;
+            };
+            if agents.get(agent).is_some() {
+                return true;
+            }
+            tracing::warn!(
+                command = %command.name,
+                file = %file.display(),
+                agent = %agent,
+                "a command file names an agent this session does not have and was refused"
+            );
+
+            false
+        });
+
+        self
+    }
 }
 
 /// Where a command in the roster came from, in precedence order.
@@ -367,7 +421,12 @@ fn command_dirs(worktree: &Path) -> Vec<(Tier, PathBuf)> {
 /// A directory that is not there is the common case and says nothing; any other
 /// failure to read it is reported, because somebody who made a `commands/` is
 /// owed a reason it produced nothing.
-fn file_commands(dir: &Path) -> Vec<Definition> {
+///
+/// `pub(crate)` for one other caller: an installed plugin's own `commands/`
+/// directory is read by [`crate::plugin`] through exactly this function, so a
+/// plugin's command file and a project's are the same file format read by the
+/// same parser rather than two command systems that drift.
+pub(crate) fn file_commands(dir: &Path) -> Vec<Definition> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) => {
@@ -476,12 +535,17 @@ fn read_command(path: &Path) -> Option<Definition> {
         return None;
     };
 
-    parse_command(name, &text).or_else(|| {
+    let definition = parse_command(name, &text).or_else(|| {
         tracing::warn!(
             file = %path.display(),
             "a command file opens a frontmatter block it never closes and was skipped"
         );
         None
+    })?;
+
+    Some(Definition {
+        source: Some(path.to_owned()),
+        ..definition
     })
 }
 
@@ -510,6 +574,9 @@ fn parse_command(name: &str, text: &str) -> Option<Definition> {
         template: body.to_owned(),
         agent,
         model,
+        // The caller knows which file this text came from; a parser given a
+        // string does not.
+        source: None,
     })
 }
 
@@ -640,6 +707,7 @@ fn builtins(worktree: &Path) -> Vec<Definition> {
         template: INIT_TEMPLATE.replacen(PATH_PLACEHOLDER, &worktree.to_string_lossy(), 1),
         agent: None,
         model: None,
+        source: None,
     }]
 }
 
@@ -651,6 +719,11 @@ fn configured(name: &str, definition: &CommandConfig) -> Definition {
         template: definition.template.clone(),
         agent: definition.agent.clone(),
         model: definition.model.clone(),
+        // A `command` table entry is not a file, whichever tier declared it —
+        // and a plugin's contributed command arrives through this same table,
+        // so it answers to the config's loud dispatch-time refusal rather than
+        // to the file tier's quiet one.
+        source: None,
     }
 }
 
@@ -1146,6 +1219,7 @@ mod tests {
             template: template.to_owned(),
             agent: None,
             model: None,
+            source: None,
         };
 
         let echoed = command(r#"!`echo hi`"#).expand("", &ctx).await;

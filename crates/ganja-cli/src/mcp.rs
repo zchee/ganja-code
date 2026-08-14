@@ -37,11 +37,14 @@
 //!   constructed as JSON and then *deserialized into the real
 //!   [`McpServer`]* before anything is written, so a shape this build could
 //!   not read back is refused at the moment it was asked for rather than at
-//!   the next launch. The two refusals `config.rs`'s own `check_mcp` makes
-//!   after decoding — an empty command, a URL nothing may send headers to,
-//!   an `output_limit` of zero — are made here too, for the same reason
-//!   `import.rs` repeats them: a file this wrote that the next launch will
-//!   not read is the failure a writer exists to prevent. The document is read
+//!   the next launch. The three refusals the loader makes after decoding — an
+//!   empty command, a URL nothing may send headers to, an `output_limit` of
+//!   zero — are made here too, by *calling* the one authority for them
+//!   ([`McpServer::check`]) rather than by spelling them again: a file this
+//!   wrote that the next launch will not read is the failure a writer exists
+//!   to prevent, and two spellings of the rule are two things to keep in
+//!   step. `import.rs` calls the same method for the same reason. The
+//!   document is read
 //!   through the loader's own dialect too, so a file only a looser parser
 //!   accepts is refused here rather than rewritten into something that still
 //!   will not load.
@@ -63,7 +66,6 @@ use ganja_core::config::{Config, McpServer};
 use ganja_permission::Project;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 use serde_json::{Map, Value};
-use url::Url;
 
 /// What this *creates*. The `.jsonc` spelling is deliberately never created:
 /// a file this wrote has no comment in it to justify the name.
@@ -525,45 +527,16 @@ fn pairs(words: &[String], flag: &str) -> Result<Value> {
 ///
 /// The decoding half is the real config type, so its `deny_unknown_fields`
 /// and its `NonZeroU64`s answer for the shape. What follows the decode is
-/// `config.rs::check_mcp`'s own three refusals, repeated rather than called:
-/// that function is private and its checks are what stands between a written
-/// entry and a config file that does not load.
+/// [`McpServer::check`] — the loader's own three refusals, *called* rather
+/// than repeated: they are what stands between a written entry and a config
+/// file that does not load, so a second spelling of them here would be a
+/// second thing to keep in step with the loader.
 fn validate(name: &str, entry: &Value) -> Result<()> {
     let server: McpServer = serde_json::from_value(entry.clone()).map_err(|error| {
         anyhow!("mcp server \"{name}\" is not one this build could read: {error}")
     })?;
 
-    let limit = match &server {
-        McpServer::Local(local) if local.command.is_empty() => {
-            bail!("mcp server \"{name}\" has an empty command");
-        }
-        McpServer::Local(local) => local.output_limit,
-        McpServer::Remote(remote) => {
-            let parsed = Url::parse(&remote.url)
-                .map_err(|error| anyhow!("mcp server \"{name}\" has no valid url: {error}"))?;
-            // The predicate the loader applies, shared rather than
-            // re-spelled: `headers` is where a token goes, and plain HTTP to
-            // anywhere but this machine puts it on the wire in the clear. The
-            // URL is deliberately absent from the message — it may carry a
-            // credential in its userinfo, and echoing one back is how it
-            // reaches a log.
-            if !ganja_provider::provider::reachable_in_the_clear(&parsed) {
-                bail!(
-                    "mcp server \"{name}\" must be reached over https, or over http to \
-                     loopback; anything else puts its headers on the wire in the clear"
-                );
-            }
-            remote.output_limit
-        }
-    };
-    if limit == Some(0) {
-        bail!(
-            "mcp server \"{name}\" has an output_limit of 0; a byte budget of nothing \
-             refuses every result"
-        );
-    }
-
-    Ok(())
+    server.check(name).map_err(|message| anyhow!(message))
 }
 
 /// Says so when another config file holds this name too, naming which one

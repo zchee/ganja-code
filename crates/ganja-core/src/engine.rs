@@ -1696,9 +1696,23 @@ impl Engine {
     ///
     /// Consuming for the same reason [`Engine::with_system_parts`] is: the roster is
     /// resolved once, before anything can be streaming.
+    ///
+    /// This is also where a command **file** naming an agent nobody has is
+    /// refused, by name and by file
+    /// ([`command::Registry::refusing_unknown_agents`]) — the first moment
+    /// both rosters exist, and still long before a turn. It therefore has to
+    /// run **after** [`Engine::with_agents`], which is the order both
+    /// frontends assemble in; called before it, the roster is left whole and
+    /// the dispatch-time [`EngineError::UnknownAgent`] below is what such a
+    /// command meets.
     #[must_use]
     pub fn with_commands(mut self, commands: Arc<command::Registry>) -> Self {
-        self.commands = commands;
+        self.commands = match &self.agents {
+            Some(agents) => {
+                Arc::new(Arc::unwrap_or_clone(commands).refusing_unknown_agents(agents.as_ref()))
+            }
+            None => commands,
+        };
 
         self
     }

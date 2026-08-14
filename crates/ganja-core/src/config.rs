@@ -46,7 +46,7 @@ use std::{
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use serde::{
-    Deserialize,
+    Deserialize, Serialize,
     de::{self, MapAccess, SeqAccess, Visitor},
 };
 use url::Url;
@@ -276,7 +276,11 @@ pub const MCP_CONNECT_TIMEOUT: u64 = 30_000;
 /// upstream skips such an entry with a log line (`mcp/index.ts:510`), which
 /// leaves a server silently absent. A config that names a server means to have
 /// one.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+///
+/// [`Serialize`] as well as [`Deserialize`], so a caller that *writes* an entry
+/// — `ganja mcp add` building one, a listing asked for JSON — spells it out of
+/// the same type the loader reads back rather than by hand.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum McpServer {
     /// A child process spoken to over its stdio.
@@ -333,10 +337,72 @@ impl McpServer {
 
         asked.unwrap_or(fallback)
     }
+
+    /// Refuses an entry that describes a server nothing could connect to, or
+    /// one nothing could ever return a result from.
+    ///
+    /// Three things are decided here rather than later. A `command` with
+    /// nothing in it is a server with no program, and finding that out one turn
+    /// later hides it behind a status line. A remote URL that is neither
+    /// `https` nor loopback is the same refusal [`crate::provider`] makes about
+    /// a base URL and for the same reason — `headers` is where a token goes,
+    /// and plain HTTP to somewhere else puts it on the wire in the clear.
+    /// Literally the same: the predicate is
+    /// [`crate::provider::reachable_in_the_clear`], and only the message below
+    /// is this module's. And an `output_limit` of zero is a byte budget nothing
+    /// could ever fit, discovered otherwise only the first time a tool call
+    /// comes back empty for no reason anybody wrote down.
+    ///
+    /// **The one authority for all three.** It is a method rather than a
+    /// private helper of the loader because three callers make exactly this
+    /// judgment about exactly this type: the loader ([`check_mcp`], per file),
+    /// `ganja mcp add` before it writes an entry, and `ganja config
+    /// import-opencode` before it writes a whole file. Each of the three used
+    /// to re-spell the refusals, which is three places for them to drift into
+    /// disagreeing about what the *next launch* will accept — and the writer
+    /// exists precisely to not write a file the next launch refuses.
+    ///
+    /// `name` is the server's key in the `mcp` table, and appears in every
+    /// message. Neither URL message quotes the URL: a remote entry is
+    /// configuration, and configuration is allowed to carry a credential in its
+    /// userinfo, so echoing one back is how it reaches a log.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, spelled for whoever has to fix the entry.
+    pub fn check(&self, name: &str) -> Result<(), String> {
+        let output_limit = match self {
+            Self::Local(local) if local.command.is_empty() => {
+                return Err(format!("mcp server \"{name}\" has an empty command"));
+            }
+            Self::Local(local) => local.output_limit,
+            Self::Remote(remote) => {
+                let parsed = Url::parse(&remote.url)
+                    .map_err(|error| format!("mcp server \"{name}\" has no valid url: {error}"))?;
+                if !crate::provider::reachable_in_the_clear(&parsed) {
+                    return Err(format!(
+                        "mcp server \"{name}\" must be reached over https, or over http to \
+                         loopback; anything else puts its headers on the wire in the clear"
+                    ));
+                }
+                remote.output_limit
+            }
+        };
+        // A budget of nothing is not a budget: every result from this server
+        // would be entirely cut, which is not a thing anybody means to write.
+        if output_limit == Some(0) {
+            return Err(format!(
+                "mcp server \"{name}\" has an output_limit of 0; a byte budget of nothing \
+                 refuses every result"
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// A local MCP server: a command this session runs and talks to over pipes.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpLocal {
     /// The program and its arguments, `[cmd, args...]`. Required, and refused
@@ -359,7 +425,7 @@ pub struct McpLocal {
 }
 
 /// A remote MCP server: an endpoint this session posts to.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpRemote {
     /// Where it lives. Refused unless it is `https`, or `http` to loopback —
@@ -390,7 +456,7 @@ pub struct McpRemote {
 /// but is its own type rather than a bare `bool` so a future field (a
 /// preregistered `client_id`, a scope) has somewhere to land without another
 /// migration of this shape.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpOauth {}
 
@@ -1785,53 +1851,15 @@ fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), S
     Ok(())
 }
 
-/// Refuses an MCP entry that describes a server nothing could connect to, or
-/// one nothing could ever return a result from.
+/// Holds every `mcp` entry in one file to [`McpServer::check`], which is where
+/// the three refusals and the reasoning behind them live.
 ///
-/// Three things are decided here rather than later. A `command` with nothing
-/// in it is a server with no program, and finding that out one turn later
-/// hides it behind a status line. A remote URL that is neither `https` nor
-/// loopback is the same refusal [`crate::provider`] makes about a base URL
-/// and for the same reason — `headers` is where a token goes, and plain HTTP
-/// to somewhere else puts it on the wire in the clear. Literally the same:
-/// the predicate is [`crate::provider::reachable_in_the_clear`], and only the
-/// message below is this module's. And an `output_limit` of zero is a byte
-/// budget nothing could ever fit, discovered otherwise only the first time a
-/// tool call comes back empty for no reason anybody wrote down.
-///
-/// Neither URL message quotes the URL. A remote entry is configuration, and
-/// configuration is allowed to carry a credential in its userinfo, so echoing
-/// one back is how it reaches a log.
+/// This function is what makes them *per file*: the complaint names the file
+/// that said it, which a check run after the merge could not.
 fn check_mcp(servers: &BTreeMap<String, McpServer>) -> Result<(), String> {
-    for (name, server) in servers {
-        let output_limit = match server {
-            McpServer::Local(local) if local.command.is_empty() => {
-                return Err(format!("mcp server \"{name}\" has an empty command"));
-            }
-            McpServer::Local(local) => local.output_limit,
-            McpServer::Remote(remote) => {
-                let parsed = Url::parse(&remote.url)
-                    .map_err(|error| format!("mcp server \"{name}\" has no valid url: {error}"))?;
-                if !crate::provider::reachable_in_the_clear(&parsed) {
-                    return Err(format!(
-                        "mcp server \"{name}\" must be reached over https, or over http to \
-                         loopback; anything else puts its headers on the wire in the clear"
-                    ));
-                }
-                remote.output_limit
-            }
-        };
-        // A budget of nothing is not a budget: every result from this server
-        // would be entirely cut, which is not a thing anybody means to write.
-        if output_limit == Some(0) {
-            return Err(format!(
-                "mcp server \"{name}\" has an output_limit of 0; a byte budget of nothing \
-                 refuses every result"
-            ));
-        }
-    }
-
-    Ok(())
+    servers
+        .iter()
+        .try_for_each(|(name, server)| server.check(name))
 }
 
 /// Refuses a `hooks` block that names an event nothing fires, a handler with
@@ -2708,6 +2736,61 @@ mod tests {
                 panic!("expected a parse failure for {text}, got {error:?}");
             };
             assert!(message.contains(named), "{text}: {message}");
+        }
+    }
+
+    /// The three refusals above, reached the way the two *writers* reach them
+    /// — `ganja mcp add` and `ganja config import-opencode` both hold a decoded
+    /// [`McpServer`] and no config file, and both call this method rather than
+    /// spelling the rules a second and third time.
+    ///
+    /// Pinned here as well as through the loader because "one authority" is
+    /// only true while the method itself refuses all three: the loader test
+    /// above would still pass if a writer's copy of a rule drifted.
+    #[test]
+    fn the_post_decode_checks_are_one_method_three_callers_share() {
+        let cases = [
+            (r#"{"type": "local", "command": []}"#, "empty command"),
+            (
+                r#"{"type": "local", "command": ["a"], "output_limit": 0}"#,
+                "output_limit of 0",
+            ),
+            (
+                r#"{"type": "remote", "url": "http://mcp.example/mcp"}"#,
+                "loopback",
+            ),
+            (r#"{"type": "remote", "url": "not a url"}"#, "no valid url"),
+        ];
+
+        for (text, named) in cases {
+            let server: McpServer =
+                serde_json::from_str(text).unwrap_or_else(|error| panic!("{text}: {error}"));
+            let message = server
+                .check("x")
+                .expect_err(&format!("{text} describes no usable server"));
+            assert!(message.contains(named), "{text}: {message}");
+            assert!(message.contains("\"x\""), "and names the server: {message}");
+        }
+
+        let fine: McpServer = serde_json::from_str(r#"{"type": "local", "command": ["a"]}"#)
+            .expect("the fixture is a server");
+        assert_eq!(fine.check("x"), Ok(()));
+    }
+
+    /// `Serialize` beside `Deserialize`, so a caller that writes an entry —
+    /// `ganja mcp add` building one, a listing asked for JSON — spells it out
+    /// of the type the loader reads back rather than by hand.
+    #[test]
+    fn an_mcp_entry_survives_the_round_trip_through_its_own_serialization() {
+        for text in [
+            r#"{"mcp": {"x": {"type": "local", "command": ["bun", "x"], "environment": {"K": "v"}, "output_limit": 4096}}}"#,
+            r#"{"mcp": {"x": {"type": "remote", "url": "https://mcp.example/mcp", "headers": {"X-A": "1"}, "oauth": {}}}}"#,
+        ] {
+            let config = parse(text).unwrap_or_else(|error| panic!("{text}: {error}"));
+            let written = serde_json::to_string(&config.mcp["x"]).expect("the entry serializes");
+            let read: McpServer = serde_json::from_str(&written)
+                .unwrap_or_else(|error| panic!("what was written reads back: {written}: {error}"));
+            assert_eq!(read, config.mcp["x"], "{written}");
         }
     }
 
