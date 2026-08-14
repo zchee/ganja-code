@@ -3,7 +3,7 @@
   "$id": "ganja-config",
   "title": "ganja configuration",
   "description": "A ganja.jsonc / ganja.json file. Both names are read in three tiers — the global config home, the one file GANJA_CONFIG or --config names, then every directory from the working directory up to the project root — and later beats earlier. Both extensions are parsed as JSONC: line and block comments and trailing commas are accepted, while single-quoted strings, unquoted keys, hexadecimal numbers and missing commas are not. This schema describes the resulting JSON value; the comment and trailing-comma syntax is a property of the reader, not of the value. Every top-level key this build understands is listed here, and any other key is a hard load error naming it.",
-  "$comment": "Derived from crates/ganja-core/src/config.rs:602-710 (struct Config, #[serde(deny_unknown_fields)]). Audited against config.rs and crates/ganja-core/tests/config_schema.rs, which catches drift in both directions.",
+  "$comment": "Derived from crates/ganja-core/src/config.rs:602-726 (struct Config, #[serde(deny_unknown_fields)]). Audited against config.rs and crates/ganja-core/tests/config_schema.rs, which catches drift in both directions.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -117,7 +117,7 @@
     "hooks": {
       "type": "object",
       "description": "Commands this session runs at the nine moments the hook engine fires, keyed by the event's own spelling. An event name nothing answers to is refused by name at load. Hooks run with the user's own authority and pass no permission gate.",
-      "$comment": "Event names: crates/ganja-core/src/hook.rs:104-169 (HookEvent, EVENTS); refusal: config.rs:1658-1692 (check_hooks).",
+      "$comment": "Event names: crates/ganja-core/src/hook.rs:104-169 (HookEvent, EVENTS); refusal: config.rs:1686-1720 (check_hooks).",
       "default": {},
       "propertyNames": { "$ref": "#/$defs/HookEventName" },
       "additionalProperties": {
@@ -132,7 +132,7 @@
     "provider": {
       "type": "object",
       "description": "Endpoints this build can talk to besides the ones it ships, by id. The id is what GANJA_PROVIDER, --model <id>/…, `model` and a stored credential all name. An id this build already ships is refused at load, because such an entry would never be reached.",
-      "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs:1566-1597 (check_providers) against crates/ganja-provider/src/provider.rs:168-175 (PROVIDERS).",
+      "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs:1594-1625 (check_providers) against crates/ganja-provider/src/provider.rs:168-175 (PROVIDERS).",
       "default": {},
       "propertyNames": {
         "type": "string",
@@ -151,6 +151,12 @@
       "$ref": "#/$defs/SkillsConfig",
       "description": "Where this session looks for skills besides ganja's own two homes.",
       "default": {}
+    },
+    "memory": {
+      "type": "boolean",
+      "description": "Whether this session carries its project's own memory — a MEMORY.md index and the topic files beside it, kept under the project's data directory and maintained by the model through the ordinary file tools. Absent is off: writing true is what switches it on, which is a deliberate divergence from Claude Code's default-on (D478), because memory writes files outside the worktree and carries standing prompt weight. Switching it on also opens the permission door for that one directory.",
+      "default": false,
+      "$comment": "crates/ganja-core/src/config.rs:697-712 (Config::memory); the section at crates/ganja-core/src/instruction.rs (memory_dir, memory_section); the door at crates/ganja-core/src/agent.rs (memory_door)."
     },
     "snapshot": {
       "type": "boolean",
@@ -204,7 +210,7 @@
     "AgentsConfig": {
       "title": "Agent execution settings",
       "description": "How this session runs the agents it has, rather than what they are. Not a key upstream has: upstream runs one subagent at a time, so it has nothing to size (D462).",
-      "$comment": "crates/ganja-core/src/config.rs:723-735 (AgentsConfig, deny_unknown_fields); default of 4 at :748 (AgentsConfig::DEFAULT_CONCURRENCY); refusal of zero at :1700-1710 (check_agents).",
+      "$comment": "crates/ganja-core/src/config.rs:739-751 (AgentsConfig, deny_unknown_fields); default of 4 at :764 (AgentsConfig::DEFAULT_CONCURRENCY); refusal of zero at :1728-1738 (check_agents).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -303,7 +309,7 @@
     "McpLocal": {
       "title": "Local MCP server",
       "description": "A child process spoken to over its stdio.",
-      "$comment": "crates/ganja-core/src/config.rs:327-347 (McpLocal, deny_unknown_fields); empty command refused at config.rs:1615-1645 (check_mcp).",
+      "$comment": "crates/ganja-core/src/config.rs:327-347 (McpLocal, deny_unknown_fields); empty command refused at config.rs:1643-1673 (check_mcp).",
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "command"],
@@ -341,7 +347,7 @@
     "McpRemote": {
       "title": "Remote MCP server",
       "description": "An HTTP endpoint spoken to over streamable HTTP.",
-      "$comment": "crates/ganja-core/src/config.rs:350-374 (McpRemote, deny_unknown_fields); URL rule at config.rs:1615-1645 (check_mcp).",
+      "$comment": "crates/ganja-core/src/config.rs:350-374 (McpRemote, deny_unknown_fields); URL rule at config.rs:1643-1673 (check_mcp).",
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "url"],
@@ -392,7 +398,7 @@
     "ProviderConfig": {
       "title": "Configured provider endpoint",
       "description": "One endpoint a config declares, and how to talk to it. There is deliberately no apiKey key: ganja's credentials travel the environment or auth.json, and `key_env` names the variable instead. Being selectable is not being cataloged — a configured provider has no sizing, pricing or auto-compaction, and must be told which model to ask for.",
-      "$comment": "crates/ganja-core/src/config.rs:406-430 (ProviderConfig, deny_unknown_fields); checks at config.rs:1566-1597 (check_providers).",
+      "$comment": "crates/ganja-core/src/config.rs:406-430 (ProviderConfig, deny_unknown_fields); checks at config.rs:1594-1625 (check_providers).",
       "type": "object",
       "additionalProperties": false,
       "required": ["dialect", "base_url"],
@@ -445,7 +451,7 @@
     "LspEntry": {
       "title": "Language server entry",
       "description": "One language server, as a config file describes it.",
-      "$comment": "crates/ganja-core/src/config.rs:484-503 (LspEntry, deny_unknown_fields); the required-field rules at config.rs:1517-1539 (check_lsp).",
+      "$comment": "crates/ganja-core/src/config.rs:484-503 (LspEntry, deny_unknown_fields); the required-field rules at config.rs:1545-1567 (check_lsp).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -566,7 +572,7 @@
     "WebfetchConfig": {
       "title": "webfetch reach",
       "description": "What the `webfetch` tool may reach.",
-      "$comment": "crates/ganja-core/src/config.rs:956-969 (WebfetchConfig, deny_unknown_fields).",
+      "$comment": "crates/ganja-core/src/config.rs:972-985 (WebfetchConfig, deny_unknown_fields).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -580,7 +586,7 @@
     "SkillsConfig": {
       "title": "Skill discovery",
       "description": "Where a session looks for skills besides ganja's own two homes, <config home>/skills and <project root>/.ganja/skills. Nothing foreign is discovered — ~/.claude/skills and friends are one line of `paths` away, never automatic.",
-      "$comment": "crates/ganja-core/src/config.rs:980-998 (SkillsConfig, deny_unknown_fields); resolution at config.rs:1008-1044 (Config::skill_paths, Config::skill_urls).",
+      "$comment": "crates/ganja-core/src/config.rs:996-1014 (SkillsConfig, deny_unknown_fields); resolution at config.rs:1024-1060 (Config::skill_paths, Config::skill_urls).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -602,7 +608,7 @@
     "TuiConfig": {
       "title": "Terminal frontend settings",
       "description": "What the terminal frontend does beyond drawing frames. Not a key upstream has: what it configures is the Codex CLI's focus-gated terminal notification, which opencode does not make (D468).",
-      "$comment": "crates/ganja-core/src/config.rs:765-786 (TuiConfig, deny_unknown_fields); accessors at :788-802 (TuiConfig::notifies, TuiConfig::notification_method).",
+      "$comment": "crates/ganja-core/src/config.rs:781-802 (TuiConfig, deny_unknown_fields); accessors at :804-818 (TuiConfig::notifies, TuiConfig::notification_method).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -624,7 +630,7 @@
     "StatuslineConfig": {
       "title": "Status bar composition",
       "description": "What the status bar renders, in what order, and how wide (D469, hud-statusline). Not a key upstream has: the segment roster ports the oh-my-claudecode HUD's behavior onto the bar ganja already draws.",
-      "$comment": "crates/ganja-core/src/config.rs:811-832 (StatuslineConfig, deny_unknown_fields).",
+      "$comment": "crates/ganja-core/src/config.rs:827-848 (StatuslineConfig, deny_unknown_fields).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -649,7 +655,7 @@
     "StatuslineElement": {
       "title": "Status bar element",
       "description": "One thing the status bar can render: today's segments (activity, agent, effort, queued, jobs, tasks, dialogs, tokens, notice, hints) and the HUD vocabulary the P14 screenshot pinned (git, model, context, session, cwd, todos). Rate-bucket elements are deliberately absent: they need a vendor usage API ganja does not speak.",
-      "$comment": "crates/ganja-core/src/config.rs:841-876 (StatuslineElement, rename_all = kebab-case).",
+      "$comment": "crates/ganja-core/src/config.rs:857-892 (StatuslineElement, rename_all = kebab-case).",
       "type": "string",
       "enum": [
         "activity",
@@ -673,7 +679,7 @@
     "Notifications": {
       "title": "Notification selection",
       "description": "Either one switch for every moment — true is both, false is none, the same answer absent gives — or a list naming exactly the moments to announce. An event name nothing announces is refused naming it.",
-      "$comment": "crates/ganja-core/src/config.rs:878-926 (Notifications, hand-written Deserialize accepting bool or list).",
+      "$comment": "crates/ganja-core/src/config.rs:894-942 (Notifications, hand-written Deserialize accepting bool or list).",
       "anyOf": [
         { "type": "boolean" },
         {
@@ -685,14 +691,14 @@
     "NotificationEvent": {
       "title": "Notification event",
       "description": "One moment the TUI can announce: a turn finishing, or a permission or question dialog waiting for an answer.",
-      "$comment": "crates/ganja-core/src/config.rs:928-936 (NotificationEvent, rename_all = kebab-case).",
+      "$comment": "crates/ganja-core/src/config.rs:944-952 (NotificationEvent, rename_all = kebab-case).",
       "type": "string",
       "enum": ["turn-complete", "approval-requested"]
     },
     "NotificationMethod": {
       "title": "Notification method",
       "description": "How an announcement reaches the terminal: OSC 9, which terminals that carry it surface as a desktop notification, or BEL, the terminal bell. The default is osc9 because of how it fails — a terminal that ignores it shows nothing, where an unwanted bell is a beep every turn.",
-      "$comment": "crates/ganja-core/src/config.rs:938-949 (NotificationMethod, rename_all = lowercase; default Osc9).",
+      "$comment": "crates/ganja-core/src/config.rs:954-965 (NotificationMethod, rename_all = lowercase; default Osc9).",
       "type": "string",
       "enum": ["osc9", "bel"],
       "default": "osc9"

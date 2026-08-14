@@ -56,6 +56,11 @@ const ACCESS_CANARY: &str = "at-test-canary-UVW";
 /// more way out than the other two have.
 const REFRESH_CANARY: &str = "rt-test-canary-RST";
 
+/// A secret written into a project's **memory** — the one place in this build
+/// where text the model wrote itself is read back into every prompt (D478).
+/// The prompt is where it belongs; a log line is not.
+const MEMORY_CANARY: &str = "mk-test-canary-OPQ";
+
 /// A `tracing` writer a test can read back.
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -129,6 +134,11 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
     // process is reading the environment concurrently.
     unsafe {
         env::set_var("XDG_DATA_HOME", home.path());
+        // The memory drill below composes a real system prompt, which reads
+        // the global instruction and skill homes; pinned here so it reads this
+        // fixture's and not whatever the machine running it happens to hold.
+        env::set_var("HOME", home.path());
+        env::set_var("XDG_CONFIG_HOME", home.path().join("config"));
         env::set_var("ANTHROPIC_API_KEY", CANARY);
         env::set_var("OPENAI_API_KEY", CANARY);
         env::set_var("GANJA_PROVIDER", "anthropic");
@@ -323,6 +333,40 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         )
     };
 
+    // The same drill for the newest text that reaches a prompt: a project's
+    // own memory. It is composed from a file the model wrote, so it may hold
+    // anything the model was ever shown — and the injection path traces the
+    // index's *path* and whether it was clamped, never a byte of what it says.
+    let memory_rendered = {
+        let checkout = home.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).expect("the fixture repository");
+        let memory = ganja_core::project::Project::resolve(&checkout)
+            .data_dir()
+            .expect("the pinned data home resolves")
+            .join("memory");
+        std::fs::create_dir_all(&memory).expect("the memory root is creatable");
+        std::fs::write(
+            memory.join("MEMORY.md"),
+            format!("- the staging deploy key is {MEMORY_CANARY}"),
+        )
+        .expect("the index is writable");
+
+        ganja_core::instruction::suffix(
+            &ganja_core::Config {
+                memory: Some(true),
+                ..ganja_core::Config::default()
+            },
+            &checkout,
+            "fake-1",
+        )
+        .expect("the environment block always says something")
+    };
+    assert!(
+        memory_rendered.contains(MEMORY_CANARY),
+        "the prompt is exactly where memory belongs, and a test that found it \
+         nowhere would be proving nothing: {memory_rendered}"
+    );
+
     let logged = capture.logged();
 
     // Not just "something was captured": something the *library* traced, from
@@ -336,6 +380,9 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         // The refused renewal's own line, for the same reason: without it the
         // OAuth half of this test would be searching an empty space.
         "the token endpoint would not renew",
+        // And the memory injection's own, so the sweep below is searching a
+        // log that really did have the chance to leak what memory holds.
+        "the project's memory joined the prompt",
     ] {
         assert!(
             logged.contains(line),
@@ -343,7 +390,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
              in it would prove nothing:\n{logged}"
         );
     }
-    for secret in [CANARY, ACCESS_CANARY, REFRESH_CANARY] {
+    for secret in [CANARY, ACCESS_CANARY, REFRESH_CANARY, MEMORY_CANARY] {
         assert!(
             !logged.contains(secret),
             "a credential reached the log:\n{logged}"
