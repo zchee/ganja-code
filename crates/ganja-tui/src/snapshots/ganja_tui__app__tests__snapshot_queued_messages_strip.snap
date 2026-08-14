@@ -2,10 +2,10 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-you                                                                             
-the turn to steer                                                               
+> the turn to steer                                                             
                                                                                 
-ganja                                                                           
+                                                                                
+                                                                                
                                                                                 
                                                                                 
                                                                                 

@@ -2,18 +2,18 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-you                                                                             
-show┌ help ────────────────────────────────────────────────────────────────┐    
-    │/sessions      Switch session                                   ctrl+s│    
-ganj│/new           New session                                            │    
-One │/compact       Compact session                                        │    
-[don│/editor        Open editor                                            │    
-@@ -│/models        Switch model                                           │    
--let│/effort        Switch model effort                                    │    
-+let│/agents        Switch agent                                           │    
-cont│/themes        Switch theme                                           │    
-[err│/mcp           MCP servers                                            │    
-refu│/context       Context usage                                          │    
+> show me every color you have                                                  
+    ┌ help ────────────────────────────────────────────────────────────────┐    
+● On│/sessions      Switch session                                   ctrl+s│    
+● Ed│/new           New session                                            │    
+  ⎿ │/compact       Compact session                                        │    
+    │/editor        Open editor                                            │    
+    │/models        Switch model                                           │    
+    │/effort        Switch model effort                                    │    
+    │/agents        Switch agent                                           │    
+● Ba│/themes        Switch theme                                           │    
+  ⎿ │/mcp           MCP servers                                            │    
+    │/context       Context usage                                          │    
     │/usage         Session usage                                          │    
     │/plugin        Plugins                                                │    
     │                                                                      │    

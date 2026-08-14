@@ -2,18 +2,18 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-you                                                                             
-show me ┌ commands ────────────────────────────────────────────────────┐        
-        │s                                                             │        
-ganja   │session                                                       │        
-One edit│> /compact       Compact session                              │        
-[done] e│  /sessions      Switch session                         ctrl+s│        
-@@ -1,2 │agent                                                         │        
--let the│  /agents        Switch agent                                 │        
-+let the│system                                                        │        
-context │  /copy          Copy session transcript                      │        
-[error] │agent                                                         │        
-refused:│  /effort        Switch model effort                          │        
+> show me every color you have                                                  
+        ┌ commands ────────────────────────────────────────────────────┐        
+● One ed│s                                                             │        
+● Edit(f│session                                                       │        
+  ⎿ them│> /compact       Compact session                              │        
+    @@ -│  /sessions      Switch session                         ctrl+s│        
+    -let│agent                                                         │        
+    +let│  /agents        Switch agent                                 │        
+    cont│system                                                        │        
+● Bash(c│  /copy          Copy session transcript                      │        
+  ⎿ [err│agent                                                         │        
+        │  /effort        Switch model effort                          │        
         │system                                                        │        
         │  /mcp           MCP servers                                  │        
         │                                                              │        

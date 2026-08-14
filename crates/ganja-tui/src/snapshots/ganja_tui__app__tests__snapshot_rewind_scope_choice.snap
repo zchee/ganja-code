@@ -2,17 +2,17 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-you                                                                             
-th┌ rewind ──────────────────────────────────────────────────────────────────┐  
-  │the question that is taken back                                           │  
-ga│Restore the code and/or conversation to the point before this message     │  
-th│> Code and conversation                                                   │  
+> the question that stands                                                      
+  ┌ rewind ──────────────────────────────────────────────────────────────────┐  
+● │the question that is taken back                                           │  
+  │Restore the code and/or conversation to the point before this message     │  
+> │> Code and conversation                                                   │  
   │    Put the files back and take the messages back with them               │  
-yo│  Conversation only                                                       │  
-th│    Take the messages back and leave the working tree exactly as it is    │  
+● │  Conversation only                                                       │  
+  │    Take the messages back and leave the working tree exactly as it is    │  
   │  Code only                                                               │  
-ga│    Put the files back and keep every message                             │  
-th│                                                                          │  
+  │    Put the files back and keep every message                             │  
+  │                                                                          │  
   │[j/k] [up/down] move   [Enter] continue   [Esc] cancel                    │  
   └──────────────────────────────────────────────────────────────────────────┘  
                                                                                 

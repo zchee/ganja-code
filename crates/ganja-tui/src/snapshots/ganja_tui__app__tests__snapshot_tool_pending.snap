@@ -2,8 +2,8 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-ganja                                                                           
-[running] shell                                                                 
+● Shell                                                                         
+                                                                                
                                                                                 
                                                                                 
                                                                                 

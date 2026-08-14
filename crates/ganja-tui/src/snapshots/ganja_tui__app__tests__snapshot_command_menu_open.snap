@@ -2,12 +2,12 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-you                                                                             
-show me every color you have                                                    
+> show me every color you have                                                  
                                                                                 
-ganja                                                                           
-One edit applied, one command refused.                                          
-[done] edit: theme.rs                                                           
+● One edit applied, one command refused.                                        
+● Edit(filePath: "theme.rs")                                                    
+  ⎿ theme.rs                                                                    
+    @@ -1,2 +1,2 @@                                                             
 ┌ commands ────────────────────────────────────────────────────────────────────┐
 │> /compact       Summarize the conversation so far and carry on from it       │
 │  /sessions      Reopen a conversation this project has stored                │

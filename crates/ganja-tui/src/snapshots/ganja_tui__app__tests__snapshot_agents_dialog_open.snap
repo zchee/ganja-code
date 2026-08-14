@@ -2,18 +2,18 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-you                                                                             
-show┌ agents ──────────────────────────────────────────────────────────────┐    
-    │> * build  The default agent. Executes tools based on configured permi│    
-ganj│    plan   Plan mode. Disallows all edit tools.                       │    
-One │                                                                      │    
-[don│[j/k] [up/down] move   [Enter] switch   [Esc] close                   │    
-@@ -│                                                                      │    
--let│                                                                      │    
-+let│                                                                      │    
-cont│                                                                      │    
-[err│                                                                      │    
-refu│                                                                      │    
+> show me every color you have                                                  
+    ┌ agents ──────────────────────────────────────────────────────────────┐    
+● On│> * build  The default agent. Executes tools based on configured permi│    
+● Ed│    plan   Plan mode. Disallows all edit tools.                       │    
+  ⎿ │                                                                      │    
+    │[j/k] [up/down] move   [Enter] switch   [Esc] close                   │    
+    │                                                                      │    
+    │                                                                      │    
+    │                                                                      │    
+● Ba│                                                                      │    
+  ⎿ │                                                                      │    
+    │                                                                      │    
     │                                                                      │    
     │                                                                      │    
     │                                                                      │    

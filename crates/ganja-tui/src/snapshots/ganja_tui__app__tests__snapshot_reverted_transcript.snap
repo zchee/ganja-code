@@ -2,15 +2,15 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-you                                                                             
-the question that stands                                                        
+> the question that stands                                                      
                                                                                 
-ganja                                                                           
-the answer that stands                                                          
+● the answer that stands                                                        
                                                                                 
 2 messages reverted — /redo to restore                                          
 ↳ crates/ganja-tui/src/app.rs                                                   
 ↳ README.md                                                                     
+                                                                                
+                                                                                
                                                                                 
                                                                                 
                                                                                 

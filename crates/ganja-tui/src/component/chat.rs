@@ -17,11 +17,33 @@
 //! Markdown reaches **assistant text only** (ruling R12): a user's own message,
 //! a tool's output and a file chip stay plain, so nothing a person typed is
 //! re-read as markup.
+//!
+//! # The grammar the pane draws (**D487**, `claude-transcript-grammar`)
+//!
+//! What the transcript looks like is Claude Code's own grammar, taken from a
+//! screenshot rather than ported: a `\u{25cf}` bullet leads every block a reply
+//! is made of and every tool call it makes, a `\u{23bf}` marker introduces what
+//! a call answered and hangs its preview under itself, and a `>` caret marks
+//! what a person said. Upstream opencode's pane renders none of that — it heads
+//! each message with its author's name and brackets a call's state into the
+//! heading word — and [`crate::transcript`], the `/copy` formatter, keeps
+//! upstream's markdown shape on purpose: the screen and the clipboard are read
+//! by different readers, and only the screen moved.
+//!
+//! Presentation is all that moves. Every fact the pane showed before — which
+//! state a call is in, what it was called with, what it answered, why it failed
+//! — is still on screen, told by a glyph and a color instead of by a bracketed
+//! word.
 
 use std::collections::HashMap;
 
 use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState};
-use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Line};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::Style,
+    text::{Line, Span},
+};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::{component::rewind, markdown, mention, theme::Theme};
@@ -59,13 +81,16 @@ fn title(entry: &Entry) -> String {
         .map_or_else(|| entry.id.as_str().to_owned(), ToOwned::to_owned)
 }
 
-/// How an entry names who wrote it.
-fn label(role: Role) -> &'static str {
-    match role {
-        Role::User => "you",
-        Role::Assistant => "ganja",
-    }
-}
+/// What leads a block of a reply: a text block the model wrote, or a call it
+/// made (**D487**).
+const BULLET: &str = "\u{25cf} ";
+
+/// What leads what a call answered, one step under the header it answers.
+const RESULT: &str = "  \u{23bf} ";
+
+/// What leads a prompt, in place of the author's name the pane used to head
+/// every message with.
+const PROMPT: &str = "> ";
 
 /// The line a revert leaves in place of the messages it hid.
 ///
@@ -139,6 +164,64 @@ struct Entry {
     /// delta both clear that, and neither is a reason to parse again.
     markdown: HashMap<PartId, markdown::Document>,
     wrapped: Option<Wrapped>,
+}
+
+/// One line of a block before the viewport lays it out: what introduces it,
+/// what it says, and how it is painted.
+///
+/// The prefix leads the row's first visual line and hangs as blank columns
+/// under every line the wrap adds, so a preview's second line still sits under
+/// its own marker instead of sliding back to the margin. The columns are
+/// **measured**, never counted: `\u{25cf}` and `\u{23bf}` are both East Asian
+/// Ambiguous, and an indent hard-coded to what they are worth here would skew
+/// every continuation the day a terminal draws one wide.
+#[derive(Debug)]
+struct Row {
+    prefix: String,
+    text: String,
+    style: Style,
+}
+
+impl Row {
+    fn new(prefix: &str, text: impl Into<String>, style: Style) -> Self {
+        Self {
+            prefix: prefix.to_owned(),
+            text: text.into(),
+            style,
+        }
+    }
+}
+
+/// Lays `rows` out at `width` columns, each behind its own prefix.
+fn lay_out(rows: &[Row], width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    for row in rows {
+        let indent = row.prefix.width();
+        let hang = " ".repeat(indent);
+        // One column of body even where the prefix alone would fill the
+        // viewport: a row that wrapped to nothing would take its text off the
+        // screen entirely, where an overflowing one is merely clipped by the
+        // buffer.
+        let body = width.saturating_sub(indent).max(1);
+
+        for (index, line) in wrap(&row.text, body).into_iter().enumerate() {
+            // A blank line inside a block stays blank — a row of spaces is an
+            // indent nobody can see, and one the backtrack highlight would
+            // have to treat as content.
+            let text = match (index, line.is_empty()) {
+                (0, _) => format!("{prefix}{line}", prefix = row.prefix),
+                (_, true) => String::new(),
+                (_, false) => format!("{hang}{line}"),
+            };
+            lines.push(Line::styled(text, row.style));
+        }
+    }
+
+    lines
 }
 
 #[derive(Debug)]
@@ -665,14 +748,17 @@ impl Entry {
             return;
         }
 
-        let body_style = match self.role {
-            Role::User => theme.accent,
-            Role::Assistant => theme.fg,
-        };
-
-        let mut lines = vec![Line::styled(label(self.role).to_owned(), theme.dim)];
-        // Parts wrap on their own so that a tool block can carry its own
-        // style instead of the running text style around it.
+        let columns = usize::from(width);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        // Parts lay themselves out so that a tool block can carry its own
+        // prefixes and styles instead of the running text's.
+        //
+        // A prompt is **one** block however many parts it was built from: the
+        // caret leads its first line and everything after hangs under it, so a
+        // prompt that is nothing but an attachment is still marked as
+        // something a person said. A reply is **many**: each text block and
+        // each call carries a bullet of its own, which is the whole of what
+        // the grammar claims about who did what (**D487**).
         for part in &self.parts {
             match &part.body {
                 // A reply is markdown; a prompt is what the user typed. The
@@ -681,27 +767,35 @@ impl Entry {
                 PartBody::Text { text } if self.role == Role::Assistant => {
                     let document = self.markdown.entry(part.id.clone()).or_default();
                     document.update(text, theme);
-                    lines.extend(
-                        document
-                            .lines()
-                            .flat_map(|line| markdown::wrap(line, usize::from(width))),
-                    );
+
+                    let indent = BULLET.width();
+                    let hang = " ".repeat(indent);
+                    let body = columns.saturating_sub(indent).max(1);
+                    let mut led = false;
+                    for line in document.lines().flat_map(|line| markdown::wrap(line, body)) {
+                        // The blank between two blocks stays blank, for
+                        // [`lay_out`]'s reason.
+                        if led && line.width() == 0 {
+                            lines.push(line);
+                            continue;
+                        }
+                        let lead = if std::mem::replace(&mut led, true) {
+                            Span::raw(hang.clone())
+                        } else {
+                            Span::styled(BULLET.to_owned(), theme.fg)
+                        };
+                        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+                        spans.push(lead);
+                        spans.extend(line.spans);
+                        lines.push(Line::from(spans));
+                    }
                 }
                 PartBody::Text { text } => {
-                    lines.extend(
-                        wrap(text, usize::from(width))
-                            .into_iter()
-                            .map(|line| Line::styled(line, body_style)),
-                    );
+                    let row = Row::new(&prompt_lead(lines.is_empty()), text.clone(), theme.accent);
+                    lines.extend(lay_out(&[row], columns));
                 }
                 PartBody::Tool { tool, state, .. } => {
-                    for (text, style) in tool_lines(tool, state, theme) {
-                        lines.extend(
-                            wrap(&text, usize::from(width))
-                                .into_iter()
-                                .map(|line| Line::styled(line, style)),
-                        );
-                    }
+                    lines.extend(lay_out(&tool_lines(tool, state, theme), columns));
                 }
                 // A file the user attached, rendered as the token they typed
                 // — `@path`, with its `#line-range` when one was named —
@@ -723,7 +817,11 @@ impl Entry {
                     } else {
                         format!("{token} ({mime})")
                     };
-                    lines.push(Line::styled(label, theme.dim));
+                    let prefix = match self.role {
+                        Role::User => prompt_lead(lines.is_empty()),
+                        Role::Assistant => BULLET.to_owned(),
+                    };
+                    lines.extend(lay_out(&[Row::new(&prefix, label, theme.dim)], columns));
                 }
                 // Sealed reasoning has no rendering: what it holds is opaque
                 // to everything but the provider, so a line about it would be
@@ -734,21 +832,16 @@ impl Entry {
                 | PartBody::Reasoning { .. } => {}
             }
         }
+        // Both of these answer the same question a failed call's own `⎿` row
+        // does — why what is above stops where it does — so they are told in
+        // the same shape.
         if let Some(error) = &self.error {
-            // The `[interrupted]` marker's own shape, because it answers the
-            // same question — why this reply stops where it does.
-            lines.extend(
-                wrap(&format!("[error] {error}"), usize::from(width))
-                    .into_iter()
-                    .map(|line| Line::styled(line, theme.error)),
-            );
+            let row = Row::new(RESULT, format!("[error] {error}"), theme.error);
+            lines.extend(lay_out(&[row], columns));
         }
         if self.interrupted {
-            lines.extend(
-                wrap(INTERRUPTED, usize::from(width))
-                    .into_iter()
-                    .map(|line| Line::styled(line, theme.error)),
-            );
+            let row = Row::new(RESULT, INTERRUPTED, theme.error);
+            lines.extend(lay_out(&[row], columns));
         }
         // Breathing room before the next entry.
         lines.push(Line::styled(String::new(), Style::default()));
@@ -761,10 +854,29 @@ impl Entry {
     }
 }
 
-/// Tool argument keys tried in priority order when deriving a compact title
-/// from a call's input. Tool-agnostic on purpose: an unfamiliar tool still
-/// shows something recognizable instead of just its bare name.
+/// What leads a prompt's row: the caret on the entry's first line, the columns
+/// it occupies under every row after it.
+fn prompt_lead(first: bool) -> String {
+    if first {
+        PROMPT.to_owned()
+    } else {
+        " ".repeat(PROMPT.width())
+    }
+}
+
+/// Tool argument keys named first in a call's header. Tool-agnostic on
+/// purpose: an unfamiliar tool still shows something recognizable instead of
+/// just its bare name, and the field that says what a call is *doing* belongs
+/// at the front of a summary that may be cut.
 const TITLE_KEYS: [&str; 5] = ["command", "filePath", "path", "pattern", "url"];
+
+/// Arguments a header names before the rest become an ellipsis. A header is
+/// one line: the whole payload is what the permission dialog draws and what
+/// the Ctrl+T inspector replays.
+const HEADER_ARGS: usize = 3;
+
+/// Columns one argument's value may fill before it is clipped.
+const HEADER_VALUE: usize = 40;
 
 /// Lines a tool call's output or diff may show before the rest is clamped.
 /// The full text is what the model saw; the transcript only needs the gist.
@@ -787,58 +899,139 @@ const TASK_DONE: &str = "\u{2713}";
 /// an indent here would be a claim the screen never honors.
 const TASK_DETAIL: &str = "\u{21b3} ";
 
-/// Picks a short, recognizable field out of a call's arguments, so a running
-/// or failed call can name what it is doing without repeating the raw JSON.
-fn derive_title(input: &serde_json::Value) -> Option<String> {
+/// A call's arguments, condensed to the one line its header has room for:
+/// `key: "value"` pairs, the recognizable fields first, capped at
+/// [`HEADER_ARGS`] of them.
+///
+/// [`None`] when there is nothing to say, which is what a call whose arguments
+/// have not arrived yet has. A nested payload is named by its shape rather than
+/// drawn — an array of todos is still an argument the header must admit to, and
+/// still not one a single line can carry.
+fn derive_args(input: &serde_json::Value) -> Option<String> {
     let object = input.as_object()?;
-    TITLE_KEYS
+    let named = TITLE_KEYS
         .iter()
-        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
+        .copied()
+        .filter(|key| object.contains_key(*key));
+    let rest = object
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !TITLE_KEYS.contains(key));
+
+    let mut shown: Vec<String> = Vec::new();
+    let mut cut = false;
+    for key in named.chain(rest) {
+        if shown.len() == HEADER_ARGS {
+            cut = true;
+            break;
+        }
+        let value = object.get(key).map_or_else(String::new, arg_value);
+        shown.push(format!("{key}: {value}"));
+    }
+
+    if shown.is_empty() {
+        return None;
+    }
+    if cut {
+        shown.push("\u{2026}".to_owned());
+    }
+
+    Some(shown.join(", "))
 }
 
-/// One line naming the tool, with `title` appended when there is one.
-fn tool_heading(tool: &str, marker: &str, title: Option<&str>) -> String {
-    match title.filter(|title| !title.is_empty()) {
-        Some(title) => format!("[{marker}] {tool}: {title}"),
-        None => format!("[{marker}] {tool}"),
+/// One argument's value, as short as it can honestly be said.
+///
+/// A string is quoted and cut to its first line and [`HEADER_VALUE`] columns —
+/// a `write` call carries a whole file in one of these — a number or a boolean
+/// is drawn as it is, and a nested payload as the shape it has.
+fn arg_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => {
+            let first = text.lines().next().unwrap_or_default();
+            let mut shown = clip(first, HEADER_VALUE);
+            if shown.len() < text.len() {
+                shown.push('\u{2026}');
+            }
+            format!("\"{shown}\"")
+        }
+        serde_json::Value::Array(_) => "[\u{2026}]".to_owned(),
+        serde_json::Value::Object(_) => "{\u{2026}}".to_owned(),
+        other => other.to_string(),
     }
 }
 
-/// The first `TOOL_PREVIEW_LINES` lines of `text`, with a marker appended
-/// when more were cut.
-fn clamp_preview(text: &str) -> Vec<String> {
+/// The one line a call is announced on: the tool, and what it was called with.
+///
+/// The name is title-cased the way the screenshot draws it and the way the
+/// task row already draws an agent's; the id itself is unchanged everywhere it
+/// is a name rather than a heading.
+fn tool_heading(tool: &str, input: Option<&serde_json::Value>) -> String {
+    let name = titlecase(tool);
+    match input.and_then(derive_args) {
+        Some(args) => format!("{name}({args})"),
+        None => name,
+    }
+}
+
+/// The rows a result lays out as: the first behind the `⎿` when nothing has
+/// claimed that marker yet, the rest under the columns it occupies.
+fn result_rows(lines: Vec<(String, Style)>, claimed: bool) -> Vec<Row> {
+    let under = " ".repeat(RESULT.width());
+
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, (text, style))| {
+            let prefix = if index == 0 && !claimed {
+                RESULT
+            } else {
+                under.as_str()
+            };
+            Row::new(prefix, text, style)
+        })
+        .collect()
+}
+
+/// What a clamped preview says about the lines it left out.
+///
+/// Claude Code's own hint names its `ctrl+o` expander; the whole of a call's
+/// output lives in ganja's Ctrl+T inspector, whose transcript tab replays
+/// exactly what `/copy` writes, so the hint names that one instead (**D487**).
+fn clamp_hint(hidden: usize) -> String {
+    format!(
+        "\u{2026} +{hidden} line{plural} (ctrl+t to expand)",
+        plural = if hidden == 1 { "" } else { "s" },
+    )
+}
+
+/// The first `TOOL_PREVIEW_LINES` lines of `text`, and how many were cut.
+fn clamp_preview(text: &str) -> (Vec<String>, usize) {
     let mut lines = text.lines();
-    let mut preview: Vec<String> = lines
+    let preview: Vec<String> = lines
         .by_ref()
         .take(TOOL_PREVIEW_LINES)
         .map(str::to_owned)
         .collect();
-    if lines.next().is_some() {
-        preview.push("...".to_owned());
-    }
-    preview
+
+    (preview, lines.count())
 }
 
-/// The **last** `TOOL_PREVIEW_LINES` lines of `text`, with a marker in front
-/// when earlier ones were cut.
+/// The **last** `TOOL_PREVIEW_LINES` lines of `text`, and how many were cut.
 ///
 /// The other end from [`clamp_preview`], and for the other case: output that
 /// is still arriving. A command's newest line is the one worth a row, where a
 /// finished call's first line is the one that says what it did.
-fn clamp_tail(text: &str) -> Vec<String> {
+fn clamp_tail(text: &str) -> (Vec<String>, usize) {
     let lines: Vec<&str> = text.lines().collect();
     let skipped = lines.len().saturating_sub(TOOL_PREVIEW_LINES);
 
-    let mut tail: Vec<String> = lines[skipped..]
-        .iter()
-        .map(|line| (*line).to_owned())
-        .collect();
-    if skipped > 0 {
-        tail.insert(0, "...".to_owned());
-    }
-
-    tail
+    (
+        lines[skipped..]
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect(),
+        skipped,
+    )
 }
 
 /// Styles one line of a unified diff by its leading marker. Hunk headers and
@@ -855,9 +1048,13 @@ fn diff_line_style(line: &str, theme: &Theme) -> Style {
 }
 
 /// One compact block for a tool call, in whatever state it currently stands.
-/// `Pending`/`Running` share a heading so a call reads the same before and
-/// after its arguments arrive; `StepStart`/`StepFinish` never reach here.
-fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<(String, Style)> {
+///
+/// Every state shares the header's **shape** — `\u{25cf} Tool(args)`, the same
+/// line before and after the call settles — and differs only in the color it
+/// is painted and in what hangs under it: a running call's newest output, a
+/// finished call's summary and preview, a failed call's first line of why
+/// (**D487**). `StepStart`/`StepFinish` never reach here.
+fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
     // A delegated turn is one row, never a transcript of its own: everything
     // the child said reaches the model inside the tool result, and repeating
     // it here would show the same work twice.
@@ -866,14 +1063,11 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<(String, Styl
     }
 
     match state {
-        ToolState::Pending => vec![(tool_heading(tool, "running", None), theme.dim)],
+        ToolState::Pending => vec![Row::new(BULLET, tool_heading(tool, None), theme.dim)],
         ToolState::Running {
             input, metadata, ..
         } => {
-            let mut lines = vec![(
-                tool_heading(tool, "running", derive_title(input).as_deref()),
-                theme.dim,
-            )];
+            let mut rows = vec![Row::new(BULLET, tool_heading(tool, Some(input)), theme.dim)];
             // A call that reports as it goes — the `!` passthrough streaming a
             // command's output — redraws its tail every time the part is
             // republished, so the newest lines are the ones on screen.
@@ -882,51 +1076,79 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<(String, Styl
                 .and_then(serde_json::Value::as_str)
                 .filter(|output| !output.is_empty())
             {
-                lines.extend(
-                    clamp_tail(output)
-                        .into_iter()
-                        .map(|line| (format!("  {line}"), theme.dim)),
-                );
+                let (tail, hidden) = clamp_tail(output);
+                let mut preview: Vec<(String, Style)> = Vec::new();
+                // In front, because these are the lines that already scrolled
+                // past: what was cut is above what is shown, not below it.
+                if hidden > 0 {
+                    preview.push((clamp_hint(hidden), theme.dim));
+                }
+                preview.extend(tail.into_iter().map(|line| (line, theme.dim)));
+                rows.extend(result_rows(preview, false));
             }
 
-            lines
+            rows
         }
         ToolState::Completed {
+            input,
             output,
             title,
             metadata,
             ..
         } => {
-            let mut lines = vec![(tool_heading(tool, "done", Some(title.as_str())), theme.fg)];
+            let mut rows = vec![Row::new(BULLET, tool_heading(tool, Some(input)), theme.fg)];
+            // What the tool itself called the work it did. A tool that named
+            // nothing leaves the marker to the preview rather than drawing an
+            // empty row above it.
+            let summary = title.trim();
+            let claimed = !summary.is_empty();
+            if claimed {
+                rows.push(Row::new(RESULT, summary.to_owned(), theme.fg));
+            }
+
             let diff = metadata
                 .get("diff")
                 .and_then(serde_json::Value::as_str)
                 .filter(|diff| !diff.is_empty());
-
-            if let Some(diff) = diff {
-                lines.extend(clamp_preview(diff).into_iter().map(|line| {
-                    let style = diff_line_style(&line, theme);
-                    (format!("  {line}"), style)
-                }));
-            } else if !output.is_empty() {
-                lines.extend(
-                    clamp_preview(output)
+            let (preview, hidden) = match diff {
+                Some(diff) => {
+                    let (lines, hidden) = clamp_preview(diff);
+                    let styled = lines
                         .into_iter()
-                        .map(|line| (format!("  {line}"), theme.dim)),
-                );
-            }
+                        .map(|line| {
+                            let style = diff_line_style(&line, theme);
+                            (line, style)
+                        })
+                        .collect();
+                    (styled, hidden)
+                }
+                None if !output.is_empty() => {
+                    let (lines, hidden) = clamp_preview(output);
+                    let styled = lines.into_iter().map(|line| (line, theme.dim)).collect();
+                    (styled, hidden)
+                }
+                None => (Vec::new(), 0),
+            };
 
-            lines
+            let mut body = preview;
+            if hidden > 0 {
+                body.push((clamp_hint(hidden), theme.dim));
+            }
+            rows.extend(result_rows(body, claimed));
+
+            rows
         }
         ToolState::Error { input, error, .. } => {
-            let mut lines = vec![(
-                tool_heading(tool, "error", derive_title(input).as_deref()),
+            let mut rows = vec![Row::new(
+                BULLET,
+                tool_heading(tool, Some(input)),
                 theme.error,
             )];
             if let Some(first) = error.lines().next().filter(|line| !line.is_empty()) {
-                lines.push((format!("  {first}"), theme.error));
+                rows.push(Row::new(RESULT, format!("[error] {first}"), theme.error));
             }
-            lines
+
+            rows
         }
     }
 }
@@ -938,14 +1160,19 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<(String, Styl
 /// what it did. **The child's own answer is never on the row** — it is inside
 /// the tool result the model reads, and a transcript that printed it would be
 /// showing the same work twice, once as prose and once as a result.
-fn task_lines(state: &ToolState, theme: &Theme) -> Vec<(String, Style)> {
+///
+/// Its own markers rather than **D487**'s: `TASK_RUNNING`/`TASK_DONE` already
+/// say what a bullet's color would, and they are what the ported row draws.
+/// The rows carry no prefix, so they lay out exactly as they always did.
+fn task_lines(state: &ToolState, theme: &Theme) -> Vec<Row> {
     match state {
-        ToolState::Pending => vec![(format!("{TASK_RUNNING} Task"), theme.dim)],
+        ToolState::Pending => vec![Row::new("", format!("{TASK_RUNNING} Task"), theme.dim)],
         ToolState::Running {
             input, metadata, ..
         } => {
             let agent = field(input, "subagent_type");
-            let mut lines = vec![(
+            let mut rows = vec![Row::new(
+                "",
                 task_heading(TASK_RUNNING, agent, field(input, "description")),
                 theme.dim,
             )];
@@ -955,9 +1182,9 @@ fn task_lines(state: &ToolState, theme: &Theme) -> Vec<(String, Style)> {
                 Some(current) => current.to_owned(),
                 None => format!("{} toolcalls", toolcalls(metadata)),
             };
-            lines.push((format!("{TASK_DETAIL}{detail}"), theme.dim));
+            rows.push(Row::new("", format!("{TASK_DETAIL}{detail}"), theme.dim));
 
-            lines
+            rows
         }
         ToolState::Completed {
             input,
@@ -971,8 +1198,9 @@ fn task_lines(state: &ToolState, theme: &Theme) -> Vec<(String, Style)> {
             let description = field(input, "description").or(Some(title.as_str()));
 
             vec![
-                (task_heading(TASK_DONE, agent, description), theme.fg),
-                (
+                Row::new("", task_heading(TASK_DONE, agent, description), theme.fg),
+                Row::new(
+                    "",
                     format!(
                         "{TASK_DETAIL}{calls} toolcalls \u{b7} {elapsed}",
                         calls = toolcalls(metadata),
@@ -1329,7 +1557,7 @@ mod tests {
         let lines = rendered(&mut chat, VIEWPORT);
 
         assert!(
-            lines.iter().any(|line| line == "hello world"),
+            lines.iter().any(|line| line == "\u{25cf} hello world"),
             "streamed fragments should join into one entry, got {lines:?}"
         );
     }
@@ -1348,8 +1576,9 @@ mod tests {
         let lines = rendered(&mut chat, VIEWPORT);
 
         assert!(
-            lines.iter().any(|line| line == "first") && lines.iter().any(|line| line == "second"),
-            "both parts should render, got {lines:?}"
+            lines.iter().any(|line| line == "\u{25cf} first")
+                && lines.iter().any(|line| line == "\u{25cf} second"),
+            "both parts should render, each behind a bullet of its own, got {lines:?}"
         );
     }
 
@@ -1375,8 +1604,8 @@ mod tests {
         let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
         assert!(
-            lines.iter().any(|line| line.contains("[running] shell")),
-            "a pending call should read as running, got {lines:?}"
+            lines.iter().any(|line| line == "\u{25cf} Shell"),
+            "a call whose arguments have not arrived names the tool alone, got {lines:?}"
         );
     }
 
@@ -1403,8 +1632,216 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("[running] shell: cargo test")),
+                .any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
             "got {lines:?}"
+        );
+    }
+
+    /// **AC1.** The whole grammar of a settled call in one screen: the bullet
+    /// and the condensed arguments on the header, the `⎿` marker carrying what
+    /// the tool called the work, the preview hanging under that marker's own
+    /// columns, and a hint naming what was cut and where the rest is.
+    #[test]
+    fn a_completed_tool_call_renders_as_a_bullet_a_result_marker_and_a_hanging_preview() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "read".to_owned(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({"filePath": "a.rs"}),
+                    output: "one\ntwo\nthree\nfour\nfive\nsix".to_owned(),
+                    title: "a.rs".to_owned(),
+                    metadata: serde_json::json!({}),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
+        let drawn: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec![
+                "\u{25cf} Read(filePath: \"a.rs\")",
+                "  \u{23bf} a.rs",
+                "    one",
+                "    two",
+                "    three",
+                "    four",
+                "    \u{2026} +2 lines (ctrl+t to expand)",
+            ],
+            "got {lines:?}"
+        );
+    }
+
+    /// **AC2.** A call that is running and the same call once it has settled
+    /// are announced by the same line: what changed is the color it is painted
+    /// in, not a word in the text.
+    #[test]
+    fn a_running_call_and_its_settled_self_share_their_header_line() {
+        let input = serde_json::json!({"command": "cargo test"});
+        let running = tool_call(
+            "shell",
+            ToolState::Running {
+                input: input.clone(),
+                metadata: serde_json::Value::Null,
+                started: 0,
+            },
+        );
+        let completed = tool_call(
+            "shell",
+            ToolState::Completed {
+                input: input.clone(),
+                output: String::new(),
+                title: "cargo test".to_owned(),
+                metadata: serde_json::json!({}),
+                started: 0,
+                completed: 1,
+            },
+        );
+        let failed = tool_call(
+            "shell",
+            ToolState::Error {
+                input,
+                error: "no such command".to_owned(),
+                started: 0,
+                completed: 1,
+            },
+        );
+
+        let header = |lines: &[String]| {
+            lines
+                .iter()
+                .find(|line| !line.is_empty())
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(header(&running), "\u{25cf} Shell(command: \"cargo test\")");
+        assert_eq!(header(&running), header(&completed));
+        assert_eq!(header(&running), header(&failed));
+    }
+
+    /// A header is one line, so the arguments on it are capped — and the cut
+    /// is admitted rather than left to look like the whole call.
+    #[test]
+    fn a_header_names_a_few_arguments_and_says_when_it_left_some_out() {
+        let lines = tool_call(
+            "grep",
+            ToolState::Running {
+                input: serde_json::json!({
+                    "include": "*.rs",
+                    "pattern": "fn main",
+                    "path": "src",
+                    "limit": 20,
+                    "todos": ["one", "two"],
+                }),
+                metadata: serde_json::Value::Null,
+                started: 0,
+            },
+        );
+
+        assert!(
+            lines.iter().any(|line| line
+                == "\u{25cf} Grep(path: \"src\", pattern: \"fn main\", include: \"*.rs\", \u{2026})"),
+            "the recognizable fields come first and the cut is named, got {lines:?}"
+        );
+    }
+
+    /// A value that would not fit a line — a whole file a `write` carries, a
+    /// command typed over several lines — is cut to something a header can
+    /// hold, and says so.
+    #[test]
+    fn a_header_cuts_an_argument_too_long_or_too_tall_to_draw() {
+        let lines = tool_call(
+            "write",
+            ToolState::Running {
+                input: serde_json::json!({
+                    "filePath": "a.rs",
+                    "content": "fn main() {\n    println!(\"hello\");\n}\n",
+                }),
+                metadata: serde_json::Value::Null,
+                started: 0,
+            },
+        );
+
+        assert!(
+            lines.iter().any(|line| line
+                == "\u{25cf} Write(filePath: \"a.rs\", content: \"fn main() {\u{2026}\")"),
+            "got {lines:?}"
+        );
+    }
+
+    /// A nested payload is named by the shape it has rather than drawn: it is
+    /// still an argument the header must admit to, and still not one a single
+    /// line can carry.
+    #[test]
+    fn a_header_names_a_nested_argument_by_its_shape() {
+        let lines = tool_call(
+            "todowrite",
+            ToolState::Running {
+                input: serde_json::json!({"todos": [{"content": "one"}]}),
+                metadata: serde_json::Value::Null,
+                started: 0,
+            },
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "\u{25cf} Todowrite(todos: [\u{2026}])"),
+            "got {lines:?}"
+        );
+    }
+
+    /// **Pre-mortem 1.** The marker's columns are measured, so a preview line
+    /// the viewport has to wrap keeps hanging under the marker instead of
+    /// sliding back to the margin.
+    #[test]
+    fn a_wrapped_preview_line_keeps_hanging_under_its_own_marker() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "read".to_owned(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({}),
+                    output: "alpha bravo charlie delta".to_owned(),
+                    title: String::new(),
+                    metadata: serde_json::json!({}),
+                    started: 0,
+                    completed: 1,
+                },
+            },
+        });
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 18, 10));
+        let drawn: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec![
+                "\u{25cf} Read",
+                "  \u{23bf} alpha bravo",
+                "    charlie delta",
+            ],
+            "the wrapped remainder sits under what the marker introduced, got {lines:?}"
         );
     }
 
@@ -1432,7 +1869,9 @@ mod tests {
         let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
         assert!(
-            lines.iter().any(|line| line.contains("[done] read: a.rs")),
+            lines
+                .iter()
+                .any(|line| line.contains("\u{25cf} Read(filePath: \"a.rs\")")),
             "got {lines:?}"
         );
         assert!(
@@ -1440,8 +1879,10 @@ mod tests {
             "got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("...")),
-            "five lines should clamp to four plus a marker, got {lines:?}"
+            lines
+                .iter()
+                .any(|line| line.contains("\u{2026} +1 line (ctrl+t to expand)")),
+            "five lines should clamp to four plus a hint naming the one cut, got {lines:?}"
         );
         assert!(
             !lines.iter().any(|line| line.contains("five")),
@@ -1511,11 +1952,15 @@ mod tests {
         let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
         assert!(
-            lines.iter().any(|line| line.contains("[error] shell")),
+            lines
+                .iter()
+                .any(|line| line.contains("\u{25cf} Shell(command: \"rm -rf /\")")),
             "got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("refused")),
+            lines
+                .iter()
+                .any(|line| line == "  \u{23bf} [error] refused: destructive command"),
             "got {lines:?}"
         );
         assert!(
@@ -1567,15 +2012,15 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("[done] shell: echo hi")),
+                .any(|line| line.contains("\u{25cf} Shell(command: \"echo hi\")")),
             "the known id should be replaced in place, got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("[running] read")),
+            lines.iter().any(|line| line == "\u{25cf} Read"),
             "an update for an id never started should still append, got {lines:?}"
         );
         assert!(
-            !lines.iter().any(|line| line.contains("[running] shell")),
+            !lines.iter().any(|line| line == "\u{25cf} Shell"),
             "the pending block should have been replaced, not kept alongside, got {lines:?}"
         );
     }
@@ -1722,8 +2167,10 @@ mod tests {
             "the oldest lines are the ones that scroll off, got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.trim() == "..."),
-            "and the cut has to be admitted, got {lines:?}"
+            lines
+                .iter()
+                .any(|line| line == "  \u{23bf} \u{2026} +2 lines (ctrl+t to expand)"),
+            "and the cut has to be admitted, above what it cut, got {lines:?}"
         );
     }
 
@@ -1742,7 +2189,7 @@ mod tests {
 
         assert_eq!(
             drawn,
-            vec![&"ganja".to_owned(), &"[running] read: a.rs".to_owned()],
+            vec![&"\u{25cf} Read(filePath: \"a.rs\")".to_owned()],
             "got {lines:?}"
         );
     }
@@ -1869,13 +2316,15 @@ mod tests {
         );
 
         assert!(
-            lines.iter().any(|line| line.contains("[error] task")),
+            lines
+                .iter()
+                .any(|line| line.contains("\u{25cf} Task(description: \"find the parser\")")),
             "got {lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("no agent named parser-hunter")),
+                .any(|line| line == "  \u{23bf} [error] no agent named parser-hunter"),
             "got {lines:?}"
         );
     }
@@ -1916,17 +2365,18 @@ mod tests {
         let lines = rendered(&mut chat, Rect::new(0, 0, 40, 10));
 
         assert!(
-            lines.iter().any(|line| line == "Heading"),
+            lines.iter().any(|line| line == "\u{25cf} Heading"),
             "the heading's marker should be concealed, got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line == "and loud text"),
-            "and so should the emphasis markers, got {lines:?}"
+            lines.iter().any(|line| line == "  and loud text"),
+            "and so should the emphasis markers, under the bullet's own columns, got {lines:?}"
         );
     }
 
     /// The other half of the scope: what a person typed is never re-read as
-    /// markup, so their `#` and `**` stay on the screen.
+    /// markup, so their `#` and `**` stay on the screen — behind the caret
+    /// that says a person is who typed them.
     #[test]
     fn a_user_message_is_left_exactly_as_it_was_typed() {
         let mut chat = Chat::default();
@@ -1937,7 +2387,41 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "# Heading and **loud** text"),
+                .any(|line| line == "> # Heading and **loud** text"),
+            "got {lines:?}"
+        );
+    }
+
+    /// A prompt is one block however many parts it was built from: the caret
+    /// leads it once, and everything after hangs under it — so a prompt that
+    /// is nothing but an attachment is still marked as something a person
+    /// said.
+    #[test]
+    fn a_prompt_carries_one_caret_and_hangs_the_rest_of_itself_under_it() {
+        let mut chat = Chat::default();
+        let mut message = Message::user("look at this");
+        message.parts.push(Part {
+            id: PartId::from("prt_f1".to_owned()),
+            body: PartBody::File {
+                path: "src/lib.rs".to_owned(),
+                mime: "text/plain".to_owned(),
+                start: None,
+                end: None,
+                content: None,
+            },
+        });
+        chat.start_message(message);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 40, 8));
+        let drawn: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec!["> look at this", "  @src/lib.rs"],
             "got {lines:?}"
         );
     }
@@ -1955,7 +2439,7 @@ mod tests {
         let first = themes.select("aura").expect("aura is builtin");
         let mut buffer = Buffer::empty(area);
         chat.render(area, &mut buffer, &first);
-        let before = buffer[(0, 1)].fg;
+        let before = buffer[(0, 0)].fg;
 
         let second = themes.select("gruvbox").expect("gruvbox is builtin");
         assert_ne!(
@@ -1967,7 +2451,7 @@ mod tests {
 
         assert_ne!(
             before,
-            buffer[(0, 1)].fg,
+            buffer[(0, 0)].fg,
             "the cached line kept the old palette"
         );
     }
@@ -2131,9 +2615,10 @@ mod tests {
         chat.revert(anchor, vec!["src/lib.rs".to_owned()]);
         rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
-        // Two entries' lines are gone and the marker's three — a headline, one
-        // file and the blank line every block ends with — took their place.
-        assert_eq!(chat.line_count(), whole - 6 + 3);
+        // Two entries' lines are gone — two apiece, a caret or bullet row and
+        // the blank every entry ends with — and the marker's three — a
+        // headline, one file and a blank of its own — took their place.
+        assert_eq!(chat.line_count(), whole - 4 + 3);
     }
 
     /// Starting a fresh conversation ends the revert with it: the session the
@@ -2237,12 +2722,12 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         chat.render(area, &mut buffer, &theme);
 
-        // Rows 0-2 are the first entry (label, text, blank), 3-5 the second.
+        // Rows 0-1 are the first entry (its one caret row, then blank), 2-3
+        // the second.
         let style = |row: u16| buffer[(0u16, row)].style();
-        assert_eq!(style(0).fg, theme.selection.fg, "the label row is painted");
-        assert_eq!(style(1).fg, theme.selection.fg, "the text row is painted");
-        assert_ne!(style(2), style(1), "the breathing-room blank is not");
-        assert_ne!(style(3).fg, theme.selection.fg, "the next message is not");
+        assert_eq!(style(0).fg, theme.selection.fg, "the prompt row is painted");
+        assert_ne!(style(1), style(0), "the breathing-room blank is not");
+        assert_ne!(style(2).fg, theme.selection.fg, "the next message is not");
     }
 
     /// Stepping the highlight to a message above the viewport scrolls it into
