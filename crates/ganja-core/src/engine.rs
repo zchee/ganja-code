@@ -3869,7 +3869,13 @@ fn message_chars(message: &Message) -> (usize, usize) {
             // reason: no wire carries it. It is on the screen, not in the
             // request, and a meter that counted it would report a window
             // filling with words the model is never sent.
+            // A provider-run tool counts nothing for the same reason, and
+            // it is the sharper case: its arguments and its result were the
+            // *gateway's* tokens, spent inside a request this side never
+            // composed, and counting them against this window would report a
+            // context filling with what somebody else sent.
             PartBody::ReasoningText { .. }
+            | PartBody::ServerTool { .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. } => {}

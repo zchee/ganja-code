@@ -117,6 +117,9 @@ fn shape(event: &Event) -> String {
             // Opened empty and grown by deltas, the way a text part is, so the
             // line names the kind and the deltas carry the words.
             PartBody::ReasoningText { .. } => "part:reasoning_text".to_owned(),
+            // Finished when it arrives, so the line names what ran rather
+            // than a state it will pass through.
+            PartBody::ServerTool { tool, .. } => format!("part:server_tool:{tool}"),
         },
         Event::PartDelta { delta, .. } => format!("delta:{delta}"),
         Event::PartUpdated { part, .. } => match &part.body {

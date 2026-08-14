@@ -610,6 +610,7 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
+            | PartBody::ServerTool { .. }
             | PartBody::Reasoning { .. } => {}
         }
     }

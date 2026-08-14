@@ -785,6 +785,20 @@ impl<'a> Reporter<'a> {
                 // A sealed blob is not thinking a reader could be shown, so it
                 // is emitted under no name at all: saying `reasoning` of it
                 // would tell a consumer the model said something printable.
+                // A tool the *provider* ran (**D489**) arrives finished and
+                // is never updated, so it is written here rather than from
+                // `updated` — under the tool kind that already exists, because
+                // it is an account of a tool that ran and a seventh name would
+                // say it is something else. What kind of tool it was is in the
+                // part's own body, where a consumer reading the payload finds
+                // the `openrouter:` name it carries.
+                PartBody::ServerTool { tool, .. } => {
+                    self.flush();
+                    self.emit(Kind::ToolUse, "part", part);
+                    if self.format == Format::Default {
+                        let _ = writeln!(self.out, "{RAN} {}", printable(tool));
+                    }
+                }
                 PartBody::Tool { .. }
                 | PartBody::File { .. }
                 | PartBody::Patch { .. }

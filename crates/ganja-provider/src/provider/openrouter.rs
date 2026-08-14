@@ -147,6 +147,59 @@ pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 /// cannot serve is the invention this port does not make.
 pub(super) const CHAT_COMPLETIONS_ONLY: [&str; 1] = ["openai/gpt-5-chat"];
 
+/// The tools this vendor runs on its own side, by the name a config asks for
+/// them under (**D489**).
+///
+/// Spec: `docs/guides/features/server-tools`, its roster table read 2026-08-14.
+/// The wire spelling is [`SERVER_TOOL_PREFIX`] and the name, which is how the
+/// reference publishes each of them (`openrouter:web_search` and so on); a
+/// config names the half after the colon, because the half before it is this
+/// provider's identity and repeating it in every entry would be noise.
+///
+/// **An identity list, deliberately.** A config naming anything outside it is
+/// refused at load rather than forwarded: an unknown `openrouter:whatever` is a
+/// row the gateway would reject *mid-turn*, and a typo somebody has to read a
+/// 400 to find is worse than one the config file names back at them. The cost is
+/// that a tool this vendor adds tomorrow needs a line here — which is the same
+/// bargain every curated list in the config makes, and this one bills per call.
+///
+/// The roster is what the reference publishes and **not** what this build
+/// guarantees to render richly: `fusion`, `advisor` and `subagent` run whole
+/// model panels behind one call, and what a transcript shows for one of those is
+/// the row and its result, the same as for a search.
+pub const SERVER_TOOLS: [&str; 10] = [
+    "web_search",
+    "datetime",
+    "image_generation",
+    "web_fetch",
+    "apply_patch",
+    "shell",
+    "fusion",
+    "advisor",
+    "subagent",
+    "experimental__search_models",
+];
+
+/// What every server tool's `type` starts with, on the way out and on the way
+/// back.
+///
+/// Both directions matter and the reference documents both: a request asks for
+/// `{"type": "openrouter:web_search"}`, and on the Responses API "the call
+/// becomes an `openrouter:shell` output item"
+/// (`docs/guides/features/server-tools/shell`, read 2026-08-14). That sentence
+/// is what lets [`super::responses`] recognize one of these on the way in
+/// without guessing at a shape — see its own decode arm for what it does and
+/// does not read out of the item.
+pub const SERVER_TOOL_PREFIX: &str = "openrouter:";
+
+/// Whether `name` is a server tool this build will ask for.
+///
+/// The one door config validation goes through, so the roster is stated once.
+#[must_use]
+pub fn serves_server_tool(name: &str) -> bool {
+    SERVER_TOOLS.contains(&name)
+}
+
 /// The provider against OpenRouter's own endpoint, authenticated by the key
 /// [`API_KEY_ENV`] or the credential store carries.
 ///

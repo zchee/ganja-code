@@ -481,6 +481,7 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
+            | PartBody::ServerTool { .. }
             | PartBody::Reasoning { .. } => {}
         }
     }

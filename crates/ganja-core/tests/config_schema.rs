@@ -164,6 +164,9 @@ const KITCHEN_SINK: &str = r#"{
       "max_width": 160,
       "detail": true
     }
+  },
+  "openrouter": {
+    "server_tools": ["web_search", "datetime"]
   }
 }"#;
 

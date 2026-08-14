@@ -172,6 +172,11 @@
       "$ref": "#/$defs/TuiConfig",
       "description": "What the terminal frontend does beyond drawing frames. Parsed and refused-unknown in core like every other curated table, acted on only by the TUI.",
       "default": {}
+    },
+    "openrouter": {
+      "$ref": "#/$defs/OpenRouterConfig",
+      "description": "What the OpenRouter gateway is asked to run on its own side. Opt-in, because server tools bill per call (D489).",
+      "default": {}
     }
   },
   "$defs": {
@@ -607,6 +612,35 @@
           "description": "Endpoints skills would be downloaded from. Accepted and not fetched; the key exists so a config carrying one still loads.",
           "default": [],
           "items": { "type": "string" }
+        }
+      }
+    },
+    "OpenRouterConfig": {
+      "title": "OpenRouter gateway settings",
+      "description": "What that gateway is asked to run on its own side. No key upstream has: opencode ships no server tools at all (D489).",
+      "$comment": "crates/ganja-core/src/config.rs (OpenRouterConfig, deny_unknown_fields); the roster is crates/ganja-provider/src/provider/openrouter.rs (SERVER_TOOLS), enforced at load by config::check_openrouter.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "server_tools": {
+          "type": "array",
+          "description": "Tools the model may call and OpenRouter executes, by the name after the `openrouter:` prefix. Each call bills, so an empty list (the default) sends none. A name outside the roster is refused at load.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "web_search",
+              "datetime",
+              "image_generation",
+              "web_fetch",
+              "apply_patch",
+              "shell",
+              "fusion",
+              "advisor",
+              "subagent",
+              "experimental__search_models"
+            ]
+          },
+          "default": []
         }
       }
     },

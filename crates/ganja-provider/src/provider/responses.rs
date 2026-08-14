@@ -418,6 +418,16 @@ pub struct ResponsesProvider {
     /// family at all, and meters nothing rather than being given an invented
     /// one — [`super::rate`]'s table picks up either without a change here.
     rates: super::RateWindows,
+    /// The gateway's own tools this session opted into, by the name a config
+    /// asked for them under (**D489**).
+    ///
+    /// Empty on every backend but [`Backend::OpenRouter`] and on that one too
+    /// unless a config named some: they bill per call, so nothing is asked for
+    /// unasked. Held on the provider rather than on the request because it is a
+    /// property of the endpoint this session is talking to — the same reason
+    /// [`Backend`] is a field here — and because a request type shared by four
+    /// wires must not grow a field only one of them can honour.
+    server_tools: Vec<String>,
 }
 
 impl fmt::Debug for ResponsesProvider {
@@ -530,7 +540,35 @@ impl ResponsesProvider {
             base_url,
             backend,
             rates: super::RateWindows::default(),
+            server_tools: Vec::new(),
         })
+    }
+
+    /// The same provider, asking the gateway to serve `tools` on its own side
+    /// (**D489**).
+    ///
+    /// Taken by value and set once, at selection, because it is configuration
+    /// rather than per-turn state: which server tools a session opted into
+    /// cannot change inside a turn, and a request that could name its own would
+    /// be a way for a transcript to start spending money.
+    ///
+    /// **Ignored on every other backend**, and quietly: the names are one
+    /// vendor's namespace and the config key that carries them is named after
+    /// that vendor, so the only way to reach this with another backend is a
+    /// caller bug — one that must not put an unknown tool type on somebody
+    /// else's request.
+    #[must_use]
+    pub fn serving(mut self, tools: Vec<String>) -> Self {
+        if self.backend != Backend::OpenRouter {
+            tracing::debug!(
+                backend = ?self.backend,
+                "server tools are one gateway's own, and this is not it"
+            );
+            return self;
+        }
+        self.server_tools = tools;
+
+        self
     }
 
     /// Why this provider will not put `model` on the wire, where it will not.
@@ -607,7 +645,7 @@ impl ResponsesProvider {
 
         // The effort's options go under the wire's own fields, so a catalog
         // row can add `reasoning` but can never unmake `model` or `stream`.
-        let own = Body::new(request, self.backend);
+        let own = Body::new(request, self.backend).serving(&self.server_tools);
         let options = summarized(&request.effort_options, &request.model, self.backend);
         let body = splice_effort(&options, &own);
         built.json(&body).build().map_err(|error| {
@@ -824,20 +862,41 @@ struct Body<'a> {
     tool_choice: Option<&'static str>,
 }
 
-/// One tool as the Responses API advertises it.
+/// One entry of a request's `tools` array.
 ///
-/// Flatter than chat completions', which nests the same four fields under
-/// `function` (`openai-responses-prepare-tools.ts`, `prepareFunctionTool`).
+/// Untagged, because the two shapes are told apart by what they carry: a tool
+/// this side will execute names itself, and a tool the *provider* will execute
+/// is a type and nothing else.
 #[derive(Debug, Serialize)]
-struct ToolSpec<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    /// The name the model is told, which is the registry's own unless that one
-    /// is outside this API's `^[a-zA-Z0-9_-]{1,64}$` — see [`alias`].
-    name: Cow<'a, str>,
-    description: &'a str,
-    /// The argument schema, which this API names `parameters` as well.
-    parameters: &'a Value,
+#[serde(untagged)]
+enum ToolSpec<'a> {
+    /// A tool the model may call and **this build** runs.
+    ///
+    /// Flatter than chat completions', which nests the same four fields under
+    /// `function` (`openai-responses-prepare-tools.ts`, `prepareFunctionTool`).
+    Function {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        /// The name the model is told, which is the registry's own unless that
+        /// one is outside this API's `^[a-zA-Z0-9_-]{1,64}$` — see [`alias`].
+        name: Cow<'a, str>,
+        description: &'a str,
+        /// The argument schema, which this API names `parameters` as well.
+        parameters: &'a Value,
+    },
+    /// A tool the model may call and **the gateway** runs (**D489**).
+    ///
+    /// One field, which is the whole shape the reference publishes:
+    /// `{"type": "openrouter:web_search"}`. No name, because the type *is* the
+    /// name; no schema, because the vendor owns the tool; and no `parameters`,
+    /// because every knob the reference documents there — search engines,
+    /// result caps, shell environments — is a per-tool object this build has no
+    /// config surface for and would be inventing defaults for. What a config
+    /// asks for today is the tool, at the vendor's own defaults.
+    Server {
+        #[serde(rename = "type")]
+        kind: String,
+    },
 }
 
 /// One entry in a request's `input`.
@@ -1063,7 +1122,7 @@ impl<'a> Body<'a> {
         let tools: Vec<ToolSpec<'a>> = request
             .tools
             .iter()
-            .map(|tool: &ToolDefinition| ToolSpec {
+            .map(|tool: &ToolDefinition| ToolSpec::Function {
                 kind: "function",
                 name: alias(&tool.name, OPENAI_CAP),
                 description: &tool.description,
@@ -1083,6 +1142,28 @@ impl<'a> Body<'a> {
                 .then_some(TOOL_CHOICE_AUTO),
             tools,
         }
+    }
+}
+
+impl<'a> Body<'a> {
+    /// Adds the gateway's own tools to the roster, after the ones this build
+    /// runs (**D489**).
+    ///
+    /// Order is deliberate and matches the reference's combined example, where
+    /// the server tools lead and the function tools follow — reversed here for
+    /// one reason: the aliased function names are what this build is
+    /// responsible for, and keeping their positions independent of a config key
+    /// keeps a request diffable against the same session without one.
+    ///
+    /// Called only where a provider knows its own configuration, so a body
+    /// built by a fixture carries none of these and every existing request is
+    /// byte-identical.
+    fn serving(mut self, names: &[String]) -> Self {
+        self.tools.extend(names.iter().map(|name| ToolSpec::Server {
+            kind: format!("{}{name}", openrouter::SERVER_TOOL_PREFIX),
+        }));
+
+        self
     }
 }
 
@@ -1172,6 +1253,7 @@ fn split(
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::ReasoningText { .. }
+            | PartBody::ServerTool { .. }
             | PartBody::Patch { .. } => {}
         }
     }
@@ -1494,6 +1576,20 @@ impl Mapping {
                 // hand state back still has thinking to show.
                 self.settled(item, events);
             }
+            // A tool the gateway ran itself (**D489**). Recognized by the
+            // namespace rather than by an enumerated list of item types,
+            // because the namespace is what the vendor documents — "on the
+            // Responses API the call becomes an `openrouter:shell` output
+            // item" — and because a roster this build has not caught up with
+            // is better rendered under its own name than skipped.
+            //
+            // Ungated by backend: the prefix is one vendor's, and a `Mapping`
+            // does not carry which backend it reads for. An item of this shape
+            // arriving from anywhere else is that endpoint claiming this
+            // vendor's namespace, and a row saying so is the honest outcome.
+            kind if kind.starts_with(openrouter::SERVER_TOOL_PREFIX) => {
+                server_tool(kind, item, events);
+            }
             _ => {}
         }
     }
@@ -1564,6 +1660,69 @@ fn sealed(item: &Value, events: &mut Vec<ProviderEvent>) {
     events.push(ProviderEvent::ReasoningState {
         item: id.to_owned(),
         encrypted: encrypted.to_owned(),
+    });
+}
+
+/// Reports a tool the gateway ran on its own side (**D489**).
+///
+/// # What it reads, and what it refuses to assume
+///
+/// The vendor documents the item's *type* and one tool's fields; it documents
+/// no envelope common to all ten, and each tool's arguments mirror whatever
+/// shape that tool was modelled on (`openrouter:shell`'s mirror OpenAI's
+/// `shell_call.action`). So this reads the two field names the reference does
+/// use — `arguments`, which every function-shaped call carries, and `output`,
+/// which the shell tool's result section names — and falls back to **the item
+/// itself minus its envelope** rather than to a guess: whatever the gateway
+/// sent is what a person is shown, which is worse-looking and never wrong.
+///
+/// A string `arguments` is parsed, because that is how this API carries a
+/// call's arguments everywhere else; one that will not parse is kept as the
+/// string it was, since a row that says `"{"` is more honest than one that
+/// says nothing.
+///
+/// Nothing here is a [`ProviderEvent::ToolCallStart`]: the work is finished,
+/// there is no registry entry to run and no dialog whose answer could change
+/// anything. See [`PartBody::ServerTool`] for the rest of that rule.
+fn server_tool(kind: &str, item: &Value, events: &mut Vec<ProviderEvent>) {
+    /// The keys that identify an item rather than describing the call it made.
+    /// `output` is here because it is the *answer*: it has a row of its own,
+    /// and a fallback that swept it in would show it twice.
+    const ENVELOPE: [&str; 5] = ["type", "id", "status", "call_id", "output"];
+
+    let input = match &item["arguments"] {
+        Value::String(arguments) => {
+            serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.clone()))
+        }
+        Value::Null => {
+            let rest: serde_json::Map<String, Value> = item
+                .as_object()
+                .map(|object| {
+                    object
+                        .iter()
+                        .filter(|(key, _)| !ENVELOPE.contains(&key.as_str()))
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if rest.is_empty() {
+                Value::Null
+            } else {
+                Value::Object(rest)
+            }
+        }
+        arguments => arguments.clone(),
+    };
+    let output = match &item["output"] {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        structured => structured.to_string(),
+    };
+
+    events.push(ProviderEvent::ServerTool {
+        tool: kind.to_owned(),
+        input,
+        output,
     });
 }
 
@@ -3325,6 +3484,111 @@ mod tests {
         }
     }
 
+    /// The gateway's own tools ride the same array, after the ones this build
+    /// runs (**D489**).
+    ///
+    /// Two shapes in one list is the whole of what the reference's combined
+    /// example shows, and the absences are the opt-in: a provider nobody
+    /// configured sends none of these, and a request that carries them still
+    /// carries every function tool it had.
+    #[test]
+    fn a_configured_gateway_asks_for_its_own_tools_beside_this_builds() {
+        let request = ChatRequest {
+            tools: vec![a_tool()],
+            ..gateway_ask()
+        };
+
+        let asked = Body::new(&request, Backend::OpenRouter)
+            .serving(&["web_search".to_owned(), "datetime".to_owned()]);
+        let body = serde_json::to_value(asked).expect("the body serializes");
+
+        assert_eq!(
+            body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "read",
+                    "description": "Reads a file from disk.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"filePath": {"type": "string"}},
+                        "required": ["filePath"],
+                    },
+                },
+                {"type": "openrouter:web_search"},
+                {"type": "openrouter:datetime"},
+            ]),
+            "the reference's own row shape, and this build's tools still first: {body}"
+        );
+
+        // Nothing configured, nothing asked for — on a request that is
+        // otherwise identical, so what this proves is the config and not the
+        // fixture.
+        let unasked = serde_json::to_value(Body::new(&request, Backend::OpenRouter))
+            .expect("the body serializes");
+        assert_eq!(
+            unasked["tools"].as_array().map(Vec::len),
+            Some(1),
+            "server tools bill per call, so a session that named none sends \
+             none: {unasked}"
+        );
+
+        // And a session with no tools of its own still gets the gateway's.
+        let alone = serde_json::to_value(
+            Body::new(&gateway_ask(), Backend::OpenRouter).serving(&["shell".to_owned()]),
+        )
+        .expect("the body serializes");
+        assert_eq!(alone["tools"], json!([{"type": "openrouter:shell"}]));
+    }
+
+    /// The other end of the same key: what a provider does with a roster is
+    /// decided by which backend it was built for, because these names are one
+    /// vendor's namespace.
+    #[test]
+    fn only_the_gateway_that_serves_server_tools_is_given_any() {
+        let routed = routed().serving(vec!["web_search".to_owned()]);
+        let body = serde_json::to_value(
+            Body::new(&gateway_ask(), Backend::OpenRouter).serving(&["web_search".to_owned()]),
+        )
+        .expect("the body serializes");
+        assert_eq!(body["tools"], json!([{"type": "openrouter:web_search"}]));
+        // The provider kept them, which is what `request` will splice.
+        assert_eq!(routed.server_tools, ["web_search"]);
+
+        let elsewhere = keyed().serving(vec!["web_search".to_owned()]);
+        assert!(
+            elsewhere.server_tools.is_empty(),
+            "one vendor's tool namespace must not reach another vendor's request"
+        );
+    }
+
+    /// The roster is the reference's, and the config key is validated against
+    /// it — so the two halves of the opt-in cannot disagree.
+    #[test]
+    fn the_server_tool_roster_is_the_one_that_vendor_publishes() {
+        assert_eq!(
+            openrouter::SERVER_TOOLS,
+            [
+                "web_search",
+                "datetime",
+                "image_generation",
+                "web_fetch",
+                "apply_patch",
+                "shell",
+                "fusion",
+                "advisor",
+                "subagent",
+                "experimental__search_models",
+            ],
+            "the roster table of `docs/guides/features/server-tools`, read 2026-08-14"
+        );
+        assert!(openrouter::serves_server_tool("web_search"));
+        assert!(
+            !openrouter::serves_server_tool("openrouter:web_search"),
+            "a config names the half after the colon; the prefix is the wire's"
+        );
+    }
+
     /// The round trip the reference's multi-turn example shows: a
     /// `function_call` item and a `function_call_output` that quotes its
     /// `call_id`.
@@ -3428,6 +3692,120 @@ mod tests {
                 &ProviderEvent::Finish(FinishReason::Completed),
             ],
             "got {seen:?}"
+        );
+    }
+
+    /// A tool the gateway ran arrives as a row to render and **nothing to run**
+    /// (**D489**).
+    ///
+    /// The three absences are the whole rule, and each of them is a way the
+    /// turn would break: a `ToolCallStart` would send the loop looking for a
+    /// tool no registry has, the dialog that call would raise would ask about
+    /// work already done, and a `Failed` would end a turn the gateway
+    /// completed.
+    #[tokio::test]
+    async fn a_gateway_run_tool_becomes_a_row_and_never_a_call_to_execute() {
+        let seen = gateway_events(concat!(
+            r#"data: {"type":"response.output_item.added","output_index":0,"item":{"#,
+            r#""type":"openrouter:web_search","id":"or_1","status":"in_progress"}}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+            r#""type":"openrouter:web_search","id":"or_1","status":"completed","#,
+            r#""arguments":"{\"query\":\"rust 2024 edition\"}","#,
+            r#""output":"3 results"}}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"It ships."}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        assert!(
+            seen.contains(&ProviderEvent::ServerTool {
+                tool: "openrouter:web_search".to_owned(),
+                input: json!({"query": "rust 2024 edition"}),
+                output: "3 results".to_owned(),
+            }),
+            "the row has to carry the call and its answer: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                ProviderEvent::ToolCallStart { .. }
+                    | ProviderEvent::ToolCallDelta { .. }
+                    | ProviderEvent::ToolCallEnd { .. }
+                    | ProviderEvent::Failed(_)
+            )),
+            "nothing here is this build's to run, ask about, or die over: {seen:?}"
+        );
+        assert_eq!(
+            text(&seen),
+            "It ships.",
+            "and the reply the gateway's own tool fed goes on arriving"
+        );
+        // Once: the opening frame announces structure, exactly as a reasoning
+        // item's does, and a row minted there would be a claim about nothing.
+        assert_eq!(
+            seen.iter()
+                .filter(|event| matches!(event, ProviderEvent::ServerTool { .. }))
+                .count(),
+            1,
+            "{seen:?}"
+        );
+    }
+
+    /// What the decode reads when the item is not shaped like the one tool the
+    /// reference spells out — which is nine of the ten, since the vendor
+    /// documents a different argument shape per tool.
+    #[tokio::test]
+    async fn a_gateway_tools_own_fields_are_shown_rather_than_guessed_at() {
+        // `openrouter:shell`'s arguments mirror OpenAI's `shell_call.action`,
+        // so they arrive under no `arguments` key at all.
+        let seen = gateway_events(concat!(
+            r#"data: {"type":"response.output_item.done","item":{"#,
+            r#""type":"openrouter:shell","id":"or_2","status":"completed","#,
+            r#""action":{"commands":["ls -la"]},"#,
+            r#""output":[{"stdout":"total 0","stderr":"","outcome":{"type":"exit","exit_code":0}}]}}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        assert!(
+            seen.contains(&ProviderEvent::ServerTool {
+                tool: "openrouter:shell".to_owned(),
+                // The item minus its envelope, which is what arrived rather
+                // than a shape assumed for it — and `output` is not in it,
+                // because the row shows that separately.
+                input: json!({"action": {"commands": ["ls -la"]}}),
+                output:
+                    r#"[{"outcome":{"exit_code":0,"type":"exit"},"stderr":"","stdout":"total 0"}]"#
+                        .to_owned(),
+            }),
+            "got {seen:?}"
+        );
+
+        // An item this build has no idea about still ends nothing: the
+        // skip-with-debug arm is the safety net a beta surface needs.
+        let unknown = gateway_events(concat!(
+            r#"data: {"type":"response.output_item.done","item":{"#,
+            r#""type":"some_future_call","id":"x_1","payload":{"a":1}}}"#,
+            "\n\n",
+            r#"data: {"type":"response.some.future.event","item_id":"x_1"}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+        assert_eq!(
+            unknown,
+            vec![
+                ProviderEvent::Usage(Usage::default()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ],
+            "an unrecognized item is skipped, and the turn still completes: {unknown:?}"
         );
     }
 

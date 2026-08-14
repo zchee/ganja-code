@@ -153,6 +153,28 @@ fn formatted(part: &Part) -> String {
         // conversation, not the model's scratch paper. The pane draws it
         // behind a `✻`; the two surfaces are allowed to disagree, and the
         // output of this function is unchanged by its arriving here.
+        // A tool the *provider* ran (**D489**) renders in the tool shape
+        // above, because that is what it is: the conversation includes it,
+        // and a copy that silently dropped the search a reply was built on
+        // would be a copy of a reply with no visible source. `Tool:` rather
+        // than a label of its own keeps upstream's vocabulary — the name it
+        // carries already says whose tool it was.
+        PartBody::ServerTool {
+            tool,
+            input,
+            output,
+        } => {
+            let mut rendered = format!("**Tool: {tool}**\n");
+            if !input.is_null() {
+                rendered.push_str(&fenced("Input", "json", &pretty(input)));
+            }
+            if !output.is_empty() {
+                rendered.push_str(&fenced("Output", "", output));
+            }
+            rendered.push('\n');
+
+            rendered
+        }
         PartBody::File { .. }
         | PartBody::StepStart
         | PartBody::StepFinish { .. }
@@ -342,6 +364,55 @@ mod tests {
         assert!(
             rendered.contains("\n**Output:**\n```\none line\n```\n"),
             "got: {rendered}"
+        );
+    }
+
+    /// A tool the *provider* ran belongs in a copy of the conversation too
+    /// (**D489**): a reply built on a search, copied without the search, is a
+    /// reply whose source vanished.
+    #[test]
+    fn a_provider_run_tool_is_copied_in_the_tool_shape() {
+        let parts = [Part {
+            id: ganja_protocol::PartId::ascending(),
+            body: PartBody::ServerTool {
+                tool: "openrouter:web_search".to_owned(),
+                input: serde_json::json!({ "query": "rust 2024" }),
+                output: "3 results".to_owned(),
+            },
+        }];
+
+        let rendered = format(&session(None), &[(Role::Assistant, &parts[..])]);
+
+        assert!(
+            rendered.contains("**Tool: openrouter:web_search**\n"),
+            "the name it came under, namespace and all: {rendered}"
+        );
+        assert!(
+            rendered.contains("\n**Input:**\n```json\n{\n  \"query\": \"rust 2024\"\n}\n```\n"),
+            "got: {rendered}"
+        );
+        assert!(
+            rendered.contains("\n**Output:**\n```\n3 results\n```\n"),
+            "got: {rendered}"
+        );
+
+        // A row the gateway reported nothing for draws no empty fences.
+        let bare = [Part {
+            id: ganja_protocol::PartId::ascending(),
+            body: PartBody::ServerTool {
+                tool: "openrouter:datetime".to_owned(),
+                input: serde_json::Value::Null,
+                output: String::new(),
+            },
+        }];
+        let rendered = format(&session(None), &[(Role::Assistant, &bare[..])]);
+        assert!(
+            rendered.contains("**Tool: openrouter:datetime**"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("**Input:**") && !rendered.contains("**Output:**"),
+            "an absent field is absent rather than an empty block: {rendered}"
         );
     }
 
