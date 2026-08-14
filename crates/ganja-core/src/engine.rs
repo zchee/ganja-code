@@ -4087,10 +4087,10 @@ mod tests {
     };
     use tokio_util::sync::CancellationToken;
 
-    use super::{Engine, EngineError, STALE_FILES, stale_notice};
+    use super::{Engine, EngineError, STALE_FILES, message_chars, stale_notice};
     use crate::{
         permission::Permissions,
-        protocol::{Command, Event, FinishReason, Message, RevertScope, Role, Usage},
+        protocol::{Command, Event, FinishReason, Message, Part, RevertScope, Role, Usage},
         provider::{
             ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake::MODEL,
         },
@@ -5112,6 +5112,42 @@ mod tests {
             .send(Command::CancelTurn)
             .await
             .expect("an idle cancel is a no-op");
+    }
+
+    /// The context meter's half of the display-only invariant (bead `pwe`).
+    ///
+    /// This one is not about what is *sent* but about what is *claimed to be
+    /// sent*: the meter reports how full the window is, and counting thinking
+    /// nothing carries would have it fill with words the model never receives
+    /// — a session told to compact by a measure of its own scratch paper. The
+    /// sealed half beside it *is* counted, because that one really does ride
+    /// the next request.
+    #[test]
+    fn readable_thinking_counts_nothing_toward_a_window_it_never_reaches() {
+        let mut assistant = Message::assistant("claude-test");
+        assistant.parts.push(Part::text("Hello!"));
+        let (said, results) = message_chars(&assistant);
+
+        assistant
+            .parts
+            .push(Part::reasoning_text("a".repeat(10_000)));
+        assert_eq!(
+            message_chars(&assistant),
+            (said, results),
+            "ten thousand characters of thinking moved the meter; nothing \
+             sends them"
+        );
+
+        // And the contrast that keeps this from passing by measuring nothing:
+        // sealed state is handed back, so it counts.
+        assistant
+            .parts
+            .push(Part::reasoning("openai", "rs_1", Some("b".repeat(64))));
+        assert_eq!(
+            message_chars(&assistant),
+            (said + 64, results),
+            "the sealed half rides the next request and has to be measured"
+        );
     }
 
     #[test]

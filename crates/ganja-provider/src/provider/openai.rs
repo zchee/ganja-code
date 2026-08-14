@@ -1191,6 +1191,51 @@ mod tests {
         );
     }
 
+    /// The same lock the other two wires carry (bead `pwe`): thinking this
+    /// build renders never reaches a body this build sends.
+    ///
+    /// Sharper here than anywhere else, because this wire has *no* reasoning
+    /// item at all — sealed or readable — so a `ReasoningText` that escaped
+    /// its arm could only arrive as content, indistinguishable from something
+    /// the model told the user.
+    #[test]
+    fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
+        const THOUGHT: &str = "the-user-is-probably-testing-me";
+
+        let mut turn = Message::assistant("gpt-test");
+        turn.parts.push(Part::reasoning_text(THOUGHT));
+        turn.parts.push(Part::text("Hello!"));
+        turn.parts.push(Part::reasoning(
+            "openai",
+            "rs_1",
+            Some("sealed-blob-0001".to_owned()),
+        ));
+
+        let request = ChatRequest {
+            effort_options: Default::default(),
+            model: "gpt-test".to_owned(),
+            system: None,
+            tools: Vec::new(),
+            messages: vec![Message::user("hi"), turn, Message::user("again")],
+        };
+        let body = serde_json::to_string(&Body::new(&request)).expect("the body serializes");
+
+        assert!(
+            !body.contains(THOUGHT),
+            "the thought reached the wire; nothing sends readable reasoning: {body}"
+        );
+        assert!(
+            !body.contains("sealed-blob-0001"),
+            "chat completions has no item for sealed reasoning, so it must \
+             not be smuggled in as content either: {body}"
+        );
+        assert!(
+            body.contains("Hello!"),
+            "the reply still has to be sent — an assertion that passed by \
+             encoding nothing would prove nothing: {body}"
+        );
+    }
+
     #[test]
     fn a_request_without_a_system_prompt_starts_with_the_user() {
         let request = ChatRequest {

@@ -630,7 +630,11 @@ pub struct Config {
     /// Spelled `"provider/model"` like [`model`](Self::model) and bound the
     /// same way ([`model_bound_to`]): a spec naming the provider this session
     /// runs as — or a bare one — is what the title request asks for, and one
-    /// naming another provider is left alone. A model the wire then refuses
+    /// naming another provider is left alone. Upstream instead resolves the
+    /// spec in whichever provider it names and can title across providers;
+    /// ganja's title rides the session's own wire, so it does not
+    /// (**D490**, `small-model-provider-bound`, stated at `session.rs`'s
+    /// `title_model`). A model the wire then refuses
     /// costs one round trip and falls back to the session's own model through
     /// the retry `session.rs`'s `request_title` already had; a config carrying
     /// none leaves the pick to the catalog's cheapest chat-capable row.

@@ -2641,6 +2641,49 @@ mod tests {
         }
     }
 
+    /// The split that makes "display-only" a fact about this build rather
+    /// than a sentence in a doc comment (bead `pwe`), and the wire where both
+    /// halves are visible at once: this API *does* take reasoning back, so the
+    /// body below has to carry the sealed item and not the readable one.
+    ///
+    /// A single moved match arm is all it would take to send both, and the
+    /// failure would be invisible — the request would still be accepted, and
+    /// the model would simply be handed the same thought twice, once in a
+    /// form it never asked for.
+    #[test]
+    fn a_transcript_held_thought_is_absent_from_the_body_while_the_sealed_half_travels() {
+        const THOUGHT: &str = "the-user-is-probably-testing-me";
+        const SEALED: &str = "sealed-blob-0001";
+
+        let mut turn = Message::assistant(SERVED);
+        turn.parts.push(Part::reasoning_text(THOUGHT));
+        turn.parts.push(Part::text("Hello!"));
+        turn.parts
+            .push(Part::reasoning(ID, "rs_1", Some(SEALED.to_owned())));
+
+        let request = ChatRequest {
+            messages: vec![Message::user("hi"), turn, Message::user("again")],
+            ..ask()
+        };
+        let body = serde_json::to_string(&Body::new(&request, Backend::Platform))
+            .expect("the body serializes");
+
+        assert!(
+            !body.contains(THOUGHT),
+            "the thought reached the wire; nothing sends readable reasoning: {body}"
+        );
+        assert!(
+            body.contains(SEALED),
+            "the *sealed* half is what this API asked to have handed back, and \
+             a build that dropped it starts every reasoning turn from nothing \
+             — this test must fail if the split is collapsed either way: {body}"
+        );
+        assert!(
+            body.contains("Hello!"),
+            "the reply still has to be sent: {body}"
+        );
+    }
+
     /// The field the live pass died on. A body without it is answered
     /// `400 {"detail":"Store must be set to false"}`, which is every
     /// subscription turn this build could take — so it is asserted on the
