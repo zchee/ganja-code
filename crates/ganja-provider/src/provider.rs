@@ -756,7 +756,6 @@ fn unusable(error: &auth::RefreshError) -> ProviderError {
     match error.kind() {
         auth::AuthErrorKind::RefreshUnavailable => ProviderError::Transport(error.to_string()),
         auth::AuthErrorKind::NotOauth
-        | auth::AuthErrorKind::Expired
         | auth::AuthErrorKind::ReauthRequired
         | auth::AuthErrorKind::Storage => ProviderError::Auth(error.to_string()),
     }
@@ -906,6 +905,7 @@ async fn open<M: Mapper>(
     mapper: impl Fn() -> M,
     client: &reqwest::Client,
     request: reqwest::Request,
+    base: &str,
     presented: &Presented,
     rates: &RateWindows,
     cancel: CancellationToken,
@@ -913,7 +913,9 @@ async fn open<M: Mapper>(
     // Taken before the request is moved into the send, so the answer can be
     // read against the endpoint it came from. Each wire has already logged the
     // provider and model it chose; this is the one seam that knows the URL.
-    let endpoint = endpoint(request.url());
+    // `base` rides along so the rendering can tell the route this build
+    // appended from the path a person configured — see [`endpoint`].
+    let endpoint = endpoint(request.url(), base);
 
     // A body that cannot be replayed cannot ride D475 either: it is sent
     // exactly once, through the same single-shot arm `retry::send` gives it.
@@ -1105,12 +1107,34 @@ fn shielded(
 
 /// Where a request went, with everything that could be a credential removed.
 ///
-/// Scheme, host, port and path — never the query string and never the
-/// userinfo. A base URL is allowed to carry credentials in its userinfo and a
-/// query string is a documented place to put a token (`?auth_token=`, which
-/// `ganja-serve` refuses to log for the same reason), so a diagnostic that
-/// rendered either would be a diagnostic that writes secrets to a file.
-pub(super) fn endpoint(url: &Url) -> String {
+/// Scheme, host and port — never the query string and never the userinfo. A
+/// base URL is allowed to carry credentials in its userinfo and a query string
+/// is a documented place to put a token (`?auth_token=`, which `ganja-serve`
+/// refuses to log for the same reason), so a diagnostic that rendered either
+/// would be a diagnostic that writes secrets to a file.
+///
+/// Of the path, only the part **this build itself appended to `base`** — the
+/// P22 narrowing (`od8`, a security-review LOW on 09b5287).
+///
+/// The split is the whole point. What a wire appends is a route it owns, a
+/// literal in its own source (`/v1/messages`, `/responses`,
+/// `/chat/completions`), and naming it is how a log says which wire spoke.
+/// What the *base* contributed is not this build's to render: a compat entry
+/// may put a token in its path (`https://host/tenant/<token>` — exotic, but
+/// config-declared bases are where it would happen), and nothing here can tell
+/// a route segment from a secret one. Stripping the base's own prefix keeps
+/// every diagnostic it had and leaks none of what a person configured.
+///
+/// Deliberately not "render the path only for a base this build ships": four
+/// builtin bases carry a path of their own — `api.openai.com/v1`,
+/// `chatgpt.com/backend-api/codex`, openrouter's and zen's — so that rule
+/// would have dropped the route for exactly the wires that share a host and
+/// need it most, while still requiring a builtin/declared flag to be plumbed
+/// and kept honest. This needs neither.
+///
+/// Fails closed: a `base` that does not parse, or a `url` that does not sit
+/// under it, renders no path at all rather than a guessed one.
+pub(super) fn endpoint(url: &Url, base: &str) -> String {
     let authority = match (url.host_str(), url.port()) {
         (Some(host), Some(port)) => format!("{host}:{port}"),
         (Some(host), None) => host.to_owned(),
@@ -1119,7 +1143,16 @@ pub(super) fn endpoint(url: &Url) -> String {
         (None, _) => String::new(),
     };
 
-    format!("{}://{authority}{}", url.scheme(), url.path())
+    // Both sides come from `Url::path`, so the comparison is between two
+    // equally percent-encoded strings rather than between a raw and a parsed
+    // one. The trailing slash goes because a base is written with or without
+    // one and the route that follows carries its own leading slash.
+    let route = Url::parse(base)
+        .ok()
+        .and_then(|base| url.path().strip_prefix(base.path().trim_end_matches('/')))
+        .unwrap_or_default();
+
+    format!("{}://{authority}{route}", url.scheme())
 }
 
 /// Drives `chunks` through the frame splitter and `mapper`.
@@ -1587,13 +1620,72 @@ mod tests {
         )
         .expect("a parseable URL");
 
-        let rendered = endpoint(&url);
+        // A base that contributed no path of its own, so the route this build
+        // appended is this build's to name.
+        let rendered = endpoint(&url, "https://api.example.com:8443");
 
         assert_eq!(rendered, "https://api.example.com:8443/v1/responses");
         assert!(
             !rendered.contains("canary"),
             "a credential reached a log line: {rendered}"
         );
+    }
+
+    /// The P22 narrowing (`od8`): a base a person configured may carry a token
+    /// in its *path*, and nothing here can tell a route segment from a secret
+    /// one — so what a base contributed is never rendered, and what the wire
+    /// appended still is.
+    #[test]
+    fn a_logged_endpoint_renders_no_path_segment_a_configured_base_contributed() {
+        let base = "https://someone:sk-test-canary-USERINFO@compat.example.com\
+                    /tenant/sk-test-canary-PATH";
+        let url = reqwest::Url::parse(&format!("{base}/v1/messages")).expect("a parseable URL");
+
+        let rendered = endpoint(&url, base);
+
+        assert_eq!(
+            rendered, "https://compat.example.com/v1/messages",
+            "the route this build appended survives; the tenant path does not"
+        );
+        assert!(
+            !rendered.contains("canary"),
+            "a credential reached a log line: {rendered}"
+        );
+
+        // Fails closed: a base this function cannot read is a base whose shape
+        // it cannot vouch for, so none of the path is rendered.
+        assert_eq!(
+            endpoint(&url, "not a URL"),
+            "https://compat.example.com",
+            "an unparseable base yields no path rather than a guessed one"
+        );
+    }
+
+    /// The builtin bases that carry a path of their own — which is why this
+    /// strips a prefix rather than classifying a base as shipped or declared.
+    /// Each keeps exactly the route its wire appended, so two backends sharing
+    /// a host stay tellable apart in a log.
+    #[test]
+    fn a_builtin_base_that_carries_its_own_path_still_names_the_route() {
+        for (base, route) in [
+            // `openai::DEFAULT_BASE_URL`, the platform Responses backend.
+            ("https://api.openai.com/v1", "/responses"),
+            // `responses::DEFAULT_BASE_URL`, the ChatGPT codex backend.
+            ("https://chatgpt.com/backend-api/codex", "/responses"),
+            // A base written with a trailing slash is the same base.
+            ("https://api.openai.com/v1/", "/chat/completions"),
+            // And one with no path of its own renders the whole path.
+            ("https://api.anthropic.com", "/v1/messages"),
+        ] {
+            let url = reqwest::Url::parse(&format!("{}{route}", base.trim_end_matches('/')))
+                .expect("a parseable URL");
+            let rendered = endpoint(&url, base);
+
+            assert!(
+                rendered.ends_with(route),
+                "{base} should still name {route}; got {rendered}"
+            );
+        }
     }
 
     /// `headers` is where a configured endpoint's token goes, so a refusal
@@ -1746,23 +1838,21 @@ mod tests {
 
         // The rest of the taxonomy is a credential that has to be replaced or a
         // file that has to be repaired, and repeating the request fixes
-        // neither.
-        for error in [
-            auth::AuthError::NotOauth {
+        // neither. One case since P22 (`flp`), where there were two: the
+        // `Expired` variant retired with the kind it mapped to, having had no
+        // production constructor once `usable_access` went.
+        let absent = unusable(
+            &auth::AuthError::NotOauth {
                 provider_id: "grok".to_owned(),
                 found: "an API key",
-            },
-            auth::AuthError::Expired {
-                provider_id: "grok".to_owned(),
-            },
-        ] {
-            let classified = unusable(&error.into());
+            }
+            .into(),
+        );
 
-            assert!(
-                matches!(classified, ProviderError::Auth(_)) && !classified.is_retryable(),
-                "{classified:?} should be a non-retryable auth failure"
-            );
-        }
+        assert!(
+            matches!(absent, ProviderError::Auth(_)) && !absent.is_retryable(),
+            "{absent:?} should be a non-retryable auth failure"
+        );
     }
 
     /// The key travels in a header on every request, so the transport is what

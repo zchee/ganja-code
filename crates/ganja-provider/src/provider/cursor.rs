@@ -320,7 +320,7 @@ impl CursorWire {
         // against the endpoint they came from. No redirect was followed to
         // get here — the client refuses them — so this is the URL the
         // request was built with.
-        let endpoint = endpoint(response.url());
+        let endpoint = endpoint(response.url(), &self.base_url);
 
         // This wire opens its own request rather than riding the shared
         // `open`, so it has to join `shielded` by hand: every failure it

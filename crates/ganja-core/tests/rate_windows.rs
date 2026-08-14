@@ -14,6 +14,11 @@
 //! the used/remaining normalization landing in one direction, and a snapshot
 //! carrying no reset staying undated rather than borrowing one.
 //!
+//! P22 (`53v`) gave the *rate* buckets that last property too, so it is pinned
+//! here as well: grok's `x-ratelimit-*` arrive with the two counts and no
+//! reset at all, and a set this build once dropped whole now reaches the
+//! accessor undated.
+//!
 //! Its own binary, `http.rs`'s posture: the response bytes are canned but the
 //! socket is not, so a header only counts once it has survived being written,
 //! read and parsed by the same client a real turn uses.
@@ -188,6 +193,44 @@ async fn a_response_carrying_rate_headers_lands_on_the_engines_polled_state() {
     assert!(
         !windows[0].expired(SystemTime::now()),
         "a window resetting in 2099 is not expired today"
+    );
+}
+
+/// AC3 (`53v`) end to end: grok's own shape — the two counts per bucket and
+/// no `-reset-` header anywhere — survives the socket and reaches the accessor
+/// every rendering surface polls.
+///
+/// Before P22 the three-field rule dropped these on the floor, so an account
+/// with real budget left metered as a silent backend. What arrives now is a
+/// bucket with no clock, which nothing may call stale and nothing may date.
+#[tokio::test]
+async fn a_response_whose_buckets_carry_no_reset_still_reaches_the_engine() {
+    let endpoint = serve(vec![pairs(&[
+        ("x-ratelimit-limit-requests", "500"),
+        ("x-ratelimit-remaining-requests", "499"),
+        ("x-ratelimit-limit-tokens", "150000"),
+        ("x-ratelimit-remaining-tokens", "149000"),
+    ])])
+    .await;
+    let engine = engine(&endpoint);
+
+    turn(&engine, "hi").await;
+
+    let windows = engine.rate_windows();
+    assert_eq!(windows.len(), 2, "both buckets land: got {windows:?}");
+    assert_eq!(windows[0].kind, "requests");
+    assert_eq!(windows[0].remaining, 499);
+    assert_eq!(windows[1].kind, "tokens");
+    assert_eq!(windows[1].remaining, 149_000);
+    assert!(
+        windows.iter().all(|window| window.reset.is_none()),
+        "nothing dated these, so nothing carries a date: {windows:?}"
+    );
+    assert!(
+        windows
+            .iter()
+            .all(|window| !window.expired(SystemTime::now())),
+        "and a bucket nobody dated cannot have gone stale: {windows:?}"
     );
 }
 

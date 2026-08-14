@@ -276,7 +276,7 @@ impl Provider for AnthropicProvider {
         tracing::debug!(
             provider = ID,
             model = request.model,
-            endpoint = super::endpoint(built.url()),
+            endpoint = super::endpoint(built.url(), &self.base_url),
             "requesting a turn"
         );
 
@@ -287,6 +287,7 @@ impl Provider for AnthropicProvider {
             },
             &self.client,
             built,
+            &self.base_url,
             &presented,
             &self.rates,
             cancel,

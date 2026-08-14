@@ -1088,20 +1088,24 @@ mod tests {
     }
 
     /// One rate-limit window, `remaining` of `limit` left, refilling `in_secs`
-    /// from now — negative for one whose reset has already gone by.
-    fn window(kind: &str, limit: u64, remaining: u64, in_secs: i64) -> RateWindow {
+    /// from now — negative for one whose reset has already gone by, and
+    /// [`None`] for a vendor that dated it not at all (grok's shape, D484 as
+    /// P22 amended it).
+    fn window(kind: &str, limit: u64, remaining: u64, in_secs: Option<i64>) -> RateWindow {
         let now = SystemTime::now();
-        let offset = Duration::from_secs(in_secs.unsigned_abs());
 
         RateWindow {
             kind: kind.to_owned(),
             limit,
             remaining,
-            reset: if in_secs < 0 {
-                now - offset
-            } else {
-                now + offset
-            },
+            reset: in_secs.map(|seconds| {
+                let offset = Duration::from_secs(seconds.unsigned_abs());
+                if seconds < 0 {
+                    now - offset
+                } else {
+                    now + offset
+                }
+            }),
         }
     }
 
@@ -1479,9 +1483,9 @@ mod tests {
         let mut status = roster(&[StatuslineElement::Rate]);
         status.set_rates(vec![
             // 10% spent — the roomy one, which must not be the one shown.
-            window("requests", 1_000, 900, 60),
+            window("requests", 1_000, 900, Some(60)),
             // 75% spent — the budget that will stop a turn first.
-            window("input-tokens", 80_000, 20_000, 60),
+            window("input-tokens", 80_000, 20_000, Some(60)),
         ]);
 
         assert_eq!(
@@ -1509,7 +1513,7 @@ mod tests {
     #[test]
     fn a_rate_window_past_its_reset_decays_to_an_empty_element() {
         let mut status = roster(&[StatuslineElement::Rate, StatuslineElement::Activity]);
-        status.set_rates(vec![window("requests", 1_000, 4, -1)]);
+        status.set_rates(vec![window("requests", 1_000, 4, Some(-1))]);
 
         let line = rendered(&status, 60);
         assert_eq!(
@@ -1519,13 +1523,29 @@ mod tests {
         assert!(!line.contains("rate:"), "got {line:?}");
     }
 
+    /// The other side of that decay, since P22 (`53v`): a window nothing dated
+    /// cannot go stale, so it stays on the bar until a later response replaces
+    /// the set. The element's *shape* is untouched — a used percentage needs
+    /// no clock — which is the whole of what the amendment costs this surface.
+    #[test]
+    fn a_rate_window_its_vendor_never_dated_keeps_metering() {
+        let mut status = roster(&[StatuslineElement::Rate]);
+        status.set_rates(vec![window("requests", 1_000, 900, None)]);
+
+        assert_eq!(
+            rendered(&status, 60),
+            "rate:[#-------]10%",
+            "grok's clockless bucket meters exactly as a dated one does"
+        );
+    }
+
     /// The plan bucket rides beside the throttling one, so the two questions —
     /// what stops this request, what runs out this week — are both answerable
     /// off one element (**D485**).
     #[test]
     fn the_rate_element_meters_the_plan_bucket_beside_the_throttling_one() {
         let mut status = roster(&[StatuslineElement::Rate]);
-        status.set_rates(vec![window("requests", 1_000, 900, 60)]);
+        status.set_rates(vec![window("requests", 1_000, 900, Some(60))]);
         status.set_plans(vec![plan("primary", 62.0, Some(3_600))]);
 
         assert_eq!(
@@ -1572,7 +1592,7 @@ mod tests {
     #[test]
     fn a_plan_window_past_its_reset_leaves_only_the_rate_meter() {
         let mut status = roster(&[StatuslineElement::Rate, StatuslineElement::Activity]);
-        status.set_rates(vec![window("requests", 100, 50, 60)]);
+        status.set_rates(vec![window("requests", 100, 50, Some(60))]);
         status.set_plans(vec![plan("primary", 99.0, Some(-1))]);
 
         let line = rendered(&status, 60);
@@ -1587,8 +1607,8 @@ mod tests {
         let mut status = roster(&[StatuslineElement::Rate]);
         status.set_rates(vec![
             // Would be the tightest by far — and is expired.
-            window("input-tokens", 100, 0, -1),
-            window("requests", 100, 50, 60),
+            window("input-tokens", 100, 0, Some(-1)),
+            window("requests", 100, 50, Some(60)),
         ]);
 
         assert_eq!(rendered(&status, 60), "rate:[####----]50%");

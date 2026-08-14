@@ -72,12 +72,24 @@
 //! # What is not invented
 //!
 //! A backend that sends nothing yields nothing — the D470 rule, restated here
-//! because this is the module a lie would start in. A bucket is only a bucket
-//! when all three of `limit`, `remaining` and `reset` parse: a window with no
-//! reset could never expire, and a number that can never expire is exactly the
-//! frozen live-looking meter the P16 pre-mortem names. Anything short of three
-//! is dropped with a debug log naming the bucket and nothing else — a header
-//! value is a fact about somebody's account.
+//! because this is the module a lie would start in. A bucket is a bucket when
+//! `limit` and `remaining` parse; anything short of those two is dropped with
+//! a debug log naming the bucket and nothing else — a header value is a fact
+//! about somebody's account.
+//!
+//! `reset` is **not** one of those two, since P22. It was, and the reasoning
+//! was that a window which could never expire is the frozen live-looking meter
+//! the P16 pre-mortem names — but the P17 probe read xAI's own headers and
+//! found `x-ratelimit-{limit,remaining}-{tokens,requests}` arriving with no
+//! `-reset-` field at all, so that rule was throwing away a whole vendor's
+//! figures to guard against a staleness that vendor never claimed. A bucket it
+//! dated not at all is kept, [`RateWindow::expired`] answers `false` for it,
+//! and it lives until [`RateWindows::record`] replaces the set — which is the
+//! decay story [`PlanWindow`] has kept since D485, now told once for both.
+//!
+//! A reset that *was* sent in a spelling this build cannot read is a different
+//! thing and still drops its bucket whole: the vendor dated the window, so
+//! drawing it as undated would say something false about what arrived.
 //!
 //! A [`PlanWindow`] keeps that rule where its vendor gives it the material and
 //! says so where it does not: codex sends a reset and the window decays past
@@ -117,8 +129,18 @@ pub struct RateWindow {
     pub limit: u64,
     /// What is left of it.
     pub remaining: u64,
-    /// When the window refills. Always present: see the module docs.
-    pub reset: SystemTime,
+    /// When the window refills, when the vendor said.
+    ///
+    /// **D484**, amended P22: reset became optional for the vendors that send
+    /// none — grok, per the P17 probe
+    /// (`.omc/plans/2026-08-14-usage-meters-cursor-exec.md`), whose
+    /// `x-ratelimit-*` headers carry the two counts and no `-reset-` field.
+    /// [`None`] is that vendor's own answer and means this bucket has **no
+    /// clock** rather than that it refills now: nothing dated it, so nothing
+    /// expires it, and it lives until [`RateWindows::record`] replaces the
+    /// whole set. Every surface that draws one says so rather than inventing
+    /// an instant.
+    pub reset: Option<SystemTime>,
 }
 
 impl RateWindow {
@@ -127,9 +149,14 @@ impl RateWindow {
     /// An expired bucket is not deleted — the number it carried was true when
     /// it was said — but every surface renders it as expired rather than as a
     /// live figure, which is the whole of the staleness guard.
+    ///
+    /// A bucket whose vendor sent no reset is **never** expired: nothing dated
+    /// it, so nothing may call it stale. It goes when the next response that
+    /// speaks replaces the set — [`PlanWindow::expired`]'s answer, for the
+    /// same reason, on the sibling shape.
     #[must_use]
     pub fn expired(&self, now: SystemTime) -> bool {
-        self.reset <= now
+        self.reset.is_some_and(|reset| reset <= now)
     }
 
     /// How much of the budget is gone, 0.0 through 1.0.
@@ -380,22 +407,37 @@ impl Family {
     }
 }
 
-/// Builds one bucket from its three raw values, dropping it — named — when any
-/// of them is missing or unreadable.
+/// Builds one bucket from its raw values, dropping it — named — when what
+/// makes it a bucket is missing or unreadable.
+///
+/// The two counts are what make it one; the reset is optional on the wire and
+/// therefore optional here (see the module docs). What a vendor sent and this
+/// build could not read is the one case that still costs the whole bucket.
 fn window(kind: String, fields: [Option<&str>; 3], now: SystemTime) -> Option<RateWindow> {
     let [limit, remaining, reset] = fields;
-    let (Some(limit), Some(remaining), Some(reset)) = (limit, remaining, reset) else {
+    let (Some(limit), Some(remaining)) = (limit, remaining) else {
         tracing::debug!(bucket = kind, "a rate-limit bucket was incomplete");
         return None;
     };
 
-    let (Ok(limit), Ok(remaining), Some(reset)) = (
-        limit.parse::<u64>(),
-        remaining.parse::<u64>(),
-        instant(reset, now),
-    ) else {
+    let (Ok(limit), Ok(remaining)) = (limit.parse::<u64>(), remaining.parse::<u64>()) else {
         tracing::debug!(bucket = kind, "a rate-limit bucket could not be read");
         return None;
+    };
+
+    let reset = match reset {
+        Some(sent) => match instant(sent, now) {
+            Some(reset) => Some(reset),
+            // Dated by its vendor in a spelling this build does not know. Not
+            // a clockless bucket — that is a vendor saying nothing, and this
+            // one said something — so the whole bucket goes rather than being
+            // drawn as undated.
+            None => {
+                tracing::debug!(bucket = kind, "a rate-limit bucket could not be read");
+                return None;
+            }
+        },
+        None => None,
     };
 
     Some(RateWindow {
@@ -820,13 +862,13 @@ mod tests {
                     kind: "input-tokens".to_owned(),
                     limit: 80_000,
                     remaining: 60_000,
-                    reset: NOW + Duration::from_secs(30),
+                    reset: Some(NOW + Duration::from_secs(30)),
                 },
                 RateWindow {
                     kind: "requests".to_owned(),
                     limit: 1_000,
                     remaining: 999,
-                    reset: NOW + Duration::from_secs(60),
+                    reset: Some(NOW + Duration::from_secs(60)),
                 },
             ],
             "both buckets are read, in their names' own order"
@@ -856,13 +898,13 @@ mod tests {
                     kind: "requests".to_owned(),
                     limit: 500,
                     remaining: 499,
-                    reset: NOW + Duration::from_secs(120),
+                    reset: Some(NOW + Duration::from_secs(120)),
                 },
                 RateWindow {
                     kind: "tokens".to_owned(),
                     limit: 150_000,
                     remaining: 149_000,
-                    reset: NOW + Duration::from_secs(360),
+                    reset: Some(NOW + Duration::from_secs(360)),
                 },
             ],
             "the bare-seconds and Go-duration spellings both land"
@@ -881,7 +923,7 @@ mod tests {
             NOW,
         );
 
-        assert_eq!(windows[0].reset, NOW + Duration::from_millis(500));
+        assert_eq!(windows[0].reset, Some(NOW + Duration::from_millis(500)));
     }
 
     /// The rule this module exists to keep: nothing is invented.
@@ -893,21 +935,92 @@ mod tests {
         );
     }
 
-    /// Three fields or no bucket — a window that could never expire is the
-    /// frozen meter the pre-mortem names.
+    /// The two counts make a bucket; the reset is the vendor's to send or not.
+    ///
+    /// This is grok's shape as the P17 probe read it off `api.x.ai`: the
+    /// `x-ratelimit-*` family with both counts per bucket and no `-reset-`
+    /// header anywhere. Before P22 the three-field rule dropped every one of
+    /// them, so a whole vendor metered as silent.
     #[test]
-    fn a_bucket_missing_its_reset_is_dropped_rather_than_left_unexpiring() {
-        assert!(
-            parse(
-                &headers(&[
-                    ("anthropic-ratelimit-requests-limit", "1000"),
-                    ("anthropic-ratelimit-requests-remaining", "999"),
-                ]),
-                NOW,
-            )
-            .is_empty(),
-            "two of three fields is not a bucket"
+    fn a_bucket_its_vendor_never_dated_is_kept_clockless() {
+        let windows = parse(
+            &headers(&[
+                ("x-ratelimit-limit-tokens", "150000"),
+                ("x-ratelimit-remaining-tokens", "149000"),
+                ("x-ratelimit-limit-requests", "500"),
+                ("x-ratelimit-remaining-requests", "499"),
+            ]),
+            NOW,
         );
+
+        assert_eq!(
+            windows,
+            vec![
+                RateWindow {
+                    kind: "requests".to_owned(),
+                    limit: 500,
+                    remaining: 499,
+                    reset: None,
+                },
+                RateWindow {
+                    kind: "tokens".to_owned(),
+                    limit: 150_000,
+                    remaining: 149_000,
+                    reset: None,
+                },
+            ],
+            "both of grok's buckets are read, dated by nobody"
+        );
+    }
+
+    /// One count is still not a bucket: nothing meters against a limit alone.
+    #[test]
+    fn a_bucket_missing_a_count_is_dropped() {
+        for lonely in [
+            ("anthropic-ratelimit-requests-limit", "1000"),
+            ("anthropic-ratelimit-requests-remaining", "999"),
+        ] {
+            assert!(
+                parse(&headers(&[lonely]), NOW).is_empty(),
+                "{} alone is half a bucket",
+                lonely.0
+            );
+        }
+    }
+
+    /// A full triple is untouched by P22's widening: dated as it always was.
+    #[test]
+    fn a_bucket_its_vendor_dated_still_carries_that_date() {
+        let windows = parse(
+            &headers(&[
+                ("anthropic-ratelimit-requests-limit", "1000"),
+                ("anthropic-ratelimit-requests-remaining", "999"),
+                ("anthropic-ratelimit-requests-reset", "1970-01-01T00:01:00Z"),
+            ]),
+            NOW,
+        );
+
+        assert_eq!(windows[0].reset, Some(NOW + Duration::from_secs(60)));
+    }
+
+    /// Mixed sets: one vendor answering about two buckets may date one of them
+    /// and not the other, and each keeps its own answer.
+    #[test]
+    fn a_dated_bucket_and_a_clockless_one_survive_the_same_response() {
+        let windows = parse(
+            &headers(&[
+                ("x-ratelimit-limit-requests", "500"),
+                ("x-ratelimit-remaining-requests", "499"),
+                ("x-ratelimit-reset-requests", "60"),
+                ("x-ratelimit-limit-tokens", "150000"),
+                ("x-ratelimit-remaining-tokens", "149000"),
+            ]),
+            NOW,
+        );
+
+        assert_eq!(windows.len(), 2, "neither is dropped for the other's sake");
+        assert_eq!(windows[0].reset, Some(NOW + Duration::from_secs(60)));
+        assert_eq!(windows[1].reset, None);
     }
 
     /// Garbage in one bucket drops that bucket and leaves its neighbour.
@@ -932,7 +1045,9 @@ mod tests {
         assert_eq!(windows[0].kind, "output-tokens");
     }
 
-    /// A reset in neither spelling is not guessed at.
+    /// A reset in neither spelling is not guessed at — and, since P22, is not
+    /// quietly demoted to a clockless bucket either: this vendor *dated* the
+    /// window, so drawing it as undated would misreport what arrived.
     #[test]
     fn a_reset_in_no_known_spelling_drops_its_bucket() {
         for spelling in ["tomorrow", "6x0s", "", "-30"] {
@@ -997,13 +1112,32 @@ mod tests {
             kind: "requests".to_owned(),
             limit: 100,
             remaining: 3,
-            reset: NOW + Duration::from_secs(60),
+            reset: Some(NOW + Duration::from_secs(60)),
         };
 
         assert!(!window.expired(NOW), "before its reset it is live");
         assert!(
             window.expired(NOW + Duration::from_secs(61)),
             "past its reset it is expired"
+        );
+    }
+
+    /// The other half of that guard, since P22: a bucket nobody dated cannot
+    /// go stale, however long the clock runs.
+    #[test]
+    fn a_bucket_its_vendor_never_dated_never_expires() {
+        let window = RateWindow {
+            kind: "requests".to_owned(),
+            limit: 100,
+            remaining: 3,
+            reset: None,
+        };
+
+        assert!(!window.expired(NOW), "nothing dated it");
+        assert!(
+            !window.expired(NOW + Duration::from_secs(86_400 * 365)),
+            "and a year of clock does not date it either: only the next \
+             response that speaks replaces it"
         );
     }
 
@@ -1014,7 +1148,7 @@ mod tests {
             kind: "requests".to_owned(),
             limit: 0,
             remaining: 0,
-            reset: NOW,
+            reset: Some(NOW),
         };
 
         assert!((window.used() - 1.0).abs() < f64::EPSILON);
