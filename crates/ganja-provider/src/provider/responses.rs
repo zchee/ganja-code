@@ -557,7 +557,8 @@ impl ResponsesProvider {
         // The effort's options go under the wire's own fields, so a catalog
         // row can add `reasoning` but can never unmake `model` or `stream`.
         let own = Body::new(request);
-        let body = splice_effort(&request.effort_options, &own);
+        let options = summarized(&request.effort_options, &request.model);
+        let body = splice_effort(&options, &own);
         built.json(&body).build().map_err(|error| {
             ProviderError::Transport(
                 resolved
@@ -1365,6 +1366,41 @@ fn seals_reasoning(model: &str) -> bool {
     id.contains("gpt-5") && !id.contains("gpt-5-chat") && !id.contains("gpt-5-pro")
 }
 
+/// The effort's options with `reasoning.summary` defaulted to `"auto"` for a
+/// model that reasons.
+///
+/// The Responses API streams no readable thinking unless the request asks —
+/// `response.reasoning_summary_text.delta` (which [`Mapping`] already turns
+/// into the pane's thinking) only exists downstream of a `reasoning.summary`
+/// in the body. `"auto"` is what the Codex CLI itself sends, on the same
+/// backend, so it is the vendor's own spelling of "show the thinking".
+///
+/// Merged key-wise rather than set whole: an effort's `reasoning.effort` must
+/// survive beside the summary, and a summary somebody spelled out in their own
+/// options is theirs — the default fills absence only. Gated by
+/// [`seals_reasoning`] exactly as `include` is, and for the same reason: a
+/// model that does not reason answers a `reasoning` field with a 400.
+fn summarized(
+    options: &serde_json::Map<String, serde_json::Value>,
+    model: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut options = options.clone();
+    if !seals_reasoning(model) {
+        return options;
+    }
+
+    let reasoning = options
+        .entry("reasoning".to_owned())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let serde_json::Value::Object(object) = reasoning {
+        object
+            .entry("summary".to_owned())
+            .or_insert_with(|| serde_json::Value::String("auto".to_owned()));
+    }
+
+    options
+}
+
 /// The chat-completions sentinel, which some deployments send here too.
 const DONE: &str = "[DONE]";
 
@@ -1397,7 +1433,7 @@ mod tests {
     use super::{
         ACCOUNT_HEADER, ALLOWED_MODELS, BETA, BETA_HEADER, Backend, Body, CHAT_COMPLETIONS_ONLY,
         DEFAULT_BASE_URL, ID, Mapping, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider,
-        SEAT_ROSTER, SUBSCRIPTION_DEFAULT, generation, reauth, seals_reasoning, serves,
+        SEAT_ROSTER, SUBSCRIPTION_DEFAULT, generation, reauth, seals_reasoning, serves, summarized,
     };
     use crate::{
         auth::{self, AuthError, OauthCredential, RefreshOauth},
@@ -1655,6 +1691,61 @@ mod tests {
             "a key the wire writes resolves to the wire"
         );
         assert_eq!(body["model"], json!(SERVED));
+    }
+
+    /// Readable thinking exists only downstream of asking for it: the body
+    /// carries `reasoning.summary: "auto"` for a model that reasons, the
+    /// default fills absence only, and a model that does not reason gets no
+    /// `reasoning` field to be refused over.
+    #[test]
+    fn a_reasoning_model_is_asked_to_show_its_thinking() {
+        let cases: Vec<(
+            &str,
+            serde_json::Map<String, serde_json::Value>,
+            serde_json::Value,
+        )> = vec![
+            (
+                "bare request asks for auto",
+                serde_json::Map::new(),
+                json!({"summary": "auto"}),
+            ),
+            (
+                "an effort's own keys survive beside the default",
+                json!({"reasoning": {"effort": "high"}})
+                    .as_object()
+                    .cloned()
+                    .expect("object fixture"),
+                json!({"effort": "high", "summary": "auto"}),
+            ),
+            (
+                "a summary somebody spelled out is theirs",
+                json!({"reasoning": {"summary": "detailed"}})
+                    .as_object()
+                    .cloned()
+                    .expect("object fixture"),
+                json!({"summary": "detailed"}),
+            ),
+        ];
+        for (name, options, expected) in cases {
+            let mut request = ask();
+            request.effort_options = options;
+            let own = Body::new(&request);
+            let options = summarized(&request.effort_options, &request.model);
+            let body = serde_json::to_value(splice_effort(&options, &own))
+                .expect("a spliced body serializes");
+            assert_eq!(body["reasoning"], expected, "{name}");
+        }
+
+        let mut request = ask();
+        request.model = "gpt-5-chat".to_owned();
+        let own = Body::new(&request);
+        let options = summarized(&request.effort_options, &request.model);
+        let body =
+            serde_json::to_value(splice_effort(&options, &own)).expect("a spliced body serializes");
+        assert!(
+            body.get("reasoning").is_none(),
+            "a model that does not reason is asked nothing about reasoning"
+        );
     }
 
     /// The allow-list is a ChatGPT seat's product decision, and applying it to
