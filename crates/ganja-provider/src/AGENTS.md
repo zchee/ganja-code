@@ -28,6 +28,7 @@ Three modules and a private fourth. `provider/` is the wires; `auth` is where a 
 
 | Directory | Purpose |
 |-----------|---------|
+| `provider/rate.rs` | The rate and plan windows a response's headers may carry. **P16**: `RateWindow`/`RateWindows`, the prefix-driven family parser (`anthropic-ratelimit-`, `x-ratelimit-`), recorded at the one `open()` seam and polled through the engine accessor (**D484**). **P17**: `PlanWindow` beside it — the codex backend's `x-codex-…-used-percent` families and Copilot's `x-quota-snapshot-*` query-string snapshots, grammars mirrored from the vendors' own clients and cited in the module doc (**D485**) — plus the names-only header probe `record` logs at debug, which is how the next family row gets decided. |
 | `provider/` | The wires themselves (see `provider/AGENTS.md`) |
 | `auth/` | The login flows, listed above beside `auth.rs` |
 
