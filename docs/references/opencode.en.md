@@ -207,7 +207,7 @@ upstream lacks.*
 | Feature | Notes | ganja |
 |---|---|---|
 | [models.dev provider catalog](https://opencode.ai/docs/providers) | 75+ providers resolved by id | ❌ six built-ins + two compat dialects |
-| [OpenCode Zen](https://opencode.ai/docs/zen) | hosted gateway, `opencode/` model prefix, one key, rotating free models | ❌ out of scope |
+| [OpenCode Zen](https://opencode.ai/docs/zen) | hosted gateway, `opencode/` model prefix, one key, rotating free models | ✅ `opencode` and `opencode-go` (D488): one OPENCODE_API_KEY, per-model dialect dispatch off the catalog npm hint across chat/Responses/Messages wires (x-api-key where the gateway demands it); google rows refused by name, the vendor's own client's answer |
 | [npm `@ai-sdk/*` provider loaders](https://opencode.ai/docs/providers) | any Vercel-AI-SDK package as a provider | ❌ ganja's `compat` speaks two fixed dialects instead |
 | [Provider options](https://opencode.ai/docs/providers) | `baseURL`, `apiKey`, `headers` | ✅ as `base_url`, `key_env`, `headers` |
 | [Per-model catalog overrides](https://opencode.ai/docs/providers) | `models.<id>.name` / `limit.context` / `limit.output` | ❌ a config provider stays uncataloged |
