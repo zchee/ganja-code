@@ -200,8 +200,8 @@ fn mcp_notice(
 /// carries a failed clone's stderr as its message.
 ///
 /// A free function because [`App::run_plugin_effect`] runs it on a blocking
-/// task: what it needs is the store and the decision, and handing it less
-/// than `self` is what makes that spawn possible.
+/// task that outlives the call: what it needs is the store and the decision,
+/// and handing it less than `self` is what makes that spawn possible.
 fn run_store_effect(store: &ganja_core::plugin::Store, effect: plugin::Effect) -> String {
     match effect {
         plugin::Effect::Enable(name) => match store.set_enabled(&name, true) {
@@ -235,6 +235,22 @@ fn run_store_effect(store: &ganja_core::plugin::Store, effect: plugin::Effect) -
             }
         }
         plugin::Effect::Reload => unreachable!("the reload never reaches the store helper"),
+    }
+}
+
+/// What the dialog says while `effect` runs off the loop: the present tense
+/// of the confirmation [`run_store_effect`] will answer with, so the notice
+/// line reads as one sentence finishing rather than as two unrelated states.
+fn pending_notice(effect: &plugin::Effect) -> String {
+    match effect {
+        plugin::Effect::Enable(name) => format!("enabling {name}\u{2026}"),
+        plugin::Effect::Disable(name) => format!("disabling {name}\u{2026}"),
+        plugin::Effect::Remove(name) => format!("removing {name}\u{2026}"),
+        plugin::Effect::AddMarketplace(origin) => {
+            format!("adding marketplace from {origin}\u{2026}")
+        }
+        plugin::Effect::Install(spec) => format!("installing {spec}\u{2026}"),
+        plugin::Effect::Reload => unreachable!("the reload never reaches the store task"),
     }
 }
 
@@ -579,6 +595,12 @@ pub struct App {
     /// MCP dial is polled. Also the guard that keeps a second `/model` from
     /// spawning a second fetch.
     wire_fetch: Option<JoinHandle<WireListing>>,
+    /// The `/plugin` store action while one is in flight, carrying the notice
+    /// it will answer with. Reaped on Tick beside [`App::wire_fetch`] and for
+    /// the same reason: a marketplace add is a `git clone`, and the loop
+    /// draws rather than clones. Also the guard that keeps a second action
+    /// from racing the first over the same `plugins.json`.
+    plugin_task: Option<JoinHandle<String>>,
     /// The tools the `@` menu drives. The registry rather than the glob tool
     /// alone, so the menu asks for its walker by the name the engine knows it
     /// by instead of holding a second copy of the decision.
@@ -701,6 +723,7 @@ impl App {
             plans: Vec::new(),
             wire_models: None,
             wire_fetch: None,
+            plugin_task: None,
             tools: ganja_tool::Registry::with_builtins(),
             themes,
             theme,
@@ -978,6 +1001,7 @@ impl App {
                 self.poll_plans();
                 self.poll_mcp_dialog();
                 self.poll_wire_models().await;
+                self.poll_plugin_task().await;
                 // The other door into the same lane: a replay that lost a race
                 // to a turn starting under it keeps its place and is retried
                 // here, where nothing else would wake the loop to try again.
@@ -1708,7 +1732,7 @@ impl App {
         // The whole event, not just the code: the free-text step takes
         // printable characters, the way the question dialog's editor does.
         if self.plugin_dialog.is_some() {
-            self.handle_plugin_key(key).await;
+            self.handle_plugin_key(key);
 
             return Ok(());
         }
@@ -3329,12 +3353,16 @@ impl App {
     /// one-collector rule). A store that cannot be read opens the dialog
     /// anyway, with the refusal on its notice line: an unreadable state file
     /// is worth a person's attention, not a silent no-op.
+    /// A dialog opened while a store action from an earlier one is still
+    /// running is told so: the lane is the app's, not the dialog's, and a
+    /// fresh dialog that showed Add as live would be inviting a refusal.
     fn open_plugin(&mut self) {
         let (rows, notice) = self.plugin_rows();
         let mut dialog = plugin::Plugin::new(rows);
         if let Some(notice) = notice {
             dialog.set_notice(notice);
         }
+        dialog.set_busy(self.plugin_task.is_some());
         self.plugin_dialog = Some(dialog);
     }
 
@@ -3382,7 +3410,7 @@ impl App {
     /// question dialog's editor does; everywhere else the keys are the
     /// `/mcp` dialog's, Esc closing the dialog except where the input step
     /// consumes it as "cancel the edit".
-    async fn handle_plugin_key(&mut self, key: KeyEvent) {
+    fn handle_plugin_key(&mut self, key: KeyEvent) {
         let Some(dialog) = &mut self.plugin_dialog else {
             return;
         };
@@ -3395,7 +3423,7 @@ impl App {
                 KeyCode::Backspace => dialog.backspace(),
                 KeyCode::Enter => {
                     if let Some(effect) = dialog.submit() {
-                        self.run_plugin_effect(effect).await;
+                        self.run_plugin_effect(effect);
                     }
                 }
                 KeyCode::Char(character) if !key.modifiers.intersects(SHORTCUT_MODIFIERS) => {
@@ -3417,44 +3445,107 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => dialog.move_selection(1),
             KeyCode::Enter => {
                 if let Some(effect) = dialog.submit() {
-                    self.run_plugin_effect(effect).await;
+                    self.run_plugin_effect(effect);
                 }
             }
             _ => {}
         }
     }
 
-    /// Runs what the dialog decided, and reflects the outcome on it: the
-    /// rows re-read from the store, the result — a confirmation, a refusal,
-    /// or a failed clone's captured git stderr — on the notice line, never a
-    /// silent state.
+    /// Starts what the dialog decided, and says on its notice line what is
+    /// happening — never a silent state. The outcome lands later, through
+    /// [`App::poll_plugin_task`].
     ///
-    /// The store calls run under [`tokio::task::spawn_blocking`] because two
-    /// of them are not quick — a marketplace add may be a `git clone`, an
-    /// install copies a tree — and the others ride the same path rather
-    /// than earning a second one. The await still holds the event loop for
-    /// the duration; a clone over a slow network is a frozen frame, which is
-    /// the honest v1 this dialog ships rather than a background lane of its
-    /// own.
-    async fn run_plugin_effect(&mut self, effect: plugin::Effect) {
-        let notice = match effect {
-            plugin::Effect::Reload => self.reload_plugins(),
-            effect => match self.resolve_plugin_store() {
-                None => "no config home could be resolved, so there is nowhere to keep plugins"
-                    .to_owned(),
-                Some(store) => {
-                    tokio::task::spawn_blocking(move || run_store_effect(&store, effect))
-                        .await
-                        .unwrap_or_else(|error| format!("the store task failed: {error}"))
-                }
-            },
+    /// The store calls run under [`tokio::task::spawn_blocking`] and are
+    /// **not awaited here**, because two of them are not quick — a
+    /// marketplace add may be a `git clone` over a network, an install copies
+    /// a tree — and an event loop that awaits one draws nothing and answers
+    /// no key until it returns (`zus`). The others ride the same lane rather
+    /// than earning a second one, and one lane is also what keeps two writers
+    /// off the same `plugins.json`: a second action while one runs is refused
+    /// with [`plugin::BUSY`] rather than queued, since a person who can see
+    /// the first one running can choose when to ask again.
+    ///
+    /// The reload is the one action that stays here: it touches no store
+    /// file, it needs `&mut self` for the engine seams it swaps, and it is a
+    /// config read rather than a network call.
+    fn run_plugin_effect(&mut self, effect: plugin::Effect) {
+        if effect == plugin::Effect::Reload {
+            let notice = self.reload_plugins();
+            let (rows, read_failure) = self.plugin_rows();
+            if let Some(dialog) = &mut self.plugin_dialog {
+                dialog.refresh(rows);
+                dialog.set_notice(read_failure.unwrap_or(notice));
+            }
+
+            return;
+        }
+
+        if self.plugin_task.is_some() {
+            // The dialog refuses its own two store-writing actions before
+            // they ever get here; this catches the rest — a row's
+            // enable/disable/remove chosen while a clone runs.
+            if let Some(dialog) = &mut self.plugin_dialog {
+                dialog.set_notice(plugin::BUSY);
+            }
+
+            return;
+        }
+
+        let Some(store) = self.resolve_plugin_store() else {
+            if let Some(dialog) = &mut self.plugin_dialog {
+                dialog.set_notice(
+                    "no config home could be resolved, so there is nowhere to keep plugins",
+                );
+            }
+
+            return;
         };
+
+        let pending = pending_notice(&effect);
+        self.plugin_task = Some(tokio::task::spawn_blocking(move || {
+            run_store_effect(&store, effect)
+        }));
+        if let Some(dialog) = &mut self.plugin_dialog {
+            dialog.set_busy(true);
+            dialog.set_notice(pending);
+        }
+    }
+
+    /// Reaps a finished `/plugin` store action and reflects it on the dialog:
+    /// the rows re-read from the store, the result — a confirmation, a
+    /// refusal, or a failed clone's captured git stderr — on the notice line.
+    ///
+    /// [`App::poll_wire_models`]'s shape, and for its reason: polled on the
+    /// tick, awaited only once the handle reports finished, so the loop never
+    /// waits on the clone it started.
+    ///
+    /// A dialog closed while the action ran simply has nowhere to put the
+    /// answer, and that is the whole of the cleanup: the result is polled
+    /// state rather than a channel into a closed dialog, and the store's own
+    /// stage-validate-move is what guarantees a killed or refused add left
+    /// nothing half-written behind.
+    async fn poll_plugin_task(&mut self) {
+        if !self
+            .plugin_task
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            return;
+        }
+        let handle = self.plugin_task.take().expect("checked finished above");
+        let notice = handle
+            .await
+            // A panic inside the store task; its message is all there is.
+            .unwrap_or_else(|error| format!("the store task failed: {error}"));
 
         let (rows, read_failure) = self.plugin_rows();
         if let Some(dialog) = &mut self.plugin_dialog {
+            dialog.set_busy(false);
             dialog.refresh(rows);
             dialog.set_notice(read_failure.unwrap_or(notice));
         }
+        self.dirty = true;
     }
 
     /// Re-reads the plugin store through a fresh config load and rebuilds
@@ -4273,7 +4364,10 @@ impl App {
             // open, exactly as the status bar's own MCP notice does.
             || self.mcp_dialog.is_some()
             || self.wire_fetch.is_some()
-            // The fifth is the fallback lane: a queued message whose replay
+            // A running store action has no event of its own either, and the
+            // dialog is waiting on exactly the tick that reaps it.
+            || self.plugin_task.is_some()
+            // The last is the fallback lane: a queued message whose replay
             // lost a race has nothing else to wake the loop and try again.
             // Only while the lane could actually act — a turn in flight is
             // woken by its own events, and a paused lane waiting on a revert
@@ -4372,9 +4466,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        App, BACKTRACK_HINT, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, ListDialog,
-        MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, Palette, Permission, RevertScope, Rewind,
-        WireListing, permission_reply,
+        App, BACKTRACK_HINT, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, JoinHandle,
+        ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, Palette, Permission, RevertScope,
+        Rewind, WireListing, permission_reply,
     };
 
     /// The session every hand-built fixture event happens in. One pinned id,
@@ -12563,6 +12657,40 @@ mod tests {
         store
     }
 
+    /// Ticks until the `/plugin` store action running off the loop has been
+    /// reaped and its outcome is on the dialog.
+    ///
+    /// What the real loop does on its own — [`App::wants_wakeup`] keeps it
+    /// ticking while the slot is full — driven by hand, because a test owns
+    /// its own clock. Every store action is one tick later than the keypress
+    /// that asked for it now (`zus`), which is the whole point: the loop
+    /// draws while a `git clone` runs.
+    async fn settle_plugin(app: &mut App) {
+        for _ in 0..600 {
+            if app.plugin_task.is_none() {
+                return;
+            }
+            app.handle(AppEvent::Tick).await.expect("a tick is handled");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("the store action never finished");
+    }
+
+    /// A blocking task in the shape of a slow clone: it parks for `millis`
+    /// and answers the way [`super::run_store_effect`] would.
+    ///
+    /// A real `git clone` finishes when the network says so, and a test that
+    /// raced one would pin timing rather than behavior. This is a real
+    /// blocking task in the real slot, which is what the loop's arrangement
+    /// is actually about.
+    fn parked_add(millis: u64) -> JoinHandle<String> {
+        tokio::task::spawn_blocking(move || {
+            std::thread::sleep(Duration::from_millis(millis));
+            "added marketplace slow-market from /slow".to_owned()
+        })
+    }
+
     /// `/plugin` opens from the roster and Esc walks back out — from the
     /// list, and from the per-plugin action step, the `/mcp` dialog's own
     /// two-step Esc.
@@ -12655,6 +12783,7 @@ mod tests {
                 .await
                 .expect("the key is handled");
         }
+        settle_plugin(&mut app).await;
         assert!(
             !store.state().expect("the state reads").plugins["formatter"].enabled,
             "the dialog's Disable landed in plugins.json"
@@ -12673,6 +12802,7 @@ mod tests {
                 .await
                 .expect("the key is handled");
         }
+        settle_plugin(&mut app).await;
         assert!(
             store.state().expect("the state reads").plugins["formatter"].enabled,
             "the dialog's Enable landed too"
@@ -12684,6 +12814,7 @@ mod tests {
                 .await
                 .expect("the key is handled");
         }
+        settle_plugin(&mut app).await;
         assert!(
             store.state().expect("the state reads").plugins.is_empty(),
             "remove deletes the state entry"
@@ -12748,6 +12879,7 @@ mod tests {
         app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
             .await
             .expect("the key is handled");
+        settle_plugin(&mut app).await;
         assert!(
             store
                 .state()
@@ -12791,6 +12923,7 @@ mod tests {
         app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
             .await
             .expect("the key is handled");
+        settle_plugin(&mut app).await;
 
         assert!(app.plugin_dialog.is_some(), "the dialog stays open");
         let mut terminal = terminal(100, 24);
@@ -12799,6 +12932,216 @@ mod tests {
             screen(&terminal).contains("git clone failed"),
             "the captured failure is on the notice line:\n{}",
             screen(&terminal)
+        );
+    }
+
+    /// **`zus`**: the event loop answers keys and draws frames *while* a
+    /// marketplace add runs, rather than freezing for the clone's duration.
+    ///
+    /// The proof is the parked task itself: the keys and the frame are
+    /// handled, and only then is the task asked whether it has finished. If
+    /// the loop had waited for it — the shape this test replaced — it could
+    /// not have answered them before the task was done.
+    #[tokio::test]
+    async fn the_loop_answers_keys_while_a_marketplace_add_is_running() {
+        let directory = temporary();
+        let store = plugin_store_fixture(&directory);
+        let mut app = app().with_plugin_store(store);
+        app.run_command(command::Action::Plugin).await;
+
+        app.plugin_task = Some(parked_add(500));
+        app.plugin_dialog
+            .as_mut()
+            .expect("the dialog is open")
+            .set_busy(true);
+
+        for code in [KeyCode::Down, KeyCode::Up, KeyCode::Down] {
+            app.handle(key(code, KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        let mut terminal = terminal(90, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        assert!(
+            !app.plugin_task
+                .as_ref()
+                .expect("the action still owns the lane")
+                .is_finished(),
+            "the keys and the frame were answered while the add ran, not after it"
+        );
+        assert!(
+            app.plugin_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.selected_plugin().is_none()),
+            "and the keys really moved the cursor: off the one plugin row"
+        );
+
+        settle_plugin(&mut app).await;
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("added marketplace slow-market"),
+            "and the outcome lands on the same line one tick later:\n{}",
+            screen(&terminal)
+        );
+        assert!(
+            app.plugin_dialog
+                .as_ref()
+                .is_some_and(|dialog| !dialog.is_busy()),
+            "the reap clears the running flag"
+        );
+    }
+
+    /// One lane, so a second store action while one runs is refused rather
+    /// than queued or raced — two writers over the same `plugins.json` is
+    /// the outcome nobody asked for. The dialog refuses its own two
+    /// store-writing actions before they open; the app catches the rest.
+    #[tokio::test]
+    async fn a_second_store_action_during_a_clone_is_refused_with_a_notice() {
+        let directory = temporary();
+        let store = plugin_store_fixture(&directory);
+        let mut app = app().with_plugin_store(store.clone());
+        app.run_command(command::Action::Plugin).await;
+
+        app.plugin_task = Some(parked_add(400));
+        app.plugin_dialog
+            .as_mut()
+            .expect("the dialog is open")
+            .set_busy(true);
+
+        // Down off the one plugin row lands on Add marketplace; Enter would
+        // open its input step were an add not already running.
+        for code in [KeyCode::Down, KeyCode::Enter] {
+            app.handle(key(code, KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        assert!(
+            app.plugin_dialog
+                .as_ref()
+                .is_some_and(|dialog| !dialog.is_typing()),
+            "the second add never opens its input"
+        );
+        let mut terminal = terminal(100, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("already running"),
+            "and the refusal is on the notice line:\n{}",
+            screen(&terminal)
+        );
+
+        // The app's own backstop, for what the dialog does not refuse itself:
+        // a row's Remove chosen while the add runs.
+        app.run_plugin_effect(component::plugin::Effect::Remove("formatter".to_owned()));
+        assert!(
+            store.plugin_root("formatter").exists(),
+            "the refused remove ran nothing"
+        );
+        assert!(
+            !app.plugin_task
+                .as_ref()
+                .expect("the first action still owns the lane")
+                .is_finished(),
+            "and nothing was spawned beside it"
+        );
+
+        // A dialog closed and reopened while the same action runs is told the
+        // lane is still busy, rather than offering an add it would refuse.
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        app.run_command(command::Action::Plugin).await;
+        assert!(
+            app.plugin_dialog
+                .as_ref()
+                .is_some_and(component::plugin::Plugin::is_busy),
+            "the reopened dialog inherits the running action"
+        );
+
+        settle_plugin(&mut app).await;
+        assert!(
+            app.plugin_dialog
+                .as_ref()
+                .is_some_and(|dialog| !dialog.is_busy()),
+            "the lane frees when the first action lands"
+        );
+    }
+
+    /// P21 pre-mortem 3: closing the dialog while a marketplace add runs
+    /// leaves no panic and nothing half-added.
+    ///
+    /// The reap only happens on a tick, and the only ticks here come after
+    /// the Esc — so the answer provably arrives with no dialog to put it on,
+    /// which is the case the delivery had to survive. What keeps the store
+    /// clean is its own stage-validate-move, unchanged: a failed clone leaves
+    /// no marketplace, and no staging directory either.
+    #[tokio::test]
+    async fn closing_the_dialog_mid_clone_leaves_no_panic_and_no_half_add() {
+        let directory = temporary();
+        let root = directory.path().join("plugin-store");
+        let store = ganja_core::plugin::Store::at(root.clone());
+        let mut app = app().with_plugin_store(store.clone());
+        app.run_command(command::Action::Plugin).await;
+
+        // An empty store starts the cursor on "Add marketplace"; `.git`
+        // routes through a real `git clone`, which is the slow one.
+        let missing = directory.path().join("nowhere.git");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        for character in missing.to_str().expect("unicode").chars() {
+            app.handle(key(KeyCode::Char(character), KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        assert!(app.plugin_task.is_some(), "the clone runs off the loop");
+        // Nothing has ticked yet, so this frame is the one drawn *during* the
+        // clone: it says what is running rather than showing a stale list.
+        let mut terminal = terminal(100, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("adding marketplace from"),
+            "the dialog says what is running:\n{}",
+            screen(&terminal)
+        );
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        assert!(
+            app.plugin_dialog.is_none(),
+            "esc closes the dialog with the clone still in flight"
+        );
+
+        settle_plugin(&mut app).await;
+        assert!(
+            app.plugin_dialog.is_none(),
+            "the landed answer reopens nothing"
+        );
+        assert!(
+            store
+                .state()
+                .expect("the state reads")
+                .marketplaces
+                .is_empty(),
+            "the failed clone added no marketplace"
+        );
+        let leftovers: Vec<String> = fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| {
+                        let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                        name.starts_with(".staging-").then_some(name)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "and left no staging directory behind: {leftovers:?}"
         );
     }
 

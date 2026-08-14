@@ -20,6 +20,13 @@
 //! dialog keeps. What this component *does* own is the notice line: an
 //! action's outcome (a failed clone's captured git stderr most of all)
 //! surfaces here, in the dialog, never as a silent state.
+//!
+//! One piece of the app's state does cross into the dialog: whether a store
+//! action it started is still running. A marketplace add is a `git clone`
+//! and runs off the event loop, so the dialog can be keyed while one is in
+//! flight — and the two actions that write the store are dimmed and refuse
+//! to open while it is, because a second writer would race the first over
+//! the same `plugins.json`.
 
 use ratatui::{
     buffer::Buffer,
@@ -64,6 +71,15 @@ const EMPTY: &str = "no plugins installed";
 /// What a plugin with no discoverable components summarizes to.
 const NO_COMPONENTS: &str = "no components";
 
+/// What a store action is refused with while another one is still running.
+///
+/// Shown by this dialog when the refusal is one it can make itself — the two
+/// store-writing top actions, which do not even open their input step while a
+/// clone runs — and by [`crate::app::App`] for the ones only it can catch, so
+/// both doors say the same thing.
+pub const BUSY: &str =
+    "a plugin action is already running \u{b7} wait for it to finish, or Esc to close";
+
 /// The row-independent actions, in the order the list shows them beneath the
 /// plugin rows.
 const TOP_ACTIONS: [TopAction; 3] = [
@@ -105,6 +121,18 @@ impl TopAction {
             Self::AddMarketplace => "Add marketplace",
             Self::Install => "Install plugin",
             Self::Reload => "Reload",
+        }
+    }
+
+    /// Whether choosing it writes the store, and therefore whether a running
+    /// action has to refuse it.
+    #[must_use]
+    fn writes_store(self) -> bool {
+        match self {
+            Self::AddMarketplace | Self::Install => true,
+            // The reload re-reads what is there; it never stages, moves or
+            // deletes, so a clone in flight is nothing for it to race.
+            Self::Reload => false,
         }
     }
 
@@ -164,8 +192,11 @@ pub struct Plugin {
     selected: usize,
     step: Step,
     /// What the last action had to say — a failed clone's git stderr, an
-    /// enable's confirmation, the reload's honest split.
+    /// enable's confirmation, the reload's honest split, or what the action
+    /// running right now is doing.
     notice: Option<String>,
+    /// Whether a store action the app started is still running off the loop.
+    busy: bool,
 }
 
 impl Plugin {
@@ -178,6 +209,7 @@ impl Plugin {
             selected: 0,
             step: Step::List,
             notice: None,
+            busy: false,
         }
     }
 
@@ -191,6 +223,18 @@ impl Plugin {
     /// Sets the notice line the next frame shows.
     pub fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
+    }
+
+    /// Says whether a store action the app started is still running, which is
+    /// what dims the two store-writing actions and refuses a second one.
+    pub fn set_busy(&mut self, busy: bool) {
+        self.busy = busy;
+    }
+
+    /// Whether such an action is running.
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        self.busy
     }
 
     /// Whether the free-text step currently owns the keyboard.
@@ -279,6 +323,12 @@ impl Plugin {
     /// Enter, wherever the dialog is: steps forward where a step is what
     /// Enter means, and answers with the [`Effect`] the app has to run where
     /// a decision was made.
+    ///
+    /// While a store action is running ([`Plugin::set_busy`]), the two
+    /// actions that write the store answer with [`BUSY`] on the notice line
+    /// instead of opening their input step: a second clone would race the
+    /// first, and letting a person type a path that is going to be refused
+    /// anyway is worse than saying so at the keypress.
     pub fn submit(&mut self) -> Option<Effect> {
         match &mut self.step {
             Step::List => {
@@ -287,6 +337,10 @@ impl Plugin {
                     return None;
                 }
                 let action = TOP_ACTIONS[self.selected - self.rows.len()];
+                if self.busy && action.writes_store() {
+                    self.notice = Some(BUSY.to_owned());
+                    return None;
+                }
                 match action {
                     TopAction::Reload => Some(Effect::Reload),
                     TopAction::AddMarketplace | TopAction::Install => {
@@ -432,14 +486,17 @@ impl Plugin {
                 marker = if index == self.selected { MARKER } else { "  " },
                 label = action.label(),
             );
-            lines.push(Line::styled(
-                clip(&line, width),
-                if index == self.selected {
-                    theme.accent
-                } else {
-                    theme.fg
-                },
-            ));
+            // A store action in flight dims the two that would race it, so
+            // the refusal on the notice line is not the first a person hears
+            // of it.
+            let style = if self.busy && action.writes_store() {
+                theme.dim
+            } else if index == self.selected {
+                theme.accent
+            } else {
+                theme.fg
+            };
+            lines.push(Line::styled(clip(&line, width), style));
         }
 
         // The scroll window slides over the composed lines: the selected
@@ -762,6 +819,57 @@ mod tests {
             rendered(&dialog, AREA).contains("git clone failed: repository not found"),
             "got:\n{}",
             rendered(&dialog, AREA)
+        );
+    }
+
+    /// `zus`: while the app has a store action running off the loop, the two
+    /// actions that would write the store are refused where they are chosen —
+    /// the input step never opens — and the notice line says why. Reload is
+    /// untouched: it writes nothing there is to race.
+    #[test]
+    fn a_running_store_action_refuses_the_two_that_would_race_it() {
+        let mut dialog = dialog();
+        dialog.set_busy(true);
+        assert!(dialog.is_busy());
+
+        for offset in 0..2 {
+            let mut dialog = dialog.clone();
+            dialog.move_selection(2 + offset);
+
+            assert_eq!(dialog.submit(), None, "the store action is refused");
+            assert!(
+                !dialog.is_typing(),
+                "and the input step it would have opened stays shut"
+            );
+            let screen = rendered(&dialog, AREA);
+            assert!(screen.contains("already running"), "got:\n{screen}");
+        }
+
+        let mut reload = dialog.clone();
+        reload.move_selection(4);
+        assert_eq!(
+            reload.submit(),
+            Some(Effect::Reload),
+            "the reload races nothing and stays live"
+        );
+    }
+
+    /// The refusal lasts exactly as long as the action does: the app clears
+    /// the flag when it reaps the task, and the input opens again.
+    #[test]
+    fn clearing_the_running_flag_opens_the_add_again() {
+        let mut dialog = dialog();
+        dialog.set_busy(true);
+        dialog.move_selection(2);
+        assert_eq!(dialog.submit(), None);
+
+        dialog.set_busy(false);
+        assert_eq!(dialog.submit(), None, "Add marketplace opens the input");
+        assert!(dialog.is_typing());
+        dialog.push('x');
+        assert_eq!(
+            dialog.submit(),
+            Some(Effect::AddMarketplace("x".to_owned()))
         );
     }
 
