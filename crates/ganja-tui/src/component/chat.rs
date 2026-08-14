@@ -35,7 +35,7 @@
 //! — is still on screen, told by a glyph and a color instead of by a bracketed
 //! word.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState};
 use ratatui::{
@@ -92,6 +92,20 @@ const RESULT: &str = "  \u{23bf} ";
 /// every message with.
 const PROMPT: &str = "> ";
 
+/// What leads the line a running turn leaves at the tail of the transcript.
+const WORKING: &str = "\u{273b} ";
+
+/// The words a working line runs under, one per turn in order.
+///
+/// **Ganja's own vocabulary.** The *shape* of the line is Claude Code's, from
+/// the screenshot; the words are not ported — those are that program's voice,
+/// and upstream opencode has no such line at all to take one from. They are
+/// deliberately machine-plain: a loop churns and grinds, and none of these
+/// claims more about what is happening inside than is true.
+const WORKING_VERBS: [&str; 6] = [
+    "Working", "Thinking", "Churning", "Grinding", "Whirring", "Chewing",
+];
+
 /// The line a revert leaves in place of the messages it hid.
 ///
 /// Upstream draws a hoverable, left-bordered panel here and makes clicking it
@@ -131,6 +145,17 @@ pub struct Chat {
     /// render scrolls it into view — and a wheel scroll after that is left
     /// alone rather than snapped back.
     backtrack_unseen: bool,
+    /// The turn that is running, while one is (**D487**).
+    working: Option<Working>,
+    /// The line [`Chat::working`] drew to on the last frame.
+    ///
+    /// Rebuilt every render rather than cached on width and theme like every
+    /// other block here, because its text moves with the clock and there is
+    /// nothing for such a cache to key on. It is kept rather than returned
+    /// because [`Chat::visible`] hands out borrowed lines, and it costs one
+    /// short format per frame — on exactly the frames the status bar's spinner
+    /// is already redrawing for.
+    working_line: Option<Line<'static>>,
 }
 
 /// What is hidden, and the row that says so.
@@ -164,6 +189,54 @@ struct Entry {
     /// delta both clear that, and neither is a reason to parse again.
     markdown: HashMap<PartId, markdown::Document>,
     wrapped: Option<Wrapped>,
+}
+
+/// What a running turn leaves at the tail of the transcript (**D487**).
+///
+/// Carries the turn's own facts and no clock of its own: the elapsed figure is
+/// read off `started` at every frame, exactly as `component::status`'s spinner
+/// reads its phase off the moment its activity began, so nothing here has to
+/// be advanced by the render loop.
+#[derive(Clone, Copy, Debug)]
+pub struct Working {
+    /// When the turn began.
+    pub started: Instant,
+    /// Which turn of this session it is, so the verb rotates rather than being
+    /// drawn at random — a transcript replays into the same screen, and a die
+    /// roll would break that.
+    pub turn: u64,
+    /// Output tokens the **session** has spent, `0` for one that has spent
+    /// none yet.
+    ///
+    /// Not what this turn has spent, which nothing on this side knows: a
+    /// provider reports usage once, when the turn ends
+    /// (`Event::TurnFinished`), and there is no per-step channel to read a
+    /// live figure off. So the honest reading of the segment is the status
+    /// bar's own `N out` — the same number, in a second place — and a session
+    /// that has spent nothing draws no segment at all rather than claiming a
+    /// zero the screen would contradict.
+    pub output_tokens: u64,
+}
+
+impl Working {
+    /// The one line this draws to.
+    fn line(&self, theme: &Theme) -> Line<'static> {
+        let verbs = u64::try_from(WORKING_VERBS.len()).unwrap_or(1);
+        let verb = WORKING_VERBS[usize::try_from(self.turn % verbs).unwrap_or(0)];
+        let mut text = format!(
+            "{WORKING}{verb}\u{2026} ({elapsed}s",
+            elapsed = self.started.elapsed().as_secs()
+        );
+        if self.output_tokens > 0 {
+            text.push_str(&format!(
+                " \u{b7} \u{2191} {tokens} tokens",
+                tokens = self.output_tokens
+            ));
+        }
+        text.push(')');
+
+        Line::styled(text, theme.accent)
+    }
 }
 
 /// One line of a block before the viewport lays it out: what introduces it,
@@ -426,11 +499,24 @@ impl Chat {
         self.revert.is_some()
     }
 
+    /// Says that a turn is running, or that none is (**D487**).
+    ///
+    /// Deliberately not a `follow_tail`: a line appearing at the bottom is not
+    /// a reason to take a reader who scrolled up back down, and the offset
+    /// clamp already keeps a pinned viewport where it was put.
+    pub fn set_working(&mut self, working: Option<Working>) {
+        self.working = working;
+        if working.is_none() {
+            self.working_line = None;
+        }
+    }
+
     /// Empties the transcript, which is what switching sessions does to it.
     pub fn clear(&mut self) {
         self.entries.clear();
         self.revert = None;
         self.backtrack = None;
+        self.set_working(None);
         self.follow_tail();
     }
 
@@ -561,6 +647,9 @@ impl Chat {
         if let Some(revert) = &mut self.revert {
             revert.wrap(hidden, area.width, theme);
         }
+        // Before the offset math below, so the line it adds is one the
+        // viewport already knows about — the marker row's own arrangement.
+        self.working_line = self.working.map(|working| working.line(theme));
 
         // The highlight span exists only after the wrap above, which is why
         // the walk into view happens here rather than in the setter: the
@@ -642,6 +731,7 @@ impl Chat {
                 .revert
                 .as_ref()
                 .map_or(0, |revert| revert.lines().len())
+            + usize::from(self.working_line.is_some())
     }
 
     /// Widths the entries are currently cached at, which is how a test tells
@@ -671,14 +761,19 @@ impl Chat {
     /// The marker row rides along as one more block at the end, which is where
     /// it belongs: the entries a revert hides are always the tail of the
     /// transcript, so what it stands in for is always below everything shown.
+    /// The working line rides the same seam, one block further down still —
+    /// what a turn is doing now is below everything it has already said
+    /// (**D487**).
     fn visible(&self, offset: usize) -> impl Iterator<Item = &Line<'static>> {
         let mut left_to_skip = offset;
         let marker: &[Line<'static>] = self.revert.as_ref().map_or(&[], Revert::lines);
+        let working: &[Line<'static>] = self.working_line.as_slice();
 
         self.shown()
             .iter()
             .map(Entry::lines)
             .chain(std::iter::once(marker))
+            .chain(std::iter::once(working))
             .flat_map(move |lines| {
                 let skip = left_to_skip.min(lines.len());
                 left_to_skip -= skip;
@@ -886,19 +981,6 @@ const TOOL_PREVIEW_LINES: usize = 4;
 /// inline row rather than as a block of output.
 const TASK_TOOL: &str = "task";
 
-/// What marks a task row that is still running, and one that finished
-/// (upstream `routes/session/index.tsx:2213-2309`).
-const TASK_RUNNING: &str = "\u{2502}";
-/// See [`TASK_RUNNING`].
-const TASK_DONE: &str = "\u{2713}";
-
-/// What introduces the task row's second line.
-///
-/// The arrow alone, without the indent upstream draws in front of it: the
-/// transcript's wrap collapses leading whitespace on every line it lays out, so
-/// an indent here would be a claim the screen never honors.
-const TASK_DETAIL: &str = "\u{21b3} ";
-
 /// A call's arguments, condensed to the one line its header has room for:
 /// `key: "value"` pairs, the recognizable fields first, capped at
 /// [`HEADER_ARGS`] of them.
@@ -946,18 +1028,23 @@ fn derive_args(input: &serde_json::Value) -> Option<String> {
 /// is drawn as it is, and a nested payload as the shape it has.
 fn arg_value(value: &serde_json::Value) -> String {
     match value {
-        serde_json::Value::String(text) => {
-            let first = text.lines().next().unwrap_or_default();
-            let mut shown = clip(first, HEADER_VALUE);
-            if shown.len() < text.len() {
-                shown.push('\u{2026}');
-            }
-            format!("\"{shown}\"")
-        }
+        serde_json::Value::String(text) => quoted(text),
         serde_json::Value::Array(_) => "[\u{2026}]".to_owned(),
         serde_json::Value::Object(_) => "{\u{2026}}".to_owned(),
         other => other.to_string(),
     }
+}
+
+/// `text` as a header draws it: quoted, first line only, and cut to
+/// [`HEADER_VALUE`] columns with the cut admitted.
+fn quoted(text: &str) -> String {
+    let first = text.lines().next().unwrap_or_default();
+    let mut shown = clip(first, HEADER_VALUE);
+    if shown.len() < text.len() {
+        shown.push('\u{2026}');
+    }
+
+    format!("\"{shown}\"")
 }
 
 /// The one line a call is announced on: the tool, and what it was called with.
@@ -1155,25 +1242,26 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
 
 /// The two lines a delegated turn gets, whatever it is doing.
 ///
-/// Spec: upstream `routes/session/index.tsx:2213-2309`. Line one names the
-/// agent and what it was asked for; line two says what it is doing now, or
-/// what it did. **The child's own answer is never on the row** — it is inside
-/// the tool result the model reads, and a transcript that printed it would be
-/// showing the same work twice, once as prose and once as a result.
-///
-/// Its own markers rather than **D487**'s: `TASK_RUNNING`/`TASK_DONE` already
-/// say what a bullet's color would, and they are what the ported row draws.
-/// The rows carry no prefix, so they lay out exactly as they always did.
+/// Spec: upstream `routes/session/index.tsx:2213-2309` for the **facts** —
+/// the agent doing the work, what it was asked for, the tool it is in or the
+/// count and the clock it finished on. The **presentation** is D487's, not
+/// upstream's: the header is a bullet and the progress is a `⎿` row, because
+/// a delegated call is a call and a lone unbulleted block would break the one
+/// claim the grammar makes. Upstream's `│`/`✓` markers retired with it — the
+/// bullet's color says what they said. **The child's own answer is never on
+/// the row** — it is inside the tool result the model reads, and a transcript
+/// that printed it would be showing the same work twice, once as prose and
+/// once as a result.
 fn task_lines(state: &ToolState, theme: &Theme) -> Vec<Row> {
     match state {
-        ToolState::Pending => vec![Row::new("", format!("{TASK_RUNNING} Task"), theme.dim)],
+        ToolState::Pending => vec![Row::new(BULLET, titlecase(TASK_TOOL), theme.dim)],
         ToolState::Running {
             input, metadata, ..
         } => {
             let agent = field(input, "subagent_type");
             let mut rows = vec![Row::new(
-                "",
-                task_heading(TASK_RUNNING, agent, field(input, "description")),
+                BULLET,
+                task_heading(agent, field(input, "description")),
                 theme.dim,
             )];
             // Upstream's own priority: the tool the child is running right now
@@ -1182,7 +1270,7 @@ fn task_lines(state: &ToolState, theme: &Theme) -> Vec<Row> {
                 Some(current) => current.to_owned(),
                 None => format!("{} toolcalls", toolcalls(metadata)),
             };
-            rows.push(Row::new("", format!("{TASK_DETAIL}{detail}"), theme.dim));
+            rows.push(Row::new(RESULT, detail, theme.dim));
 
             rows
         }
@@ -1198,11 +1286,11 @@ fn task_lines(state: &ToolState, theme: &Theme) -> Vec<Row> {
             let description = field(input, "description").or(Some(title.as_str()));
 
             vec![
-                Row::new("", task_heading(TASK_DONE, agent, description), theme.fg),
+                Row::new(BULLET, task_heading(agent, description), theme.fg),
                 Row::new(
-                    "",
+                    RESULT,
                     format!(
-                        "{TASK_DETAIL}{calls} toolcalls \u{b7} {elapsed}",
+                        "{calls} toolcalls \u{b7} {elapsed}",
                         calls = toolcalls(metadata),
                         elapsed = elapsed(*started, *completed),
                     ),
@@ -1232,22 +1320,26 @@ fn toolcalls(metadata: &serde_json::Value) -> u64 {
         .unwrap_or(0)
 }
 
-/// The task row's first line: a marker, the agent doing the work, and what it
-/// was asked for.
-fn task_heading(marker: &str, agent: Option<&str>, description: Option<&str>) -> String {
-    let mut heading = String::from(marker);
-    heading.push(' ');
-    if let Some(agent) = agent {
-        heading.push_str(&titlecase(agent));
-        heading.push(' ');
-    }
-    heading.push_str("Task");
-    if let Some(description) = description {
-        heading.push_str(" \u{2014} ");
-        heading.push_str(description);
+/// The task row's header: the agent doing the work and what it was asked for,
+/// in the shape every other call's header has.
+///
+/// Its own arguments rather than [`derive_args`]'s, because the raw input's
+/// spelling is not the one a person reads: the agent arrives as
+/// `subagent_type` on a running call's input and as `agent` on a finished
+/// call's metadata, and a header that printed both spellings would be naming
+/// the wire rather than the work.
+fn task_heading(agent: Option<&str>, description: Option<&str>) -> String {
+    let name = titlecase(TASK_TOOL);
+    let args: Vec<String> = [("agent", agent), ("description", description)]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| format!("{key}: {}", quoted(value))))
+        .collect();
+
+    if args.is_empty() {
+        return name;
     }
 
-    heading
+    format!("{name}({args})", args = args.join(", "))
 }
 
 /// `name` with its first character upper-cased, which is how upstream renders
@@ -1357,10 +1449,12 @@ pub(crate) fn clip(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, ToolState};
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    use super::{Chat, elapsed, split_at_width, wrap};
+    use super::{Chat, Instant, Working, elapsed, split_at_width, wrap};
     use crate::theme::{Theme, Themes};
 
     /// A reply carrying one tool part in `state`, rendered wide enough that
@@ -2211,15 +2305,12 @@ mod tests {
         );
 
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("\u{2502} Explore Task \u{2014} find the parser")),
+            lines.iter().any(|line| line
+                == "\u{25cf} Task(agent: \"explore\", description: \"find the parser\")"),
             "got {lines:?}"
         );
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("\u{21b3} grep parser")),
+            lines.iter().any(|line| line == "  \u{23bf} grep parser"),
             "got {lines:?}"
         );
     }
@@ -2238,15 +2329,13 @@ mod tests {
         );
 
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("\u{21b3} 3 toolcalls")),
+            lines.iter().any(|line| line == "  \u{23bf} 3 toolcalls"),
             "got {lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("Task \u{2014} find the parser")),
+                .any(|line| line == "\u{25cf} Task(description: \"find the parser\")"),
             "an agent nobody named is left off rather than invented, got {lines:?}"
         );
     }
@@ -2279,15 +2368,14 @@ mod tests {
         );
 
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("\u{2713} Explore Task \u{2014} find the parser")),
+            lines.iter().any(|line| line
+                == "\u{25cf} Task(agent: \"explore\", description: \"find the parser\")"),
             "got {lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("\u{21b3} 7 toolcalls \u{b7} 12.4s")),
+                .any(|line| line == "  \u{23bf} 7 toolcalls \u{b7} 12.4s"),
             "got {lines:?}"
         );
         assert!(
@@ -2703,6 +2791,149 @@ mod tests {
 
         assert_eq!(checkpoints[1].title, "the first real line");
         assert_eq!(checkpoints[0].title, id.as_str());
+    }
+
+    /// A turn that started `seconds` ago, having spent `output_tokens`.
+    fn working(turn: u64, seconds: u64, output_tokens: u64) -> Working {
+        Working {
+            started: Instant::now()
+                .checked_sub(Duration::from_secs(seconds))
+                .expect("the test clock is well past the epoch"),
+            turn,
+            output_tokens,
+        }
+    }
+
+    /// **AC4.** While a turn runs the tail says so, with what it has spent;
+    /// when the turn settles the line is gone and nothing of it is left in the
+    /// count the viewport scrolls by.
+    #[test]
+    fn the_tail_says_a_turn_is_working_and_takes_it_back_when_the_turn_settles() {
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("go on then"));
+        let area = Rect::new(0, 0, 60, 10);
+        rendered(&mut chat, area);
+        let settled = chat.line_count();
+
+        chat.set_working(Some(working(1, 12, 431)));
+        let lines = rendered(&mut chat, area);
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "\u{273b} Thinking\u{2026} (12s \u{b7} \u{2191} 431 tokens)"),
+            "got {lines:?}"
+        );
+        assert_eq!(chat.line_count(), settled + 1, "one line, and only one");
+
+        chat.set_working(None);
+        let lines = rendered(&mut chat, area);
+
+        assert!(
+            !lines.iter().any(|line| line.contains('\u{273b}')),
+            "a settled turn leaves no working line, got {lines:?}"
+        );
+        assert_eq!(chat.line_count(), settled);
+    }
+
+    /// A session that has spent nothing yet says nothing about tokens, rather
+    /// than claiming a zero the screen would contradict.
+    #[test]
+    fn a_working_line_with_nothing_spent_yet_draws_no_token_segment() {
+        let mut chat = Chat::default();
+        chat.set_working(Some(working(1, 3, 0)));
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 6));
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "\u{273b} Thinking\u{2026} (3s)"),
+            "got {lines:?}"
+        );
+    }
+
+    /// The verb rotates with the turn and repeats around the list, so the same
+    /// transcript replayed twice reads the same both times.
+    #[test]
+    fn the_working_verb_rotates_with_the_turn_and_wraps_around() {
+        let verb = |turn: u64| {
+            let mut chat = Chat::default();
+            chat.set_working(Some(working(turn, 0, 0)));
+            rendered(&mut chat, Rect::new(0, 0, 40, 4))
+                .into_iter()
+                .find(|line| !line.is_empty())
+                .unwrap_or_default()
+        };
+
+        assert_eq!(verb(0), "\u{273b} Working\u{2026} (0s)");
+        assert_eq!(verb(1), "\u{273b} Thinking\u{2026} (0s)");
+        assert_ne!(verb(1), verb(2));
+        assert_eq!(
+            verb(6),
+            verb(0),
+            "six verbs in, the list starts over rather than running out"
+        );
+    }
+
+    /// **Pre-mortem 2.** The working line rides the marker row's seam, so it
+    /// neither breaks the tail-follow nor moves a viewport somebody pinned.
+    #[test]
+    fn the_working_line_disturbs_neither_the_tail_nor_a_pinned_viewport() {
+        let mut chat = Chat::default();
+        transcript(&mut chat, 20);
+        rendered(&mut chat, VIEWPORT);
+        assert!(chat.is_following_tail());
+
+        chat.set_working(Some(working(1, 5, 0)));
+        let lines = rendered(&mut chat, VIEWPORT);
+        assert!(chat.is_following_tail(), "the tail is still followed");
+        assert!(
+            lines.last().is_some_and(|line| line.contains('\u{273b}')),
+            "and the working line is what the tail now ends on, got {lines:?}"
+        );
+
+        chat.set_working(None);
+        chat.scroll_lines(-9);
+        let pinned = rendered(&mut chat, VIEWPORT);
+        assert!(!chat.is_following_tail());
+
+        chat.set_working(Some(working(1, 6, 0)));
+
+        assert_eq!(
+            rendered(&mut chat, VIEWPORT),
+            pinned,
+            "a line arriving at the bottom must not move a reader who is not there"
+        );
+    }
+
+    /// **AC3, the half this build can answer.** Sealed reasoning is a blob only
+    /// the provider can open; there is nothing in it for a `✻` line to say, so
+    /// the part draws nothing at all — and the reply around it is untouched.
+    #[test]
+    fn sealed_reasoning_draws_nothing_and_leaves_the_reply_alone() {
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part::reasoning(
+            "anthropic",
+            "rs_1",
+            Some("OPAQUE".to_owned()),
+        ));
+        reply.parts.push(Part::text("the answer itself"));
+        chat.start_message(reply);
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 10));
+        let drawn: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec!["\u{25cf} the answer itself"],
+            "a blob is not a thought anybody can read, got {lines:?}"
+        );
     }
 
     /// **D467.** The highlighted message's rows carry the selection style,

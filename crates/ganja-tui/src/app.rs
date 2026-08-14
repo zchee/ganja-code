@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     NOTICE_SEPARATOR, clipboard, command,
     component::{
-        chat::{Chat, WHEEL_LINES},
+        chat::{Chat, WHEEL_LINES, Working},
         context,
         dropdown::{self, Dropdown},
         editor::{self, Editor, Mode},
@@ -479,6 +479,11 @@ pub struct App {
     /// thought it was idle, `NotStreaming` on the steer that thought it was
     /// not.
     turn_running: bool,
+    /// How many turns this session has started, which is what rotates the
+    /// working line's verb (**D487**). Counted here rather than in the pane
+    /// because the pane is handed a turn's facts, not asked to notice one
+    /// beginning.
+    turns: u64,
     /// How many messages this session has queued, so each gets a correlation
     /// id of its own for `SteerConsumed` to name.
     steers: u32,
@@ -670,6 +675,7 @@ impl App {
             cleared: Cleared::Unhide,
             queue: Queue::default(),
             turn_running: false,
+            turns: 0,
             steers: 0,
             revert_pending: false,
             code_only_rewind: false,
@@ -3921,6 +3927,16 @@ impl App {
                     // The turn now holds the engine's slot, which is what
                     // makes the next Enter a steer rather than a prompt.
                     self.turn_running = true;
+                    // And the transcript's tail says so until it settles
+                    // (**D487**). The token figure is read once, here: the
+                    // provider reports usage when the turn ends, so nothing
+                    // moves it while the turn runs.
+                    self.turns = self.turns.saturating_add(1);
+                    self.chat.set_working(Some(Working {
+                        started: Instant::now(),
+                        turn: self.turns,
+                        output_tokens: self.totals.output_tokens,
+                    }));
                 }
                 self.chat.start_message(message);
             }
@@ -4152,6 +4168,9 @@ impl App {
                 // unconsumed messages were never announced, and this is where
                 // they are re-owned.
                 self.turn_running = false;
+                // Whatever ended it, the tail stops claiming work is under
+                // way (**D487**).
+                self.chat.set_working(None);
                 self.queue.strand();
                 self.sync_queue_status();
                 // A finished turn has no children left, however its parts
@@ -4220,9 +4239,21 @@ impl App {
         if self.dirty {
             self.urgent || self.last_draw.elapsed() >= FRAME
         } else {
-            // The spinner animates on its own while a turn streams.
-            self.status.is_streaming() && self.last_draw.elapsed() >= FRAME
+            // The spinner animates on its own while a turn streams, and so
+            // does the transcript's working line — which outlives the
+            // streaming state, since a turn spends most of itself inside tool
+            // calls and its clock has to keep counting there (**D487**).
+            self.animating() && self.last_draw.elapsed() >= FRAME
         }
+    }
+
+    /// Whether something on screen moves without an event arriving.
+    ///
+    /// The status bar's spinner and the transcript's working line are the two,
+    /// and they are not the same window: the spinner runs while the reply
+    /// streams, the working line for the whole turn.
+    fn animating(&self) -> bool {
+        self.status.is_streaming() || self.turn_running
     }
 
     /// Whether the loop should wake itself rather than wait for something to
@@ -4236,7 +4267,7 @@ impl App {
     /// an unrelated keypress.
     fn wants_wakeup(&self) -> bool {
         self.dirty
-            || self.status.is_streaming()
+            || self.animating()
             || self.pending_mcp()
             // The dialog polls status/tool-counts on every tick while it is
             // open, exactly as the status bar's own MCP notice does.
@@ -5925,6 +5956,53 @@ mod tests {
             "got:\n{screen_text}"
         );
         assert!(screen_text.contains("ok"), "got:\n{screen_text}");
+    }
+
+    /// **AC4.** The tail says a turn is under way for exactly as long as the
+    /// engine holds one, and the loop keeps waking itself while it does — the
+    /// elapsed figure is a clock, and a clock nobody redraws is a wrong one.
+    #[tokio::test]
+    async fn the_working_line_lives_exactly_as_long_as_the_turn_does() {
+        let mut app = app();
+        let reply = Message::assistant("canned");
+
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
+            message: reply.clone(),
+        }))
+        .await
+        .expect("a message start is handled");
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("\u{273b} "),
+            "got:\n{}",
+            screen(&terminal)
+        );
+        assert!(app.animating(), "the loop has a reason to wake itself");
+
+        app.handle(AppEvent::core(CoreEvent::MessageFinished {
+            session_id: session(),
+            message_id: reply.id.clone(),
+            reason: FinishReason::Completed,
+            usage: None,
+            error: None,
+            completed: 0,
+        }))
+        .await
+        .expect("a finish is handled");
+        app.draw(&mut terminal).expect("a frame draws");
+
+        assert!(
+            !screen(&terminal).contains("\u{273b} "),
+            "a settled turn leaves no working line:\n{}",
+            screen(&terminal)
+        );
+        assert!(
+            !app.animating(),
+            "and nothing left on screen moves on its own"
+        );
     }
 
     #[tokio::test]
@@ -9479,9 +9557,12 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
         let screen = screen(&terminal);
 
-        assert!(screen.contains("Explore Task"), "got:\n{screen}");
+        assert!(
+            screen.contains("\u{25cf} Task(agent: \"explore\""),
+            "got:\n{screen}"
+        );
         assert!(screen.contains("find the parser"), "got:\n{screen}");
-        assert!(screen.contains("grep parser"), "got:\n{screen}");
+        assert!(screen.contains("\u{23bf} grep parser"), "got:\n{screen}");
     }
 
     #[tokio::test]
