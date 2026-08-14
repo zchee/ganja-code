@@ -58,7 +58,9 @@ fn listing(project: &TempDir, data: &TempDir, config: Option<&std::path::Path>) 
         .env("XDG_CONFIG_HOME", data.path().join("config"))
         .env_remove("GANJA_CONFIG_HOME")
         .arg("mcp");
-    for variable in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
+    // Taken from the table rather than named here: a provider added later must
+    // not be able to make a developer's exported key decide whether these pass.
+    for (_, variable) in ganja_provider::auth::KEY_VARS {
         command.env_remove(variable);
     }
     match config {

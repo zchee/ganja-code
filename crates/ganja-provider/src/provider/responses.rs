@@ -86,7 +86,7 @@ use crate::{
         ChatRequest, CredentialSource, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
         check_base_url, client, open,
         openai::{self, arguments, result},
-        require_key, setting, shown_base_url, splice_effort,
+        openrouter, require_key, setting, shown_base_url, splice_effort,
         sse::Frame,
         steps,
     },
@@ -107,34 +107,65 @@ pub const ID: &str = openai::ID;
 /// `codex.ts`'s `CODEX_API_ENDPOINT` exactly.
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
-/// Which of this vendor's two backends a provider was built against.
+/// Which backend a provider was built against.
 ///
 /// Not a runtime question: it follows the credential, which is resolved once
 /// per session in `ganja_core::provider::openai_provider`. Keeping it a field rather than
 /// re-deriving it per request is what makes "a key request is never filtered by
 /// the seat's allow-list" a fact about how the provider was constructed instead
 /// of a condition somebody could forget to write.
+///
+/// Two of the three are one vendor's; the third is a different vendor serving
+/// the same dialect, which is why this enum answers [`Self::provider_id`] as
+/// well. See [`super::openrouter`] for what that one keeps and drops, and why.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Backend {
+pub(super) enum Backend {
     /// The backend a ChatGPT subscription is served by, reached with an OAuth
     /// access token (`codex.ts:12`).
     Codex,
     /// OpenAI's own platform API, reached with an API key.
     Platform,
+    /// OpenRouter's Responses surface, reached with that vendor's own API key.
+    OpenRouter,
 }
 
 impl Backend {
     /// Where this backend lives when [`BASE_URL_ENV`](openai::BASE_URL_ENV)
     /// names nothing.
     ///
-    /// Two hosts because the credential decides which one will take it: a
-    /// ChatGPT token is refused by the platform, and a key is refused by the
-    /// codex backend.
+    /// Three hosts because the credential decides which one will take it: a
+    /// ChatGPT token is refused by the platform, a key is refused by the codex
+    /// backend, and neither vendor's credential is the other's.
     const fn default_base_url(self) -> &'static str {
         match self {
             Self::Codex => DEFAULT_BASE_URL,
             Self::Platform => openai::DEFAULT_BASE_URL,
+            Self::OpenRouter => openrouter::DEFAULT_BASE_URL,
         }
+    }
+
+    /// Which provider a turn on this backend reports itself as.
+    ///
+    /// [`Provider::id`] is what the session layer prices a turn by — it filters
+    /// the catalog on it — so this is not cosmetic: an OpenRouter turn reporting
+    /// itself as `openai` would be sized and billed against the wrong table, and
+    /// its sealed reasoning would be handed to the wrong wire.
+    const fn provider_id(self) -> &'static str {
+        match self {
+            Self::Codex | Self::Platform => ID,
+            Self::OpenRouter => openrouter::ID,
+        }
+    }
+
+    /// Whether this backend documents the sealed-reasoning pairing
+    /// ([`Body::include`] out, a `reasoning` input item back).
+    ///
+    /// OpenAI's two do; OpenRouter's does not, and nothing here guesses on its
+    /// behalf — the whole reasoning is in [`super::openrouter`]'s module doc.
+    /// One predicate rather than three sites, because asking for state and
+    /// replaying it are one feature and half of it is worse than neither.
+    const fn replays_reasoning(self) -> bool {
+        matches!(self, Self::Codex | Self::Platform)
     }
 }
 
@@ -470,7 +501,7 @@ impl ResponsesProvider {
     ///
     /// Returns [`ProviderError::Transport`] when no HTTP client can be built,
     /// or when `base_url` names an endpoint a credential may not travel to.
-    fn built(
+    pub(super) fn built(
         credential: CredentialSource,
         base_url: String,
         backend: Backend,
@@ -496,8 +527,12 @@ impl ResponsesProvider {
     /// subscription: `codex.ts:281` hands back the unfiltered model list for
     /// any credential that is not an OAuth one, so the platform serves whatever
     /// it sells and a key session is never held to somebody's seat.
-    fn refuses(&self, model: &str) -> Option<ProviderError> {
+    pub(super) fn refuses(&self, model: &str) -> Option<ProviderError> {
         if CHAT_COMPLETIONS_ONLY.contains(&model) {
+            return Some(chat_completions_only(model));
+        }
+        if self.backend == Backend::OpenRouter && openrouter::CHAT_COMPLETIONS_ONLY.contains(&model)
+        {
             return Some(chat_completions_only(model));
         }
         if self.backend == Backend::Codex && !serves(model) {
@@ -556,8 +591,8 @@ impl ResponsesProvider {
 
         // The effort's options go under the wire's own fields, so a catalog
         // row can add `reasoning` but can never unmake `model` or `stream`.
-        let own = Body::new(request);
-        let options = summarized(&request.effort_options, &request.model);
+        let own = Body::new(request, self.backend);
+        let options = summarized(&request.effort_options, &request.model, self.backend);
         let body = splice_effort(&options, &own);
         built.json(&body).build().map_err(|error| {
             ProviderError::Transport(
@@ -581,8 +616,10 @@ fn configured(backend: Backend) -> String {
 
 #[async_trait]
 impl Provider for ResponsesProvider {
+    /// The backend's, not the module's: two of the three are this vendor and
+    /// one is not — see [`Backend::provider_id`] for what rides on the answer.
     fn id(&self) -> &str {
-        ID
+        self.backend.provider_id()
     }
 
     /// The media types the Responses API documents: `input_image` takes
@@ -633,7 +670,8 @@ impl Provider for ResponsesProvider {
             "requesting a turn"
         );
 
-        open::<Mapping>(
+        open(
+            move || Mapping::for_backend(backend),
             &self.client,
             built,
             &resolved.presented,
@@ -891,7 +929,14 @@ impl<'a> Body<'a> {
     /// field exists for: sealed state is handed back only to the wire that
     /// sealed it. A session that changes vendors mid-conversation carries
     /// another provider's blobs in its transcript, and they mean nothing here.
-    fn new(request: &'a ChatRequest) -> Self {
+    /// The wire is `backend`'s to name rather than this module's, because one
+    /// of the three backends is a different vendor entirely.
+    ///
+    /// And a fourth: a backend that does not document the replay does not get
+    /// one ([`Backend::replays_reasoning`]). Nothing is asked for and nothing is
+    /// handed back there, which is [`super::openrouter`]'s reasoning and is
+    /// stated once in that module rather than twice here.
+    fn new(request: &'a ChatRequest, backend: Backend) -> Self {
         let mut input: Vec<Item<'a>> = Vec::new();
 
         for message in &request.messages {
@@ -930,7 +975,10 @@ impl<'a> Body<'a> {
                     input.push(Item::Said { role, content });
                 }
                 for thought in &thoughts {
-                    if thought.provider != ID {
+                    if !backend.replays_reasoning() {
+                        continue;
+                    }
+                    if thought.provider != backend.provider_id() {
                         tracing::debug!(
                             provider = thought.provider,
                             "reasoning sealed by another provider is not this wire's to \
@@ -978,7 +1026,8 @@ impl<'a> Body<'a> {
             model: &request.model,
             stream: true,
             store: false,
-            include: seals_reasoning(&request.model).then_some([REASONING_INCLUDE]),
+            include: (backend.replays_reasoning() && seals_reasoning(&request.model))
+                .then_some([REASONING_INCLUDE]),
             instructions: request.system.as_deref(),
             input,
             tools: request
@@ -1097,8 +1146,19 @@ fn split(
 }
 
 /// Accumulates what the frames so far said.
-#[derive(Debug, Default)]
+///
+/// [`Default`] is the recording mapper, because recording is what every backend
+/// but one does and a default that silently dropped state would be the wrong
+/// way round: a mapper built without thinking about it keeps what it was sent.
+#[derive(Debug)]
 struct Mapping {
+    /// Whether a sealed reasoning item is worth recording.
+    ///
+    /// The other half of [`Backend::replays_reasoning`], and it has to be the
+    /// same answer: a part recording state this build will never hand back is
+    /// the row-that-can-never-do-anything [`sealed`]'s own doc refuses to mint,
+    /// only with the emptiness one layer further out.
+    seals: bool,
     usage: Usage,
     /// Call identifiers by the *item* id their argument deltas name.
     ///
@@ -1109,6 +1169,29 @@ struct Mapping {
     /// result has to quote back is the `call_id`. Keying tool events by the
     /// wrong one produces a transcript whose calls nothing answers.
     calls: HashMap<String, String>,
+}
+
+impl Default for Mapping {
+    fn default() -> Self {
+        Self {
+            seals: true,
+            usage: Usage::default(),
+            calls: HashMap::new(),
+        }
+    }
+}
+
+impl Mapping {
+    /// The mapper a `backend`'s stream is read by.
+    ///
+    /// One field, and it is the reading half of the same decision the encoder
+    /// makes: ask for state and keep it, or do neither.
+    fn for_backend(backend: Backend) -> Self {
+        Self {
+            seals: backend.replays_reasoning(),
+            ..Self::default()
+        }
+    }
 }
 
 impl Mapper for Mapping {
@@ -1264,7 +1347,7 @@ impl Mapping {
                     events.push(ProviderEvent::ToolCallEnd { id });
                 }
             }
-            REASONING => sealed(item, events),
+            REASONING if self.seals => sealed(item, events),
             _ => {}
         }
     }
@@ -1383,9 +1466,16 @@ fn seals_reasoning(model: &str) -> bool {
 fn summarized(
     options: &serde_json::Map<String, serde_json::Value>,
     model: &str,
+    backend: Backend,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut options = options.clone();
-    if !seals_reasoning(model) {
+    // Gated on the backend as well as the model, because both halves of the
+    // default are this vendor's: `seals_reasoning` is a rule about *its* model
+    // ids, and `"auto"` is what *its* CLI sends. Neither is a statement about a
+    // gateway whose roster is mostly other people's models — see
+    // [`super::openrouter`], which sends a `reasoning` object only when an
+    // effort put one there.
+    if !backend.replays_reasoning() || !seals_reasoning(model) {
         return options;
     }
 
@@ -1441,7 +1531,7 @@ mod tests {
         protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
         provider::{
             ChatRequest, CredentialSource, NO_RESULT, PROVIDERS, Presented, Provider as _,
-            ProviderError, ProviderEvent, Resolved, openai, replay, splice_effort,
+            ProviderError, ProviderEvent, Resolved, openai, openrouter, replay, splice_effort,
         },
         tool::ToolDefinition,
     };
@@ -1530,6 +1620,27 @@ mod tests {
             Backend::Platform,
         )
         .expect("loopback may carry a key")
+    }
+
+    /// A model the gateway publishes, in that vendor's own namespaced spelling.
+    const GATEWAY_MODEL: &str = "openai/gpt-5.4";
+
+    /// The same wire against the gateway, authenticated by that vendor's key.
+    fn routed() -> ResponsesProvider {
+        ResponsesProvider::built(
+            CredentialSource::Key(Presented::new(KEY).expect("a non-blank key")),
+            "http://127.0.0.1:8080/api/v1".to_owned(),
+            Backend::OpenRouter,
+        )
+        .expect("loopback may carry a key")
+    }
+
+    /// One turn's worth of request against the gateway.
+    fn gateway_ask() -> ChatRequest {
+        ChatRequest {
+            model: GATEWAY_MODEL.to_owned(),
+            ..ask()
+        }
     }
 
     /// One turn's worth of request, on a model this backend serves — anything
@@ -1654,9 +1765,185 @@ mod tests {
             );
         }
         assert_eq!(
-            serde_json::to_value(Body::new(&ask())).expect("the body serializes")["store"],
+            serde_json::to_value(Body::new(&ask(), Backend::Platform))
+                .expect("the body serializes")["store"],
             json!(false),
             "one encoder, so `store: false` is not a subscription special case"
+        );
+    }
+
+    /// The third backend's request: the same encoder pointed at another vendor,
+    /// under that vendor's own bearer and with **nothing** of this one's.
+    ///
+    /// Spelled as absences for the reason the platform test above is: a field
+    /// carried over on the assumption that one Responses surface is every
+    /// Responses surface is exactly the failure this backend exists to prevent,
+    /// and each absence here is a row of `super::openrouter`'s ledger.
+    #[test]
+    fn an_openrouter_request_carries_only_what_that_vendor_documents() {
+        let provider = routed();
+        let built = provider
+            .request(&presenting(KEY, Some(ACCOUNT)), &gateway_ask())
+            .expect("the request builds");
+        let headers = built.headers();
+
+        assert_eq!(
+            built.url().as_str(),
+            "http://127.0.0.1:8080/api/v1/responses",
+            "the vendor's own Responses path, under whatever base URL points at it"
+        );
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some(format!("Bearer {KEY}")).as_deref(),
+            "the reference asks for a bearer and a content type, and this is the \
+             half that is a credential"
+        );
+        for absent in [ACCOUNT_HEADER, ORIGINATOR_HEADER, BETA_HEADER, "user-agent"] {
+            assert!(
+                !headers.contains_key(absent),
+                "`{absent}` belongs to a ChatGPT seat impersonating the Codex CLI \
+                 and reached a different vendor entirely: {headers:?}"
+            );
+        }
+
+        let body = serde_json::to_value(Body::new(&gateway_ask(), Backend::OpenRouter))
+            .expect("the body serializes");
+        assert_eq!(
+            body["store"],
+            json!(false),
+            "the reference rejects `store: true` outright, so `false` is the only \
+             value a stateless API takes"
+        );
+        assert!(
+            body.get("include").is_none(),
+            "the reference documents no `include` parameter at all: {body}"
+        );
+        assert!(
+            body.get("previous_response_id").is_none(),
+            "the other half of the same rejection, and a field this encoder has \
+             never had: {body}"
+        );
+        assert_eq!(
+            body["model"],
+            json!(GATEWAY_MODEL),
+            "the id passes through \
+             verbatim, namespace and all — it is the vendor's own spelling"
+        );
+    }
+
+    /// Asking for sealed reasoning and replaying it are one feature, and this
+    /// backend does neither: the vendor documents no `include` to ask with and
+    /// no way to hand the state back. Half of the pairing would be worse than
+    /// neither — a request that asked and never replayed spends a field every
+    /// turn for nothing, and one that replayed unasked is a guess whose failure
+    /// lands on the *second* request of every reasoning turn.
+    ///
+    /// The same transcript on the platform backend is the control: what differs
+    /// is the backend and nothing else about the fixture.
+    #[test]
+    fn an_openrouter_turn_neither_asks_for_sealed_reasoning_nor_replays_it() {
+        let mut assistant = Message::assistant("gpt");
+        assistant.parts.push(Part::text("thinking about it"));
+        assistant.parts.push(Part::reasoning(
+            openrouter::ID,
+            "rs_gateway",
+            Some("sealed-by-the-gateway".to_owned()),
+        ));
+
+        let mut request = gateway_ask();
+        request.messages.push(assistant);
+
+        let body = serde_json::to_value(Body::new(&request, Backend::OpenRouter))
+            .expect("the body serializes");
+        assert!(
+            body.get("include").is_none(),
+            "nothing was asked for: {body}"
+        );
+        assert!(
+            !body["input"]
+                .as_array()
+                .expect("input is a list")
+                .iter()
+                .any(|item| item["type"] == json!("reasoning")),
+            "and nothing is handed back: {body}"
+        );
+
+        // The control. A model whose id `seals_reasoning` recognizes, on the
+        // backend whose vendor documents the pairing, does both — so what the
+        // assertions above prove is the backend and not the fixture.
+        let mut owned = Message::assistant("gpt");
+        owned
+            .parts
+            .push(Part::reasoning(ID, "rs_1", Some("sealed".to_owned())));
+        let mut control = ask();
+        control.messages.push(owned);
+
+        let platform = serde_json::to_value(Body::new(&control, Backend::Platform))
+            .expect("the body serializes");
+        assert_eq!(platform["include"], json!(["reasoning.encrypted_content"]));
+        assert!(
+            platform["input"]
+                .as_array()
+                .expect("input is a list")
+                .iter()
+                .any(|item| item["type"] == json!("reasoning")),
+            "{platform}"
+        );
+    }
+
+    /// The reading half of the same decision. A mapper that recorded state this
+    /// build will never hand back would mint the row-that-can-never-do-anything
+    /// [`super::sealed`]'s own doc refuses, one layer further out.
+    #[test]
+    fn the_backend_that_replays_sealed_state_is_the_one_that_records_it() {
+        for backend in [Backend::Codex, Backend::Platform] {
+            assert!(
+                Mapping::for_backend(backend).seals && backend.replays_reasoning(),
+                "{backend:?} documents the pairing, so both halves are on"
+            );
+        }
+        assert!(
+            !Mapping::for_backend(Backend::OpenRouter).seals
+                && !Backend::OpenRouter.replays_reasoning(),
+            "and both halves are off together, or the transcript fills with \
+             state nothing will ever send"
+        );
+    }
+
+    /// `reasoning.summary: "auto"` is two of this vendor's decisions in one
+    /// field — [`seals_reasoning`] is a rule about *its* model ids, and `"auto"`
+    /// is what *its* CLI sends — so a gateway fronting mostly other people's
+    /// models gets neither. What an effort put there still travels, because the
+    /// reference does document `reasoning` with effort levels.
+    #[test]
+    fn an_openrouter_request_defaults_no_summary_and_still_carries_an_effort() {
+        let bare = summarized(
+            &serde_json::Map::new(),
+            "openai/gpt-5.4",
+            Backend::OpenRouter,
+        );
+        assert!(
+            bare.is_empty(),
+            "an id that merely *contains* this vendor's model family is not this \
+             vendor's model: {bare:?}"
+        );
+
+        let mut request = gateway_ask();
+        request.effort_options = json!({"reasoning": {"effort": "high"}})
+            .as_object()
+            .cloned()
+            .expect("object fixture");
+        let own = Body::new(&request, Backend::OpenRouter);
+        let options = summarized(&request.effort_options, &request.model, Backend::OpenRouter);
+        let body =
+            serde_json::to_value(splice_effort(&options, &own)).expect("a spliced body serializes");
+
+        assert_eq!(
+            body["reasoning"],
+            json!({"effort": "high"}),
+            "the effort's own object, and not a summary nobody asked for"
         );
     }
 
@@ -1676,7 +1963,7 @@ mod tests {
         .cloned()
         .expect("the fixture options are an object");
 
-        let own = Body::new(&request);
+        let own = Body::new(&request, Backend::Platform);
         let body = serde_json::to_value(splice_effort(&request.effort_options, &own))
             .expect("a spliced body serializes");
 
@@ -1729,8 +2016,8 @@ mod tests {
         for (name, options, expected) in cases {
             let mut request = ask();
             request.effort_options = options;
-            let own = Body::new(&request);
-            let options = summarized(&request.effort_options, &request.model);
+            let own = Body::new(&request, Backend::Platform);
+            let options = summarized(&request.effort_options, &request.model, Backend::Platform);
             let body = serde_json::to_value(splice_effort(&options, &own))
                 .expect("a spliced body serializes");
             assert_eq!(body["reasoning"], expected, "{name}");
@@ -1738,8 +2025,8 @@ mod tests {
 
         let mut request = ask();
         request.model = "gpt-5-chat".to_owned();
-        let own = Body::new(&request);
-        let options = summarized(&request.effort_options, &request.model);
+        let own = Body::new(&request, Backend::Platform);
+        let options = summarized(&request.effort_options, &request.model, Backend::Platform);
         let body =
             serde_json::to_value(splice_effort(&options, &own)).expect("a spliced body serializes");
         assert!(
@@ -1943,7 +2230,8 @@ mod tests {
     /// is the only reason a second request can carry the first one's thinking.
     #[test]
     fn every_body_tells_the_backend_to_keep_nothing_and_to_seal_what_it_thought() {
-        let body = serde_json::to_value(Body::new(&ask())).expect("the body serializes");
+        let body = serde_json::to_value(Body::new(&ask(), Backend::Platform))
+            .expect("the body serializes");
 
         assert_eq!(
             body["store"],
@@ -1983,7 +2271,8 @@ mod tests {
             model: "gpt-4.1".to_owned(),
             ..ask()
         };
-        let body = serde_json::to_value(Body::new(&plain)).expect("the body serializes");
+        let body = serde_json::to_value(Body::new(&plain, Backend::Platform))
+            .expect("the body serializes");
         assert!(
             body["include"].is_null(),
             "a body that asks for nothing omits the field entirely, the way \
@@ -2020,7 +2309,8 @@ mod tests {
             messages: vec![Message::user("read src/main.rs"), assistant],
             tools: Vec::new(),
         };
-        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+        let body = serde_json::to_value(Body::new(&request, Backend::Platform))
+            .expect("the body serializes");
 
         assert_eq!(
             body["input"],
@@ -2081,7 +2371,8 @@ mod tests {
             messages: vec![user],
             tools: Vec::new(),
         };
-        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+        let body = serde_json::to_value(Body::new(&request, Backend::Platform))
+            .expect("the body serializes");
 
         assert_eq!(
             body["input"],
@@ -2136,7 +2427,8 @@ mod tests {
             messages: vec![Message::user("hello"), assistant],
             tools: Vec::new(),
         };
-        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+        let body = serde_json::to_value(Body::new(&request, Backend::Platform))
+            .expect("the body serializes");
 
         assert_eq!(
             body["input"],
@@ -2394,7 +2686,8 @@ mod tests {
         };
 
         assert_eq!(
-            serde_json::to_value(Body::new(&request)).expect("the body serializes"),
+            serde_json::to_value(Body::new(&request, Backend::Platform))
+                .expect("the body serializes"),
             json!({
                 "model": "gpt-test",
                 "stream": true,
@@ -2420,7 +2713,8 @@ mod tests {
             tools: vec![a_tool()],
         };
 
-        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+        let body = serde_json::to_value(Body::new(&request, Backend::Platform))
+            .expect("the body serializes");
 
         assert_eq!(
             body["tools"],
@@ -2518,7 +2812,8 @@ mod tests {
             tools: vec![a_tool()],
         };
 
-        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+        let body = serde_json::to_value(Body::new(&request, Backend::Platform))
+            .expect("the body serializes");
 
         assert_eq!(
             body["input"],
@@ -2599,7 +2894,8 @@ mod tests {
             tools: vec![a_tool()],
         };
 
-        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+        let body = serde_json::to_value(Body::new(&request, Backend::Platform))
+            .expect("the body serializes");
         let wire = body["input"].to_string();
         let position = |needle: &str| wire.find(needle).expect("the wire holds it");
 
@@ -2629,7 +2925,8 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
+        let body = serde_json::to_value(Body::new(&request, Backend::Platform))
+            .expect("the body serializes");
 
         assert_eq!(
             body["input"][2],

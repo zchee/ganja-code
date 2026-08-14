@@ -165,6 +165,11 @@ const SHARED: u32 = 0o077;
 pub const KEY_VARS: &[(&str, &str)] = &[
     ("anthropic", "ANTHROPIC_API_KEY"),
     ("openai", "OPENAI_API_KEY"),
+    // A gateway rather than a model vendor, and the variable is still its own:
+    // it is what this one's console, its `curl` examples and the model
+    // catalog's `env` for it all name. `provider::openrouter` pins the two
+    // spellings against each other.
+    ("openrouter", "OPENROUTER_API_KEY"),
 ];
 
 /// The environment variable an API key for `provider_id` may be passed in.
@@ -3663,6 +3668,75 @@ mod tests {
         assert_eq!(
             key_of(credential_for("anthropic").expect("the stored key reads")),
             Some("sk-stored-0001".to_owned()),
+            "an empty variable must not shadow a stored key"
+        );
+
+        clear_keys();
+        set_env("XDG_DATA_HOME", None);
+    }
+
+    /// The newest key provider gets the same precedence the two older ones
+    /// have, proved rather than assumed.
+    ///
+    /// It is one row in [`KEY_VARS`] and one line in [`STORAGE_ALIASES`] that
+    /// it is deliberately *not* in, and both are easy to get wrong in ways
+    /// nothing else would notice: a missing row makes an exported key invisible
+    /// (the stored one answers, silently, for the whole session), and an alias
+    /// nobody needed would file the credential where an opencode install
+    /// reading the same file could not find it.
+    #[test]
+    fn an_exported_gateway_key_outranks_a_stored_one_and_is_filed_under_its_own_name() {
+        let _guard = environment();
+        let directory = temporary();
+
+        clear_keys();
+        set_env("XDG_DATA_HOME", Some(&directory.path().to_string_lossy()));
+
+        let provider = crate::provider::openrouter::ID;
+        let variable = crate::provider::openrouter::API_KEY_ENV;
+        assert_eq!(key_var(provider), Some(variable));
+
+        set_credential(provider, "sk-or-stored-0001").expect("the key stores");
+        assert_eq!(
+            key_of(credential_for(provider).expect("the stored key reads")),
+            Some("sk-or-stored-0001".to_owned())
+        );
+
+        // Under its own name on disk, which is upstream's name too — a gateway
+        // whose credential ganja filed somewhere else would be a login opencode
+        // could not see and `config import-opencode` could not translate.
+        let stored: std::collections::BTreeMap<String, serde_json::Value> = serde_json::from_slice(
+            &fs::read(store_path().expect("the store has a path")).expect("the store exists"),
+        )
+        .expect("the store is JSON");
+        assert!(
+            stored.contains_key(provider),
+            "the entry is filed under {provider}: {stored:?}"
+        );
+
+        set_env(variable, Some(CANARY));
+        assert_eq!(
+            key_of(credential_for(provider).expect("the environment reads")),
+            Some(CANARY.to_owned()),
+            "the environment has to win here too"
+        );
+        assert_eq!(
+            list_providers()
+                .expect("the listing reads")
+                .iter()
+                .find(|entry| entry.provider_id == provider)
+                .map(|entry| entry.source),
+            Some(Source::Environment("OPENROUTER_API_KEY")),
+            "the listing has to show the credential actually in use"
+        );
+
+        // And an exported-but-empty variable falls through rather than
+        // shadowing, which is the half that decides whether a session with a
+        // blank export dies at startup or quietly runs on the stored key.
+        set_env(variable, Some("   "));
+        assert_eq!(
+            key_of(credential_for(provider).expect("the stored key reads")),
+            Some("sk-or-stored-0001".to_owned()),
             "an empty variable must not shadow a stored key"
         );
 

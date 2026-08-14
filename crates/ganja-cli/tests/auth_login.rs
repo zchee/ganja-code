@@ -236,6 +236,7 @@ fn ganja(data: &TempDir, issuer: &str) -> Command {
         .env("GANJA_AUTH_ISSUER", issuer)
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

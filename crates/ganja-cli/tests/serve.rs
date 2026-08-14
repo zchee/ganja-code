@@ -58,6 +58,7 @@ impl Served {
             .env_remove("GANJA_SERVER_USERNAME")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENROUTER_API_KEY")
             .env("GANJA_FAKE_SCRIPT", project.join("script.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -127,6 +128,7 @@ impl Served {
             .env_remove("GANJA_SERVER_USERNAME")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENROUTER_API_KEY")
             .stdin(Stdio::null())
             .output()
             .expect("the attached run finishes");

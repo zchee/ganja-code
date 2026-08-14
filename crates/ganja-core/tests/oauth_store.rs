@@ -54,9 +54,12 @@ fn every_entry_survives_a_save_including_the_fields_this_build_cannot_read() {
     unsafe {
         env::set_var("XDG_DATA_HOME", home.path());
         // A stored credential is what has to answer here; an exported key would
-        // win the lookup and the file would never be read.
-        env::remove_var("ANTHROPIC_API_KEY");
-        env::remove_var("OPENAI_API_KEY");
+        // win the lookup and the file would never be read. Taken from the table
+        // rather than named: a provider added later must not be able to make a
+        // developer's exported key decide what this listing holds.
+        for (_, variable) in auth::KEY_VARS {
+            env::remove_var(variable);
+        }
     }
 
     let path = auth::store_path().expect("the store has a path");
