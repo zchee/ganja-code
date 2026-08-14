@@ -762,11 +762,17 @@ async fn report(watched: &Watched, current: Option<&str>, toolcalls: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{denies_task, roster, subagent_rules};
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+
+    use super::{Watched, denies_task, roster, subagent_rules, watch};
     use crate::{
         agent::{self, Registry},
         config::Config,
+        engine::Fanout,
         permission::{Action, Permissions, Rule},
+        protocol::{Event, MessageId, Part, PartId, SessionId},
         tool::{
             Tool as _,
             task::{DESCRIPTION, ROSTER_HEADER, TaskTool},
@@ -775,6 +781,77 @@ mod tests {
 
     fn registry() -> Registry {
         Registry::from_config(&Config::default()).expect("the default config resolves agents")
+    }
+
+    /// A child's thinking is not a child's answer (bead `pwe`), and the
+    /// accumulator is where that could go wrong without anybody seeing it.
+    ///
+    /// What the watcher collects becomes the **parent's tool result** — text
+    /// the parent model reads as the report it asked for, and which every
+    /// later request in the parent's conversation then carries. So a thought
+    /// leaking here is a thought that reaches a model, by a route no wire
+    /// encoder guards: the arm that keeps `open` where it is on a
+    /// `ReasoningText` part is the whole of the barrier, and moving it into
+    /// the text arm would have the child's scratch paper delivered as its
+    /// conclusion.
+    #[tokio::test]
+    async fn a_childs_thinking_is_not_the_answer_its_parent_is_handed() {
+        const THOUGHT: &str = "the-user-is-probably-testing-me";
+
+        let (events, received) = mpsc::channel(64);
+        let (parent, _parent_reader) = mpsc::channel(64);
+        let watched = Watched {
+            events: Arc::new(Fanout::new(parent)),
+            session_id: SessionId::from("ses_parent".to_owned()),
+            tools: Arc::new(crate::tool::Registry::new(Vec::new())),
+            message_id: MessageId::ascending(),
+            part_id: PartId::ascending(),
+            command: "look something up".to_owned(),
+        };
+
+        let message_id = MessageId::ascending();
+        let session_id = SessionId::from("ses_child".to_owned());
+        // Thinking on *both* sides of the reply, which is the shape that makes
+        // this an assertion rather than an accident: what the parent is handed
+        // is the last text part the child opened (upstream's `findLast`), so a
+        // trailing thought is the one that would actually be delivered as the
+        // answer. A thought that only ever preceded the reply would be
+        // overwritten by it and prove nothing.
+        let mut stream = Vec::new();
+        for (part, delta) in [
+            (Part::reasoning_text(""), THOUGHT),
+            (Part::text(""), "the answer"),
+            (Part::reasoning_text(""), "and-a-trailing-second-thought"),
+        ] {
+            let part_id = part.id.clone();
+            stream.push(Event::PartStarted {
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+                part,
+            });
+            stream.push(Event::PartDelta {
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+                part_id,
+                delta: delta.to_owned(),
+            });
+        }
+        for event in stream {
+            events.send(event).await.expect("the watcher is listening");
+        }
+        drop(events);
+
+        let outcome = watch(received, watched).await;
+
+        assert_eq!(
+            outcome.text, "the answer",
+            "the parent is handed the child's conclusion and nothing else"
+        );
+        assert!(
+            !outcome.text.contains(THOUGHT) && !outcome.text.contains("second-thought"),
+            "the child's thinking reached the parent's tool result: {}",
+            outcome.text
+        );
     }
 
     #[test]

@@ -1548,6 +1548,22 @@ async fn title_stream(
 /// nothing about. The wire is the authority, and its refusal is caught one
 /// round trip later by [`request_title`]'s retry.
 ///
+/// # A configured spec binds to this session's provider (**D490**, `small-model-provider-bound`)
+///
+/// Upstream resolves a configured `small_model` in **whichever provider its
+/// prefix names**: `getSmallModel` ignores the provider it was handed the
+/// moment `cfg.small_model` is set and looks the spec up wholesale
+/// (`packages/opencode/src/provider/provider.ts:1878`), so an anthropic
+/// session there can be titled by an openai model. It can afford that because
+/// a provider is a registry entry it can fetch a second one of; here a title
+/// request rides the session's **own wire instance** — the one thing the
+/// engine was built with — and there is no second one to construct at this
+/// seam. So a foreign-prefixed spec is skipped rather than honored, with the
+/// line [`crate::config::model_bound_to`] logs, and the session titles the way
+/// it would have with no key at all. A cross-provider title would mean
+/// selecting and authenticating a second provider inside a piece of session
+/// bookkeeping, which is a much larger thing than the key asks for.
+///
 /// Cheapest by fresh-input price is upstream's "small model" in spirit, and it
 /// was the whole of the rule until a ChatGPT-seat session was found asking
 /// `text-embedding-3-small` for a title on every conversation — the cheapest
@@ -4365,7 +4381,7 @@ mod tests {
 
     use super::{
         Answered, BufferedCall, ChildParts, PendingReplies, Turn, TurnKind, add_usage, attached,
-        parse_args, resolve, resolve_mentions, sliced, title_model,
+        parse_args, resolve, resolve_mentions, serialize_message, sliced, title_model,
     };
     use crate::{
         catalog,
@@ -5233,6 +5249,50 @@ mod tests {
             ),
             "composer-1"
         );
+    }
+
+    /// The compaction seam's own non-replay lock (bead `pwe`), and the one
+    /// where the leak would be *permanent*.
+    ///
+    /// A summary is not a rendering: it becomes the history, and every request
+    /// after it carries what it says. Thinking that reached this text would
+    /// therefore be thinking the model was eventually told — the display-only
+    /// invariant broken by a route nothing else in the build watches, and
+    /// broken past the point where deleting the part would undo it.
+    #[test]
+    fn a_thought_never_reaches_the_summary_that_becomes_the_history() {
+        const THOUGHT: &str = "the-user-is-probably-testing-me";
+
+        let mut assistant = Message::assistant("claude-test");
+        assistant.parts.push(Part::reasoning_text(THOUGHT));
+        assistant.parts.push(Part::text("Hello!"));
+        assistant.parts.push(Part::reasoning(
+            "openai",
+            "rs_1",
+            Some("sealed-blob-0001".to_owned()),
+        ));
+
+        let serialized = serialize_message(&assistant);
+
+        assert!(
+            !serialized.contains(THOUGHT),
+            "the thought would have been summarized into the history and sent \
+             on every later request: {serialized}"
+        );
+        assert!(
+            !serialized.contains("sealed-blob-0001"),
+            "sealed state is bytes for one provider, not something a summary \
+             can carry: {serialized}"
+        );
+        assert_eq!(
+            serialized, "[Assistant]: Hello!",
+            "what the model actually said is what the summary is composed of"
+        );
+
+        // The user's side of the same match, which has an arm of its own.
+        let mut user = Message::user("hi");
+        user.parts.push(Part::reasoning_text(THOUGHT));
+        assert_eq!(serialize_message(&user), "[User]: hi");
     }
 
     /// The other half of the binding rule at this seam: a spec belonging to

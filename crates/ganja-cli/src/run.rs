@@ -1220,12 +1220,16 @@ mod tests {
             ]
         );
         // Each kind names a distinct one of them, so no two objects can be
-        // told apart by anything but their type.
+        // told apart by anything but their type. All six are listed: `as_str`
+        // indexes `TYPES` by discriminant, so a kind left out of this array is
+        // a kind whose index nothing checks — which is exactly how `reasoning`
+        // sat here unverified while its slot was still a placeholder.
         let named = [
             Kind::ToolUse,
             Kind::StepStart,
             Kind::StepFinish,
             Kind::Text,
+            Kind::Reasoning,
             Kind::Error,
         ]
         .map(Kind::as_str);

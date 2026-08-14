@@ -1163,6 +1163,54 @@ mod tests {
         );
     }
 
+    /// Readable thinking is display-only, and this is the wire where that
+    /// stops being prose and starts being a test (bead `pwe`).
+    ///
+    /// The invariant was held by one arm of one match — move
+    /// `PartBody::ReasoningText` up into the text arm and every later request
+    /// silently starts carrying the model's scratch paper as if the model had
+    /// said it. The transcript here is what a real reasoning turn leaves
+    /// behind: a thought, a reply, and the sealed state this API has no item
+    /// for either.
+    #[test]
+    fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
+        const THOUGHT: &str = "the-user-is-probably-testing-me";
+
+        let mut turn = Message::assistant("claude");
+        turn.parts.push(Part::reasoning_text(THOUGHT));
+        turn.parts.push(Part::text("Hello!"));
+        turn.parts.push(Part::reasoning(
+            "anthropic",
+            "rs_1",
+            Some("sealed-blob-0001".to_owned()),
+        ));
+
+        let request = ChatRequest {
+            effort_options: Default::default(),
+            model: "claude-test".to_owned(),
+            system: None,
+            tools: Vec::new(),
+            messages: vec![Message::user("hi"), turn, Message::user("again")],
+        };
+        let body = serde_json::to_string(&Body::new(&request, DEFAULT_MAX_TOKENS))
+            .expect("the body serializes");
+
+        assert!(
+            !body.contains(THOUGHT),
+            "the thought reached the wire; nothing sends readable reasoning: {body}"
+        );
+        assert!(
+            !body.contains("sealed-blob-0001"),
+            "this API's own thinking block is not ported, so a foreign wire's \
+             sealed state must not travel either: {body}"
+        );
+        assert!(
+            body.contains("Hello!"),
+            "the reply still has to be sent — an assertion that passed by \
+             encoding nothing would prove nothing: {body}"
+        );
+    }
+
     #[test]
     fn a_request_without_a_system_prompt_omits_the_field() {
         let request = ChatRequest {
