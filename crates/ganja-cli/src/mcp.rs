@@ -107,6 +107,11 @@ pub(crate) struct AddArgs {
     /// A header sent with every request to a remote server, `Key=Value`.
     #[arg(long, value_name = "KEY=VALUE", conflicts_with = "command")]
     pub(crate) header: Vec<String>,
+    /// Mark a remote server for OAuth: `ganja mcp login <name>` discovers its
+    /// authorization server and runs the browser login (the config's
+    /// `oauth: {}`). Without this, login refuses the server by name.
+    #[arg(long, conflicts_with = "command")]
+    pub(crate) oauth: bool,
     /// A variable layered over the ones a local server inherits, `KEY=VALUE`.
     #[arg(long, value_name = "KEY=VALUE", conflicts_with = "url")]
     pub(crate) env: Vec<String>,
@@ -481,6 +486,12 @@ fn entry(args: &AddArgs) -> Result<Value> {
         if !args.header.is_empty() {
             object.insert("headers".to_owned(), pairs(&args.header, "--header")?);
         }
+        if args.oauth {
+            // The empty object is the whole vocabulary: `oauth: {}` is the
+            // config's opt-in marker for discovery + PKCE (D466), and writing
+            // any richer shape here would invent keys the loader refuses.
+            object.insert("oauth".to_owned(), Value::Object(Map::new()));
+        }
     } else {
         object.insert("type".to_owned(), Value::from("local"));
         object.insert(
@@ -765,6 +776,7 @@ mod tests {
             force: false,
             url: None,
             header: Vec::new(),
+            oauth: false,
             env: Vec::new(),
             cwd: None,
             timeout: None,
@@ -830,6 +842,28 @@ mod tests {
                 "url": "https://mcp.example/api",
                 "headers": {"Authorization": "Bearer x"},
                 "output_limit": 4_096,
+            })
+        );
+        validate("hosted", &built).expect("the loader would read it back");
+    }
+
+    /// The marker `ganja mcp login` gates on: without it, login refuses the
+    /// server by name — which is exactly what the field hit when `add` had no
+    /// way to write it.
+    #[test]
+    fn oauth_marks_a_remote_for_login_and_the_loader_reads_it_back() {
+        let mut asked = args("hosted");
+        asked.url = Some("https://mcp.example/api".to_owned());
+        asked.oauth = true;
+
+        let built = entry(&asked).expect("the entry is buildable");
+
+        assert_eq!(
+            built,
+            json!({
+                "type": "remote",
+                "url": "https://mcp.example/api",
+                "oauth": {},
             })
         );
         validate("hosted", &built).expect("the loader would read it back");

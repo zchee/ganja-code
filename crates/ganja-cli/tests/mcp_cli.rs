@@ -127,6 +127,49 @@ fn plant(path: &Path, text: &str) {
     fs::write(path, text).expect("the fixture file is writable");
 }
 
+/// The field sequence that motivated `--oauth`: an entry added without the
+/// marker cannot `mcp login`, and `add` used to have no way to write it.
+#[test]
+fn oauth_added_from_the_flag_reaches_login_past_the_no_oauth_refusal() {
+    let home = Home::new();
+
+    // A loopback endpoint with nothing listening: discovery dies on a refused
+    // connection in milliseconds, so the test proves login got PAST the
+    // no-oauth gate without a single byte leaving the machine.
+    home.ganja()
+        .args([
+            "mcp",
+            "add",
+            "context7",
+            "--global",
+            "--oauth",
+            "--url",
+            "http://127.0.0.1:1/mcp",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        read(&home.global_config()),
+        json!({
+            "mcp": {
+                "context7": {
+                    "type": "remote",
+                    "url": "http://127.0.0.1:1/mcp",
+                    "oauth": {},
+                }
+            }
+        }),
+        "the marker is written exactly as the loader's vocabulary spells it"
+    );
+
+    home.ganja()
+        .args(["mcp", "login", "context7"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has no `oauth` configured").not());
+}
+
 #[test]
 fn a_local_server_round_trips_through_the_loader_that_will_read_it() {
     let home = Home::new();
