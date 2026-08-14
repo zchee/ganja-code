@@ -508,7 +508,7 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
 /// because both receive them as one.
 pub(super) fn arguments(state: &ToolState) -> String {
     let input = match state {
-        ToolState::Pending => return "{}".to_owned(),
+        ToolState::Pending { .. } => return "{}".to_owned(),
         ToolState::Running { input, .. }
         | ToolState::Completed { input, .. }
         | ToolState::Error { input, .. } => input,
@@ -528,7 +528,7 @@ pub(super) fn result(state: &ToolState) -> &str {
         ToolState::Error { error, .. } => error,
         // See [`NO_RESULT`]: the turn that made this call died before the tool
         // answered, and an unanswered call is a request the API refuses.
-        ToolState::Pending | ToolState::Running { .. } => NO_RESULT,
+        ToolState::Pending { .. } | ToolState::Running { .. } => NO_RESULT,
     }
 }
 
@@ -1732,7 +1732,7 @@ mod tests {
     #[test]
     fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
         for state in [
-            ToolState::Pending,
+            ToolState::Pending { input: None },
             ToolState::Running {
                 input: json!({"filePath": "src/main.rs"}),
                 metadata: serde_json::Value::Null,

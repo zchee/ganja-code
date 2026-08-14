@@ -624,7 +624,7 @@ fn content(blocks: Vec<Block<'_>>) -> Content<'_> {
 /// The arguments a call ran with, or [`NO_INPUT`] when it never got that far.
 fn input(state: &ToolState) -> &Value {
     match state {
-        ToolState::Pending => &NO_INPUT,
+        ToolState::Pending { .. } => &NO_INPUT,
         ToolState::Running { input, .. }
         | ToolState::Completed { input, .. }
         | ToolState::Error { input, .. } => input,
@@ -638,7 +638,7 @@ fn result(state: &ToolState) -> (&str, bool) {
         ToolState::Error { error, .. } => (error, true),
         // See [`NO_RESULT`]: the turn that made this call died before the tool
         // answered, and an unanswered call is a request the API refuses.
-        ToolState::Pending | ToolState::Running { .. } => (NO_RESULT, true),
+        ToolState::Pending { .. } | ToolState::Running { .. } => (NO_RESULT, true),
     }
 }
 
@@ -1856,7 +1856,7 @@ mod tests {
     #[test]
     fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
         for state in [
-            ToolState::Pending,
+            ToolState::Pending { input: None },
             ToolState::Running {
                 input: json!({"filePath": "src/main.rs"}),
                 metadata: serde_json::Value::Null,

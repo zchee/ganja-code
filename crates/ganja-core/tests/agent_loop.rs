@@ -83,7 +83,7 @@ fn usage(input: u64, output: u64) -> Usage {
 fn shape(event: &Event) -> String {
     fn state_tag(state: &ToolState) -> &'static str {
         match state {
-            ToolState::Pending => "pending",
+            ToolState::Pending { .. } => "pending",
             ToolState::Running { .. } => "running",
             ToolState::Completed { .. } => "completed",
             ToolState::Error { .. } => "error",
@@ -283,7 +283,12 @@ async fn a_turn_spans_steps_until_a_request_ends_without_tool_calls() {
             "part:text",
             "delta:Let me look. ",
             "part:tool_pending:call_1",
+            // The moment a call's arguments finish streaming its part renames
+            // them, still pending: what will run is on screen before its turn
+            // comes (2026-08-15).
+            "updated:pending:call_1",
             "part:tool_pending:call_2",
+            "updated:pending:call_2",
             "part:step_finish:3/5",
             "updated:running:call_1",
             "updated:completed:call_1",

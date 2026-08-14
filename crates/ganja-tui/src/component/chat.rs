@@ -1543,7 +1543,15 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
     }
 
     match state {
-        ToolState::Pending => vec![Row::new(BULLET, tool_heading(tool, None), theme.dim)],
+        // A call whose turn has not come yet still says what it will do, once
+        // the stream has finished saying so (2026-08-15): the settled
+        // arguments ride the pending state, and a bare name means they are
+        // still streaming.
+        ToolState::Pending { input } => vec![Row::new(
+            BULLET,
+            tool_heading(tool, input.as_ref()),
+            theme.dim,
+        )],
         ToolState::Running {
             input, metadata, ..
         } => {
@@ -1674,7 +1682,14 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
 /// once as a result.
 fn task_lines(state: &ToolState, theme: &Theme) -> Vec<Row> {
     match state {
-        ToolState::Pending => vec![Row::new(BULLET, titlecase(TASK_TOOL), theme.dim)],
+        ToolState::Pending { input } => {
+            let heading = input.as_ref().map_or_else(
+                || titlecase(TASK_TOOL),
+                |input| task_heading(field(input, "subagent_type"), field(input, "description")),
+            );
+
+            vec![Row::new(BULLET, heading, theme.dim)]
+        }
         ToolState::Running {
             input, metadata, ..
         } => {
@@ -3108,7 +3123,7 @@ mod tests {
                 body: PartBody::Tool {
                     call_id: "call_2".to_owned(),
                     tool: "read".to_owned(),
-                    state: ToolState::Pending,
+                    state: ToolState::Pending { input: None },
                 },
             },
         );
@@ -3297,6 +3312,31 @@ mod tests {
             drawn,
             vec![&"\u{25cf} Read(a.rs)".to_owned()],
             "got {lines:?}"
+        );
+    }
+
+    /// A call waiting its turn behind the step's earlier calls names its
+    /// arguments the moment the stream finishes saying them (2026-08-15), and
+    /// stays a bare name while they are still arriving.
+    #[test]
+    fn a_waiting_call_names_its_arguments_once_they_have_settled() {
+        let named = tool_call(
+            "shell",
+            ToolState::Pending {
+                input: Some(serde_json::json!({"command": "cargo test"})),
+            },
+        );
+        assert!(
+            named
+                .iter()
+                .any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
+            "got {named:?}"
+        );
+
+        let streaming = tool_call("shell", ToolState::Pending { input: None });
+        assert!(
+            streaming.iter().any(|line| line == "\u{25cf} Shell"),
+            "got {streaming:?}"
         );
     }
 

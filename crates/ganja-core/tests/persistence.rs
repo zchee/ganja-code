@@ -420,7 +420,7 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
         body: PartBody::Tool {
             call_id: "call_10".to_owned(),
             tool: "glob".to_owned(),
-            state: ToolState::Pending,
+            state: ToolState::Pending { input: None },
         },
     });
     assert!(

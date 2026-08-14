@@ -4078,7 +4078,7 @@ impl App {
             } => {
                 if let PartBody::Tool { tool, state, .. } = &part.body {
                     self.status.set_activity(match state {
-                        ToolState::Pending | ToolState::Running { .. } => {
+                        ToolState::Pending { .. } | ToolState::Running { .. } => {
                             Activity::Tool(tool.clone())
                         }
                         ToolState::Completed { .. } | ToolState::Error { .. } => {

@@ -919,7 +919,7 @@ mod tests {
                 .send(Event::PartStarted {
                     session_id: session_id.clone(),
                     message_id: message_id.clone(),
-                    part: call(index, ToolState::Pending),
+                    part: call(index, ToolState::Pending { input: None }),
                 })
                 .await
                 .expect("the watcher is listening");

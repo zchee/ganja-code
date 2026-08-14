@@ -522,7 +522,7 @@ async fn collect(engine: &Engine, events: &mut BoxStream<'static, Event>) -> Vec
                             }
                         }
                         // Arguments still streaming; nothing has run yet.
-                        ToolState::Pending => {}
+                        ToolState::Pending { .. } => {}
                     }
                 }
             }

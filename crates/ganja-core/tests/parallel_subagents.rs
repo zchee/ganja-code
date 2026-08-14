@@ -375,7 +375,7 @@ fn task_parts(seen: &[Event]) -> HashMap<String, ToolState> {
             continue;
         }
         let described = match state {
-            ToolState::Pending => None,
+            ToolState::Pending { .. } => None,
             ToolState::Running { input, .. }
             | ToolState::Completed { input, .. }
             | ToolState::Error { input, .. } => input["description"].as_str().map(str::to_owned),
