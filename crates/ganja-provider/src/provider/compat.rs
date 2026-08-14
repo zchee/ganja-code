@@ -161,6 +161,18 @@ impl Provider for CompatProvider {
             Wire::Messages(wire) => wire.stream(request, cancel).await,
         }
     }
+
+    /// Delegated for [`super::grok`]'s reason. A config-declared endpoint that
+    /// sends one of the two known families is metered exactly like a builtin
+    /// one; one that sends neither meters nothing, which is the same answer
+    /// this build gives about everything else it cannot size about such an
+    /// endpoint.
+    fn rate_windows(&self) -> Vec<super::RateWindow> {
+        match &self.wire {
+            Wire::ChatCompletions(wire) => wire.rate_windows(),
+            Wire::Messages(wire) => wire.rate_windows(),
+        }
+    }
 }
 
 #[cfg(test)]

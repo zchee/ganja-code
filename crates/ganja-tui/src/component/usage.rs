@@ -18,7 +18,17 @@
 //! weekly buckets — which ride a vendor usage API ganja does not speak;
 //! those rows are **explicitly absent**, with one honest line naming why,
 //! rather than drawn empty or faked (the plan's honest-degradation rule,
-//! ruled sufficient in Open question 2). Its `Total duration` row renders
+//! ruled sufficient in Open question 2).
+//!
+//! P16 narrowed that absence rather than filling it (**D484**): the vendor's
+//! *rate-limit* windows — which every response's headers already carry, and
+//! which need no usage API — get a `Current window` section of their own, in
+//! the same block-bar shape, tightest budget first. What the honest line now
+//! names is only the plan meters, which still have no source. A backend that
+//! sends no such headers renders no section at all, and a window past its own
+//! reset renders as expired rather than as a live figure.
+//!
+//! Its `Total duration` row renders
 //! when the opener hands one in (W7: the app's own wall clock since it was
 //! built — never an invented API duration); its code-change row stays absent
 //! the same way as the plan meters: no data source exists anywhere in the
@@ -36,7 +46,10 @@
 //! closes it; [`crate::app::App`] owns that key, the same split every other
 //! dialog keeps.
 
-use ganja_core::catalog::{self, compact_tokens};
+use ganja_core::{
+    catalog::{self, compact_tokens},
+    provider::RateWindow,
+};
 use ganja_protocol::Usage as TokenUsage;
 use ratatui::{
     buffer::Buffer,
@@ -64,7 +77,21 @@ const MAX_WIDTH: u16 = 96;
 /// Tallest the modal grows: enough for the sections and a handful of turn
 /// rows; a longer session keeps its newest rows, the ones a person opening
 /// the panel is asking about.
-const MAX_HEIGHT: u16 = 24;
+///
+/// Two taller than P14 left it, which is exactly what the `Current window`
+/// section costs at [`RATE_ROWS`] (**D484**). Grown rather than left to push
+/// the honest-absence line and the key hints off the bottom: a section added
+/// at the cost of the footer that explains the panel would be a poor trade.
+const MAX_HEIGHT: u16 = 26;
+
+/// How many rate windows the `Current window` section draws before it starts
+/// counting the rest.
+///
+/// Two, because the question the section answers is "what stops me first" and
+/// the tightest two are that answer — and because a vendor sending four
+/// buckets would otherwise cost this modal eight rows it does not have. What
+/// is left out is named on its own line rather than dropped silently.
+const RATE_ROWS: usize = 2;
 
 /// Cells in a block bar, the same span of columns the old ASCII meter held.
 const METER_WIDTH: usize = 20;
@@ -74,7 +101,18 @@ const HINTS: &str = "[Esc] close";
 
 /// The one honest line where Claude Code draws its plan-limit meters: ganja
 /// speaks no vendor usage API, so there is nothing true to draw (D471).
+///
+/// **Narrowed in P16** (**D484**): it used to stand for every window this panel
+/// could not show. The vendor's own rate-limit windows *are* now shown, in
+/// [`Usage::render`]'s `Current window` section, so this line names only what
+/// is still genuinely absent — the subscription plan's meters, which need the
+/// usage API D471 ruled out.
 const NO_PLAN_LIMITS: &str = "plan limits (5h/weekly) unavailable: no vendor usage API";
+
+/// What the `Current window` section says when a bucket's own reset has
+/// passed. The vendor said a true thing at a moment that is over; renaming it
+/// is the whole staleness guard (P16 pre-mortem 4).
+const EXPIRED: &str = "expired \u{2014} refreshes on the next request";
 
 /// Column widths of the per-turn table, matching the inspector's tab so the
 /// same rows read the same in both places.
@@ -101,6 +139,17 @@ pub struct Data {
     /// this side truly holds (W7). Absent, the row is absent: an invented
     /// duration would be worse than none.
     pub duration: Option<std::time::Duration>,
+    /// The vendor's own rate-limit windows, as `Engine::rate_windows` last
+    /// answered (**D484**). Empty renders no `Current window` section at all —
+    /// the D470 rule, which is why this panel can carry the section and the
+    /// honest-absence line side by side without either becoming a lie.
+    pub rates: Vec<RateWindow>,
+    /// What "now" the section's expiry is judged against. Its own field rather
+    /// than a [`SystemTime::now`] inside the renderer so a test can manufacture
+    /// an already-expired bucket without waiting for a clock.
+    ///
+    /// [`SystemTime::now`]: std::time::SystemTime::now
+    pub now: Option<std::time::SystemTime>,
 }
 
 /// The dialog itself.
@@ -275,6 +324,60 @@ impl Usage {
         }
         lines.push(Line::raw(""));
 
+        // Current window: the vendor's own rate-limit buckets, in the same
+        // block-bar shape as everything above (**D484**). Absent entirely
+        // when the wire has heard none — a section header over "none" would
+        // be this panel claiming to know something about a backend that
+        // never spoke.
+        if !self.data.rates.is_empty() {
+            let now = self.data.now.unwrap_or_else(std::time::SystemTime::now);
+            // Tightest first: the budget that will stop a turn soonest is the
+            // one somebody opening this panel is asking about, and it is what
+            // the cap below keeps.
+            let mut windows: Vec<_> = self.data.rates.iter().collect();
+            windows.sort_by(|left, right| right.used().total_cmp(&left.used()));
+
+            lines.push(Line::styled(clip("Current window", inner_width), header));
+            for window in windows.iter().take(RATE_ROWS) {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(Self::bar(window.used(), theme));
+                spans.push(Span::styled(
+                    format!(
+                        " {} \u{b7} {} of {} left, {}",
+                        window.kind,
+                        compact_tokens(window.remaining),
+                        compact_tokens(window.limit),
+                        if window.expired(now) {
+                            EXPIRED.to_owned()
+                        } else {
+                            format!(
+                                "resets in {}",
+                                compact_duration(
+                                    window.reset.duration_since(now).unwrap_or_default()
+                                )
+                            )
+                        },
+                    ),
+                    theme.fg,
+                ));
+                lines.push(Line::from(spans));
+            }
+            if let Some(rest) = windows
+                .len()
+                .checked_sub(RATE_ROWS)
+                .filter(|rest| *rest > 0)
+            {
+                lines.push(Line::styled(
+                    clip(
+                        &format!("  ({rest} roomier windows not shown)"),
+                        inner_width,
+                    ),
+                    theme.dim,
+                ));
+            }
+            lines.push(Line::raw(""));
+        }
+
         // Cache: what the splits bought — a real, derived rate Claude shows
         // only as raw counters (which the Session lines now carry too).
         lines.push(Line::styled(clip("Cache", inner_width), header));
@@ -379,10 +482,12 @@ fn compact_duration(duration: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
     use ganja_protocol::Message;
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    use super::{Data, TokenUsage, TurnUsage, Usage};
+    use super::{Data, RateWindow, TokenUsage, TurnUsage, Usage};
     use crate::{component::status::Totals, theme::Theme};
 
     /// Wide enough for the pinned per-model line to render whole.
@@ -420,8 +525,35 @@ mod tests {
                 },
             }],
             duration: None,
+            // The headerless case every existing assertion in this module is
+            // written against, kept explicit so the regression pin is visible:
+            // a fake-provider session renders exactly what it always did
+            // (**D484**, AC7's last clause).
+            rates: Vec::new(),
+            now: None,
         }
     }
+
+    /// One rate-limit window, `remaining` of `limit` left, refilling `in_secs`
+    /// from [`NOW`] — negative for one whose reset has already gone by.
+    fn window(kind: &str, limit: u64, remaining: u64, in_secs: i64) -> RateWindow {
+        let offset = Duration::from_secs(in_secs.unsigned_abs());
+
+        RateWindow {
+            kind: kind.to_owned(),
+            limit,
+            remaining,
+            reset: if in_secs < 0 {
+                NOW - offset
+            } else {
+                NOW + offset
+            },
+        }
+    }
+
+    /// A fixed "now" the panel judges expiry against, so an expired bucket is
+    /// manufactured rather than waited for.
+    const NOW: SystemTime = UNIX_EPOCH;
 
     /// AC5's "same formatter" clause, pinned as a regression test now that
     /// the sharing is literal: the panel's turn row spells its id and cost
@@ -585,6 +717,104 @@ mod tests {
         assert!(
             !screen.contains("wk:["),
             "no weekly meter may be drawn:\n{screen}"
+        );
+        // The P16 narrowing (**D484**): with no windows heard, the section is
+        // absent too — the honest-absence line is not standing in for it.
+        assert!(
+            !screen.contains("Current window"),
+            "a vendor that said nothing gets no section:\n{screen}"
+        );
+    }
+
+    /// The `Current window` section renders what the vendor really said, in
+    /// the panel's own block-bar shape (**D484**).
+    #[test]
+    fn the_current_window_section_meters_each_bucket_the_vendor_reported() {
+        let screen = rendered(
+            &Usage::new(Data {
+                rates: vec![
+                    window("requests", 1_000, 900, 90),
+                    window("input-tokens", 80_000, 20_000, 30),
+                ],
+                now: Some(NOW),
+                ..data()
+            }),
+            AREA,
+        );
+
+        assert!(screen.contains("Current window"), "got:\n{screen}");
+        assert!(
+            screen.contains("requests \u{b7} 900 of 1.0k left, resets in 1m"),
+            "the requests bucket renders its own name, counts and reset:\n{screen}"
+        );
+        assert!(
+            screen.contains("input-tokens \u{b7} 20.0k of 80.0k left, resets in 30s"),
+            "and so does the token bucket:\n{screen}"
+        );
+        // The narrowed absence line still stands beside it: what is missing is
+        // the plan meters, and only those.
+        assert!(
+            screen.contains("plan limits (5h/weekly) unavailable: no vendor usage API"),
+            "got:\n{screen}"
+        );
+    }
+
+    /// P16 pre-mortem 4, on the panel: a window past its reset says so instead
+    /// of presenting a number as current.
+    #[test]
+    fn a_window_past_its_reset_renders_as_expired_rather_than_as_a_live_number() {
+        let screen = rendered(
+            &Usage::new(Data {
+                rates: vec![window("requests", 1_000, 4, -1)],
+                now: Some(NOW),
+                ..data()
+            }),
+            AREA,
+        );
+
+        assert!(
+            screen.contains("expired \u{2014} refreshes on the next request"),
+            "got:\n{screen}"
+        );
+        assert!(
+            !screen.contains("resets in"),
+            "nothing may claim the window is still counting down:\n{screen}"
+        );
+        // The counts stay: they were true when the vendor said them, and the
+        // panel's job is to date them, not to erase them.
+        assert!(screen.contains("4 of 1.0k left"), "got:\n{screen}");
+    }
+
+    /// More windows than the section draws are counted, never dropped in
+    /// silence — and the ones kept are the tightest (**D484**).
+    #[test]
+    fn windows_past_the_sections_cap_are_counted_and_the_tightest_are_kept() {
+        let screen = rendered(
+            &Usage::new(Data {
+                rates: vec![
+                    window("requests", 100, 99, 60),
+                    window("input-tokens", 100, 5, 60),
+                    window("output-tokens", 100, 50, 60),
+                    window("tokens", 100, 90, 60),
+                ],
+                now: Some(NOW),
+                ..data()
+            }),
+            AREA,
+        );
+
+        assert!(
+            screen.contains("input-tokens \u{b7} 5 of 100 left")
+                && screen.contains("output-tokens \u{b7} 50 of 100 left"),
+            "the two tightest windows are the ones drawn:\n{screen}"
+        );
+        assert!(
+            screen.contains("(2 roomier windows not shown)"),
+            "the rest are counted rather than dropped:\n{screen}"
+        );
+        assert!(
+            screen.contains("plan limits (5h/weekly) unavailable"),
+            "and the footer still fits:\n{screen}"
         );
     }
 

@@ -10,10 +10,14 @@
 //! the named order, joined with dim ` | ` separators, truncated with an
 //! ellipsis at the width limit, a `repo:… | branch:…` line *above* the bar
 //! when `git` is named, and an optional detail line under it — the rendering
-//! the P14 screenshot pinned. The rate-bucket meters that screenshot also
-//! shows (5h/week/spend) are deliberately absent: they need a vendor usage
-//! API ganja does not speak, so the meter renderer is built once ([`meter`])
-//! and the elements wait for a data source rather than inventing one.
+//! the P14 screenshot pinned. P14 left the rate-bucket meters that screenshot
+//! also shows waiting for a data source rather than inventing one; **P16 found
+//! one** (**D484**) that is not the missing usage API — the rate-limit headers
+//! every response already carries — and the `rate` element draws the tightest
+//! of them through the same [`meter`] the `ctx` element uses. What is still
+//! absent is what still has no source: the subscription plan's 5h/weekly
+//! meters and any account-wide spend figure. `rate` yields no cell at all when
+//! the wire has heard nothing, or when everything it heard has expired.
 
 use std::{
     cell::RefCell,
@@ -25,6 +29,7 @@ use std::{
 use ganja_core::{
     catalog::compact_tokens,
     config::{StatuslineConfig, StatuslineElement},
+    provider::RateWindow,
 };
 use ratatui::{
     buffer::Buffer,
@@ -241,6 +246,12 @@ pub struct Status {
     context: Option<(u64, u64)>,
     /// Todo progress for the `todos` element.
     todos: Option<Todos>,
+    /// The vendor's own rate-limit windows for the `rate` element, as the app
+    /// last polled them off `Engine::rate_windows` (**D484**). Empty until a
+    /// real response has carried the headers — and empty forever against a
+    /// backend that never sends them, which is what makes the element vanish
+    /// rather than draw a zero.
+    rates: Vec<RateWindow>,
     /// When this bar was built — the `session` element's zero. Not `since`,
     /// which every activity change resets.
     started: Instant,
@@ -277,6 +288,7 @@ impl Status {
             model: None,
             context: None,
             todos: None,
+            rates: Vec::new(),
             started: Instant::now(),
             cwd: workdir
                 .as_deref()
@@ -310,6 +322,30 @@ impl Status {
     /// Records todo progress for the `todos` element.
     pub fn set_todos(&mut self, todos: Option<Todos>) {
         self.todos = todos;
+    }
+
+    /// Records the vendor's rate-limit windows for the `rate` element.
+    ///
+    /// Whole-set, like [`Status::set_context`]: the engine hands over what the
+    /// wire last heard, and an empty hand-over is an honest "nothing known"
+    /// rather than an instruction to keep the previous numbers on screen.
+    pub fn set_rates(&mut self, rates: Vec<RateWindow>) {
+        self.rates = rates;
+    }
+
+    /// The window that will stop a turn first: least remaining of the budget,
+    /// among those that have not already expired.
+    ///
+    /// Expiry is checked here rather than at the engine because it is a
+    /// question about *now*, and now is whenever this bar is being drawn. A
+    /// set whose every window has expired yields [`None`], which is what makes
+    /// the element decay to empty instead of freezing at the last happy
+    /// number (P16 pre-mortem 4).
+    fn tightest_rate(&self, now: SystemTime) -> Option<&RateWindow> {
+        self.rates
+            .iter()
+            .filter(|window| !window.expired(now))
+            .max_by(|left, right| left.used().total_cmp(&right.used()))
     }
 
     /// How many rows this bar wants: one, plus the git line above it and the
@@ -696,6 +732,16 @@ impl Status {
                         vec![Span::styled(text, theme.accent)]
                     })
             }
+            // The tightest live window as the context meter's own shape, so
+            // the two things a person reads as "how much room is left" read
+            // alike (**D484**). No live window — none heard, or every one
+            // past its reset — is no cell at all.
+            StatuslineElement::Rate => self.tightest_rate(SystemTime::now()).map(|window| {
+                // Used, not remaining, so the bar fills and reddens the
+                // way `ctx` does as the room runs out.
+                let spent = window.limit.saturating_sub(window.remaining);
+                meter("rate", percent_of(spent, window.limit), theme)
+            }),
             // Rendered above the bar and at its right edge respectively;
             // `render_roster` owns both placements.
             StatuslineElement::Git | StatuslineElement::Hints => None,
@@ -931,8 +977,8 @@ mod tests {
     use unicode_width::UnicodeWidthStr as _;
 
     use super::{
-        Activity, HINTS, SHELL_HINTS, Severity, Status, Todos, Totals, discover_git, head_name,
-        meter_fill, meter_severity,
+        Activity, Duration, HINTS, RateWindow, SHELL_HINTS, Severity, Status, SystemTime, Todos,
+        Totals, discover_git, head_name, meter_fill, meter_severity,
     };
     use crate::theme::Theme;
 
@@ -971,6 +1017,24 @@ mod tests {
         let mut status = Status::new(None);
         status.elements = Some(elements.to_vec());
         status
+    }
+
+    /// One rate-limit window, `remaining` of `limit` left, refilling `in_secs`
+    /// from now — negative for one whose reset has already gone by.
+    fn window(kind: &str, limit: u64, remaining: u64, in_secs: i64) -> RateWindow {
+        let now = SystemTime::now();
+        let offset = Duration::from_secs(in_secs.unsigned_abs());
+
+        RateWindow {
+            kind: kind.to_owned(),
+            limit,
+            remaining,
+            reset: if in_secs < 0 {
+                now - offset
+            } else {
+                now + offset
+            },
+        }
     }
 
     #[test]
@@ -1314,6 +1378,67 @@ mod tests {
             "the three named elements, in the named order, and nothing else"
         );
         assert!(!line.contains("ready"), "the activity was not named");
+    }
+
+    /// The `rate` element draws the vendor's tightest live window in the
+    /// context meter's own shape (**D484**).
+    #[test]
+    fn the_rate_element_meters_the_tightest_window_the_vendor_reported() {
+        let mut status = roster(&[StatuslineElement::Rate]);
+        status.set_rates(vec![
+            // 10% spent — the roomy one, which must not be the one shown.
+            window("requests", 1_000, 900, 60),
+            // 75% spent — the budget that will stop a turn first.
+            window("input-tokens", 80_000, 20_000, 60),
+        ]);
+
+        assert_eq!(
+            rendered(&status, 60),
+            "rate:[######--]75%",
+            "the tightest of the two windows is the one metered"
+        );
+    }
+
+    /// The D470 rule at the bar: a wire that heard no rate headers yields no
+    /// cell, not a zero.
+    #[test]
+    fn the_rate_element_renders_nothing_when_the_vendor_said_nothing() {
+        let status = roster(&[StatuslineElement::Rate, StatuslineElement::Activity]);
+
+        assert_eq!(
+            rendered(&status, 60),
+            "ready",
+            "with no windows the element contributes no cell and no separator"
+        );
+    }
+
+    /// P16 pre-mortem 4: a window past its own reset decays to empty rather
+    /// than freezing at the last happy number.
+    #[test]
+    fn a_rate_window_past_its_reset_decays_to_an_empty_element() {
+        let mut status = roster(&[StatuslineElement::Rate, StatuslineElement::Activity]);
+        status.set_rates(vec![window("requests", 1_000, 4, -1)]);
+
+        let line = rendered(&status, 60);
+        assert_eq!(
+            line, "ready",
+            "an expired window renders nothing at all, never a stale meter"
+        );
+        assert!(!line.contains("rate:"), "got {line:?}");
+    }
+
+    /// An expired window beside a live one leaves the live one showing: the
+    /// decay is per window, not per set.
+    #[test]
+    fn an_expired_window_beside_a_live_one_leaves_the_live_one_metered() {
+        let mut status = roster(&[StatuslineElement::Rate]);
+        status.set_rates(vec![
+            // Would be the tightest by far — and is expired.
+            window("input-tokens", 100, 0, -1),
+            window("requests", 100, 50, 60),
+        ]);
+
+        assert_eq!(rendered(&status, 60), "rate:[####----]50%");
     }
 
     /// The meter's percent is the estimate the app handed in, and 70% is

@@ -365,6 +365,12 @@ pub struct ResponsesProvider {
     /// Which backend this provider was built for — see [`Backend`] for the
     /// table of what it decides.
     backend: Backend,
+    /// What this backend last said was left of the account's budget
+    /// (**D484**). The platform backend sends the `x-ratelimit-*` family with
+    /// Go-spelled resets; the codex backend was observed sending no such
+    /// family at all, and meters nothing rather than being given an invented
+    /// one — [`super::rate`]'s table picks up either without a change here.
+    rates: super::RateWindows,
 }
 
 impl fmt::Debug for ResponsesProvider {
@@ -476,6 +482,7 @@ impl ResponsesProvider {
             credential,
             base_url,
             backend,
+            rates: super::RateWindows::default(),
         })
     }
 
@@ -625,9 +632,19 @@ impl Provider for ResponsesProvider {
             "requesting a turn"
         );
 
-        open::<Mapping>(&self.client, built, &resolved.presented, cancel)
-            .await
-            .map_err(|error| reauth(backend, error))
+        open::<Mapping>(
+            &self.client,
+            built,
+            &resolved.presented,
+            &self.rates,
+            cancel,
+        )
+        .await
+        .map_err(|error| reauth(backend, error))
+    }
+
+    fn rate_windows(&self) -> Vec<super::RateWindow> {
+        self.rates.latest()
     }
 }
 

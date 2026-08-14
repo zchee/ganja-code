@@ -853,10 +853,16 @@ pub struct StatuslineConfig {
 /// One thing the status bar can render, named the way a config names it.
 ///
 /// The first block is today's bar, segment for segment; the second is the
-/// HUD vocabulary the P14 screenshot pinned. Rate-bucket elements (5h/week/
-/// spend meters) are deliberately not here: they need a vendor usage API
-/// ganja does not speak, and a name that renders nothing would be a lie the
-/// loader let through.
+/// HUD vocabulary the P14 screenshot pinned; the last is [`Self::Rate`].
+///
+/// P14 recorded here that rate-bucket elements were deliberately absent for
+/// want of a data source. **P16 found one that is not the missing usage API**
+/// (**D484**): the rate-limit headers every response already carries. What
+/// stays absent is what still has no honest source — the subscription plan's
+/// 5h/weekly meters and any account-wide spend figure, which need the vendor
+/// usage API ganja holds no credential tier for (**D471**). A name that
+/// renders nothing would still be a lie the loader let through; `rate` renders
+/// something whenever the vendor said something, and nothing when it did not.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum StatuslineElement {
@@ -892,6 +898,14 @@ pub enum StatuslineElement {
     Cwd,
     /// Todo progress, `todos:N/M` plus the in-progress title.
     Todos,
+    /// The tightest of the vendor's own rate-limit windows, as the context
+    /// meter's shape (**D484**) — `rate:[####----]NN%` over the bucket with
+    /// least left, the one that will stop a turn first.
+    ///
+    /// Renders **nothing at all** when the wire has heard no such headers, or
+    /// when every window it heard is past its own reset: an element that has
+    /// nothing true to say yields no cell rather than a stale number.
+    Rate,
 }
 
 /// Which notification moments a `tui.notifications` key asked for.

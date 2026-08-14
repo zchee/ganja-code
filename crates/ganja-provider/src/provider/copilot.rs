@@ -259,6 +259,12 @@ impl Provider for CopilotProvider {
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
         self.0.stream(request, cancel).await
     }
+
+    /// Delegated for [`super::grok`]'s reason: the buckets belong to whichever
+    /// wire the response reached, not to the name wrapped around it.
+    fn rate_windows(&self) -> Vec<super::RateWindow> {
+        self.0.rate_windows()
+    }
 }
 
 #[cfg(test)]

@@ -89,6 +89,12 @@ pub struct AnthropicProvider {
     /// describe the endpoint, which is fixed when the provider is built, and
     /// never the credential, which is not.
     headers: reqwest::header::HeaderMap,
+    /// What this endpoint last said was left of the account's budget
+    /// (**D484**). Held by the wire rather than by a session because that is
+    /// what the headers measure; the parsing is [`super::rate`]'s, shared with
+    /// every other wire, so nothing about this vendor's spelling is repeated
+    /// here.
+    rates: super::RateWindows,
 }
 
 impl fmt::Debug for AnthropicProvider {
@@ -166,6 +172,7 @@ impl AnthropicProvider {
             base_url: base_url.into(),
             max_tokens: DEFAULT_MAX_TOKENS,
             headers: reqwest::header::HeaderMap::new(),
+            rates: super::RateWindows::default(),
         })
     }
 
@@ -273,7 +280,11 @@ impl Provider for AnthropicProvider {
             "requesting a turn"
         );
 
-        open::<Mapping>(&self.client, built, &presented, cancel).await
+        open::<Mapping>(&self.client, built, &presented, &self.rates, cancel).await
+    }
+
+    fn rate_windows(&self) -> Vec<super::RateWindow> {
+        self.rates.latest()
     }
 }
 
