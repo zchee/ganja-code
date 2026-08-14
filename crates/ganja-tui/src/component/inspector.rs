@@ -29,6 +29,12 @@
 //! overlay whose whole reference is white-on-black, and no theme schema slot
 //! exists that could scope a choice to this surface alone.
 //!
+//! The viewport moved once more the same day: every tab opens **pinned to
+//! its tail** — the newest of what the overlay exists to expand — and,
+//! because each render re-reads the feed, a pinned viewport follows a
+//! streaming turn on its own. Scrolling up unpins and holds; the bottom, or
+//! End, re-pins — the chat pane's own tail-follow rule, on the overlay.
+//!
 //! A view, not a mode: nothing here pauses a running turn, and every
 //! [`Inspector::render`] call re-reads what `App` hands it rather than a
 //! snapshot taken when the overlay opened — the state itself (the raw-log
@@ -159,29 +165,42 @@ impl Tab {
 #[derive(Debug)]
 pub struct Inspector {
     tab: Tab,
-    /// First row of the active tab's content on screen. Reset to zero on a
-    /// tab switch, and clamped by the render the same way
-    /// [`crate::component::help::Help::offset`] is — the render is the only
-    /// place that knows how many rows there are and how many fit.
-    offset: usize,
+    /// First row of the active tab's content on screen, or [`None`] to stay
+    /// **pinned to the tail** — the opening state (2026-08-15, retiring the
+    /// open-at-the-top posture): the newest of what this overlay exists to
+    /// expand is what it opens on, and because every render re-reads the feed
+    /// fresh, a pinned viewport follows a streaming turn on its own. Clamped
+    /// by the render the same way [`crate::component::help::Help::offset`]
+    /// is — the render is the only place that knows how many rows there are
+    /// and how many fit — and a viewport scrolled to (or past) the bottom
+    /// returns to [`None`], exactly the chat pane's own tail-follow rule.
+    offset: Option<usize>,
+    /// The active tab's content length at the last render, so a scroll that
+    /// starts from the pinned tail has a row to start counting from.
+    total: usize,
+    /// How many content rows the last render had room for, kept beside
+    /// `total` for the same reason.
+    rows: usize,
 }
 
 impl Inspector {
-    /// Opens on the transcript tab, scrolled to the top.
+    /// Opens on the transcript tab, pinned to the tail.
     #[must_use]
     pub fn new() -> Self {
         Self {
             tab: Tab::Transcript,
-            offset: 0,
+            offset: None,
+            total: 0,
+            rows: 0,
         }
     }
 
-    /// Switches to `tab`, and back to the top of it: a scroll position from
-    /// one tab means nothing on another.
+    /// Switches to `tab`, and back to its tail: a scroll position from one
+    /// tab means nothing on another, and the tail is where every tab opens.
     fn select(&mut self, tab: Tab) {
         if self.tab != tab {
             self.tab = tab;
-            self.offset = 0;
+            self.offset = None;
         }
     }
 
@@ -205,20 +224,25 @@ impl Inspector {
     }
 
     /// Moves the active tab's viewport by `delta` rows, negative towards the
-    /// top. Deliberately unclamped at the far end, for the reason
-    /// [`crate::component::help::Help::scroll`] is: only the render knows
-    /// where the far end is.
+    /// top. A pinned viewport starts counting from the tail the last render
+    /// measured; reaching the bottom again — End rides this with
+    /// `isize::MAX` — re-pins, so scrolling down past the end behaves like
+    /// never having scrolled, exactly as the chat pane reads it.
     pub fn scroll(&mut self, delta: isize) {
-        self.offset = if delta < 0 {
-            self.offset.saturating_sub(delta.unsigned_abs())
+        let max = self.total.saturating_sub(self.rows);
+        let current = self.offset.unwrap_or(max);
+        let moved = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
         } else {
-            self.offset.saturating_add(delta.unsigned_abs())
+            current.saturating_add(delta.unsigned_abs())
         };
+
+        self.offset = (moved < max).then_some(moved);
     }
 
     /// Moves the active tab's viewport to its first row.
     pub fn scroll_to_top(&mut self) {
-        self.offset = 0;
+        self.offset = Some(0);
     }
 
     /// Draws the overlay over the whole of `area`.
@@ -252,10 +276,15 @@ impl Inspector {
         let total = content.len();
 
         let rows = usize::from(area.height).saturating_sub(CHROME).max(1);
-        // Written back so a scroll up starts from the last row actually
-        // shown, the same discipline `Help::render` follows.
-        self.offset = self.offset.min(total.saturating_sub(rows));
-        let offset = self.offset;
+        // Written back so a scroll starts from the rows actually shown, the
+        // same discipline `Help::render` follows — and a viewport that was
+        // dragged to the bottom, or that the content shrank out from under,
+        // goes back to following the tail.
+        let max = total.saturating_sub(rows);
+        self.total = total;
+        self.rows = rows;
+        self.offset = self.offset.filter(|offset| *offset < max);
+        let offset = self.offset.unwrap_or(max);
 
         let mut lines: Vec<Line<'static>> = vec![
             banner_line(self.tab, theme, width),
@@ -506,7 +535,9 @@ mod tests {
     use std::collections::VecDeque;
 
     use ganja_core::SessionId;
-    use ganja_protocol::{Event as CoreEvent, Message, Part, PartBody, PartId, Role, ToolState};
+    use ganja_protocol::{
+        Event as CoreEvent, Message, MessageId, Part, PartBody, PartId, Role, ToolState,
+    };
     use ratatui::{buffer::Buffer, layout::Rect};
 
     use super::{Feed, Inspector, TurnUsage};
@@ -756,7 +787,7 @@ mod tests {
     }
 
     /// Switching tabs forgets the old tab's scroll position: it describes
-    /// nothing about the new one.
+    /// nothing about the new one, whose tail is where every tab opens.
     #[test]
     fn switching_tabs_resets_the_scroll_position() {
         let (events, usages) = (VecDeque::new(), VecDeque::new());
@@ -765,13 +796,63 @@ mod tests {
         inspector.scroll(5);
         inspector.select_index(1);
 
-        // Rendering does not panic and the new tab starts at its own top;
-        // asserted indirectly by re-selecting the transcript tab and
+        // Rendering does not panic and the new tab starts pinned to its own
+        // tail; asserted indirectly by re-selecting the transcript tab and
         // confirming a fresh `Inspector` renders identically.
         let moved = render(&mut inspector, &feed);
         let fresh = render(&mut Inspector::default(), &feed);
         inspector.select_index(0);
         assert_eq!(render(&mut inspector, &feed), fresh, "got:\n{moved}");
+    }
+
+    /// Every tab opens pinned to its tail — the newest is what the overlay
+    /// exists to expand — and a pinned viewport follows the stream, because
+    /// every render re-reads the feed fresh (2026-08-15, retiring the
+    /// open-at-the-top posture). Scrolling up unpins and holds; End re-pins.
+    #[test]
+    fn the_log_tab_opens_on_its_tail_and_follows_what_arrives() {
+        let delta = |index: usize| CoreEvent::PartDelta {
+            session_id: SessionId::from("ses_1".to_owned()),
+            message_id: MessageId::from("msg_1".to_owned()),
+            part_id: PartId::from(format!("prt_{index}")),
+            delta: format!("delta {index}"),
+        };
+        let mut events: VecDeque<CoreEvent> = (0..30).map(delta).collect();
+        let usages = VecDeque::new();
+        let mut inspector = Inspector::new();
+        inspector.select_index(1);
+        let area = Rect::new(0, 0, 120, 8);
+
+        let opened = render_in(&mut inspector, area, &feed(None, &[], &events, &usages));
+        assert!(
+            opened.contains("prt_29"),
+            "the tail is what opens:\n{opened}"
+        );
+        assert!(
+            !opened.contains("prt_0\""),
+            "and the head is off screen:\n{opened}"
+        );
+
+        events.push_back(delta(30));
+        let followed = render_in(&mut inspector, area, &feed(None, &[], &events, &usages));
+        assert!(
+            followed.contains("prt_30"),
+            "a pinned viewport follows what arrives:\n{followed}"
+        );
+
+        inspector.scroll(-1);
+        let held = render_in(&mut inspector, area, &feed(None, &[], &events, &usages));
+        assert!(
+            !held.contains("prt_30"),
+            "scrolled up, the viewport holds its place:\n{held}"
+        );
+
+        inspector.scroll(isize::MAX);
+        let repinned = render_in(&mut inspector, area, &feed(None, &[], &events, &usages));
+        assert!(
+            repinned.contains("prt_30"),
+            "End re-pins the viewport to the tail:\n{repinned}"
+        );
     }
 
     #[test]
