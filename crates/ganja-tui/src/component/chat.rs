@@ -33,7 +33,11 @@
 //! Presentation is all that moves. Every fact the pane showed before — which
 //! state a call is in, what it was called with, what it answered, why it failed
 //! — is still on screen, told by a glyph and a color instead of by a bracketed
-//! word.
+//! word. Two later screenshots (2026-08-14) pin two more results the same way:
+//! a `read` of a **directory** answers with `Listed N entries` rather than the
+//! envelope it writes for the model, and a `todowrite` answers with the
+//! checklist itself — `\u{2610}`/`\u{2612}` a row each — drawn both on the call's
+//! own row and, while the turn is still running, under the working line.
 
 use std::{collections::HashMap, time::Instant};
 
@@ -154,7 +158,9 @@ pub struct Chat {
     backtrack_unseen: bool,
     /// The turn that is running, while one is (**D487**).
     working: Option<Working>,
-    /// The line [`Chat::working`] drew to on the last frame.
+    /// The lines [`Chat::working`] drew to on the last frame: the working line
+    /// itself, and under it this turn's checklist while the turn has one
+    /// (**D487**).
     ///
     /// Rebuilt every render rather than cached on width and theme like every
     /// other block here, because its text moves with the clock and there is
@@ -162,7 +168,7 @@ pub struct Chat {
     /// because [`Chat::visible`] hands out borrowed lines, and it costs one
     /// short format per frame — on exactly the frames the status bar's spinner
     /// is already redrawing for.
-    working_line: Option<Line<'static>>,
+    working_lines: Vec<Line<'static>>,
 }
 
 /// What is hidden, and the row that says so.
@@ -514,7 +520,7 @@ impl Chat {
     pub fn set_working(&mut self, working: Option<Working>) {
         self.working = working;
         if working.is_none() {
-            self.working_line = None;
+            self.working_lines.clear();
         }
     }
 
@@ -658,9 +664,19 @@ impl Chat {
         if let Some(revert) = &mut self.revert {
             revert.wrap(hidden, area.width, theme);
         }
-        // Before the offset math below, so the line it adds is one the
+        // Before the offset math below, so the lines it adds are ones the
         // viewport already knows about — the marker row's own arrangement.
-        self.working_line = self.working.map(|working| working.line(theme));
+        // The checklist under the line is laid out here rather than cached
+        // because the line above it is: the pair is one block, rebuilt on the
+        // frames the clock already forces (**D487**).
+        let working = self.working.map(|working| {
+            let mut lines = vec![working.line(theme)];
+            let todos = result_rows(self.working_todos(theme), false);
+            lines.extend(lay_out(&todos, usize::from(area.width)));
+
+            lines
+        });
+        self.working_lines = working.unwrap_or_default();
 
         // The highlight span exists only after the wrap above, which is why
         // the walk into view happens here rather than in the setter: the
@@ -742,7 +758,7 @@ impl Chat {
                 .revert
                 .as_ref()
                 .map_or(0, |revert| revert.lines().len())
-            + usize::from(self.working_line.is_some())
+            + self.working_lines.len()
     }
 
     /// Widths the entries are currently cached at, which is how a test tells
@@ -766,6 +782,33 @@ impl Chat {
         self.offset = if offset >= max { None } else { Some(offset) };
     }
 
+    /// The checklist the working line carries: the newest settled `todowrite`
+    /// of the turn that is running, or nothing when this turn has written no
+    /// list (**D487**).
+    ///
+    /// Bounded to the current turn by walking back only as far as the prompt
+    /// that started it — a plan the previous turn wrote is not what this one is
+    /// working through, and a stale list under a live clock is the one reading
+    /// that would be false. Settled calls only, so the rows under the working
+    /// line and the rows on the call's own transcript row are the same rows
+    /// from the same source.
+    fn working_todos(&self, theme: &Theme) -> Vec<(String, Style)> {
+        self.shown()
+            .iter()
+            .rev()
+            .take_while(|entry| entry.role != Role::User)
+            .flat_map(|entry| entry.parts.iter().rev())
+            .find_map(|part| match &part.body {
+                PartBody::Tool {
+                    tool,
+                    state: ToolState::Completed { input, .. },
+                    ..
+                } if tool == TODO_TOOL => todo_rows(input, theme),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     /// Yields the lines the viewport shows, skipping whole entries rather than
     /// stepping over every line above the offset.
     ///
@@ -773,12 +816,13 @@ impl Chat {
     /// it belongs: the entries a revert hides are always the tail of the
     /// transcript, so what it stands in for is always below everything shown.
     /// The working line rides the same seam, one block further down still —
-    /// what a turn is doing now is below everything it has already said
+    /// what a turn is doing now is below everything it has already said — and
+    /// the checklist it carries rides with it, as lines of that same block
     /// (**D487**).
     fn visible(&self, offset: usize) -> impl Iterator<Item = &Line<'static>> {
         let mut left_to_skip = offset;
         let marker: &[Line<'static>] = self.revert.as_ref().map_or(&[], Revert::lines);
-        let working: &[Line<'static>] = self.working_line.as_slice();
+        let working: &[Line<'static>] = self.working_lines.as_slice();
 
         self.shown()
             .iter()
@@ -1016,15 +1060,39 @@ const TOOL_PREVIEW_LINES: usize = 4;
 const TASK_TOOL: &str = "task";
 
 /// The tool whose result is a count rather than a preview (**D487**, pinned by
-/// the user's screenshot).
+/// the user's screenshots).
 ///
 /// Every other settled call shows some of what it produced. A read shows how
-/// much of the file it took and nothing else: the content is what the *model*
-/// asked for, and a person reading the transcript does not need the file read
-/// back to them through a four-line window — least of all wrapped in the
+/// much it took and nothing else — how many lines of a file, or how many
+/// entries of a directory (2026-08-14, the second screenshot: a listing spilled
+/// its envelope onto the screen exactly as a file read used to): the content is
+/// what the *model* asked for, and a person reading the transcript does not need
+/// it read back to them through a four-line window — least of all wrapped in the
 /// envelope the tool writes for the model's benefit. The whole of it is one
 /// Ctrl+T away, which is where a reader who wants it goes.
 const READ_TOOL: &str = "read";
+
+/// The tool whose result is its own list, drawn as a checklist (**D487**,
+/// pinned by the user's screenshot 2026-08-14).
+///
+/// A todo list is the one tool output that is *for the person*: the model
+/// already knows what it wrote, and what a reader wants is the plan, not the
+/// JSON the plan travelled in. It is short by construction — the tool's own
+/// prompt keeps it so — which is why it is the one preview here that is never
+/// clamped.
+const TODO_TOOL: &str = "todowrite";
+
+/// What leads a task still to be done, and one that will not be done again.
+///
+/// The screenshot shows only the open box, so what the other states look like is
+/// this build's reading of it: `in_progress` keeps the open box — the task is
+/// still open — and is painted in the accent so the one row being worked on can
+/// be found at a glance, while `completed` and `cancelled` share the crossed box
+/// dimmed and struck through, because both are rows a reader is done with.
+const TODO_OPEN: char = '\u{2610}';
+
+/// See [`TODO_OPEN`].
+const TODO_DONE: char = '\u{2612}';
 
 /// A call's arguments, condensed to the one line its header has room for:
 /// `key: "value"` pairs, the recognizable fields first, capped at
@@ -1138,25 +1206,96 @@ fn read_args(input: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// How many lines a settled read actually took, as its own `display` block
-/// recorded them.
+/// What a settled read answered with, in the one line the row shows: how much
+/// of a file it took, or how many entries it listed.
 ///
-/// [`None`] for everything that is not a read **of a file** — a directory
-/// listing, a PDF, a refusal — each of which keeps the rendering every other
-/// tool's result has, because a count of lines is not what any of them did.
-fn lines_read(metadata: &serde_json::Value) -> Option<u64> {
+/// Read off the call's own `display` block rather than scraped out of the
+/// envelope the tool writes (`ganja_tool::read`, whose file branch publishes
+/// `type`/`lineStart`/`lineEnd` and whose directory branch publishes
+/// `type`/`entries`/`totalEntries`). The block is the same fact in a shape that
+/// cannot be miscounted: the envelope's text is clamped to a byte budget
+/// before it ships, so a large listing can lose its own `</entries>` close,
+/// where the metadata beside it is untouched.
+///
+/// The directory count is of the entries this call **listed**, not of the
+/// entries the directory holds — the same reading the file branch takes, where
+/// the count is of the lines read and not of the file's length. What was left
+/// out is in the envelope, one Ctrl+T away.
+///
+/// [`None`] for a read that is neither — a PDF, an image — each of which
+/// carries no `display` block at all and keeps the rendering every other tool's
+/// result has, because neither a line count nor an entry count is what it did.
+fn read_summary(metadata: &serde_json::Value) -> Option<String> {
     let display = metadata.get("display")?;
-    if field(display, "type") != Some("file") {
-        return None;
+
+    match field(display, "type")? {
+        "file" => {
+            let start = display
+                .get("lineStart")
+                .and_then(serde_json::Value::as_u64)?;
+            let end = display.get("lineEnd").and_then(serde_json::Value::as_u64)?;
+            // An empty file reports an end before its start, and read nothing.
+            let read = if end < start { 0 } else { end - start + 1 };
+
+            Some(format!(
+                "Read {read} line{plural}",
+                plural = if read == 1 { "" } else { "s" }
+            ))
+        }
+        "directory" => {
+            let entries = display
+                .get("entries")
+                .and_then(serde_json::Value::as_array)?;
+
+            Some(format!(
+                "Listed {count} entr{plural}",
+                count = entries.len(),
+                plural = if entries.len() == 1 { "y" } else { "ies" }
+            ))
+        }
+        _ => None,
     }
+}
 
-    let start = display
-        .get("lineStart")
-        .and_then(serde_json::Value::as_u64)?;
-    let end = display.get("lineEnd").and_then(serde_json::Value::as_u64)?;
+/// The checklist a `todowrite` call draws: one row per task, its box telling
+/// where the task has got to (**D487**).
+///
+/// Read off the call's **input** rather than its output, for the reason
+/// [`read_args`] reads the input: the list is structured there — `todos` of
+/// `{content, status, priority}`, `ganja_tool::todo`'s own shape — where the
+/// output is that same list re-serialized as JSON for the model to read back.
+/// The tool republishes it in its metadata too, but only on a call that
+/// settled, and the input is the one copy every state carries.
+///
+/// [`None`] when the argument is not a list this can draw — a list that is
+/// empty, an element without content, an input that is not the tool's at all —
+/// and then the call keeps the preview every other tool's result has, which at
+/// least shows what really arrived. A checklist with no rows would be a `⎿`
+/// pointing at nothing.
+fn todo_rows(input: &serde_json::Value, theme: &Theme) -> Option<Vec<(String, Style)>> {
+    let todos = input
+        .get("todos")?
+        .as_array()
+        .filter(|todos| !todos.is_empty())?;
 
-    // An empty file reports an end before its start, and read nothing.
-    Some(if end < start { 0 } else { end - start + 1 })
+    todos
+        .iter()
+        .map(|todo| {
+            let content = field(todo, "content")?;
+            // An unfamiliar status is a task nobody has said is finished, so it
+            // draws as one still open rather than as an error the row cannot
+            // show anyway.
+            let (box_glyph, style) = match todo.get("status").and_then(serde_json::Value::as_str) {
+                Some("completed" | "cancelled") => {
+                    (TODO_DONE, theme.dim.add_modifier(Modifier::CROSSED_OUT))
+                }
+                Some("in_progress") => (TODO_OPEN, theme.accent.add_modifier(Modifier::BOLD)),
+                _ => (TODO_OPEN, theme.fg),
+            };
+
+            Some((format!("{box_glyph} {content}"), style))
+        })
+        .collect()
 }
 
 /// The rows a result lays out as: the first behind the `⎿` when nothing has
@@ -1285,16 +1424,19 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
             let mut rows = vec![Row::new(BULLET, tool_heading(tool, Some(input)), theme.fg)];
             // A read answers with a count and stops there; see [`READ_TOOL`].
             if tool == READ_TOOL
-                && let Some(read) = lines_read(metadata)
+                && let Some(summary) = read_summary(metadata)
             {
-                rows.push(Row::new(
-                    RESULT,
-                    format!(
-                        "Read {read} line{plural}",
-                        plural = if read == 1 { "" } else { "s" }
-                    ),
-                    theme.dim,
-                ));
+                rows.push(Row::new(RESULT, summary, theme.dim));
+
+                return rows;
+            }
+            // A todo list answers with the list; see [`TODO_TOOL`]. The tool's
+            // own `N todos` title goes with the JSON it titled — the rows say
+            // how much is left, and say it in the words the model wrote.
+            if tool == TODO_TOOL
+                && let Some(todos) = todo_rows(input, theme)
+            {
+                rows.extend(result_rows(todos, false));
 
                 return rows;
             }
@@ -2036,23 +2178,337 @@ mod tests {
             "got {empty:?}"
         );
 
-        let listing = tool_call(
+        // A PDF is the kind of read that is neither a file's lines nor a
+        // directory's entries: `ganja_tool::read` publishes no `display` block
+        // for one at all, so there is nothing here to count.
+        let pdf = tool_call(
             "read",
             ToolState::Completed {
-                input: serde_json::json!({"filePath": "/repo/src"}),
-                output: "lib.rs\nmain.rs".to_owned(),
-                title: "src".to_owned(),
+                input: serde_json::json!({"filePath": "/repo/paper.pdf"}),
+                output: "PDF read successfully. This tool cannot hand file bytes to the model yet."
+                    .to_owned(),
+                title: "paper.pdf".to_owned(),
                 metadata: serde_json::json!({
-                    "display": {"type": "directory", "path": "/repo/src"},
+                    "preview": "PDF read successfully",
+                    "truncated": false,
+                    "mime": "application/pdf",
                 }),
                 started: 0,
                 completed: 1,
             },
         );
         assert!(
-            listing.iter().any(|line| line == "  \u{23bf} src")
-                && listing.iter().any(|line| line == "    lib.rs"),
-            "a directory listing is still shown, got {listing:?}"
+            pdf.iter().any(|line| line == "  \u{23bf} paper.pdf")
+                && pdf
+                    .iter()
+                    .any(|line| line.contains("PDF read successfully")),
+            "a read that counted nothing keeps the ordinary shape, got {pdf:?}"
+        );
+    }
+
+    /// A settled read of a **directory**, as the second screenshot pins it: the
+    /// path on the header and a count of what was listed as the whole of the
+    /// result — none of the envelope the tool writes for the model.
+    #[test]
+    fn a_settled_read_of_a_directory_is_a_count_and_no_envelope() {
+        let lines = tool_call(
+            "read",
+            ToolState::Completed {
+                input: serde_json::json!({"filePath": "/repo/src"}),
+                output: "<path>/repo/src</path>\n<type>directory</type>\n<entries>\n\
+                         lib.rs\nmain.rs\ncomponent/\n\n(3 entries)\n</entries>"
+                    .to_owned(),
+                title: "src".to_owned(),
+                metadata: serde_json::json!({
+                    "display": {
+                        "type": "directory",
+                        "path": "/repo/src",
+                        "entries": ["component/", "lib.rs", "main.rs"],
+                        "offset": 1,
+                        "totalEntries": 3,
+                        "truncated": false,
+                    },
+                }),
+                started: 0,
+                completed: 1,
+            },
+        );
+        let drawn: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec!["\u{25cf} Read(/repo/src)", "  \u{23bf} Listed 3 entries"],
+            "got {lines:?}"
+        );
+    }
+
+    /// The header states the ask, on a directory as on a file: a listing that
+    /// asked for a window says which one, and the count under it is of what
+    /// that window actually held.
+    #[test]
+    fn a_read_of_a_range_of_a_directory_keeps_the_range_it_asked_for() {
+        let lines = tool_call(
+            "read",
+            ToolState::Completed {
+                input: serde_json::json!({
+                    "filePath": "/repo/src",
+                    "offset": 3,
+                    "limit": 2,
+                }),
+                output: "<path>/repo/src</path>\n<type>directory</type>\n<entries>\n\
+                         lib.rs\nmain.rs\n\n(Showing 2 of 9 entries. \
+                         Use 'offset' parameter to read beyond entry 5)\n</entries>"
+                    .to_owned(),
+                title: "src".to_owned(),
+                metadata: serde_json::json!({
+                    "display": {
+                        "type": "directory",
+                        "path": "/repo/src",
+                        "entries": ["lib.rs", "main.rs"],
+                        "offset": 3,
+                        "totalEntries": 9,
+                        "truncated": true,
+                    },
+                }),
+                started: 0,
+                completed: 1,
+            },
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "\u{25cf} Read(/repo/src \u{b7} lines 3-4)")
+                && lines
+                    .iter()
+                    .any(|line| line == "  \u{23bf} Listed 2 entries"),
+            "got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("<entries>")),
+            "the envelope is the model's, not the transcript's: {lines:?}"
+        );
+    }
+
+    /// A `todowrite` carrying `todos` in each state the tool defines.
+    fn todo_call(todos: serde_json::Value) -> ToolState {
+        ToolState::Completed {
+            input: serde_json::json!({ "todos": todos }),
+            output: "[\n  {\n    \"content\": \"port cell.slang\"\n  }\n]".to_owned(),
+            title: "2 todos".to_owned(),
+            metadata: serde_json::json!({}),
+            started: 0,
+            completed: 1,
+        }
+    }
+
+    /// The list every checklist test writes, one task per state that draws
+    /// differently.
+    fn todos() -> serde_json::Value {
+        serde_json::json!([
+            {"content": "port cell.slang", "status": "completed", "priority": "high"},
+            {"content": "port graphics.slang", "status": "in_progress", "priority": "high"},
+            {"content": "port bgimage.slang", "status": "pending", "priority": "medium"},
+            {"content": "port the old shim", "status": "cancelled", "priority": "low"},
+        ])
+    }
+
+    /// **The checklist screenshot.** A settled `todowrite` answers with the list
+    /// itself — a box per task, the first on the elbow and the rest hanging
+    /// under it — and never with the JSON the list travelled in.
+    #[test]
+    fn a_settled_todowrite_draws_its_list_as_a_checklist() {
+        let lines = tool_call("todowrite", todo_call(todos()));
+        let drawn: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec![
+                "\u{25cf} Todowrite(todos: [\u{2026}])",
+                "  \u{23bf} \u{2612} port cell.slang",
+                "    \u{2610} port graphics.slang",
+                "    \u{2610} port bgimage.slang",
+                "    \u{2612} port the old shim",
+            ],
+            "got {lines:?}"
+        );
+    }
+
+    /// Each state is told by its box and by how the row is painted: the one
+    /// being worked on stands out, and the two nobody will work on again are
+    /// struck through.
+    #[test]
+    fn a_checklist_paints_the_task_in_hand_and_strikes_the_ones_that_are_done() {
+        let theme = Theme::default();
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "todowrite".to_owned(),
+                state: todo_call(todos()),
+            },
+        });
+        chat.start_message(reply);
+
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buffer = Buffer::empty(area);
+        chat.render(area, &mut buffer, &theme);
+
+        // Row 0 is the header, so the four tasks follow in the order written.
+        let done = buffer[(0, 1)].style();
+        let in_hand = buffer[(0, 2)].style();
+        let pending = buffer[(0, 3)].style();
+        let cancelled = buffer[(0, 4)].style();
+
+        assert!(
+            done.add_modifier.contains(Modifier::CROSSED_OUT)
+                && cancelled.add_modifier.contains(Modifier::CROSSED_OUT),
+            "a finished task is struck through, got {done:?} and {cancelled:?}"
+        );
+        assert!(
+            in_hand.add_modifier.contains(Modifier::BOLD) && in_hand.fg == theme.accent.fg,
+            "the task in hand is the one the eye should land on, got {in_hand:?}"
+        );
+        assert!(
+            !pending.add_modifier.contains(Modifier::CROSSED_OUT) && pending.fg == theme.fg.fg,
+            "a task still to do is ordinary body text, got {pending:?}"
+        );
+    }
+
+    /// An argument that is not a list this can draw keeps the preview every
+    /// other tool's result has: what really arrived is more use than a `⎿`
+    /// pointing at nothing.
+    #[test]
+    fn a_todowrite_whose_list_cannot_be_read_keeps_the_ordinary_preview() {
+        for todos in [
+            serde_json::json!("all of them"),
+            serde_json::json!([]),
+            serde_json::json!([{"status": "pending"}]),
+        ] {
+            let lines = tool_call("todowrite", todo_call(todos.clone()));
+
+            assert!(
+                lines.iter().any(|line| line == "  \u{23bf} 2 todos")
+                    && lines.iter().any(|line| line.contains("port cell.slang")),
+                "the tool's own title and preview stand in for {todos}: {lines:?}"
+            );
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line.contains(super::TODO_OPEN) || line.contains(super::TODO_DONE)),
+                "nothing is drawn as a checklist it is not: {lines:?}"
+            );
+        }
+    }
+
+    /// **The checklist screenshot's other half.** While a turn runs, its newest
+    /// list hangs under the working line; when the turn settles the copy goes
+    /// with the line, and the call's own rows stay where they are.
+    #[test]
+    fn the_working_line_carries_this_turns_checklist_and_drops_it_on_settle() {
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("port the shaders"));
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "todowrite".to_owned(),
+                state: todo_call(todos()),
+            },
+        });
+        chat.start_message(reply);
+        chat.set_working(Some(Working {
+            started: Instant::now(),
+            turn: 1,
+            output_tokens: 0,
+        }));
+
+        let boxes = |lines: &[String]| {
+            lines
+                .iter()
+                .filter(|line| line.contains(super::TODO_OPEN) || line.contains(super::TODO_DONE))
+                .count()
+        };
+        let area = Rect::new(0, 0, 60, 24);
+        let running = rendered(&mut chat, area);
+
+        assert!(
+            running.iter().any(|line| line.starts_with("\u{273b} ")),
+            "a turn is running, got {running:?}"
+        );
+        assert_eq!(
+            boxes(&running),
+            8,
+            "the list is on the call's row and under the working line: {running:?}"
+        );
+        let working = running
+            .iter()
+            .position(|line| line.starts_with("\u{273b} "))
+            .expect("the working line is on screen");
+        assert_eq!(
+            running[working + 1],
+            "  \u{23bf} \u{2612} port cell.slang",
+            "the copy hangs off the working line's own elbow: {running:?}"
+        );
+
+        chat.set_working(None);
+        let settled = rendered(&mut chat, area);
+
+        assert!(
+            !settled.iter().any(|line| line.starts_with("\u{273b} ")),
+            "a settled turn leaves no working line: {settled:?}"
+        );
+        assert_eq!(
+            boxes(&settled),
+            4,
+            "and the transcript keeps the rows it already drew: {settled:?}"
+        );
+    }
+
+    /// The copy under the working line is *this* turn's: a plan the last turn
+    /// wrote is not what the running one is working through.
+    #[test]
+    fn the_working_line_carries_no_checklist_from_a_turn_that_is_over() {
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("port the shaders"));
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "todowrite".to_owned(),
+                state: todo_call(todos()),
+            },
+        });
+        chat.start_message(reply);
+        chat.start_message(Message::user("now something else"));
+        chat.start_message(Message::assistant("canned"));
+        chat.set_working(Some(Working {
+            started: Instant::now(),
+            turn: 2,
+            output_tokens: 0,
+        }));
+
+        let lines = rendered(&mut chat, Rect::new(0, 0, 60, 24));
+        let working = lines
+            .iter()
+            .position(|line| line.starts_with("\u{273b} "))
+            .expect("the working line is on screen");
+
+        assert!(
+            lines[working + 1..].iter().all(|line| line.is_empty()),
+            "the new turn has written no list, so nothing hangs under it: {lines:?}"
         );
     }
 
