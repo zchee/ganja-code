@@ -128,7 +128,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | [エージェント定義ファイル](https://developers.openai.com/codex/cli) *(低確度)* | `~/.codex/agents/*.toml`・エージェント毎の model/reasoning/sandbox | ⚠️ config 宣言 agent(model・prompt・permission ルール);エージェント毎 sandbox なし |
 | [Skills(SKILL.md)](https://developers.openai.com/codex/cli) | クロスツール標準・progressive disclosure | ✅ ganja の2ホーム+`skills.paths` |
 | [スキル探索パス](https://developers.openai.com/codex/cli) | `$CODEX_HOME/skills` + repo `.codex/skills` + `.agents/skills` | ⚠️ ganja は config ホーム+`.ganja/skills`+設定パスを走査;外来物は既定で発見しない |
-| `/skills` 一覧・`$skill-name` 起動 *(低確度)* | TUI 内一覧と明示起動 | ⚠️ ganja はプロンプトに `<available_skills>` を載せ `skill` ツールが要求時ロード;一覧 UI なし |
+| [`/skills` 一覧・`$skill-name` 起動](https://developers.openai.com/codex/cli) *(2026-08-15 確認済)* | TUI 内一覧と明示起動 | ✅ `$` 打鍵でセレクタ、Tab/Enter が `$name` を補完、送信時にエンジンが `skill` ツール自身のレンダリングへ展開;`/skills` ダイアログと `ganja skills` が一覧(D491) |
 
 ## 10. MCP・LSP
 
