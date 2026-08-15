@@ -10,6 +10,7 @@ pub mod command;
 pub mod component;
 pub mod event;
 pub mod external;
+pub mod graphics;
 pub mod history;
 pub mod keybind;
 pub(crate) mod markdown;
@@ -273,6 +274,9 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
             )
             .with_provider(provider_id)
             .with_keybinds(keys)
+            // Inline image previews, only where the environment says a kitty
+            // ancestor will actually draw them (2026-08-15).
+            .with_graphics(graphics::Emitter::detect())
             // The `tui` table's moments, written to the same stdout the frame
             // rides — the notifier the app's focus gate emits through
             // (**D468**).
@@ -442,6 +446,15 @@ fn capture_input() -> Result<()> {
 }
 
 fn restore() -> Result<()> {
+    // Placements outlive the cells they sat on; the broom runs before the
+    // screen is handed back (2026-08-15). Best-effort by nature — a terminal
+    // that never drew any ignores an APC it never learned.
+    if let Some(emitter) = graphics::Emitter::detect() {
+        use std::io::Write as _;
+        let mut out = stdout();
+        let _ = out.write_all(emitter.delete_all().as_bytes());
+        let _ = out.flush();
+    }
     let focus = execute!(stdout(), DisableFocusChange).context("failed to disable focus reporting");
     let paste =
         execute!(stdout(), DisableBracketedPaste).context("failed to disable bracketed paste");

@@ -10,7 +10,7 @@
 //! keep streaming cheap without making typing feel laggy.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -36,7 +36,7 @@ use ratatui::{
         Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
         MouseEventKind,
     },
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -67,7 +67,7 @@ use crate::{
         usage,
     },
     event::AppEvent,
-    external,
+    external, graphics,
     history::{self, History},
     keybind::{self, Keybinds},
     mention, notify,
@@ -537,6 +537,26 @@ pub struct App {
     /// one earns a fresh `clipboard-<n>.png` name (**F3**) instead of
     /// colliding with the last.
     clipboard_pastes: u32,
+    /// The kitty-graphics emitter this terminal earned at startup, or
+    /// [`None`] where previews would be escape noise — every test's value.
+    graphics: Option<graphics::Emitter>,
+    /// Thumbnails decoded once per pasted image, [`None`] cached for a file
+    /// that would not decode so a broken file is never re-read every frame.
+    preview_cache: HashMap<u32, Option<graphics::Preview>>,
+    /// Image ids already transmitted to the terminal this run: pixels travel
+    /// once, placements move every frame the strip does.
+    transmitted: HashSet<u32>,
+    /// Where the preview strip landed in the last frame's split.
+    preview_rect: Rect,
+    /// What the strip holds this frame: image number and its width in cells,
+    /// left to right.
+    preview_frame: Vec<(u32, u16)>,
+    /// The strip as last actually emitted, so an unchanged frame writes no
+    /// escapes at all.
+    preview_drawn: Option<(Rect, Vec<(u32, u16)>)>,
+    /// When the clipboard-image hint last showed, for its 30-second rate
+    /// limit — matching Claude Code's own observed behaviour.
+    image_hint_last: Option<std::time::Instant>,
     /// The clipboard images pasted this session, by the number their
     /// composer token carries: `[Image #N]` in the text is Claude Code's own
     /// spelling (2026-08-15), and this map is what turns the token back into
@@ -739,6 +759,13 @@ impl App {
             wire_models: None,
             wire_fetch: None,
             file_walk: None,
+            graphics: None,
+            preview_cache: HashMap::new(),
+            transmitted: HashSet::new(),
+            preview_rect: Rect::default(),
+            preview_frame: Vec::new(),
+            preview_drawn: None,
+            image_hint_last: None,
             plugin_task: None,
             tools: ganja_tool::Registry::with_builtins(),
             themes,
@@ -776,6 +803,15 @@ impl App {
     pub fn with_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = root.into();
 
+        self
+    }
+
+    /// Enables kitty-graphics previews, handed in by the real frontend after
+    /// environment detection — never defaulted, so a test's `TestBackend`
+    /// frame can never leak escape sequences onto a real stdout.
+    #[must_use]
+    pub fn with_graphics(mut self, graphics: Option<graphics::Emitter>) -> Self {
+        self.graphics = graphics;
         self
     }
 
@@ -1232,7 +1268,15 @@ impl App {
         if self.stale {
             terminal.clear().context("failed to repaint the screen")?;
             self.stale = false;
+            // The clear may have taken the terminal's placements with it;
+            // whatever the strip held must be spoken again.
+            self.preview_drawn = None;
         }
+
+        // The token the cursor sits on lights up reversed — Claude Code's
+        // own composer rendering (2026-08-15 screenshot) — before the editor
+        // draws this frame.
+        self.highlight_image_token();
 
         terminal
             .draw(|frame| {
@@ -1244,12 +1288,25 @@ impl App {
                     .chat
                     .lay_out_working(area.width, &self.theme)
                     .min(area.height / 2);
-                let [transcript, working, prompt, status] = Layout::vertical([
+                // The image strip's plan is this frame's too: which pasted
+                // images the composer still names, each at its cell box.
+                self.preview_frame = self.plan_previews(area.width);
+                let preview_height = if self.preview_frame.is_empty() {
+                    0
+                } else {
+                    PREVIEW_ROWS
+                };
+                let [transcript, working, preview, prompt, status] = Layout::vertical([
                     Constraint::Min(1),
                     // What the running turn is doing now, pinned above the
                     // composer rather than scrolled with the transcript
                     // (**D487**, amended by the 2026-08-15 screenshots).
                     Constraint::Length(working_height),
+                    // The attached images themselves, left-aligned over the
+                    // kitty graphics protocol — rows reserved here so the
+                    // pixels land on blank cells, drawn after the frame by
+                    // `App::flush_graphics` (2026-08-15).
+                    Constraint::Length(preview_height),
                     Constraint::Length(editor::HEIGHT),
                     // A configured roster may earn a git line above the bar
                     // and a detail line below it; the default bar is the one
@@ -1257,6 +1314,7 @@ impl App {
                     Constraint::Length(self.status.height()),
                 ])
                 .areas(area);
+                self.preview_rect = preview;
 
                 let buffer = frame.buffer_mut();
                 // The theme's surface goes down first and everything is drawn
@@ -1363,6 +1421,10 @@ impl App {
         // already writes its mouse and paste sequences. A write that fails is
         // one lost copy over that channel, not a reason to fail the frame.
         self.flush_osc();
+        // Same seam, same reasoning: the image strip's kitty-graphics
+        // escapes go out between frames, positioned onto the rows the split
+        // above reserved (2026-08-15).
+        self.flush_graphics();
 
         self.dirty = false;
         self.urgent = false;
@@ -1423,7 +1485,10 @@ impl App {
             // What the notifier's gate reads (**D468**): a terminal being
             // looked at needs no announcement, and these two events are the
             // only way this side ever learns which it is.
-            TermEvent::FocusGained => self.focused = true,
+            TermEvent::FocusGained => {
+                self.focused = true;
+                self.hint_clipboard_image();
+            }
             TermEvent::FocusLost => self.focused = false,
             _ => {}
         }
@@ -1600,6 +1665,123 @@ impl App {
     /// whose number nothing pasted — typed by hand, or recalled from history
     /// into a fresh session — stays literal text, the same fate a mistyped
     /// `@` path meets.
+    /// This frame's image strip, planned left to right: each pasted image
+    /// the composer still names, decoded once into the cache, at the cell
+    /// box its aspect earns under [`PREVIEW_ROWS`] — stopping at the frame's
+    /// right edge rather than wrapping, because a strip is a strip.
+    fn plan_previews(&mut self, width: u16) -> Vec<(u32, u16)> {
+        if self.graphics.is_none() {
+            return Vec::new();
+        }
+        let text = self.editor.text();
+        let mut x: u32 = 0;
+        let mut plan = Vec::new();
+        for (number, path) in self.pasted_images.clone() {
+            if !text.contains(&format!("[Image #{number}]")) {
+                continue;
+            }
+            let Some(preview) = self
+                .preview_cache
+                .entry(number)
+                .or_insert_with(|| graphics::load(&path))
+            else {
+                continue;
+            };
+            let columns =
+                graphics::columns_for(preview.width, preview.height, PREVIEW_ROWS).min(48);
+            if x + u32::from(columns) > u32::from(width) {
+                break;
+            }
+            plan.push((number, columns));
+            x += u32::from(columns) + 1;
+        }
+
+        plan
+    }
+
+    /// Emits the strip the last frame planned, exactly once per change: the
+    /// old placements deleted, new pixels transmitted on their first
+    /// appearance, and every image placed left-aligned on the reserved rows.
+    /// Written to the real stdout the way `flush_osc` writes, because the
+    /// kitty graphics protocol is a terminal channel, not a buffer cell —
+    /// and guarded on the emitter, so a test's frame writes nothing.
+    fn flush_graphics(&mut self) {
+        use std::io::Write as _;
+
+        let Some(emitter) = self.graphics else {
+            return;
+        };
+        let current = (self.preview_rect, self.preview_frame.clone());
+        if self.preview_drawn.as_ref() == Some(&current) {
+            return;
+        }
+
+        let mut wire = String::new();
+        match &self.preview_drawn {
+            Some((_, drawn)) => {
+                for (id, _) in drawn {
+                    wire.push_str(&emitter.delete(*id));
+                }
+            }
+            // First emission after a start or a full repaint: sweep whatever
+            // an earlier life of this screen may have left.
+            None => wire.push_str(&emitter.delete_all()),
+        }
+        let mut x = self.preview_rect.x;
+        for (id, columns) in &current.1 {
+            if !self.transmitted.contains(id)
+                && let Some(Some(preview)) = self.preview_cache.get(id)
+            {
+                wire.push_str(&emitter.transmit(*id, &preview.png));
+                self.transmitted.insert(*id);
+            }
+            // CSI cursor addressing is one-based; the placement lands at the
+            // cursor, which is the whole reason the move precedes it.
+            wire.push_str(&format!("\x1b[{};{}H", self.preview_rect.y + 1, x + 1));
+            wire.push_str(&emitter.place(*id, *columns, self.preview_rect.height));
+            x = x.saturating_add(columns + 1);
+        }
+
+        let mut stdout = std::io::stdout();
+        if let Err(error) = stdout.write_all(wire.as_bytes()) {
+            tracing::warn!(%error, "the image strip's graphics escapes could not be written");
+        }
+        let _ = stdout.flush();
+        self.preview_drawn = Some(current);
+    }
+
+    /// Reverses the `[Image #N]` token the cursor sits on — Claude Code's
+    /// own composer rendering — and clears the reverse when it sits
+    /// elsewhere. The number is unique per paste, so the widget's search
+    /// highlight matches exactly the one token.
+    fn highlight_image_token(&mut self) {
+        let text = self.editor.text();
+        let (row, column) = self.editor.cursor();
+        let token = image_token_at(&text, char_offset(&text, row, column));
+        self.editor.set_token_highlight(token);
+    }
+
+    /// Claude Code's own focus-time nudge (observed behaviour):
+    /// coming back to the terminal with an image on the clipboard earns one
+    /// status-line hint, at most every thirty seconds. The one-second
+    /// debounce upstream wraps around its subprocess check is dropped — one
+    /// in-process read at a focus boundary is cheap enough to take inline.
+    fn hint_clipboard_image(&mut self) {
+        const EVERY: Duration = Duration::from_secs(30);
+        if self
+            .image_hint_last
+            .is_some_and(|last| last.elapsed() < EVERY)
+        {
+            return;
+        }
+        if self.clipboard.read_image().is_ok() {
+            self.image_hint_last = Some(Instant::now());
+            self.status
+                .set_notice(Some("Image in clipboard \u{b7} ctrl+v to paste".to_owned()));
+            self.dirty = true;
+        }
+    }
+
     /// The number the next `[Image #N]` token carries: one past however many
     /// images this session has pasted, whichever door they came through —
     /// the scratch-PNG counter names files, this names tokens.
@@ -4560,6 +4742,50 @@ impl App {
 /// *names* under the directories named, which finds what a person is usually
 /// typing and cannot be mistaken for the same ranking (deviation:
 /// mention-matches-under-the-path-typed).
+/// Rows the image preview strip stands, when the composer names any pasted
+/// image and the terminal can draw one.
+const PREVIEW_ROWS: u16 = 5;
+
+/// The character offset of the editor's `(row, column)` cursor in its text,
+/// lines rejoined the way [`Editor::text`] joins them.
+fn char_offset(text: &str, row: usize, column: usize) -> usize {
+    text.split('\n')
+        .take(row)
+        .map(|line| line.chars().count() + 1)
+        .sum::<usize>()
+        + column
+}
+
+/// The number of the `[Image #N]` token `offset` sits on — inside it, or
+/// directly after its closing bracket, which is where the cursor lands the
+/// moment a paste inserts one.
+fn image_token_at(text: &str, offset: usize) -> Option<u32> {
+    const HEAD: [char; 8] = ['[', 'I', 'm', 'a', 'g', 'e', ' ', '#'];
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = 0;
+    while start + HEAD.len() < chars.len() {
+        if chars[start..start + HEAD.len()] != HEAD {
+            start += 1;
+            continue;
+        }
+        let digits = start + HEAD.len();
+        let mut end = digits;
+        while end < chars.len() && chars[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == digits || chars.get(end) != Some(&']') {
+            start += 1;
+            continue;
+        }
+        if (start..=end + 1).contains(&offset) {
+            return chars[digits..end].iter().collect::<String>().parse().ok();
+        }
+        start = end + 1;
+    }
+
+    None
+}
+
 /// One in-flight `@`-menu walk: the fragment it answers, the token that
 /// supersedes it, and the walk itself.
 struct FileWalk {
@@ -10421,6 +10647,67 @@ mod tests {
         let (width, height, decoded) = decode_png(&bytes);
         assert_eq!((width, height), (3, 1), "the scripted dimensions survive");
         assert_eq!(decoded, rgba, "and so do the pixels");
+    }
+
+    /// The cursor lights the token it sits on — inside it or right after
+    /// its bracket, where a fresh paste leaves it — and nothing else.
+    #[test]
+    fn the_token_under_the_cursor_is_found_and_prose_is_not() {
+        let text = "see [Image #12] here";
+
+        assert_eq!(super::image_token_at(text, 4), Some(12), "its first char");
+        assert_eq!(super::image_token_at(text, 9), Some(12), "inside");
+        assert_eq!(
+            super::image_token_at(text, 15),
+            Some(12),
+            "right after the bracket"
+        );
+        assert_eq!(super::image_token_at(text, 3), None, "before it");
+        assert_eq!(super::image_token_at(text, 16), None, "past it");
+        assert_eq!(super::image_token_at("no tokens at all", 5), None);
+        assert_eq!(
+            super::image_token_at("[Image #] empty", 3),
+            None,
+            "digits are required"
+        );
+    }
+
+    /// The offset math the highlight rides: rows rejoined on newlines,
+    /// counted in characters, multibyte included.
+    #[test]
+    fn the_cursor_offset_counts_characters_across_lines() {
+        assert_eq!(super::char_offset("abc\ndef", 1, 2), 6);
+        assert_eq!(super::char_offset("見て\n[Image #1]", 1, 0), 3);
+        assert_eq!(super::char_offset("abc", 0, 3), 3);
+    }
+
+    /// Claude Code's focus-time nudge (observed behaviour): coming back
+    /// to a terminal with an image on the clipboard says so once, and the
+    /// thirty-second limit keeps a window-switching flurry to one hint.
+    #[tokio::test]
+    async fn regaining_focus_over_a_clipboard_image_hints_once() {
+        let mut app = app().with_clipboard(Box::new(clipboard::Recording::holding_image(
+            1,
+            1,
+            vec![1, 2, 3, 4],
+        )));
+
+        app.handle(AppEvent::Term(TermEvent::FocusGained))
+            .await
+            .expect("focus is handled");
+        assert!(
+            status_line(&mut app).contains("Image in clipboard"),
+            "the hint names the ctrl+v door"
+        );
+
+        app.status.set_notice(None);
+        app.handle(AppEvent::Term(TermEvent::FocusGained))
+            .await
+            .expect("focus is handled again");
+        assert!(
+            !status_line(&mut app).contains("Image in clipboard"),
+            "the rate limit holds the second hint"
+        );
     }
 
     /// Cmd+V over an image-only clipboard: the terminal has no text and
