@@ -1113,14 +1113,22 @@ fn skill_parts<'a>(roots: &skill::Roots, names: &'a [String]) -> impl Iterator<I
     names.iter().map(move |name| {
         let text = match skills.iter().find(|skill| skill.name == *name) {
             Some(skill) => {
-                let dir = skill
-                    .location
-                    .parent()
-                    .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+                let rendered = skill::rendered(skill, &skill::base_dir(skill));
+                // The name and the size, never the body: what a skill says is
+                // the conversation's, not the log's.
+                tracing::debug!(
+                    name = name.as_str(),
+                    bytes = rendered.len(),
+                    "a $ invocation loaded a skill"
+                );
 
-                skill::rendered(skill, &dir)
+                rendered
             }
-            None => skill::not_found(name, &skills),
+            None => {
+                tracing::warn!(name = name.as_str(), "a $ invocation named no skill");
+
+                skill::not_found(name, &skills)
+            }
         };
 
         Part::text(text)
