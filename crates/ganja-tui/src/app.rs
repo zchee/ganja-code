@@ -537,6 +537,13 @@ pub struct App {
     /// one earns a fresh `clipboard-<n>.png` name (**F3**) instead of
     /// colliding with the last.
     clipboard_pastes: u32,
+    /// The clipboard images pasted this session, by the number their
+    /// composer token carries: `[Image #N]` in the text is Claude Code's own
+    /// spelling (2026-08-15), and this map is what turns the token back into
+    /// the saved file at send time — the token stays in the text, compact
+    /// where a scratch path is noise, and the path rides `mentions` exactly
+    /// as an `@` attachment does.
+    pasted_images: Vec<(u32, String)>,
     /// Where a pasted clipboard image is saved, or [`None`] to resolve the
     /// real `<XDG data>/ganja/clipboard` at paste time. Overridden in tests
     /// (`App::with_clipboard_scratch_dir`) for the same reason
@@ -714,6 +721,7 @@ impl App {
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             clipboard: Box::new(clipboard::System::default()),
             clipboard_pastes: 0,
+            pasted_images: Vec::new(),
             clipboard_scratch: None,
             // Inert until the startup lane hands over the loaded store: reading
             // the disk here would mean every test touched the real history.
@@ -1486,15 +1494,18 @@ impl App {
 
     /// The image half of [`App::paste_from_clipboard`]: saves what the
     /// clipboard holds as PNG and attaches it through the same mention
-    /// pipeline an `@file` reaches, so it renders the same chip and earns the
-    /// same submit-time wire-degradation warning (`App::degraded`) — no
-    /// second attachment channel (**F3**).
+    /// pipeline an `@file` reaches — the path joins `mentions` at send time,
+    /// earning the same submit-time wire-degradation warning
+    /// (`App::degraded`); no second attachment channel (**F3**). What the
+    /// *composer* shows moved on 2026-08-15: Claude Code's own `[Image #N]`
+    /// token rather than the scratch path, which is machinery, not prose.
     async fn paste_clipboard_image(&mut self) {
         match self.clipboard.read_image() {
             Ok(image) => match self.save_clipboard_image(&image) {
                 Ok(path) => {
-                    self.editor
-                        .insert(&format!("{} ", mention::token(&path, None, None)));
+                    let number = self.clipboard_pastes;
+                    self.pasted_images.push((number, path));
+                    self.editor.insert(&format!("[Image #{number}] "));
                     self.sync_menus().await;
                 }
                 Err(reason) => self.status.set_notice(Some(reason)),
@@ -1530,6 +1541,24 @@ impl App {
         std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
 
         Ok(path.display().to_string())
+    }
+
+    /// The saved clipboard images `text`'s `[Image #N]` tokens still name
+    /// (2026-08-15): each one pasted this session and present in the text at
+    /// send time attaches its file exactly as an `@` mention would. A token
+    /// whose number nothing pasted — typed by hand, or recalled from history
+    /// into a fresh session — stays literal text, the same fate a mistyped
+    /// `@` path meets.
+    fn pasted_images_in(&self, text: &str) -> Vec<ganja_protocol::Mention> {
+        self.pasted_images
+            .iter()
+            .filter(|(number, _)| text.contains(&format!("[Image #{number}]")))
+            .map(|(_, path)| ganja_protocol::Mention {
+                path: path.clone(),
+                start: None,
+                end: None,
+            })
+            .collect()
     }
 
     /// `<XDG data>/ganja/clipboard`, or [`None`] when there is no home to
@@ -3777,14 +3806,16 @@ impl App {
                 // (**D113**). `@alice` in a sentence is a person, and
                 // attaching her would put an attachment-error block in front
                 // of the model instead of what the user wrote.
-                let mentions = mention::attachable(&prompt, &self.root);
+                let mut mentions = mention::attachable(&prompt, &self.root);
+                mentions.extend(self.pasted_images_in(&prompt));
                 degraded = self.degraded(&mentions);
 
                 self.engine
                     .send(Command::SendPrompt {
-                        // The `@path` tokens stay in the text: they are what
-                        // the user wrote, and the engine reads the files they
-                        // name when it builds the request.
+                        // The `@path` and `[Image #N]` tokens stay in the
+                        // text: they are what the user wrote, and the engine
+                        // reads the files `mentions` names when it builds
+                        // the request.
                         text: prompt,
                         mentions,
                     })
@@ -3836,7 +3867,8 @@ impl App {
             return;
         }
 
-        let mentions = mention::attachable(&prompt, &self.root);
+        let mut mentions = mention::attachable(&prompt, &self.root);
+        mentions.extend(self.pasted_images_in(&prompt));
         let degraded = self.degraded(&mentions);
         let sent = self
             .engine
@@ -10299,12 +10331,12 @@ mod tests {
         assert!(app.editor.is_empty(), "and nothing was inserted");
     }
 
-    /// **F3**, lifting D111's image half: a scripted clipboard image pastes
-    /// as an `@`-mention chip, named the same way `@file` insertion renders
-    /// one, and the bytes on disk are a real, decodable PNG of the scripted
-    /// dimensions.
+    /// **F3**, lifting D111's image half — respelled 2026-08-15 to Claude
+    /// Code's own composer token: a scripted clipboard image pastes as
+    /// `[Image #N]` inline, and the bytes on disk are a real, decodable PNG
+    /// of the scripted dimensions.
     #[tokio::test]
-    async fn pasting_a_clipboard_image_attaches_it_as_a_numbered_png_chip() {
+    async fn pasting_a_clipboard_image_shows_an_inline_image_token() {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255];
         let mut app = app()
@@ -10319,17 +10351,71 @@ mod tests {
             .await
             .expect("control-v is handled");
 
-        let expected_path = scratch.path().join("clipboard-1.png");
         assert_eq!(
             app.editor.text(),
-            format!("@{} ", expected_path.display()),
-            "the chip names the file the way an @file mention does"
+            "[Image #1] ",
+            "the composer carries the token, not the scratch path"
         );
 
-        let bytes = fs::read(&expected_path).expect("the image was saved");
+        let bytes = fs::read(scratch.path().join("clipboard-1.png")).expect("the image was saved");
         let (width, height, decoded) = decode_png(&bytes);
         assert_eq!((width, height), (3, 1), "the scripted dimensions survive");
         assert_eq!(decoded, rgba, "and so do the pixels");
+    }
+
+    /// The token is the composer's face for the saved file: submitting a
+    /// prompt that still carries it attaches the PNG exactly as an `@`
+    /// mention would, while the text the model reads keeps the token.
+    #[tokio::test]
+    async fn a_submitted_image_token_attaches_the_saved_png() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let engine = engine();
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, None, Themes::builtin())
+            .with_clipboard(Box::new(clipboard::Recording::holding_image(
+                1,
+                1,
+                vec![1, 2, 3, 4],
+            )))
+            .with_clipboard_scratch_dir(scratch.path());
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+        for event in typing("what is this") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        let CoreEvent::MessageStarted { message, .. } =
+            events.next().await.expect("the engine reports the prompt")
+        else {
+            panic!("the first event of a turn is the user's message");
+        };
+        let files: Vec<&str> = message
+            .parts
+            .iter()
+            .filter_map(|part| match &part.body {
+                PartBody::File { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            files,
+            vec![scratch.path().join("clipboard-1.png").display().to_string()],
+            "the token's file rides the mentions"
+        );
+        assert!(
+            message
+                .parts
+                .iter()
+                .any(|part| part.as_text() == Some("[Image #1] what is this")),
+            "and the text keeps the token: {:?}",
+            message.parts
+        );
     }
 
     /// A second paste in the same session earns its own name rather than
@@ -10353,10 +10439,8 @@ mod tests {
             .await
             .expect("the second control-v is handled");
 
-        assert_eq!(
-            app.editor.text(),
-            format!("@{} ", scratch.path().join("clipboard-2.png").display())
-        );
+        assert_eq!(app.editor.text(), "[Image #2] ");
+        assert!(scratch.path().join("clipboard-2.png").exists());
         assert!(scratch.path().join("clipboard-1.png").exists());
         assert!(scratch.path().join("clipboard-2.png").exists());
     }
@@ -10391,9 +10475,11 @@ mod tests {
         // a real `<XDG data>/ganja/clipboard` path is long enough that the
         // rendered bar can truncate it before the mime reaches the visible
         // width — a pre-existing, unrelated property of a one-line status
-        // bar, not something this test should depend on.
+        // bar, not something this test should depend on. The mention comes
+        // off the `[Image #N]` token's own map (2026-08-15), since the
+        // composer no longer carries the path.
         let pasted = app.editor.text();
-        let mentions = crate::mention::attachable(&pasted, &app.root);
+        let mentions = app.pasted_images_in(&pasted);
         assert_eq!(mentions.len(), 1, "the pasted image resolved as a mention");
         assert_eq!(
             app.degraded(&mentions),
