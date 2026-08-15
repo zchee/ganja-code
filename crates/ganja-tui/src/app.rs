@@ -1408,6 +1408,17 @@ impl App {
             // mistaken for — which is the whole point of turning bracketed
             // paste on: an Enter inside pasted text is a line, not a submit.
             // A modal owns the keyboard while it is up, and it owns this too.
+            // An **empty** bracketed paste is Cmd+V over an image-only
+            // clipboard: the terminal has no text to put inside the envelope
+            // and sends the brackets bare, and that emptiness is the signal —
+            // Claude Code's own Cmd+V mechanism (observed 2026-08-15), since
+            // no terminal forwards the system paste chord
+            // as a key. Routed through the full clipboard chain, whose text
+            // question cannot re-enter here: a clipboard the terminal found
+            // no text on answers the file and image questions instead.
+            TermEvent::Paste(text) if !self.modal_open() && text.is_empty() => {
+                self.paste_from_clipboard().await;
+            }
             TermEvent::Paste(text) if !self.modal_open() => self.paste(&text).await,
             // What the notifier's gate reads (**D468**): a terminal being
             // looked at needs no announcement, and these two events are the
@@ -10410,6 +10421,34 @@ mod tests {
         let (width, height, decoded) = decode_png(&bytes);
         assert_eq!((width, height), (3, 1), "the scripted dimensions survive");
         assert_eq!(decoded, rgba, "and so do the pixels");
+    }
+
+    /// Cmd+V over an image-only clipboard: the terminal has no text and
+    /// sends the bracketed-paste envelope **empty**, and that emptiness
+    /// routes to the clipboard chain — Claude Code's own mechanism
+    /// (observed 2026-08-15) — so the system paste chord
+    /// attaches the image exactly as Ctrl+V does.
+    #[tokio::test]
+    async fn an_empty_terminal_paste_reads_the_image_off_the_clipboard() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let mut app = app()
+            .with_clipboard(Box::new(clipboard::Recording::holding_image(
+                1,
+                1,
+                vec![1, 2, 3, 4],
+            )))
+            .with_clipboard_scratch_dir(scratch.path());
+
+        app.handle(AppEvent::Term(TermEvent::Paste(String::new())))
+            .await
+            .expect("an empty paste is handled");
+
+        assert_eq!(
+            app.editor.text(),
+            "[Image #1] ",
+            "the empty envelope reads the clipboard image instead"
+        );
+        assert!(scratch.path().join("clipboard-1.png").exists());
     }
 
     /// The pinned 2026-08-15 screenshot: a file copied in Finder rides the
