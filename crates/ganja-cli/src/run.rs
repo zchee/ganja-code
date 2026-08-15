@@ -631,11 +631,22 @@ async fn drive(
                 .await
         }
         None => {
+            // The composer's `$name` grammar works headless too: the scan is
+            // the same `requested_in` the TUI submits through, over the same
+            // roots the engine will expand from, so a token nothing answers
+            // to stays literal here exactly as it does on a screen.
+            let skills = {
+                let roots = engine.skill_roots();
+                ganja_core::tool::skill::requested_in(
+                    message,
+                    &ganja_core::tool::skill::discover(&roots),
+                )
+            };
             engine
                 .send(EngineCommand::SendPrompt {
                     text: message.to_owned(),
                     mentions: Vec::new(),
-                    skills: Vec::new(),
+                    skills,
                 })
                 .await
         }
@@ -1462,6 +1473,76 @@ mod tests {
                 "the decision has to be said: {err:?}"
             );
         }
+    }
+
+    /// The `$` scan runs headless too: a run's prompt tokens reach the
+    /// provider expanded through the engine's own roots, exactly as a
+    /// screenful session's do. The nd-JSON stream carries only the
+    /// assistant's side, so the proof reads the fake provider's request log
+    /// — which *is* this run's wire.
+    #[tokio::test]
+    async fn a_runs_dollar_tokens_reach_the_provider_expanded() {
+        let root = tempfile::tempdir().expect("a scratch directory");
+        let dir = root.path().join("porting");
+        std::fs::create_dir_all(&dir).expect("the fixture tree is creatable");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: porting\n---\nRead upstream first.",
+        )
+        .expect("the fixture is writable");
+
+        let provider = std::sync::Arc::new(ganja_core::provider::fake::FakeProvider::new(
+            "done",
+            std::time::Duration::ZERO,
+        ));
+        let engine = ganja_core::Engine::new(
+            std::sync::Arc::clone(&provider) as _,
+            "run-model",
+            std::sync::Arc::new(ganja_core::tool::Registry::new(Vec::new())),
+            ganja_core::permission::Permissions::default(),
+        )
+        .with_skill_roots(
+            ganja_core::tool::skill::Roots::none().with_paths([root.path().to_path_buf()]),
+        );
+
+        let failure = super::drive(
+            &engine,
+            None,
+            "use $porting and leave $PATH alone",
+            None,
+            false,
+            Format::Default,
+        )
+        .await
+        .expect("the canned turn drives to its end");
+        assert_eq!(failure, None, "and ends clean");
+
+        let requests = provider.recorded();
+        let carried: Vec<&str> = requests
+            .first()
+            .expect("the run reached the provider")
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .flat_map(|message| message.parts.iter())
+            .filter_map(ganja_protocol::Part::as_text)
+            .collect();
+
+        assert!(
+            carried
+                .iter()
+                .any(|part| part.starts_with("<skill_content name=\"porting\">")
+                    && part.contains("Read upstream first.")),
+            "the invoked skill rides the request whole: {carried:?}"
+        );
+        assert!(
+            carried.iter().any(|part| part.contains("$PATH")),
+            "and the un-invoked token is still just text: {carried:?}"
+        );
+        assert!(
+            !carried.iter().any(|part| part.contains("name=\"PATH\"")),
+            "nothing answered to $PATH, so nothing was loaded for it: {carried:?}"
+        );
     }
 
     #[test]
