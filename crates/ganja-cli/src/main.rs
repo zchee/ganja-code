@@ -35,6 +35,7 @@ mod mcp;
 mod plugin;
 mod run;
 mod serve;
+mod skills;
 
 // A plain comment, and above the doc comment rather than below it: clap
 // renders a doc comment as the help a person reads — every line of it — and
@@ -254,6 +255,12 @@ enum Command {
     Serve(serve::ServeArgs),
     /// List the stored sessions of the project this was run in.
     Sessions,
+    /// List the skills a session can load — the roster `$name` invokes.
+    ///
+    /// The same discovery a session runs: ganja's two homes, whatever
+    /// `skills.paths` names, and every enabled plugin's skills/, with the
+    /// later tier winning a name collision.
+    Skills,
 }
 
 #[derive(Debug, Subcommand)]
@@ -619,6 +626,10 @@ async fn main() -> Result<()> {
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Serve(args)) => serve::serve(args).await,
         Some(Command::Sessions) => sessions_command(),
+        Some(Command::Skills) => {
+            let cwd = std::env::current_dir().context("failed to read the working directory")?;
+            skills::skills_command(&cwd)
+        }
     }
 }
 

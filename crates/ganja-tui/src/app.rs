@@ -2801,11 +2801,8 @@ impl App {
         let rows = ganja_tool::skill::discover(&roots)
             .into_iter()
             .map(|skill| {
-                let origin = roots
-                    .dirs()
-                    .iter()
-                    .find(|dir| skill.location.starts_with(dir))
-                    .map(|dir| dir.display().to_string());
+                let origin =
+                    ganja_tool::skill::origin(&roots, &skill).map(|dir| dir.display().to_string());
                 let detail = match (skill.description.as_deref(), origin) {
                     (Some(description), Some(origin)) => format!("{description} — {origin}"),
                     (Some(description), None) => description.to_owned(),

@@ -445,6 +445,23 @@ pub fn requested_in(text: &str, skills: &[Skill]) -> Vec<String> {
     found
 }
 
+/// The root `skill` was found under, for a listing that names where each
+/// skill came from.
+///
+/// Later roots are consulted first because a later root wins a name
+/// collision, so when two nested roots both prefix one location the answer
+/// is the tier that actually served it. [`None`] is a skill whose location
+/// no root prefixes, which only a hand-built [`Skill`] can be.
+#[must_use]
+pub fn origin<'a>(roots: &'a Roots, skill: &Skill) -> Option<&'a Path> {
+    roots
+        .dirs()
+        .iter()
+        .rev()
+        .find(|dir| skill.location.starts_with(dir))
+        .map(PathBuf::as_path)
+}
+
 /// What a loaded skill hands the model (`tool/skill.ts:45-61`).
 ///
 /// Public because the tool is no longer the only door: the engine expands a
@@ -734,6 +751,30 @@ mod tests {
         for (text, expected) in cases {
             assert_eq!(super::requested_in(text, &skills), expected, "{text:?}");
         }
+    }
+
+    /// A listing names the tier that actually serves each name: the later
+    /// root when two prefix one location, and nothing for a location outside
+    /// every root.
+    #[test]
+    fn a_skills_origin_is_the_root_that_serves_it() {
+        let outer = PathBuf::from("/skills");
+        let inner = PathBuf::from("/skills/nested");
+        let roots = super::Roots::none().with_paths([outer.clone(), inner.clone()]);
+
+        let nested = Skill {
+            location: inner.join("porting").join("SKILL.md"),
+            ..named("porting")
+        };
+        assert_eq!(super::origin(&roots, &nested), Some(inner.as_path()));
+
+        let outer_only = Skill {
+            location: outer.join("tdd").join("SKILL.md"),
+            ..named("tdd")
+        };
+        assert_eq!(super::origin(&roots, &outer_only), Some(outer.as_path()));
+
+        assert_eq!(super::origin(&roots, &named("floating")), None);
     }
 
     /// The tool's refusal and the engine's expansion miss read the same
