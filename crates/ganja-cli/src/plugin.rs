@@ -58,6 +58,13 @@ pub(crate) enum PluginAction {
         /// The plugin's name, as `ganja plugin list` shows it.
         plugin: String,
     },
+    /// Show one installed plugin in full: identity, component inventory, and
+    /// the projected token cost of what it puts in front of the model —
+    /// Claude Code's own `details` surface.
+    Details {
+        /// The plugin's name, as `ganja plugin list` shows it.
+        plugin: String,
+    },
 }
 
 /// What `ganja plugin marketplace` can be asked to do.
@@ -169,7 +176,142 @@ pub(crate) fn plugin_command(action: PluginAction) -> Result<()> {
             println!("removed {plugin}");
             Ok(())
         }
+        PluginAction::Details { plugin } => details(&store, &plugin),
     }
+}
+
+/// Prints one plugin in Claude Code's own `details` shape: the header, the
+/// component inventory, and the projected token costs with their own
+/// disclaimers.
+fn details(store: &Store, plugin: &str) -> Result<()> {
+    let details = store.details(plugin)?;
+
+    let version = details
+        .version
+        .as_deref()
+        .map(|version| format!(" {version}"))
+        .unwrap_or_default();
+    let state = if details.enabled { "" } else { " (disabled)" };
+    println!("{}{version}{state}", details.name);
+    if let Some(description) = &details.description {
+        println!("{}{description}", crate::INDENT);
+    }
+    println!(
+        "{}Source: {}@{}",
+        crate::INDENT,
+        details.name,
+        details.marketplace
+    );
+
+    println!();
+    println!("Component inventory");
+    let named = |label: &str, names: &[String]| {
+        if names.is_empty() {
+            println!("{}{label} (0)", crate::INDENT);
+        } else {
+            println!(
+                "{}{label} ({})  {}",
+                crate::INDENT,
+                names.len(),
+                names.join(", ")
+            );
+        }
+    };
+    let costed_names = |components: &[ganja_core::plugin::ComponentCost]| {
+        components
+            .iter()
+            .map(|component| component.name.clone())
+            .collect::<Vec<_>>()
+    };
+    named("Skills", &costed_names(&details.skills));
+    named("Agents", &costed_names(&details.agents));
+    named("Commands", &costed_names(&details.commands));
+    named("Hooks", &details.hooks);
+    named("MCP servers", &details.mcp);
+    named("LSP servers", &details.lsp);
+
+    println!();
+    println!("Projected token cost");
+    println!(
+        "{}Always-on:   ~{} tok   added to every session",
+        crate::INDENT,
+        grouped(details.always_on_total())
+    );
+
+    let mut components: Vec<&ganja_core::plugin::ComponentCost> = Vec::new();
+    components.extend(&details.skills);
+    components.extend(&details.agents);
+    components.extend(&details.commands);
+    if !components.is_empty() {
+        println!();
+        println!("Per-component (rounded)");
+        let width = components
+            .iter()
+            .map(|component| component.name.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("component".len());
+        println!(
+            "{}{:<width$}  {:>9}  {:>9}",
+            crate::INDENT,
+            "component",
+            "always-on",
+            "on-invoke"
+        );
+        for component in components {
+            println!(
+                "{}{:<width$}  {:>9}  {:>9}",
+                crate::INDENT,
+                component.name,
+                approx(component.always_on),
+                approx(component.on_invoke)
+            );
+        }
+        println!();
+        println!(
+            "{}On-invoke cost is paid each time a skill or agent fires.",
+            crate::INDENT
+        );
+        println!(
+            "{}Token counts are estimates and may differ from actual usage.",
+            crate::INDENT
+        );
+    }
+
+    Ok(())
+}
+
+/// A token estimate the way the reference output rounds one: `< 20` below
+/// twenty, `~N` to the nearest ten below a thousand, `~N.Nk` above with a
+/// clean `.0` dropped.
+fn approx(tokens: u64) -> String {
+    if tokens < 20 {
+        "< 20".to_owned()
+    } else if tokens < 1_000 {
+        format!("~{}", (tokens + 5) / 10 * 10)
+    } else {
+        let tenths = (tokens + 50) / 100;
+        if tenths.is_multiple_of(10) {
+            format!("~{}k", tenths / 10)
+        } else {
+            format!("~{}.{}k", tenths / 10, tenths % 10)
+        }
+    }
+}
+
+/// `1620` as `1,620` — the always-on total is a real figure, grouped rather
+/// than rounded.
+fn grouped(tokens: u64) -> String {
+    let digits = tokens.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+
+    out
 }
 
 /// Prints every added marketplace: origin, offer count — or why its own
@@ -233,4 +375,34 @@ fn list(store: &Store) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{approx, grouped};
+
+    /// The reference output's own roundings, row by row: `< 20` below
+    /// twenty, nearest ten below a thousand, tenths of k above with a clean
+    /// `.0` dropped.
+    #[test]
+    fn token_estimates_round_the_way_the_reference_output_does() {
+        assert_eq!(approx(7), "< 20");
+        assert_eq!(approx(19), "< 20");
+        assert_eq!(approx(20), "~20");
+        assert_eq!(approx(38), "~40");
+        assert_eq!(approx(44), "~40");
+        assert_eq!(approx(946), "~950");
+        assert_eq!(approx(1_020), "~1k");
+        assert_eq!(approx(1_120), "~1.1k");
+        assert_eq!(approx(3_840), "~3.8k");
+    }
+
+    /// The always-on total keeps its digits, grouped in threes.
+    #[test]
+    fn the_total_groups_its_thousands() {
+        assert_eq!(grouped(7), "7");
+        assert_eq!(grouped(950), "950");
+        assert_eq!(grouped(1_620), "1,620");
+        assert_eq!(grouped(1_234_567), "1,234,567");
+    }
 }
