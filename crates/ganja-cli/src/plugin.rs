@@ -73,6 +73,25 @@ pub(crate) enum MarketplaceAction {
         /// included), or a path to a directory holding the marketplace.
         source: String,
     },
+    /// List the added marketplaces: origin, what each offers, and the
+    /// installed plugins that came from it.
+    List,
+    /// Delete an added marketplace's copy and its record.
+    ///
+    /// Refused while plugins installed from it remain — an installed plugin
+    /// would keep working but could never update again, so `ganja plugin
+    /// remove` them first is the honest order.
+    Remove {
+        /// The marketplace's name, as the listing shows it.
+        name: String,
+    },
+    /// Re-fetch added marketplaces from their recorded origins — one by
+    /// name, or every one when none is named. Validated exactly as an add
+    /// is, and a fetch that renamed itself is refused rather than forked.
+    Update {
+        /// The marketplace's name; absent, every added marketplace updates.
+        name: Option<String>,
+    },
 }
 
 /// Runs one `ganja plugin` action against the store under the config home.
@@ -88,6 +107,40 @@ pub(crate) fn plugin_command(action: PluginAction) -> Result<()> {
         } => {
             let name = store.add_marketplace(&source)?;
             println!("added marketplace {name} from {source}");
+            Ok(())
+        }
+        PluginAction::Marketplace {
+            action: MarketplaceAction::List,
+        } => marketplaces(&store),
+        PluginAction::Marketplace {
+            action: MarketplaceAction::Remove { name },
+        } => {
+            store.remove_marketplace(&name)?;
+            println!("removed marketplace {name}");
+            Ok(())
+        }
+        PluginAction::Marketplace {
+            action: MarketplaceAction::Update { name },
+        } => {
+            let names = match name {
+                Some(name) => vec![name],
+                None => store
+                    .marketplaces()?
+                    .into_iter()
+                    .map(|listing| listing.name)
+                    .collect(),
+            };
+            if names.is_empty() {
+                println!(
+                    "no marketplaces are added; `ganja plugin marketplace add` is how one \
+                     arrives"
+                );
+                return Ok(());
+            }
+            for name in names {
+                let origin = store.update_marketplace(&name)?;
+                println!("updated marketplace {name} from {origin}");
+            }
             Ok(())
         }
         PluginAction::Install { spec } => {
@@ -117,6 +170,38 @@ pub(crate) fn plugin_command(action: PluginAction) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Prints every added marketplace: origin, offer count — or why its own
+/// file no longer reads — and the installed plugins hung under it the way
+/// `list` hangs components.
+fn marketplaces(store: &Store) -> Result<()> {
+    let listings = store.marketplaces()?;
+    if listings.is_empty() {
+        println!("no marketplaces are added; `ganja plugin marketplace add` is how one arrives");
+        return Ok(());
+    }
+
+    for listing in listings {
+        match &listing.offered {
+            Ok(offered) => println!(
+                "{} (from {}, offers {} plugin{})",
+                listing.name,
+                listing.origin,
+                offered.len(),
+                if offered.len() == 1 { "" } else { "s" },
+            ),
+            Err(reason) => println!(
+                "{} (from {}, unreadable: {reason})",
+                listing.name, listing.origin
+            ),
+        }
+        for plugin in listing.installed {
+            println!("{}installed: {plugin}", crate::INDENT);
+        }
+    }
+
+    Ok(())
 }
 
 /// Prints every installed plugin, its state, where it came from, and what it

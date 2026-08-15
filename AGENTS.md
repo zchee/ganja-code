@@ -52,8 +52,10 @@ cargo run -- mcp add local -- npx some-server   # also: add remote --url https:/
                                 #   remove <name>; --global targets the config home file; a
                                 #   ganja.jsonc target is edited comment-preservingly (D483)
 cargo run -- plugin list        # the installed plugins and what each contributes; also:
-                                #   marketplace add <git-url|path>, install <plugin>@<marketplace>,
-                                #   enable, disable, remove — the `/plugin` dialog's own actions
+                                #   marketplace add <git-url|path> / list / remove <name> /
+                                #   update [<name>] (re-fetch from the recorded origin; all when
+                                #   unnamed), install <plugin>@<marketplace>, enable, disable,
+                                #   remove — the `/plugin` dialog's own actions
 cargo run -- run "what does this crate do"        # one headless turn; --format json for a script
 cargo run -- run --continue --auto "now fix it"   # --auto allows what a headless run otherwise refuses
 cargo run -- config import-opencode --dry-run  # translate an opencode config, naming what it skipped
