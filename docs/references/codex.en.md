@@ -130,7 +130,7 @@ experimental upstream and moves fast.*
 | [Agent definition files](https://developers.openai.com/codex/cli) *(low confidence)* | `~/.codex/agents/*.toml`, per-agent model/reasoning/sandbox | ⚠️ config-declared agents (model, prompt, permission rules); no per-agent sandbox |
 | [Skills (SKILL.md)](https://developers.openai.com/codex/cli) | cross-tool standard, progressive disclosure | ✅ ganja's two homes + `skills.paths` |
 | [Skill discovery paths](https://developers.openai.com/codex/cli) | `$CODEX_HOME/skills` + repo `.codex/skills` + `.agents/skills` | ⚠️ ganja scans its config home + `.ganja/skills` + configured paths; nothing foreign discovered by default |
-| `/skills` list, `$skill-name` invocation *(low confidence)* | in-TUI listing and explicit invocation | ⚠️ ganja's prompt carries `<available_skills>` and the `skill` tool loads on request; no list UI |
+| [`/skills` list, `$skill-name` invocation](https://developers.openai.com/codex/cli) *(confirmed 2026-08-15)* | in-TUI listing and explicit invocation | ✅ typed `$` raises a selector, Tab/Enter complete `$name`, the engine expands the token into the `skill` tool's own rendering at send; `/skills` dialog and `ganja skills` list the roster (D491) |
 
 ## 10. MCP and LSP
 

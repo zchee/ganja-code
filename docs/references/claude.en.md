@@ -171,7 +171,7 @@ docs unless marked otherwise.*
 | [`isolation: worktree`](https://code.claude.com/docs/en/sub-agents) | subagent in its own git worktree | ❌ |
 | [Skill preloading (`skills:` on agents)](https://code.claude.com/docs/en/sub-agents) | | ❌ |
 | [SKILL.md loading](https://code.claude.com/docs/en/skills) | | ✅ ganja's two homes + `skills.paths` |
-| [Skill auto-triggering + `paths` scoping](https://code.claude.com/docs/en/skills) | description- and path-matched invocation | ❌ explicit load only |
+| [Skill auto-triggering + `paths` scoping](https://code.claude.com/docs/en/skills) | description- and path-matched invocation | ❌ explicit only — the model's `skill` tool, or the composer's `$name` token (D491, the Codex CLI's grammar where Claude uses `/name`) |
 | [`context: fork`](https://code.claude.com/docs/en/skills) | run the skill in a forked subagent, return only results | ❌ |
 | [Skill `allowed-tools`](https://code.claude.com/docs/en/skills) | tool restriction incl. `mcp__*` wildcards | ❌ |
 | [Plugins: 5 component types](https://code.claude.com/docs/en/plugins) | skills, agents, hooks, MCP servers, LSP servers | ✅ all six surfaces merge as config contributors (D472/D473; `commands/` closed the set in P22): hooks append, MCP servers arrive namespaced `plugin:<name>:<server>` and ask by default, skills roots concatenate, `commands/*.md` join the command table spelled `<plugin>:<name>`, agents/LSP merge per key with explicit config winning |

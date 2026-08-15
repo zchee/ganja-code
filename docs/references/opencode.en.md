@@ -44,7 +44,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 | [Sidebar](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/feature-plugins/sidebar) | context/files/lsp/mcp/todo panes | ❌ |
 | [Diff viewer](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component/diff-viewer) | file tree, split/unified, hunk nav | ❌ inline unified diffs only |
 | [Subagent transcript viewer](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-subagent.tsx) | | ⚠️ no per-child dialog, but a running task row hangs the child's recent calls under it (a capped log the watcher writes, whole in the Ctrl+T transcript, 2026-08-15) where upstream's metadata named only the current tool |
-| [Provider / MCP / skill / status / debug pickers](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | | ❌ (`/effort` picker ✅) |
+| [Provider / MCP / skill / status / debug pickers](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | | ⚠️ `/effort` picker ✅; skills ✅ as the typed-`$` selector + `/skills` dialog (D491); provider/status/debug ❌ |
 | Delete-failed / retry recovery dialogs | | ❌ |
 | [Desktop notifications](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/notifications.ts) | | ❌ |
 | Toast overlay | | ⚠️ adapted to status-bar notices, texts verbatim |

@@ -44,7 +44,7 @@ ganja が仕様として読むピン済みタグ(`anomalyco/opencode@v1.18.13`)�
 | [サイドバー](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/feature-plugins/sidebar) | context/files/lsp/mcp/todo ペイン | ❌ |
 | [diff ビューア](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component/diff-viewer) | ファイルツリー・split/unified・hunk ナビ | ❌ インライン unified のみ |
 | [サブエージェントビューア](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-subagent.tsx) | 子トランスクリプト閲覧 | ⚠️ 子専用ダイアログは無いが、実行中の task 行が子の直近呼出しを下にぶら下げる(watcher が書く上限付きログ;全量は Ctrl+T トランスクリプトに、2026-08-15)— upstream のメタデータは現在のツール名だけだった |
-| [provider / MCP / skill / status / debug ピッカー](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | | ❌(`/effort` ピッカーは✅) |
+| [provider / MCP / skill / status / debug ピッカー](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | | ⚠️ `/effort` ピッカー✅;skill は `$` 打鍵セレクタ+`/skills` ダイアログとして✅(D491);provider/status/debug ❌ |
 | 削除失敗・リトライ回復ダイアログ | | ❌ |
 | [デスクトップ通知](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/notifications.ts) | | ❌ |
 | toast オーバーレイ | | ⚠️ ステータスバー通知に適合・文言は逐語 |

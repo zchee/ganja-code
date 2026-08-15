@@ -169,7 +169,7 @@ ganja 側セルは 2026-08-15 に post-P22 のツリーへ更新済み(Claude �
 | [`isolation: worktree`](https://code.claude.com/docs/en/sub-agents) | worktree 内で実行 | ❌ |
 | [エージェントへの skill 事前ロード](https://code.claude.com/docs/en/sub-agents) | `skills:` | ❌ |
 | [SKILL.md ロード](https://code.claude.com/docs/en/skills) | | ✅ ganja の2ホーム+`skills.paths` |
-| [自動トリガー+`paths` スコープ](https://code.claude.com/docs/en/skills) | 記述・パスマッチ発動 | ❌ 明示ロードのみ |
+| [自動トリガー+`paths` スコープ](https://code.claude.com/docs/en/skills) | 記述・パスマッチ発動 | ❌ 明示のみ — モデルの `skill` ツールか composer の `$name` トークン(D491、Claude の `/name` に対し Codex CLI の文法) |
 | [`context: fork`](https://code.claude.com/docs/en/skills) | fork したサブエージェントで実行し結果のみ返す | ❌ |
 | [skill の `allowed-tools`](https://code.claude.com/docs/en/skills) | `mcp__*` ワイルドカード含む制限 | ❌ |
 | [プラグイン: 5 コンポーネント](https://code.claude.com/docs/en/plugins) | skills・agents・hooks・MCP・LSP | ✅ 6 面すべてが config への寄与としてマージされる(D472/D473;P22 で `commands/` が集合を閉じた): hooks は追記、MCP は `plugin:<name>:<server>` に名前空間化され既定で確認要求、skills ルートは連結、`commands/*.md` は `<plugin>:<name>` としてコマンド表に加わり、agents/LSP はキー単位で明示 config が勝つ |
