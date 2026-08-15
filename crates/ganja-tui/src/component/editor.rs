@@ -255,6 +255,19 @@ impl Editor {
         self.area.input(key);
     }
 
+    /// Deletes `count` characters starting at `(row, column)`, leaving the
+    /// cursor where the deletion began — the whole-token backspace's engine
+    /// (2026-08-15).
+    pub fn delete_span(&mut self, row: usize, column: usize, count: usize) {
+        self.area.move_cursor(CursorMove::Jump(
+            u16::try_from(row).unwrap_or(u16::MAX),
+            u16::try_from(column + count).unwrap_or(u16::MAX),
+        ));
+        for _ in 0..count {
+            self.area.delete_char();
+        }
+    }
+
     /// Draws the editor into `area`.
     pub fn render(&self, area: Rect, buffer: &mut Buffer) {
         (&self.area).render(area, buffer);

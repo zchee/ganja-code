@@ -1716,7 +1716,33 @@ impl App {
         let text = self.editor.text();
         let (row, column) = self.editor.cursor();
         let token = image_token_at(&text, char_offset(&text, row, column));
-        self.editor.set_token_highlight(token);
+        self.editor
+            .set_token_highlight(token.map(|(_, _, number)| number));
+    }
+
+    /// Backspace over an `[Image #N]` token takes the whole token — Claude
+    /// Code's own composer rule, widened from
+    /// cursor-after to anywhere the highlight lights: the token is atomic to
+    /// the eye, so it is atomic to the delete. At the token's very front the
+    /// answer is no, because backspace there is about the character before
+    /// the token.
+    fn delete_image_token(&mut self) -> bool {
+        let text = self.editor.text();
+        let (row, column) = self.editor.cursor();
+        let offset = char_offset(&text, row, column);
+        let Some((start, end, _)) = image_token_at(&text, offset) else {
+            return false;
+        };
+        if offset == start {
+            return false;
+        }
+
+        // A token never spans lines, so its `[` sits on the cursor's own
+        // row, `offset - start` columns back.
+        self.editor
+            .delete_span(row, column - (offset - start), end + 1 - start);
+
+        true
     }
 
     /// Claude Code's own focus-time nudge (observed behaviour):
@@ -2185,6 +2211,13 @@ impl App {
             }
             KeyCode::Down
                 if self.editor.on_last_line() && self.recall(history::Direction::Newer) =>
+            {
+                self.sync_menus().await;
+            }
+            // Ahead of the widget's own single-character delete: a token the
+            // cursor lights deletes whole (2026-08-15).
+            KeyCode::Backspace
+                if key.modifiers == KeyModifiers::NONE && self.delete_image_token() =>
             {
                 self.sync_menus().await;
             }
@@ -4710,10 +4743,10 @@ fn char_offset(text: &str, row: usize, column: usize) -> usize {
         + column
 }
 
-/// The number of the `[Image #N]` token `offset` sits on — inside it, or
-/// directly after its closing bracket, which is where the cursor lands the
-/// moment a paste inserts one.
-fn image_token_at(text: &str, offset: usize) -> Option<u32> {
+/// The `[Image #N]` token `offset` sits on — inside it, or directly after
+/// its closing bracket, which is where the cursor lands the moment a paste
+/// inserts one: the char offsets of its `[` and its `]`, and its number.
+fn image_token_at(text: &str, offset: usize) -> Option<(usize, usize, u32)> {
     const HEAD: [char; 8] = ['[', 'I', 'm', 'a', 'g', 'e', ' ', '#'];
     let chars: Vec<char> = text.chars().collect();
     let mut start = 0;
@@ -4732,7 +4765,9 @@ fn image_token_at(text: &str, offset: usize) -> Option<u32> {
             continue;
         }
         if (start..=end + 1).contains(&offset) {
-            return chars[digits..end].iter().collect::<String>().parse().ok();
+            let number = chars[digits..end].iter().collect::<String>().parse().ok()?;
+
+            return Some((start, end, number));
         }
         start = end + 1;
     }
@@ -10638,11 +10673,15 @@ mod tests {
     fn the_token_under_the_cursor_is_found_and_prose_is_not() {
         let text = "see [Image #12] here";
 
-        assert_eq!(super::image_token_at(text, 4), Some(12), "its first char");
-        assert_eq!(super::image_token_at(text, 9), Some(12), "inside");
+        assert_eq!(
+            super::image_token_at(text, 4),
+            Some((4, 14, 12)),
+            "its first char"
+        );
+        assert_eq!(super::image_token_at(text, 9), Some((4, 14, 12)), "inside");
         assert_eq!(
             super::image_token_at(text, 15),
-            Some(12),
+            Some((4, 14, 12)),
             "right after the bracket"
         );
         assert_eq!(super::image_token_at(text, 3), None, "before it");
@@ -10662,6 +10701,48 @@ mod tests {
         assert_eq!(super::char_offset("abc\ndef", 1, 2), 6);
         assert_eq!(super::char_offset("見て\n[Image #1]", 1, 0), 3);
         assert_eq!(super::char_offset("abc", 0, 3), 3);
+    }
+
+    /// Backspace on a token the cursor lights takes the whole token —
+    /// Claude Code's own composer rule, widened to
+    /// anywhere inside it. At the token's very front it stays an ordinary
+    /// one-character delete, because backspace there is about what sits
+    /// before the token.
+    #[tokio::test]
+    async fn backspace_on_an_image_token_deletes_the_whole_token() {
+        {
+            let mut app = app();
+            typed(&mut app, "see [Image #12] x").await;
+            for _ in 0..3 {
+                app.handle(key(KeyCode::Left, KeyModifiers::NONE))
+                    .await
+                    .expect("left is handled");
+            }
+            app.handle(key(KeyCode::Backspace, KeyModifiers::NONE))
+                .await
+                .expect("backspace is handled");
+            assert_eq!(
+                app.editor.text(),
+                "see  x",
+                "mid-token backspace takes the token whole"
+            );
+        }
+
+        let mut app = app();
+        typed(&mut app, "ab[Image #5]").await;
+        for _ in 0..10 {
+            app.handle(key(KeyCode::Left, KeyModifiers::NONE))
+                .await
+                .expect("left is handled");
+        }
+        app.handle(key(KeyCode::Backspace, KeyModifiers::NONE))
+            .await
+            .expect("backspace is handled");
+        assert_eq!(
+            app.editor.text(),
+            "a[Image #5]",
+            "at the token's front, backspace is about the character before it"
+        );
     }
 
     /// Claude Code's focus-time nudge (observed behaviour): coming back
