@@ -595,6 +595,13 @@ pub struct App {
     /// MCP dial is polled. Also the guard that keeps a second `/model` from
     /// spawning a second fetch.
     wire_fetch: Option<JoinHandle<WireListing>>,
+    /// The `@` menu's project walk while one is in flight, reaped on Tick
+    /// exactly as `wire_fetch` is (2026-08-15: awaiting it inline stalled
+    /// every keystroke by the whole walk's duration on a big or cold tree).
+    /// The newest fragment wins — a keystroke cancels and replaces an older
+    /// walk — and the reap installs the menu only while the composer still
+    /// shows the fragment it walked for.
+    file_walk: Option<FileWalk>,
     /// The `/plugin` store action while one is in flight, carrying the notice
     /// it will answer with. Reaped on Tick beside [`App::wire_fetch`] and for
     /// the same reason: a marketplace add is a `git clone`, and the loop
@@ -723,6 +730,7 @@ impl App {
             plans: Vec::new(),
             wire_models: None,
             wire_fetch: None,
+            file_walk: None,
             plugin_task: None,
             tools: ganja_tool::Registry::with_builtins(),
             themes,
@@ -1001,6 +1009,7 @@ impl App {
                 self.poll_plans();
                 self.poll_mcp_dialog();
                 self.poll_wire_models().await;
+                self.poll_file_walk().await;
                 self.poll_plugin_task().await;
                 // The other door into the same lane: a replay that lost a race
                 // to a turn starting under it keeps its place and is retried
@@ -2430,11 +2439,13 @@ impl App {
         if self.editor.mode() == Mode::Shell {
             self.dropdown = None;
             self.files = None;
+            self.cancel_file_walk();
             return;
         }
 
         if dropdown::triggered(&text, cursor) {
             self.files = None;
+            self.cancel_file_walk();
             match &mut self.dropdown {
                 Some(dropdown) => dropdown.refresh(&text),
                 None => {
@@ -2447,6 +2458,7 @@ impl App {
 
         let Some(fragment) = mention::trigger(&text, cursor) else {
             self.files = None;
+            self.cancel_file_walk();
             return;
         };
         // The list depends on the fragment and on nothing else, so a keystroke
@@ -2456,11 +2468,57 @@ impl App {
             .as_ref()
             .is_some_and(|files| files.answers(&fragment))
         {
+            self.cancel_file_walk();
+            return;
+        }
+        if self
+            .file_walk
+            .as_ref()
+            .is_some_and(|walk| walk.fragment == fragment)
+        {
             return;
         }
 
-        let paths = self.find_files(&fragment.text).await;
-        self.files = Some(Files::new(fragment, paths));
+        // Spawned rather than awaited (2026-08-15): a keystroke that waited on
+        // the walk stalled the whole loop for the walk's duration. A menu that
+        // is already up keeps its rows — stale beats stalled — until the reap
+        // on Tick installs the new ones.
+        self.spawn_file_walk(fragment);
+    }
+
+    /// Ends an in-flight `@`-menu walk: the token stops the blocking walk
+    /// between its batches, and nothing will reap the handle.
+    fn cancel_file_walk(&mut self) {
+        if let Some(walk) = self.file_walk.take() {
+            walk.cancel.cancel();
+            walk.task.abort();
+        }
+    }
+
+    /// Installs a finished walk's rows — while the composer still shows the
+    /// fragment they answer. Polled on Tick exactly as `wire_fetch` is.
+    async fn poll_file_walk(&mut self) {
+        if !self
+            .file_walk
+            .as_ref()
+            .is_some_and(|walk| walk.task.is_finished())
+        {
+            return;
+        }
+        let walk = self.file_walk.take().expect("checked finished above");
+        let Ok(paths) = walk.task.await else {
+            return;
+        };
+
+        // The editor may have moved on while the project was being walked; a
+        // menu for a fragment nobody is typing any more would be a lie.
+        let (text, cursor) = (self.editor.text(), self.editor.cursor());
+        if self.editor.mode() != Mode::Shell
+            && mention::trigger(&text, cursor).is_some_and(|current| current == walk.fragment)
+        {
+            self.files = Some(Files::new(walk.fragment, paths));
+            self.dirty = true;
+        }
     }
 
     /// The files a mention fragment offers, relative to [`App::cwd`].
@@ -2477,13 +2535,15 @@ impl App {
     /// change to the fragment. On a very large tree that is a visible pause
     /// while typing; upstream answers from an index it keeps warm, which is a
     /// P6-sized piece of machinery this build does not have.
-    async fn find_files(&self, fragment: &str) -> Vec<String> {
-        let Some(glob) = self.tools.get("glob") else {
-            return Vec::new();
+    fn spawn_file_walk(&mut self, fragment: mention::Fragment) {
+        self.cancel_file_walk();
+        let Some(glob) = self.tools.get("glob").cloned() else {
+            return;
         };
+        let cancel = CancellationToken::new();
         let ctx = ToolCtx {
             cwd: self.cwd.clone(),
-            cancel: CancellationToken::new(),
+            cancel: cancel.clone(),
             call_id: MENTION_CALL.to_owned(),
             files: Arc::new(FileTimes::default()),
             // The menu is a file walk, not a conversation: it has no
@@ -2494,17 +2554,25 @@ impl App {
             switch: None,
             jobs: None,
         };
+        let cwd = self.cwd.clone();
+        let wanted = pattern(&fragment.text);
 
-        // A fragment is typed, not written: half of one is a pattern that does
-        // not parse yet, and a menu is not the place to say so.
-        let Ok(found) = glob
-            .run(serde_json::json!({ "pattern": pattern(fragment) }), &ctx)
-            .await
-        else {
-            return Vec::new();
-        };
-
-        relative_paths(&self.cwd, &found.output)
+        let task = tokio::spawn(async move {
+            // A fragment is typed, not written: half of one is a pattern that
+            // does not parse yet, and a menu is not the place to say so.
+            match glob
+                .run(serde_json::json!({ "pattern": wanted }), &ctx)
+                .await
+            {
+                Ok(found) => relative_paths(&cwd, &found.output),
+                Err(_) => Vec::new(),
+            }
+        });
+        self.file_walk = Some(FileWalk {
+            fragment,
+            cancel,
+            task,
+        });
     }
 
     /// Opens the model list over the roster this session's *wire* owns where
@@ -3921,6 +3989,7 @@ impl App {
         self.editor.clear();
         self.dropdown = None;
         self.files = None;
+        self.cancel_file_walk();
     }
 
     /// The submit-time half of graceful degradation: a mention the wire cannot
@@ -4366,6 +4435,10 @@ impl App {
             // open, exactly as the status bar's own MCP notice does.
             || self.mcp_dialog.is_some()
             || self.wire_fetch.is_some()
+            // The `@` menu's walk resolves on the tick that reaps it, and an
+            // idle loop would otherwise leave a finished walk uninstalled
+            // until the next keystroke.
+            || self.file_walk.is_some()
             // A running store action has no event of its own either, and the
             // dialog is waiting on exactly the tick that reaps it.
             || self.plugin_task.is_some()
@@ -4395,6 +4468,14 @@ impl App {
 /// *names* under the directories named, which finds what a person is usually
 /// typing and cannot be mistaken for the same ranking (deviation:
 /// mention-matches-under-the-path-typed).
+/// One in-flight `@`-menu walk: the fragment it answers, the token that
+/// supersedes it, and the walk itself.
+struct FileWalk {
+    fragment: mention::Fragment,
+    cancel: CancellationToken,
+    task: JoinHandle<Vec<String>>,
+}
+
 fn pattern(fragment: &str) -> String {
     // While a range is being typed the fragment carries it (`@src/app#10-20`),
     // and the walk knows nothing about lines: the query is what sits before
@@ -8817,11 +8898,28 @@ mod tests {
         listed
     }
 
-    /// Types `text` into `app`, one key at a time, the way a person does.
+    /// Types `text` into `app`, one key at a time, the way a person does —
+    /// then settles the `@` menu's background walk, which a real run reaps
+    /// on its next ticks (2026-08-15: the walk left the keystroke's own
+    /// handling).
     async fn typed(app: &mut App, text: &str) {
         for event in typing(text) {
             app.handle(event).await.expect("typing is handled");
         }
+        settle_file_menu(app).await;
+    }
+
+    /// Waits for an in-flight `@` walk to finish and installs it, standing in
+    /// for the tick loop.
+    async fn settle_file_menu(app: &mut App) {
+        for _ in 0..500 {
+            if app.file_walk.is_none() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            app.poll_file_walk().await;
+        }
+        panic!("the file walk never settled");
     }
 
     #[tokio::test]
@@ -8952,6 +9050,7 @@ mod tests {
                 .await
                 .expect("left is handled");
         }
+        settle_file_menu(&mut app).await;
         assert!(
             app.files.is_some(),
             "the cursor is inside the mention again"
