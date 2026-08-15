@@ -268,6 +268,7 @@ mod tests {
             summary: None,
             agent: None,
             model: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: None,
             revert: None,
         }

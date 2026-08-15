@@ -100,6 +100,7 @@ pub(crate) fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
     .with_mcp(Arc::clone(&servers))
     .with_snapshots(snapshots)
     .with_concurrency(config.agents.concurrency())
+    .with_defer_threshold(config.defer_threshold())
     .with_small_model(config.small_model.clone())
     // The same value the skill tool above was installed over, so a `$name`
     // invocation and a `skill` call load from one list.

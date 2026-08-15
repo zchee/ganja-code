@@ -113,6 +113,11 @@ pub(crate) struct Host {
     /// Tools the **child** is offered: this build's registry without the task
     /// tool, which is the whole of the depth guard.
     pub(crate) tools: Arc<Registry>,
+    /// The parent's deferral, whole (**D492**): the child reads the same
+    /// advertised subset, and its activations join the same session set —
+    /// permission gating untouched, the only effect parent-visible roster
+    /// growth.
+    pub(crate) deferral: crate::tool::deferral::Deferral,
     /// The parent's rules, which the child derives its own from.
     pub(crate) permissions: Arc<std::sync::Mutex<Permissions>>,
     /// The half of the system prompt an agent replaces, for a subagent that
@@ -505,6 +510,10 @@ fn create(state: &SessionState, session: &SessionId, agent: &Agent, what: &str, 
         // A child runs no effort — see `Turn::child` — so its record claims
         // none either.
         effort: None,
+        // A child's activations live in the shared in-memory set and reach
+        // the *root* row at the parent's fan-in flush; its own row never
+        // carries any (**D492**).
+        activated_tools: std::collections::BTreeSet::new(),
         parent,
         revert: None,
     };

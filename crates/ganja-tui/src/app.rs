@@ -5143,6 +5143,7 @@ mod tests {
             summary: None,
             agent: None,
             model: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: None,
             revert: None,
         };
@@ -5174,6 +5175,7 @@ mod tests {
             summary: None,
             agent: Some("explore".to_owned()),
             model: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: Some(SessionId::from(parent.to_owned())),
             revert: None,
         };

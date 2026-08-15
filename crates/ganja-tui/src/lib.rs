@@ -176,6 +176,7 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
     // its own engine, so a knob wired into `ganja-cli`'s `assemble` alone
     // would be a knob every interactive session still ignored.
     .with_concurrency(config.agents.concurrency())
+    .with_defer_threshold(config.defer_threshold())
     .with_small_model(config.small_model.clone())
     // The same value the skill tool above was installed over, so a `$name`
     // invocation and a `skill` call load from one list.
@@ -520,6 +521,7 @@ mod tests {
             summary: None,
             agent: None,
             model: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: None,
             revert: None,
         };

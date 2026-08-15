@@ -953,6 +953,7 @@ fn store(storage: &Storage, id: &str, parent: Option<&str>) {
             summary: None,
             agent: None,
             model: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: parent.map(|parent| SessionId::from(parent.to_owned())),
             revert: None,
         })

@@ -29,6 +29,7 @@ pub fn seeded_session_info(id: SessionId, context_tokens: u64) -> SessionInfo {
         agent: None,
         model: None,
         effort: None,
+        activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
     }
