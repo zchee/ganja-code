@@ -29,6 +29,7 @@ pub mod queue;
 pub mod rewind;
 pub mod search;
 pub mod sessions;
+pub mod skill_menu;
 pub mod status;
 pub mod themes;
 pub mod usage;

@@ -1,5 +1,6 @@
 ---
 source: crates/ganja-tui/src/app.rs
+assertion_line: 9296
 expression: screen(&terminal)
 ---
 > show me every color you have                                                  
@@ -8,14 +9,14 @@ expression: screen(&terminal)
 ● Edit(f│session                                                       │        
   ⎿ them│> /compact       Compact session                              │        
     @@ -│  /sessions      Switch session                         ctrl+s│        
-    -let│agent                                                         │        
-    +let│  /agents        Switch agent                                 │        
-    cont│system                                                        │        
-● Bash(c│  /copy          Copy session transcript                      │        
-  ⎿ [err│agent                                                         │        
+    -let│system                                                        │        
+    +let│  /skills        Skills                                       │        
+    cont│agent                                                         │        
+● Bash(c│  /agents        Switch agent                                 │        
+  ⎿ [err│system                                                        │        
+        │  /copy          Copy session transcript                      │        
+        │agent                                                         │        
         │  /effort        Switch model effort                          │        
-        │system                                                        │        
-        │  /mcp           MCP servers                                  │        
         │                                                              │        
         │[type] filter   [up/down] move   [Enter] run   [Esc] close    │        
         └──────────────────────────────────────────────────────────────┘        

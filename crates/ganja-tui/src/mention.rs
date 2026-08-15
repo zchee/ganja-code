@@ -55,13 +55,26 @@ impl Fragment {
 /// terms this editor keeps its cursor in.
 #[must_use]
 pub fn trigger(text: &str, cursor: (usize, usize)) -> Option<Fragment> {
+    sigil_trigger(text, cursor, '@')
+}
+
+/// The `$name` skill invocation `text` is offering to complete, or [`None`]
+/// — [`trigger`]'s rule with `$` for `@`, because the Codex CLI's skill
+/// grammar (**D491**) is a mention like `@`'s, not a line prefix like `!`'s.
+#[must_use]
+pub fn skill_trigger(text: &str, cursor: (usize, usize)) -> Option<Fragment> {
+    sigil_trigger(text, cursor, '$')
+}
+
+/// The two triggers' one rule: the sigil opens a word — start-of-line or
+/// whitespace before it — and the fragment is what sits between it and the
+/// cursor, unbroken by whitespace.
+fn sigil_trigger(text: &str, cursor: (usize, usize), sigil: char) -> Option<Fragment> {
     let (row, column) = cursor;
     let line = text.split('\n').nth(row)?;
     let prefix: Vec<char> = line.chars().take(column).collect();
 
-    let start = prefix.iter().rposition(|character| *character == '@')?;
-    // Start-of-line or whitespace before it; anything else and the `@` belongs
-    // to the word in front of it.
+    let start = prefix.iter().rposition(|character| *character == sigil)?;
     if start > 0 && !prefix[start - 1].is_whitespace() {
         return None;
     }
