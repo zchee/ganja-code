@@ -62,6 +62,7 @@ use crate::{
         rewind::Rewind,
         search::HistorySearch,
         sessions::{self, Sessions},
+        skill_menu::SkillMenu,
         status::{Activity, Status, Todos, Totals},
         themes::ThemeList,
         usage,
@@ -280,6 +281,9 @@ enum Chooser {
     Effort,
     /// The agents this session may run as.
     Agents,
+    /// The skills a `$` invocation can load; Enter inserts the token rather
+    /// than switching anything (**D491**).
+    Skills,
 }
 
 /// What the background model-listing fetch resolves to: the seam's whole
@@ -476,6 +480,9 @@ pub struct App {
     dropdown: Option<Dropdown>,
     /// The inline file menu, while the buffer is mentioning a file.
     files: Option<Files>,
+    /// The inline skill menu, while the buffer is invoking one with `$`
+    /// (**D491**, the Codex CLI's selector).
+    skill_menu: Option<SkillMenu>,
     /// The commands the **engine** offers, resolved when the app was built.
     /// Choosing one types its name rather than running it, because every one
     /// of them expects arguments.
@@ -713,6 +720,7 @@ impl App {
             turn_usages: VecDeque::new(),
             dropdown: None,
             files: None,
+            skill_menu: None,
             engine_commands,
             // Nothing has been sent yet, and the one `RevertChanged` that can
             // arrive before anything is — a resumed session's — carries a
@@ -1210,7 +1218,10 @@ impl App {
         // open over it: the rows are cached and the next `/model` opens
         // instantly instead. The set is the one the key router checks, the
         // inline menus included.
-        let claimed = self.modal_open() || self.dropdown.is_some() || self.files.is_some();
+        let claimed = self.modal_open()
+            || self.dropdown.is_some()
+            || self.files.is_some()
+            || self.skill_menu.is_some();
 
         match handle.await {
             Ok(Some(Ok(listed))) if listed.models.is_empty() => {
@@ -1317,6 +1328,9 @@ impl App {
                 }
                 if let Some(files) = &self.files {
                     files.render(prompt, buffer, &self.theme);
+                }
+                if let Some(skills) = &self.skill_menu {
+                    skills.render(prompt, buffer, &self.theme);
                 }
                 // The two dialogs that can block a turn draw last so they are
                 // on top. Permission stays above question if an impossible
@@ -2042,6 +2056,9 @@ impl App {
         if self.files.is_some() && self.handle_files_key(key).await {
             return Ok(());
         }
+        if self.skill_menu.is_some() && self.handle_skill_menu_key(key) {
+            return Ok(());
+        }
 
         // Upstream's gate exactly: cursor at the very start, in the ordinary
         // mode, with no menu open. The `!` itself is never inserted — what
@@ -2259,6 +2276,7 @@ impl App {
         // whatever was being offered is not being offered any more.
         self.dropdown = None;
         self.files = None;
+        self.skill_menu = None;
     }
 
     /// Whether `key` quits.
@@ -2300,6 +2318,7 @@ impl App {
             command::Action::Agents => self.open_agents(),
             command::Action::Themes => self.open_themes(),
             command::Action::Mcp => self.open_mcp(),
+            command::Action::Skills => self.open_skills(),
             command::Action::Context => self.open_context().await,
             command::Action::Usage => self.open_usage(),
             command::Action::Plugin => self.open_plugin(),
@@ -2517,6 +2536,13 @@ impl App {
             Chooser::Models => self.switch_model(value).await,
             Chooser::Effort => self.switch_effort(value).await,
             Chooser::Agents => self.switch_agent(value).await,
+            Chooser::Skills => {
+                // The switches above close the dialog on their own paths;
+                // an insertion has no such path, so it closes here.
+                self.chooser = None;
+                self.editor.insert(&format!("${value} "));
+                self.dirty = true;
+            }
         }
     }
 
@@ -2687,6 +2713,144 @@ impl App {
         self.editor.set_text_at(&lines.join("\n"), row, column);
     }
 
+    /// One keypress while the skill menu is up, and whether it was one of the
+    /// menu's own — the file menu's contract, key for key.
+    fn handle_skill_menu_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            // Keeps the text, exactly as the other two menus do (**D11**).
+            KeyCode::Esc => {
+                self.skill_menu = None;
+
+                true
+            }
+            KeyCode::Up => {
+                if let Some(menu) = &mut self.skill_menu {
+                    menu.move_selection(-1);
+                }
+
+                true
+            }
+            KeyCode::Down => {
+                if let Some(menu) = &mut self.skill_menu {
+                    menu.move_selection(1);
+                }
+
+                true
+            }
+            KeyCode::Enter | KeyCode::Tab if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
+                let chosen = self
+                    .skill_menu
+                    .as_ref()
+                    .and_then(SkillMenu::selected)
+                    .map(str::to_owned);
+                if let Some(name) = chosen {
+                    self.insert_skill(&name);
+                } else {
+                    self.skill_menu = None;
+                }
+
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Replaces the `$fragment` the skill menu was opened for with `$name `,
+    /// keeping the literal token in the prompt: it is what the user wrote,
+    /// and the engine loads the skill separately when it builds the request.
+    fn insert_skill(&mut self, name: &str) {
+        let Some(menu) = self.skill_menu.take() else {
+            return;
+        };
+        let fragment = menu.fragment();
+
+        let mut lines: Vec<String> = self.editor.text().split('\n').map(str::to_owned).collect();
+        let Some(line) = lines.get_mut(fragment.row) else {
+            return;
+        };
+
+        let characters: Vec<char> = line.chars().collect();
+        let head: String = characters[..fragment.start.min(characters.len())]
+            .iter()
+            .collect();
+        let rest = characters
+            .get(fragment.start + fragment.width()..)
+            .unwrap_or_default();
+        let tail: String = rest.iter().collect();
+        // A space after the token closes it, so the menu does not reopen on
+        // the name that was just chosen — the file menu's own exception when
+        // one is already there.
+        let token = format!("${name}");
+        let inserted = match rest.first() {
+            Some(next) if next.is_whitespace() => token,
+            _ => format!("{token} "),
+        };
+        let column = head.chars().count() + inserted.chars().count();
+        *line = format!("{head}{inserted}{tail}");
+
+        let row = fragment.row;
+        self.editor.set_text_at(&lines.join("\n"), row, column);
+    }
+
+    /// Opens the `/skills` dialog: one row per discovered skill — name,
+    /// description, origin root — with Enter inserting `$name ` into the
+    /// composer rather than switching anything (**D491**; the Codex CLI's
+    /// own `/skills` listing beside its `$` selector).
+    fn open_skills(&mut self) {
+        let roots = self.engine.skill_roots();
+        let rows = ganja_tool::skill::discover(&roots)
+            .into_iter()
+            .map(|skill| {
+                let origin = roots
+                    .dirs()
+                    .iter()
+                    .find(|dir| skill.location.starts_with(dir))
+                    .map(|dir| dir.display().to_string());
+                let detail = match (skill.description.as_deref(), origin) {
+                    (Some(description), Some(origin)) => format!("{description} — {origin}"),
+                    (Some(description), None) => description.to_owned(),
+                    (None, Some(origin)) => origin,
+                    (None, None) => String::new(),
+                };
+
+                list::Row {
+                    value: skill.name.clone(),
+                    label: skill.name,
+                    detail: (!detail.is_empty()).then_some(detail),
+                    active: false,
+                }
+            })
+            .collect();
+
+        self.chooser = Some((Chooser::Skills, ListDialog::new(" skills ", rows)));
+        self.dirty = true;
+    }
+
+    /// Opens, re-narrows or closes the `$` skill menu — the `@` menu's rule
+    /// with `discover` in place of the project walk. The roots are a handful
+    /// of directories, so the walk happens on the keystroke itself rather
+    /// than in the background, and the menu closes rather than sitting empty
+    /// when a non-empty fragment matches nothing: `costs $5 each` is prose,
+    /// not an invocation nobody can complete.
+    fn sync_skill_menu(&mut self, text: &str, cursor: (usize, usize)) {
+        let Some(fragment) = mention::skill_trigger(text, cursor) else {
+            self.skill_menu = None;
+            return;
+        };
+        if self
+            .skill_menu
+            .as_ref()
+            .is_some_and(|menu| menu.answers(&fragment))
+        {
+            return;
+        }
+
+        let skills = ganja_tool::skill::discover(&self.engine.skill_roots());
+        let narrowing = !fragment.text.is_empty();
+        let menu = SkillMenu::new(fragment, &skills);
+        self.skill_menu = (!(menu.is_empty() && narrowing)).then_some(menu);
+    }
+
     /// Opens, re-narrows or closes the two inline menus after the buffer
     /// changed.
     ///
@@ -2701,12 +2865,14 @@ impl App {
         if self.editor.mode() == Mode::Shell {
             self.dropdown = None;
             self.files = None;
+            self.skill_menu = None;
             self.cancel_file_walk();
             return;
         }
 
         if dropdown::triggered(&text, cursor) {
             self.files = None;
+            self.skill_menu = None;
             self.cancel_file_walk();
             match &mut self.dropdown {
                 Some(dropdown) => dropdown.refresh(&text),
@@ -2721,8 +2887,12 @@ impl App {
         let Some(fragment) = mention::trigger(&text, cursor) else {
             self.files = None;
             self.cancel_file_walk();
+            self.sync_skill_menu(&text, cursor);
             return;
         };
+        // An `@` fragment under the cursor is a file being mentioned, not a
+        // skill being invoked.
+        self.skill_menu = None;
         // The list depends on the fragment and on nothing else, so a keystroke
         // that left it alone must not walk the project again.
         if self
@@ -4258,11 +4428,12 @@ impl App {
         self.status.set_running_tasks(self.chat.running_tasks());
     }
 
-    /// Empties the composer and the two menus that were about what was in it.
+    /// Empties the composer and the menus that were about what was in it.
     fn clear_composer(&mut self) {
         self.editor.clear();
         self.dropdown = None;
         self.files = None;
+        self.skill_menu = None;
         self.cancel_file_walk();
     }
 
@@ -9200,6 +9371,201 @@ mod tests {
         }
 
         directory
+    }
+
+    /// A skills root holding two named skills, for the `$` menu to offer.
+    fn skill_root() -> TempDir {
+        let directory = temporary();
+        for (name, description) in [("porting", "How to port a module."), ("tdd", "Red, green.")] {
+            let dir = directory.path().join(name);
+            std::fs::create_dir_all(&dir).expect("the fixture tree is made");
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {description}\n---\nbody"),
+            )
+            .expect("the fixture file writes");
+        }
+
+        directory
+    }
+
+    /// An app whose engine holds `root` as its skill roots — the same seam
+    /// the real assembly wires (`with_skill_roots`).
+    fn app_with_skills(root: &TempDir) -> App {
+        let mut app = app();
+        app.engine.replace_skill_roots(
+            ganja_tool::skill::Roots::none().with_paths([root.path().to_path_buf()]),
+        );
+
+        app
+    }
+
+    #[tokio::test]
+    async fn a_dollar_raises_the_skill_menu_and_the_fragment_narrows_it() {
+        let root = skill_root();
+        let mut app = app_with_skills(&root);
+
+        for event in typing("use $port") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        assert!(app.skill_menu.is_some(), "the skill menu should be open");
+        assert_eq!(
+            app.skill_menu.as_ref().and_then(|menu| menu.selected()),
+            Some("porting"),
+            "the fragment narrowed the list to the matching name"
+        );
+    }
+
+    /// The exact trigger, at the level a person meets it: prose dollars are
+    /// prose, and only a token a skill answers to keeps a menu up.
+    #[tokio::test]
+    async fn prose_dollars_raise_no_skill_menu() {
+        let cases = [
+            ("costs $5 each", false),
+            ("$ cargo build", false),
+            ("mail me$porting", false),
+            ("$port", true),
+            ("$", true),
+        ];
+
+        for (text, expected) in cases {
+            let root = skill_root();
+            let mut app = app_with_skills(&root);
+            for event in typing(text) {
+                app.handle(event).await.expect("typing is handled");
+            }
+
+            assert_eq!(
+                app.skill_menu.is_some(),
+                expected,
+                "{text:?} should {}have raised the menu",
+                if expected { "" } else { "not " }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tab_completes_the_invocation_without_submitting() {
+        let root = skill_root();
+        let mut app = app_with_skills(&root);
+        for event in typing("use $port") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .expect("tab is handled");
+
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("use $porting "),
+            "the fragment became the whole name, with room after it"
+        );
+        assert!(app.skill_menu.is_none(), "completing closes the menu");
+        assert_eq!(
+            app.editor.cursor(),
+            (0, "use $porting ".chars().count()),
+            "the cursor follows what was inserted"
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_on_the_skill_menu_completes_the_same_as_tab() {
+        let root = skill_root();
+        let mut app = app_with_skills(&root);
+        for event in typing("$td") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(
+            app.editor.prompt().as_deref(),
+            Some("$tdd "),
+            "enter completes rather than submitting"
+        );
+        assert!(app.skill_menu.is_none());
+    }
+
+    /// Escape closes the menu and keeps the text (**D11**), like the other
+    /// two inline menus.
+    #[tokio::test]
+    async fn esc_closes_the_skill_menu_and_keeps_the_text() {
+        let root = skill_root();
+        let mut app = app_with_skills(&root);
+        for event in typing("$port") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert!(app.skill_menu.is_some());
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("esc is handled");
+
+        assert!(app.skill_menu.is_none());
+        assert_eq!(app.editor.prompt().as_deref(), Some("$port"));
+    }
+
+    /// The submit half: the names a buffer's tokens invoke are exactly what
+    /// rides `Command::SendPrompt::skills`, validated against the same
+    /// discovery the menu offered from.
+    #[tokio::test]
+    async fn requested_skills_reads_the_tokens_a_submit_would_send() {
+        let root = skill_root();
+        let app = app_with_skills(&root);
+
+        assert_eq!(
+            app.requested_skills("use $porting then $tdd, not $PATH or $5"),
+            vec!["porting".to_owned(), "tdd".to_owned()]
+        );
+        assert!(app.requested_skills("nothing invoked").is_empty());
+    }
+
+    /// The `/skills` dialog is a listing with an insertion, not a switch:
+    /// Enter puts `$name ` at the cursor and the session changes nothing.
+    #[tokio::test]
+    async fn the_skills_dialog_lists_and_enter_inserts_the_token() {
+        let root = skill_root();
+        let mut app = app_with_skills(&root);
+        app.run_command(command::Action::Skills).await;
+
+        let (kind, dialog) = app.chooser.as_ref().expect("the dialog is open");
+        assert!(matches!(kind, Chooser::Skills));
+        assert_eq!(dialog.selected(), Some("porting"));
+
+        // The row names the description; the origin root rides beside it but
+        // is a temporary path too wide for this terminal, so the sentence is
+        // the part a screen this size proves.
+        let mut terminal = terminal(120, 20);
+        app.draw(&mut terminal).expect("a frame draws");
+        let drawn = screen(&terminal);
+        assert!(
+            drawn.contains("How to port a module."),
+            "the dialog shows the skill's sentence: {drawn}"
+        );
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.editor.prompt().as_deref(), Some("$porting "));
+        assert!(app.chooser.is_none(), "choosing closes the dialog");
+    }
+
+    #[tokio::test]
+    async fn snapshot_skill_menu() {
+        let root = skill_root();
+        let mut app = app_with_skills(&root);
+        for event in typing("use $") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        let mut terminal = terminal(80, 16);
+        app.draw(&mut terminal).expect("a frame draws");
+        insta::assert_snapshot!(screen(&terminal));
     }
 
     /// An app whose `@` menu walks `directory`.

@@ -56,6 +56,9 @@ pub enum Action {
     /// Open the `/mcp` dialog: every configured server's status and tool
     /// count, with Reconnect on a failed one.
     Mcp,
+    /// Open the `/skills` list: every skill a `$` invocation can load, with
+    /// Enter inserting `$name ` into the composer (**D491**).
+    Skills,
     /// Open the `/context` panel: what fills the model's context window,
     /// estimated per category (**D470**).
     Context,
@@ -105,6 +108,7 @@ impl Action {
             | Self::Effort
             | Self::Agents
             | Self::Mcp
+            | Self::Skills
             | Self::Context
             | Self::Usage
             | Self::Plugin
@@ -262,6 +266,15 @@ pub const COMMANDS: &[Entry] = &[
         aliases: &[],
         title: "MCP servers",
         description: "See what every configured server lends, and reconnect a failed one",
+        category: Category::System,
+        suggested: false,
+    },
+    Entry {
+        action: Action::Skills,
+        name: "skills",
+        aliases: &[],
+        title: "Skills",
+        description: "List the skills a $ invocation can load, and insert one",
         category: Category::System,
         suggested: false,
     },
@@ -675,6 +688,7 @@ mod tests {
             ("agents", &[][..], Action::Agents),
             ("themes", &[][..], Action::Themes),
             ("mcp", &[][..], Action::Mcp),
+            ("skills", &[][..], Action::Skills),
             ("context", &[][..], Action::Context),
             ("usage", &[][..], Action::Usage),
             ("plugin", &[][..], Action::Plugin),

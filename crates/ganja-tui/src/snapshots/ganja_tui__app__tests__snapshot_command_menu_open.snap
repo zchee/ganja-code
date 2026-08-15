@@ -1,5 +1,6 @@
 ---
 source: crates/ganja-tui/src/app.rs
+assertion_line: 9336
 expression: screen(&terminal)
 ---
 > show me every color you have                                                  
@@ -11,6 +12,7 @@ expression: screen(&terminal)
 ┌ commands ────────────────────────────────────────────────────────────────────┐
 │> /compact       Summarize the conversation so far and carry on from it       │
 │  /sessions      Reopen a conversation this project has stored                │
+│  /skills        List the skills a $ invocation can load, and insert one      │
 │  /agents        Run the rest of this session as a different agent            │
 │  /context       See what fills the model's context window, estimated per cate│
 │  /copy          Put the whole conversation on the clipboard, as markdown     │
@@ -18,7 +20,6 @@ expression: screen(&terminal)
 │  /init          guided AGENTS.md setup                                       │
 │  /mcp           See what every configured server lends, and reconnect a faile│
 │  /models        Ask the rest of this session of a different model            │
-│  /new           Leave this conversation and start an empty one               │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ message ─────────────────────────────────────────────────────────────────────┐
 │/s                                                                            │
