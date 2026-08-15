@@ -145,6 +145,16 @@ fn reverted_headline(hidden: usize) -> String {
 #[derive(Debug, Default)]
 pub struct Chat {
     entries: Vec<Entry>,
+    /// Whether the terminal can draw pixels (kitty graphics, set once at
+    /// startup): on, an attached image's row becomes a reserved blank box
+    /// the placement lands on; off, the token-and-mime row stands as always
+    /// (2026-08-15).
+    graphics: bool,
+    /// Where the last render left each **fully visible** attached image:
+    /// its part's path, and the screen cell its box's top-left holds. What
+    /// [`crate::app::App`] places after the frame — recomputed every render,
+    /// because scrolling moves the boxes and the placements must follow.
+    image_spots: Vec<(String, u16, u16)>,
     /// The revert this transcript is showing, while it is showing one.
     ///
     /// Nothing is removed while it is set: the messages an undo hid are still
@@ -424,9 +434,31 @@ struct Wrapped {
     /// everything drawn fresh takes the new one.
     revision: u64,
     lines: Vec<Line<'static>>,
+    /// The attached images these lines reserved boxes for: each part's path
+    /// beside the line index its [`IMAGE_ROWS`]-tall box starts on, empty
+    /// whenever the terminal draws no pixels (2026-08-15).
+    images: Vec<(usize, String)>,
 }
 
+/// Rows an attached image's reserved box stands in the transcript.
+pub const IMAGE_ROWS: u16 = 5;
+
 impl Chat {
+    /// Turns pixel drawing on, set once at startup by the frontend that
+    /// detected a kitty ancestor: attached images reserve boxes instead of
+    /// spelling their paths (2026-08-15).
+    pub fn set_graphics(&mut self, graphics: bool) {
+        self.graphics = graphics;
+    }
+
+    /// Where the last render left each fully visible attached image: the
+    /// part's path and the screen cell its box's top-left holds, for the
+    /// app's post-frame placements.
+    #[must_use]
+    pub fn image_spots(&self) -> &[(String, u16, u16)] {
+        &self.image_spots
+    }
+
     /// Appends `message` and returns to following the tail.
     pub fn start_message(&mut self, message: Message) {
         self.push(message, false);
@@ -764,8 +796,9 @@ impl Chat {
         self.height = usize::from(area.height);
         let first_hidden = self.first_hidden();
         let hidden = self.entries.len() - first_hidden;
+        let graphics = self.graphics;
         for entry in &mut self.entries[..first_hidden] {
-            entry.wrap(area.width, theme);
+            entry.wrap(area.width, theme, graphics);
         }
         if let Some(revert) = &mut self.revert {
             revert.wrap(hidden, area.width, theme);
@@ -789,6 +822,28 @@ impl Chat {
             .offset
             .map_or_else(|| self.max_offset(), |offset| offset.min(self.max_offset()));
         self.offset = self.offset.map(|_| offset);
+
+        // Where each attached image's reserved box landed this frame, for
+        // the placements that follow it (2026-08-15). Fully visible boxes
+        // only: a placement always extends downward from its cell, so a box
+        // half scrolled off would paint over whatever sits below the pane.
+        let mut spots: Vec<(String, u16, u16)> = Vec::new();
+        if self.graphics {
+            let mut start = 0usize;
+            for entry in self.shown() {
+                for (line, path) in entry.images() {
+                    let absolute = start + line;
+                    if absolute >= offset
+                        && absolute + usize::from(IMAGE_ROWS) <= offset + usize::from(area.height)
+                        && let Ok(row) = u16::try_from(absolute - offset)
+                    {
+                        spots.push((path.clone(), area.x + 2, area.y + row));
+                    }
+                }
+                start += entry.lines().len();
+            }
+        }
+        self.image_spots = spots;
 
         for (row, line) in self.visible(offset).enumerate() {
             let Ok(row) = u16::try_from(row) else {
@@ -1007,6 +1062,7 @@ impl Revert {
             width,
             revision: theme.revision(),
             lines,
+            images: Vec::new(),
         });
     }
 }
@@ -1018,7 +1074,14 @@ impl Entry {
             .map_or(&[], |wrapped| wrapped.lines.as_slice())
     }
 
-    fn wrap(&mut self, width: u16, theme: &Theme) {
+    /// The attached images the last wrap reserved boxes for.
+    fn images(&self) -> &[(usize, String)] {
+        self.wrapped
+            .as_ref()
+            .map_or(&[], |wrapped| wrapped.images.as_slice())
+    }
+
+    fn wrap(&mut self, width: u16, theme: &Theme, graphics: bool) {
         if self
             .wrapped
             .as_ref()
@@ -1029,6 +1092,7 @@ impl Entry {
 
         let columns = usize::from(width);
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut images: Vec<(usize, String)> = Vec::new();
         // Parts lay themselves out so that a tool block can carry its own
         // prefixes and styles instead of the running text's.
         //
@@ -1116,6 +1180,20 @@ impl Entry {
                     end,
                     ..
                 } => {
+                    // An attached image the terminal can draw is drawn
+                    // (2026-08-15): the token-and-mime row gives way to a
+                    // reserved blank box the kitty-graphics placement lands
+                    // on after the frame — the picture the person attached,
+                    // not its filesystem spelling. Every other file, and
+                    // every image on a pixel-less terminal, keeps the row.
+                    if graphics && mime.starts_with("image/") {
+                        images.push((lines.len(), path.clone()));
+                        lines.extend(std::iter::repeat_n(
+                            Line::default(),
+                            usize::from(IMAGE_ROWS),
+                        ));
+                        continue;
+                    }
                     let token = mention::token(path, *start, *end);
                     let label = if mime == "text/plain" {
                         token
@@ -1178,6 +1256,7 @@ impl Entry {
             width,
             revision: theme.revision(),
             lines,
+            images,
         });
     }
 }
@@ -2070,6 +2149,60 @@ mod tests {
             "a text mention needs no mime label:\n{screen}"
         );
         assert!(screen.contains("@shot.png (image/png)"), "{screen}");
+    }
+
+    /// With pixels available, an attached image's row gives way to a
+    /// reserved blank box and the render says where the box landed — the
+    /// picture in the transcript, not its path (2026-08-15). A text
+    /// attachment keeps its token row beside it.
+    #[test]
+    fn with_graphics_an_attached_image_reserves_a_box_and_reports_its_spot() {
+        let mut chat = Chat::default();
+        chat.set_graphics(true);
+        let mut message = Message::user("look");
+        message.parts.push(Part {
+            id: PartId::from("prt_f1".to_owned()),
+            body: PartBody::File {
+                path: "shot.png".to_owned(),
+                mime: "image/png".to_owned(),
+                start: None,
+                end: None,
+                content: None,
+            },
+        });
+        message.parts.push(Part {
+            id: PartId::from("prt_f2".to_owned()),
+            body: PartBody::File {
+                path: "src/lib.rs".to_owned(),
+                mime: "text/plain".to_owned(),
+                start: None,
+                end: None,
+                content: None,
+            },
+        });
+        chat.start_message(message);
+
+        let area = Rect::new(0, 0, 40, 12);
+        let screen = rendered(&mut chat, area).join("\n");
+        assert!(
+            !screen.contains("shot.png"),
+            "the image's path is off the screen:\n{screen}"
+        );
+        assert!(screen.contains("@src/lib.rs"), "{screen}");
+        assert_eq!(
+            chat.image_spots(),
+            &[("shot.png".to_owned(), 2, 1)],
+            "the box's top-left is reported for the placement"
+        );
+
+        // Scrolled so the box cannot fit whole, the spot is withheld: a
+        // placement extends downward and would paint over what sits below.
+        let short = Rect::new(0, 0, 40, 3);
+        rendered(&mut chat, short);
+        assert!(
+            chat.image_spots().is_empty(),
+            "a box that cannot fit whole places nothing"
+        );
     }
 
     #[test]

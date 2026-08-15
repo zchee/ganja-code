@@ -36,7 +36,7 @@ use ratatui::{
         Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
         MouseEventKind,
     },
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout},
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     NOTICE_SEPARATOR, clipboard, command,
     component::{
-        chat::{Chat, WHEEL_LINES, Working},
+        chat::{self, Chat, WHEEL_LINES, Working},
         context,
         dropdown::{self, Dropdown},
         editor::{self, Editor, Mode},
@@ -540,20 +540,15 @@ pub struct App {
     /// The kitty-graphics emitter this terminal earned at startup, or
     /// [`None`] where previews would be escape noise — every test's value.
     graphics: Option<graphics::Emitter>,
-    /// Thumbnails decoded once per pasted image, [`None`] cached for a file
-    /// that would not decode so a broken file is never re-read every frame.
-    preview_cache: HashMap<u32, Option<graphics::Preview>>,
-    /// Image ids already transmitted to the terminal this run: pixels travel
-    /// once, placements move every frame the strip does.
-    transmitted: HashSet<u32>,
-    /// Where the preview strip landed in the last frame's split.
-    preview_rect: Rect,
-    /// What the strip holds this frame: image number and its width in cells,
-    /// left to right.
-    preview_frame: Vec<(u32, u16)>,
-    /// The strip as last actually emitted, so an unchanged frame writes no
-    /// escapes at all.
-    preview_drawn: Option<(Rect, Vec<(u32, u16)>)>,
+    /// Per attached-image path: the id its pixels were transmitted under and
+    /// the thumbnail's pixel box — or the zero id, cached for a file that
+    /// would not decode so a broken file is never re-read every frame.
+    transmitted: HashMap<String, (u32, u32, u32)>,
+    /// The last id handed out; ids start at one so zero can mean "failed".
+    image_id: u32,
+    /// The placements as last actually emitted — id, cell position and cell
+    /// box — so an unchanged frame writes no escapes at all.
+    graphics_drawn: Option<Vec<(u32, u16, u16, u16)>>,
     /// When the clipboard-image hint last showed, for its 30-second rate
     /// limit — Claude Code's own (`cli.unpack.js:205435`).
     image_hint_last: Option<std::time::Instant>,
@@ -760,11 +755,9 @@ impl App {
             wire_fetch: None,
             file_walk: None,
             graphics: None,
-            preview_cache: HashMap::new(),
-            transmitted: HashSet::new(),
-            preview_rect: Rect::default(),
-            preview_frame: Vec::new(),
-            preview_drawn: None,
+            transmitted: HashMap::new(),
+            image_id: 0,
+            graphics_drawn: None,
             image_hint_last: None,
             plugin_task: None,
             tools: ganja_tool::Registry::with_builtins(),
@@ -808,10 +801,13 @@ impl App {
 
     /// Enables kitty-graphics previews, handed in by the real frontend after
     /// environment detection — never defaulted, so a test's `TestBackend`
-    /// frame can never leak escape sequences onto a real stdout.
+    /// frame can never leak escape sequences onto a real stdout. The chat
+    /// learns at the same moment: with pixels available, an attached image's
+    /// transcript row is a reserved box rather than a path.
     #[must_use]
     pub fn with_graphics(mut self, graphics: Option<graphics::Emitter>) -> Self {
         self.graphics = graphics;
+        self.chat.set_graphics(graphics.is_some());
         self
     }
 
@@ -1269,8 +1265,8 @@ impl App {
             terminal.clear().context("failed to repaint the screen")?;
             self.stale = false;
             // The clear may have taken the terminal's placements with it;
-            // whatever the strip held must be spoken again.
-            self.preview_drawn = None;
+            // whatever was placed must be spoken again.
+            self.graphics_drawn = None;
         }
 
         // The token the cursor sits on lights up reversed — Claude Code's
@@ -1288,25 +1284,12 @@ impl App {
                     .chat
                     .lay_out_working(area.width, &self.theme)
                     .min(area.height / 2);
-                // The image strip's plan is this frame's too: which pasted
-                // images the composer still names, each at its cell box.
-                self.preview_frame = self.plan_previews(area.width);
-                let preview_height = if self.preview_frame.is_empty() {
-                    0
-                } else {
-                    PREVIEW_ROWS
-                };
-                let [transcript, working, preview, prompt, status] = Layout::vertical([
+                let [transcript, working, prompt, status] = Layout::vertical([
                     Constraint::Min(1),
                     // What the running turn is doing now, pinned above the
                     // composer rather than scrolled with the transcript
                     // (**D487**, amended by the 2026-08-15 screenshots).
                     Constraint::Length(working_height),
-                    // The attached images themselves, left-aligned over the
-                    // kitty graphics protocol — rows reserved here so the
-                    // pixels land on blank cells, drawn after the frame by
-                    // `App::flush_graphics` (2026-08-15).
-                    Constraint::Length(preview_height),
                     Constraint::Length(editor::HEIGHT),
                     // A configured roster may earn a git line above the bar
                     // and a detail line below it; the default bar is the one
@@ -1314,7 +1297,6 @@ impl App {
                     Constraint::Length(self.status.height()),
                 ])
                 .areas(area);
-                self.preview_rect = preview;
 
                 let buffer = frame.buffer_mut();
                 // The theme's surface goes down first and everything is drawn
@@ -1677,93 +1659,79 @@ impl App {
     /// whose number nothing pasted — typed by hand, or recalled from history
     /// into a fresh session — stays literal text, the same fate a mistyped
     /// `@` path meets.
-    /// This frame's image strip, planned left to right: each pasted image
-    /// the composer still names, decoded once into the cache, at the cell
-    /// box its aspect earns under [`PREVIEW_ROWS`] — stopping at the frame's
-    /// right edge rather than wrapping, because a strip is a strip.
-    fn plan_previews(&mut self, width: u16) -> Vec<(u32, u16)> {
-        if self.graphics.is_none() {
-            return Vec::new();
-        }
-        let text = self.editor.text();
-        let mut x: u32 = 0;
-        let mut plan = Vec::new();
-        for (number, path) in self.pasted_images.clone() {
-            if !text.contains(&format!("[Image #{number}]")) {
-                continue;
-            }
-            // Joined against the root the way the engine resolves the
-            // mention itself: a dropped path may be project-relative, and a
-            // join with an absolute one is that absolute path.
-            let resolved = self.root.join(&path).display().to_string();
-            let Some(preview) = self
-                .preview_cache
-                .entry(number)
-                .or_insert_with(|| graphics::load(&resolved))
-            else {
-                continue;
-            };
-            let columns =
-                graphics::columns_for(preview.width, preview.height, PREVIEW_ROWS).min(48);
-            if x + u32::from(columns) > u32::from(width) {
-                break;
-            }
-            plan.push((number, columns));
-            x += u32::from(columns) + 1;
-        }
-
-        plan
-    }
-
-    /// Emits the strip the last frame planned, exactly once per change: the
-    /// old placements deleted, new pixels transmitted on their first
-    /// appearance, and every image placed left-aligned on the reserved rows.
-    /// Written to the real stdout the way `flush_osc` writes, because the
-    /// kitty graphics protocol is a terminal channel, not a buffer cell —
-    /// and guarded on the emitter, so a test's frame writes nothing.
+    /// Emits placements for the attached images the transcript's last frame
+    /// left fully visible, exactly once per change: pixels transmitted the
+    /// first time a path is seen (thumbnailed, any of the four formats),
+    /// stale placements deleted, and each image placed on the blank box its
+    /// entry reserved. Written to the real stdout the way `flush_osc`
+    /// writes, because the kitty graphics protocol is a terminal channel,
+    /// not a buffer cell — and guarded on the emitter, so a test's frame
+    /// writes nothing.
     fn flush_graphics(&mut self) {
         use std::io::Write as _;
 
         let Some(emitter) = self.graphics else {
             return;
         };
-        let current = (self.preview_rect, self.preview_frame.clone());
-        if self.preview_drawn.as_ref() == Some(&current) {
-            return;
+        let spots: Vec<(String, u16, u16)> = self.chat.image_spots().to_vec();
+        let mut transmits = String::new();
+        let mut current: Vec<(u32, u16, u16, u16)> = Vec::new();
+        for (path, x, y) in spots {
+            // Joined against the root the way the engine resolves the
+            // mention itself: a dropped path may be project-relative, and a
+            // join with an absolute one is that absolute path.
+            let resolved = self.root.join(&path).display().to_string();
+            let (id, width, height) = match self.transmitted.get(&resolved) {
+                Some(&known) => known,
+                None => {
+                    let loaded = graphics::load(&resolved).map_or((0, 0, 0), |preview| {
+                        self.image_id += 1;
+                        transmits.push_str(&emitter.transmit(self.image_id, &preview.png));
+                        (self.image_id, preview.width, preview.height)
+                    });
+                    self.transmitted.insert(resolved, loaded);
+                    loaded
+                }
+            };
+            if id == 0 {
+                // The zero id is the cached "would not decode": the entry's
+                // blank box stays blank, and the file is never re-read.
+                continue;
+            }
+            let columns = graphics::columns_for(width, height, chat::IMAGE_ROWS).min(60);
+            current.push((id, x, y, columns));
         }
 
-        let mut wire = String::new();
-        match &self.preview_drawn {
-            Some((_, drawn)) => {
-                for (id, _) in drawn {
-                    wire.push_str(&emitter.delete(*id));
+        if self.graphics_drawn.as_ref() == Some(&current) {
+            return;
+        }
+        let mut wire = transmits;
+        match &self.graphics_drawn {
+            Some(drawn) => {
+                let mut deleted = HashSet::new();
+                for (id, ..) in drawn {
+                    if deleted.insert(*id) {
+                        wire.push_str(&emitter.delete(*id));
+                    }
                 }
             }
             // First emission after a start or a full repaint: sweep whatever
             // an earlier life of this screen may have left.
             None => wire.push_str(&emitter.delete_all()),
         }
-        let mut x = self.preview_rect.x;
-        for (id, columns) in &current.1 {
-            if !self.transmitted.contains(id)
-                && let Some(Some(preview)) = self.preview_cache.get(id)
-            {
-                wire.push_str(&emitter.transmit(*id, &preview.png));
-                self.transmitted.insert(*id);
-            }
+        for (id, x, y, columns) in &current {
             // CSI cursor addressing is one-based; the placement lands at the
             // cursor, which is the whole reason the move precedes it.
-            wire.push_str(&format!("\x1b[{};{}H", self.preview_rect.y + 1, x + 1));
-            wire.push_str(&emitter.place(*id, *columns, self.preview_rect.height));
-            x = x.saturating_add(columns + 1);
+            wire.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
+            wire.push_str(&emitter.place(*id, *columns, chat::IMAGE_ROWS));
         }
 
         let mut stdout = std::io::stdout();
         if let Err(error) = stdout.write_all(wire.as_bytes()) {
-            tracing::warn!(%error, "the image strip's graphics escapes could not be written");
+            tracing::warn!(%error, "the transcript's graphics escapes could not be written");
         }
         let _ = stdout.flush();
-        self.preview_drawn = Some(current);
+        self.graphics_drawn = Some(current);
     }
 
     /// Reverses the `[Image #N]` token the cursor sits on — Claude Code's
@@ -4758,10 +4726,6 @@ impl App {
 /// *names* under the directories named, which finds what a person is usually
 /// typing and cannot be mistaken for the same ranking (deviation:
 /// mention-matches-under-the-path-typed).
-/// Rows the image preview strip stands, when the composer names any pasted
-/// image and the terminal can draw one.
-const PREVIEW_ROWS: u16 = 5;
-
 /// The character offset of the editor's `(row, column)` cursor in its text,
 /// lines rejoined the way [`Editor::text`] joins them.
 fn char_offset(text: &str, row: usize, column: usize) -> usize {
