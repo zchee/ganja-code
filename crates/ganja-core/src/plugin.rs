@@ -216,10 +216,12 @@ pub struct MarketplaceEntry {
 /// A marketplace entry's `source`, in the two shapes the spec writes.
 ///
 /// A string is a path relative to the marketplace root. An object is one of
-/// the spec's remote forms (`{"source": "github", "repo": …}` and friends) —
-/// **parsed but not installable in this build**: the phase plan defers plugin
-/// sources beyond a relative path, so [`Store::install`] refuses one by name
-/// instead of this parser refusing the whole marketplace it appears in.
+/// the spec's remote forms, carried verbatim for [`Store::install`] to fetch
+/// (2026-08-15, retiring the deferral): the `url`/`git`/`git-subdir` shapes
+/// — a git URL, an optional `sha`/`ref` pin, an optional `path` inside the
+/// repository — and the `github` shorthand. A kind beyond those is refused
+/// by name at install, never by this parser refusing the whole marketplace
+/// it appears in.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
     /// A path relative to the marketplace root, pointing only into it.
@@ -598,8 +600,9 @@ impl Store {
     /// # Errors
     ///
     /// [`PluginError`] for a marketplace never added, an entry the
-    /// marketplace does not list, a remote source (deferred in this build), a
-    /// source directory that is missing, or a manifest that does not parse.
+    /// marketplace does not list, a remote source this build cannot fetch or
+    /// whose fetch fails, a source directory that is missing, or a manifest
+    /// that does not parse.
     pub fn install(&self, plugin: &str, marketplace: &str) -> Result<(), PluginError> {
         check_name("plugin", plugin)?;
         let state = self.state()?;
@@ -630,23 +633,34 @@ impl Store {
                  {offered}"
             )));
         };
-        let Source::Path(relative) = &entry.source else {
-            return Err(PluginError::Unknown(format!(
-                "plugin \"{plugin}\" has a remote source, which this build does not fetch \
-                 yet; only a path inside the marketplace installs"
-            )));
-        };
+        // A remote source clones into its own staging first (2026-08-15,
+        // retiring the deferral): kept alive past the copy below, cleaned on
+        // drop like every staging here.
+        let _fetched;
+        let source_dir = match &entry.source {
+            Source::Path(relative) => {
+                // `Marketplace::parse` already refused absolute and `..`
+                // sources, so the join cannot leave `market_dir`; the
+                // existence check is about catalogs that drifted from their
+                // own tree.
+                let source_dir = market_dir.join(relative);
+                if !source_dir.is_dir() {
+                    return Err(PluginError::Unknown(format!(
+                        "plugin \"{plugin}\" points at {relative}, which is not a directory \
+                         in marketplace \"{marketplace}\""
+                    )));
+                }
 
-        // `Marketplace::parse` already refused absolute and `..` sources, so
-        // the join cannot leave `market_dir`; the existence check is about
-        // catalogs that drifted from their own tree.
-        let source_dir = market_dir.join(relative);
-        if !source_dir.is_dir() {
-            return Err(PluginError::Unknown(format!(
-                "plugin \"{plugin}\" points at {relative}, which is not a directory in \
-                 marketplace \"{marketplace}\""
-            )));
-        }
+                source_dir
+            }
+            Source::Remote(object) => {
+                let staging = self.staging_dir("fetch")?;
+                let dir = fetch_remote(plugin, object, &staging.keep)?;
+                _fetched = staging;
+
+                dir
+            }
+        };
 
         // The manifest is optional in the spec (components are discovered by
         // location); when present it must parse, and its name is *not*
@@ -804,19 +818,17 @@ fn looks_like_git(origin: &str) -> bool {
         || origin.ends_with(".git")
 }
 
-/// Clones `origin` into `into`, shallow — history is not what a marketplace
-/// copy is for. The spawn keeps `hook.rs`'s discipline where it applies to a
-/// non-shell child: stdin is null (nothing is ever typed at a clone), both
-/// output streams are captured, and the captured stderr *is* the error,
-/// because a clone fails for reasons only git can name.
-fn clone(origin: &str, into: &Path) -> Result<(), PluginError> {
+/// Runs one git command. The spawn keeps `hook.rs`'s discipline where it
+/// applies to a non-shell child: stdin is null (nothing is ever typed at
+/// git), both output streams are captured, and the captured stderr *is* the
+/// error, because git fails for reasons only git can name.
+fn git<I, S>(verb: &str, args: I) -> Result<(), PluginError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     let output = Command::new("git")
-        .arg("clone")
-        .arg("--depth")
-        .arg("1")
-        .arg("--")
-        .arg(origin)
-        .arg(into)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -827,12 +839,174 @@ fn clone(origin: &str, into: &Path) -> Result<(), PluginError> {
         })?;
     if !output.status.success() {
         return Err(PluginError::Git {
-            verb: "clone".to_owned(),
+            verb: verb.to_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
 
     Ok(())
+}
+
+/// Clones `origin` into `into`, shallow — history is not what a marketplace
+/// copy is for.
+fn clone(origin: &str, into: &Path) -> Result<(), PluginError> {
+    git(
+        "clone",
+        [
+            std::ffi::OsStr::new("clone"),
+            std::ffi::OsStr::new("--depth"),
+            std::ffi::OsStr::new("1"),
+            std::ffi::OsStr::new("--"),
+            std::ffi::OsStr::new(origin),
+            into.as_os_str(),
+        ],
+    )
+}
+
+/// Puts the tree `pin` names from `origin` into `into` — a plugin install
+/// takes the exact commit the marketplace reviewed, never whatever the
+/// branch moved to since (2026-08-15).
+///
+/// Two roads, because servers disagree about naming a bare commit: first a
+/// pinpoint fetch (`init`/`fetch --depth 1 origin <pin>`/`checkout
+/// FETCH_HEAD`), which GitHub answers for any sha; where the server refuses
+/// unadvertised objects, a full clone and a detached checkout of the pin.
+/// With no pin at all the marketplace said "wherever the default branch is",
+/// and the shallow clone says exactly that.
+fn fetch_pinned(origin: &str, pin: Option<&str>, into: &Path) -> Result<(), PluginError> {
+    let Some(pin) = pin else {
+        return clone(origin, into);
+    };
+
+    let pinpoint = git("init", [std::ffi::OsStr::new("init"), into.as_os_str()])
+        .and_then(|()| {
+            git(
+                "remote add",
+                [
+                    std::ffi::OsStr::new("-C"),
+                    into.as_os_str(),
+                    std::ffi::OsStr::new("remote"),
+                    std::ffi::OsStr::new("add"),
+                    std::ffi::OsStr::new("origin"),
+                    std::ffi::OsStr::new(origin),
+                ],
+            )
+        })
+        .and_then(|()| {
+            git(
+                "fetch",
+                [
+                    std::ffi::OsStr::new("-C"),
+                    into.as_os_str(),
+                    std::ffi::OsStr::new("fetch"),
+                    std::ffi::OsStr::new("--depth"),
+                    std::ffi::OsStr::new("1"),
+                    std::ffi::OsStr::new("origin"),
+                    std::ffi::OsStr::new(pin),
+                ],
+            )
+        })
+        .and_then(|()| {
+            git(
+                "checkout",
+                [
+                    std::ffi::OsStr::new("-C"),
+                    into.as_os_str(),
+                    std::ffi::OsStr::new("checkout"),
+                    std::ffi::OsStr::new("--detach"),
+                    std::ffi::OsStr::new("FETCH_HEAD"),
+                ],
+            )
+        });
+    if pinpoint.is_ok() {
+        return Ok(());
+    }
+
+    // The pinpoint road failed — wipe its half-made state so the clone finds
+    // clean ground, and take the long way.
+    let _ = fs::remove_dir_all(into);
+    git(
+        "clone",
+        [
+            std::ffi::OsStr::new("clone"),
+            std::ffi::OsStr::new("--"),
+            std::ffi::OsStr::new(origin),
+            into.as_os_str(),
+        ],
+    )?;
+    git(
+        "checkout",
+        [
+            std::ffi::OsStr::new("-C"),
+            into.as_os_str(),
+            std::ffi::OsStr::new("checkout"),
+            std::ffi::OsStr::new("--detach"),
+            std::ffi::OsStr::new(pin),
+        ],
+    )
+}
+
+/// Resolves a marketplace entry's remote source object into a directory
+/// under `into` holding the plugin: the spec's `url` and `git-subdir` forms
+/// (a git URL, an optional `sha`/`ref` pin, an optional `path` inside the
+/// repository) and its `github` shorthand (`repo` as `owner/name`). Read
+/// tolerantly the way every foreign file here is — unknown keys pass — but
+/// a kind this build cannot fetch, a missing URL, or a `path` that walks
+/// out of the clone is a refusal by name.
+fn fetch_remote(plugin: &str, object: &Value, into: &Path) -> Result<PathBuf, PluginError> {
+    let kind = object
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let url = match kind {
+        "url" | "git" | "git-subdir" => {
+            object.get("url").and_then(Value::as_str).map(str::to_owned)
+        }
+        "github" => object
+            .get("repo")
+            .and_then(Value::as_str)
+            .map(|repo| format!("https://github.com/{repo}.git")),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        PluginError::Unknown(format!(
+            "plugin \"{plugin}\" has a source of kind \"{kind}\" this build cannot fetch; \
+             it fetches url, git, git-subdir and github sources"
+        ))
+    })?;
+
+    // The sha outranks the ref when the entry carries both: the sha is what
+    // was reviewed, the ref is where it happened to live.
+    let pin = object
+        .get("sha")
+        .or_else(|| object.get("ref"))
+        .and_then(Value::as_str);
+    fetch_pinned(&url, pin, into)?;
+
+    match object.get("path").and_then(Value::as_str) {
+        None => Ok(into.to_path_buf()),
+        Some(path) => {
+            let relative = Path::new(path);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                return Err(PluginError::Unknown(format!(
+                    "plugin \"{plugin}\" names a path that leaves its own repository: {path}"
+                )));
+            }
+            let dir = into.join(relative);
+            if !dir.is_dir() {
+                return Err(PluginError::Unknown(format!(
+                    "plugin \"{plugin}\" points at {path}, which is not a directory in the \
+                     fetched repository"
+                )));
+            }
+
+            Ok(dir)
+        }
+    }
 }
 
 /// Copies a directory tree, skipping `.git` — a marketplace copy is the
@@ -1512,7 +1686,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Contribution, Manifest, Marketplace, PluginError, Source, collect, looks_like_git,
+        Contribution, Manifest, Marketplace, PluginError, Source, Store, collect, looks_like_git,
         split_frontmatter,
     };
     use crate::config::{HookHandler, McpServer};
@@ -1524,6 +1698,107 @@ mod tests {
             fs::create_dir_all(parent).expect("the fixture tree is creatable");
         }
         fs::write(path, text).expect("the fixture file is writable");
+    }
+
+    /// Runs git in `dir` for a fixture, identity pinned so `commit` works on
+    /// a machine with no git config of its own.
+    fn fixture_git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "user.name=Fixture",
+            ])
+            .args(args)
+            .output()
+            .expect("git spawns");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A remote source installs the **pinned** commit — never the branch's
+    /// newer tip — descending the entry's `path` inside the repository
+    /// (2026-08-15, the official marketplace's own `url`+`sha`+`path`
+    /// shape); and a source kind this build cannot fetch refuses by name.
+    #[test]
+    fn a_remote_source_installs_the_pinned_commit_and_unknown_kinds_refuse() {
+        let home = TempDir::new().expect("a temporary directory");
+        let repo = home.path().join("repo");
+        plant(
+            &repo,
+            "pack/skills/hello/SKILL.md",
+            "---\nname: hello\ndescription: the first version\n---\nv1",
+        );
+        fixture_git(&repo, &["init", "--quiet", "-b", "main"]);
+        fixture_git(&repo, &["add", "."]);
+        fixture_git(&repo, &["commit", "--quiet", "-m", "v1"]);
+        let pinned = fixture_git(&repo, &["rev-parse", "HEAD"]);
+        plant(
+            &repo,
+            "pack/skills/hello/SKILL.md",
+            "---\nname: hello\ndescription: the second version\n---\nv2",
+        );
+        fixture_git(&repo, &["commit", "--quiet", "-am", "v2"]);
+
+        let market = home.path().join("market");
+        plant(
+            &market,
+            ".claude-plugin/marketplace.json",
+            &format!(
+                r#"{{
+                  "name": "remote-market",
+                  "owner": {{ "name": "The Suite" }},
+                  "plugins": [
+                    {{
+                      "name": "hello",
+                      "source": {{
+                        "source": "url",
+                        "url": "{url}",
+                        "sha": "{pinned}",
+                        "path": "pack"
+                      }}
+                    }},
+                    {{
+                      "name": "unfetchable",
+                      "source": {{ "source": "npm", "package": "nope" }}
+                    }}
+                  ]
+                }}"#,
+                url = repo.display(),
+            ),
+        );
+
+        let store = Store::at(home.path().join("store"));
+        store
+            .add_marketplace(&market.display().to_string())
+            .expect("the marketplace adds");
+        store
+            .install("hello", "remote-market")
+            .expect("the remote source installs");
+
+        let installed =
+            fs::read_to_string(store.plugin_root("hello").join("skills/hello/SKILL.md"))
+                .expect("the pinned skill landed");
+        assert!(
+            installed.contains("the first version"),
+            "the pin outranks the branch tip: {installed}"
+        );
+
+        let refused = store
+            .install("unfetchable", "remote-market")
+            .expect_err("an unfetchable kind refuses");
+        assert!(
+            refused.to_string().contains("cannot fetch"),
+            "the refusal names the limit: {refused}"
+        );
     }
 
     #[test]
