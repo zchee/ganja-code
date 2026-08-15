@@ -1,6 +1,6 @@
 ---
 source: crates/ganja-tui/src/app.rs
-assertion_line: 9492
+assertion_line: 9579
 expression: screen(&terminal)
 ---
                                                                                 
@@ -10,8 +10,8 @@ expression: screen(&terminal)
                                                                                 
                                                                                 
 ┌ skills ──────────────────────────────────────────────────────────────────────┐
-│> porting  How to port a module.                                              │
-│  tdd      Red, green.                                                        │
+│> porting  (user) How to port a module.                                       │
+│  tdd      (user) Red, green.                                                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ message ─────────────────────────────────────────────────────────────────────┐
 │use $                                                                         │
