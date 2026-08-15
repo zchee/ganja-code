@@ -1538,8 +1538,20 @@ impl App {
         match mention::classify_drop(&normalized, &self.cwd) {
             Some(paths) => {
                 for path in paths {
-                    self.editor
-                        .insert(&format!("{} ", mention::token(&path, None, None)));
+                    // A dropped image is the picture, not its path
+                    // (2026-08-15): the same [Image #N] token every other
+                    // door inserts, so the strip previews it and the
+                    // composer never carries forty characters of filesystem.
+                    // Everything else keeps the @ spelling a drop always had.
+                    let mime = attachment::mime(&path);
+                    if mime.starts_with("image/") && attachment::is_binary(mime) {
+                        let number = self.next_image_number();
+                        self.pasted_images.push((number, path));
+                        self.editor.insert(&format!("[Image #{number}] "));
+                    } else {
+                        self.editor
+                            .insert(&format!("{} ", mention::token(&path, None, None)));
+                    }
                 }
             }
             None => self.editor.insert(&normalized),
@@ -1680,10 +1692,14 @@ impl App {
             if !text.contains(&format!("[Image #{number}]")) {
                 continue;
             }
+            // Joined against the root the way the engine resolves the
+            // mention itself: a dropped path may be project-relative, and a
+            // join with an absolute one is that absolute path.
+            let resolved = self.root.join(&path).display().to_string();
             let Some(preview) = self
                 .preview_cache
                 .entry(number)
-                .or_insert_with(|| graphics::load(&path))
+                .or_insert_with(|| graphics::load(&resolved))
             else {
                 continue;
             };
@@ -10536,6 +10552,35 @@ mod tests {
             .expect("a paste is handled");
 
         assert_eq!(app.editor.text(), "@src/lib.rs ");
+    }
+
+    /// A dropped **image** is the picture, not its path (2026-08-15): the
+    /// drop inserts the same `[Image #N]` token every other door does, so
+    /// the strip previews it and the composer never carries the filesystem
+    /// spelling the user asked to be rid of.
+    #[tokio::test]
+    async fn a_dropped_image_path_becomes_an_image_token() {
+        let directory = project();
+        fs::write(directory.path().join("shot.png"), b"png-ish").expect("the image exists");
+        let mut app = app_in(&directory);
+
+        app.handle(AppEvent::Term(TermEvent::Paste("shot.png".to_owned())))
+            .await
+            .expect("a paste is handled");
+
+        assert_eq!(
+            app.editor.text(),
+            "[Image #1] ",
+            "the picture's token, never its path"
+        );
+        assert_eq!(
+            app.pasted_images_in("[Image #1]")
+                .into_iter()
+                .map(|mention| mention.path)
+                .collect::<Vec<_>>(),
+            vec!["shot.png".to_owned()],
+            "and the token names the dropped file"
+        );
     }
 
     /// Several paths pasted at once — the way a terminal hands over a
