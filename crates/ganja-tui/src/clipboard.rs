@@ -230,7 +230,7 @@ pub mod osc52 {
 /// Hand-rolled rather than pulled in as a dependency: the one caller is the
 /// OSC 52 sequence above, and a full crate for one table lookup per three
 /// bytes would be weight this frontend does not otherwise carry.
-fn base64(bytes: &[u8]) -> String {
+pub(crate) fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);

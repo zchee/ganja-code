@@ -160,7 +160,24 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 # live spike names the dialect, not here.
 buffa = "0.9.1"
 ratatui = "0.30.2"
-ratatui-textarea = "0.9.2"
+ratatui-textarea = { version = "0.9.2", features = [
+    # The widget's own match-highlight machinery, ridden by the composer to
+    # reverse the `[Image #N]` token under the cursor (2026-08-15) — one
+    # regex over the buffer beats a hand-rolled span overlay.
+    "search",
+] }
+# Decodes the four attachment image formats — png, jpeg, gif (first frame),
+# webp — for the composer's kitty-graphics preview, bounded to a thumbnail
+# before the pixels ride the wire as PNG. Already in the tree through
+# `arboard`'s image-data feature; naming it directly makes the decoders a
+# contract rather than a transitive accident. Default features stay off: four
+# decoders, none of the rest of the format zoo.
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
 # A hook's `matcher` is one regex asked one question about one string — does
 # this tool name match — and neither matcher already in the tree answers it.
 # `grep-regex` builds a line-oriented `Matcher` for `grep-searcher`'s Sink, a

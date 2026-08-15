@@ -48,6 +48,7 @@ ganja-tool.workspace = true
 nucleo-matcher.workspace = true
 # Encodes a clipboard-pasted image (`clipboard.rs::Clipboard::read_image`) to
 # PNG bytes before it enters the mention pipeline as an `@`-attached file.
+image.workspace = true
 png.workspace = true
 # An assistant's reply is markdown. Parsed into block events rather than into
 # HTML — the transcript needs headings, fences and table cells as data it can

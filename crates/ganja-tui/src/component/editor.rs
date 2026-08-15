@@ -7,6 +7,7 @@ use ratatui::{
     buffer::Buffer,
     crossterm::event::KeyEvent,
     layout::Rect,
+    style::{Modifier, Style},
     widgets::{Block, Widget as _},
 };
 use ratatui_textarea::{CursorMove, TextArea};
@@ -147,6 +148,26 @@ impl Editor {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.area.is_empty()
+    }
+
+    /// Reverses the `[Image #N]` token whose number is `token` — the
+    /// composer rendering Claude Code draws when the cursor sits on one
+    /// (2026-08-15 screenshot) — or clears the reverse for [`None`]. Ridden
+    /// on the widget's own search machinery: the number is unique per
+    /// paste, so the escaped literal matches exactly the one token.
+    pub fn set_token_highlight(&mut self, token: Option<u32>) {
+        match token {
+            Some(number) => {
+                let _ = self
+                    .area
+                    .set_search_pattern(format!("\\[Image #{number}\\]"));
+                self.area
+                    .set_search_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+            None => {
+                let _ = self.area.set_search_pattern("");
+            }
+        }
     }
 
     /// Where the cursor is, as a zero-based (row, column) pair counted in
