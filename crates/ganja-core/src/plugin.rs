@@ -355,6 +355,21 @@ pub struct State {
     pub plugins: BTreeMap<String, PluginState>,
 }
 
+/// One added marketplace, as `ganja plugin marketplace list` shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketplaceListing {
+    /// The marketplace's name, which is also its directory in the store.
+    pub name: String,
+    /// The git URL or local path its add recorded.
+    pub origin: String,
+    /// The plugin names its file offers — or, for a copy whose own file no
+    /// longer reads, the reason it does not: one bad marketplace is its own
+    /// bad news, never the listing's.
+    pub offered: Result<Vec<String>, String>,
+    /// The installed plugins that came from it.
+    pub installed: Vec<String>,
+}
+
 /// One added marketplace, as the state file records it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MarketplaceState {
@@ -549,6 +564,29 @@ impl Store {
     /// [`PluginError`] for a clone that failed (with git's stderr), a source
     /// with no marketplace file, or one whose file does not validate.
     pub fn add_marketplace(&self, origin: &str) -> Result<String, PluginError> {
+        let (staging, market) = self.stage_origin(origin)?;
+
+        let final_dir = self.marketplaces_dir().join(&market.name);
+        replace_dir(&staging.keep, &final_dir)?;
+        drop(staging);
+
+        let mut state = self.state()?;
+        state.marketplaces.insert(
+            market.name.clone(),
+            MarketplaceState {
+                origin: origin.to_owned(),
+            },
+        );
+        self.write_state(&state)?;
+
+        Ok(market.name)
+    }
+
+    /// Fetches `origin` — a git clone or a directory copy — into a fresh
+    /// staging directory and parses its marketplace file: the shared front
+    /// half of an add and an update, which is what keeps the two validating
+    /// identically (2026-08-15).
+    fn stage_origin(&self, origin: &str) -> Result<(Staging, Marketplace), PluginError> {
         let staging = self.staging_dir("marketplace")?;
         let staged = staging.keep.clone();
 
@@ -571,20 +609,146 @@ impl Store {
         })?;
         let market = Marketplace::parse(&text)?;
 
-        let final_dir = self.marketplaces_dir().join(&market.name);
-        replace_dir(&staged, &final_dir)?;
+        Ok((staging, market))
+    }
+
+    /// Every added marketplace, sorted by name: where it came from, the
+    /// plugins it offers — or why its own file no longer reads — and the
+    /// installed plugins that came from it.
+    ///
+    /// # Errors
+    ///
+    /// [`PluginError`] only for a state file that does not read; a single
+    /// marketplace whose copy has gone bad is reported inside its own
+    /// listing rather than sinking the others.
+    pub fn marketplaces(&self) -> Result<Vec<MarketplaceListing>, PluginError> {
+        let state = self.state()?;
+
+        Ok(state
+            .marketplaces
+            .iter()
+            .map(|(name, market)| {
+                let manifest = self
+                    .marketplaces_dir()
+                    .join(name)
+                    .join(CLAUDE_PLUGIN_DIR)
+                    .join(MARKETPLACE_FILE);
+                let offered = fs::read_to_string(&manifest)
+                    .map_err(|error| error.to_string())
+                    .and_then(|text| Marketplace::parse(&text).map_err(|error| error.to_string()))
+                    .map(|market| {
+                        market
+                            .plugins
+                            .into_iter()
+                            .map(|plugin| plugin.name)
+                            .collect()
+                    });
+                let installed = state
+                    .plugins
+                    .iter()
+                    .filter(|(_, plugin)| plugin.marketplace == *name)
+                    .map(|(plugin, _)| plugin.clone())
+                    .collect();
+
+                MarketplaceListing {
+                    name: name.clone(),
+                    origin: market.origin.clone(),
+                    offered,
+                    installed,
+                }
+            })
+            .collect())
+    }
+
+    /// Removes one added marketplace: its copy and its state entry.
+    ///
+    /// Refused while plugins installed from it remain, naming them: an
+    /// installed plugin is its own copy and would keep working, but it
+    /// could never update again, and `ganja plugin remove` first is the
+    /// honest spelling of that choice.
+    ///
+    /// # Errors
+    ///
+    /// [`PluginError`] for a marketplace never added, one with installed
+    /// plugins, or a copy that would not delete.
+    pub fn remove_marketplace(&self, name: &str) -> Result<(), PluginError> {
+        check_name("marketplace", name)?;
+        let mut state = self.state()?;
+        if !state.marketplaces.contains_key(name) {
+            return Err(self.no_such_marketplace(&state, name));
+        }
+        let dependents = state
+            .plugins
+            .iter()
+            .filter(|(_, plugin)| plugin.marketplace == name)
+            .map(|(plugin, _)| plugin.as_str())
+            .collect::<Vec<_>>();
+        if !dependents.is_empty() {
+            return Err(PluginError::Unknown(format!(
+                "plugins installed from \"{name}\" are still present ({}); `ganja plugin \
+                 remove` them first",
+                dependents.join(", ")
+            )));
+        }
+
+        let dir = self.marketplaces_dir().join(name);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|source| PluginError::Io {
+                what: dir.display().to_string(),
+                source,
+            })?;
+        }
+        state.marketplaces.remove(name);
+        self.write_state(&state)
+    }
+
+    /// Re-fetches one added marketplace from the origin its add recorded,
+    /// staged and validated exactly as the add was, and answers that origin
+    /// for the caller's own report.
+    ///
+    /// A re-fetch whose file names a **different** marketplace is refused
+    /// rather than silently forked — remove and re-add is the honest
+    /// spelling of a rename.
+    ///
+    /// # Errors
+    ///
+    /// [`PluginError`] for a marketplace never added, a fetch that failed,
+    /// a file that does not validate, or one that changed its name.
+    pub fn update_marketplace(&self, name: &str) -> Result<String, PluginError> {
+        check_name("marketplace", name)?;
+        let state = self.state()?;
+        let Some(market) = state.marketplaces.get(name) else {
+            return Err(self.no_such_marketplace(&state, name));
+        };
+        let origin = market.origin.clone();
+
+        let (staging, fetched) = self.stage_origin(&origin)?;
+        if fetched.name != name {
+            return Err(PluginError::Unknown(format!(
+                "{origin} now names itself \"{}\" rather than \"{name}\"; `ganja plugin \
+                 marketplace remove {name}` and a fresh add are how a rename is taken",
+                fetched.name
+            )));
+        }
+        replace_dir(&staging.keep, &self.marketplaces_dir().join(name))?;
         drop(staging);
 
-        let mut state = self.state()?;
-        state.marketplaces.insert(
-            market.name.clone(),
-            MarketplaceState {
-                origin: origin.to_owned(),
-            },
-        );
-        self.write_state(&state)?;
+        Ok(origin)
+    }
 
-        Ok(market.name)
+    /// The refusal for a marketplace nobody added, naming what was.
+    fn no_such_marketplace(&self, state: &State, name: &str) -> PluginError {
+        let added = state
+            .marketplaces
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let added = if added.is_empty() { "none" } else { &added };
+
+        PluginError::Unknown(format!(
+            "no marketplace \"{name}\" has been added; added: {added}"
+        ))
     }
 
     /// Installs one plugin from an added marketplace: resolves the entry's
@@ -1722,6 +1886,98 @@ mod tests {
         );
 
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// The three marketplace verbs beyond add (2026-08-15): the listing
+    /// names origin, offers and installed plugins per marketplace; remove
+    /// refuses while installed plugins depend on it and deletes cleanly
+    /// once they are gone; update re-fetches from the recorded origin and
+    /// refuses a fetch that renamed itself.
+    #[test]
+    fn marketplaces_list_remove_and_update_from_their_recorded_origins() {
+        let home = TempDir::new().expect("a temporary directory");
+        let market = home.path().join("market");
+        let manifest = |plugins: &str| {
+            format!(r#"{{ "name": "verbs", "owner": {{ "name": "t" }}, "plugins": [{plugins}] }}"#)
+        };
+        plant(
+            &market,
+            ".claude-plugin/marketplace.json",
+            &manifest(r#"{ "name": "one", "source": "./one" }"#),
+        );
+        plant(
+            &market,
+            "one/skills/one/SKILL.md",
+            "---\nname: one\ndescription: d\n---\nx",
+        );
+
+        let store = Store::at(home.path().join("store"));
+        store
+            .add_marketplace(&market.display().to_string())
+            .expect("the marketplace adds");
+        store.install("one", "verbs").expect("its plugin installs");
+
+        let listings = store.marketplaces().expect("the listing reads");
+        assert_eq!(listings.len(), 1);
+        assert_eq!(listings[0].name, "verbs");
+        assert_eq!(listings[0].origin, market.display().to_string());
+        assert_eq!(
+            listings[0].offered,
+            Ok(vec!["one".to_owned()]),
+            "the offer roster comes off the copy's own file"
+        );
+        assert_eq!(listings[0].installed, vec!["one".to_owned()]);
+
+        let refused = store
+            .remove_marketplace("verbs")
+            .expect_err("installed plugins hold the marketplace");
+        assert!(
+            refused.to_string().contains("one"),
+            "the refusal names the dependents: {refused}"
+        );
+
+        // The origin grows a second plugin; update picks it up in place.
+        plant(
+            &market,
+            ".claude-plugin/marketplace.json",
+            &manifest(
+                r#"{ "name": "one", "source": "./one" }, { "name": "two", "source": "./one" }"#,
+            ),
+        );
+        let origin = store
+            .update_marketplace("verbs")
+            .expect("the update fetches");
+        assert_eq!(origin, market.display().to_string());
+        let updated = store.marketplaces().expect("the listing reads");
+        assert_eq!(
+            updated[0].offered,
+            Ok(vec!["one".to_owned(), "two".to_owned()]),
+            "the update replaced the copy"
+        );
+
+        // A rename upstream is refused, never silently forked.
+        plant(
+            &market,
+            ".claude-plugin/marketplace.json",
+            r#"{ "name": "renamed", "owner": { "name": "t" }, "plugins": [] }"#,
+        );
+        let forked = store
+            .update_marketplace("verbs")
+            .expect_err("a rename refuses");
+        assert!(
+            forked.to_string().contains("renamed"),
+            "the refusal names both: {forked}"
+        );
+
+        store.remove("one").expect("the plugin removes");
+        store
+            .remove_marketplace("verbs")
+            .expect("with no dependents the marketplace removes");
+        assert!(store.marketplaces().expect("the listing reads").is_empty());
+        let unknown = store
+            .remove_marketplace("verbs")
+            .expect_err("a second remove refuses");
+        assert!(unknown.to_string().contains("added: none"), "{unknown}");
     }
 
     /// A remote source installs the **pinned** commit — never the branch's
