@@ -119,6 +119,13 @@
       "default": {},
       "additionalProperties": { "$ref": "#/$defs/McpServer" }
     },
+    "tool_defer_threshold": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Defer whole MCP servers' tool schemas (largest servers first) until the advertised mcp__* total is at or under this; a resident tool_search fetches a deferred schema on demand, and a direct call to a deferred tool still executes and activates it (D492). 0 defers every server; a huge value disables deferral. Absent = 32. Size is not coldness: the deferred giant may be the main server — its tools return to the roster the moment they are touched.",
+      "default": 32,
+      "$comment": "crates/ganja-core/src/config.rs (Config::tool_defer_threshold, defer_threshold); the filter at crates/ganja-core/src/session.rs; the value at crates/ganja-tool/src/deferral.rs."
+    },
     "hooks": {
       "type": "object",
       "description": "Commands this session runs at the nine moments the hook engine fires, keyed by the event's own spelling. An event name nothing answers to is refused by name at load. Hooks run with the user's own authority and pass no permission gate.",

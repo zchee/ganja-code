@@ -674,6 +674,12 @@ pub struct Overrides {
     pub config_file: Option<PathBuf>,
 }
 
+/// What [`Config::defer_threshold`] answers when no tier wrote the key:
+/// Claude Code's own order of magnitude for a roster worth deferring, small
+/// enough that a genuinely giant server defers and large enough that a
+/// typical handful of servers never notices the machinery exists.
+pub const DEFAULT_TOOL_DEFER_THRESHOLD: usize = 32;
+
 /// Everything the config files asked for, merged.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -783,6 +789,20 @@ pub struct Config {
     /// written against.
     #[serde(default)]
     pub mcp: BTreeMap<String, McpServer>,
+    /// Defer whole MCP servers' tool schemas — largest servers first — until
+    /// the advertised `mcp__*` total is at or under this (**D492**).
+    ///
+    /// **Absent is 32** ([`Config::defer_threshold`] is what reads it). `0`
+    /// defers every server and a huge value disables deferral — both are
+    /// meaningful, so nothing beyond serde's own unsigned-integer check is
+    /// refused. Top-level rather than a key inside [`mcp`](Self::mcp), whose
+    /// map a server actually named `defer_threshold` would collide with — the
+    /// D462 lesson. Counted in tools, not schema bytes: the unit a person can
+    /// count in `/mcp`'s own listing. Size is not coldness — the deferred
+    /// giant may be the main server; its tools return to the roster the
+    /// moment they are touched, and raising this key is the one-line off
+    /// switch.
+    pub tool_defer_threshold: Option<usize>,
     /// Commands this session runs at the nine moments [`crate::hook`] names,
     /// keyed by the event's own spelling (`"PreToolUse"`, `"SessionStart"`, …).
     ///
@@ -1242,6 +1262,15 @@ impl Config {
         self.memory == Some(true)
     }
 
+    /// The advertised `mcp__*` schema budget; see
+    /// [`Config::tool_defer_threshold`] for the key. Absent is
+    /// [`DEFAULT_TOOL_DEFER_THRESHOLD`].
+    #[must_use]
+    pub fn defer_threshold(&self) -> usize {
+        self.tool_defer_threshold
+            .unwrap_or(DEFAULT_TOOL_DEFER_THRESHOLD)
+    }
+
     /// Whether `webfetch` may reach a private address; see
     /// [`WebfetchConfig::allow_private`].
     #[must_use]
@@ -1318,6 +1347,7 @@ impl Config {
         overlay(&mut self.shell, other.shell);
         overlay(&mut self.memory, other.memory);
         overlay(&mut self.snapshot, other.snapshot);
+        overlay(&mut self.tool_defer_threshold, other.tool_defer_threshold);
         overlay(&mut self.agents.concurrency, other.agents.concurrency);
         overlay(&mut self.tui.notifications, other.tui.notifications);
         overlay(
@@ -2087,6 +2117,49 @@ mod tests {
         assert!(merged.memory_enabled(), "silence is not a refusal");
         merged.merge(parse(r#"{"memory": false}"#).expect("it parses"));
         assert!(!merged.memory_enabled());
+    }
+
+    /// The schema budget for MCP tools (**D492**): absent is 32, and the two
+    /// extremes both mean something — 0 defers every server, huge disables
+    /// deferral — so neither is refused.
+    #[test]
+    fn tool_defer_threshold_is_thirty_two_until_a_config_says_otherwise() {
+        let absent = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        assert_eq!(absent.tool_defer_threshold, None);
+        assert_eq!(absent.defer_threshold(), 32);
+
+        let zero = parse(r#"{"tool_defer_threshold": 0}"#).expect("0 defers every server");
+        assert_eq!(zero.defer_threshold(), 0);
+
+        let huge =
+            parse(r#"{"tool_defer_threshold": 100000}"#).expect("a huge budget disables deferral");
+        assert_eq!(huge.defer_threshold(), 100_000);
+
+        // A tier that says nothing leaves the tier below it alone; a closer
+        // tier's number wins.
+        let mut merged = zero;
+        merged.merge(parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses"));
+        assert_eq!(merged.defer_threshold(), 0, "silence is not an opinion");
+        merged.merge(parse(r#"{"tool_defer_threshold": 8}"#).expect("it parses"));
+        assert_eq!(merged.defer_threshold(), 8);
+    }
+
+    /// The key takes a count and nothing else: a string, a float or a
+    /// negative is serde's own type refusal — positioned, like every curated
+    /// scalar's here; it is unknown *keys* that are refused by name.
+    #[test]
+    fn a_tool_defer_threshold_that_is_not_a_count_is_refused() {
+        for wrong in [
+            r#"{"tool_defer_threshold": "many"}"#,
+            r#"{"tool_defer_threshold": 1.5}"#,
+            r#"{"tool_defer_threshold": -1}"#,
+        ] {
+            let error = parse(wrong).expect_err("a threshold is an unsigned integer");
+            assert!(
+                error.to_string().contains("expected usize"),
+                "the refusal says what the key takes: {error}"
+            );
+        }
     }
 
     /// Claude's own block, pasted whole: the shape is kept so that it can be.
