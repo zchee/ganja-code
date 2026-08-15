@@ -355,6 +355,107 @@ pub struct State {
     pub plugins: BTreeMap<String, PluginState>,
 }
 
+/// One installed plugin in full, as `ganja plugin details` shows it
+/// (2026-08-15, Claude Code's own `details` surface): identity, inventory,
+/// and the projected token cost of what it puts in front of the model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Details {
+    /// The plugin's name — the marketplace entry's, which is the identity.
+    pub name: String,
+    /// The version its own manifest pins, when it pins one.
+    pub version: Option<String>,
+    /// One line about what it does: the manifest's, or the marketplace
+    /// entry's where the manifest says nothing.
+    pub description: Option<String>,
+    /// The marketplace it was installed from.
+    pub marketplace: String,
+    /// Whether the load path currently reads it.
+    pub enabled: bool,
+    /// Skills, each with its projected cost.
+    pub skills: Vec<ComponentCost>,
+    /// Agents, each with its projected cost.
+    pub agents: Vec<ComponentCost>,
+    /// Commands, each with its projected cost — always-on zero, because the
+    /// palette is the UI's and nothing reaches the model until one runs.
+    pub commands: Vec<ComponentCost>,
+    /// Hook event names.
+    pub hooks: Vec<String>,
+    /// MCP server names, plugin-local.
+    pub mcp: Vec<String>,
+    /// LSP server names.
+    pub lsp: Vec<String>,
+}
+
+/// One component's projected token cost, both figures the chars-over-four
+/// estimate the disclaimers own up to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComponentCost {
+    /// The component's plugin-local name.
+    pub name: String,
+    /// Tokens added to **every** session: the name-and-description line the
+    /// roster or `<available_skills>` block carries.
+    pub always_on: u64,
+    /// Tokens paid **each time it fires**: the body loaded on invocation.
+    pub on_invoke: u64,
+}
+
+impl Details {
+    /// The always-on figures summed: what installing this plugin adds to
+    /// every session before anything fires.
+    #[must_use]
+    pub fn always_on_total(&self) -> u64 {
+        self.skills
+            .iter()
+            .chain(&self.agents)
+            .chain(&self.commands)
+            .map(|component| component.always_on)
+            .sum()
+    }
+}
+
+/// Tokens a text is projected to cost: characters over four, rounded up —
+/// the same order-of-magnitude arithmetic every "~" in the output admits to.
+fn projected_tokens(text: &str) -> u64 {
+    u64::try_from(text.chars().count().div_ceil(4)).unwrap_or(u64::MAX)
+}
+
+/// Walks a plugin's `skills/` for every `SKILL.md` and prices each: the
+/// frontmatter's name and description are what `<available_skills>` carries
+/// into every session, the body is what an invocation loads. A file with no
+/// frontmatter still counts — its directory names it, its whole text is the
+/// invocation.
+fn collect_skill_costs(root: &Path, into: &mut Vec<ComponentCost>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_skill_costs(&path, into);
+            continue;
+        }
+        if entry.file_name() != "SKILL.md" {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let (fields, body) = split_frontmatter(&text);
+        let name = fields.get("name").cloned().unwrap_or_else(|| {
+            path.parent().and_then(Path::file_name).map_or_else(
+                || "skill".to_owned(),
+                |dir| dir.to_string_lossy().into_owned(),
+            )
+        });
+        let description = fields.get("description").map_or("", String::as_str);
+        into.push(ComponentCost {
+            always_on: projected_tokens(&name) + projected_tokens(description),
+            on_invoke: projected_tokens(body),
+            name,
+        });
+    }
+}
+
 /// One added marketplace, as `ganja plugin marketplace list` shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketplaceListing {
@@ -734,6 +835,89 @@ impl Store {
         drop(staging);
 
         Ok(origin)
+    }
+
+    /// Everything `ganja plugin details` prints about one installed plugin:
+    /// identity off the manifest (description falling back to the
+    /// marketplace entry's), the component inventory off the same collector
+    /// the load path uses, and each prompt-bearing component's projected
+    /// token cost — always-on for what its roster line adds to every
+    /// session, on-invoke for the body loaded when it fires.
+    ///
+    /// # Errors
+    ///
+    /// [`PluginError`] for a plugin the store does not hold, or state that
+    /// does not read; a missing or unparseable manifest costs the identity
+    /// fields, never the details.
+    pub fn details(&self, plugin: &str) -> Result<Details, PluginError> {
+        let state = self.state()?;
+        let Some(installed) = state.plugins.get(plugin) else {
+            return Err(self.no_such_plugin(&state, plugin));
+        };
+        let root = self.plugin_root(plugin);
+
+        let manifest = fs::read_to_string(root.join(CLAUDE_PLUGIN_DIR).join(MANIFEST_FILE))
+            .ok()
+            .and_then(|text| Manifest::parse(&text).ok());
+        // The marketplace entry's description stands in where the manifest
+        // says nothing — it is what the person chose the plugin by.
+        let description = manifest
+            .as_ref()
+            .and_then(|manifest| manifest.description.clone())
+            .or_else(|| {
+                let manifest = self
+                    .marketplaces_dir()
+                    .join(&installed.marketplace)
+                    .join(CLAUDE_PLUGIN_DIR)
+                    .join(MARKETPLACE_FILE);
+                let market = Marketplace::parse(&fs::read_to_string(manifest).ok()?).ok()?;
+
+                market
+                    .plugins
+                    .into_iter()
+                    .find(|entry| entry.name == plugin)?
+                    .description
+            });
+
+        let contribution = collect(&root, plugin);
+        let mut skills = Vec::new();
+        if let Some(skills_root) = &contribution.skills_root {
+            collect_skill_costs(skills_root, &mut skills);
+            skills.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        let agents = contribution
+            .agents
+            .iter()
+            .map(|(name, agent)| ComponentCost {
+                name: name.clone(),
+                always_on: projected_tokens(name)
+                    + agent.description.as_deref().map_or(0, projected_tokens),
+                on_invoke: agent.prompt.as_deref().map_or(0, projected_tokens),
+            })
+            .collect();
+        let commands = contribution
+            .commands
+            .iter()
+            .map(|(name, command)| ComponentCost {
+                name: name.clone(),
+                always_on: 0,
+                on_invoke: projected_tokens(&command.template),
+            })
+            .collect();
+
+        Ok(Details {
+            name: plugin.to_owned(),
+            version: manifest.and_then(|manifest| manifest.version),
+            description,
+            marketplace: installed.marketplace.clone(),
+            enabled: installed.enabled,
+            skills,
+            agents,
+            commands,
+            hooks: contribution.hooks.keys().cloned().collect(),
+            mcp: contribution.mcp.keys().cloned().collect(),
+            lsp: contribution.lsp.keys().cloned().collect(),
+        })
     }
 
     /// The refusal for a marketplace nobody added, naming what was.
@@ -1886,6 +2070,85 @@ mod tests {
         );
 
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// `details` prices what a plugin puts in front of the model
+    /// (2026-08-15, Claude Code's own surface): identity off the manifest
+    /// with the marketplace entry's description standing in, skills priced
+    /// as roster-line always-on plus body on-invoke, agents likewise,
+    /// commands on-invoke only — the palette is UI — and the bare counts
+    /// for the surfaces that carry no prompt.
+    #[test]
+    fn details_prices_the_prompt_bearing_components() {
+        let home = TempDir::new().expect("a temporary directory");
+        let market = home.path().join("market");
+        plant(
+            &market,
+            ".claude-plugin/marketplace.json",
+            r#"{ "name": "m", "owner": { "name": "t" }, "plugins": [
+                { "name": "priced", "source": "./priced",
+                  "description": "the entry's own line" }
+            ] }"#,
+        );
+        plant(
+            &market,
+            "priced/.claude-plugin/plugin.json",
+            r#"{ "name": "priced", "version": "1.2.3" }"#,
+        );
+        plant(
+            &market,
+            "priced/skills/greet/SKILL.md",
+            "---\nname: greet\ndescription: says hello politely\n---\nA body of some length here.",
+        );
+        plant(
+            &market,
+            "priced/agents/rev.md",
+            "---\nname: rev\ndescription: reviews\n---\nYou review code carefully.",
+        );
+        plant(&market, "priced/commands/go.md", "run everything now");
+
+        let store = Store::at(home.path().join("store"));
+        store
+            .add_marketplace(&market.display().to_string())
+            .expect("the marketplace adds");
+        store.install("priced", "m").expect("the plugin installs");
+
+        let details = store.details("priced").expect("the details read");
+        assert_eq!(details.version.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            details.description.as_deref(),
+            Some("the entry's own line"),
+            "the marketplace entry's description stands in for a silent manifest"
+        );
+        assert_eq!(details.marketplace, "m");
+        assert!(details.enabled);
+
+        assert_eq!(details.skills.len(), 1);
+        let skill = &details.skills[0];
+        assert_eq!(skill.name, "greet");
+        // "greet" is 5 chars (2 tokens up) and the description 20 (5): the
+        // arithmetic is the estimate's whole contract.
+        assert_eq!(skill.always_on, 2 + 5);
+        assert_eq!(skill.on_invoke, 7, "28 body chars over four");
+
+        assert_eq!(details.agents.len(), 1);
+        assert!(details.agents[0].always_on > 0);
+        assert!(details.agents[0].on_invoke > 0);
+
+        assert_eq!(details.commands.len(), 1);
+        assert_eq!(details.commands[0].always_on, 0, "the palette is UI");
+        assert!(details.commands[0].on_invoke > 0);
+
+        assert_eq!(
+            details.always_on_total(),
+            details.skills[0].always_on + details.agents[0].always_on
+        );
+        assert!(details.hooks.is_empty());
+
+        let missing = store
+            .details("nothing")
+            .expect_err("an unknown plugin refuses");
+        assert!(missing.to_string().contains("nothing"), "{missing}");
     }
 
     /// The three marketplace verbs beyond add (2026-08-15): the listing
