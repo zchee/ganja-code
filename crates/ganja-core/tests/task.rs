@@ -883,6 +883,7 @@ async fn a_delegated_child_is_stored_as_a_session_of_its_own_naming_its_parent()
             agent: None,
             model: None,
             effort: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: None,
             revert: None,
         })

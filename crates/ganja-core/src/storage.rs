@@ -54,6 +54,7 @@
 //! defaults; every pragma is set explicitly, on every connection.
 
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
@@ -301,6 +302,16 @@ pub struct SessionInfo {
     /// carries the name, the same rule a live model switch applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Deferred-roster names this session has activated — by a `tool_search`
+    /// hit, by an executed `mcp__*` call, or by resume seeding (**D492**).
+    ///
+    /// Insert-only in memory; made durable at each root-side activating
+    /// call's `finish` and re-read on resume, where it is unioned with every
+    /// `mcp__*` call name in the stored transcript. An empty set writes no
+    /// key — a pre-feature-shaped row stays byte-stable — and an absent key
+    /// reads as empty, so the tolerance runs both ways.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub activated_tools: BTreeSet<String>,
     /// The session that delegated this one, when a `task` call created it.
     ///
     /// Present on subagent sessions and absent on every other, which is what
@@ -1810,6 +1821,7 @@ mod tests {
             agent: None,
             model: None,
             effort: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: None,
             revert: None,
         }

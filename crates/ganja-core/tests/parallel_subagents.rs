@@ -1042,6 +1042,7 @@ async fn a_stored_turn_replays_its_calls_in_call_order() {
             agent: None,
             model: None,
             effort: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: None,
             revert: None,
         })

@@ -877,6 +877,26 @@ pub struct Engine {
     /// Which [`mcp::Servers::generation`] the registries above were built
     /// from, so a rebuild happens exactly when the tool surface moved.
     mcp_installed: std::sync::Mutex<u64>,
+    /// The session-lifetime activated set (**D492**): names a `tool_search`
+    /// hit, an executed `mcp__*` call, or resume seeding put back on the
+    /// advertised roster. Insert-only between `NewSession`s, and the one
+    /// shared handle every [`deferral::Deferral`](crate::tool::deferral)
+    /// clone writes through — which is what makes "a tool this conversation
+    /// has touched is never un-advertised" a property of the handle rather
+    /// than a discipline.
+    activated_tools: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    /// Which names defer, over the handle above, as last computed on the
+    /// shared composition path ([`Engine::compose_deferral`]). What every
+    /// turn clones. Empty candidates on every engine whose registry holds no
+    /// `mcp__*` names — every scripted and golden run.
+    deferral: std::sync::Mutex<crate::tool::deferral::Deferral>,
+    /// The composed registry's definitions, as last rebuilt — the snapshot
+    /// `tool_search` answers from, shared rather than copied so a
+    /// reconnect's recomposition is what a later search reads.
+    tool_definitions: Arc<std::sync::Mutex<Vec<crate::tool::ToolDefinition>>>,
+    /// The advertised `mcp__*` budget, from the config's
+    /// `tool_defer_threshold`; see [`Engine::with_defer_threshold`].
+    defer_threshold: usize,
     /// Language servers this session may run. [`None`] is a session whose
     /// config asked for none, which is the default and every scripted and
     /// golden run. Nothing starts here: a server is spawned by the first touch
@@ -1065,7 +1085,7 @@ impl Engine {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let root = crate::project::Project::resolve(&cwd).root().to_owned();
 
-        Self {
+        let engine = Self {
             provider,
             active: std::sync::Mutex::new(Active {
                 model,
@@ -1086,6 +1106,10 @@ impl Engine {
             lent_tools: std::sync::Mutex::new(Arc::clone(&tools)),
             mcp: None,
             mcp_installed: std::sync::Mutex::new(0),
+            activated_tools: Arc::default(),
+            deferral: std::sync::Mutex::new(crate::tool::deferral::Deferral::none()),
+            tool_definitions: Arc::default(),
+            defer_threshold: crate::config::DEFAULT_TOOL_DEFER_THRESHOLD,
             lsp: None,
             snapshots: None,
             revert: std::sync::Mutex::new(None),
@@ -1113,7 +1137,15 @@ impl Engine {
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
             small_model: None,
-        }
+        };
+        // The builder-time run of the shared composition path, for the one
+        // engine no rebuild ever reaches: a fixture whose `mcp__*` names
+        // arrived as base tools. A registry without such names composes to
+        // an empty candidate set and the same `Arc`, so every other caller
+        // is untouched by construction.
+        engine.recompose_deferral();
+
+        engine
     }
 
     /// Sets what the model is told before it is told anything else, as its two
@@ -1309,6 +1341,20 @@ impl Engine {
         self.concurrency = concurrency.max(1);
 
         self
+    }
+
+    /// Sets the advertised `mcp__*` budget — the config's
+    /// `tool_defer_threshold` (**D492**) — and recomputes the deferral over
+    /// the current set, so a builder-time registry already carrying `mcp__*`
+    /// names defers under the budget it was just given rather than the
+    /// default it was born with.
+    #[must_use]
+    pub fn with_defer_threshold(self, threshold: usize) -> Self {
+        let mut engine = self;
+        engine.defer_threshold = threshold;
+        engine.recompose_deferral();
+
+        engine
     }
 
     /// Sets the config's `small_model` — the model this session's title
@@ -2132,6 +2178,38 @@ impl Engine {
         .await
         .expect("the session load neither panics nor is aborted")?;
 
+        // The activated set is re-seeded on every resume (**D492**): the
+        // row's own field unioned with every `mcp__*` tool-call name in the
+        // **full** stored transcript, not the post-compaction window.
+        // Deliberately broader than the in-process predicate — denied and
+        // unknown calls seed too, owned as benign over-seeding (grow-only;
+        // advertisement is not authority; a name matching no candidate
+        // changes nothing) — because it buys replay hygiene: a resumed
+        // request never replays an `mcp__*` call the roster withholds. The
+        // union covers *calls*; a search leaves no such part, and the flush
+        // at its own finish is what wrote it onto the row this reads.
+        let mut activated = info.activated_tools.clone();
+        for message in &transcript {
+            for part in &message.parts {
+                if let crate::protocol::PartBody::Tool { tool, .. } = &part.body
+                    && tool.starts_with(ganja_permission::permission::MCP_PREFIX)
+                {
+                    activated.insert(tool.clone());
+                }
+            }
+        }
+        if !activated.is_empty() {
+            tracing::debug!(
+                count = activated.len(),
+                by = "seed",
+                "seeded the activated tools from the resumed session"
+            );
+        }
+        *self
+            .activated_tools
+            .lock()
+            .expect("the activated set is never poisoned") = activated;
+
         let start = match &info.summary {
             None => 0,
             Some(summary) => match transcript.iter().position(|m| m.id == *summary) {
@@ -2559,6 +2637,15 @@ impl Engine {
             live.info = None;
             live.warned_uncataloged = false;
         }
+        // The next conversation starts with nothing activated (**D492**),
+        // and the recompute puts the names the old session had touched back
+        // under the deferral arithmetic — over never-touched names only, as
+        // every recompute is, which for a fresh set is all of them.
+        self.activated_tools
+            .lock()
+            .expect("the activated set is never poisoned")
+            .clear();
+        self.recompose_deferral();
         // Nothing before this turn to compare against, so the plan-to-build
         // reminder does not fire on the first turn of a new session.
         self.active().previous_agent = None;
@@ -3037,10 +3124,11 @@ impl Engine {
         if agents.get(agent::PLAN).is_some() {
             rebuilt = rebuilt.with(Arc::new(plan::PlanEnterTool));
         }
+        let rebuilt = self.compose_deferral(Arc::new(rebuilt));
         *self
             .tools
             .lock()
-            .expect("the tool registry is never poisoned") = Arc::new(rebuilt);
+            .expect("the tool registry is never poisoned") = rebuilt;
     }
 
     /// The base set plus whatever the MCP servers are currently lending.
@@ -3108,12 +3196,14 @@ impl Engine {
         match agent {
             Some(agent) => self.install(agent),
             // No agents means no task tool, so the offered set *is* the lent
-            // set.
+            // set — still through the deferral half, which is what keeps the
+            // two arms one composition path.
             None => {
+                let composed = self.compose_deferral(lent);
                 *self
                     .tools
                     .lock()
-                    .expect("the tool registry is never poisoned") = lent;
+                    .expect("the tool registry is never poisoned") = composed;
             }
         }
     }
@@ -3152,20 +3242,107 @@ impl Engine {
         )
     }
 
+    /// The deferral the next turn carries, as last composed.
+    fn deferral(&self) -> crate::tool::deferral::Deferral {
+        self.deferral
+            .lock()
+            .expect("the deferral is never poisoned")
+            .clone()
+    }
+
+    /// The deferral half of every registry composition (**D492**), shared by
+    /// [`Engine::install`], [`Engine::rebuild_offered`] and the builders so
+    /// no path can disagree: candidates are grouped from the composed set's
+    /// own `mcp__*` names with the activated set exempt before the
+    /// arithmetic, `tool_search` joins the roster only while something
+    /// defers — beside every builtin, `task`, `skill` and the plan doors,
+    /// never itself deferred — and the definitions snapshot it answers from
+    /// is rewritten last, so a reconnect's recomposition is what a later
+    /// search reads.
+    fn compose_deferral(&self, registry: Arc<Registry>) -> Arc<Registry> {
+        let activated = self
+            .activated_tools
+            .lock()
+            .expect("the activated set is never poisoned")
+            .clone();
+        let definitions = registry.definitions();
+        let candidates = crate::tool::deferral::candidates(
+            definitions
+                .iter()
+                .map(|definition| definition.name.as_str()),
+            self.defer_threshold,
+            &activated,
+        );
+        let deferral =
+            crate::tool::deferral::Deferral::over(candidates, Arc::clone(&self.activated_tools));
+
+        let registry = if deferral.any() {
+            Arc::new(
+                registry.with(Arc::new(crate::tool::deferral::ToolSearchTool::over(
+                    Arc::clone(&self.tool_definitions),
+                    deferral.clone(),
+                ))),
+            )
+        } else {
+            registry
+        };
+
+        *self
+            .tool_definitions
+            .lock()
+            .expect("the definitions snapshot is never poisoned") = registry.definitions();
+        *self
+            .deferral
+            .lock()
+            .expect("the deferral is never poisoned") = deferral;
+
+        registry
+    }
+
+    /// Recomputes the deferral over the currently offered set, in place —
+    /// the builder-time half of the shared path, for the engine that never
+    /// rebuilds (base-tool `mcp__*` names, a threshold set after
+    /// construction) and for `NewSession`, whose cleared activated set puts
+    /// never-touched names back under the arithmetic.
+    fn recompose_deferral(&self) {
+        let composed = self.compose_deferral(self.tools());
+        *self
+            .tools
+            .lock()
+            .expect("the tool registry is never poisoned") = composed;
+    }
+
     /// What a `task` call needs to run a child loop, or [`None`] when this
     /// engine has no agents to spawn.
     fn spawn_host(&self, model: String) -> Option<Arc<subagent::Host>> {
+        let deferral = self.deferral();
+        // A subagent is offered this build's tools minus the one that
+        // spawns subagents, which is the whole of the depth limit (D9).
+        // MCP tools are in that set: a subagent works on the same project
+        // with the same servers. Their asks refuse unattended, because
+        // nobody is watching a subagent's turn. While something defers, the
+        // resident `tool_search` rides along (**D492**) — a child reads the
+        // same advertised subset, so it is owed the same door back in —
+        // while `task` and the plan doors stay absent exactly as before.
+        let tools = if deferral.any() {
+            Arc::new(
+                self.lent()
+                    .with(Arc::new(crate::tool::deferral::ToolSearchTool::over(
+                        Arc::clone(&self.tool_definitions),
+                        deferral.clone(),
+                    ))),
+            )
+        } else {
+            self.lent()
+        };
+
         Some(Arc::new(subagent::Host {
             provider: Arc::clone(&self.provider),
             model,
             small_model: self.small_model.clone(),
             agents: Arc::clone(self.agents.as_ref()?),
-            // A subagent is offered this build's tools minus the one that
-            // spawns subagents, which is the whole of the depth limit (D9).
-            // MCP tools are in that set: a subagent works on the same project
-            // with the same servers. Their asks refuse unattended, because
-            // nobody is watching a subagent's turn.
-            tools: self.lent(),
+            tools,
+            deferral,
             permissions: Arc::clone(&self.permissions),
             base_prompt: self.base_half(),
             prompt_suffix: self.environment_half(),
@@ -3772,6 +3949,7 @@ impl Engine {
             kind,
             tools: self.tools(),
             skill_roots: self.skill_roots.clone(),
+            deferral: self.deferral(),
             permissions,
             cwd: self.cwd.clone(),
             root: self.root.clone(),
@@ -4091,6 +4269,7 @@ fn fresh_session(
         agent,
         model: Some(model),
         effort,
+        activated_tools: std::collections::BTreeSet::new(),
         // A session a person started, not one a tool call delegated.
         parent: None,
         // Nothing has been undone in a session that has not run a turn.
@@ -4572,6 +4751,7 @@ mod tests {
             summary: None,
             agent: None,
             model: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: None,
             revert: None,
         };
@@ -4649,6 +4829,7 @@ mod tests {
             agent: None,
             model: None,
             effort: None,
+            activated_tools: std::collections::BTreeSet::new(),
             parent: None,
             revert: None,
         };

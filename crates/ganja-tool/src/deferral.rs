@@ -8,7 +8,8 @@
 //! filter: a direct call to a deferred tool executes, because a tool result
 //! is information and a correct guess is not an error.
 //!
-//! [`Deferral`] is a value in the same spirit as `SkillTool`'s roots: the
+//! [`Deferral`](crate::deferral::Deferral) is a value in the same spirit as
+//! `SkillTool`'s roots: the
 //! engine computes which names defer and hands a clone to each turn, and the
 //! only shared state is the insert-only activated set behind an `Arc` — a
 //! `tool_search` hit, an executed direct call, or resume seeding writes it,
@@ -124,11 +125,17 @@ pub fn candidates<'a>(
     });
 
     let mut deferred = BTreeSet::new();
-    for (_, members) in ordered {
+    for (server, members) in ordered {
         if advertised <= threshold {
             break;
         }
         advertised -= members.len();
+        tracing::debug!(
+            server,
+            tools = members.len(),
+            threshold,
+            "deferring an MCP server's schemas"
+        );
         deferred.extend(members.into_iter().map(str::to_owned));
     }
 

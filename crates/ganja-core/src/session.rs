@@ -694,6 +694,41 @@ impl Persist {
         }
     }
 
+    /// The durable half of an activation (**D492**): the same single-field,
+    /// in-place `live.info` write [`Persist::remember_agent`] makes, run at
+    /// every call's `finish` and gated on growth against the row's
+    /// last-written value.
+    ///
+    /// Root-scoped by the guard below — a child's persist targets the
+    /// child's own row, so `live.info` (the root's) never matches it and the
+    /// write no-ops; the shared in-memory set carries the child's inserts to
+    /// the parent's next `finish` instead. Never a full [`Persist::finish`],
+    /// whose usage summing belongs to the turn tail alone: a mid-turn-flushed
+    /// row carries pre-tail `usage`/`context_tokens` on purpose, the same
+    /// staleness a crash before any tail write has always had.
+    fn flush_activated(&self, activated: &std::collections::BTreeSet<String>) {
+        let mut live = self
+            .state
+            .live
+            .lock()
+            .expect("the live session is never poisoned");
+        let Some(info) = live.info.as_mut() else {
+            return;
+        };
+        if info.id != self.session {
+            return;
+        }
+        if activated.is_subset(&info.activated_tools) {
+            return;
+        }
+
+        info.activated_tools.extend(activated.iter().cloned());
+        info.updated = now();
+        if let Err(error) = self.state.storage.save_info(info) {
+            self.complain("the activated tools", &error);
+        }
+    }
+
     /// The one call that touches `save_part`, so every write shares the
     /// warning path.
     fn write(&self, owner: &Message, part: &Part) {
@@ -789,6 +824,13 @@ pub(crate) struct Turn {
     /// every engine whose frontend installed no roots: expansion then answers
     /// each name with the tool's own not-found sentence.
     pub(crate) skill_roots: skill::Roots,
+    /// Which registry names are deferred and which this session has
+    /// activated (**D492**), cloned from the engine at the turn's start the
+    /// way [`Turn::tools`] is snapshotted — the candidates travel by value,
+    /// the activated set is the engine's own shared handle. Empty on every
+    /// scripted and golden run, under which every request is byte-identical
+    /// to one built before deferral existed.
+    pub(crate) deferral: crate::tool::deferral::Deferral,
     /// Rules deciding which calls wait for the user.
     pub(crate) permissions: Arc<std::sync::Mutex<Permissions>>,
     /// Directory tool calls resolve relative paths against.
@@ -941,6 +983,11 @@ impl Turn {
             // invocation belongs to what a *person* typed. Its `skill` tool
             // still loads through the registry above.
             skill_roots: skill::Roots::none(),
+            // The parent's own value: a child reads the same advertised
+            // subset, and its activations land in the same session set — the
+            // parent's next step sees them in memory, and the parent's
+            // `task`-call finish is what makes them durable (**D492**).
+            deferral: host.deferral.clone(),
             permissions: Arc::new(std::sync::Mutex::new(parts.permissions)),
             cwd: host.cwd.clone(),
             root: host.root.clone(),
@@ -1024,6 +1071,16 @@ impl Turn {
     fn persist_part(&self, owner: &Message, part: &Part) {
         if let Some(persist) = &self.persist {
             persist.part_now(owner, part);
+        }
+    }
+
+    /// Flushes the activated set to the session row on growth, when the
+    /// engine persists (**D492**). A child turn's persist targets the
+    /// child's own row and no-ops against the root's — see
+    /// [`Persist::flush_activated`] for whose row the guard keeps this.
+    fn flush_activated(&self) {
+        if let Some(persist) = &self.persist {
+            persist.flush_activated(&self.deferral.activated());
         }
     }
 
@@ -2812,6 +2869,37 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 .extend(turn.reminders.iter().cloned().map(Part::text));
         }
 
+        // What is deferred right now, named beside the reminders as its own
+        // per-step computed block — never `turn.reminders`, whose vec is
+        // static for the turn, because this one shrinks as activations land
+        // and has to be recomputed each step. Like the reminders it belongs
+        // to the REQUEST and not to the transcript, and an empty listing
+        // appends nothing, which is every scripted and golden run.
+        let mut tools = turn.tools.definitions();
+        let listing = turn.deferral.listing(&tools);
+        if !listing.is_empty()
+            && let Some(user) = messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.role == Role::User)
+        {
+            user.parts.push(Part::text(listing));
+        }
+        // **D492** (`deferred-mcp-tools-advertise-filtered`): what is
+        // *advertised* is a subset of what is *registered* — whole MCP
+        // servers past the config's `tool_defer_threshold`, largest first —
+        // through this one order-preserving filter; the registry,
+        // permission, hook and transcript keys stay whole. The deliberate
+        // departure from Claude Code's ToolSearch: a direct call to a
+        // deferred tool is *not* uncallable — it resolves in the complete
+        // registry, executes under its unchanged gate, and activates by
+        // executing (`finish`), because a tool result is information and a
+        // correct guess is not an error. The owned risk is a schema-blind,
+        // permission-allowed call reaching a real server with guessed
+        // arguments: the `mcp__` prefix asks by default, and the failure
+        // that follows a bad guess now advertises the schema.
+        turn.deferral.retain_advertised(&mut tools);
+
         // The one place a mention becomes content. Doing it here rather than
         // when the user attached the file is what makes the model read the
         // file as it is *now*: a mention is a reference, and a reference
@@ -2831,7 +2919,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             model: turn.model.clone(),
             system,
             messages,
-            tools: turn.tools.definitions(),
+            tools,
             effort_options: turn.effort_options.clone(),
         }
     };
@@ -3532,9 +3620,13 @@ async fn prepare(
     let Some(tool) = turn.tools.get(&call.name) else {
         // Upstream reroutes an unavailable tool through `invalid.ts` carrying
         // the AI SDK's `NoSuchToolError` message, and this is that message.
-        let names: Vec<String> = turn
-            .tools
-            .definitions()
+        // The roster it quotes is the *advertised* subset, through the same
+        // filter the request build uses — a deferred tool never reaches this
+        // arm (it resolves above and executes), so naming it here would be
+        // telling the model a name the request never offered.
+        let mut definitions = turn.tools.definitions();
+        turn.deferral.retain_advertised(&mut definitions);
+        let names: Vec<String> = definitions
             .into_iter()
             .map(|definition| definition.name)
             .collect();
@@ -3822,6 +3914,32 @@ async fn finish(
     let Prepared {
         call, args, hook, ..
     } = prepared;
+
+    // A deferred tool that *executed* — resolved, permission-passed, body ran
+    // — activates whatever came back (**D492**). Before the outcome match so
+    // all three arms activate alike: a failed call (MCP `isError` maps to
+    // `Err(ToolError::Failed)`) is exactly the moment the model most needs
+    // the schema advertised, success-only activation would leave it retrying
+    // blind, and a cancelled call activating is harmless — the set is
+    // grow-only, and advertisement is not authority.
+    if call
+        .name
+        .starts_with(ganja_permission::permission::MCP_PREFIX)
+        && turn.deferral.activate(&call.name)
+    {
+        tracing::debug!(
+            tool = call.name.as_str(),
+            by = "call",
+            "activated a deferred tool"
+        );
+    }
+    // Durability at the activation event, not the turn tail: the growth
+    // check runs at *every* call's finish — the parent's `task` call
+    // included, which is the fan-in flush for a child's activations, however
+    // deep the child ran — and compares the shared set against the root
+    // row's last-written value, so a child's no-op persist can never consume
+    // the growth signal.
+    turn.flush_activated();
 
     match result {
         Ok(mut output) => {
@@ -4721,6 +4839,7 @@ mod tests {
             },
             tools: Arc::new(Registry::new(vec![tool])),
             skill_roots: crate::tool::skill::Roots::none(),
+            deferral: crate::tool::deferral::Deferral::none(),
             permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
             cwd: std::env::temp_dir(),
             root: std::env::temp_dir(),
@@ -5131,6 +5250,7 @@ mod tests {
                     .expect("the default config resolves agents"),
             ),
             tools: Arc::new(Registry::new(Vec::new())),
+            deferral: crate::tool::deferral::Deferral::none(),
             permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
             base_prompt: None,
             prompt_suffix: None,
