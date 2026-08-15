@@ -1483,12 +1483,52 @@ impl App {
     /// text) reaches the same place here, because [`clipboard::Clipboard`]
     /// already answers the two as independent questions.
     async fn paste_from_clipboard(&mut self) {
+        // Files first (2026-08-15): a file copied in Finder rides the
+        // pasteboard as its URL *and* its bare name as text, so a paste that
+        // asked for text first inserted a basename that resolves nowhere —
+        // the pinned screenshot. Only a clipboard that holds no files at all
+        // falls through to the text and image questions.
+        if let Ok(files) = self.clipboard.read_files()
+            && !files.is_empty()
+        {
+            self.paste_files(files).await;
+            return;
+        }
+
         match self.clipboard.read() {
             Ok(text) => self.paste(&text).await,
             Err(clipboard::Error::NotText) => self.paste_clipboard_image().await,
             // A machine with no clipboard costs a notice and never the
             // keystroke: nothing here may eat what was being typed.
             Err(error) => self.status.set_notice(Some(error.to_string())),
+        }
+    }
+
+    /// A paste of copied files: images become inline `[Image #N]` tokens
+    /// backed by the copied file itself — no scratch copy, the file is
+    /// already somewhere durable — and everything else joins the composer the
+    /// way the same paths *typed or dropped* would, through
+    /// [`App::paste`]'s own classifier.
+    async fn paste_files(&mut self, files: Vec<std::path::PathBuf>) {
+        let mut leftovers: Vec<String> = Vec::new();
+        let mut tokenized = false;
+        for file in files {
+            let path = file.display().to_string();
+            let mime = attachment::mime(&path);
+            if mime.starts_with("image/") && attachment::is_binary(mime) && file.is_file() {
+                let number = self.next_image_number();
+                self.pasted_images.push((number, path));
+                self.editor.insert(&format!("[Image #{number}] "));
+                tokenized = true;
+            } else {
+                leftovers.push(path);
+            }
+        }
+
+        if !leftovers.is_empty() {
+            self.paste(&leftovers.join("\n")).await;
+        } else if tokenized {
+            self.sync_menus().await;
         }
     }
 
@@ -1503,7 +1543,7 @@ impl App {
         match self.clipboard.read_image() {
             Ok(image) => match self.save_clipboard_image(&image) {
                 Ok(path) => {
-                    let number = self.clipboard_pastes;
+                    let number = self.next_image_number();
                     self.pasted_images.push((number, path));
                     self.editor.insert(&format!("[Image #{number}] "));
                     self.sync_menus().await;
@@ -1549,6 +1589,15 @@ impl App {
     /// whose number nothing pasted — typed by hand, or recalled from history
     /// into a fresh session — stays literal text, the same fate a mistyped
     /// `@` path meets.
+    /// The number the next `[Image #N]` token carries: one past however many
+    /// images this session has pasted, whichever door they came through —
+    /// the scratch-PNG counter names files, this names tokens.
+    fn next_image_number(&self) -> u32 {
+        u32::try_from(self.pasted_images.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1)
+    }
+
     fn pasted_images_in(&self, text: &str) -> Vec<ganja_protocol::Mention> {
         self.pasted_images
             .iter()
@@ -10361,6 +10410,62 @@ mod tests {
         let (width, height, decoded) = decode_png(&bytes);
         assert_eq!((width, height), (3, 1), "the scripted dimensions survive");
         assert_eq!(decoded, rgba, "and so do the pixels");
+    }
+
+    /// The pinned 2026-08-15 screenshot: a file copied in Finder rides the
+    /// pasteboard as its URL *and* its bare name as text, and pasting it must
+    /// consult the files first — asked for text, the paste inserted
+    /// `Screenshot ….png`, a basename that resolves nowhere. An image file
+    /// tokenizes as `[Image #N]` mapped to the copied file itself, no scratch
+    /// copy made.
+    #[tokio::test]
+    async fn pasting_a_copied_image_file_tokenizes_the_file_itself() {
+        let dir = tempfile::tempdir().expect("a directory for the copied file");
+        let copied = dir.path().join("Screenshot 2026-08-15 at 10.29.02.png");
+        fs::write(&copied, b"not-really-a-png").expect("the copied file exists");
+        let mut app = app().with_clipboard(Box::new(clipboard::Recording::holding_files(vec![
+            copied.clone(),
+        ])));
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+
+        assert_eq!(
+            app.editor.text(),
+            "[Image #1] ",
+            "the copied image is a token, not its basename as text"
+        );
+        assert_eq!(
+            app.pasted_images_in("[Image #1]")
+                .into_iter()
+                .map(|mention| mention.path)
+                .collect::<Vec<_>>(),
+            vec![copied.display().to_string()],
+            "and the token names the copied file itself"
+        );
+    }
+
+    /// A copied file that is not an image goes through the same classifier a
+    /// typed or dropped path does — an existing file becomes an `@` mention.
+    #[tokio::test]
+    async fn pasting_a_copied_non_image_file_becomes_a_mention() {
+        let dir = tempfile::tempdir().expect("a directory for the copied file");
+        let copied = dir.path().join("notes.rs");
+        fs::write(&copied, b"fn main() {}").expect("the copied file exists");
+        let mut app = app().with_clipboard(Box::new(clipboard::Recording::holding_files(vec![
+            copied.clone(),
+        ])));
+
+        app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-v is handled");
+
+        assert_eq!(
+            app.editor.text(),
+            format!("@{} ", copied.display()),
+            "a non-image file pastes as the mention its drop would"
+        );
     }
 
     /// The token is the composer's face for the saved file: submitting a

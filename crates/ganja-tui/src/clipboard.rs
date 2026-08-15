@@ -51,6 +51,12 @@ pub enum Error {
     /// [`Clipboard::read`] — or nothing this build can read at all.
     #[error("the clipboard does not hold an image")]
     NoImage,
+    /// The clipboard does not hold copied files. A file copied in a file
+    /// manager usually rides beside a text spelling of its *name* — which is
+    /// why [`Clipboard::read_files`] must be asked before [`Clipboard::read`]
+    /// (2026-08-15).
+    #[error("the clipboard does not hold files")]
+    NoFiles,
 }
 
 /// RGBA8 pixels read from the clipboard, row-major with no padding: exactly
@@ -98,6 +104,14 @@ pub trait Clipboard: Send {
     /// Returns [`Error::NoImage`] when it holds something else — text, or
     /// nothing — and [`Error::Unavailable`] when there is nothing to ask.
     fn read_image(&mut self) -> Result<Image, Error>;
+
+    /// The files the clipboard holds, when what was copied was files.
+    ///
+    /// Asked **first** at paste time (2026-08-15): a file copied in Finder
+    /// puts the file's URL *and* its bare name as text on the pasteboard, so
+    /// a paste that asked for text first would insert a basename that
+    /// resolves nowhere — the screenshot that pinned this bug.
+    fn read_files(&mut self) -> Result<Vec<std::path::PathBuf>, Error>;
 }
 
 /// The clipboard the desktop this process runs on provides.
@@ -157,6 +171,16 @@ impl Clipboard for System {
             height: image.height,
             rgba: image.bytes.into_owned(),
         })
+    }
+
+    fn read_files(&mut self) -> Result<Vec<std::path::PathBuf>, Error> {
+        self.handle()?
+            .get()
+            .file_list()
+            .map_err(|error| match error {
+                arboard::Error::ContentNotAvailable => Error::NoFiles,
+                other => Error::Unavailable(other.to_string()),
+            })
     }
 }
 
@@ -247,6 +271,8 @@ pub struct Recording {
     pub holds: Result<String, Error>,
     /// What the next image read answers with.
     pub holds_image: Result<Image, Error>,
+    /// What the next file-list read answers with.
+    pub holds_files: Result<Vec<std::path::PathBuf>, Error>,
     /// What every write answers with; [`Ok`] by default.
     pub accepts: Result<(), Error>,
 }
@@ -260,6 +286,7 @@ impl Default for Recording {
             written: std::sync::Arc::default(),
             holds: Err(Error::NotText),
             holds_image: Err(Error::NoImage),
+            holds_files: Err(Error::NoFiles),
             accepts: Ok(()),
         }
     }
@@ -287,6 +314,25 @@ impl Recording {
         }
     }
 
+    /// A clipboard holding copied files, the way a Finder ⌘C leaves one —
+    /// beside, on a real pasteboard, a text spelling of the bare names that
+    /// this double deliberately also carries, so a test exercises the order
+    /// the paste consults the two in (2026-08-15).
+    pub fn holding_files(files: Vec<std::path::PathBuf>) -> Self {
+        let names = files
+            .iter()
+            .filter_map(|file| file.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Self {
+            holds: Ok(names),
+            holds_files: Ok(files),
+            ..Self::default()
+        }
+    }
+
     /// A clipboard whose reads — text and image alike — fail with `error`.
     ///
     /// The real [`System`] cannot fail one and not the other for the same
@@ -296,7 +342,8 @@ impl Recording {
     pub fn refusing_reads(error: Error) -> Self {
         Self {
             holds: Err(error.clone()),
-            holds_image: Err(error),
+            holds_image: Err(error.clone()),
+            holds_files: Err(error),
             ..Self::default()
         }
     }
@@ -334,6 +381,10 @@ impl Clipboard for Recording {
 
     fn read_image(&mut self) -> Result<Image, Error> {
         self.holds_image.clone()
+    }
+
+    fn read_files(&mut self) -> Result<Vec<std::path::PathBuf>, Error> {
+        self.holds_files.clone()
     }
 }
 
