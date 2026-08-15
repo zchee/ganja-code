@@ -6,7 +6,8 @@
 > パリティであり、Codex CLI は第三のプロダクトとして比較のために目録化した
 > だけである。表中の ❌ は観察であって、約束ではない。
 
-スナップショット: 2026-08-12、Codex CLI の main ブランチを対象(本リポジトリに
+ganja 側セルは 2026-08-15 に post-P22 のツリーへ更新済み(Codex 側調査は
+2026-08-12 のまま)。スナップショット: 2026-08-12、Codex CLI の main ブランチを対象(本リポジトリに
 Codex のピンは存在しない — upstream の変化とともに行は古くなる)。
 *(低確度)* を付した行は公式ドキュメントではなくコミュニティ情報に依る。
 
@@ -36,7 +37,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 
 | 機能 | 補足 | ganja |
 |---|---|---|
-| [トランスクリプトオーバーレイ](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ 同じキー、3タブ(完全な tool/MCP 入出力を含む展開トランスクリプト・生イベントログ・ターン毎トークン表);フルターミナル占有とバナーはこのオーバーレイ独自の表現、フッター文言は Claude Code の Ctrl+O から |
+| [トランスクリプトオーバーレイ](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ 同じキー、3タブ(完全な tool/MCP 入出力を含む展開トランスクリプト・生イベントログ・ターン毎トークン表);フルターミナル占有とバナーはこのオーバーレイ独自の表現、フッター文言は Claude Code の Ctrl+O から — 2026-08-15 以降は塗りも Codex 自身のモノクロ(どのテーマでも文字色 on 端末背景)で、各タブは末尾固定で開きストリームに追従する |
 | [ステータスライン構成](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ✅ `tui.statusline` の要素ロースター(D469): ユーザー順の名前付き要素、幅対応、OMC HUD の描画形(メーター・git 行・任意の詳細行);要素語彙は Codex の id リストではなく ganja 自身のもので、未知の名前はロード時に拒否 |
 | [オンボーディングフロー](https://developers.openai.com/codex/cli) | 初回起動時の認証選択(ChatGPT OAuth / API キー)・config 初期化 | ❌ ganja はステータスバー通知付きで fake プロバイダ起動;`auth login` は別の CLI 手順 |
 | [承認ダイアログ](https://github.com/openai/codex/blob/main/docs/getting-started.md) | 実行前のコマンド/パッチのプレビュー;承認・セッション内承認・フィードバック付き拒否 | ⚠️ ganja の permission ダイアログ(allow / always / deny)— "always" はセッションと共に消えず、プロジェクト毎ストアに永続化 |
@@ -65,7 +66,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | [`/diff`](https://developers.openai.com/codex/cli) | セッション全変更のビューア | ❌(編集毎のインライン diff は✅) |
 | [`/compact`](https://developers.openai.com/codex/cli) | 会話の要約圧縮 | ✅ +自動圧縮 |
 | [`/prompts` → Agent Skills](https://developers.openai.com/codex/cli) *(中確度)* | テンプレートは SKILL.md 標準へ移行 | ⚠️ skills は✅・テンプレ一覧 UI ❌ |
-| [`/status`](https://developers.openai.com/codex/cli) | モデル・トークン・文脈・コストのダッシュボード | ⚠️ ステータスバー+Totals のみ |
+| [`/status`](https://developers.openai.com/codex/cli) | モデル・トークン・文脈・コストのダッシュボード | ⚠️ `/usage`(セッション合計・キャッシュ/推論内訳・ベンダー rate 窓・プラン上限メーター)と `/context`(カテゴリ別グリッド)+ステータスバーに分かれる;単一ダッシュボードコマンドは無い |
 | [`/init`](https://developers.openai.com/codex/cli) | AGENTS.md 生成 | ✅ |
 | [`/resume`](https://developers.openai.com/codex/cli) | TUI 内セッションピッカー | ✅ `/sessions` |
 | [`/feedback`](https://developers.openai.com/codex/cli) | サニタイズ済み診断のベンダー送信 | ❌(テレメトリチャネル自体なし) |
@@ -150,7 +151,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | 機能 | 補足 | ganja |
 |---|---|---|
 | [カスタム `model_providers`](https://github.com/openai/codex/blob/main/docs/config.md) | `base_url`+`env_key`+`http_headers`+モデルリスト・`wire_api = "responses"` のみ | ✅ 強いパリティ: ganja の `provider` テーブル(dialect/base_url/key_env/headers)— しかも ganja は **2 dialect** を話す(Codex は1つに絞った) |
-| [モデル選択](https://github.com/openai/codex/blob/main/docs/config.md) | `model`・`model_reasoning_effort`・`model_reasoning_summary` | ⚠️ `/model` + `/effort` のカタログ roster;summary ノブなし |
+| [モデル選択](https://github.com/openai/codex/blob/main/docs/config.md) | `model`・`model_reasoning_effort`・`model_reasoning_summary` | ⚠️ config キー `model` と `effort`(effort は新規セッションを播種、採用時にカタログ照合;保存済みセッション自身の選択が勝つ — P17)+ `/model`・`/effort`;summary ノブなし |
 | [ChatGPT OAuth / API キー](https://github.com/openai/codex/blob/main/docs/authentication.md) | 二資格情報 | ✅ 同型(ganja の `openai`) |
 | [`codex login --device-auth`](https://github.com/openai/codex/blob/main/docs/authentication.md) | headless デバイスコード認証 | ✅ ganja の grok・ChatGPT ログインともデバイスフロー保持 |
 | [資格情報の優先順位](https://github.com/openai/codex/blob/main/docs/authentication.md) | `CODEX_API_KEY` > `OPENAI_API_KEY` > `auth.json` | ✅ 同型: env キーが保存ログインに優先 |
@@ -207,7 +208,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | [`CODEX_HOME`](https://github.com/openai/codex/blob/main/docs/config.md) | 状態・設定のホーム(`~/.codex`) | ✅ `GANJA_CONFIG_HOME` — マージではなく1ホーム |
 | [`OPENAI_API_KEY`](https://github.com/openai/codex/blob/main/docs/authentication.md) | API キー資格情報 | ✅ 同じ変数 |
 | [`CODEX_API_KEY`](https://github.com/openai/codex/blob/main/docs/authentication.md) *(中確度)* | Codex 専用のキー上書き | ❌ ganja 専用キー変数は意図して持たない |
-| [`RUST_LOG` / `LOG_FORMAT`](https://github.com/openai/codex/blob/main/docs/config.md) *(中確度)* | tracing フィルタ+形式・ログは `$CODEX_HOME/log/` | ❌ 文書化されたログ env 面なし |
+| [`RUST_LOG` / `LOG_FORMAT`](https://github.com/openai/codex/blob/main/docs/config.md) *(中確度)* | tracing フィルタ+形式・ログは `$CODEX_HOME/log/` | ⚠️ `RUST_LOG` を尊重(`-v` の既定フィルタより優先)、データホームの `log/` に**ローカル**日付名の日次ファイル・7 件保持;`LOG_FORMAT` ノブは無い |
 | `OPENAI_BASE_URL` | エンドポイント上書き | ✅ 同じ変数 — ただし ganja は *Responses* クライアントを向ける・https か loopback 以外は拒否 |
 
 ganja 自身の `GANJA_*` 面はリポジトリルートの `AGENTS.md` に文書化。

@@ -6,7 +6,8 @@
 > 挙動パリティであり、Claude Code は別プロダクトとして比較のために目録化した
 > だけである。表中の ❌ は観察であって、約束ではない。
 
-スナップショット: 2026-08-12、Claude Code 2.1.x 世代を対象。Claude Code の
+ganja 側セルは 2026-08-15 に post-P22 のツリーへ更新済み(Claude 側調査は
+2026-08-12 のまま)。スナップショット: 2026-08-12、Claude Code 2.1.x 世代を対象。Claude Code の
 更新は速いので、古くなった行は「古い行」であって ganja の退行ではない。
 *(低確度)* を付した行は公式ドキュメントではなくコミュニティ情報に依る。
 
@@ -50,11 +51,11 @@
 
 | 機能 | 補足 | ganja |
 |---|---|---|
-| トランスクリプト文法 *(スクリーンショット由来。文書化されていない)* | 返答ブロックとツール呼出しに `●`、結果マーカーに `⎿`(プレビューはその下に字下げ)、ユーザー自身のメッセージに `>`、thinking に `✻` | ✅ そのまま移植(D487): 同じ4字形、引数要約はヘッダ1行に凝縮(`● Tool(key: "value", …)`、上限付きで切り詰めを明示)、状態は角括弧の語ではなく色で示す、クランプしたプレビューは ganja 自身の展開手段を指す(`… +N lines (ctrl+t to expand)` — Claude は ctrl+o を指す)。`read` は件数のみでプレビューを一切出さない(`● Read(/abs/path · lines A-B)` + `⎿ Read N lines`);`/copy` は意図的に upstream opencode の markdown 形状を維持する — 画面とクリップボードは読み手が違う |
-| 作業中の行 *(スクリーンショット由来)* | ターン実行中、トランスクリプト末尾に `✻ <verb>… (Ns · ↑ N tokens)` | ⚠️ 形状は同じ、動詞は ganja 独自(Claude の語彙はあちらの声である);トークン値はセッション累計の出力トークン — provider は1ターンに一度しか usage を報告せず、ターン内の実測値を読む経路が無いため。値が無いときはゼロを示さずセグメントごと落とす |
+| トランスクリプト文法 *(スクリーンショット由来。文書化されていない)* | 返答ブロックとツール呼出しに `●`、結果マーカーに `⎿`(プレビューはその下に字下げ)、ユーザー自身のメッセージに `>`、thinking に `✻` | ✅ そのまま移植(D487): 同じ4字形、引数要約はヘッダ1行に凝縮(`● Tool(key: "value", …)`、上限付きで切り詰めを明示)、状態は角括弧の語ではなく色で示す — 2026-08-15 以降、確定した ● は成否だけを答える(成功=緑・失敗=赤、失敗行の見出しは通常色のまま)— クランプしたプレビューは ganja 自身の展開手段を指す(`… +N lines (ctrl+t to expand)` — Claude は ctrl+o を指す)。`read` は件数のみでプレビューを一切出さない(`● Read(/abs/path · lines A-B)` + `⎿ Read N lines`);`/copy` は意図的に upstream opencode の markdown 形状を維持する — 画面とクリップボードは読み手が違う |
+| 作業中の行 *(スクリーンショット由来)* | ターン実行中、composer 直上に `✻ <verb>… (Ns · ↓ N tokens)` を固定し、その下に todo リスト | ⚠️ 2026-08-15 以降は配置も同じ — スクロール外の composer 直上ストリップに、専用オレンジ+左→右のシマー帯で描いた行と、実行中ターンの最新チェックリストをぶら下げる — 動詞は ganja 独自(Claude の語彙はあちらの声である);トークン値は Claude 自身の ↓ 矢印に乗るがセッション累計の出力トークンで、usage はリクエスト毎にしか届かないため、値が無いときはゼロを示さずセグメントごと落とす |
 | thinking のストリーム表示 | 到着した thinking ブロックをトランスクリプトに描画 | ✅ `✻` マーカー・dim italic・ストリーム中は新しい側からクランプ;**表示専用** — どの wire も送り返さず、要約にも載らず、context メーターは 0 と数え、クリップボードにも出ない。upstream opencode は可読部と封緘部を1つの part に融合してリクエストに載せ返すが、ganja は分割し封緘側だけを送る |
-| [verbose トランスクリプトビューア](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O オーバーレイ: 全履歴・ツールペイロード・thinking ブロック | ✅ Ctrl+T インスペクタ — フルターミナル占有・3タブ(展開トランスクリプト・生イベントログ・ターン毎トークン表);表現は Codex CLI 自身のオーバーレイと Claude Code の Ctrl+O フッター文言を合成 |
-| [Todo チェックリストパネル](https://code.claude.com/docs/en/interactive-mode) | Ctrl+T でタスクのサイドパネルを開閉 | ⚠️ todo はチャット内描画のみ;ganja の Ctrl+T はインスペクタに割当済み |
+| [verbose トランスクリプトビューア](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O オーバーレイ: 全履歴・ツールペイロード・thinking ブロック | ✅ Ctrl+T インスペクタ — フルターミナル占有・3タブ(展開トランスクリプト・生イベントログ・ターン毎トークン表);表現は Codex CLI 自身のオーバーレイと Claude Code の Ctrl+O フッター文言を合成し、どのテーマでも Codex モノクロで描画、各タブは末尾固定で開きストリームに追従する(2026-08-15) |
+| [Todo チェックリストパネル](https://code.claude.com/docs/en/interactive-mode) | Ctrl+T でタスクのサイドパネルを開閉 | ⚠️ 開閉パネルは無い(ganja の Ctrl+T はインスペクタ)が、実行中ターンの最新チェックリストは作業行の下・composer 直上に固定表示 — Claude 自身の配置 — され、各 `todowrite` 呼出しはチャット内で ☐/☒ 行として描かれる(2026-08-15) |
 | [permission ダイアログ](https://code.claude.com/docs/en/iam) | ツール呼出しのプレビュー・承認/拒否・ダイアログ内モード切替 | ✅ upstream 由来のダイアログセマンティクス(`a`/`A`/`d`)、複数の子が同時に尋ねるとキュー化;ダイアログ内モード切替はなし(モード概念自体がない) |
 | [trust ダイアログ](https://code.claude.com/docs/en/iam) | 初回起動時のディレクトリ信頼確認 | ❌ trust 層なし;すべて permission ルールが門番 |
 | [ステータスラインのスクリプト化](https://code.claude.com/docs/en/statusline) | `/statusline`、セッション JSON を stdin で受ける `statusLine` コマンド | ⚠️ 代わりにネイティブな `tui.statusline` 要素ロースター(D469): ユーザー順の名前付きセグメント、HUD 形のメーター、任意の git 行・詳細行 — 外部スクリプトプロトコルは意図的に無し(描画ティックごとのサブプロセスを作らない) |
@@ -93,8 +94,8 @@
 | [`/statusline`](https://code.claude.com/docs/en/statusline) | ステータスバーのスクリプト化 | ❌ スクリプト化コマンドは無し;バー自体は `tui.statusline` でネイティブに構成できる(D469) |
 | [`/output-style`](https://code.claude.com/docs/en/output-styles) | 応答スタイル | ❌ |
 | [`/context`](https://code.claude.com/docs/en/costs) | 文脈使用量の可視化グリッド | ✅ 圧縮見積もり器と同じ内訳でカテゴリ別グリッド+凡例を描画(D470);ウィンドウ未収載モデルは正直に合計表示へ縮退し、分母を発明しない |
-| [`/todos`](https://code.claude.com/docs/en/interactive-mode) | タスクチェックリスト表示 | ⚠️ チャット内描画のみ |
-| [`/usage`](https://code.claude.com/docs/en/costs) | 使用量・コスト内訳 | ✅ セッション合計・キャッシュ/推論の内訳・文脈 %・ターン別テーブル(D471)+「Current window」セクション(D484)に加え、バックエンドが実際に送るプラン上限メーターを描画(D485): ChatGPT シートの 5h/weekly used-percent 窓と Copilot のクォータスナップショットを毎応答のヘッダから読む(文法は各ベンダー公式クライアントから引用);何も送らないクレデンシャル(Platform キー、Anthropic の Admin 専用 usage API)だけを honest-absence の末尾が名指しする |
+| [`/todos`](https://code.claude.com/docs/en/interactive-mode) | タスクチェックリスト表示 | ⚠️ コマンドは無いが、リストはチャット内に ☐/☒ 行で描かれ、ターン実行中は composer 直上にも固定表示される(2026-08-15) |
+| [`/usage`](https://code.claude.com/docs/en/costs) | 使用量・コスト内訳 | ✅ セッション合計・キャッシュ/推論の内訳・文脈 %・ターン別テーブル(D471)+「Current window」セクション(D484;パネルは「expired」を言葉で言い、HUD の `rate` メーターは最後に聞いた値を保持する — リクエスト系バケットの reset はミリ秒単位で来るため、時計に従うメーターは点滅か 0% 固定にしかならない)に加え、バックエンドが実際に送るプラン上限メーターを描画(D485): ChatGPT シートの 5h/weekly used-percent 窓と Copilot のクォータスナップショットを毎応答のヘッダから読む(文法は各ベンダー公式クライアントから引用);何も送らないクレデンシャル(Platform キー、Anthropic の Admin 専用 usage API)だけを honest-absence の末尾が名指しする |
 | [`/doctor`](https://code.claude.com/docs/en/troubleshooting) | 自己診断 | ❌ |
 | [`/export`](https://code.claude.com/docs/en/slash-commands) | 会話のエクスポート | ⚠️ `/copy` のみ |
 | [`/cd`](https://code.claude.com/docs/en/slash-commands) *(低確度)* | 作業ディレクトリ変更 | ❌ 起動ディレクトリ固定は設計判断 |
@@ -116,7 +117,7 @@
 | [`BashOutput` / `KillShell`](https://code.claude.com/docs/en/settings) | バックグラウンドシェルの読取・停止 | ✅ `bash_output`(差分ポーリング+正規表現 `filter`)・`kill_shell` — upstream opencode に対応物なし(D454) |
 | [`WebFetch`](https://code.claude.com/docs/en/settings) | URL 取得・解析 | ✅ `webfetch` |
 | [`WebSearch`](https://code.claude.com/docs/en/settings) | web 検索 | ✅ `websearch`(Exa/Parallel) |
-| [`Task`](https://code.claude.com/docs/en/sub-agents) | サブエージェント起動 | ✅ `task` |
+| [`Task`](https://code.claude.com/docs/en/sub-agents) | サブエージェント起動 | ✅ `task` — 実行中の行は子の直近呼出しを下にぶら下げ(watcher が書く上限付きログ;全量は Ctrl+T か `/copy` に)、後ろで順番待ちの呼出しは確定済み引数を名乗る(2026-08-15) |
 | [`TodoWrite`](https://code.claude.com/docs/en/interactive-mode) | チェックリスト | ✅ `todowrite` |
 | [`ExitPlanMode`](https://code.claude.com/docs/en/common-workflows) | 承認付き plan 離脱 | ✅ `plan_exit`(question ゲートの build 切替) |
 | skill ツール | スキルの明示ロード | ✅ `skill` |
@@ -153,7 +154,7 @@
 | [テンプレート内 `` !`cmd` ``](https://code.claude.com/docs/en/slash-commands) | 起動時のシェル出力埋込 | ✅(P8) |
 | [テンプレート内 `@path`](https://code.claude.com/docs/en/slash-commands) | ファイル埋込 | ✅(P8・mention 級添付として) |
 | [frontmatter: `allowed-tools`](https://code.claude.com/docs/en/slash-commands) | コマンド毎のツール制限 | ❌(コマンド毎 agent は✅) |
-| [frontmatter: `model`・`argument-hint`](https://code.claude.com/docs/en/slash-commands) | コマンド毎モデル+ヒント | ❌ |
+| [frontmatter: `model`・`argument-hint`](https://code.claude.com/docs/en/slash-commands) | コマンド毎モデル+ヒント | ✅ ファイル tier の frontmatter が両方を持つ(D481) |
 | [CLAUDE.md 階層](https://code.claude.com/docs/en/memory) | グローバル→ルート→サブディレクトリを連結 | ✅ グローバル+プロジェクトの AGENTS.md 族に加え、ツールが実際に触れたサブツリーの AGENTS.md 族を lazy に次リクエストへ注入(touch 駆動・closest-last・clamp 付き、D480)— Claude の起動時連結とは方式が異なる |
 | [メモリー内 `@path` import](https://code.claude.com/docs/en/memory) | インポート元相対で解決するモジュール分割 | ❌ |
 | [自動メモリー](https://code.claude.com/docs/en/memory) | `~/.claude/projects/<hash>/memory/`(MEMORY.md 索引+トピックファイル)を自己保守 | ✅ opt-in(config `memory: true`、既定 off は意図的相違): プロジェクト毎データディレクトリの `memory/`(MEMORY.md 索引+トピックファイル)を prompt に合成、維持指示ブロックは合成文で秘密の保存を明示的に禁止(D478) |
@@ -171,7 +172,7 @@
 | [自動トリガー+`paths` スコープ](https://code.claude.com/docs/en/skills) | 記述・パスマッチ発動 | ❌ 明示ロードのみ |
 | [`context: fork`](https://code.claude.com/docs/en/skills) | fork したサブエージェントで実行し結果のみ返す | ❌ |
 | [skill の `allowed-tools`](https://code.claude.com/docs/en/skills) | `mcp__*` ワイルドカード含む制限 | ❌ |
-| [プラグイン: 5 コンポーネント](https://code.claude.com/docs/en/plugins) | skills・agents・hooks・MCP・LSP | ✅ 5 面すべてが config への寄与としてマージされる(D472/D473): hooks は追記、MCP は `plugin:<name>:<server>` に名前空間化され既定で確認要求、skills ルートは連結、agents/LSP はキー単位で明示 config が勝つ;6 面目の `commands/` は後送り |
+| [プラグイン: 5 コンポーネント](https://code.claude.com/docs/en/plugins) | skills・agents・hooks・MCP・LSP | ✅ 6 面すべてが config への寄与としてマージされる(D472/D473;P22 で `commands/` が集合を閉じた): hooks は追記、MCP は `plugin:<name>:<server>` に名前空間化され既定で確認要求、skills ルートは連結、`commands/*.md` は `<plugin>:<name>` としてコマンド表に加わり、agents/LSP はキー単位で明示 config が勝つ |
 | [marketplace](https://code.claude.com/docs/en/plugins) | `marketplace.json`・`/plugin install`・`/reload-plugins` | ⚠️ `marketplace.json` をそのまま解釈、git URL かローカルパスから追加、インストールは `<plugin>@<marketplace>` 表記(D472);リモート source オブジェクト(`github:` 等)はパースのみでまだインストール不可、reload は restart-honest(D474) |
 
 ## 10. MCP・LSP
@@ -196,7 +197,7 @@
 | [1M コンテキストエイリアス](https://code.claude.com/docs/en/model-config) | `sonnet[1m]`・`opus[1m]` | ❌ |
 | [`MAX_THINKING_TOKENS`](https://code.claude.com/docs/en/settings) | thinking 予算上書き | ⚠️ カタログ由来の effort variant が予算を運ぶ |
 | [自動圧縮しきい値の上書き](https://code.claude.com/docs/en/settings) *(低確度)* | 発火率の env 調整 | ❌ 固定しきい値 |
-| [小型高速モデルへのルーティング](https://code.claude.com/docs/en/settings) | 背景処理を安価モデルへ | ⚠️ ganja のタイトル要求はセッションモデルに乗る |
+| [小型高速モデルへのルーティング](https://code.claude.com/docs/en/settings) | 背景処理を安価モデルへ | ⚠️ `small_model` がタイトル要求を担う(接頭辞の provider に束縛、D490);他の背景処理はセッションモデルのまま |
 | [サブスクリプション OAuth / Console API キー](https://code.claude.com/docs/en/iam) | `/login` が claude.ai OAuth(PKCE)か従量 API キーを選ばせる | ⚠️ ganja の `anthropic` は API キーのみ(env または保存);サブスクリプション OAuth は upstream 仕様に存在しなかった(規約対応で撤去済み) |
 | [`apiKeyHelper`](https://code.claude.com/docs/en/settings) | 要求時にキーを出力する settings 宣言コマンド | ❌ 最も近いのは config プロバイダの `key_env` |
 | [`ANTHROPIC_AUTH_TOKEN`](https://code.claude.com/docs/en/settings) | ゲートウェイ・プロキシ用カスタム bearer | ❌ |
@@ -214,7 +215,7 @@
 | [`permissions` ブロック](https://code.claude.com/docs/en/iam) | `allow`/`ask`/`deny` 配列+`defaultMode` | ⚠️ ganja の `permission` ブロックは upstream opencode の文法(§6) |
 | [`env` ブロック](https://code.claude.com/docs/en/settings) | スコープ毎の環境変数注入 | ❌ |
 | [`hooks` キー](https://code.claude.com/docs/en/hooks) | イベント名キーの matcher/handler 群 | ✅ Claude の形をそのまま採用(§7) |
-| [`model` / `effortLevel` キー](https://code.claude.com/docs/en/model-config) | 既定モデルと推論深度 | ⚠️ `model` ✅;effort はセッション内選択(`/effort`)で config キーではない |
+| [`model` / `effortLevel` キー](https://code.claude.com/docs/en/model-config) | 既定モデルと推論深度 | ✅ `model` も `effort` も: `effort` は新規セッションのカタログ effort を播種し、採用時にモデルの行へ照合される — 既定であって上書きではないので、保存済みセッション自身の選択が勝つ(P17) |
 | [`statusLine`・`outputStyle`・`spinnerTipsEnabled`](https://code.claude.com/docs/en/statusline) | 表示スクリプトとスタイル | ❌(ganja の表示ノブはテーマのみ) |
 | [`attribution`](https://code.claude.com/docs/en/settings) *(低確度)* | コミット/PR トレーラー文言 | ❌ ganja は自分でコミットを書かない |
 | [`claude config` CLI](https://code.claude.com/docs/en/settings) | `get`/`set`/`list`・`--global` | ❌ 設定ファイルのみ |

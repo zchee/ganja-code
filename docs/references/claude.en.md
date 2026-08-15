@@ -9,7 +9,8 @@
 Snapshot: 2026-08-12, against the Claude Code 2.1.x generation. Claude Code
 moves quickly — treat stale rows as stale, not as ganja regressions. Rows
 marked *(low confidence)* rest on community sources rather than official
-documentation.
+documentation. The ganja-side cells were refreshed 2026-08-15 against the
+post-P22 tree; the Claude-side survey is still the 2026-08-12 pass.
 
 Sections follow the shared outline all three references use (claude, codex,
 opencode), so the same topic sits at the same section number in each.
@@ -52,11 +53,11 @@ docs unless marked otherwise.*
 
 | Feature | Notes | ganja |
 |---|---|---|
-| Transcript grammar *(screenshot-sourced, not documented)* | `●` bullets on reply blocks and tool calls, `⎿` result markers with the preview indented under them, `>` on the user's own message, `✻` on thinking | ✅ ported wholesale (D487): the same four glyphs, argument summaries condensed onto the header (`● Tool(key: "value", …)`, capped and admitting the cut), state told by color rather than a bracketed word, clamped previews naming ganja's own expander (`… +N lines (ctrl+t to expand)` — Claude's names ctrl+o). A `read` shows a count and no preview at all (`● Read(/abs/path · lines A-B)` + `⎿ Read N lines`); `/copy` deliberately keeps upstream opencode's markdown shape instead, since the screen and the clipboard serve different readers |
-| Working line *(screenshot-sourced)* | `✻ <verb>… (Ns · ↑ N tokens)` at the transcript tail while a turn runs | ⚠️ same shape, ganja's own verb set (Claude's words are that program's voice); the token figure is the session's running output total, because a provider reports usage once per turn and there is no live per-turn channel to read — the segment is dropped rather than showing a zero |
+| Transcript grammar *(screenshot-sourced, not documented)* | `●` bullets on reply blocks and tool calls, `⎿` result markers with the preview indented under them, `>` on the user's own message, `✻` on thinking | ✅ ported wholesale (D487): the same four glyphs, argument summaries condensed onto the header (`● Tool(key: "value", …)`, capped and admitting the cut), state told by color rather than a bracketed word — since 2026-08-15 a settled bullet answers the verdict alone, success green and error red with the failed heading kept prose — clamped previews naming ganja's own expander (`… +N lines (ctrl+t to expand)` — Claude's names ctrl+o). A `read` shows a count and no preview at all (`● Read(/abs/path · lines A-B)` + `⎿ Read N lines`); `/copy` deliberately keeps upstream opencode's markdown shape instead, since the screen and the clipboard serve different readers |
+| Working line *(screenshot-sourced)* | `✻ <verb>… (Ns · ↓ N tokens)` pinned above the composer while a turn runs, the todo list under it | ⚠️ the same placement since 2026-08-15 — a strip pinned above the composer, outside the scroll, carrying the line (painted its own orange with a sweeping shimmer band) and the running turn's newest checklist under it — with ganja's own verb set (Claude's words are that program's voice); the token figure rides Claude's own ↓ arrow but counts the session's running output total, dropped rather than showing a zero, because usage arrives once per request |
 | Streamed thinking | thinking blocks rendered in the transcript as they arrive | ✅ `✻` marker, dim italic, clamped from the newest end while it streams; **display-only** — no wire replays it, no summary carries it, the context meter counts it as nothing, and it never reaches the clipboard. Upstream opencode fuses readable and sealed reasoning into one part and replays it; ganja splits them and sends only the sealed half |
-| [Verbose transcript viewer](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O overlay: full history, tool payloads, thinking blocks | ✅ Ctrl+T inspector — full-terminal takeover, three tabs (expanded transcript, raw event log, per-turn tokens); presentation synthesizes Codex CLI's own overlay and Claude Code's Ctrl+O footer wording |
-| [Todo checklist panel](https://code.claude.com/docs/en/interactive-mode) | Ctrl+T toggles a task side-panel | ⚠️ todos render in-chat only; ganja's Ctrl+T went to the inspector |
+| [Verbose transcript viewer](https://code.claude.com/docs/en/interactive-mode) | Ctrl+O overlay: full history, tool payloads, thinking blocks | ✅ Ctrl+T inspector — full-terminal takeover, three tabs (expanded transcript, raw event log, per-turn tokens); presentation synthesizes Codex CLI's own overlay and Claude Code's Ctrl+O footer wording, painted Codex-monochrome under every theme, opening pinned to the tail and following the stream (2026-08-15) |
+| [Todo checklist panel](https://code.claude.com/docs/en/interactive-mode) | Ctrl+T toggles a task side-panel | ⚠️ no toggleable panel (ganja's Ctrl+T went to the inspector), but the running turn's newest checklist rides pinned above the composer under the working line — Claude's own placement — and every `todowrite` call draws it as ☐/☒ rows in-chat (2026-08-15) |
 | [Permission dialog](https://code.claude.com/docs/en/iam) | tool call preview, approve/deny, mode switch in-dialog | ✅ upstream's dialog semantics (`a`/`A`/`d`), queued when several children ask at once; no in-dialog mode switching (no mode concept) |
 | [Trust dialog](https://code.claude.com/docs/en/iam) | first-launch directory trust prompt | ❌ no trust tier; permission rules gate everything instead |
 | [Status line scripting](https://code.claude.com/docs/en/statusline) | `/statusline`, `statusLine` command fed session JSON on stdin | ⚠️ native `tui.statusline` element roster instead (D469): user-ordered named segments, HUD-shaped meters, optional git/detail lines — no external script protocol, deliberately (no subprocess per render tick) |
@@ -95,8 +96,8 @@ docs unless marked otherwise.*
 | [`/statusline`](https://code.claude.com/docs/en/statusline) | status bar scripting | ❌ no scripting command; the bar is configured natively via `tui.statusline` (D469) |
 | [`/output-style`](https://code.claude.com/docs/en/output-styles) | response styles | ❌ |
 | [`/context`](https://code.claude.com/docs/en/costs) | context usage grid | ✅ per-category grid + legend over the compaction estimator's breakdown (D470); an unsized model degrades to totals with an honest notice, never an invented denominator |
-| [`/todos`](https://code.claude.com/docs/en/interactive-mode) | task checklist view | ⚠️ todos render in-chat only |
-| [`/usage`](https://code.claude.com/docs/en/costs) | usage/cost breakdown | ✅ session totals, cache/reasoning splits, context % and the per-turn table (D471), a Current window section mirroring the vendor's rate windows from response headers (D484, expired buckets decay), and real plan-limit meters where a backend serves them (D485): the ChatGPT seat's 5h/weekly used-percent windows and Copilot's quota snapshots, read off every response's headers with grammars mirrored from the vendors' own clients; the honest-absence tail names only the credentials that serve nothing (platform key, anthropic's admin-only usage API) |
+| [`/todos`](https://code.claude.com/docs/en/interactive-mode) | task checklist view | ⚠️ no command, but the list renders in-chat as ☐/☒ rows and rides pinned above the composer while the turn runs (2026-08-15) |
+| [`/usage`](https://code.claude.com/docs/en/costs) | usage/cost breakdown | ✅ session totals, cache/reasoning splits, context % and the per-turn table (D471), a Current window section mirroring the vendor's rate windows from response headers (D484; the panel says "expired" in words, while the HUD's `rate` meter holds the newest heard figures — request buckets legally reset in milliseconds, so a clock-honoring meter could only blink or pin at zero), and real plan-limit meters where a backend serves them (D485): the ChatGPT seat's 5h/weekly used-percent windows and Copilot's quota snapshots, read off every response's headers with grammars mirrored from the vendors' own clients; the honest-absence tail names only the credentials that serve nothing (platform key, anthropic's admin-only usage API) |
 | [`/doctor`](https://code.claude.com/docs/en/troubleshooting) | self-diagnostics | ❌ |
 | [`/export`](https://code.claude.com/docs/en/slash-commands) | export conversation | ⚠️ `/copy` only |
 | [`/cd`](https://code.claude.com/docs/en/slash-commands) *(low confidence)* | change directory | ❌ launch-directory-only is a design stance |
@@ -118,7 +119,7 @@ docs unless marked otherwise.*
 | [`BashOutput` / `KillShell`](https://code.claude.com/docs/en/settings) | background shell readback and kill | ✅ `bash_output` (delta polling + regex `filter`), `kill_shell` — no upstream opencode counterpart (D454) |
 | [`WebFetch`](https://code.claude.com/docs/en/settings) | fetch and parse a URL | ✅ `webfetch` |
 | [`WebSearch`](https://code.claude.com/docs/en/settings) | web search | ✅ `websearch` (Exa/Parallel) |
-| [`Task`](https://code.claude.com/docs/en/sub-agents) | spawn subagents | ✅ `task` |
+| [`Task`](https://code.claude.com/docs/en/sub-agents) | spawn subagents | ✅ `task` — the running row hangs the child's recent calls under it (a capped log the watcher writes; the whole of it one Ctrl+T or `/copy` away), and a call queued behind it names its settled arguments while it waits (2026-08-15) |
 | [`TodoWrite`](https://code.claude.com/docs/en/interactive-mode) | session checklist | ✅ `todowrite` |
 | [`ExitPlanMode`](https://code.claude.com/docs/en/common-workflows) | leave planning with user confirmation | ✅ `plan_exit` (question-gated switch to build) |
 | Skill tool | load a skill on request | ✅ `skill` |
@@ -155,7 +156,7 @@ docs unless marked otherwise.*
 | [`` !`cmd` `` in templates](https://code.claude.com/docs/en/slash-commands) | dynamic shell output at invocation | ✅ (P8) |
 | [`@path` in templates](https://code.claude.com/docs/en/slash-commands) | file embedding | ✅ (P8, as mention-grade attachment) |
 | [Command frontmatter: `allowed-tools`](https://code.claude.com/docs/en/slash-commands) | per-command tool restriction | ❌ (per-command agent ✅) |
-| [Command frontmatter: `model`, `argument-hint`](https://code.claude.com/docs/en/slash-commands) | per-command model + hint text | ❌ |
+| [Command frontmatter: `model`, `argument-hint`](https://code.claude.com/docs/en/slash-commands) | per-command model + hint text | ✅ the file tier's frontmatter carries both (D481) |
 | [CLAUDE.md hierarchy](https://code.claude.com/docs/en/memory) | global → project root → subdirectory files, walked and concatenated | ✅ global + project AGENTS.md family, plus lazy injection of subtree AGENTS.md files as tools actually touch files beneath them (touch-driven, closest-last, clamped, D480) — a different mechanism than Claude's startup concatenation |
 | [`@path` imports in memory files](https://code.claude.com/docs/en/memory) | modular includes, resolved relative to the importer | ❌ |
 | [Auto memory](https://code.claude.com/docs/en/memory) | `~/.claude/projects/<hash>/memory/` with MEMORY.md index + topic files, self-maintained | ✅ opt-in (config `memory: true`; default-off is a deliberate divergence): the per-project data directory's `memory/` (MEMORY.md index + topic files) composed into the prompt, with a synthesized upkeep block that explicitly forbids storing secrets (D478) |
@@ -173,7 +174,7 @@ docs unless marked otherwise.*
 | [Skill auto-triggering + `paths` scoping](https://code.claude.com/docs/en/skills) | description- and path-matched invocation | ❌ explicit load only |
 | [`context: fork`](https://code.claude.com/docs/en/skills) | run the skill in a forked subagent, return only results | ❌ |
 | [Skill `allowed-tools`](https://code.claude.com/docs/en/skills) | tool restriction incl. `mcp__*` wildcards | ❌ |
-| [Plugins: 5 component types](https://code.claude.com/docs/en/plugins) | skills, agents, hooks, MCP servers, LSP servers | ✅ all five merge as config contributors (D472/D473): hooks append, MCP servers arrive namespaced `plugin:<name>:<server>` and ask by default, skills roots concatenate, agents/LSP merge per key with explicit config winning; the `commands/` sixth surface is deferred |
+| [Plugins: 5 component types](https://code.claude.com/docs/en/plugins) | skills, agents, hooks, MCP servers, LSP servers | ✅ all six surfaces merge as config contributors (D472/D473; `commands/` closed the set in P22): hooks append, MCP servers arrive namespaced `plugin:<name>:<server>` and ask by default, skills roots concatenate, `commands/*.md` join the command table spelled `<plugin>:<name>`, agents/LSP merge per key with explicit config winning |
 | [Marketplaces](https://code.claude.com/docs/en/plugins) | `marketplace.json`, `/plugin install`, `/reload-plugins` | ⚠️ `marketplace.json` verbatim, added from a git URL or local path, installs spelled `<plugin>@<marketplace>` (D472); remote source objects (`github:` etc.) parse but do not install yet, and reload is restart-honest (D474) |
 
 ## 10. MCP and LSP
@@ -198,7 +199,7 @@ docs unless marked otherwise.*
 | [1M-context aliases](https://code.claude.com/docs/en/model-config) | `sonnet[1m]`, `opus[1m]` | ❌ |
 | [`MAX_THINKING_TOKENS`](https://code.claude.com/docs/en/settings) | thinking budget override | ⚠️ effort variants carry budgets from the catalog instead |
 | [Auto-compact threshold override](https://code.claude.com/docs/en/settings) *(low confidence)* | env-tunable trigger percentage | ❌ fixed thresholds |
-| [Small/fast model routing](https://code.claude.com/docs/en/settings) | background tasks on a cheaper model | ⚠️ ganja's title requests ride the session model |
+| [Small/fast model routing](https://code.claude.com/docs/en/settings) | background tasks on a cheaper model | ⚠️ `small_model` runs the title request, bound to the provider its prefix names (D490); other background work still rides the session model |
 | [Subscription OAuth vs Console API key](https://code.claude.com/docs/en/iam) | `/login` picks claude.ai OAuth (PKCE) or a metered API key | ⚠️ ganja's `anthropic` is API-key only (env or stored); subscription OAuth was never in the upstream spec (removed for terms compliance) |
 | [`apiKeyHelper`](https://code.claude.com/docs/en/settings) | settings-declared command that emits the key on demand | ❌ nearest is `key_env` on a config-declared provider |
 | [`ANTHROPIC_AUTH_TOKEN`](https://code.claude.com/docs/en/settings) | custom bearer for gateways/proxies | ❌ |
@@ -216,7 +217,7 @@ docs unless marked otherwise.*
 | [`permissions` block](https://code.claude.com/docs/en/iam) | `allow`/`ask`/`deny` arrays + `defaultMode` | ⚠️ ganja's `permission` block is upstream opencode's grammar instead (§6) |
 | [`env` block](https://code.claude.com/docs/en/settings) | inject environment per scope | ❌ |
 | [`hooks` key](https://code.claude.com/docs/en/hooks) | event-keyed matcher/handler groups | ✅ Claude's shape kept verbatim (§7) |
-| [`model` / `effortLevel` keys](https://code.claude.com/docs/en/model-config) | default model and reasoning depth | ⚠️ `model` ✅; effort is picked per-session (`/effort`), not a config key |
+| [`model` / `effortLevel` keys](https://code.claude.com/docs/en/model-config) | default model and reasoning depth | ✅ `model` and `effort` both: `effort` seeds a fresh session's catalog effort, validated against the model's row at adoption — a default, never an override, so a stored session's own choice outranks it (P17) |
 | [`statusLine`, `outputStyle`, `spinnerTipsEnabled`](https://code.claude.com/docs/en/statusline) | display scripting and styles | ❌ (themes are ganja's one display knob) |
 | [`attribution`](https://code.claude.com/docs/en/settings) *(low confidence)* | commit/PR trailer text | ❌ ganja writes no commits of its own |
 | [`claude config` CLI](https://code.claude.com/docs/en/settings) | `get`/`set`/`list`, `--global` | ❌ config files only |

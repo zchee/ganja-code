@@ -8,7 +8,9 @@
 
 Snapshot: 2026-08-12, against Codex CLI's main branch (Codex has no pin in
 this repo — rows drift as upstream moves). Rows marked *(low confidence)*
-rest on community sources rather than official documentation.
+rest on community sources rather than official documentation. The ganja-side
+cells were refreshed 2026-08-15 against the post-P22 tree; the Codex-side
+survey is still the 2026-08-12 pass.
 
 Sections follow the shared outline all three references use (claude, codex,
 opencode), so the same topic sits at the same section number in each.
@@ -36,7 +38,7 @@ status-line rows moved here from §1, the rest is researched.*
 
 | Feature | Notes | ganja |
 |---|---|---|
-| [Transcript overlay](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ same chord, three tabs (expanded transcript incl. full tool/MCP input+output, raw event log, per-turn token table); full-terminal takeover and the banner are this overlay's own presentation, Claude Code's Ctrl+O supplies the one-line footer wording |
+| [Transcript overlay](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ same chord, three tabs (expanded transcript incl. full tool/MCP input+output, raw event log, per-turn token table); full-terminal takeover and the banner are this overlay's own presentation, Claude Code's Ctrl+O supplies the one-line footer wording — and since 2026-08-15 the paint is Codex's own monochrome (the theme's text color on the terminal's background, under every theme) with every tab opening pinned to its tail and following the stream |
 | [Status-line composition](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ✅ `tui.statusline` element roster (D469): user-ordered named elements, width-aware, rendered in the OMC HUD's shape (meters, git line, optional detail lines); the element vocabulary is ganja's own, not Codex's id list, and an unknown name is refused at load |
 | [Onboarding flow](https://developers.openai.com/codex/cli) | first-run auth choice (ChatGPT OAuth / API key), config bootstrap | ❌ ganja boots into the fake provider with a status-bar notice; `auth login` is a separate CLI step |
 | [Approval dialog](https://github.com/openai/codex/blob/main/docs/getting-started.md) | pending command/patch preview; approve, approve-for-session, deny with feedback | ⚠️ ganja's permission dialog (allow / always / deny) — "always" persists to the per-project store instead of dying with the session |
@@ -65,7 +67,7 @@ status-line rows moved here from §1, the rest is researched.*
 | [`/diff`](https://developers.openai.com/codex/cli) | session-wide change viewer | ❌ (per-edit inline diffs ✅) |
 | [`/compact`](https://developers.openai.com/codex/cli) | summarize the conversation | ✅ plus auto-compaction |
 | [`/prompts` → Agent Skills](https://developers.openai.com/codex/cli) *(medium confidence)* | prompt templates deprecated toward SKILL.md | ⚠️ skills ✅ (SKILL.md-compatible); no template list UI |
-| [`/status`](https://developers.openai.com/codex/cli) | model/tokens/context/cost dashboard | ⚠️ status bar + totals only |
+| [`/status`](https://developers.openai.com/codex/cli) | model/tokens/context/cost dashboard | ⚠️ split across `/usage` (session totals, cache/reasoning splits, vendor rate windows, plan-limit meters) and `/context` (per-category grid) beside the status bar; no single dashboard command |
 | [`/init`](https://developers.openai.com/codex/cli) | generate AGENTS.md | ✅ |
 | [`/resume`](https://developers.openai.com/codex/cli) | in-TUI session picker | ✅ `/sessions` |
 | [`/feedback`](https://developers.openai.com/codex/cli) | sanitized diagnostics report to OpenAI | ❌ (no telemetry channel at all) |
@@ -151,7 +153,7 @@ config section, the login rows from the CLI section, plus researched rows.*
 | Feature | Notes | ganja |
 |---|---|---|
 | [Custom `model_providers`](https://github.com/openai/codex/blob/main/docs/config.md) | `base_url` + `env_key` + `http_headers` + model list; `wire_api = "responses"` only | ✅ strong parity: ganja's `provider` table (dialect/base_url/key_env/headers) — and ganja speaks **two** dialects where Codex kept one |
-| [Model selection](https://github.com/openai/codex/blob/main/docs/config.md) | `model`, `model_reasoning_effort`, `model_reasoning_summary` | ⚠️ `/model` + `/effort` on the catalog roster; no summary knob |
+| [Model selection](https://github.com/openai/codex/blob/main/docs/config.md) | `model`, `model_reasoning_effort`, `model_reasoning_summary` | ⚠️ `model` and `effort` config keys (effort seeds a fresh session, catalog-validated at adoption; a stored session's own choice outranks it — P17) beside `/model` + `/effort`; no summary knob |
 | [ChatGPT OAuth or API key](https://github.com/openai/codex/blob/main/docs/authentication.md) | dual credentials | ✅ the same shape (ganja's `openai`) |
 | [`codex login --device-auth`](https://github.com/openai/codex/blob/main/docs/authentication.md) | headless device-code auth | ✅ ganja's grok and ChatGPT logins both carry device flows |
 | [Credential precedence](https://github.com/openai/codex/blob/main/docs/authentication.md) | `CODEX_API_KEY` > `OPENAI_API_KEY` > `auth.json` | ✅ same shape: env key outranks the stored login |
@@ -208,7 +210,7 @@ config section, the login rows from the CLI section, plus researched rows.*
 | [`CODEX_HOME`](https://github.com/openai/codex/blob/main/docs/config.md) | the state/config home (`~/.codex`) | ✅ `GANJA_CONFIG_HOME` — one home, not a merge |
 | [`OPENAI_API_KEY`](https://github.com/openai/codex/blob/main/docs/authentication.md) | API-key credential | ✅ the same variable |
 | [`CODEX_API_KEY`](https://github.com/openai/codex/blob/main/docs/authentication.md) *(medium confidence)* | Codex-specific key override | ❌ no ganja-specific key variable on purpose |
-| [`RUST_LOG` / `LOG_FORMAT`](https://github.com/openai/codex/blob/main/docs/config.md) *(medium confidence)* | tracing filter + format, logs under `$CODEX_HOME/log/` | ❌ no documented logging env surface |
+| [`RUST_LOG` / `LOG_FORMAT`](https://github.com/openai/codex/blob/main/docs/config.md) *(medium confidence)* | tracing filter + format, logs under `$CODEX_HOME/log/` | ⚠️ `RUST_LOG` honored (it outranks `-v`'s default filter), daily files named by the **local** date under the data home's `log/`, seven kept; no `LOG_FORMAT` knob |
 | `OPENAI_BASE_URL` | endpoint override | ✅ the same variable — but ganja points a *Responses* client at it, refused unless https or loopback |
 
 ganja's own `GANJA_*` surface is documented in the repository root's
