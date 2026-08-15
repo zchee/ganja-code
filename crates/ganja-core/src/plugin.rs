@@ -558,6 +558,18 @@ pub struct Listing {
     pub components: Vec<String>,
 }
 
+/// The source tag the skill listings show for a skill discovered under
+/// `origin`: the plugin's name for a root inside the install store, `user`
+/// for everything else — ganja's own homes and whatever `skills.paths` named
+/// are all directories the user placed or configured, and a fixture's
+/// temporary roots match no store at all.
+#[must_use]
+pub fn skill_source(origin: &Path) -> String {
+    Store::discover()
+        .and_then(|store| store.plugin_of(origin))
+        .unwrap_or_else(|| "user".to_owned())
+}
+
 /// The install store: everything under `<config home>/plugins/`.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -600,6 +612,18 @@ impl Store {
     #[must_use]
     pub fn plugin_root(&self, plugin: &str) -> PathBuf {
         self.installed_dir().join(plugin)
+    }
+
+    /// The plugin a directory belongs to, when it sits inside this store's
+    /// `installed/` tree — what the skill listings tag a row with. [`None`]
+    /// is a directory the user placed or configured themselves.
+    #[must_use]
+    pub fn plugin_of(&self, path: &Path) -> Option<String> {
+        path.strip_prefix(self.installed_dir())
+            .ok()?
+            .components()
+            .next()
+            .map(|name| name.as_os_str().to_string_lossy().into_owned())
     }
 
     /// Reads the state file, or the empty state when there is none yet.
@@ -2032,6 +2056,32 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
+
+    /// The listings' source tag reads the store's own layout: the component
+    /// after `installed/` is the plugin, and anything outside it is nobody's.
+    #[test]
+    fn a_skills_origin_inside_the_store_names_its_plugin() {
+        let store = Store::at(std::path::PathBuf::from("/home/.config/ganja/plugins"));
+
+        assert_eq!(
+            store.plugin_of(std::path::Path::new(
+                "/home/.config/ganja/plugins/installed/mattpocock-skills/skills"
+            )),
+            Some("mattpocock-skills".to_owned())
+        );
+        assert_eq!(
+            store.plugin_of(std::path::Path::new("/home/.config/ganja/skills")),
+            None,
+            "ganja's own home is the user's, not a plugin's"
+        );
+        assert_eq!(
+            store.plugin_of(std::path::Path::new(
+                "/home/.config/ganja/plugins/installed"
+            )),
+            None,
+            "the installed directory itself belongs to no plugin"
+        );
+    }
 
     use super::{
         Contribution, Manifest, Marketplace, PluginError, Source, Store, collect, looks_like_git,

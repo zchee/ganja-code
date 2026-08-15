@@ -47,9 +47,11 @@ pub struct SkillMenu {
 }
 
 impl SkillMenu {
-    /// Opens the menu over `skills`, narrowed and ranked by `fragment`.
+    /// Opens the menu over `skills` — each with the source tag the caller
+    /// worked out, a plugin's name or `user` — narrowed and ranked by
+    /// `fragment`.
     #[must_use]
-    pub fn new(fragment: Fragment, skills: &[ganja_tool::skill::Skill]) -> Self {
+    pub fn new(fragment: Fragment, skills: &[(ganja_tool::skill::Skill, String)]) -> Self {
         let rows = ranked(&fragment.text, skills);
 
         Self {
@@ -124,12 +126,18 @@ impl SkillMenu {
 
 /// `skills` narrowed to `needle` and ranked, or all of them in discovery
 /// order when nothing has been typed yet.
-fn ranked(needle: &str, skills: &[ganja_tool::skill::Skill]) -> Vec<(String, String)> {
-    let row = |skill: &ganja_tool::skill::Skill| {
-        (
-            skill.name.clone(),
-            skill.description.clone().unwrap_or_default(),
-        )
+///
+/// A row's second column opens with its source tag — `(plugin-name)` or
+/// `(user)` — and the tag is scored with the description, so `$matt` finds a
+/// plugin's skills by the plugin's own name.
+fn ranked(needle: &str, skills: &[(ganja_tool::skill::Skill, String)]) -> Vec<(String, String)> {
+    let row = |(skill, source): &(ganja_tool::skill::Skill, String)| {
+        let description = match skill.description.as_deref() {
+            Some(description) => format!("({source}) {description}"),
+            None => format!("({source})"),
+        };
+
+        (skill.name.clone(), description)
     };
 
     if needle.is_empty() {
@@ -147,19 +155,20 @@ fn ranked(needle: &str, skills: &[ganja_tool::skill::Skill]) -> Vec<(String, Str
     let mut buffer = Vec::new();
     let mut scored: Vec<(u32, (String, String))> = skills
         .iter()
-        .filter_map(|skill| {
-            let name = atom
-                .score(Utf32Str::new(&skill.name, &mut buffer), &mut matcher)
+        .filter_map(|entry| {
+            let (name, described) = row(entry);
+            let name_score = atom
+                .score(Utf32Str::new(&name, &mut buffer), &mut matcher)
                 .map(|score| u32::from(score) * 2);
-            let description = skill.description.as_deref().and_then(|description| {
-                atom.score(Utf32Str::new(description, &mut buffer), &mut matcher)
-                    .map(u32::from)
-            });
+            let description_score = atom
+                .score(Utf32Str::new(&described, &mut buffer), &mut matcher)
+                .map(u32::from);
 
-            name.into_iter()
-                .chain(description)
+            name_score
+                .into_iter()
+                .chain(description_score)
                 .max()
-                .map(|score| (score, row(skill)))
+                .map(|score| (score, (name, described)))
         })
         .collect();
     // Ties break on the name so a fragment always produces the same list —
@@ -178,13 +187,20 @@ mod tests {
     use super::SkillMenu;
     use crate::mention::Fragment;
 
-    fn skill(name: &str, description: Option<&str>) -> Skill {
-        Skill {
-            name: name.to_owned(),
-            description: description.map(str::to_owned),
-            location: PathBuf::from("SKILL.md"),
-            content: String::new(),
-        }
+    fn skill(name: &str, description: Option<&str>) -> (Skill, String) {
+        tagged(name, description, "user")
+    }
+
+    fn tagged(name: &str, description: Option<&str>, source: &str) -> (Skill, String) {
+        (
+            Skill {
+                name: name.to_owned(),
+                description: description.map(str::to_owned),
+                location: PathBuf::from("SKILL.md"),
+                content: String::new(),
+            },
+            source.to_owned(),
+        )
     }
 
     fn fragment(text: &str) -> Fragment {
@@ -208,6 +224,45 @@ mod tests {
 
         assert!(!menu.is_empty());
         assert_eq!(menu.selected(), Some("alpha"));
+    }
+
+    /// Every row says where it came from: the source opens the description
+    /// column, and a skill with no description still shows its tag.
+    #[test]
+    fn a_row_opens_its_description_with_the_source_tag() {
+        let menu = SkillMenu::new(
+            fragment(""),
+            &[
+                tagged("ask-matt", Some("A router."), "mattpocock-skills"),
+                skill("mine", None),
+            ],
+        );
+
+        assert_eq!(
+            menu.rows,
+            vec![
+                (
+                    "ask-matt".to_owned(),
+                    "(mattpocock-skills) A router.".to_owned()
+                ),
+                ("mine".to_owned(), "(user)".to_owned()),
+            ]
+        );
+    }
+
+    /// The tag is part of what a fragment can match, so a plugin's skills are
+    /// findable by the plugin's own name.
+    #[test]
+    fn a_fragment_can_match_the_source_tag() {
+        let menu = SkillMenu::new(
+            fragment("matt"),
+            &[
+                tagged("ask", Some("A router."), "mattpocock-skills"),
+                skill("porting", Some("how to port")),
+            ],
+        );
+
+        assert_eq!(menu.selected(), Some("ask"));
     }
 
     #[test]

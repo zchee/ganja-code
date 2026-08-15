@@ -29,6 +29,12 @@ pub fn skills_command(cwd: &Path) -> Result<()> {
 
 /// The listing, one string per printed line — separated from the printing so
 /// a test reads exactly what a person would.
+///
+/// Each description opens with its source tag — the plugin that installed
+/// the skill, or `(user)` for a directory the user placed or configured —
+/// which is also what the `$` selector's rows open with, so the two surfaces
+/// read alike. The full origin path stays the `/skills` dialog's detail;
+/// this listing keeps to the tag.
 fn rows(roots: &skill::Roots, found: &[skill::Skill]) -> Vec<String> {
     if found.is_empty() {
         return vec![
@@ -43,14 +49,13 @@ fn rows(roots: &skill::Roots, found: &[skill::Skill]) -> Vec<String> {
         .map(|skill| skill.name.chars().count())
         .max()
         .unwrap_or(0);
-    let mut lines = vec![format!("{:<name_width$}  DESCRIPTION — ORIGIN", "NAME")];
+    let mut lines = vec![format!("{:<name_width$}  (SOURCE) DESCRIPTION", "NAME")];
     lines.extend(found.iter().map(|skill| {
-        let origin = skill::origin(roots, skill)
-            .map(|dir| dir.display().to_string())
-            .unwrap_or_default();
+        let source = skill::origin(roots, skill)
+            .map_or_else(|| "user".to_owned(), ganja_core::plugin::skill_source);
         let description = skill.description.as_deref().unwrap_or("(no description)");
 
-        format!("{:<name_width$}  {description} — {origin}", skill.name)
+        format!("{:<name_width$}  ({source}) {description}", skill.name)
     }));
 
     lines
@@ -72,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn the_listing_aligns_names_and_attributes_each_row_to_its_root() {
+    fn the_listing_aligns_names_and_tags_each_row_with_its_source() {
         let roots = Roots::none().with_paths([PathBuf::from("/home/skills")]);
         let lines = super::rows(
             &roots,
@@ -89,9 +94,9 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "NAME     DESCRIPTION — ORIGIN".to_owned(),
-                "porting  How to port. — /home/skills".to_owned(),
-                "tdd      (no description) — /home/skills".to_owned(),
+                "NAME     (SOURCE) DESCRIPTION".to_owned(),
+                "porting  (user) How to port.".to_owned(),
+                "tdd      (user) (no description)".to_owned(),
             ]
         );
     }

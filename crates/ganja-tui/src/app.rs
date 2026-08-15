@@ -2801,13 +2801,17 @@ impl App {
         let rows = ganja_tool::skill::discover(&roots)
             .into_iter()
             .map(|skill| {
-                let origin =
-                    ganja_tool::skill::origin(&roots, &skill).map(|dir| dir.display().to_string());
+                let origin = ganja_tool::skill::origin(&roots, &skill);
+                let source =
+                    origin.map_or_else(|| "user".to_owned(), ganja_core::plugin::skill_source);
+                let origin = origin.map(|dir| dir.display().to_string());
                 let detail = match (skill.description.as_deref(), origin) {
-                    (Some(description), Some(origin)) => format!("{description} — {origin}"),
-                    (Some(description), None) => description.to_owned(),
-                    (None, Some(origin)) => origin,
-                    (None, None) => String::new(),
+                    (Some(description), Some(origin)) => {
+                        format!("({source}) {description} — {origin}")
+                    }
+                    (Some(description), None) => format!("({source}) {description}"),
+                    (None, Some(origin)) => format!("({source}) — {origin}"),
+                    (None, None) => format!("({source})"),
                 };
 
                 list::Row {
@@ -2842,7 +2846,16 @@ impl App {
             return;
         }
 
-        let skills = ganja_tool::skill::discover(&self.engine.skill_roots());
+        let roots = self.engine.skill_roots();
+        let skills: Vec<(ganja_tool::skill::Skill, String)> = ganja_tool::skill::discover(&roots)
+            .into_iter()
+            .map(|skill| {
+                let source = ganja_tool::skill::origin(&roots, &skill)
+                    .map_or_else(|| "user".to_owned(), ganja_core::plugin::skill_source);
+
+                (skill, source)
+            })
+            .collect();
         let narrowing = !fragment.text.is_empty();
         let menu = SkillMenu::new(fragment, &skills);
         self.skill_menu = (!(menu.is_empty() && narrowing)).then_some(menu);
