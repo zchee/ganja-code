@@ -230,12 +230,6 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
         Some(resume) => stored_transcript(&engine, resume).await?,
         None => Vec::new(),
     };
-    // After the resume, because the config is the default and the stored row
-    // is the choice: a continued session runs under the effort it was left
-    // under, and only a session carrying none takes the configured one. The
-    // frame this announces into is the first one the app draws.
-    engine.seed_effort(config.effort.clone()).await;
-
     // The builtins, the user's own themes, and the theme they last picked —
     // then whatever the config asks for on top, because a `theme` written in a
     // file outranks a runtime pick permanently rather than until the next one.
@@ -249,6 +243,18 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
     // slightly stale rather than a session that does not start.
     let background = CancellationToken::new();
     catalog::spawn_refresh_loop(background.clone());
+
+    // After the resume, because the config is the default and the stored row
+    // is the choice: a continued session runs under the effort it was left
+    // under, and only a session carrying none takes the configured one. And
+    // after the catalog call above, whose first act is the synchronous disk
+    // read — the seed validates its name against the active model's catalog
+    // row, and seeded any earlier it read a model the compiled snapshot
+    // predates as carrying no efforts at all, clearing a configured effort at
+    // every launch (2026-08-15; the CLI paths were never wrong, because
+    // `assemble` loads the cache before either seeds). The frame this
+    // announces into is still the first one the app draws.
+    engine.seed_effort(config.effort.clone()).await;
 
     // Spilled tool output older than a week is nobody's context any more, and
     // nothing else on this machine ever deletes it.
