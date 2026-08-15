@@ -75,18 +75,16 @@ impl Emitter {
         wire
     }
 
-    /// Places the transmitted `id` at the cursor, scaled into `columns` by
-    /// `rows` cells.
+    /// Creates the **virtual** placement (`U=1`) placeholder cells refer to,
+    /// `columns` by `rows` cells — the tmux-proof half of the Unicode
+    /// placeholder scheme: the image has no position of its own, so no
+    /// cursor race can misplace it (2026-08-15, retiring the cursor-move
+    /// placements the first cut used).
     #[must_use]
-    pub fn place(&self, id: u32, columns: u16, rows: u16) -> String {
-        self.wrapped(&format!("\x1b_Ga=p,i={id},c={columns},r={rows},q=2\x1b\\"))
-    }
-
-    /// Deletes every placement of `id`; the transmitted pixels stay for the
-    /// next placement.
-    #[must_use]
-    pub fn delete(&self, id: u32) -> String {
-        self.wrapped(&format!("\x1b_Ga=d,d=i,i={id},q=2\x1b\\"))
+    pub fn virtual_placement(&self, id: u32, columns: u16, rows: u16) -> String {
+        self.wrapped(&format!(
+            "\x1b_Ga=p,U=1,i={id},c={columns},r={rows},q=2\x1b\\"
+        ))
     }
 
     /// Deletes every placement this program made — the teardown broom.
@@ -155,6 +153,48 @@ pub fn load(path: &str) -> Option<Preview> {
     Some(Preview { png, width, height })
 }
 
+/// The base character of a kitty Unicode image placeholder (U+10EEEE): a
+/// cell holding it, with the image id in its foreground color and the
+/// row/column diacritics after it, is composited over by the terminal.
+pub const PLACEHOLDER: char = '\u{10EEEE}';
+
+/// The first 64 of kitty's own row/column diacritics
+/// (`gen/rowcolumn-diacritics.txt`), in table order — placements here never
+/// exceed 60 columns, so the tail of the 297 is never needed.
+const DIACRITICS: [char; 64] = [
+    '\u{0305}', '\u{030D}', '\u{030E}', '\u{0310}', '\u{0312}', '\u{033D}', '\u{033E}', '\u{033F}',
+    '\u{0346}', '\u{034A}', '\u{034B}', '\u{034C}', '\u{0350}', '\u{0351}', '\u{0352}', '\u{0357}',
+    '\u{035B}', '\u{0363}', '\u{0364}', '\u{0365}', '\u{0366}', '\u{0367}', '\u{0368}', '\u{0369}',
+    '\u{036A}', '\u{036B}', '\u{036C}', '\u{036D}', '\u{036E}', '\u{036F}', '\u{0483}', '\u{0484}',
+    '\u{0485}', '\u{0486}', '\u{0487}', '\u{0592}', '\u{0593}', '\u{0594}', '\u{0595}', '\u{0597}',
+    '\u{0598}', '\u{0599}', '\u{059C}', '\u{059D}', '\u{059E}', '\u{059F}', '\u{05A0}', '\u{05A1}',
+    '\u{05A8}', '\u{05A9}', '\u{05AB}', '\u{05AC}', '\u{05AF}', '\u{05C4}', '\u{0610}', '\u{0611}',
+    '\u{0612}', '\u{0613}', '\u{0614}', '\u{0615}', '\u{0616}', '\u{0617}', '\u{0657}', '\u{0658}',
+];
+
+/// One placeholder grapheme: the base character plus the diacritics naming
+/// which cell of the virtual placement this is.
+#[must_use]
+pub fn placeholder(row: u16, column: u16) -> String {
+    let mut cell = String::new();
+    cell.push(PLACEHOLDER);
+    cell.push(DIACRITICS[usize::from(row) % DIACRITICS.len()]);
+    cell.push(DIACRITICS[usize::from(column) % DIACRITICS.len()]);
+
+    cell
+}
+
+/// The foreground color that carries `id` to the terminal: its low 24 bits
+/// as RGB, which is how a placeholder cell says which image it shows.
+#[must_use]
+pub fn id_color(id: u32) -> ratatui::style::Color {
+    ratatui::style::Color::Rgb(
+        u8::try_from((id >> 16) & 0xFF).unwrap_or(0),
+        u8::try_from((id >> 8) & 0xFF).unwrap_or(0),
+        u8::try_from(id & 0xFF).unwrap_or(0),
+    )
+}
+
 /// The cell box a `width`×`height` image fills at `rows` rows tall, aspect
 /// kept under a terminal cell twice as tall as it is wide.
 #[must_use]
@@ -190,14 +230,29 @@ mod tests {
         assert!(commands[1].starts_with("\x1b_Gm=0;"));
     }
 
-    /// Placement and deletion address the id, sized in cells, silenced.
+    /// The virtual placement carries `U=1` beside its cell box, and the
+    /// teardown broom deletes everything — both silenced.
     #[test]
-    fn placement_and_deletion_speak_the_documented_keys() {
+    fn virtual_placement_and_deletion_speak_the_documented_keys() {
         let emitter = Emitter::direct();
 
-        assert_eq!(emitter.place(3, 10, 5), "\x1b_Ga=p,i=3,c=10,r=5,q=2\x1b\\");
-        assert_eq!(emitter.delete(3), "\x1b_Ga=d,d=i,i=3,q=2\x1b\\");
+        assert_eq!(
+            emitter.virtual_placement(3, 10, 5),
+            "\x1b_Ga=p,U=1,i=3,c=10,r=5,q=2\x1b\\"
+        );
         assert_eq!(emitter.delete_all(), "\x1b_Ga=d,d=a,q=2\x1b\\");
+    }
+
+    /// A placeholder grapheme is the base character with kitty's own row and
+    /// column diacritics, and the id rides the foreground color's 24 bits.
+    #[test]
+    fn placeholders_carry_kittys_own_diacritics_and_the_id_rides_the_color() {
+        assert_eq!(super::placeholder(0, 0), "\u{10EEEE}\u{0305}\u{0305}");
+        assert_eq!(super::placeholder(1, 2), "\u{10EEEE}\u{030D}\u{030E}");
+        assert_eq!(
+            super::id_color(0x0001_0203),
+            ratatui::style::Color::Rgb(1, 2, 3)
+        );
     }
 
     /// Under tmux the whole APC rides the passthrough envelope with every
