@@ -164,6 +164,7 @@ async fn ask(
         .send(Command::SendPrompt {
             text: text.to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

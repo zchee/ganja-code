@@ -971,6 +971,14 @@ pub enum Command {
         /// stored command replays — exactly the bytes it always did.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mentions: Vec<Mention>,
+        /// Skills the user explicitly invoked with `$name` tokens — the
+        /// OpenAI Codex CLI's grammar — still present in `text`. Names, not
+        /// bodies: the engine loads each one at the same seam mentions
+        /// resolve at, so what the model reads is decided where the roots
+        /// live, not by whichever frontend sent this. Absent from the wire
+        /// when there are none, same as `mentions`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<String>,
     },
     /// Hands a message to the turn that is **already** streaming, which takes
     /// it on at its next step boundary rather than starting a turn of its own.
@@ -1011,6 +1019,12 @@ pub enum Command {
         /// mentions follow. Absent from the wire when there are none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mentions: Vec<Mention>,
+        /// Skills the message's `$name` tokens invoke, resolved when the
+        /// carrying request is built — [`Command::SendPrompt::skills`]'
+        /// read-at-send rule, at the steer seam. Absent from the wire when
+        /// there are none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<String>,
     },
     /// Stops the turn that is streaming; a no-op when the engine is idle.
     /// When the turn is waiting on a permission, cancelling also refuses it.
@@ -1646,6 +1660,7 @@ mod tests {
             Command::SendPrompt {
                 text: "hello".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             },
             Command::SendPrompt {
                 text: "what does this do".to_owned(),
@@ -1653,6 +1668,7 @@ mod tests {
                     path: "src/main.rs".to_owned(),
                     ..Default::default()
                 }],
+                skills: Vec::new(),
             },
             Command::SendPrompt {
                 text: "explain these lines".to_owned(),
@@ -1661,11 +1677,13 @@ mod tests {
                     start: Some(10),
                     end: Some(20),
                 }],
+                skills: Vec::new(),
             },
             Command::Steer {
                 id: "steer-1".to_owned(),
                 text: "actually, use the other file".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             },
             Command::Steer {
                 id: "steer-2".to_owned(),
@@ -1675,6 +1693,7 @@ mod tests {
                     start: Some(10),
                     end: Some(20),
                 }],
+                skills: Vec::new(),
             },
             Command::CancelTurn,
             Command::ReplyPermission {
@@ -1869,6 +1888,7 @@ mod tests {
                 serde_json::to_string(&Command::SendPrompt {
                     text: "hi".to_owned(),
                     mentions: Vec::new(),
+                    skills: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi"}"#,
             ),
@@ -1885,6 +1905,7 @@ mod tests {
                             ..Default::default()
                         },
                     ],
+                    skills: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs"},{"path":"README.md"}]}"#,
             ),
@@ -1898,6 +1919,7 @@ mod tests {
                         start: Some(12),
                         end: Some(40),
                     }],
+                    skills: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs","start":12,"end":40}]}"#,
             ),
@@ -1909,6 +1931,7 @@ mod tests {
                     id: "steer-1".to_owned(),
                     text: "use the other file".to_owned(),
                     mentions: Vec::new(),
+                    skills: Vec::new(),
                 }),
                 r#"{"type":"steer","id":"steer-1","text":"use the other file"}"#,
             ),
@@ -1921,8 +1944,29 @@ mod tests {
                         start: Some(10),
                         end: Some(20),
                     }],
+                    skills: Vec::new(),
                 }),
                 r#"{"type":"steer","id":"steer-2","text":"this one","mentions":[{"path":"src/main.rs","start":10,"end":20}]}"#,
+            ),
+            // A `$skill` invocation rides as names beside the mentions — the
+            // token itself stays in the text — and keeps the mentions'
+            // absence rule: no invocations, no key.
+            (
+                serde_json::to_string(&Command::SendPrompt {
+                    text: "use $porting here".to_owned(),
+                    mentions: Vec::new(),
+                    skills: vec!["porting".to_owned()],
+                }),
+                r#"{"type":"send_prompt","text":"use $porting here","skills":["porting"]}"#,
+            ),
+            (
+                serde_json::to_string(&Command::Steer {
+                    id: "steer-3".to_owned(),
+                    text: "and $tdd too".to_owned(),
+                    mentions: Vec::new(),
+                    skills: vec!["tdd".to_owned()],
+                }),
+                r#"{"type":"steer","id":"steer-3","text":"and $tdd too","skills":["tdd"]}"#,
             ),
             (
                 serde_json::to_string(&Event::SteerConsumed {
@@ -2443,6 +2487,7 @@ mod tests {
             Command::SendPrompt {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             }
         );
 
@@ -2459,6 +2504,7 @@ mod tests {
                     start: None,
                     end: None,
                 }],
+                skills: Vec::new(),
             }
         );
     }
@@ -2479,6 +2525,7 @@ mod tests {
                 id: "steer-1".to_owned(),
                 text: "use the other file".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             }
         );
 
@@ -2496,6 +2543,7 @@ mod tests {
                     start: None,
                     end: None,
                 }],
+                skills: Vec::new(),
             }
         );
     }

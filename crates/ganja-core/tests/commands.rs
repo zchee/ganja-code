@@ -256,6 +256,7 @@ async fn a_command_that_names_an_agent_runs_as_it_for_one_turn() {
         .send(Command::SendPrompt {
             text: "hi".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("a finished turn leaves the engine idle");
@@ -364,6 +365,7 @@ async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
         .send(Command::SendPrompt {
             text: "carry on".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("a finished turn leaves the engine idle");
@@ -397,6 +399,7 @@ async fn starting_a_new_session_leaves_the_old_one_on_disk_and_the_next_prompt_f
         .send(Command::SendPrompt {
             text: "first".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -419,6 +422,7 @@ async fn starting_a_new_session_leaves_the_old_one_on_disk_and_the_next_prompt_f
         .send(Command::SendPrompt {
             text: "second".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -478,6 +482,7 @@ async fn a_new_session_does_not_inherit_what_the_last_one_had_read() {
         .send(Command::SendPrompt {
             text: "read it".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -492,6 +497,7 @@ async fn a_new_session_does_not_inherit_what_the_last_one_had_read() {
         .send(Command::SendPrompt {
             text: "now write it".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

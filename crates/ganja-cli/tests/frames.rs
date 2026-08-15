@@ -209,6 +209,7 @@ async fn a_running_server_writes_the_frames_the_client_declares() {
         .send(Command::SendPrompt {
             text: "say something".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("the engine takes a prompt");
@@ -283,6 +284,7 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
         .send(Command::SendPrompt {
             text: "say a great deal".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("the engine takes a prompt");

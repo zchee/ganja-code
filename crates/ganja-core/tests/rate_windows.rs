@@ -151,6 +151,7 @@ async fn turn(engine: &Engine, prompt: &str) {
         .send(Command::SendPrompt {
             text: prompt.to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

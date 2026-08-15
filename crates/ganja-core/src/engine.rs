@@ -857,6 +857,12 @@ pub struct Engine {
     /// without anything an MCP server lent. What every rebuild below starts
     /// from.
     base_tools: Arc<Registry>,
+    /// Where a turn's `$name` invocations load skills from — the same value
+    /// the frontend's `skill` tool was installed over, handed here through
+    /// [`Engine::with_skill_roots`] so a user invocation and a model's
+    /// `skill` call read one list. Empty by default, which keeps every
+    /// fixture and golden run off the machine it happens to be on.
+    skill_roots: crate::tool::skill::Roots,
     /// [`Engine::base_tools`] plus whatever the connected MCP servers are
     /// currently lending. What a subagent is offered — the same set the parent
     /// has, minus the task tool it never gets.
@@ -1076,6 +1082,7 @@ impl Engine {
             // engine knows which agents it may spawn, which is
             // `with_agents`'s business.
             base_tools: Arc::clone(&tools),
+            skill_roots: crate::tool::skill::Roots::none(),
             lent_tools: std::sync::Mutex::new(Arc::clone(&tools)),
             mcp: None,
             mcp_installed: std::sync::Mutex::new(0),
@@ -1541,6 +1548,37 @@ impl Engine {
         self.hooks = Some(hooks);
 
         self
+    }
+
+    /// Where a turn's `$name` invocations load skills from.
+    ///
+    /// The caller hands the same `instruction::skill_roots` value it built
+    /// the `skill` tool over, which is what keeps the prompt's
+    /// `<available_skills>`, the tool's answers and a `$` invocation one
+    /// list. An engine never given roots expands every name to the tool's
+    /// own not-found sentence — honest, and exactly what a fixture wants.
+    #[must_use]
+    pub fn with_skill_roots(mut self, roots: crate::tool::skill::Roots) -> Self {
+        self.skill_roots = roots;
+
+        self
+    }
+
+    /// Replaces the skill roots in place — the `/plugin` dialog's Reload,
+    /// which swaps these beside [`Engine::replace_base_tools`] so the next
+    /// turn's `$` invocations read the same list its rebuilt `skill` tool
+    /// does. A running turn keeps the roots it started with, like every
+    /// other value a turn clones at its start.
+    pub fn replace_skill_roots(&mut self, roots: crate::tool::skill::Roots) {
+        self.skill_roots = roots;
+    }
+
+    /// The roots [`Engine::with_skill_roots`] installed, for a frontend
+    /// composing `$name` invocations against the same list a turn will
+    /// expand them from.
+    #[must_use]
+    pub fn skill_roots(&self) -> crate::tool::skill::Roots {
+        self.skill_roots.clone()
     }
 
     /// Replaces what runs at the nine hook moments, in place — the hooks
@@ -2345,11 +2383,20 @@ impl Engine {
     /// session cannot become.
     pub async fn send(&self, command: Command) -> Result<(), EngineError> {
         match command {
-            Command::SendPrompt { text, mentions } => {
-                self.start_turn(text, TurnKind::Prompt { mentions }, None)
+            Command::SendPrompt {
+                text,
+                mentions,
+                skills,
+            } => {
+                self.start_turn(text, TurnKind::Prompt { mentions, skills }, None)
                     .await
             }
-            Command::Steer { id, text, mentions } => self.steer(id, text, mentions).await,
+            Command::Steer {
+                id,
+                text,
+                mentions,
+                skills,
+            } => self.steer(id, text, mentions, skills).await,
             Command::CancelTurn => {
                 self.cancel_turn().await;
                 Ok(())
@@ -2454,6 +2501,10 @@ impl Engine {
             expanded.prompt,
             TurnKind::Prompt {
                 mentions: expanded.mentions,
+                // A template's `$` words are its own vocabulary
+                // (`$ARGUMENTS`), not the composer's skill grammar: nothing
+                // in an expanded command is scanned for invocations.
+                skills: Vec::new(),
             },
             overrides,
         )
@@ -3720,6 +3771,7 @@ impl Engine {
             reminders,
             kind,
             tools: self.tools(),
+            skill_roots: self.skill_roots.clone(),
             permissions,
             cwd: self.cwd.clone(),
             root: self.root.clone(),
@@ -3777,6 +3829,7 @@ impl Engine {
         id: String,
         text: String,
         mentions: Vec<crate::protocol::Mention>,
+        skills: Vec<String>,
     ) -> Result<(), EngineError> {
         let queued = self
             .turn
@@ -3787,7 +3840,12 @@ impl Engine {
                 turn.steer
                     .lock()
                     .expect("the steer mailbox is never poisoned")
-                    .push(SteerInput { id, text, mentions });
+                    .push(SteerInput {
+                        id,
+                        text,
+                        mentions,
+                        skills,
+                    });
 
                 true
             })
@@ -4276,6 +4334,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4358,6 +4417,7 @@ mod tests {
                 .send(Command::SendPrompt {
                     text: prompt.to_owned(),
                     mentions: Vec::new(),
+                    skills: Vec::new(),
                 })
                 .await
                 .expect("an idle engine accepts a prompt");
@@ -4414,6 +4474,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4435,6 +4496,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "again".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("a failed turn leaves the engine idle");
@@ -4454,6 +4516,7 @@ mod tests {
                 .send(Command::SendPrompt {
                     text: prompt.to_owned(),
                     mentions: Vec::new(),
+                    skills: Vec::new(),
                 })
                 .await
                 .expect("an idle engine accepts a prompt");
@@ -4538,6 +4601,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "next".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4723,6 +4787,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "fill the conversation a little".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4769,6 +4834,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "the first prompt".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4779,6 +4845,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "the second prompt, which the revert takes back".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4846,6 +4913,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "x".repeat(400),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4879,6 +4947,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4922,6 +4991,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4961,6 +5031,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -4988,6 +5059,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "second".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("a fresh conversation accepts a prompt");
@@ -5022,6 +5094,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5035,6 +5108,7 @@ mod tests {
                 .send(Command::SendPrompt {
                     text: "second".to_owned(),
                     mentions: Vec::new(),
+                    skills: Vec::new(),
                 })
                 .await,
             Err(EngineError::Busy)
@@ -5055,6 +5129,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5086,6 +5161,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5111,6 +5187,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5121,6 +5198,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "second".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("a finished turn leaves the engine idle");
@@ -5251,6 +5329,7 @@ mod tests {
                 .send(Command::SendPrompt {
                     text: prompt.to_owned(),
                     mentions: Vec::new(),
+                    skills: Vec::new(),
                 })
                 .await
                 .expect("an idle engine accepts a prompt");
@@ -5308,6 +5387,7 @@ mod tests {
             .send(Command::SendPrompt {
                 text: "now what".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("a finished passthrough leaves the engine idle");

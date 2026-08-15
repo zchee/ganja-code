@@ -287,6 +287,7 @@ async fn switching_the_session_agent_does_not_drop_the_standing_refusal() {
         .send(Command::SendPrompt {
             text: "ask me something".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -338,6 +339,7 @@ async fn standing_rules_imposed_before_the_agents_survive_them() {
         .send(Command::SendPrompt {
             text: "ask me something".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

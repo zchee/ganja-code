@@ -96,6 +96,7 @@ async fn a_slow_consumer_receives_every_event_in_order() {
         .send(Command::SendPrompt {
             text: "flood".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -183,6 +184,7 @@ async fn prompt(engine: &Engine, text: &str) {
         .send(Command::SendPrompt {
             text: text.to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

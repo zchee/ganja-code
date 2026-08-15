@@ -458,6 +458,7 @@ async fn two_children_asking_at_once_hold_two_dialogs_answered_by_id() {
         .send(Command::SendPrompt {
             text: "delegate two ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -585,6 +586,7 @@ async fn three_task_calls_run_concurrently_and_land_as_they_finish() {
         .send(Command::SendPrompt {
             text: "delegate three ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -675,6 +677,7 @@ async fn each_child_reports_progress_on_its_own_part() {
         .send(Command::SendPrompt {
             text: "delegate two ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -777,6 +780,7 @@ async fn the_configured_cap_is_how_many_children_run_at_once() {
         .send(Command::SendPrompt {
             text: "delegate four ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -836,6 +840,7 @@ async fn a_cancel_while_two_dialogs_are_queued_answers_both_and_ends_the_turn() 
         .send(Command::SendPrompt {
             text: "delegate two ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -898,6 +903,7 @@ async fn a_cancel_while_two_dialogs_are_queued_answers_both_and_ends_the_turn() 
         .send(Command::SendPrompt {
             text: "delegate two ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("a cancelled turn leaves the engine idle");
@@ -935,6 +941,7 @@ async fn concurrent_children_stay_off_the_subscribed_stream() {
         .send(Command::SendPrompt {
             text: "delegate three ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1092,6 +1099,7 @@ async fn a_stored_turn_replays_its_calls_in_call_order() {
         .send(Command::SendPrompt {
             text: "delegate three ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1131,6 +1139,7 @@ async fn a_stored_turn_replays_its_calls_in_call_order() {
         .send(Command::SendPrompt {
             text: "delegate three ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("a finished turn leaves the engine idle");
@@ -1246,6 +1255,7 @@ async fn ordinary_calls_still_resolve_one_after_another() {
         .send(Command::SendPrompt {
             text: "run both".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1329,6 +1339,7 @@ async fn every_child_that_ends_fires_its_own_subagent_stop() {
         .send(Command::SendPrompt {
             text: "delegate three ways".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

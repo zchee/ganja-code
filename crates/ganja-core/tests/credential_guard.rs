@@ -75,6 +75,7 @@ async fn an_engines_own_credential_store_is_refused_to_the_model_that_asks_for_i
         .send(Command::SendPrompt {
             text: "read the auth file".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
