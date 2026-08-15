@@ -10,7 +10,7 @@
 //! keep streaming cheap without making typing feel laggy.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -546,9 +546,6 @@ pub struct App {
     transmitted: HashMap<String, (u32, u32, u32)>,
     /// The last id handed out; ids start at one so zero can mean "failed".
     image_id: u32,
-    /// The placements as last actually emitted — id, cell position and cell
-    /// box — so an unchanged frame writes no escapes at all.
-    graphics_drawn: Option<Vec<(u32, u16, u16, u16)>>,
     /// When the clipboard-image hint last showed, for its 30-second rate
     /// limit — matching Claude Code's own observed behaviour.
     image_hint_last: Option<std::time::Instant>,
@@ -757,7 +754,6 @@ impl App {
             graphics: None,
             transmitted: HashMap::new(),
             image_id: 0,
-            graphics_drawn: None,
             image_hint_last: None,
             plugin_task: None,
             tools: ganja_tool::Registry::with_builtins(),
@@ -1264,9 +1260,6 @@ impl App {
         if self.stale {
             terminal.clear().context("failed to repaint the screen")?;
             self.stale = false;
-            // The clear may have taken the terminal's placements with it;
-            // whatever was placed must be spoken again.
-            self.graphics_drawn = None;
         }
 
         // The token the cursor sits on lights up reversed — Claude Code's
@@ -1659,24 +1652,28 @@ impl App {
     /// whose number nothing pasted — typed by hand, or recalled from history
     /// into a fresh session — stays literal text, the same fate a mistyped
     /// `@` path meets.
-    /// Emits placements for the attached images the transcript's last frame
-    /// left fully visible, exactly once per change: pixels transmitted the
-    /// first time a path is seen (thumbnailed, any of the four formats),
-    /// stale placements deleted, and each image placed on the blank box its
-    /// entry reserved. Written to the real stdout the way `flush_osc`
-    /// writes, because the kitty graphics protocol is a terminal channel,
-    /// not a buffer cell — and guarded on the emitter, so a test's frame
-    /// writes nothing.
+    /// Answers the images the transcript's last frame wanted cells for:
+    /// each path loaded once (thumbnailed, any of the four formats),
+    /// transmitted under a fresh id, given its **virtual** placement, and
+    /// handed back to the chat so the next frame draws its placeholder
+    /// cells. The APCs are position-independent — the cells say where the
+    /// picture goes — so nothing here moves a cursor, which is exactly what
+    /// makes the scheme safe under tmux. Written to the real stdout the way
+    /// `flush_osc` writes; guarded on the emitter, so a test's frame writes
+    /// nothing.
     fn flush_graphics(&mut self) {
         use std::io::Write as _;
 
         let Some(emitter) = self.graphics else {
             return;
         };
-        let spots: Vec<(String, u16, u16)> = self.chat.image_spots().to_vec();
-        let mut transmits = String::new();
-        let mut current: Vec<(u32, u16, u16, u16)> = Vec::new();
-        for (path, x, y) in spots {
+        let wanted: Vec<String> = self.chat.images_wanting_cells().to_vec();
+        if wanted.is_empty() {
+            return;
+        }
+
+        let mut wire = String::new();
+        for path in wanted {
             // Joined against the root the way the engine resolves the
             // mention itself: a dropped path may be project-relative, and a
             // join with an absolute one is that absolute path.
@@ -1686,44 +1683,22 @@ impl App {
                 None => {
                     let loaded = graphics::load(&resolved).map_or((0, 0, 0), |preview| {
                         self.image_id += 1;
-                        transmits.push_str(&emitter.transmit(self.image_id, &preview.png));
+                        wire.push_str(&emitter.transmit(self.image_id, &preview.png));
                         (self.image_id, preview.width, preview.height)
                     });
                     self.transmitted.insert(resolved, loaded);
                     loaded
                 }
             };
-            if id == 0 {
-                // The zero id is the cached "would not decode": the entry's
-                // blank box stays blank, and the file is never re-read.
-                continue;
-            }
-            let columns = graphics::columns_for(width, height, chat::IMAGE_ROWS).min(60);
-            current.push((id, x, y, columns));
-        }
-
-        if self.graphics_drawn.as_ref() == Some(&current) {
-            return;
-        }
-        let mut wire = transmits;
-        match &self.graphics_drawn {
-            Some(drawn) => {
-                let mut deleted = HashSet::new();
-                for (id, ..) in drawn {
-                    if deleted.insert(*id) {
-                        wire.push_str(&emitter.delete(*id));
-                    }
-                }
-            }
-            // First emission after a start or a full repaint: sweep whatever
-            // an earlier life of this screen may have left.
-            None => wire.push_str(&emitter.delete_all()),
-        }
-        for (id, x, y, columns) in &current {
-            // CSI cursor addressing is one-based; the placement lands at the
-            // cursor, which is the whole reason the move precedes it.
-            wire.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
-            wire.push_str(&emitter.place(*id, *columns, chat::IMAGE_ROWS));
+            let columns = if id == 0 {
+                0
+            } else {
+                let columns = graphics::columns_for(width, height, chat::IMAGE_ROWS).min(60);
+                wire.push_str(&emitter.virtual_placement(id, columns, chat::IMAGE_ROWS));
+                columns
+            };
+            self.chat.set_image_cell(&path, id, columns);
+            self.dirty = true;
         }
 
         let mut stdout = std::io::stdout();
@@ -1731,7 +1706,6 @@ impl App {
             tracing::warn!(%error, "the transcript's graphics escapes could not be written");
         }
         let _ = stdout.flush();
-        self.graphics_drawn = Some(current);
     }
 
     /// Reverses the `[Image #N]` token the cursor sits on — Claude Code's

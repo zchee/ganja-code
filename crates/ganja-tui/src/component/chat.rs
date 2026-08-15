@@ -60,7 +60,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
-use crate::{component::rewind, markdown, mention, theme::Theme};
+use crate::{component::rewind, graphics, markdown, mention, theme::Theme};
 
 /// Lines one wheel notch moves the viewport.
 pub const WHEEL_LINES: isize = 3;
@@ -146,15 +146,18 @@ fn reverted_headline(hidden: usize) -> String {
 pub struct Chat {
     entries: Vec<Entry>,
     /// Whether the terminal can draw pixels (kitty graphics, set once at
-    /// startup): on, an attached image's row becomes a reserved blank box
-    /// the placement lands on; off, the token-and-mime row stands as always
-    /// (2026-08-15).
+    /// startup): on, an attached image's row becomes rows of Unicode
+    /// placeholder cells the terminal composites the picture over; off, the
+    /// token-and-mime row stands as always (2026-08-15).
     graphics: bool,
-    /// Where the last render left each **fully visible** attached image:
-    /// its part's path, and the screen cell its box's top-left holds. What
-    /// [`crate::app::App`] places after the frame — recomputed every render,
-    /// because scrolling moves the boxes and the placements must follow.
-    image_spots: Vec<(String, u16, u16)>,
+    /// Per attached-image path: the id its pixels travel under and the cell
+    /// columns its box stands, filled in by [`crate::app::App`] once the
+    /// file has been read and transmitted. The zero id is a file that would
+    /// not decode — its box stays blank and is never asked for again.
+    image_cells: HashMap<String, (u32, u16)>,
+    /// The image paths the last wrap wanted cells for and did not have:
+    /// what the app loads and transmits after the frame.
+    image_wanted: Vec<String>,
     /// The revert this transcript is showing, while it is showing one.
     ///
     /// Nothing is removed while it is set: the messages an undo hid are still
@@ -434,9 +437,8 @@ struct Wrapped {
     /// everything drawn fresh takes the new one.
     revision: u64,
     lines: Vec<Line<'static>>,
-    /// The attached images these lines reserved boxes for: each part's path
-    /// beside the line index its [`IMAGE_ROWS`]-tall box starts on, empty
-    /// whenever the terminal draws no pixels (2026-08-15).
+    /// The attached-image paths this wrap wanted placeholder cells for and
+    /// did not have yet, empty once every image is answered (2026-08-15).
     images: Vec<(usize, String)>,
 }
 
@@ -451,12 +453,23 @@ impl Chat {
         self.graphics = graphics;
     }
 
-    /// Where the last render left each fully visible attached image: the
-    /// part's path and the screen cell its box's top-left holds, for the
-    /// app's post-frame placements.
+    /// The image paths the last render wanted placeholder cells for and did
+    /// not have — what the app loads, transmits, and answers through
+    /// [`Chat::set_image_cell`].
     #[must_use]
-    pub fn image_spots(&self) -> &[(String, u16, u16)] {
-        &self.image_spots
+    pub fn images_wanting_cells(&self) -> &[String] {
+        &self.image_wanted
+    }
+
+    /// Answers a wanted image: the id its pixels were transmitted under and
+    /// the columns its box stands — or the zero id for a file that would not
+    /// decode, whose box stays honestly blank. Every entry rewraps, because
+    /// any of them may hold the same path.
+    pub fn set_image_cell(&mut self, path: &str, id: u32, columns: u16) {
+        self.image_cells.insert(path.to_owned(), (id, columns));
+        for entry in &mut self.entries {
+            entry.wrapped = None;
+        }
     }
 
     /// Appends `message` and returns to following the tail.
@@ -798,7 +811,7 @@ impl Chat {
         let hidden = self.entries.len() - first_hidden;
         let graphics = self.graphics;
         for entry in &mut self.entries[..first_hidden] {
-            entry.wrap(area.width, theme, graphics);
+            entry.wrap(area.width, theme, graphics, &self.image_cells);
         }
         if let Some(revert) = &mut self.revert {
             revert.wrap(hidden, area.width, theme);
@@ -823,27 +836,18 @@ impl Chat {
             .map_or_else(|| self.max_offset(), |offset| offset.min(self.max_offset()));
         self.offset = self.offset.map(|_| offset);
 
-        // Where each attached image's reserved box landed this frame, for
-        // the placements that follow it (2026-08-15). Fully visible boxes
-        // only: a placement always extends downward from its cell, so a box
-        // half scrolled off would paint over whatever sits below the pane.
-        let mut spots: Vec<(String, u16, u16)> = Vec::new();
-        if self.graphics {
-            let mut start = 0usize;
-            for entry in self.shown() {
-                for (line, path) in entry.images() {
-                    let absolute = start + line;
-                    if absolute >= offset
-                        && absolute + usize::from(IMAGE_ROWS) <= offset + usize::from(area.height)
-                        && let Ok(row) = u16::try_from(absolute - offset)
-                    {
-                        spots.push((path.clone(), area.x + 2, area.y + row));
-                    }
+        // The image paths this frame's wraps wanted cells for and did not
+        // have — deduped, for the app's post-frame load-and-transmit
+        // (2026-08-15).
+        let mut wanted: Vec<String> = Vec::new();
+        for entry in self.shown() {
+            for (_, path) in entry.images() {
+                if !wanted.contains(path) {
+                    wanted.push(path.clone());
                 }
-                start += entry.lines().len();
             }
         }
-        self.image_spots = spots;
+        self.image_wanted = wanted;
 
         for (row, line) in self.visible(offset).enumerate() {
             let Ok(row) = u16::try_from(row) else {
@@ -1081,7 +1085,13 @@ impl Entry {
             .map_or(&[], |wrapped| wrapped.images.as_slice())
     }
 
-    fn wrap(&mut self, width: u16, theme: &Theme, graphics: bool) {
+    fn wrap(
+        &mut self,
+        width: u16,
+        theme: &Theme,
+        graphics: bool,
+        cells: &HashMap<String, (u32, u16)>,
+    ) {
         if self
             .wrapped
             .as_ref()
@@ -1181,17 +1191,41 @@ impl Entry {
                     ..
                 } => {
                     // An attached image the terminal can draw is drawn
-                    // (2026-08-15): the token-and-mime row gives way to a
-                    // reserved blank box the kitty-graphics placement lands
-                    // on after the frame — the picture the person attached,
-                    // not its filesystem spelling. Every other file, and
-                    // every image on a pixel-less terminal, keeps the row.
+                    // (2026-08-15): the token-and-mime row gives way to rows
+                    // of kitty Unicode placeholder cells the terminal
+                    // composites the picture over — cells rather than a
+                    // positioned placement, because cells scroll, clip and
+                    // survive tmux exactly as text does, where the first
+                    // cut's cursor-move placements landed on whatever row a
+                    // multiplexer's redraw left the real cursor on. Every
+                    // other file, and every image on a pixel-less terminal,
+                    // keeps the token row.
                     if graphics && mime.starts_with("image/") {
-                        images.push((lines.len(), path.clone()));
-                        lines.extend(std::iter::repeat_n(
-                            Line::default(),
-                            usize::from(IMAGE_ROWS),
-                        ));
+                        match cells.get(path) {
+                            Some(&(id, columns)) if id != 0 => {
+                                let style = Style::default().fg(graphics::id_color(id));
+                                for row in 0..IMAGE_ROWS {
+                                    let mut text = String::from("  ");
+                                    for column in 0..columns {
+                                        text.push_str(&graphics::placeholder(row, column));
+                                    }
+                                    lines.push(Line::styled(text, style));
+                                }
+                            }
+                            // The zero id is a file that would not decode:
+                            // the box stays honestly blank, forever.
+                            Some(_) => lines.extend(std::iter::repeat_n(
+                                Line::default(),
+                                usize::from(IMAGE_ROWS),
+                            )),
+                            None => {
+                                images.push((lines.len(), path.clone()));
+                                lines.extend(std::iter::repeat_n(
+                                    Line::default(),
+                                    usize::from(IMAGE_ROWS),
+                                ));
+                            }
+                        }
                         continue;
                     }
                     let token = mention::token(path, *start, *end);
@@ -2151,12 +2185,14 @@ mod tests {
         assert!(screen.contains("@shot.png (image/png)"), "{screen}");
     }
 
-    /// With pixels available, an attached image's row gives way to a
-    /// reserved blank box and the render says where the box landed — the
-    /// picture in the transcript, not its path (2026-08-15). A text
-    /// attachment keeps its token row beside it.
+    /// With pixels available, an attached image's row gives way to a blank
+    /// box and the render asks for its cells; answered, the box fills with
+    /// kitty placeholder cells carrying the id in their color — the picture
+    /// in the transcript, not its path (2026-08-15). A text attachment
+    /// keeps its token row beside it, and a decode failure leaves the box
+    /// honestly blank forever.
     #[test]
-    fn with_graphics_an_attached_image_reserves_a_box_and_reports_its_spot() {
+    fn with_graphics_an_attached_image_asks_for_cells_and_then_draws_them() {
         let mut chat = Chat::default();
         chat.set_graphics(true);
         let mut message = Message::user("look");
@@ -2190,19 +2226,39 @@ mod tests {
         );
         assert!(screen.contains("@src/lib.rs"), "{screen}");
         assert_eq!(
-            chat.image_spots(),
-            &[("shot.png".to_owned(), 2, 1)],
-            "the box's top-left is reported for the placement"
+            chat.images_wanting_cells(),
+            &["shot.png".to_owned()],
+            "the render asks for the cells it does not have"
         );
 
-        // Scrolled so the box cannot fit whole, the spot is withheld: a
-        // placement extends downward and would paint over what sits below.
-        let short = Rect::new(0, 0, 40, 3);
-        rendered(&mut chat, short);
+        chat.set_image_cell("shot.png", 7, 3);
+        let mut buffer = Buffer::empty(area);
+        chat.render(area, &mut buffer, &Theme::default());
+        let cell = &buffer[(2, 1)];
         assert!(
-            chat.image_spots().is_empty(),
-            "a box that cannot fit whole places nothing"
+            cell.symbol().starts_with('\u{10EEEE}'),
+            "the box holds placeholder cells, got {:?}",
+            cell.symbol()
         );
+        assert_eq!(
+            cell.style().fg,
+            Some(crate::graphics::id_color(7)),
+            "and the id rides the color"
+        );
+        assert!(
+            chat.images_wanting_cells().is_empty(),
+            "an answered image is not asked for again"
+        );
+
+        chat.set_image_cell("shot.png", 0, 0);
+        let mut blank = Buffer::empty(area);
+        chat.render(area, &mut blank, &Theme::default());
+        assert_eq!(
+            blank[(2, 1)].symbol(),
+            " ",
+            "a decode failure keeps the box blank"
+        );
+        assert!(chat.images_wanting_cells().is_empty(), "and never re-asks");
     }
 
     #[test]
