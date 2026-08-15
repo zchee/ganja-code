@@ -352,21 +352,7 @@ impl Tool for SkillTool {
         let skills = discover(&self.roots);
 
         let Some(skill) = skills.iter().find(|skill| skill.name == args.name) else {
-            let available: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
-
-            // Upstream's own sentence (`skill/index.ts:77-79`), and the reason
-            // it is a failure rather than a panic: a tool result is
-            // information the model reads and acts on, so the list of what it
-            // *could* have asked for is the useful half.
-            return Err(ToolError::Failed(format!(
-                "Skill \"{}\" not found. Available skills: {}",
-                args.name,
-                if available.is_empty() {
-                    "none".to_owned()
-                } else {
-                    available.join(", ")
-                }
-            )));
+            return Err(ToolError::Failed(not_found(&args.name, &skills)));
         };
 
         let dir = skill
@@ -385,8 +371,88 @@ impl Tool for SkillTool {
     }
 }
 
+/// The sentence a name nothing answers to gets back, listing what it could
+/// have asked for.
+///
+/// Upstream's own (`skill/index.ts:77-79`), and a failure rather than a panic
+/// because a tool result is information the model reads and acts on — the
+/// list of what it *could* have asked for is the useful half. Public for the
+/// same reason [`rendered`] is: the engine's `$name` expansion reports a miss
+/// in this exact spelling, so the model reads one sentence wherever the miss
+/// happened.
+#[must_use]
+pub fn not_found(name: &str, skills: &[Skill]) -> String {
+    let available: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+
+    format!(
+        "Skill \"{name}\" not found. Available skills: {}",
+        if available.is_empty() {
+            "none".to_owned()
+        } else {
+            available.join(", ")
+        }
+    )
+}
+
+/// The skills `text` explicitly invokes: every `$name` token naming one of
+/// `skills`, in first-appearance order, deduped.
+///
+/// The grammar is the OpenAI Codex CLI's `$skill-name` mention — an inline
+/// token like a composer's `@file`, not a line-prefix classifier like `!` —
+/// and validation against the discovered set is what keeps it safe to scan
+/// free text: `$PATH` in a pasted shell snippet stays literal because nothing
+/// answers to it. A token is the longest run of `[A-Za-z0-9._:-]` after a
+/// `$`; when that run as a whole names no skill, trailing punctuation from
+/// that same set (`.`, `:`, `_`, `-`) is trimmed one character at a time and
+/// retried, so `use $porting.` invokes `porting` while `$portingfoo` invokes
+/// nothing — a longer word is a different word, never a prefix match.
+#[must_use]
+pub fn requested_in(text: &str, skills: &[Skill]) -> Vec<String> {
+    let is_token_byte =
+        |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-');
+    let bytes = text.as_bytes();
+    let mut found: Vec<String> = Vec::new();
+    let mut at = 0;
+
+    while at < bytes.len() {
+        if bytes[at] != b'$' {
+            at += 1;
+            continue;
+        }
+        let start = at + 1;
+        let mut end = start;
+        while end < bytes.len() && is_token_byte(bytes[end]) {
+            end += 1;
+        }
+        // The run is ASCII throughout, so these byte offsets are char
+        // boundaries.
+        let mut run = &text[start..end];
+        while !run.is_empty() {
+            if skills.iter().any(|skill| skill.name == run) {
+                if !found.iter().any(|name| name == run) {
+                    found.push(run.to_owned());
+                }
+                break;
+            }
+            match run.as_bytes().last() {
+                Some(b'.' | b'_' | b':' | b'-') => run = &run[..run.len() - 1],
+                _ => break,
+            }
+        }
+        at = end.max(at + 1);
+    }
+
+    found
+}
+
 /// What a loaded skill hands the model (`tool/skill.ts:45-61`).
-fn rendered(skill: &Skill, dir: &Path) -> String {
+///
+/// Public because the tool is no longer the only door: the engine expands a
+/// composer's `$name` invocation through this same function, and the two must
+/// stay byte-identical — a model that loads a skill both ways may never see
+/// two spellings of one body. Share it; never copy it.
+#[must_use]
+pub fn rendered(skill: &Skill, dir: &Path) -> String {
     let files: Vec<String> = beside(dir)
         .iter()
         .map(|path| format!("<file>{}</file>", path.display()))
@@ -625,6 +691,63 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].content, "the second");
+    }
+
+    /// A skill that exists only by name, for scanning text against.
+    fn named(name: &str) -> Skill {
+        Skill {
+            name: name.to_owned(),
+            description: None,
+            location: PathBuf::from("SKILL.md"),
+            content: String::new(),
+        }
+    }
+
+    /// A `$` token invokes a skill only when a discovered name answers to it,
+    /// which is what keeps scanning free text safe: pasted shell prompts and
+    /// environment variables match nothing and stay literal.
+    #[test]
+    fn a_dollar_token_invokes_only_a_name_something_answers_to() {
+        let skills = [named("porting"), named("my-skill"), named("v1.2")];
+        let cases: [(&str, &[&str]); 13] = [
+            ("use $porting now", &["porting"]),
+            ("$porting", &["porting"]),
+            ("ends with $porting", &["porting"]),
+            ("echo $PATH; then $porting", &["porting"]),
+            ("$ cargo build", &[]),
+            ("$", &[]),
+            ("no tokens at all", &[]),
+            ("$portingfoo is a different word, never a prefix match", &[]),
+            (
+                "use $porting. then $my-skill: done",
+                &["porting", "my-skill"],
+            ),
+            ("a dot the name owns survives the trim: $v1.2.", &["v1.2"]),
+            ("$my-skill-", &["my-skill"]),
+            (
+                "$my-skill then $porting then $my-skill again",
+                &["my-skill", "porting"],
+            ),
+            ("日本語の中の$porting。も見つかる", &["porting"]),
+        ];
+
+        for (text, expected) in cases {
+            assert_eq!(super::requested_in(text, &skills), expected, "{text:?}");
+        }
+    }
+
+    /// The tool's refusal and the engine's expansion miss read the same
+    /// sentence, because both call this.
+    #[test]
+    fn a_missing_name_is_reported_with_the_names_there_are() {
+        assert_eq!(
+            super::not_found("missing", &[named("porting"), named("tdd")]),
+            "Skill \"missing\" not found. Available skills: porting, tdd"
+        );
+        assert_eq!(
+            super::not_found("missing", &[]),
+            "Skill \"missing\" not found. Available skills: none"
+        );
     }
 
     /// The one directory a config named is scanned, and what a call gets back

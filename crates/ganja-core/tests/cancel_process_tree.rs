@@ -208,6 +208,7 @@ async fn drill() {
         .send(Command::SendPrompt {
             text: "run it".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

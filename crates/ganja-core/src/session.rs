@@ -60,6 +60,7 @@ use crate::{
     storage::{SessionId, SessionInfo, Storage, StorageError},
     tool::{
         Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput, question, shell,
+        skill,
     },
 };
 
@@ -281,6 +282,10 @@ pub(crate) struct SteerInput {
     /// Read when the request carrying this message is built, never here: a
     /// steer's mentions obey the same read-at-send rule a prompt's do.
     pub(crate) mentions: Vec<crate::protocol::Mention>,
+    /// Skills the message's `$name` tokens invoked, resolved when the drain
+    /// builds the message — the same read-at-send rule, so a skill edited
+    /// between the steer and the step boundary is read as it stands then.
+    pub(crate) skills: Vec<String>,
 }
 
 /// The running turn's mailbox: what has been handed to it, and what it has
@@ -719,6 +724,10 @@ pub(crate) enum TurnKind {
         /// Files the user attached, which become [`PartBody::File`] parts on
         /// their message and are read when a request is built.
         mentions: Vec<crate::protocol::Mention>,
+        /// Skills the user's `$name` tokens invoked, resolved against
+        /// [`Turn::skill_roots`] when the message is built — see
+        /// [`skill_parts`].
+        skills: Vec<String>,
     },
     /// Run a command the *user* typed and put it and its output in the
     /// transcript, without asking the model anything. Upstream's `!`
@@ -773,6 +782,13 @@ pub(crate) struct Turn {
     pub(crate) kind: TurnKind,
     /// Tools the model is offered, and this loop executes.
     pub(crate) tools: Arc<Registry>,
+    /// Where this session's skills are looked for, for the `$name`
+    /// invocations a prompt or steer carries — the same value the frontend's
+    /// `skill` tool holds, so a user invocation and a model's `skill` call
+    /// load from one list. Empty on every scripted and golden run, and on
+    /// every engine whose frontend installed no roots: expansion then answers
+    /// each name with the tool's own not-found sentence.
+    pub(crate) skill_roots: skill::Roots,
     /// Rules deciding which calls wait for the user.
     pub(crate) permissions: Arc<std::sync::Mutex<Permissions>>,
     /// Directory tool calls resolve relative paths against.
@@ -921,6 +937,10 @@ impl Turn {
             reminders: Vec::new(),
             kind: parts.kind,
             tools: Arc::clone(&host.tools),
+            // No roots: a child's prompt is built by a `task` call, and `$`
+            // invocation belongs to what a *person* typed. Its `skill` tool
+            // still loads through the registry above.
+            skill_roots: skill::Roots::none(),
             permissions: Arc::new(std::sync::Mutex::new(parts.permissions)),
             cwd: host.cwd.clone(),
             root: host.root.clone(),
@@ -1059,6 +1079,54 @@ fn mention_parts(mentions: &[crate::protocol::Mention]) -> impl Iterator<Item = 
     })
 }
 
+/// Turns the `$name` invocations a message carried into the parts the model
+/// reads.
+///
+/// Each name resolves against `roots` **now** — the read-at-send rule
+/// mentions follow — and becomes the same `<skill_content>` block a `skill`
+/// tool call returns, byte for byte, because both sides call
+/// [`skill::rendered`]; copying that function instead of sharing it is the
+/// one refactor this seam forbids. A name nothing answers to becomes the
+/// tool's own not-found sentence ([`skill::not_found`]) and the turn
+/// proceeds: a miss is information the model reads, never control flow.
+/// Nothing here crosses a permission gate or fires a `PreToolUse` hook — the
+/// person typing the token is the consent, exactly as it is for the tool's
+/// own default-allow standing.
+///
+/// **D491** (`dollar-skill-invocation`): upstream opencode v1.18.13 has no
+/// user-facing skill invocation at all — skills reach only the model, through
+/// the `skill` tool. The grammar here is the OpenAI Codex CLI's `$skill-name`
+/// mention (its `/skills` listing rides along in the frontends), and the
+/// expansion is engine-side rather than a model-mediated tool round trip
+/// because an *explicit* invocation must be deterministic: the model may not
+/// decline to load what the person named, and no request is spent asking it
+/// to.
+fn skill_parts<'a>(roots: &skill::Roots, names: &'a [String]) -> impl Iterator<Item = Part> + 'a {
+    // One walk per message, not one per name: the roster the misses are
+    // reported against is then the roster the hits were found in.
+    let skills = if names.is_empty() {
+        Vec::new()
+    } else {
+        skill::discover(roots)
+    };
+
+    names.iter().map(move |name| {
+        let text = match skills.iter().find(|skill| skill.name == *name) {
+            Some(skill) => {
+                let dir = skill
+                    .location
+                    .parent()
+                    .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+                skill::rendered(skill, &dir)
+            }
+            None => skill::not_found(name, &skills),
+        };
+
+        Part::text(text)
+    })
+}
+
 /// Takes whatever a [`Command::Steer`] left for this turn and turns each one
 /// into a real user message: announced, persisted, and appended to what the
 /// next request carries.
@@ -1106,6 +1174,8 @@ async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, bool> {
 
         let mut user = Message::user(input.text);
         user.parts.extend(mention_parts(&input.mentions));
+        user.parts
+            .extend(skill_parts(&turn.skill_roots, &input.skills));
 
         // Disk before the provider hears it, exactly as the opening prompt
         // reaches it: a `kill -9` mid-stream must still preserve what was
@@ -1724,9 +1794,11 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
 
     let mut user = Message::user(turn.prompt.clone());
     // A mention is a reference and nothing more; what the file says is read
-    // when a request is built. See [`PartBody::File`].
-    if let TurnKind::Prompt { mentions } = &turn.kind {
+    // when a request is built. See [`PartBody::File`]. A `$` invocation is
+    // the opposite — its body is loaded here, whole — see [`skill_parts`].
+    if let TurnKind::Prompt { mentions, skills } = &turn.kind {
         user.parts.extend(mention_parts(mentions));
+        user.parts.extend(skill_parts(&turn.skill_roots, skills));
     }
     // The prompt reaches the disk before the provider hears it: a `kill -9`
     // mid-stream must still preserve what was asked.
@@ -4637,8 +4709,10 @@ mod tests {
             reminders: Vec::new(),
             kind: TurnKind::Prompt {
                 mentions: Vec::new(),
+                skills: Vec::new(),
             },
             tools: Arc::new(Registry::new(vec![tool])),
+            skill_roots: crate::tool::skill::Roots::none(),
             permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
             cwd: std::env::temp_dir(),
             root: std::env::temp_dir(),
@@ -5085,6 +5159,7 @@ mod tests {
                 system: None,
                 kind: TurnKind::Prompt {
                     mentions: Vec::new(),
+                    skills: Vec::new(),
                 },
                 prompt: "do the thing".to_owned(),
                 permissions: Permissions::default(),

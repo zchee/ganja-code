@@ -205,6 +205,7 @@ fn prompt() -> Command {
     Command::SendPrompt {
         text: "go".to_owned(),
         mentions: Vec::new(),
+        skills: Vec::new(),
     }
 }
 

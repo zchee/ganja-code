@@ -339,6 +339,10 @@ struct PromptBody {
     text: String,
     #[serde(default)]
     mentions: Vec<Mention>,
+    /// `$name` skill invocations, passed through to the engine as
+    /// `SendPrompt` carries them; resolution stays the engine's.
+    #[serde(default)]
+    skills: Vec<String>,
     agent: Option<String>,
     model: Option<String>,
 }
@@ -368,6 +372,7 @@ async fn prompt(
         .send(Command::SendPrompt {
             text: body.text,
             mentions: body.mentions,
+            skills: body.skills,
         })
         .await?;
 

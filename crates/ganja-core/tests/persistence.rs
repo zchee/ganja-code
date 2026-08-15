@@ -269,6 +269,7 @@ async fn a_turn_on_a_persistent_engine_reaches_the_disk_as_it_streamed() {
         .send(Command::SendPrompt {
             text: "hi disk".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -348,6 +349,7 @@ async fn a_prompt_is_on_disk_before_the_provider_is_asked_rather_than_when_the_t
         .send(Command::SendPrompt {
             text: "hold the line".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -506,6 +508,7 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
         .send(Command::SendPrompt {
             text: "continue".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("a resumed engine accepts a prompt");
@@ -576,6 +579,7 @@ async fn session_operations_know_when_they_cannot_run() {
         .send(Command::SendPrompt {
             text: "stream for a while".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -615,6 +619,7 @@ async fn usage_and_the_context_measure_survive_a_restart() {
             .send(Command::SendPrompt {
                 text: prompt.to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -667,6 +672,7 @@ async fn usage_and_the_context_measure_survive_a_restart() {
         .send(Command::SendPrompt {
             text: "delta".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("a resumed engine accepts a prompt");
@@ -720,6 +726,7 @@ async fn an_over_budget_session_is_summarized_before_the_turn() {
         .send(Command::SendPrompt {
             text: "next step please".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -858,6 +865,7 @@ async fn a_cancel_during_compaction_leaves_the_window_uninstalled() {
         .send(Command::SendPrompt {
             text: "cancel me".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -894,6 +902,7 @@ async fn a_cancel_during_compaction_leaves_the_window_uninstalled() {
         .send(Command::SendPrompt {
             text: "still alive?".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("a cancelled turn leaves the engine idle");
@@ -927,6 +936,7 @@ async fn the_fake_provider_titles_from_the_prompt_without_a_request() {
         .send(Command::SendPrompt {
             text: prompt.clone(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -976,6 +986,7 @@ async fn a_real_provider_titles_through_its_cheapest_stablemate() {
         .send(Command::SendPrompt {
             text: prompt.to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1051,6 +1062,7 @@ async fn a_configured_small_model_is_what_the_title_request_asks_for() {
         .send(Command::SendPrompt {
             text: "fix the flux capacitor please".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1102,6 +1114,7 @@ async fn a_small_model_naming_another_provider_leaves_the_title_alone() {
         .send(Command::SendPrompt {
             text: "fix the flux capacitor please".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1145,6 +1158,7 @@ async fn a_refused_small_model_falls_back_to_the_sessions_own_model() {
         .send(Command::SendPrompt {
             text: "fix the flux capacitor please".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1198,6 +1212,7 @@ async fn a_failed_title_request_falls_back_to_the_prompt() {
         .send(Command::SendPrompt {
             text: prompt.to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1248,6 +1263,7 @@ async fn an_unsummarizable_history_skips_compaction_instead_of_failing() {
         .send(Command::SendPrompt {
             text: "go".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1299,6 +1315,7 @@ async fn a_finish_is_never_overtaken_by_the_next_turns_events() {
                     .send(Command::SendPrompt {
                         text: format!("turn {accepted}"),
                         mentions: Vec::new(),
+                        skills: Vec::new(),
                     })
                     .await
                 {

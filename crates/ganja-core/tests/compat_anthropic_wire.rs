@@ -132,6 +132,7 @@ async fn a_config_named_anthropic_compatible_endpoint_speaks_messages_on_the_key
         .send(Command::SendPrompt {
             text: "hi".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

@@ -55,6 +55,7 @@ async fn ask(engine: &Engine, events: &mut futures::stream::BoxStream<'static, E
         .send(Command::SendPrompt {
             text: "anything".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -290,6 +291,7 @@ async fn a_subagent_is_handed_the_base_prompt_of_the_family_in_force() {
         .send(Command::SendPrompt {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

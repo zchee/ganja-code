@@ -149,6 +149,7 @@ async fn cancelling_a_turn_kills_the_process_group_of_the_command_it_was_running
         .send(Command::SendPrompt {
             text: "run it".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

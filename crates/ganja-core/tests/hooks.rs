@@ -131,6 +131,7 @@ fn prompt(text: &str) -> Command {
     Command::SendPrompt {
         text: text.to_owned(),
         mentions: Vec::new(),
+        skills: Vec::new(),
     }
 }
 

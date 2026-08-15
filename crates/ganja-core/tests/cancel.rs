@@ -37,6 +37,7 @@ async fn cancelling_mid_stream_finishes_the_turn_inside_the_budget() {
         .send(Command::SendPrompt {
             text: "hello".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

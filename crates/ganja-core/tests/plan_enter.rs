@@ -134,6 +134,7 @@ async fn answered_turn(
         .send(Command::SendPrompt {
             text: prompt.to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -284,6 +285,7 @@ async fn a_yes_answer_lands_the_switch_to_plan_when_the_turn_ends() {
         Command::SendPrompt {
             text: "what is the shape".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         },
     )
     .await;
@@ -325,6 +327,7 @@ async fn a_no_answer_leaves_the_session_building() {
         Command::SendPrompt {
             text: "keep going".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         },
     )
     .await;
@@ -363,6 +366,7 @@ async fn an_edit_in_the_turn_that_asked_is_still_a_build_agents_edit() {
         .send(Command::SendPrompt {
             text: "add a cache layer".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -419,6 +423,7 @@ async fn a_manual_switch_after_yes_supersedes_the_plan_switch() {
         .send(Command::SendPrompt {
             text: "just do it".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("the switch left the engine idle");
@@ -498,6 +503,7 @@ async fn a_planning_session_reads_a_refusal_rather_than_a_missing_tool() {
         .send(Command::SendPrompt {
             text: "plan it".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -545,6 +551,7 @@ async fn the_enter_door_is_registered_only_where_a_plan_agent_exists() {
         .send(Command::SendPrompt {
             text: "hi".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -581,6 +588,7 @@ async fn the_enter_door_is_registered_only_where_a_plan_agent_exists() {
         .send(Command::SendPrompt {
             text: "hi".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

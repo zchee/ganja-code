@@ -60,6 +60,7 @@ async fn a_mention_becomes_a_file_part_on_the_message_and_content_in_the_request
                 path: path.to_string_lossy().into_owned(),
                 ..Default::default()
             }],
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -98,6 +99,7 @@ async fn the_users_message_carries_the_mention_as_a_reference() {
                 path: path.to_string_lossy().into_owned(),
                 ..Default::default()
             }],
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -156,6 +158,7 @@ async fn a_mentioned_file_is_read_when_the_request_is_built_not_when_it_was_atta
                 path: path.to_string_lossy().into_owned(),
                 ..Default::default()
             }],
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -167,6 +170,7 @@ async fn a_mentioned_file_is_read_when_the_request_is_built_not_when_it_was_atta
         .send(Command::SendPrompt {
             text: "read it again".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("a finished turn leaves the engine idle");
@@ -217,6 +221,7 @@ async fn a_mention_does_not_let_the_model_edit_a_file_it_never_read() {
                 path: path.to_string_lossy().into_owned(),
                 ..Default::default()
             }],
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -274,6 +279,7 @@ async fn a_mention_naming_something_unreadable_says_so_rather_than_vanishing() {
                     ..Default::default()
                 },
             ],
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -311,6 +317,7 @@ async fn a_png_mention_reaches_the_wire_as_base64_with_its_mime() {
                 path: path.to_string_lossy().into_owned(),
                 ..Default::default()
             }],
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -358,6 +365,7 @@ async fn a_png_mention_on_a_text_only_wire_reaches_the_model_as_its_name() {
                 path: path.to_string_lossy().into_owned(),
                 ..Default::default()
             }],
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -432,6 +440,7 @@ async fn a_clipboard_pasted_png_reaches_the_wire_as_a_decodable_image_of_its_dim
                 path: path.to_string_lossy().into_owned(),
                 ..Default::default()
             }],
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -484,6 +493,7 @@ async fn a_ranged_mention_inlines_exactly_the_named_lines() {
                 start: Some(2),
                 end: Some(4),
             }],
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

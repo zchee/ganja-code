@@ -3926,10 +3926,14 @@ impl App {
                 ganja_tool::webfetch::WebfetchTool::allowing_private(),
             ));
         }
+        let skill_roots = ganja_core::instruction::skill_roots(&config, &self.cwd);
         tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(
-            ganja_core::instruction::skill_roots(&config, &self.cwd),
+            skill_roots.clone(),
         )));
         self.engine.replace_base_tools(Arc::new(tools));
+        // Swapped beside the registry so the next turn's `$` invocations read
+        // the same list its rebuilt skill tool does.
+        self.engine.replace_skill_roots(skill_roots);
 
         let cwd = self.cwd.clone();
         self.engine.replace_environment(move |model| {
@@ -4043,14 +4047,17 @@ impl App {
                 mentions.extend(self.pasted_images_in(&prompt));
                 degraded = self.degraded(&mentions);
 
+                let skills = self.requested_skills(&prompt);
                 self.engine
                     .send(Command::SendPrompt {
-                        // The `@path` and `[Image #N]` tokens stay in the
-                        // text: they are what the user wrote, and the engine
-                        // reads the files `mentions` names when it builds
-                        // the request.
+                        // The `@path`, `[Image #N]` and `$skill` tokens stay
+                        // in the text: they are what the user wrote, and the
+                        // engine reads the files `mentions` names — and loads
+                        // the skills `skills` names — when it builds the
+                        // request.
                         text: prompt,
                         mentions,
+                        skills,
                     })
                     .await
             }
@@ -4103,12 +4110,14 @@ impl App {
         let mut mentions = mention::attachable(&prompt, &self.root);
         mentions.extend(self.pasted_images_in(&prompt));
         let degraded = self.degraded(&mentions);
+        let skills = self.requested_skills(&prompt);
         let sent = self
             .engine
             .send(Command::Steer {
                 id: id.clone(),
                 text: prompt.clone(),
                 mentions,
+                skills,
             })
             .await;
 
@@ -4267,6 +4276,16 @@ impl App {
                 degraded.join(", ")
             )
         }));
+    }
+
+    /// The `$name` invocations `text` carries, validated against a fresh
+    /// discovery of the engine's own skill roots — the same walk the `skill`
+    /// tool runs, so what a token invokes is what a call could load, and a
+    /// `$word` nothing answers to stays literal.
+    fn requested_skills(&self, text: &str) -> Vec<String> {
+        let roots = self.engine.skill_roots();
+
+        ganja_tool::skill::requested_in(text, &ganja_tool::skill::discover(&roots))
     }
 
     /// The mentions whose bytes the selected provider will not carry, as
@@ -5072,6 +5091,7 @@ mod tests {
             .send(ganja_protocol::Command::SendPrompt {
                 text: "ask me".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts the prompt");
@@ -6759,6 +6779,7 @@ mod tests {
             .send(ganja_protocol::Command::SendPrompt {
                 text: "run it".to_owned(),
                 mentions: Vec::new(),
+                skills: Vec::new(),
             })
             .await
             .expect("an idle engine accepts the prompt");

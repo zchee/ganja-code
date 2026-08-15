@@ -235,6 +235,7 @@ async fn a_passthrough_writes_the_command_and_its_output_into_the_transcript() {
         .send(Command::SendPrompt {
             text: "what did that print".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("a finished turn leaves the engine idle");
@@ -400,6 +401,7 @@ async fn a_passthrough_is_refused_while_a_turn_is_streaming() {
         .send(Command::SendPrompt {
             text: "think about it".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

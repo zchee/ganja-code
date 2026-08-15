@@ -635,6 +635,7 @@ async fn drive(
                 .send(EngineCommand::SendPrompt {
                     text: message.to_owned(),
                     mentions: Vec::new(),
+                    skills: Vec::new(),
                 })
                 .await
         }

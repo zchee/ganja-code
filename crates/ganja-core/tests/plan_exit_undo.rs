@@ -164,6 +164,7 @@ async fn an_undo_after_a_yes_takes_the_approval_back_with_the_plan() {
         .send(Command::SendPrompt {
             text: "here is the plan".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -232,6 +233,7 @@ async fn an_undo_after_a_yes_takes_the_approval_back_with_the_plan() {
         Command::SendPrompt {
             text: "keep planning".to_owned(),
             mentions: Vec::new(),
+            skills: Vec::new(),
         },
     )
     .await;
