@@ -1439,6 +1439,7 @@ dependencies = [
  "ignore",
  "libc",
  "notify",
+ "nucleo-matcher",
  "reqwest",
  "schemars",
  "serde",

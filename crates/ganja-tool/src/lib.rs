@@ -17,6 +17,10 @@
 /// third-party tool has any business addressing files through.
 mod anchor;
 pub mod bash_output;
+/// Deferred tool schemas and the resident `tool_search` door back in —
+/// ganja's take on Claude Code's ToolSearch, minted **D492** where the
+/// engine filters (a direct call to a deferred tool executes).
+pub mod deferral;
 pub mod edit;
 /// The minimal-YAML frontmatter reader, public because `ganja-core`'s agent
 /// definition files open with the same fence a `SKILL.md` does and were being

@@ -40,6 +40,10 @@ htmd.workspace = true
 # the files a session has read, which on a large checkout would be a stat storm
 # for an answer that is almost always "nothing moved".
 notify.workspace = true
+# `tool_search` ranks a keyword query over the deferred tools' names and
+# descriptions with the same matcher the palette and the `@` menu already
+# use, instead of hand-rolling a third scorer.
+nucleo-matcher.workspace = true
 # `webfetch` is the one tool that reaches the network; the workspace
 # declaration pins rustls so no build here reaches for OpenSSL.
 reqwest.workspace = true
