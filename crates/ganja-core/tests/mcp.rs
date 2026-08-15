@@ -416,6 +416,16 @@ async fn a_deferred_reference_server_is_searched_up_and_round_trips() {
         "the activated tool round-trips over stdio"
     );
 
+    // Criterion 10's Servers half, against the live server: deferral narrows
+    // what is advertised and never what is counted — the /mcp-facing count
+    // still says every tool the server lends, which is exactly the set the
+    // listing named while the first request advertised none of them.
+    assert_eq!(
+        engine.mcp_tool_counts().get("reference").copied(),
+        Some(listing.matches("- mcp__reference__").count()),
+        "the lent surface stays whole under a threshold of zero"
+    );
+
     engine.shutdown_mcp().await;
 }
 

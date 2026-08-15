@@ -957,6 +957,49 @@ mod tests {
         assert!(!deferral.advertised("mcp__github__create_issue"));
     }
 
+    /// The two numbers the description promises: five matches when the model
+    /// names no count, and never more than twenty however many it asks for.
+    /// Activation is sticky, so the second call ranks what the first left.
+    #[tokio::test]
+    async fn keyword_matches_default_to_five_and_clamp_at_twenty() {
+        let names: Vec<String> = (0..25).map(|n| format!("mcp__s__thing_{n:02}")).collect();
+        let deferral = Deferral::over(names.iter().cloned().collect(), shared(&[]));
+        let definitions: Vec<ToolDefinition> = names
+            .iter()
+            .map(|name| definition(name, "does a thing"))
+            .collect();
+        let tool = search_over(definitions, &deferral);
+
+        let defaulted = tool
+            .run(serde_json::json!({ "query": "thing" }), &ctx())
+            .await
+            .expect("keywords answer");
+        assert_eq!(
+            defaulted.metadata["activated"]
+                .as_array()
+                .expect("the metadata lists what was activated")
+                .len(),
+            5,
+            "no count asked for is five"
+        );
+
+        let clamped = tool
+            .run(
+                serde_json::json!({ "query": "thing", "max_results": 50 }),
+                &ctx(),
+            )
+            .await
+            .expect("keywords answer");
+        assert_eq!(
+            clamped.metadata["activated"]
+                .as_array()
+                .expect("the metadata lists what was activated")
+                .len(),
+            20,
+            "fifty asked for is twenty, ranked over the twenty still deferred"
+        );
+    }
+
     /// The first paragraph is model-facing contract: the `select:` grammar
     /// and the batch-first phrasing. A change here is a change to what every
     /// model is taught, so it is pinned byte-for-byte.
