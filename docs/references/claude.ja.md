@@ -186,6 +186,7 @@ ganja 側セルは 2026-08-15 に post-P22 のツリーへ更新済み(Claude �
 | [project スコープの初回承認](https://code.claude.com/docs/en/mcp) | repo 注入サーバー対策 | ✅ より強い: 全 MCP ツールが既定で ask |
 | [タイムアウト・出力上限](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`・`MCP_TOOL_TIMEOUT`・`MAX_MCP_OUTPUT_TOKENS` | ⚠️ サーバー毎 `timeout`/`output_limit` config キー(バイト単位・トークンではない);グローバルな env var ノブはなし |
 | 再接続 | 死んだサーバーの復帰 | ✅ `/mcp` ダイアログの手動 Reconnect(`Failed` な任意サーバー)+初回 dial が失敗したサーバー限定のセッション1回だけの自動リトライ(D463) |
+| ToolSearch/遅延ツール | しきい値超過で MCP ツールの schema がコンテキストから外れ、名前はリマインダーに載り、ToolSearch ツールがオンデマンドで schema を読込む;未ロードの deferred ツールは呼出し不可 | ✅ D492: `tool_defer_threshold`(未指定=32・0=全サーバー defer・巨大=無効)を超えるとサーバー丸ごと大きい順に defer、毎 step の listing が deferred を列挙し、常駐 `tool_search`(`select:` 完全一致のバッチ優先・それ以外は nucleo キーワード)がセッション単位で activate — schema は次 step のリクエストに載る。意図的乖離が一つ: deferred ツールへの直接呼出しは**実行され**、実行が activate する(成功・失敗どちらでも);`+term` require モードは未実装 |
 | [plugin 経由の LSP サーバー](https://code.claude.com/docs/en/plugins) | プラグインが LSP サーバーを同梱できる | ✅ プラグインの `.lsp.json` がファーストパーティの `lsp` テーブルへキー単位でマージされ、明示 config が勝ち、明示の `lsp: false` は決して覆されない(D473) |
 
 ## 11. モデル・プロバイダ・認証

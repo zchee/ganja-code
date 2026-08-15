@@ -250,6 +250,10 @@ async fn engine_and_servers(
         permissions,
     )
     .with_system_parts(Some("you are a fixture".to_owned()), None)
+    // The same knob the real assembly wires, so a fixture config can opt a
+    // leg into deferral (D492); every config that says nothing keeps the
+    // default budget, under which these small fixtures never defer.
+    .with_defer_threshold(config.defer_threshold())
     .with_mcp(servers);
     engine.connect_mcp();
 
@@ -331,6 +335,86 @@ async fn the_reference_server_round_trips_a_call_the_model_made() {
     ] {
         assert!(offered.contains(&name.to_owned()), "{name} in {offered:?}");
     }
+
+    engine.shutdown_mcp().await;
+}
+
+/// Defer-load against the real server (**D492**): a threshold of zero defers
+/// the whole reference server on the first request — the listing naming its
+/// tools, the resident `tool_search` beside the builtins — a search fetches
+/// the echo tool's real schema back, the very next step advertises it, and
+/// the activated tool round-trips a real call over stdio.
+#[tokio::test]
+async fn a_deferred_reference_server_is_searched_up_and_round_trips() {
+    let (provider, requests) = ScriptedProvider::new(vec![
+        tool_call(
+            "tool_search",
+            json!({ "query": "select:mcp__reference__echo" }),
+        ),
+        tool_call("mcp__reference__echo", json!({ "text": "the argument" })),
+        says("it came back"),
+    ]);
+    let mut config = reference_server("reference");
+    config.tool_defer_threshold = Some(0);
+    let engine = engine_with(provider, &config).await;
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    assert_eq!(
+        engine.mcp_status().get("reference"),
+        Some(&McpStatus::Connected),
+        "the fixture server did not connect"
+    );
+
+    let seen = turn(
+        &engine,
+        &mut events,
+        "echo through the deferred server",
+        PermissionReply::Once,
+    )
+    .await;
+
+    let log = requests
+        .lock()
+        .expect("the request log is never poisoned")
+        .clone();
+    let first = offered(&log[0]);
+    assert!(first.contains(&"tool_search".to_owned()), "{first:?}");
+    assert!(
+        !first.iter().any(|name| name.starts_with("mcp__")),
+        "the whole server deferred: {first:?}"
+    );
+    let listing = log[0]
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == ganja_core::protocol::Role::User)
+        .and_then(|message| {
+            message.parts.iter().find_map(|part| match &part.body {
+                PartBody::Text { text } if text.starts_with("<deferred_tools>") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        })
+        .expect("the deferred server is named to the model");
+    assert!(listing.contains("mcp__reference__echo"), "{listing}");
+
+    let search = completed(&tool_part(&seen, "tool_search"));
+    assert!(
+        search.contains("## mcp__reference__echo"),
+        "the real schema came back: {search}"
+    );
+    assert!(
+        offered(&log[1]).contains(&"mcp__reference__echo".to_owned()),
+        "the next step advertises what the search activated: {:?}",
+        offered(&log[1])
+    );
+
+    assert_eq!(
+        completed(&tool_part(&seen, "mcp__reference__echo")),
+        "echo: the argument",
+        "the activated tool round-trips over stdio"
+    );
 
     engine.shutdown_mcp().await;
 }
