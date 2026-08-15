@@ -1349,12 +1349,11 @@ impl Engine {
     /// names defers under the budget it was just given rather than the
     /// default it was born with.
     #[must_use]
-    pub fn with_defer_threshold(self, threshold: usize) -> Self {
-        let mut engine = self;
-        engine.defer_threshold = threshold;
-        engine.recompose_deferral();
+    pub fn with_defer_threshold(mut self, threshold: usize) -> Self {
+        self.defer_threshold = threshold;
+        self.recompose_deferral();
 
-        engine
+        self
     }
 
     /// Sets the config's `small_model` — the model this session's title
