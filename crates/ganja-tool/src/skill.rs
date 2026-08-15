@@ -355,10 +355,7 @@ impl Tool for SkillTool {
             return Err(ToolError::Failed(not_found(&args.name, &skills)));
         };
 
-        let dir = skill
-            .location
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let dir = base_dir(skill);
 
         Ok(ToolOutput {
             title: format!("Loaded skill: {}", skill.name),
@@ -443,6 +440,18 @@ pub fn requested_in(text: &str, skills: &[Skill]) -> Vec<String> {
     }
 
     found
+}
+
+/// The directory a skill's relative paths resolve against: its manifest's
+/// own, with `.` for a hand-built skill whose location has none. The one
+/// spelling of that rule, fed to [`rendered`] by the tool and the engine's
+/// `$` expansion alike.
+#[must_use]
+pub fn base_dir(skill: &Skill) -> PathBuf {
+    skill
+        .location
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
 /// The root `skill` was found under, for a listing that names where each

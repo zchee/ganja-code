@@ -47,6 +47,13 @@
 //!   corrupt `--format json`'s stream, so a warning and an error both go to
 //!   stderr and an nd-JSON `error` object is emitted *beside* the stderr line
 //!   rather than instead of it (deviation: run-reports-errors-on-both-channels).
+//! * **An attached run does not invoke skills.** A local run scans its prompt
+//!   for `$name` tokens (**D491**); `--attach` sends the text literal, because
+//!   `ganja_client::Prompt` carries no `skills` field and the roster to
+//!   validate a token against lives on the server this client did not
+//!   assemble. The wire is ready — serve's prompt route accepts `skills` —
+//!   so this is a recorded gap, not a stance; `ganja-code-80g` tracks it
+//!   (deviation: an-attached-run-sends-dollar-tokens-literal).
 
 use std::{
     io::{self, IsTerminal as _, Read as _, Write},
