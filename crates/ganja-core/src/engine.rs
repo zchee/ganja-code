@@ -5163,8 +5163,9 @@ mod tests {
 
         let session = engine.session_id();
         assert!(
-            session.as_str().starts_with("ses_"),
-            "an ephemeral engine's session still has a name: {session:?}"
+            crate::protocol::is_uuidv7(session.as_str()),
+            "an ephemeral engine's session id is a bare UUIDv7 now that the \
+             `ses_` prefix is gone: {session:?}"
         );
 
         engine

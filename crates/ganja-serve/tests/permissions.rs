@@ -11,7 +11,7 @@ use ganja_core::{
     permission::{Action, Permissions, Rule},
     tool::Registry,
 };
-use ganja_protocol::{Event, PartBody, ToolState};
+use ganja_protocol::{Event, PartBody, ToolState, is_uuidv7};
 use ganja_testkit::{RecorderTool, says, tool_call};
 use support::{DEADLINE, base_url, loopback_config, scripted_engine};
 
@@ -96,7 +96,7 @@ async fn a_dialog_is_listed_answered_over_http_and_then_gone() {
     assert_eq!(request["session_id"], session.as_str());
     assert_eq!(request["args"]["key"], "a");
     let id = request["id"].as_str().expect("the id travels");
-    assert!(id.starts_with("perm_"), "a permission id: {id}");
+    assert!(is_uuidv7(id), "a bare UUIDv7 permission id: {id}");
 
     // Answer it over HTTP; the turn resumes and the tool runs.
     let replied = reqwest::Client::new()
