@@ -152,6 +152,7 @@ async fn turn(engine: &Engine, prompt: &str) {
             text: prompt.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

@@ -120,6 +120,7 @@ async fn a_live_model_writes_a_file_and_runs_it() {
             text: prompt(&root),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

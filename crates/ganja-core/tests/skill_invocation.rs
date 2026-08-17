@@ -100,6 +100,7 @@ async fn an_invocation_is_the_tools_own_rendering_byte_for_byte() {
             text: "explain $porting now, and leave $PATH alone".to_owned(),
             mentions: Vec::new(),
             skills: vec!["porting".to_owned()],
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -152,6 +153,7 @@ async fn a_vanished_skill_is_reported_in_the_tools_words_and_the_turn_proceeds()
             text: "use $missing".to_owned(),
             mentions: Vec::new(),
             skills: vec!["missing".to_owned()],
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -195,6 +197,7 @@ async fn a_name_collision_loads_the_same_body_the_tool_would() {
             text: "$porting".to_owned(),
             mentions: Vec::new(),
             skills: vec!["porting".to_owned()],
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -240,6 +243,7 @@ async fn a_steered_invocation_expands_at_the_boundary_that_takes_it() {
             text: "run something".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -259,6 +263,7 @@ async fn a_steered_invocation_expands_at_the_boundary_that_takes_it() {
             text: "also $porting".to_owned(),
             mentions: Vec::new(),
             skills: vec!["porting".to_owned()],
+            peers: Vec::new(),
         })
         .await
         .expect("a steer reaches a running turn");

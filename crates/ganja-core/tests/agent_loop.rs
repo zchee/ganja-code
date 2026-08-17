@@ -217,6 +217,7 @@ fn prompt() -> Command {
         text: "go".to_owned(),
         mentions: Vec::new(),
         skills: Vec::new(),
+        peers: Vec::new(),
     }
 }
 

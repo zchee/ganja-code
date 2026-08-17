@@ -1003,6 +1003,99 @@ impl PeerMessage {
     }
 }
 
+/// A peer's message on its way *in*: the wire shape
+/// [`Command::SendPrompt`](crate::Command::SendPrompt) and
+/// [`Command::Steer`](crate::Command::Steer) carry one on.
+///
+/// # Why this is not [`PeerMessage`]
+///
+/// [`PeerMessage`] deliberately has no serde at all, and that rule is not
+/// bent here: it is a constructor with a condition attached, and a
+/// `Deserialize` impl is exactly a constructor that skips the condition. So
+/// the wire carries these plain fields instead, and they become a
+/// `PeerMessage` — cap and all — inside [`into_part`](Self::into_part), which
+/// is the **only** thing this type does.
+///
+/// That single door is the point, and it is why the fields are **private**
+/// ([`PermissionResponse`]'s rule, for the same reason): a payload has no
+/// `Display`, no `Into<String>` and no accessor for its body, so nothing can
+/// read a peer's words off it except by turning it into the part that says
+/// whose words they are. The frontend that receives a teammate's message
+/// therefore cannot quietly paste it into the prompt text — where it would
+/// reach the model as something the person typed — without writing a
+/// conversion nobody could mistake for an accident.
+///
+/// Serde reaches those fields, and that is not the same hole. The rule
+/// [`PeerMessage`] keeps is that construction carries a condition; this type's
+/// rule is that its content cannot be *read* as text, and decoding one from a
+/// command breaks neither.
+///
+/// [`PermissionResponse`]: crate::team::PermissionResponse
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerPayload {
+    /// Which teammate wrote it — the bare member name, which is also its
+    /// mailbox address.
+    from: String,
+    /// The sender's own one-line summary, where it wrote one. Capped at
+    /// [`DISPLAY_FIELD_CAP`] on the way into the part, never here: what
+    /// arrives on a wire is recorded as it arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    /// The member's assigned color, for a frontend to draw it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
+    /// What the peer said, verbatim.
+    body: String,
+}
+
+impl PeerPayload {
+    /// Takes a teammate's message off whatever delivered it.
+    ///
+    /// The arguments are in [`Part::peer`](crate::Part::peer)'s order, because
+    /// this becomes one of those and two of the four are adjacent options.
+    ///
+    /// `color` is recorded as given. Whether it is one the roster actually
+    /// assigned is a question for the caller, which is holding the member
+    /// record: §5.3's "write it only if it validates" ran there, and a wire
+    /// struct re-deciding it would be a second opinion about somebody else's
+    /// roster.
+    #[must_use]
+    pub fn new(
+        from: impl Into<String>,
+        summary: Option<String>,
+        color: Option<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            from: from.into(),
+            summary,
+            color,
+            body: body.into(),
+        }
+    }
+
+    /// The one thing a payload becomes: the transcript part that says whose
+    /// words these are.
+    ///
+    /// Routed through [`PeerMessage::new`] rather than straight into
+    /// [`Part::peer`](crate::Part::peer), so the summary a wire sent is capped
+    /// by the same constructor every other path caps at — the cap lives in one
+    /// place, and this is how a new door reaches it instead of copying it.
+    #[must_use]
+    pub fn into_part(self) -> crate::Part {
+        let color = self.color;
+        let message = PeerMessage::new(self.from, self.body, self.summary);
+
+        crate::Part::peer(
+            message.from(),
+            message.summary().map(str::to_owned),
+            color,
+            message.body(),
+        )
+    }
+}
+
 /// Truncates a display-only field to [`DISPLAY_FIELD_CAP`] characters.
 ///
 /// Counts `char`s and cuts on a `char` boundary, so a field of CJK is

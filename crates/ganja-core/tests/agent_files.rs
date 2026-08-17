@@ -124,6 +124,7 @@ async fn a_file_agents_prompt_is_what_the_model_is_sent(project: &Path) {
             text: "what does this crate do".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -167,6 +168,7 @@ async fn a_tool_its_roster_leaves_out_is_refused_at_the_gate(project: &Path) {
             text: "fix the bug".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

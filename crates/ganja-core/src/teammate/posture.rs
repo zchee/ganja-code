@@ -905,6 +905,7 @@ mod tests {
                 text: "write the note".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -959,6 +960,7 @@ mod tests {
                 text: "write the note".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -996,6 +998,7 @@ mod tests {
                 text: "write the note".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -1048,6 +1051,7 @@ mod tests {
                 text: "write the note".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -1127,6 +1131,7 @@ mod tests {
                 text: "write the note".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");

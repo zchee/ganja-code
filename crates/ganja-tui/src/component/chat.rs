@@ -2511,6 +2511,72 @@ mod tests {
         );
     }
 
+    /// **AC-7.** The whole of the teammate rendering in one frame: the sender
+    /// dimmed at the head of its block and carrying its own one-line summary,
+    /// what it said hanging under that name in body text, and one caret for
+    /// the entry however many parts it arrived in.
+    ///
+    /// The dump is symbols only, the palette-independent shape this crate's
+    /// snapshots use — so the two styles that carry the meaning here are
+    /// asserted beside it rather than left to a theme change to break.
+    ///
+    /// It lives beside the pane it pins rather than in `app.rs`, because what
+    /// is under test is one component's own drawing; it writes into the crate's
+    /// one snapshot directory all the same.
+    #[test]
+    fn snapshot_teammate_message() {
+        // Wide and tall enough for the whole entry: what this pins is which
+        // glyph and which style leads each row, so no row may scroll off.
+        const AREA: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 46,
+            height: 10,
+        };
+
+        let mut chat = Chat::default();
+        let prompt = Message::user("what did w1 say");
+        chat.start_message(prompt.clone());
+        chat.start_part(
+            &prompt.id,
+            Part::peer(
+                "w1",
+                Some("picked up W2".to_owned()),
+                None,
+                "The protocol surface is mine.\nThe envelope is W6's.",
+            ),
+        );
+        chat.start_part(&prompt.id, Part::peer("w2", None, None, "and I have it"));
+
+        insta::with_settings!({snapshot_path => "../snapshots"}, {
+            insta::assert_snapshot!(rendered(&mut chat, AREA).join("\n"));
+        });
+
+        let mut buffer = Buffer::empty(AREA);
+        chat.render(AREA, &mut buffer, &Theme::default());
+        let row_of = |needle: &str| {
+            (0..AREA.height)
+                .find(|row| {
+                    (0..AREA.width)
+                        .map(|column| buffer[(column, *row)].symbol())
+                        .collect::<String>()
+                        .contains(needle)
+                })
+                .unwrap_or_else(|| panic!("the frame holds {needle:?}"))
+        };
+        let theme = Theme::default();
+        assert_eq!(
+            buffer[(2, row_of("w1: picked up W2"))].style().fg,
+            theme.dim.fg,
+            "the name that says whose words these are recedes"
+        );
+        assert_eq!(
+            buffer[(2, row_of("The protocol surface"))].style().fg,
+            theme.fg.fg,
+            "and what it said is body text under it"
+        );
+    }
+
     #[test]
     fn events_for_a_message_the_transcript_never_saw_are_ignored() {
         let mut chat = Chat::default();

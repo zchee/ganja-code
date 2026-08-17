@@ -180,6 +180,7 @@ fn prompt(text: &str) -> Command {
         text: text.to_owned(),
         mentions: Vec::new(),
         skills: Vec::new(),
+        peers: Vec::new(),
     }
 }
 
@@ -189,6 +190,7 @@ fn steer(id: &str, text: &str) -> Command {
         text: text.to_owned(),
         mentions: Vec::new(),
         skills: Vec::new(),
+        peers: Vec::new(),
     }
 }
 
@@ -548,6 +550,7 @@ async fn a_steered_mention_is_read_when_the_request_carrying_it_is_built() {
                 ..Default::default()
             }],
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("a steer reaches a running turn");

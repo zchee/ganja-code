@@ -214,6 +214,7 @@ async fn a_teammate_session_is_listed_and_resumable_on_both_backends() {
             text: TEAMMATE_PROMPT.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

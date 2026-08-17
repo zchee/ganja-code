@@ -221,6 +221,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
             text: "load ganja's own".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -273,6 +274,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
             text: "hello".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -319,6 +321,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
             text: "port the module".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -416,6 +419,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
             text: "load the one from claude".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

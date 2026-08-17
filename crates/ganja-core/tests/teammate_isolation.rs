@@ -73,6 +73,7 @@ async fn prompt(engine: &Engine, text: &str) {
             text: text.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
