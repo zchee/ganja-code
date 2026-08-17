@@ -674,6 +674,35 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
     /// value in P25a.
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported>;
 
+    /// Starts what [`TeammateBackend::spawn`] produced, once the team file
+    /// names it (§4.1's step 6, after its step 2).
+    ///
+    /// The default does nothing, and that is the right answer for the
+    /// in-process backend: a teammate is running from the moment it is
+    /// spawned. A pane backend splits its window in `spawn` — that is what
+    /// yields the handle a record has to name — and types the launch line
+    /// **here**, because the record is the first thing the pane's process
+    /// reads, and a process launched before its record exists would read a
+    /// team it is not yet a member of. The registry calls this right after
+    /// its record write, and nowhere else.
+    ///
+    /// A hook rather than a watch for the record from inside `spawn`, because
+    /// a call has an unwind path and a poll does not: a launch line that could
+    /// not be typed after the record was written would otherwise be a
+    /// registered member holding an idle shell that nothing cleans up.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] when the surface could not be started — the same
+    /// vocabulary a refused `spawn` answers in, because to whoever asked it is
+    /// the same fact: this surface cannot be had. The registry unwinds exactly
+    /// as it does for a record that would not write — the handle is killed,
+    /// the record and the seeded prompt are taken back out, the name is given
+    /// back — and the caller reads one refusal.
+    async fn launch(&self, _spec: &SpawnSpec, _handle: &Handle) -> Result<(), Unsupported> {
+        Ok(())
+    }
+
     /// Ends what [`TeammateBackend::spawn`] produced. Idempotent: a handle
     /// whose teammate has already gone is nothing to end.
     async fn kill(&self, handle: &Handle);
@@ -1278,6 +1307,18 @@ impl TeammateRegistry {
             member.surface.kill(&member.handle).await;
         }
 
+        self.unrecord(teammate).await?;
+
+        Ok(held)
+    }
+
+    /// Takes `teammate`'s record out of the team file, under the same lock a
+    /// spawn's write holds. Answers whether the document named it.
+    ///
+    /// The half of a retire that outlives this process, and the unwind a
+    /// refused launch owes — the one failing spawn path that runs after the
+    /// record was written.
+    async fn unrecord(&self, teammate: &str) -> Result<bool, SpawnError> {
         let writing = self.team_file.lock().await;
         let mut file = self.read_team().await?;
         let before = file.members.len();
@@ -1286,11 +1327,11 @@ impl TeammateRegistry {
             // Nothing to rewrite, and rewriting anyway would stage and rename a
             // byte-identical document over a directory a real `claude` may be
             // reading.
-            return Ok(held);
+            return Ok(false);
         }
         self.write_team(file, &writing).await?;
 
-        Ok(held)
+        Ok(true)
     }
 
     /// Tells `teammate` that it is waiting on the lead's answer to
@@ -1315,20 +1356,24 @@ impl TeammateRegistry {
     /// Registers a teammate, seeds its mailbox with the task it was given, and
     /// starts it.
     ///
-    /// §4.1's sequence, with one step moved and the move deliberate. The
-    /// reference creates the surface, writes the member record, seeds the
-    /// inbox, writes the spawn prompt and only then launches the command —
-    /// four steps of which the first and the last are one call here, because
-    /// [`TeammateBackend::spawn`] is what yields the surface a record has to
-    /// name. So the record is written **after** the backend answers, and a
-    /// refused spawn leaves no member behind rather than one somebody has to
-    /// clean up. What a pane needs before it starts — its inbox and the task in
-    /// it — is still written first; what it does *not* need is the record,
-    /// because §4.1 hands a pane its own name on the command line.
+    /// §4.1's sequence, in this order: **claim the name → seed the inbox →
+    /// `spawn` → record → `launch` → start.** The reference creates the
+    /// surface, writes the member record, seeds the inbox, writes the spawn
+    /// prompt and only then launches the command; here [`TeammateBackend::spawn`]
+    /// is what yields the surface a record has to name, so the record is
+    /// written **after** the backend answers — a refused spawn leaves no
+    /// member behind rather than one somebody has to clean up — and
+    /// [`TeammateBackend::launch`] is what starts the surface **after** the
+    /// record exists, since a pane's process reads its record first. What a
+    /// pane needs before either — its inbox and the task in it — is still
+    /// written first.
     ///
     /// A refused spawn also takes the prompt back out of the inbox: leaving
     /// somebody's instructions in a mailbox nothing will ever read is the one
-    /// half of a failed spawn that would still be visible tomorrow.
+    /// half of a failed spawn that would still be visible tomorrow. A refused
+    /// **launch** takes the record back out too, and kills the handle: it is
+    /// the one failing path that runs after the team file names the member,
+    /// so it is the one that has a record to unwind.
     ///
     /// # Two spawns at once
     ///
@@ -1398,6 +1443,23 @@ impl TeammateRegistry {
             unseed_inbox(&spec, seeded).await;
             self.release(&spec.name);
             return Err(error);
+        }
+        if let Err(unsupported) = backend.launch(&spec, &handle).await {
+            backend.kill(&handle).await;
+            match self.unrecord(spec.name.as_str()).await {
+                Ok(_) => {}
+                // Not fatal to the unwind and not retried: what is left is a
+                // stale row naming a surface that has already been ended,
+                // which the next lead's startup sweep is what drops.
+                Err(error) => tracing::warn!(
+                    teammate = spec.name.as_str(),
+                    %error,
+                    "a refused launch left its record in the team file"
+                ),
+            }
+            unseed_inbox(&spec, seeded).await;
+            self.release(&spec.name);
+            return Err(SpawnError::Unsupported(unsupported));
         }
 
         let spawned = Spawned {
@@ -1867,7 +1929,7 @@ async fn fold_calls(
 mod tests {
     use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
-    use ganja_team::{TeamName, TeamsRoot};
+    use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 
     use super::{
         DEFAULT_BACKEND, Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec,
@@ -2080,17 +2142,34 @@ mod tests {
     }
 
     /// A backend that hands out a pane-shaped handle and remembers every
-    /// handle it is asked to end — what a real pane backend does, minus tmux.
+    /// handle it is asked to end and every launch it is asked for — what a
+    /// real pane backend does, minus tmux. `launch` also reads the team file
+    /// as a pane's process would, so a test can see whether the record was
+    /// there yet.
     #[derive(Debug, Default)]
     struct Recording {
         killed: std::sync::Mutex<Vec<(String, String)>>,
+        /// `(name, whether the team file named it at launch time)`.
+        launched: std::sync::Mutex<Vec<(String, bool)>>,
+        /// Refuse every launch, so the unwind can be watched.
+        refuse_launch: bool,
     }
+
+    /// Why a refusing [`Recording`] refuses.
+    const UNLAUNCHABLE: &str = "the launch line could not be typed";
 
     impl Recording {
         fn killed(&self) -> Vec<(String, String)> {
             self.killed
                 .lock()
                 .expect("the kill log is never poisoned")
+                .clone()
+        }
+
+        fn launched(&self) -> Vec<(String, bool)> {
+            self.launched
+                .lock()
+                .expect("the launch log is never poisoned")
                 .clone()
         }
     }
@@ -2106,6 +2185,27 @@ mod tests {
                 pane_id: "%7".to_owned(),
                 birth: "48213".to_owned(),
             })
+        }
+
+        async fn launch(&self, spec: &SpawnSpec, handle: &Handle) -> Result<(), Unsupported> {
+            assert!(
+                matches!(handle, Handle::Pane { pane_id, .. } if pane_id == "%7"),
+                "launched with the handle spawn minted: {handle:?}"
+            );
+            let recorded = std::fs::read_to_string(spec.root.config_path(&spec.team))
+                .is_ok_and(|document| document.contains(&format!("\"{}\"", spec.name)));
+            self.launched
+                .lock()
+                .expect("the launch log is never poisoned")
+                .push((spec.name.as_str().to_owned(), recorded));
+            if self.refuse_launch {
+                return Err(Unsupported {
+                    backend: MemberBackend::Pane,
+                    reason: UNLAUNCHABLE.to_owned(),
+                });
+            }
+
+            Ok(())
         }
 
         async fn kill(&self, handle: &Handle) {
@@ -2159,6 +2259,92 @@ mod tests {
             backend.killed().len(),
             1,
             "a member already retired is not ended a second time by anybody"
+        );
+    }
+
+    /// §4.1's step order as the registry keeps it: the surface is launched
+    /// **after** its record is in the team file — a pane's process reads that
+    /// record first — and a launch that is refused unwinds the whole spawn:
+    /// the handle is killed, the record and the seeded prompt are taken back
+    /// out, and the name is free again.
+    #[tokio::test]
+    async fn a_surface_is_launched_after_its_record_exists_and_a_refused_launch_unwinds() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+
+        let backend = Arc::new(Recording::default());
+        registry
+            .spawn(
+                Arc::clone(&backend) as Arc<dyn TeammateBackend>,
+                request("w1", MemberBackend::Pane, home.path()),
+            )
+            .await
+            .expect("the recording backend spawns and launches");
+        assert_eq!(
+            backend.launched(),
+            [("w1".to_owned(), true)],
+            "launched once, and the team file already named it"
+        );
+        assert!(backend.killed().is_empty());
+        assert!(
+            reserved(&registry).contains("w1"),
+            "a launched spawn spends its name"
+        );
+
+        let refusing = Arc::new(Recording {
+            refuse_launch: true,
+            ..Recording::default()
+        });
+        let refused = registry
+            .spawn(
+                Arc::clone(&refusing) as Arc<dyn TeammateBackend>,
+                request("w2", MemberBackend::Pane, home.path()),
+            )
+            .await
+            .expect_err("a refused launch is a refused spawn");
+        assert!(
+            refused.to_string().contains(UNLAUNCHABLE),
+            "refused in the backend's own words: {refused}"
+        );
+        assert_eq!(
+            refusing.launched(),
+            [("w2".to_owned(), true)],
+            "the record was there when the launch was asked for"
+        );
+        assert_eq!(
+            refusing.killed(),
+            [("%7".to_owned(), "48213".to_owned())],
+            "the handle a refused launch leaves is ended"
+        );
+        assert!(
+            !reserved(&registry).contains("w2"),
+            "and the name is free again: {:?}",
+            reserved(&registry)
+        );
+        let document = std::fs::read_to_string(registry.root().config_path(registry.team()))
+            .expect("the team file is on disk");
+        assert!(
+            !document.contains("\"w2\""),
+            "the record a refused launch had written is taken back out:\n{document}"
+        );
+        assert!(
+            document.contains("\"w1\""),
+            "without touching the member that did launch:\n{document}"
+        );
+        let inbox = registry.root().inbox_path(
+            registry.team(),
+            &MemberName::parse("w2").expect("a member name"),
+        );
+        assert!(
+            mailbox::read(&inbox)
+                .map(|held| held.valid.is_empty())
+                .unwrap_or(true),
+            "and the seeded prompt is gone from an inbox nothing will read"
+        );
+        assert_eq!(
+            registry.view().members.len(),
+            2,
+            "the roster holds the lead and w1, never w2"
         );
     }
 }
