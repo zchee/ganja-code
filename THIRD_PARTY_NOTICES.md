@@ -18,9 +18,21 @@ The implementation is original Rust code using idiomatic patterns; it is **not a
 
 ---
 
+## Claude Code
+
+The teammates landing (P25) ports **Claude Code's** team behavior — the teams directory, the member records, the file-backed mailboxes, the frame vocabulary and the spawn sequence — from a reference document read as a specification. As with opencode, what is ported is behavior, and the Rust is original.
+
+**No Claude Code prose is copied into this repository's own strings** (D497). Every refusal, description and notice `crates/ganja-team/`, `crates/ganja-tool/src/send_message.rs` and `crates/ganja-core/src/teammate/` emit is a declared constant carrying ganja's own words; the reference's sentences are read for the information they carry and none of their bytes ship. The document's own **field and frame names** — `agentId`, `tmuxPaneId`, `planModeRequired`, `permission_request`, `shutdown_approved`, and the rest of the two reserved sets — are interop facts rather than expression: they are the identifiers a real `claude` process reads and writes in a directory ganja may be sharing with it, and there is no way to interoperate without spelling them exactly.
+
+**Captured fixtures.** Everything under `crates/ganja-team/tests/fixtures/` — `session-62633995/config.json`, `session-62633995/inboxes/{team-lead,kv-review-2}.json` and `session-44cd25e1/inboxes/worker-mask.json` — is **output Claude Code wrote**, captured verbatim from `~/.claude/teams/` on 2026-08-17 (Claude Code 2.1.x; the installed version at capture was 2.1.233) and committed as interop test data. They are the only thing `crates/ganja-team/tests/claude_format_interop.rs` (AC-1b) can compare byte-for-byte against, which is the whole reason the bytes are in the tree rather than regenerated: a round-trip against documents this repository also wrote proves self-consistency and nothing about interop.
+
+Three spans were redacted before commit — one prompt and two absolute paths — length-preservingly, so the byte comparison the fixtures exist for still means what it says. Everything else is Claude's own bytes. `crates/ganja-team/tests/fixtures/PROVENANCE.md` records the capture in full: where each file came from, what was replaced and why, and the law the redaction was held to. **Do not reformat these files**; the interop test is the guard, and rewriting them would delete the only thing it is for.
+
+---
+
 ## Scope of this file
 
-These notices cover material **incorporated into this repository's own sources**: ported behavior, prompt texts, and theme definitions.
+These notices cover material **incorporated into this repository's own sources**: ported behavior, prompt texts, theme definitions, and the captured documents committed as interop test data.
 
 Rust dependencies are not vendored here — they are resolved by Cargo and recorded in `Cargo.lock`. Their license notices are therefore not reproduced in this file; a complete, generated attribution list belongs with the distributed binaries and is produced at packaging time (e.g. `cargo about`). Listing individual crates here would give an arbitrary and misleading picture of a tree that carries hundreds of them.
 
