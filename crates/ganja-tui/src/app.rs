@@ -664,13 +664,19 @@ pub struct App {
     /// Peer messages handed to the running turn and not yet consumed, keyed by
     /// the steer id the strip renders them under (**D503**).
     ///
+    /// A **batch** per id, because a whole §6.2 pass crosses as one
+    /// `Command::Steer`: the event that names the id retires everything that
+    /// command carried, so the id owns a list rather than a message.
+    ///
     /// Only [`Delivery::Acknowledged`] senders are ever in here; see
-    /// [`App::deliver_peer`] for what the other arm does instead. The
+    /// [`App::deliver_peers`] for what the other arm does instead. The
     /// [`Delivered`] is kept rather than the text, because pruning the lead's
     /// inbox needs the identity it carries — which is what makes the entry
     /// **durable**: until the engine says it consumed the message, the message
-    /// is still in the mailbox and the next pass would offer it again.
-    peer_steers: HashMap<String, Delivered>,
+    /// is still in the mailbox and the next pass would offer it again. That
+    /// durability is also why this map is what a pass is filtered against:
+    /// re-offering is by design, and delivering twice is not.
+    peer_steers: HashMap<String, Vec<Delivered>>,
     /// Peer messages a `SteerConsumed` retired, waiting to leave the mailbox.
     ///
     /// [`App::auto_permissions`]'s shape and its reason: `handle_core` is
@@ -1100,7 +1106,7 @@ impl App {
                     Some(incoming) => AppEvent::core(incoming),
                     None => break,
                 },
-                () = tokio::time::sleep(self.until_next_frame()), if self.wants_wakeup() => {
+                () = tokio::time::sleep(self.until_next_wakeup()), if self.wants_wakeup() => {
                     AppEvent::Tick
                 }
                 // Raw mode swallows Ctrl-C, so this arm only fires for a signal
@@ -1111,6 +1117,16 @@ impl App {
             self.handle(event).await?;
 
             if self.quit {
+                // A spawn still in flight has nobody left to report to and may
+                // be blocked on a dialog this loop will never draw again.
+                // Aborted here rather than at each of the three doors that set
+                // the flag, so the rule is written once — and at an `await`
+                // rather than mid-write: everything the registry does to a file
+                // is staged and renamed on a blocking thread the abort does not
+                // reach.
+                if let Some(spawn) = self.team_spawn.take() {
+                    spawn.abort();
+                }
                 break;
             }
         }
@@ -1298,13 +1314,20 @@ impl App {
 
     /// The lead's side of the mailbox, once a tick (**D503**).
     ///
-    /// Three things, and only the last is rate-limited. Counting teammates and
-    /// carrying their dialogs are both reads of memory this process already
-    /// holds, and a question a person is being asked must not wait out a
-    /// cadence meant for a file. The §6.2 pass **is** a file read — one
-    /// `read_to_string` and, when it finds anything, a locked
+    /// Three things, and only the last is rate-limited *here*. Counting
+    /// teammates and carrying their dialogs are reads of memory this process
+    /// already holds, and cost a lock and nothing else; the §6.2 pass **is** a
+    /// file read — one `read_to_string` and, when it finds anything, a locked
     /// read-modify-write — so it keeps the reference's own 1000 ms rather than
     /// the loop's 16.
+    ///
+    /// What decides how often this runs at all is [`App::until_next_wakeup`],
+    /// and the two gates answer different questions. A session with a teammate
+    /// running keeps waking at frame rate, because that teammate may hand over
+    /// a permission dialog on a channel nothing else wakes for. A lead with an
+    /// empty roster has only the file to wait for, so the loop sleeps until the
+    /// pass below is really due instead of arriving sixty times a second to
+    /// find it is not.
     async fn poll_team(&mut self) {
         self.poll_teammate_count();
         self.drain_teammate_dialogs();
@@ -1326,17 +1349,23 @@ impl App {
             return;
         };
         // Control frames are already acted on — the pass did that, and never
-        // handed one over to be queued. What is left is what a person reads.
-        for message in pass.messages {
-            if !self.deliver_peer(message).await {
-                // Refused, and therefore **not** pruned: the message is still
-                // in the mailbox, and the next pass offers it again. A
-                // delivery delayed rather than a delivery lost, which is the
-                // whole reason the durable half of the two-tier queue is a
-                // file.
-                break;
-            }
-        }
+        // handed one over to be queued. What is left is what a person reads,
+        // minus whatever this app is already holding: a plain message stays in
+        // the inbox until the turn provably took it, so every pass in between
+        // offers the same message again. Re-offering is the durable half of
+        // the design working; delivering it again is the same words reaching
+        // the model N times over one long step.
+        let fresh: Vec<Delivered> = pass
+            .messages
+            .into_iter()
+            .filter(|message| !self.in_flight(message))
+            .collect();
+        // One command for the whole pass, rather than one per message. The
+        // engine takes a batch of peers on a single `Steer`, and sending them
+        // one at a time made the second refuse: `Busy` is what the engine says
+        // between accepting the first prompt and starting the turn it becomes,
+        // so message two of three waited out another cadence for nothing.
+        self.deliver_peers(fresh).await;
         if !pass.retired.is_empty() {
             // The roster shrank under the bar, and nothing else this tick will
             // notice.
@@ -1398,6 +1427,11 @@ impl App {
     /// member's ring of recent calls (**D503**) moves on every tool call its
     /// teammate makes, and a teammate that shuts itself down leaves the roster
     /// with no event of its own.
+    ///
+    /// The frame is marked dirty only when the poll really found something
+    /// different, which is that sibling's rule too: a roster nobody touched
+    /// redrawing at frame rate is a dialog that costs more open than the app
+    /// does streaming.
     fn poll_team_dialog(&mut self) {
         if self.team_dialog.is_none() {
             return;
@@ -1406,10 +1440,11 @@ impl App {
             return;
         };
         let rows = team::rows(&view);
-        if let Some(dialog) = &mut self.team_dialog {
-            dialog.refresh(rows);
-        }
-        self.dirty = true;
+        let moved = self
+            .team_dialog
+            .as_mut()
+            .is_some_and(|dialog| dialog.refresh(rows));
+        self.dirty |= moved;
     }
 
     /// One keypress while the `/team` dialog is open, which owns every key.
@@ -1468,6 +1503,16 @@ impl App {
     /// answering into a status bar the next notice overwrites.
     async fn run_team_line(&mut self, line: command::Team) {
         self.open_team();
+        // A refusal is about the **words**, and a session leading no team
+        // mistyped them just the same. Said before the roster is consulted, so
+        // `/team wat` is answered with what is wrong with it rather than with
+        // an unrelated fact about this session — `tell_team` falls back to the
+        // status bar when there is no dialog to say it on.
+        if let command::Team::Refused(refusal) = line {
+            self.tell_team(refusal);
+
+            return;
+        }
         if self.team_dialog.is_none() {
             // No team, and `open_team` has already said so.
             return;
@@ -1484,38 +1529,43 @@ impl App {
                 Some(member) => self.ask_shutdown(&member).await,
                 None => self.ask_whole_team_to_stop().await,
             },
-            command::Team::Refused(refusal) => self.tell_team(refusal),
+            // Answered above, before the team was ever consulted.
+            command::Team::Refused(_) => {}
         }
     }
 
     /// Asks every teammate to shut down — `/team shutdown` with nobody named.
     ///
-    /// The lead is skipped, and not as a special case worth a guard: it is the
-    /// one member of the roster that is not a teammate, and a lead writing a
-    /// shutdown request into its own inbox would read it back as a stranger's.
+    /// The fan-out and the frames are [`ganja_core::Teammates`]'s, for
+    /// [`App::ask_shutdown`]'s reason; what is here is the one sentence a
+    /// person reads, said **once** for the whole question they asked rather
+    /// than written per member and overwritten by the next one.
     async fn ask_whole_team_to_stop(&mut self) {
-        let Some(view) = self.team_roster() else {
+        let Some(teammates) = self.engine.teammates().map(Arc::clone) else {
             self.tell_team(NO_TEAM.to_owned());
 
             return;
         };
-        let members: Vec<String> = view
-            .members
-            .into_iter()
-            .filter(|member| !member.is_lead)
-            .map(|member| member.name)
-            .collect();
-        if members.is_empty() {
+        let outcomes = teammates.ask_whole_team_to_stop().await;
+        if outcomes.is_empty() {
             self.tell_team(NOBODY_TO_STOP.to_owned());
 
             return;
         }
-        for member in &members {
-            self.ask_shutdown(member).await;
-        }
-        // One sentence for the whole fan-out, replacing the per-member ones the
-        // loop just wrote: what a person asked was one question.
-        self.tell_team(format!("asked {} teammates to stop", members.len()));
+        let asked = outcomes.iter().filter(|(_, sent)| sent.is_ok()).count();
+        // A count on its own would be a claim about teammates nobody reached,
+        // so the first refusal comes with it: the rest are in the log, and one
+        // notice line is what there is room to say.
+        let refused = outcomes
+            .iter()
+            .find_map(|(member, sent)| sent.as_ref().err().map(|why| said(member, Err(why))));
+        let total = outcomes.len();
+        self.tell_team(match refused {
+            None => format!("asked {total} teammates to stop"),
+            Some(refusal) => {
+                format!("asked {asked} of {total} teammates to stop{NOTICE_SEPARATOR}{refusal}")
+            }
+        });
     }
 
     /// Runs what the `/team` dialog decided.
@@ -1650,37 +1700,23 @@ impl App {
         })
     }
 
-    /// Asks one member to shut down, through the mailbox everything else goes
-    /// through.
+    /// Asks one member to shut down, and says what the mailbox answered.
     ///
-    /// A frame rather than a call into the registry, and deliberately: the
-    /// teammate's own runner is what tears it down, in the order §6.1 fixes —
-    /// a `shutdown_request` jumps ahead of everything else in its inbox — and it
-    /// answers with the `shutdown_approved` this lead's own inbox pass retires
-    /// it on. A registry call would skip the loop and leave the answer nobody
-    /// wrote.
+    /// The **frame** is [`ganja_core::Teammates`]'s to build, and that is the
+    /// whole reason this is two lines: which §6.1 frames exist, which of them a
+    /// lead may send and in what order the far side reads them are the engine's
+    /// facts, exactly as reading them back is
+    /// ([`ganja_core::teammate::lead_inbox`] argues it for that direction). A
+    /// frontend that encoded one would be a second place for one wire to
+    /// drift. What is left here is a sentence.
     async fn ask_shutdown(&mut self, member: &str) {
-        let request =
-            ganja_protocol::team::Frame::ShutdownRequest(ganja_protocol::team::ShutdownRequest {
-                request_id: ganja_protocol::uuidv7(),
-                from: ganja_core::team::team::LEAD.to_owned(),
-                reason: Some(SHUTDOWN_ASKED.to_owned()),
-                timestamp: ganja_core::team::record::now_iso8601(),
-            });
-        let document = match serde_json::to_value(&request) {
-            Ok(document) => document,
-            Err(error) => {
-                self.tell_team(format!(
-                    "the shutdown request could not be written: {error}"
-                ));
+        let Some(teammates) = self.engine.teammates().map(Arc::clone) else {
+            self.tell_team(NO_TEAM.to_owned());
 
-                return;
-            }
+            return;
         };
-        let said = self
-            .post_to_member(member, ganja_tool::team::Body::Frame(document))
-            .await;
-        self.tell_team(said);
+        let outcome = teammates.ask_shutdown(member).await;
+        self.tell_team(said(member, outcome.as_ref()));
     }
 
     /// Writes `body` into one member's inbox, through the lead's own postbox.
@@ -1697,13 +1733,11 @@ impl App {
             return NO_TEAM.to_owned();
         };
         let postbox = ganja_core::Postbox::lead(teammates.registry());
-        match postbox
+        let outcome = postbox
             .deliver(ganja_tool::team::Address::Local(to.to_owned()), body)
-            .await
-        {
-            Ok(sent) => format!("{}: {}", sent.to, sent.note),
-            Err(undelivered) => format!("{to}: {}", undelivered_reason(&undelivered)),
-        }
+            .await;
+
+        said(to, outcome.as_ref())
     }
 
     /// Puts one sentence where the person who asked is looking: the dialog's
@@ -1888,8 +1922,27 @@ impl App {
         true
     }
 
-    /// Hands one peer's message to this conversation, and says whether it
-    /// landed (**D-3**, **D503**).
+    /// Whether `message` is one this app has already handed to the engine and
+    /// has yet to take out of the lead's mailbox.
+    ///
+    /// Derived from what is really held rather than tracked beside it, and
+    /// that is the point: a set kept in parallel is a set that can disagree
+    /// with the thing it describes, where these two collections **are** the
+    /// in-flight set — [`App::peer_steers`] is what a `SteerConsumed` will
+    /// retire, and [`App::settled`] is what one already did and is waiting for
+    /// an `await` to prune. Both are a handful of entries at their largest.
+    fn in_flight(&self, message: &Delivered) -> bool {
+        let identity = message.identity();
+
+        self.peer_steers
+            .values()
+            .flatten()
+            .chain(&self.settled)
+            .any(|held| held.identity() == identity)
+    }
+
+    /// Hands one §6.2 pass of peers' messages to this conversation (**D-3**,
+    /// **D503**).
     ///
     /// [`App::enqueue`]'s two lanes — steer a running turn, prompt an idle one
     /// — and deliberately **not** [`App::enqueue`] itself, because everything
@@ -1902,26 +1955,41 @@ impl App {
     /// file, a skill token consent to load one, a command name consent to run
     /// one. The person at the terminal typed none of it.
     ///
+    /// # One command per pass
+    ///
+    /// The whole batch rides a single command, because the engine's own
+    /// vocabulary takes a list of peers and because sending them one at a time
+    /// serialised badly: an idle engine accepts the first as a prompt and
+    /// answers `Busy` to the second until the turn it just started is really
+    /// running, so the rest of the pass waited out another cadence for no
+    /// reason. One command also means one outcome — the batch lands or none of
+    /// it does — and nothing has to reason about half a delivered pass.
+    ///
     /// **The mailbox is the durable queue.** Nothing is pruned until the
     /// engine has taken the message, so a refusal, a crash or a turn that
     /// ended without draining its steers all end the same way: the message is
-    /// still in the file, and the next pass offers it again.
+    /// still in the file, and the next pass offers it again — which is exactly
+    /// why [`App::in_flight`] exists, since re-offering is by design and
+    /// re-delivering is not.
     ///
     /// # It travels as a peer, not as text
     ///
-    /// The body rides `peers` rather than `text` (**D495**): the engine turns
+    /// The bodies ride `peers` rather than `text` (**D495**): the engine turns
     /// each payload into a `PartBody::Peer` on the user message, and the request
     /// assembly renders §5.3's `<teammate-message …>` envelope around it. `text`
     /// is left **empty** on purpose — the engine drops a blank text part when
     /// peers are present, and putting the same words in both would tell the
     /// model twice, once attributed and once as though this conversation had
     /// said it.
-    async fn deliver_peer(&mut self, message: Delivered) -> bool {
+    async fn deliver_peers(&mut self, messages: Vec<Delivered>) -> bool {
+        if messages.is_empty() {
+            return true;
+        }
         if !self.turn_running {
             // An accepted prompt *is* the turn, so there is nothing to render
             // as pending and nothing to wait for.
-            if self.start_peer_turn(&message).await {
-                self.settle_peer(&[message]).await;
+            if self.start_peer_turn(&messages).await {
+                self.settle_peer(&messages).await;
 
                 return true;
             }
@@ -1937,7 +2005,7 @@ impl App {
                 text: String::new(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
-                peers: vec![payload(&message)],
+                peers: messages.iter().map(payload).collect(),
             })
             .await;
         match steered {
@@ -1952,39 +2020,48 @@ impl App {
                 return false;
             }
         }
-        match message.delivery {
-            // The sender's backend gives the lead a consumption fact it can
-            // wait for, so the strip renders the entry **pending until
-            // consumed** and the mailbox keeps it until then.
-            Delivery::Acknowledged => {
-                // The strip shows the words, since that is what a person is
-                // looking for; what the engine holds is the attributed part.
-                self.queue.push_steered(id.clone(), message.body.clone());
-                self.peer_steers.insert(id, message);
-                self.sync_queue_status();
-            }
-            // It gives no such fact — a real `claude` pane marks a message read
-            // when it *reads* it, not when a turn takes it on — so the entry is
-            // **sent** at write time and retired immediately rather than
-            // waiting for an acknowledgement that will never come. Without this
-            // split a claude peer's message sits pending in the lead's UI
-            // forever.
-            Delivery::FireAndForget => self.settle_peer(&[message]).await,
+        // One command, two kinds of sender: what the engine now holds is one
+        // batch, and how long each message stays claimed is still its own
+        // backend's answer.
+        let (acknowledged, fire_and_forget): (Vec<Delivered>, Vec<Delivered>) = messages
+            .into_iter()
+            .partition(|message| message.delivery == Delivery::Acknowledged);
+        // The sender's backend gives the lead a consumption fact it can wait
+        // for, so the strip renders these entries **pending until consumed**
+        // and the mailbox keeps them until then.
+        for message in &acknowledged {
+            // The strip shows the words, since that is what a person is
+            // looking for; what the engine holds is the attributed part. A peer
+            // row, so no Up arrow can lift a teammate's words into the composer
+            // (§7-5).
+            self.queue.push_peer(id.clone(), message.body.clone());
         }
+        if !acknowledged.is_empty() {
+            self.peer_steers.insert(id, acknowledged);
+            self.sync_queue_status();
+        }
+        // The other backend gives no such fact — a real `claude` pane marks a
+        // message read when it *reads* it, not when a turn takes it on — so
+        // those entries are **sent** at write time and retired immediately
+        // rather than waiting for an acknowledgement that will never come.
+        // Without this split a claude peer's message sits pending in the lead's
+        // UI forever. One prune for the whole half, because each is a locked
+        // read-modify-write of one file.
+        self.settle_peer(&fire_and_forget).await;
 
         true
     }
 
-    /// Starts a turn answering a peer's message, with none of the composer's
-    /// interpretation — see [`App::deliver_peer`].
-    async fn start_peer_turn(&mut self, message: &Delivered) -> bool {
+    /// Starts a turn answering a pass of peers' messages, with none of the
+    /// composer's interpretation — see [`App::deliver_peers`].
+    async fn start_peer_turn(&mut self, messages: &[Delivered]) -> bool {
         let sent = self
             .engine
             .send(Command::SendPrompt {
                 text: String::new(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
-                peers: vec![payload(message)],
+                peers: messages.iter().map(payload).collect(),
             })
             .await;
         match sent {
@@ -2024,12 +2101,17 @@ impl App {
     /// matches the engine's command roster. A peer's words must cross none of
     /// those (§7-5), so they are re-offered from the file by the next §6.2
     /// pass instead.
+    ///
+    /// Dropping the map is also what makes those messages deliverable again:
+    /// it *is* the in-flight set [`App::in_flight`] reads, so a pass that finds
+    /// them still in the inbox now finds nothing holding them either.
     fn strand_peers(&mut self) {
         if self.peer_steers.is_empty() {
             return;
         }
         let stranded = std::mem::take(&mut self.peer_steers);
         for id in stranded.keys() {
+            // One id per batch, and `consume` retires every row it stood for.
             self.queue.consume(id);
         }
         self.sync_queue_status();
@@ -5248,6 +5330,13 @@ impl App {
     /// `SteerConsumed` leaves the message in the transcript exactly once and
     /// the recalled copy in the composer, where the person decides whether to
     /// send it again. Nothing here resends anything.
+    ///
+    /// **A teammate's row is never what comes back** ([`Queue::withdraw_newest`]
+    /// passes it over): this is the composer, where Enter resolves `@`
+    /// mentions, loads `$` skills and runs `/` commands, and words nobody at
+    /// this terminal typed may not be put in front of it (§7-5). A strip
+    /// holding only peers' messages therefore answers `false` and the Up arrow
+    /// walks the history, exactly as an empty one does.
     fn withdraw_queued(&mut self) -> bool {
         let Some(entry) = self.queue.withdraw_newest() else {
             return false;
@@ -5536,10 +5625,11 @@ impl App {
             CoreEvent::SteerConsumed { id, .. } => {
                 self.queue.consume(&id);
                 // And for a peer's message this is the consumption fact
-                // [`Delivery::Acknowledged`] was waiting for: the turn has it,
-                // so the mailbox may finally let it go (**D503**).
-                if let Some(message) = self.peer_steers.remove(&id) {
-                    self.settled.push(message);
+                // [`Delivery::Acknowledged`] was waiting for: the turn has the
+                // whole batch this id stood for, so the mailbox may finally let
+                // all of it go (**D503**).
+                if let Some(batch) = self.peer_steers.remove(&id) {
+                    self.settled.extend(batch);
                 }
                 self.sync_queue_status();
             }
@@ -5784,13 +5874,29 @@ impl App {
     /// Whether the loop should wake itself rather than wait for something to
     /// happen.
     ///
+    /// Two clocks answer to this, and [`App::until_next_wakeup`] is where they
+    /// are told apart: almost everything here wants the **next frame**, and one
+    /// arm — a lead with a mailbox — wants the next §6.2 pass a whole second
+    /// away.
+    fn wants_wakeup(&self) -> bool {
+        self.wants_frame()
+            // A lead has to keep waking, because the thing it is waiting for is
+            // a file another process writes: nothing here would ever hear a
+            // teammate's message otherwise, and an idle session is exactly when
+            // one is most likely to arrive (**D503**).
+            || self.lead_inbox.is_some()
+    }
+
+    /// Whether something wants the **next frame**, as against the next mailbox
+    /// pass.
+    ///
     /// The third arm is the MCP dial: nothing else would wake an idle app
     /// while servers connect in the background, so without it a failed server
     /// would sit unreported until the user's next keystroke. The fourth is
     /// the model-listing fetch, for the same reason: the tick is what reaps
     /// it, and without this arm the finished fetch would sit unopened until
     /// an unrelated keypress.
-    fn wants_wakeup(&self) -> bool {
+    fn wants_frame(&self) -> bool {
         self.dirty
             || self.animating()
             || self.pending_mcp()
@@ -5815,17 +5921,45 @@ impl App {
             // is waiting on a person, so neither is a reason to keep the loop
             // spinning at frame rate.
             || (self.queue.has_fallback() && !self.turn_running && !self.revert_pending)
-            // And a lead has to keep waking, because the thing it is waiting
-            // for is a file another process writes: nothing here would ever
-            // hear a teammate's message otherwise, and an idle session is
-            // exactly when one is most likely to arrive. Cheap at the rate it
-            // actually costs — [`App::poll_team`] gates the read at §6's
-            // 1000 ms, so the extra ticks find nothing to do (**D503**).
-            || self.lead_inbox.is_some()
+            // The `/team` dialog polls the roster and each member's ring on
+            // every tick, exactly as the `/mcp` dialog polls its statuses.
+            || self.team_dialog.is_some()
+            // A teammate that is running may hand this loop a permission
+            // dialog down a channel nothing else wakes for, and somebody
+            // waiting on a teammate is somebody watching for that dialog. A
+            // team with nobody in it hands over nothing, which is what keeps
+            // the ordinary case — a session that leads a team and has spawned
+            // into none — off this arm entirely (**D503**).
+            || self.teammates > 0
+    }
+
+    /// How long the loop may sleep before it has to do something.
+    ///
+    /// The frame clock when anything is about to be **drawn**, and the team
+    /// clock when the only reason to wake at all is the lead's §6.2 pass.
+    /// Sharing one timer was a real cost rather than a tidiness one: a
+    /// registry is installed for every session that has a config home, so an
+    /// idle terminal woke sixty times a second forever, ran the whole tick
+    /// body each time, and found the pass not yet due on fifty-nine of them.
+    fn until_next_wakeup(&self) -> Duration {
+        if self.wants_frame() {
+            return self.until_next_frame();
+        }
+
+        self.until_team_poll()
     }
 
     fn until_next_frame(&self) -> Duration {
         FRAME.saturating_sub(self.last_draw.elapsed())
+    }
+
+    /// How long until the §6.2 pass is due again — zero when it has never run,
+    /// which is a first tick rather than a wait.
+    fn until_team_poll(&self) -> Duration {
+        let poll = ganja_core::teammate::lead_inbox::POLL;
+
+        self.team_polled
+            .map_or(Duration::ZERO, |last| poll.saturating_sub(last.elapsed()))
     }
 }
 
@@ -5902,8 +6036,22 @@ const NO_TEAM: &str = "this session leads no team \u{b7} there is no config home
 /// What `/team shutdown` answers when the team is only the lead.
 const NOBODY_TO_STOP: &str = "this team has no teammates to stop";
 
-/// The reason the lead gives when a person asks a teammate to stop.
-const SHUTDOWN_ASKED: &str = "the lead asked through /team shutdown";
+/// What one write into a teammate's inbox is reported as, whichever way it
+/// went.
+///
+/// One function for both outcomes so a fan-out and a single ask cannot word
+/// the same fact two ways. `to` is only reached for on the failing side: a
+/// write that landed reports the **canonical** name the roster resolved, which
+/// is not always the spelling that was asked for.
+fn said(
+    to: &str,
+    outcome: Result<&ganja_tool::team::Sent, &ganja_tool::team::Undelivered>,
+) -> String {
+    match outcome {
+        Ok(sent) => format!("{}: {}", sent.to, sent.note),
+        Err(undelivered) => format!("{to}: {}", undelivered_reason(undelivered)),
+    }
+}
 
 /// What a spawn's own dialog is filed under, where a call's dialog names its
 /// tool. Not a registry id — no tool raised this — and named for the door it
@@ -5932,15 +6080,21 @@ struct DialogAsker {
 }
 
 /// Written in the shape `async_trait` desugars to, because this crate does not
-/// depend on that macro and should not start: the frontend implements exactly
-/// one async trait, and one boxed future spelled out is smaller than a build
-/// dependency added to hide it.
+/// depend on that macro and should not start. Two impls here are spelled out
+/// this way — this one and [`crate::component::team`]'s test double — and two
+/// boxed futures written out are still smaller than a build dependency added
+/// to hide them.
 impl ganja_core::SpawnAsker for DialogAsker {
     /// Asks, and treats every way of not being answered as a refusal.
     ///
     /// A full queue, a receiver that went away with the app, a dropped
     /// sender — none of them is a yes, and the trait's own doc says so: a spawn
     /// nobody could be asked about is one nobody approved.
+    ///
+    /// `try_send` rather than `send`, which is what makes that true of the
+    /// full queue as well: awaiting a slot would leave the spawn hanging on a
+    /// loop that has stopped draining rather than refusing it, and this seam's
+    /// whole contract is that not being answered *is* an answer.
     fn ask<'a, 'b>(
         &'a self,
         request: ganja_core::SpawnAsk,
@@ -5951,7 +6105,7 @@ impl ganja_core::SpawnAsker for DialogAsker {
     {
         Box::pin(async move {
             let (reply, answered) = tokio::sync::oneshot::channel();
-            if self.asks.send((request, reply)).await.is_err() {
+            if self.asks.try_send((request, reply)).is_err() {
                 return PermissionReply::Reject;
             }
 
@@ -15469,12 +15623,12 @@ mod tests {
         turn_in_flight(&mut app, &mut events).await;
 
         assert!(
-            app.deliver_peer(ganja_core::teammate::lead_inbox::Delivered::new(
+            app.deliver_peers(vec![ganja_core::teammate::lead_inbox::Delivered::new(
                 "w1",
                 "2026-08-17T00:00:00.000Z",
                 "have a look at the parser",
                 ganja_core::teammate::Delivery::Acknowledged,
-            ))
+            )])
             .await,
             "the engine took the steer"
         );
@@ -15482,12 +15636,12 @@ mod tests {
         assert!(app.queue.entries()[0].is_steered());
 
         assert!(
-            app.deliver_peer(ganja_core::teammate::lead_inbox::Delivered::new(
+            app.deliver_peers(vec![ganja_core::teammate::lead_inbox::Delivered::new(
                 "claude-peer",
                 "2026-08-17T00:00:01.000Z",
                 "and one from a pane",
                 ganja_core::teammate::Delivery::FireAndForget,
-            ))
+            )])
             .await
         );
         assert_eq!(
@@ -15495,6 +15649,175 @@ mod tests {
             1,
             "sent at write time, so nothing new is pending"
         );
+    }
+
+    /// **§7-5, and the door it closes.** A teammate's message waits on the
+    /// same strip a typed one does, and Up must not lift it into the composer:
+    /// Enter there resolves `@` mentions, loads `$` skills and runs `/`
+    /// commands, and the person at this terminal consented to none of it. The
+    /// body is exactly the three tokens that would be acted on.
+    #[tokio::test]
+    async fn a_peers_message_cannot_be_recalled_into_the_composer() {
+        let directory = temporary();
+        let (mut app, _registry, mut events) = leading(&directory).await;
+        turn_in_flight(&mut app, &mut events).await;
+        app.deliver_peers(vec![ganja_core::teammate::lead_inbox::Delivered::new(
+            "w1",
+            "2026-08-17T00:00:00.000Z",
+            "@Cargo.toml /init $skill",
+            ganja_core::teammate::Delivery::Acknowledged,
+        )])
+        .await;
+        assert_eq!(app.queue.depth(), 1);
+
+        app.handle(key(KeyCode::Up, KeyModifiers::NONE))
+            .await
+            .expect("the arrow is handled");
+
+        assert_eq!(
+            app.editor.text(),
+            "what is left",
+            "the strip holds nothing this person wrote, so Up falls through to \
+             the history walk exactly as an empty strip does — and what it \
+             finds there is their own last prompt"
+        );
+        assert_eq!(app.queue.depth(), 1, "the peer's row is still waiting");
+
+        // The person's own entry is still theirs to take back, from under the
+        // peer's row.
+        app.editor.set_text("");
+        app.queue
+            .push_steered("steer-99".to_owned(), "mine".to_owned());
+        app.handle(key(KeyCode::Up, KeyModifiers::NONE))
+            .await
+            .expect("the arrow is handled");
+
+        assert_eq!(app.editor.text(), "mine");
+        assert_eq!(app.queue.depth(), 1, "and the peer's row stayed put");
+    }
+
+    /// **Delivery is not idempotent; only pruning is.** An `Acknowledged`
+    /// sender's message stays in the inbox until the turn provably took it, so
+    /// every pass in between offers it again — and a second pass that
+    /// *delivered* it again would put the same words to the model over and
+    /// over for the whole length of a long step.
+    ///
+    /// The message is written into the mailbox and handed over by hand, since
+    /// only a member this registry really started reports `Acknowledged`, and
+    /// the identity §2.3 composes has to be the same one on both sides for the
+    /// pass to recognise what it is already holding.
+    #[tokio::test]
+    async fn a_message_still_awaiting_its_consumption_is_not_delivered_twice() {
+        let directory = temporary();
+        let (mut app, registry, mut events) = leading(&directory).await;
+        turn_in_flight(&mut app, &mut events).await;
+        let when = "2026-08-17T00:00:00.000Z";
+        ganja_core::team::mailbox::write(
+            &registry.lead_inbox(),
+            ganja_core::team::MailboxMessage::new("w1", "the parser is done", when),
+        )
+        .expect("the lead's inbox takes a message");
+        assert!(
+            app.deliver_peers(vec![ganja_core::teammate::lead_inbox::Delivered::new(
+                "w1",
+                when,
+                "the parser is done",
+                ganja_core::teammate::Delivery::Acknowledged,
+            )])
+            .await
+        );
+        assert_eq!(app.steers, 1);
+        assert_eq!(app.queue.depth(), 1);
+        assert_eq!(
+            still_owed(&registry),
+            1,
+            "the mailbox keeps it until the turn says it took it, which is \
+             exactly what makes the next pass offer it again"
+        );
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        assert_eq!(app.steers, 1, "the same message is not steered twice");
+        assert_eq!(app.queue.depth(), 1, "and the strip did not grow a copy");
+    }
+
+    /// **One command per pass.** The engine takes a batch of peers on one
+    /// `Steer`, and sending them one at a time made the second refuse: `Busy`
+    /// is what an engine answers between accepting a prompt and running the
+    /// turn it becomes, so the rest of a pass waited out another cadence for
+    /// nothing.
+    #[tokio::test]
+    async fn a_whole_pass_of_messages_crosses_as_one_command() {
+        let directory = temporary();
+        let (mut app, registry, mut events) = leading(&directory).await;
+        turn_in_flight(&mut app, &mut events).await;
+        peer_writes(&registry, "w1", "the parser is done");
+        peer_writes(&registry, "w2", "and the lexer");
+        peer_writes(&registry, "w1", "one more thing");
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        assert_eq!(app.steers, 1, "three messages, one command");
+        assert_eq!(
+            still_owed(&registry),
+            0,
+            "and one prune for the whole batch"
+        );
+
+        // The strip still renders *messages*, one row each, all standing for
+        // the single steer that carried them — shown here with senders whose
+        // backend acknowledges, since those are the rows that wait.
+        app.deliver_peers(vec![
+            ganja_core::teammate::lead_inbox::Delivered::new(
+                "w1",
+                "2026-08-17T00:00:00.000Z",
+                "have a look at the parser",
+                ganja_core::teammate::Delivery::Acknowledged,
+            ),
+            ganja_core::teammate::lead_inbox::Delivered::new(
+                "w2",
+                "2026-08-17T00:00:01.000Z",
+                "and at the lexer",
+                ganja_core::teammate::Delivery::Acknowledged,
+            ),
+        ])
+        .await;
+
+        assert_eq!(app.steers, 2, "one more command");
+        assert_eq!(app.queue.depth(), 2, "and one row per message");
+        assert_eq!(
+            app.queue
+                .entries()
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1,
+            "all under the one id that will retire them together"
+        );
+    }
+
+    /// An idle lead is not a busy one: the only thing it is waiting for is a
+    /// file at §6's own thousand-millisecond cadence, so that is how long it
+    /// sleeps rather than sixty times a second forever.
+    #[tokio::test]
+    async fn an_idle_lead_sleeps_until_its_next_mailbox_pass_rather_than_at_frame_rate() {
+        let directory = temporary();
+        let (mut app, _registry, _events) = leading(&directory).await;
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        app.dirty = false;
+
+        assert!(app.wants_wakeup(), "a lead still has to keep waking");
+        assert!(
+            app.until_next_wakeup() > FRAME,
+            "but for the mailbox rather than for a frame: {:?}",
+            app.until_next_wakeup()
+        );
+
+        // Anything that is really about to be drawn takes the frame clock back.
+        app.open_team();
+        assert!(app.until_next_wakeup() <= FRAME);
     }
 
     /// A steer the turn never took is **not** handed to the replay lane: that
@@ -15506,12 +15829,12 @@ mod tests {
         let directory = temporary();
         let (mut app, _registry, mut events) = leading(&directory).await;
         turn_in_flight(&mut app, &mut events).await;
-        app.deliver_peer(ganja_core::teammate::lead_inbox::Delivered::new(
+        app.deliver_peers(vec![ganja_core::teammate::lead_inbox::Delivered::new(
             "w1",
             "2026-08-17T00:00:00.000Z",
             "@Cargo.toml /init $skill",
             ganja_core::teammate::Delivery::Acknowledged,
-        ))
+        )])
         .await;
         assert_eq!(app.queue.depth(), 1);
 

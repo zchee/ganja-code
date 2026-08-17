@@ -17,6 +17,15 @@
 //! **A queued entry is never silent.** Its text is on screen for as long as
 //! anything owns it, and the status bar carries the depth: an entry that got
 //! stuck would be a visible bug rather than a message that vanished.
+//!
+//! # A teammate's words are a third kind of row
+//!
+//! A peer's message waits here too (**D503**), and it is not the person's to
+//! take back: recalling one into the composer would put words nobody typed
+//! where Enter reads them as consent — for the `@` mentions, `$` skills and
+//! `/` commands in them (§7-5). So the lane a row belongs to is a **field**
+//! rather than something a caller remembers, and [`Queue::withdraw_newest`]
+//! answers with the newest row this person really wrote.
 
 use ratatui::{
     buffer::Buffer,
@@ -38,20 +47,42 @@ const MAX_ROWS: usize = 5;
 /// What each row is marked with.
 const MARKER: &str = "\u{2502} ";
 
+/// Which lane a row belongs to, which is to say **who wrote it**.
+///
+/// A field rather than a caller's memory, because the one thing that must
+/// never happen to a peer's words is that they end up in the composer as
+/// though this person had typed them (§7-5): a `String` walking around with no
+/// mark on it is exactly how that happens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane {
+    /// The person at this terminal typed it.
+    Typed,
+    /// A teammate wrote it, and it reached here through the lead's mailbox
+    /// (**D503**).
+    Peer,
+}
+
 /// One message waiting to reach the engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// The correlation id minted for it. A steered entry is retired when
     /// `Event::SteerConsumed` names this; a fallback entry keeps it only so
     /// every row on screen has one identity for its whole life.
+    ///
+    /// Not unique per row: one `Command::Steer` carries a whole pass of a
+    /// teammate's messages under one id, and the event that names it retires
+    /// every row it stood for at once.
     pub id: String,
-    /// What the user typed, verbatim — including its `@` and `/` tokens, which
-    /// are resolved when the entry actually reaches the engine and not before.
+    /// What was written, verbatim — including its `@` and `/` tokens, which
+    /// are resolved when a *typed* entry actually reaches the engine and never
+    /// for a peer's.
     pub text: String,
     /// Whether the engine took this as a steer and has yet to say it consumed
     /// it. `false` is the fallback lane: nothing is waiting on the engine, and
     /// this entry is replayed as a prompt at the end of the turn.
     steered: bool,
+    /// Who wrote it.
+    lane: Lane,
 }
 
 impl Entry {
@@ -61,6 +92,12 @@ impl Entry {
     #[must_use]
     pub fn is_steered(&self) -> bool {
         self.steered
+    }
+
+    /// Which lane it belongs to.
+    #[must_use]
+    pub fn lane(&self) -> Lane {
+        self.lane
     }
 }
 
@@ -77,16 +114,36 @@ impl Queue {
             id,
             text,
             steered: true,
+            lane: Lane::Typed,
+        });
+    }
+
+    /// Records a teammate's message the engine accepted as a steer (**D503**).
+    ///
+    /// The same row as [`Queue::push_steered`]'s in every way a person can
+    /// see — the words are what they are looking for — and a different one in
+    /// the only way that matters: Up will not hand it back to them.
+    pub fn push_peer(&mut self, id: String, text: String) {
+        self.entries.push(Entry {
+            id,
+            text,
+            steered: true,
+            lane: Lane::Peer,
         });
     }
 
     /// Records a message nothing is going to steer, to be replayed as a prompt
     /// once the engine is idle.
+    ///
+    /// Typed by construction: the replay lane resolves mentions and matches
+    /// command names, which a peer's words consent to none of, so a peer's
+    /// message is given back to its mailbox instead (§7-5).
     pub fn push_fallback(&mut self, id: String, text: String) {
         self.entries.push(Entry {
             id,
             text,
             steered: false,
+            lane: Lane::Typed,
         });
     }
 
@@ -110,12 +167,21 @@ impl Queue {
         self.entries.len() != before
     }
 
-    /// Turns every entry still waiting on the engine into a fallback one,
-    /// which is what the end of a turn means for them: no turn is left to
+    /// Turns every **typed** entry still waiting on the engine into a fallback
+    /// one, which is what the end of a turn means for them: no turn is left to
     /// drain a steer, so whatever it did not take is replayed as a prompt.
+    ///
+    /// A peer's row is left where it is, and that is the structural half of
+    /// §7-5: the replay lane resolves mentions, loads skills and matches
+    /// command names, so a teammate's words must never reach it. The app takes
+    /// those rows back separately and lets the mailbox re-offer them — a row
+    /// this missed would sit on the strip rather than be replayed, which is the
+    /// safe way for that to go wrong.
     pub fn strand(&mut self) {
         for entry in &mut self.entries {
-            entry.steered = false;
+            if entry.lane == Lane::Typed {
+                entry.steered = false;
+            }
         }
     }
 
@@ -126,15 +192,29 @@ impl Queue {
         Some(self.entries.remove(index))
     }
 
-    /// Takes the newest entry back for editing, whichever lane it was in.
+    /// Takes the newest entry **this person wrote** back for editing.
     ///
     /// A steered entry cannot be un-sent — there is no command that takes a
     /// steer back, and inventing one would be a second contract to race — so
     /// what a withdrawal does is drop the *rendered* claim on it. If the
     /// engine consumes it anyway it lands exactly once, in the transcript,
     /// where the person can see it.
+    ///
+    /// A teammate's row is passed over rather than popped (**§7-5**): the
+    /// composer is a consent surface — Enter there resolves `@` mentions,
+    /// loads `$` skills and runs `/` commands — and words nobody at this
+    /// terminal typed may not be put in front of it. So a strip whose newest
+    /// row is a peer's hands back the newest one under it, and a strip holding
+    /// nothing else hands back [`None`], which is an Up arrow falling through
+    /// to the history walk exactly as an empty strip does. Whoever wrote the
+    /// peer row keeps its id, so a withdrawal can never orphan one either.
     pub fn withdraw_newest(&mut self) -> Option<Entry> {
-        self.entries.pop()
+        let index = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.lane == Lane::Typed)?;
+
+        Some(self.entries.remove(index))
     }
 
     /// Whether anything is waiting to be replayed as a prompt.
@@ -202,7 +282,10 @@ impl Queue {
     ///
     /// Newest rather than oldest, because the newest is what an Up arrow takes
     /// back and a list whose bottom row is not the one the key acts on would
-    /// be lying about which.
+    /// be lying about which. A peer's row is the one exception — the key skips
+    /// it, since it is nobody here's to edit — and it is drawn in place anyway,
+    /// because the strip's job is to say what is waiting and a message hidden
+    /// to keep a hint line true would be the worse lie.
     fn lines(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
         let first = self.entries.len().saturating_sub(rows);
         let mut lines: Vec<Line<'static>> = self.entries[first..]
@@ -391,5 +474,65 @@ mod tests {
         assert_eq!(taken.text, "second");
         assert_eq!(queue.depth(), 1);
         assert!(taken.is_steered());
+    }
+
+    /// **§7-5.** The composer is a consent surface, so a teammate's words may
+    /// not be handed to it: Up passes a peer's row over and takes the newest
+    /// one this person really wrote, and a strip holding only a peer's answers
+    /// nothing at all.
+    #[test]
+    fn withdrawing_passes_over_a_peers_row_and_takes_the_persons_own() {
+        let mut queue = Queue::default();
+        queue.push_steered("steer-1".to_owned(), "mine".to_owned());
+        queue.push_peer("peer-1".to_owned(), "@Cargo.toml /init $skill".to_owned());
+
+        let taken = queue.withdraw_newest().expect("the person's own entry");
+
+        assert_eq!(taken.text, "mine");
+        assert_eq!(taken.lane(), super::Lane::Typed);
+        assert_eq!(queue.depth(), 1, "and the peer's row is still waiting");
+        assert_eq!(queue.entries()[0].text, "@Cargo.toml /init $skill");
+
+        assert!(
+            queue.withdraw_newest().is_none(),
+            "a strip holding only a peer's message has nothing to hand back"
+        );
+        assert_eq!(queue.depth(), 1);
+    }
+
+    /// The other half of the same rule: the replay lane resolves mentions and
+    /// runs command names, so the end of a turn must not put a peer's row into
+    /// it.
+    #[test]
+    fn stranding_leaves_a_peers_row_out_of_the_replay_lane() {
+        let mut queue = Queue::default();
+        queue.push_peer("peer-1".to_owned(), "@Cargo.toml /init".to_owned());
+        queue.push_steered("steer-1".to_owned(), "mine".to_owned());
+
+        queue.strand();
+
+        let taken = queue.take_next_fallback().expect("the person's own entry");
+        assert_eq!(taken.text, "mine");
+        assert!(
+            !queue.has_fallback(),
+            "and the peer's row is nothing the lane may replay"
+        );
+        assert_eq!(queue.depth(), 1);
+    }
+
+    /// One `Command::Steer` carries a whole pass of a teammate's messages, so
+    /// its id stands for several rows and the event that names it retires all
+    /// of them.
+    #[test]
+    fn consuming_a_batchs_id_retires_every_row_it_stood_for() {
+        let mut queue = Queue::default();
+        queue.push_peer("steer-1".to_owned(), "the parser is done".to_owned());
+        queue.push_peer("steer-1".to_owned(), "and the lexer".to_owned());
+        queue.push_steered("steer-2".to_owned(), "mine".to_owned());
+
+        assert!(queue.consume("steer-1"));
+
+        assert_eq!(queue.depth(), 1);
+        assert_eq!(queue.entries()[0].text, "mine");
     }
 }

@@ -4,11 +4,14 @@
 //! Spawn row that belongs to the team rather than to any member.
 //!
 //! Upstream opencode has no team, no teammates and no surface for either, so
-//! nothing here cites an upstream file. The two-step shape is
-//! [`crate::component::mcp::Mcp`]'s and the row-independent action plus
-//! free-text step are [`crate::component::plugin::Plugin`]'s — the same
-//! grammar every dialog in this frontend already taught, applied to a new
-//! subject.
+//! nothing here cites an upstream file. What it ports is Claude Code's
+//! **§4** — the spawn sequence its `--backend`/`--agent` grammar comes from
+//! (§4.1), the surfaces a member may run on (§4.2) and the colour a team
+//! assigns each of them (§4.3) — with §6.1's shutdown as the other action a row
+//! offers. The two-step shape is [`crate::component::mcp::Mcp`]'s and the
+//! row-independent action plus free-text step are
+//! [`crate::component::plugin::Plugin`]'s — the same grammar every dialog in
+//! this frontend already taught, applied to a new subject.
 //!
 //! Two decisions of the landing show up as code here:
 //!
@@ -272,8 +275,20 @@ enum Asking {
 enum Step {
     /// Choosing a member row or the Spawn row under them.
     Members,
-    /// Choosing one of the selected member's actions, by index.
-    Actions(usize),
+    /// Choosing one of a named member's actions.
+    ///
+    /// The **name** rather than the cursor's index, because this dialog
+    /// re-polls the roster on every tick: a teammate that retires or spawns
+    /// while somebody is deciding moves the rows under an index, and Enter
+    /// would then act on whoever had slid into that slot. A name cannot slide,
+    /// and one that leaves the roster drops the step
+    /// ([`Team::refresh`]) rather than resolving to a stranger.
+    Actions {
+        /// Whose actions these are.
+        member: String,
+        /// Which of them the cursor is on.
+        option: usize,
+    },
     /// Typing the text a step needs.
     Input {
         /// What the text is for.
@@ -318,9 +333,30 @@ impl Team {
     /// under it. A ring growing under a person mid-decision must not move what
     /// their next keypress lands on, which is the whole reason this is not a
     /// fresh [`Team::new`] every tick.
-    pub fn refresh(&mut self, rows: Vec<Row>) {
+    ///
+    /// The one thing a refresh **does** move is an action step whose member is
+    /// gone: there is no honest way to keep offering Shutdown for a teammate
+    /// that has shut down, so the step drops back to the roster and the person
+    /// chooses again.
+    ///
+    /// Answers whether anything really changed, so a caller polling every tick
+    /// repaints only when it did. A `/team` dialog left open would otherwise
+    /// mark every one of those ticks dirty and redraw the screen at frame rate
+    /// for a roster nobody touched.
+    pub fn refresh(&mut self, rows: Vec<Row>) -> bool {
+        let mut moved = rows != self.rows;
         self.rows = rows;
         self.selected = self.selected.min(self.total_rows().saturating_sub(1));
+        let orphaned = match &self.step {
+            Step::Actions { member, .. } => self.row_named(member).is_none(),
+            Step::Members | Step::Input { .. } => false,
+        };
+        if orphaned {
+            self.step = Step::Members;
+            moved = true;
+        }
+
+        moved
     }
 
     /// Sets the notice line the next frame shows.
@@ -363,7 +399,7 @@ impl Team {
     /// Whether the per-member action step is the one on screen.
     #[must_use]
     pub fn is_choosing_action(&self) -> bool {
-        matches!(self.step, Step::Actions(_))
+        matches!(self.step, Step::Actions { .. })
     }
 
     /// What has been typed into the free-text step.
@@ -371,7 +407,7 @@ impl Team {
     pub fn input(&self) -> Option<&str> {
         match &self.step {
             Step::Input { buffer, .. } => Some(buffer.as_str()),
-            Step::Members | Step::Actions(_) => None,
+            Step::Members | Step::Actions { .. } => None,
         }
     }
 
@@ -380,6 +416,12 @@ impl Team {
     #[must_use]
     pub fn selected_member(&self) -> Option<&Row> {
         self.rows.get(self.selected)
+    }
+
+    /// The row a name belongs to, which is how an action step finds the member
+    /// it was opened for however the roster has moved since.
+    fn row_named(&self, name: &str) -> Option<&Row> {
+        self.rows.iter().find(|row| row.name == name)
     }
 
     /// Every position the member-step cursor can land on: the members, then
@@ -407,11 +449,15 @@ impl Team {
     pub fn move_selection(&mut self, delta: isize) {
         match &self.step {
             Step::Members => self.selected = clamped(self.selected, delta, self.total_rows()),
-            Step::Actions(option) => {
+            Step::Actions { member, option } => {
                 let count = self
-                    .selected_member()
+                    .row_named(member)
                     .map_or(0, |row| Self::actions(row).len());
-                self.step = Step::Actions(clamped(*option, delta, count));
+                let moved = clamped(*option, delta, count);
+                self.step = Step::Actions {
+                    member: member.clone(),
+                    option: moved,
+                };
             }
             Step::Input { .. } => {}
         }
@@ -457,17 +503,20 @@ impl Team {
     pub fn submit(&mut self) -> Option<Effect> {
         match &mut self.step {
             Step::Members => {
-                if self.selected < self.rows.len() {
+                if let Some(row) = self.rows.get(self.selected) {
                     // A row with nothing to offer leaves the dialog exactly as
                     // it was — the `/mcp` dialog's own answer for a row it
                     // cannot act on.
-                    if self
-                        .selected_member()
-                        .is_some_and(|row| Self::actions(row).is_empty())
-                    {
+                    if Self::actions(row).is_empty() {
                         return None;
                     }
-                    self.step = Step::Actions(0);
+                    // The name is taken here, at the keypress a person made
+                    // while looking at this row, and is what every later step
+                    // resolves against.
+                    self.step = Step::Actions {
+                        member: row.name.clone(),
+                        option: 0,
+                    };
                     return None;
                 }
                 if self.busy {
@@ -481,15 +530,19 @@ impl Team {
 
                 None
             }
-            Step::Actions(option) => {
+            Step::Actions { member, option } => {
                 let option = *option;
-                let row = self.selected_member()?;
+                let member = member.clone();
+                // Resolved by the name this step was opened for, never by the
+                // cursor: a poll that arrived mid-decision may have moved every
+                // row, and a member that left the roster is answered by
+                // `refresh` dropping this step before Enter is ever read.
+                let row = self.row_named(&member)?;
                 let effect = match *Self::actions(row).get(option)? {
-                    RowAction::Shutdown => Effect::Shutdown(row.name.clone()),
+                    RowAction::Shutdown => Effect::Shutdown(member),
                     RowAction::Message => {
-                        let asking = Asking::Message(row.name.clone());
                         self.step = Step::Input {
-                            asking,
+                            asking: Asking::Message(member),
                             buffer: String::new(),
                         };
 
@@ -551,7 +604,9 @@ impl Team {
 
         let mut lines = match &self.step {
             Step::Members => self.member_rows(inner_width, rows, theme),
-            Step::Actions(option) => self.action_rows(inner_width, *option, theme),
+            Step::Actions { member, option } => {
+                self.action_rows(inner_width, member, *option, theme)
+            }
             Step::Input { asking, buffer } => Self::input_rows(inner_width, asking, buffer, theme),
         };
         if let Some(notice) = &self.notice {
@@ -560,7 +615,7 @@ impl Team {
         }
         let hints = match &self.step {
             Step::Members => MEMBER_HINTS,
-            Step::Actions(_) => ACTION_HINTS,
+            Step::Actions { .. } => ACTION_HINTS,
             Step::Input { .. } => INPUT_HINTS,
         };
         lines.push(Line::raw(""));
@@ -572,9 +627,11 @@ impl Team {
         // dialog's own two-height scheme.
         let height = match &self.step {
             Step::Members => available,
-            Step::Actions(_) | Step::Input { .. } => u16::try_from(lines.len().saturating_add(2))
-                .unwrap_or(available)
-                .min(available),
+            Step::Actions { .. } | Step::Input { .. } => {
+                u16::try_from(lines.len().saturating_add(2))
+                    .unwrap_or(available)
+                    .min(available)
+            }
         };
         let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
 
@@ -662,8 +719,19 @@ impl Team {
 
     /// The per-member action step: which member it is about, then what can be
     /// done to it.
-    fn action_rows(&self, width: usize, option: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let Some(row) = self.selected_member() else {
+    ///
+    /// Resolved by name for [`Step::Actions`]'s reason. A name with no row is
+    /// unreachable — [`Team::refresh`] drops the step the moment one leaves —
+    /// and is drawn as the empty roster rather than unwrapped, because the cost
+    /// of being wrong here is a panic in somebody's render.
+    fn action_rows(
+        &self,
+        width: usize,
+        member: &str,
+        option: usize,
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
+        let Some(row) = self.row_named(member) else {
             return vec![Line::styled(clip(EMPTY, width), theme.dim)];
         };
 
@@ -858,10 +926,11 @@ mod tests {
     /// A `Subagents` seam that records the request the `task` tool's teammate
     /// door hands it.
     ///
-    /// Hand-desugared rather than `#[async_trait]`: this crate does not depend
-    /// on `async-trait` and taking a dependency on it for one test double is
-    /// not worth a manifest edit — the trait's own attribute expands to
-    /// exactly this signature.
+    /// Hand-desugared rather than `#[async_trait]`, exactly as
+    /// [`crate::app`]'s own `SpawnAsker` impl is: this crate takes no
+    /// dependency on that macro, and the attribute expands to precisely this
+    /// signature. Writing it out is what keeps a build dependency out of the
+    /// manifest for one test double.
     #[derive(Debug)]
     struct Recorder {
         started: Mutex<Vec<TeammateSpawn>>,
@@ -1225,6 +1294,90 @@ mod tests {
             dialog.selected_member().is_none(),
             "the cursor reclamps onto the Spawn row"
         );
+    }
+
+    /// A poll that found the same roster changed nothing, and says so — which
+    /// is what keeps an open dialog from repainting the screen on every one of
+    /// the ticks it polls on.
+    #[test]
+    fn a_refresh_that_found_the_same_roster_reports_nothing_moved() {
+        let mut dialog = dialog();
+
+        assert!(
+            !dialog.refresh(vec![
+                lead(),
+                row(
+                    "w1",
+                    MemberBackend::InProcess,
+                    &["read(src/lib.rs)", "grep(fn spawn)"],
+                ),
+                row("w2", MemberBackend::Claude, &[]),
+            ]),
+            "an identical poll is not a reason to redraw"
+        );
+        assert!(
+            dialog.refresh(vec![
+                lead(),
+                row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
+                row("w2", MemberBackend::Claude, &[]),
+            ]),
+            "a ring that moved is"
+        );
+    }
+
+    /// **The action step is about a member, not about a row index.** The
+    /// roster is re-polled on every tick, so a teammate retiring or spawning
+    /// mid-decision moves the rows under the cursor — and an Enter that
+    /// resolved by index would shut down whoever slid into that slot.
+    #[test]
+    fn an_action_chosen_for_one_member_still_names_it_after_the_roster_moved() {
+        let mut dialog = dialog();
+        dialog.move_selection(1);
+        assert_eq!(dialog.submit(), None, "Enter opens w1's actions");
+        assert!(dialog.is_choosing_action());
+
+        // w0 joined the team while the action menu was up, so w1 is no longer
+        // the row the cursor's old index named.
+        dialog.refresh(vec![
+            lead(),
+            row("w0", MemberBackend::InProcess, &[]),
+            row("w1", MemberBackend::InProcess, &[]),
+            row("w2", MemberBackend::Claude, &[]),
+        ]);
+        assert!(dialog.is_choosing_action(), "the step is still w1's");
+        let screen = rendered(&dialog, AREA);
+        assert!(screen.contains("w1"), "and says so:\n{screen}");
+
+        dialog.move_selection(1);
+
+        assert_eq!(
+            dialog.submit(),
+            Some(Effect::Shutdown("w1".to_owned())),
+            "the member Enter was pressed for, not the one at that index now"
+        );
+    }
+
+    /// And when that member is the one that left, the step drops rather than
+    /// going on offering Shutdown for a teammate that has shut down.
+    #[test]
+    fn an_action_step_whose_member_left_the_roster_drops_back_to_it() {
+        let mut dialog = dialog();
+        dialog.move_selection(1);
+        dialog.submit();
+        assert!(dialog.is_choosing_action());
+
+        assert!(
+            dialog.refresh(vec![lead(), row("w2", MemberBackend::Claude, &[])]),
+            "a dropped step is something moved"
+        );
+
+        assert!(!dialog.is_choosing_action(), "and back to the roster");
+        // The cursor stayed where it was, so the next Enter opens the actions
+        // of whoever is under it now — chosen by a person looking at that row,
+        // which is the whole difference.
+        assert_eq!(dialog.submit(), None);
+        dialog.move_selection(1);
+        assert_eq!(dialog.submit(), Some(Effect::Shutdown("w2".to_owned())));
     }
 
     /// The command grammar is the dialog's grammar, so a `/team` line and the
