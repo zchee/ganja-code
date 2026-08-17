@@ -50,8 +50,8 @@ use crate::{
     hook, job, lsp, mcp,
     permission::{Permissions, Rule},
     protocol::{
-        Command, Event, Message, MessageId, PartBody, RevertInfo, RevertScope, Role, ToolState,
-        Usage, now,
+        Command, Event, Message, MessageId, PartBody, PermissionId, PermissionMode,
+        PermissionReply, RevertInfo, RevertScope, Role, ToolState, Usage, now,
     },
     provider::Provider,
     session::{
@@ -60,8 +60,8 @@ use crate::{
     },
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
-    subagent,
-    tool::{Credentials, FileTimes, Registry, plan, task},
+    subagent, teammate,
+    tool::{Credentials, FileTimes, Registry, plan, send_message, task, team::Peer},
     watch,
 };
 
@@ -372,6 +372,86 @@ pub(crate) struct Fanout {
     /// waiting is the point: backpressure has always landed on whoever is
     /// publishing.
     publish: tokio::sync::Mutex<()>,
+    /// Who answers a permission dialog when nobody is going to be asked one.
+    /// Inert on every fanout but the engine's own; see [`Bypass`].
+    bypass: Bypass,
+}
+
+/// The answer a bypassed turn gives its own permission dialogs (**D496**).
+///
+/// D479's bypass lives in the two frontends: a `--yolo` session answers every
+/// `PermissionRequested` with "allow once" instead of drawing it. A teammate
+/// has no frontend, and a lead's `mode_set_request` can reach any engine, so
+/// the same answer has to exist *inside* the engine — and this is the value
+/// that gives it.
+///
+/// # Why it hangs off the fanout
+///
+/// A dialog passes exactly one funnel. Every request a turn raises — a root
+/// turn's, and a child's re-addressed and republished by
+/// [`subagent`](crate::subagent)'s watcher — is delivered through
+/// [`Fanout::send`], and nothing else in the engine sees one. Answering there
+/// also puts the reply in the wait's own channel *before* the turn wakes from
+/// publishing the request, so a bypassed dialog costs the turn nothing and no
+/// subscriber ever sees a reply ahead of the request it answers.
+///
+/// # What it does not do
+///
+/// It answers a dialog; it does not repeal a rule. A `deny` raises no request
+/// at all — `session.rs`'s gate fails the call outright — so nothing here can
+/// launder one, and the answer is always [`PermissionReply::Once`], which
+/// remembers nothing and writes nothing to this project's store. That is
+/// D479's posture exactly, reached at a turn boundary instead of at launch.
+#[derive(Default)]
+struct Bypass {
+    /// The running turn's wait registry, present exactly when that turn
+    /// *began* under [`PermissionMode::Bypass`].
+    ///
+    /// Installed at a turn's start, which is what makes D496's "applied at the
+    /// next turn's start" true rather than aspirational: a mode set mid-turn
+    /// changes what the engine holds and not this, so the turn that is
+    /// streaming keeps the posture it began with — D474's discipline, the same
+    /// one the hooks and the base tools a turn clones at its start keep.
+    ///
+    /// The registry is held here directly rather than reached through
+    /// [`TurnSlot`]: that slot is an async mutex a publisher may already be
+    /// inside, and an answer that had to take it could end up waiting on the
+    /// very publish that asked for it.
+    answering: std::sync::Mutex<Option<Arc<std::sync::Mutex<PendingReplies>>>>,
+}
+
+impl Bypass {
+    /// What a turn beginning under `mode` installs — and what one beginning
+    /// under [`PermissionMode::Ask`] takes away again.
+    fn begin(&self, mode: PermissionMode, pending: &Arc<std::sync::Mutex<PendingReplies>>) {
+        *self.lock() = match mode {
+            PermissionMode::Ask => None,
+            PermissionMode::Bypass => Some(Arc::clone(pending)),
+        };
+    }
+
+    /// Answers the request `id` with "allow once", if this turn is bypassed.
+    fn answer(&self, id: &PermissionId) {
+        let Some(pending) = self.lock().clone() else {
+            return;
+        };
+        let answered = pending
+            .lock()
+            .expect("the pending replies are never poisoned")
+            .answer_permission(id, PermissionReply::Once);
+        if answered {
+            tracing::debug!(
+                id = id.as_str(),
+                "a bypassed turn allowed this call once without asking anybody"
+            );
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<std::sync::Mutex<PendingReplies>>>> {
+        self.answering
+            .lock()
+            .expect("the bypassed turn's registry is never poisoned")
+    }
 }
 
 /// The registry half of [`Fanout`]: the queues, and the counter that names
@@ -415,6 +495,7 @@ impl Fanout {
                 minted: 1,
             }),
             publish: tokio::sync::Mutex::new(()),
+            bypass: Bypass::default(),
         }
     }
 
@@ -495,6 +576,13 @@ impl Fanout {
             if sender.send(event.clone()).await.is_err() {
                 dead.push(*id);
             }
+        }
+
+        // A bypassed turn answers its own dialog here: after every subscriber
+        // has the request, and before the turn wakes from this call. See
+        // [`Bypass`] for why this funnel is where that answer belongs.
+        if let Event::PermissionRequested { id, .. } = &event {
+            self.bypass.answer(id);
         }
 
         let mut outlets = self.lock();
@@ -886,9 +974,9 @@ pub struct Engine {
     /// than a discipline.
     activated_tools: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
     /// Which names defer, over the handle above, as last computed on the
-    /// shared composition path ([`Engine::compose_deferral`]). What every
-    /// turn clones. Empty candidates on every engine whose registry holds no
-    /// `mcp__*` names — every scripted and golden run.
+    /// shared composition path ([`Engine::compose`]). What every turn clones.
+    /// Empty candidates on every engine whose registry holds no `mcp__*`
+    /// names — every scripted and golden run.
     deferral: std::sync::Mutex<crate::tool::deferral::Deferral>,
     /// The composed registry's definitions, as last rebuilt — the snapshot
     /// `tool_search` answers from, shared rather than copied so a
@@ -995,6 +1083,30 @@ pub struct Engine {
     /// `run_in_background: true`. Always present, unlike `mcp`/`lsp`: there
     /// is no engine a background job cannot outlive.
     jobs: Arc<job::JobRegistry>,
+    /// The teammates this session started, once somebody gave it a team
+    /// (**D500**). [`None`] is every session that never spawned one, which is
+    /// every scripted, golden and PTY run — and every teammate's own engine,
+    /// since a teammate spawns nobody.
+    ///
+    /// Beside [`Engine::jobs`] rather than inside a turn for the reason that
+    /// registry is: a teammate's lifetime is not a turn's, so a turn's cancel
+    /// must not end one. Unlike jobs it is optional, because a session with no
+    /// team has no directory on disk and should leave none.
+    teammates: Option<Arc<teammate::TeammateRegistry>>,
+    /// The roster the offered `send_message` was last described against, so a
+    /// teammate spawned mid-session is addressable at the next turn rather
+    /// than never. The same once-per-turn-start memo `mcp_installed` keeps,
+    /// for the same reason: a rebuild happens exactly when what it renders
+    /// moved.
+    team_roster: std::sync::Mutex<Vec<Peer>>,
+    /// The posture the **next** turn runs under (**D-15**, **D496**).
+    ///
+    /// Written the moment a [`Command::SetPermissionMode`] arrives, mid-turn
+    /// included, and read once at a turn's start into [`Bypass`]. Not reset by
+    /// [`Command::NewSession`], for the reason the model and the agent are
+    /// not: it is what this engine runs as, and neither the person nor the
+    /// lead who set it asked for it back.
+    permission_mode: std::sync::Mutex<PermissionMode>,
     /// What a config asked to be run at the nine moments [`crate::hook`]
     /// names. [`None`] is an engine whose config asked for none, which does no
     /// hook work at all rather than inert hook work at nine seams.
@@ -1133,6 +1245,9 @@ impl Engine {
             history: Arc::default(),
             persistence,
             jobs: Arc::new(job::JobRegistry::new()),
+            teammates: None,
+            team_roster: std::sync::Mutex::new(Vec::new()),
+            permission_mode: std::sync::Mutex::new(PermissionMode::Ask),
             hooks: None,
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
@@ -1143,7 +1258,7 @@ impl Engine {
         // arrived as base tools. A registry without such names composes to
         // an empty candidate set and the same `Arc`, so every other caller
         // is untouched by construction.
-        engine.recompose_deferral();
+        engine.recompose_tools();
 
         engine
     }
@@ -1351,7 +1466,7 @@ impl Engine {
     #[must_use]
     pub fn with_defer_threshold(mut self, threshold: usize) -> Self {
         self.defer_threshold = threshold;
-        self.recompose_deferral();
+        self.recompose_tools();
 
         self
     }
@@ -1576,6 +1691,53 @@ impl Engine {
     /// safe to call on an engine that started none.
     pub async fn shutdown_jobs(&self) {
         self.jobs.shutdown().await;
+    }
+
+    /// Gives this session a team (**D500**).
+    ///
+    /// Consuming, like every other installer here: whether a session can spawn
+    /// teammates is decided once, before anything can be streaming. What the
+    /// registry then holds is not — teammates come and go — which is why the
+    /// two surfaces that draw it, the status segment and the `/team` dialog,
+    /// poll [`Engine::teammates`] rather than being told.
+    ///
+    /// The offered tool set is recomposed here, because a team is what puts
+    /// `send_message` in front of the model at all — presence is ability, the
+    /// same rule the `task` tool is registered under.
+    #[must_use]
+    pub fn with_teammates(mut self, teammates: Arc<teammate::TeammateRegistry>) -> Self {
+        self.teammates = Some(teammates);
+        self.recompose_tools();
+
+        self
+    }
+
+    /// The teammates this session started, for a status display or the
+    /// `/team` dialog to poll — exactly as [`Engine::jobs`] is polled.
+    ///
+    /// [`None`] is a session with no team, which is a different answer from a
+    /// team with nobody in it: the first has no directory on disk and the
+    /// second does.
+    #[must_use]
+    pub fn teammates(&self) -> Option<&Arc<teammate::TeammateRegistry>> {
+        self.teammates.as_ref()
+    }
+
+    /// Ends every teammate this session started, waiting for each one's turn
+    /// to settle rather than killing it.
+    ///
+    /// On the exit path beside [`Engine::shutdown_mcp`] and
+    /// [`Engine::shutdown_jobs`], and idempotent like both. What it must never
+    /// do is shut down what a teammate *shares*: an in-process teammate holds
+    /// the lead's MCP servers and language servers when it holds any at all,
+    /// and those die with the lead one layer below the engine. So this calls
+    /// through to [`teammate::TeammateRegistry::shutdown`], which settles each
+    /// teammate's own turn and ends its own background jobs — and nothing
+    /// else's.
+    pub async fn shutdown_teammates(&self) {
+        if let Some(teammates) = &self.teammates {
+            teammates.shutdown().await;
+        }
     }
 
     /// Sets what this session runs at the nine moments [`crate::hook`] names.
@@ -2493,17 +2655,7 @@ impl Engine {
             Command::SwitchAgent { name } => self.switch_agent(name).await,
             Command::SwitchModel { model } => self.switch_model(model).await,
             Command::SwitchEffort { effort } => self.switch_effort(effort).await,
-            // Accepted, and so far only accepted: the wire type is complete
-            // (AC-19) ahead of the seam that stores the posture and applies it
-            // at the next turn's start, which lands in W5a/L2. Taking it
-            // silently is the honest half — nothing changed, so no
-            // `Event::PermissionModeChanged` is published — and refusing it
-            // would teach a lead's `mode_set_request` to retry against a
-            // command this build does accept.
-            Command::SetPermissionMode { mode } => {
-                tracing::debug!(?mode, "a permission mode was set before it is applied");
-                Ok(())
-            }
+            Command::SetPermissionMode { mode } => self.set_permission_mode(mode).await,
             Command::RunShell { command } => {
                 self.start_turn(command.clone(), TurnKind::Shell { command }, None)
                     .await
@@ -2656,7 +2808,7 @@ impl Engine {
             .lock()
             .expect("the activated set is never poisoned")
             .clear();
-        self.recompose_deferral();
+        self.recompose_tools();
         // Nothing before this turn to compare against, so the plan-to-build
         // reminder does not fire on the first turn of a new session.
         self.active().previous_agent = None;
@@ -3135,7 +3287,7 @@ impl Engine {
         if agents.get(agent::PLAN).is_some() {
             rebuilt = rebuilt.with(Arc::new(plan::PlanEnterTool));
         }
-        let rebuilt = self.compose_deferral(Arc::new(rebuilt));
+        let rebuilt = self.compose(Arc::new(rebuilt));
         *self
             .tools
             .lock()
@@ -3210,7 +3362,7 @@ impl Engine {
             // set — still through the deferral half, which is what keeps the
             // two arms one composition path.
             None => {
-                let composed = self.compose_deferral(lent);
+                let composed = self.compose(lent);
                 *self
                     .tools
                     .lock()
@@ -3243,6 +3395,34 @@ impl Engine {
         self.rebuild_offered(lent);
     }
 
+    /// Rebuilds the offered set if the team's roster has moved since the last
+    /// composition.
+    ///
+    /// [`Engine::refresh_mcp`]'s shape, at the same seam and for the same
+    /// reason: `send_message`'s description **is** the roster, so a teammate
+    /// spawned while a turn was streaming is addressable at the *next* turn
+    /// rather than changing the tool set under a request already sent. And
+    /// like that one it is a memo rather than an unconditional rebuild — a
+    /// team whose membership has not moved costs a lock and a comparison.
+    fn refresh_team(&self) {
+        let Some(teammates) = &self.teammates else {
+            return;
+        };
+
+        let roster = roster_of(teammates);
+        let mut installed = self
+            .team_roster
+            .lock()
+            .expect("the team roster is never poisoned");
+        if *installed == roster {
+            return;
+        }
+        *installed = roster;
+        drop(installed);
+
+        self.rebuild_offered(self.lent());
+    }
+
     /// The tools the next turn offers the model.
     fn tools(&self) -> Arc<Registry> {
         Arc::clone(
@@ -3261,15 +3441,64 @@ impl Engine {
             .clone()
     }
 
-    /// The deferral half of every registry composition (**D492**), shared by
-    /// [`Engine::install`], [`Engine::rebuild_offered`] and the builders so
-    /// no path can disagree: candidates are grouped from the composed set's
-    /// own `mcp__*` names with the activated set exempt before the
-    /// arithmetic, `tool_search` joins the roster only while something
-    /// defers — beside every builtin, `task`, `skill` and the plan doors,
-    /// never itself deferred — and the definitions snapshot it answers from
-    /// is rewritten last, so a reconnect's recomposition is what a later
-    /// search reads.
+    /// Everything a composed registry gains beyond the base set and what the
+    /// MCP servers lend: the team's messaging tool, then the deferral.
+    ///
+    /// The shared composition path, and the only one — [`Engine::install`],
+    /// [`Engine::rebuild_offered`] and the builders all arrive here, so a
+    /// `/plugin` Reload, an agent switch and a server's dial cannot disagree
+    /// about what the model is offered. Order matters in one direction only:
+    /// the team tool joins before the arithmetic that reads the composed set's
+    /// names, so it is in the definitions snapshot `tool_search` answers from.
+    fn compose(&self, registry: Arc<Registry>) -> Arc<Registry> {
+        self.compose_deferral(self.team_messaging(registry))
+    }
+
+    /// Adds `send_message` when this session has a team, and nothing at all
+    /// when it has none (**D498**).
+    ///
+    /// Registered here rather than in `Registry::with_builtins` for `task`'s
+    /// reason: presence is ability. A session with no team has nobody to
+    /// address, so the tool is not offered — which is also what keeps the
+    /// golden differential comparing two agents rather than two teams — and a
+    /// session that has one is offered it again on every rebuild, so a
+    /// `/plugin` Reload cannot quietly drop it.
+    ///
+    /// The roster the description lists is every member but the one doing the
+    /// addressing. The engine holding a registry is the lead's — a teammate's
+    /// engine is built by [`teammate::Teammate::new`], which installs none —
+    /// so the row dropped is the lead's own, and a model is never offered its
+    /// own name as a recipient.
+    ///
+    /// What the tool *delivers* through is [`crate::tool::team::Postbox`],
+    /// carried per call in its `ToolCtx`; until W5a/L3 installs one, a call
+    /// reads that tool's own "this session has no team" refusal rather than
+    /// sending anything.
+    ///
+    /// A subagent is offered the *lent* set rather than the composed one, so
+    /// it does not get this — deliberately, and for the reason it does not get
+    /// `task` either: a delegated turn runs inside the lead's own turn, and
+    /// the identity it would send under is the lead's.
+    fn team_messaging(&self, registry: Arc<Registry>) -> Arc<Registry> {
+        let Some(teammates) = &self.teammates else {
+            return registry;
+        };
+
+        Arc::new(
+            registry.with(Arc::new(send_message::SendMessageTool::new(&roster_of(
+                teammates,
+            )))),
+        )
+    }
+
+    /// The deferral half of every registry composition (**D492**), reached
+    /// through [`Engine::compose`] so no path can disagree: candidates are
+    /// grouped from the composed set's own `mcp__*` names with the activated
+    /// set exempt before the arithmetic, `tool_search` joins the roster only
+    /// while something defers — beside every builtin, `task`, `skill` and the
+    /// plan doors, never itself deferred — and the definitions snapshot it
+    /// answers from is rewritten last, so a reconnect's recomposition is what
+    /// a later search reads.
     fn compose_deferral(&self, registry: Arc<Registry>) -> Arc<Registry> {
         let activated = self
             .activated_tools
@@ -3310,13 +3539,13 @@ impl Engine {
         registry
     }
 
-    /// Recomputes the deferral over the currently offered set, in place —
-    /// the builder-time half of the shared path, for the engine that never
-    /// rebuilds (base-tool `mcp__*` names, a threshold set after
+    /// Runs the shared composition path over the currently offered set, in
+    /// place — the builder-time half of it, for the engine that never rebuilds
+    /// (base-tool `mcp__*` names, a threshold or a team installed after
     /// construction) and for `NewSession`, whose cleared activated set puts
     /// never-touched names back under the arithmetic.
-    fn recompose_deferral(&self) {
-        let composed = self.compose_deferral(self.tools());
+    fn recompose_tools(&self) {
+        let composed = self.compose(self.tools());
         *self
             .tools
             .lock()
@@ -3560,6 +3789,56 @@ impl Engine {
         Ok(())
     }
 
+    /// Takes the posture the next turn runs under (**D-15**, **D496**).
+    ///
+    /// **No [`Engine::lock_entry`], deliberately**, where the three switches
+    /// above it all take one. It is D474's discipline rather than
+    /// [`Command::SwitchAgent`]'s refusal, and the difference is who is
+    /// sending: an agent, a model or an effort is picked by the person
+    /// watching the turn, who can wait for it to end, while this may be a
+    /// team's lead answering a teammate's `mode_set_request` mid-stream — and
+    /// a refusal there would drop a decision nobody would think to re-send.
+    ///
+    /// So the change is taken at once, announced at once, and **bites at the
+    /// next turn's start**, where [`Bypass::begin`] reads it. The event is
+    /// therefore earlier than the effect, which is what its own documentation
+    /// says.
+    ///
+    /// # Errors
+    ///
+    /// None today: the two postures are always reachable, and a mode name this
+    /// build has no posture for was already refused where the name was read
+    /// ([`PermissionMode::from_claude_name`]). The signature matches its
+    /// neighbours' so the command table stays one shape.
+    async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), EngineError> {
+        *self
+            .permission_mode
+            .lock()
+            .expect("the permission mode is never poisoned") = mode;
+        let _ = self
+            .fanout
+            .send(Event::PermissionModeChanged {
+                session_id: self.session_id(),
+                mode,
+            })
+            .await;
+
+        Ok(())
+    }
+
+    /// The posture the next turn will run under.
+    ///
+    /// The *next* one, always: a turn already streaming keeps what it began
+    /// with, so this answers what a running turn is doing only when nothing
+    /// has been set since it started.
+    #[must_use]
+    pub fn permission_mode(&self) -> PermissionMode {
+        *self
+            .permission_mode
+            .lock()
+            .expect("the permission mode is never poisoned")
+    }
+
     /// Adopts a configured effort for a session that has not chosen one.
     ///
     /// A **default, not an override**, which is the whole difference from
@@ -3779,6 +4058,9 @@ impl Engine {
         // the last turn was streaming is offered to the model here, and a
         // connection that died is withdrawn here.
         self.refresh_mcp();
+        // The same seam, for the same reason, for the team: a teammate spawned
+        // mid-turn is somebody the next turn may write to.
+        self.refresh_team();
 
         // A prompt or a shell command after an `/undo` is the user keeping
         // what the undo did. The messages it hid leave the transcript here,
@@ -3940,6 +4222,11 @@ impl Engine {
             permission: Arc::clone(&pending),
             steer: Arc::clone(&steer),
         });
+        // Where a permission mode bites (**D496**): read once, here, so this
+        // turn keeps the posture it began with however many arrive while it
+        // streams — the same discipline the hooks and the tool set a turn
+        // clones at its start keep.
+        self.fanout.bypass.begin(self.permission_mode(), &pending);
         drop(turn);
 
         // The task is deliberately not joined. `cancel` is what stops a turn,
@@ -4210,6 +4497,29 @@ fn message_chars(message: &Message) -> (usize, usize) {
     (generated, results)
 }
 
+/// The team as the engine holding it may address it: every member but the
+/// lead, which on this engine is the caller.
+///
+/// A [`Peer`] carries the little `send_message` needs — the name a `to`
+/// argument takes and the line it is listed under — and no more: the colour,
+/// the surface and the ring of recent calls are what a `/team` dialog draws,
+/// and a tool description that recited them would go stale between rebuilds.
+/// There is nothing to describe a teammate *with* on this side yet, so every
+/// row is listed under the tool's own "a teammate of this session".
+fn roster_of(teammates: &teammate::TeammateRegistry) -> Vec<Peer> {
+    teammates
+        .view()
+        .members
+        .into_iter()
+        .filter(|member| !member.is_lead)
+        .map(|member| Peer {
+            name: member.name,
+            description: None,
+            lead: false,
+        })
+        .collect()
+}
+
 fn reminders(
     agent: Option<&str>,
     previous: Option<&str>,
@@ -4376,7 +4686,9 @@ mod tests {
     };
     use tokio_util::sync::CancellationToken;
 
-    use super::{Engine, EngineError, STALE_FILES, message_chars, stale_notice};
+    use super::{
+        Engine, EngineError, STALE_FILES, message_chars, send_message, stale_notice, teammate,
+    };
     use crate::{
         permission::Permissions,
         protocol::{Command, Event, FinishReason, Message, Part, RevertScope, Role, Usage},
@@ -5679,6 +5991,55 @@ mod tests {
         assert!(
             engine.lent().get("read").is_some(),
             "the lent set a subagent is offered moves with it"
+        );
+    }
+
+    /// The team's messaging tool is offered where a team exists, nowhere else,
+    /// and a reload of the base set does not drop it.
+    ///
+    /// Three moves in one test because the claim is the difference between
+    /// them: an engine with no team must not offer `send_message` at all, or
+    /// the second move proves nothing; and the third is the reload seam
+    /// (**D474**), whose whole hazard is a tool that lives outside the shared
+    /// composition path and is quietly lost the first time the set is rebuilt.
+    #[test]
+    fn a_reload_of_the_base_tools_keeps_the_teams_messaging_tool() {
+        assert!(
+            engine().tools().get(send_message::ID).is_none(),
+            "a session with no team has nobody to address"
+        );
+
+        let mut engine = engine().with_teammates(Arc::new(teammate::TeammateRegistry::new(
+            ganja_team::TeamsRoot::new(std::path::PathBuf::from("/nonexistent/teams")),
+            ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
+            "session-abcd1234",
+            std::path::PathBuf::from("/nonexistent/project"),
+        )));
+        assert!(
+            engine.tools().get(send_message::ID).is_some(),
+            "a session with a team is offered the tool that addresses it"
+        );
+
+        engine.replace_base_tools(Arc::new(Registry::with_builtins()));
+
+        assert!(
+            engine.tools().get(send_message::ID).is_some(),
+            "a reload rebuilds through the shared composition path, which offers it again"
+        );
+    }
+
+    /// One limit, written twice, pinned equal.
+    ///
+    /// `ganja-tool` may not name `ganja-protocol` — its internal dependency
+    /// list is exactly the permission crate — so §5.3's cap on a summary is
+    /// declared on both sides of that boundary. This crate is the only one
+    /// that sees both, which is what makes the pin its debt.
+    #[test]
+    fn the_summary_cap_the_tool_enforces_is_the_one_the_wire_declares() {
+        assert_eq!(
+            send_message::SUMMARY_CAP,
+            crate::protocol::team::DISPLAY_FIELD_CAP,
+            "a summary capped at one number and rendered against another is a summary cut twice"
         );
     }
 

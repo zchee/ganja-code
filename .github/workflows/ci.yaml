@@ -67,12 +67,15 @@ jobs:
           test "$internal" = "ganja-permission "
 
       # The same closed form for the engine: its internal deps are exactly the
-      # four crates beneath it, in sorted order. A split crate joining this
-      # list is a deliberate edit here, never an accident the old greps missed.
-      - name: ganja-core's internal dependencies are exactly the four beneath it
+      # five crates beneath it, in sorted order. A split crate joining this
+      # list is a deliberate edit here, never an accident the old greps missed
+      # — `ganja-team` is the fifth, because a teammate's lifetime is the
+      # engine's and the documents that lifetime is written into are that
+      # crate's.
+      - name: ganja-core's internal dependencies are exactly the five beneath it
         run: |
           internal="$(cargo tree -p ganja-core -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-core$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-permission ganja-protocol ganja-provider ganja-tool "
+          test "$internal" = "ganja-permission ganja-protocol ganja-provider ganja-team ganja-tool "
 
       # The teams directory is file I/O over a document format ganja does not
       # own, so the list that matters is the one it must never grow: the
