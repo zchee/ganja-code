@@ -114,12 +114,14 @@ jobs:
       # The leaf gate above only sees ganja-* crates, so it cannot notice the
       # protocol quietly widening its external list — measured: a scratch
       # `schemars.workspace = true` resolved cleanly, dragged six transitive
-      # crates into a two-dependency leaf, and left that gate green. The
-      # manifest comment forbids widening; this makes the comment a gate.
-      - name: ganja-protocol's direct dependencies are exactly serde and serde_json
+      # crates into what was then a two-dependency leaf, and left that gate
+      # green. The manifest comment forbids widening; this makes the comment a
+      # gate. `uuid` joined deliberately in P25 (D493, the id mint) and is
+      # depth-1 only — its own `getrandom` is below this gate's horizon.
+      - name: ganja-protocol's direct dependencies are exactly serde, serde_json and uuid
         run: |
           external="$(cargo tree -p ganja-protocol -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' ')"
-          test "$external" = "serde serde_json "
+          test "$external" = "serde serde_json uuid "
 
       # The client's whole reason to exist is what it does *not* link: an
       # engine (it would become a second frontend rather than a consumer of

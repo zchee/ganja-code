@@ -11,7 +11,7 @@ repository.workspace = true
 # dependencies from `wildcards = "deny"`.
 publish = false
 
-# Two entries, and that is the point of the crate: a frontend that names an
+# Three entries, and that is the point of the crate: a frontend that names an
 # `Event`, or a test that asserts on a `Part`, links this and builds nothing
 # else. Anything that would widen this list belongs on the other side of the
 # boundary.
@@ -21,3 +21,9 @@ serde.workspace = true
 # put there, so the protocol carries them as values rather than re-declaring
 # every tool's shape here.
 serde_json.workspace = true
+# The third entry, and the reason the sentence above says three: minting an id
+# is this crate's one behavior that is not serialization, and an id that two
+# processes can mint identically is a fused session (D493). UUIDv7's monotonic
+# context is a specification with an implementation, not something to re-derive
+# here from `getrandom` and a hand-written counter.
+uuid.workspace = true

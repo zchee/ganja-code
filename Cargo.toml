@@ -271,6 +271,14 @@ url = "2.5.8"
 # Already in the tree via `ratatui-core`; declared here because the chat
 # viewport measures its own wrap widths instead of leaning on `Paragraph`.
 unicode-width = "0.2.2"
+# Every id the protocol mints, and the one dependency `ganja-protocol` grew
+# past the two serde crates: RFC 9562 UUIDv7, whose `ContextV7` counter is what
+# keeps ids minted inside one millisecond ordered — plain v7's random bits are
+# not, and a streaming turn mints many part ids per millisecond (D493). `std`
+# is what puts that context behind the crate's own mutex; with defaults off,
+# the other six UUID versions and their generators stay out. No `serde`
+# feature: ids stay `String` newtypes, so nothing here serializes a `Uuid`.
+uuid = { version = "1.24.1", default-features = false, features = ["v7", "std"] }
 # Owner-only DACLs on the two secret-bearing surfaces whose unix modes are
 # already enforced — the credential store and spilled tool output: create
 # handles sealed via `SetSecurityInfo` before the first secret byte, the
