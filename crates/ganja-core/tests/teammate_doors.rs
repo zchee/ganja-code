@@ -257,23 +257,19 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
     );
 
     // The two pane values refuse through this door — a door that spawned where
-    // the other refused would be two behaviours wearing one argument — and the
-    // `pane` sentence is the one `teammate_no_tmux.rs` pins: the session, not
-    // the build, is what is missing. `claude`'s sentence is W5b/L3's to pin in
-    // both binaries once `claude.rs`'s body lands; until then its skeleton
-    // refuses naming the phase, and what this door proves about it is that it
-    // refuses at all.
+    // the other refused would be two behaviours wearing one argument — and both
+    // refuse in the sentence `teammate_no_tmux.rs` pins: the session, not the
+    // build, is what is missing. Since W5b both bodies are real, so this says
+    // the same thing about `claude` it always said about `pane`.
     for backend in ["pane", "claude"] {
         let refused = match tool.run(args(backend), &ctx).await {
             Err(ToolError::Failed(message)) => message,
             other => panic!("expected {backend} to be refused, got {other:?}"),
         };
-        if backend == "pane" {
-            assert!(
-                refused.contains(REFUSED_NO_TMUX),
-                "{backend} refuses in the sentence teammate_no_tmux.rs pins: {refused}"
-            );
-        }
+        assert!(
+            refused.contains(REFUSED_NO_TMUX),
+            "{backend} refuses in the sentence teammate_no_tmux.rs pins: {refused}"
+        );
         assert!(
             refused.contains(backend),
             "and names the surface that was asked for: {refused}"

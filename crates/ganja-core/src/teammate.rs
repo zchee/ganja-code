@@ -86,10 +86,12 @@
 //! `$TMUX` governs whether a pane backend *can run*, not which backend is
 //! chosen: a session without it refuses `pane` and `claude` readably rather
 //! than falling back to `in-process`, because a person who asked for a window
-//! and silently got none has been lied to. That rule is enforced against real
-//! panes in P25b; in this phase both pane values refuse identically with
-//! [`crate::teammate::Unsupported`], and an unknown value is refused by name
-//! listing the three ([`crate::teammate::parse_backend`]).
+//! and silently got none has been lied to. Both pane values refuse
+//! **identically** — one [`crate::teammate::Unsupported`] carrying
+//! [`crate::teammate::tmux::REFUSED_NO_TMUX`], since a door that spawned where
+//! the other refused would be two behaviours wearing one argument — and an
+//! unknown value is refused by name listing the three
+//! ([`crate::teammate::parse_backend`]).
 //!
 //! One vocabulary rather than a second three-valued enum here: the argument,
 //! the member record's `backendType` and [`ganja_protocol::team::MemberView`]
@@ -324,14 +326,6 @@ pub const BACKENDS: [&str; 3] = ["in-process", "pane", "claude"];
 /// What a door spawns when nobody named a backend (**D501**).
 pub const DEFAULT_BACKEND: MemberBackend = MemberBackend::InProcess;
 
-/// Why a pane backend refuses in P25a.
-///
-/// One sentence for both pane values, because AC-14's P25a leg is exactly that
-/// they refuse *identically*: a door that spawned where the other refused would
-/// be two behaviours wearing one argument.
-pub const REFUSED_UNTIL_P25B: &str =
-    "this build spawns only in-process teammates; a teammate with a pane of its own lands in P25b";
-
 /// How long a teammate is given to reach the end of its turn before what it
 /// owns is ended anyway.
 ///
@@ -466,17 +460,6 @@ pub struct Unsupported {
     pub backend: MemberBackend,
     /// Why it could not be had, in the terms whoever asked reads next.
     pub reason: String,
-}
-
-impl Unsupported {
-    /// The refusal both pane backends answer with in P25a.
-    #[must_use]
-    pub fn until_p25b(backend: MemberBackend) -> Self {
-        Self {
-            backend,
-            reason: REFUSED_UNTIL_P25B.to_owned(),
-        }
-    }
 }
 
 /// What a backend can tell the lead about a message it handed over
