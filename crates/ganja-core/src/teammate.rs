@@ -1184,12 +1184,36 @@ impl TeammateRegistry {
             .map(|member| member.surface.delivery())
     }
 
-    /// Forgets `teammate`, and takes its record out of the team file (§6.2).
+    /// Forgets `teammate`, ends what it ran on, and takes its record out of
+    /// the team file (§6.2).
     ///
     /// What the lead does when it reads a `shutdown_approved`: the teammate has
     /// already torn itself down on its own side, and this is the half that only
-    /// the lead can do — the roster it renders and the document a resumed
-    /// session would read both stop naming a conversation that has ended.
+    /// the lead can do — the surface it ran on is ended, and the roster the
+    /// lead renders and the document a resumed session would read both stop
+    /// naming a conversation that has ended.
+    ///
+    /// **The kill goes through the backend that spawned it, against the
+    /// handle recorded at spawn**, and nothing a frame carried: a
+    /// `shutdown_approved` names a `paneId`, and a member that could name
+    /// somebody else's there could have the lead kill a stranger's window.
+    /// The pane backend compares that recorded `(pane_id, birth)` pair against
+    /// what is live before it sends `kill-pane` (the reaper's rule, AC-12: a
+    /// mismatch never kills), and the in-process one settles a teammate that
+    /// has already settled itself — idempotent by [`TeammateBackend::kill`]'s
+    /// own contract, so a teammate that tore itself down costs a look and
+    /// nothing else.
+    ///
+    /// **Kill first, record second — §6.2's own order** (`killPane`, then
+    /// remove from the roster). The order is chosen for what survives a
+    /// failure between the two: a kill that landed before a write that did not
+    /// leaves a *dead* pane and a stale record, which the reaper drops at the
+    /// next startup by finding no live pane behind it; the other way round, a
+    /// record gone before a kill that did not land leaves a *live* pane that
+    /// no record names — and the reaper walks the team file, so that pane is
+    /// invisible to it, stranded until a person closes it. A kill this cannot
+    /// observe failing (the trait answers nothing) is logged by the backend
+    /// itself, loudly.
     ///
     /// The team file's read-modify-write is held under the same lock a spawn's
     /// is, for the same reason: a retire racing a spawn would otherwise write
@@ -1198,7 +1222,9 @@ impl TeammateRegistry {
     /// Answers whether this registry was holding the name. A miss is ordinary
     /// rather than exceptional — a shutdown read twice, or a peer another
     /// process started — and the document is still looked at either way,
-    /// because the record is the half that outlives this process.
+    /// because the record is the half that outlives this process. A member
+    /// nothing here holds has nothing here to kill: what another process
+    /// spawned is that process's to end.
     ///
     /// **The roster is forgotten first, and a failing write does not put it
     /// back.** Nothing is lost by that: the teammate has already torn itself
@@ -1213,12 +1239,20 @@ impl TeammateRegistry {
     /// and [`SpawnError::Lost`] when the blocking hop that does it did not come
     /// back.
     pub async fn retire(&self, teammate: &str) -> Result<bool, SpawnError> {
-        let held = self
+        let removed = self
             .members
             .lock()
             .expect("the member map is never poisoned")
-            .remove(teammate)
-            .is_some();
+            .remove(teammate);
+        let held = removed.is_some();
+        if let Some(member) = removed {
+            tracing::info!(
+                teammate,
+                handle = ?member.handle,
+                "ending a retired teammate's surface"
+            );
+            member.surface.kill(&member.handle).await;
+        }
 
         let writing = self.team_file.lock().await;
         let mut file = self.read_team().await?;
@@ -1812,12 +1846,44 @@ mod tests {
     use ganja_team::{TeamName, TeamsRoot};
 
     use super::{
-        DEFAULT_BACKEND, InProcess, MemberBackend, SpawnRequest, TeammateBackend, TeammateRegistry,
-        pane::GanjaPane, session_team,
+        DEFAULT_BACKEND, Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec,
+        TeammateBackend, TeammateRegistry, Unsupported, session_team,
     };
     use crate::{
         Storage, permission::Permissions, provider::FakeProvider, tool::Registry as Tools,
     };
+
+    /// Why [`Never`] refuses.
+    const NEVER: &str = "this door spawns nothing";
+
+    /// A backend that spawns nothing at all, refusing in its own sentence.
+    ///
+    /// A fixture rather than a real pane backend, because a real one spawns:
+    /// a test that leaned on `GanjaPane` refusing would split a pane into
+    /// whichever tmux session the developer happens to be sitting in the day
+    /// its body lands.
+    #[derive(Debug)]
+    struct Never;
+
+    #[async_trait::async_trait]
+    impl TeammateBackend for Never {
+        fn backend(&self) -> MemberBackend {
+            MemberBackend::Pane
+        }
+
+        async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
+            Err(Unsupported {
+                backend: MemberBackend::Pane,
+                reason: NEVER.to_owned(),
+            })
+        }
+
+        async fn kill(&self, _handle: &Handle) {}
+
+        fn delivery(&self) -> Delivery {
+            Delivery::FireAndForget
+        }
+    }
 
     /// An empty registry over a tree that goes away with `home`.
     fn registry(home: &Path) -> Arc<TeammateRegistry> {
@@ -1915,13 +1981,17 @@ mod tests {
         let home = ganja_testkit::temp_dir();
         let registry = registry(home.path());
 
-        registry
+        let refused = registry
             .spawn(
-                Arc::new(GanjaPane),
+                Arc::new(Never),
                 request("worker", MemberBackend::Pane, home.path()),
             )
             .await
-            .expect_err("this build has no panes yet");
+            .expect_err("this backend spawns nothing");
+        assert!(
+            refused.to_string().contains(NEVER),
+            "refused by the backend, not before it: {refused}"
+        );
 
         assert!(
             reserved(&registry).is_empty(),
@@ -1982,6 +2052,89 @@ mod tests {
                 .await
                 .expect("a second retire is fine"),
             "a shutdown read twice is ordinary rather than an error"
+        );
+    }
+
+    /// A backend that hands out a pane-shaped handle and remembers every
+    /// handle it is asked to end — what a real pane backend does, minus tmux.
+    #[derive(Debug, Default)]
+    struct Recording {
+        killed: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl Recording {
+        fn killed(&self) -> Vec<(String, String)> {
+            self.killed
+                .lock()
+                .expect("the kill log is never poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TeammateBackend for Recording {
+        fn backend(&self) -> MemberBackend {
+            MemberBackend::Pane
+        }
+
+        async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
+            Ok(Handle::Pane {
+                pane_id: "%7".to_owned(),
+                birth: "48213".to_owned(),
+            })
+        }
+
+        async fn kill(&self, handle: &Handle) {
+            let Handle::Pane { pane_id, birth } = handle else {
+                panic!("a pane backend was asked to end something it did not start: {handle:?}");
+            };
+            self.killed
+                .lock()
+                .expect("the kill log is never poisoned")
+                .push((pane_id.clone(), birth.clone()));
+        }
+
+        fn delivery(&self) -> Delivery {
+            Delivery::Acknowledged
+        }
+    }
+
+    /// §6.2's other half: reading a `shutdown_approved` ends the surface the
+    /// member ran on — through the backend that spawned it and against the
+    /// handle recorded at spawn, exactly once, and never again for a name the
+    /// registry no longer holds.
+    #[tokio::test]
+    async fn retiring_a_teammate_ends_its_surface_through_the_recorded_handle_once() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        let backend = Arc::new(Recording::default());
+        registry
+            .spawn(
+                Arc::clone(&backend) as Arc<dyn TeammateBackend>,
+                request("w1", MemberBackend::Pane, home.path()),
+            )
+            .await
+            .expect("the recording backend spawns");
+        assert!(backend.killed().is_empty(), "spawning ends nothing");
+
+        assert!(registry.retire("w1").await.expect("the retire lands"));
+        assert_eq!(
+            backend.killed(),
+            [("%7".to_owned(), "48213".to_owned())],
+            "the recorded pair, through the backend that minted it"
+        );
+
+        assert!(
+            !registry
+                .retire("w1")
+                .await
+                .expect("a second retire is fine")
+        );
+        registry.shutdown().await;
+        assert_eq!(
+            backend.killed().len(),
+            1,
+            "a member already retired is not ended a second time by anybody"
         );
     }
 }
