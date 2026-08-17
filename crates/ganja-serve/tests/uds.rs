@@ -509,7 +509,8 @@ async fn a_socket_directory_under_a_world_writable_parent_without_the_sticky_bit
     let error = match refused {
         Err(error) => error,
         Ok(handle) => panic!(
-            "a directory under a world-writable parent without the sticky bit must not be bound              into; it was, at {}",
+            "a directory under a world-writable parent without the sticky bit must not be bound \
+             into; it was, at {}",
             handle.address()
         ),
     };
