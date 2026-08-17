@@ -433,7 +433,14 @@ pub enum Action {
 
 impl Action {
     /// What this action decides on its own.
-    fn decision(&self) -> Decision {
+    ///
+    /// Public because a caller above this crate reads rules the engine never
+    /// turns into a call — the teammate spawn gate judges a flag and a
+    /// directory that no tool has arguments for — and a second hand-written
+    /// match over these four variants is a second place for
+    /// [`Action::Other`]'s reading to drift.
+    #[must_use]
+    pub fn decision(&self) -> Decision {
         match self {
             Self::Allow => Decision::Allow,
             Self::Deny => Decision::Deny,

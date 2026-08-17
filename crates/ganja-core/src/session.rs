@@ -3792,9 +3792,15 @@ async fn start(
     )
     .await?;
 
+    // One token for this call, so everything the call raises is retired with
+    // it: the tool's own body below, and — for a `task` call that spawns a
+    // teammate rather than delegating — the spawn's permission dialog, which
+    // has nothing else that would ever end its wait.
+    let cancel = turn.cancel.child_token();
+
     let ctx = ToolCtx {
         cwd: turn.cwd.clone(),
-        cancel: turn.cancel.child_token(),
+        cancel: cancel.clone(),
         call_id: prepared.call.id.clone(),
         files: Arc::clone(&turn.files),
         credentials: turn.credentials.clone(),
@@ -3807,6 +3813,7 @@ async fn start(
                 host: Arc::clone(host),
                 events: Arc::clone(&turn.events),
                 session_id: turn.session_id.clone(),
+                cancel: cancel.child_token(),
                 // Shared with this turn: the parent is inside the call for as
                 // long as the child runs, so the registry is the child's to ask
                 // through and a reply addressed to the parent reaches it. Keyed
@@ -5315,6 +5322,7 @@ mod tests {
             pending: Arc::default(),
             message_id: crate::protocol::MessageId::ascending(),
             part_id: crate::protocol::PartId::ascending(),
+            cancel: CancellationToken::new(),
         };
 
         (spawn, received)

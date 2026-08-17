@@ -69,7 +69,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     engine::Evicted,
-    permission::{Action, Decision, EXTERNAL_DIRECTORY, Permissions, Rule, matches, resolve},
+    permission::{Decision, EXTERNAL_DIRECTORY, Permissions, Rule, matches, resolve},
     protocol::{Command, Event, PermissionId, PermissionReply},
     teammate::{SpawnSpec, Teammate},
 };
@@ -335,13 +335,11 @@ fn decide(rules: &[Rule], permission: &str, pattern: &str) -> Decision {
         .iter()
         .rev()
         .find(|rule| matches(permission, &rule.permission) && matches(pattern, &rule.pattern))
-        .map_or(Decision::Ask, |rule| match rule.action {
-            Action::Allow => Decision::Allow,
-            Action::Deny => Decision::Deny,
-            // A rule this build cannot carry out is still a rule saying the
-            // call is not routine — `Action::decision`'s own reading.
-            Action::Ask | Action::Other(_) => Decision::Ask,
-        })
+        // [`Action::decision`]'s own reading rather than a second copy of it:
+        // what an action this build cannot carry out means is the permission
+        // engine's answer to give, and two matches over those four variants
+        // are two places for it to drift.
+        .map_or(Decision::Ask, |rule| rule.action.decision())
 }
 
 /// One teammate's permission dialog, on its way to the lead.
@@ -380,6 +378,11 @@ pub struct Forwarded {
 /// race the teammate's first dialog. An eviction ends the forwarding with a
 /// warning, which is the honest outcome — the alternative is a bridge that
 /// silently stops carrying questions.
+///
+/// Nothing on this path ever waits on the lead. The channel a question travels
+/// to the lead on is bounded and is offered a question rather than made to
+/// carry one (`hand_over`), so a lead that is behind — or that never claimed
+/// its receiver at all — costs the teammate a refusal and never its turn.
 pub struct Forwarding {
     teammate: Arc<Teammate>,
     posture: Posture,
@@ -407,7 +410,9 @@ impl Forwarding {
     /// lead, or a session nothing attached one to. Every ask is then refused
     /// rather than left hanging: a question nobody can see has exactly one
     /// honest answer, and a refusal is information the model reads and carries
-    /// on from.
+    /// on from. A `lead` whose queue is full is the same answer for the same
+    /// reason (`hand_over`); the two arms differ only in whether the surface
+    /// was ever there.
     #[must_use]
     pub fn new(
         teammate: Arc<Teammate>,
@@ -475,10 +480,21 @@ impl Forwarding {
 
 /// Hands one request to the lead and arranges for its answer.
 ///
-/// The wait runs in a task of its own so the loop keeps reading: a teammate
-/// whose turn opened two dialogs at once must not have the second one held
-/// behind the first, which is the very collision the pending-reply registry was
-/// made a registry for.
+/// **The handover never waits.** A [`mpsc::Sender::try_send`] rather than a
+/// `send().await`, and the difference is the whole of the queue's contract: an
+/// awaited send on a bounded channel whose receiver nobody claimed — or whose
+/// claimant stopped draining — blocks here forever, and the teammate's turn is
+/// blocked behind it with no timeout and nothing to cancel it. A full queue is
+/// therefore answered the same way no queue at all is: a question that cannot
+/// be put in front of anybody is refused, which is information the model reads
+/// and carries on from. The queue is deliberately small
+/// (`Engine::TEAMMATE_DIALOGS`) because a lead holding a dozen unanswered
+/// dialogs is a lead nobody is sitting at.
+///
+/// The wait for the *answer* runs in a task of its own so the loop keeps
+/// reading: a teammate whose turn opened two dialogs at once must not have the
+/// second one held behind the first, which is the very collision the
+/// pending-reply registry was made a registry for.
 async fn hand_over(
     teammate: &Arc<Teammate>,
     lead: mpsc::Sender<Forwarded>,
@@ -487,17 +503,24 @@ async fn hand_over(
     cancel: &CancellationToken,
 ) {
     let (sender, receiver) = oneshot::channel();
-    let handed = tokio::select! {
-        () = cancel.cancelled() => return,
-        handed = lead.send(Forwarded {
-            teammate: teammate.name().to_owned(),
-            request: event,
-            reply: sender,
-        }) => handed,
-    };
-    if handed.is_err() {
-        // The lead's side is gone. Same answer as never having had one.
+    if let Err(undelivered) = lead.try_send(Forwarded {
+        teammate: teammate.name().to_owned(),
+        request: event,
+        reply: sender,
+    }) {
+        // Full and closed are one answer with two reasons, and the reason is
+        // worth a line: a lead that has gone is permanent, where a lead that
+        // is behind is this teammate's asks being dropped while it catches up.
+        tracing::warn!(
+            teammate = teammate.name(),
+            reason = match undelivered {
+                mpsc::error::TrySendError::Full(_) => "the lead's dialog queue is full",
+                mpsc::error::TrySendError::Closed(_) => "the lead's side is gone",
+            },
+            "a teammate's permission dialog was refused rather than made to wait"
+        );
         answer(teammate, request, PermissionReply::Reject).await;
+
         return;
     }
 
@@ -505,7 +528,12 @@ async fn hand_over(
     let cancel = cancel.clone();
     tokio::spawn(async move {
         let reply = tokio::select! {
-            () = cancel.cancelled() => return,
+            // A cancel is the registry shutting the team down, and the
+            // teammate's turn is still sitting in this dialog: its command
+            // channel is up until its engine goes, so the honest move is to
+            // answer rather than to walk away and leave `Teammate::shutdown`
+            // waiting out its settle on a turn nothing will ever unblock.
+            () = cancel.cancelled() => PermissionReply::Reject,
             // A dropped sender is a lead that gave up on the dialog, which is
             // the refusal it looks like.
             reply = receiver => reply.unwrap_or(PermissionReply::Reject),
@@ -537,13 +565,13 @@ mod tests {
     use ganja_team::{MemberName, TeamName, TeamsRoot};
 
     use super::{
-        ANY, Arc, BYPASS, CancellationToken, Forwarding, Posture, SpawnGate, SpawnSpec, Teammate,
-        from_lead, mpsc, permissions_for, spawn_gate,
+        ANY, Arc, BYPASS, CancellationToken, Event, Forwarded, Forwarding, Posture, SpawnGate,
+        SpawnSpec, Teammate, from_lead, mpsc, oneshot, permissions_for, spawn_gate,
     };
     use crate::{
         Storage,
         permission::{Action, Decision, EXTERNAL_DIRECTORY, Permissions, Rule},
-        protocol::{Command, PermissionReply},
+        protocol::{Command, PermissionId, PermissionReply, SessionId},
         provider::Provider,
         tool::Registry,
     };
@@ -1031,6 +1059,85 @@ mod tests {
                 .expect("the call log is never poisoned")
                 .is_empty(),
             "a question nobody could see is a refusal"
+        );
+
+        cancel.cancel();
+        carrying.await.expect("the forwarding ends with its token");
+    }
+
+    /// A dialog already sitting in the lead's one slot.
+    ///
+    /// Never read by anything: what it *is* does not matter, and that it is
+    /// **there** is the whole of it — a queue with its only slot spent is what
+    /// a lead that stopped draining looks like from this side.
+    fn occupying() -> Forwarded {
+        Forwarded {
+            teammate: "somebody-else".to_owned(),
+            request: Event::PermissionRequested {
+                session_id: SessionId::ascending(),
+                id: PermissionId::ascending(),
+                call_id: "a call".to_owned(),
+                tool: "write".to_owned(),
+                title: "a question nobody answered".to_owned(),
+                args: serde_json::Value::Null,
+                directories: Vec::new(),
+            },
+            reply: oneshot::channel().0,
+        }
+    }
+
+    /// **A full queue answers exactly as no queue does.** The lead's receiver
+    /// is claimed and then never drained, which is what a wedged frontend looks
+    /// like from here; the teammate's ask must come back refused rather than
+    /// wait behind a question nobody is going to read.
+    ///
+    /// The channel is filled *first*, so the ask meets a full queue rather than
+    /// racing to fill one. And this test's real assertion is that it finishes
+    /// at all: before the handover stopped waiting, the turn below never ended
+    /// and the only thing that noticed was the harness's own timeout.
+    #[tokio::test]
+    async fn a_teammate_whose_lead_never_reads_is_refused_rather_than_left_waiting() {
+        let (tool, calls) = ganja_testkit::RecorderTool::new("write", "wrote", "written");
+        let (provider, _) = ganja_testkit::ScriptedProvider::named("fake", writes());
+        let (_directory, teammate) = teammate(
+            provider,
+            Arc::new(Registry::new(vec![tool])),
+            permissions_for(&lead(Vec::new()), Vec::new()),
+        );
+
+        // `_held` keeps the receiver alive, so the handover below meets `Full`
+        // rather than `Closed` — the two arms answer alike, and this is the one
+        // a test could otherwise pass without ever reaching.
+        let (sender, _held) = mpsc::channel(1);
+        sender.try_send(occupying()).expect("the one slot was free");
+
+        let cancel = CancellationToken::new();
+        let carrying = tokio::spawn(
+            Forwarding::new(Arc::clone(&teammate), Posture::ForwardToLead, Some(sender))
+                .run(cancel.clone()),
+        );
+        let mut events = teammate
+            .engine()
+            .subscribe()
+            .await
+            .expect("the first subscriber wins");
+        teammate
+            .engine()
+            .send(Command::SendPrompt {
+                text: "write the note".to_owned(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        ganja_testkit::drain(&mut events).await;
+
+        assert!(
+            calls
+                .lock()
+                .expect("the call log is never poisoned")
+                .is_empty(),
+            "a question that could not be handed over is a refusal"
         );
 
         cancel.cancel();

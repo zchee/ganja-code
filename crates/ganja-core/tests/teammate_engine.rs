@@ -51,36 +51,40 @@ const REPORT: &str = "reporting in, zarquon";
 /// What the lead writes to the teammate, appearing nowhere else.
 const MEMO: &str = "look at the build, zarquon";
 
-/// How long the request log has to stand still before nobody is asking.
-const QUIET: Duration = Duration::from_millis(400);
+/// How many requests one teammate's spawn accounts for: the turn it takes on
+/// the task in its mailbox, and the title a persistent engine asks for once
+/// that turn has a message to name.
+///
+/// A fact about the script and the engine, not about the machine — which is
+/// what lets the wait below be a count rather than a stillness.
+const SPAWN_REQUESTS: usize = 2;
 
-/// Waits until nothing has asked the provider for [`QUIET`], and answers how
+/// Waits until the teammate has asked its [`SPAWN_REQUESTS`], and answers how
 /// many requests there were by then.
 ///
 /// The teammate's turn is started by its runner rather than by this test, so
-/// "it has finished" is not a thing that can be awaited — but "it has stopped
-/// asking" is, and that is the property the script push below needs.
-async fn quiet(requests: &Arc<std::sync::Mutex<Vec<ChatRequest>>>) -> usize {
+/// "it has finished" is not a thing that can be awaited. Waiting for the log
+/// to *stand still* was the previous shape and it was a sleep in disguise: it
+/// passed on a fast machine and would have started failing on a loaded one for
+/// reasons having nothing to do with the code under test. Counting works
+/// because the double records a request **before** it pops the script for it,
+/// so by the time the second request is logged both scripts are spent and the
+/// next push can only be the lead's.
+async fn spawn_turn_taken(requests: &Arc<std::sync::Mutex<Vec<ChatRequest>>>) -> usize {
     let deadline = tokio::time::Instant::now() + EVENTUALLY;
     loop {
         let seen = requests
             .lock()
             .expect("the request log is never poisoned")
             .len();
-        tokio::time::sleep(QUIET).await;
-        let after = requests
-            .lock()
-            .expect("the request log is never poisoned")
-            .len();
-        // Something asked, and then nothing did: the first half is what says
-        // the runner really woke up, the second that it is done.
-        if after > 0 && after == seen {
-            return after;
+        if seen >= SPAWN_REQUESTS {
+            return seen;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the teammate should have taken its spawn turn and stopped by now"
+            "the teammate should have taken its spawn turn by now, got {seen} requests"
         );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -434,10 +438,10 @@ async fn what_the_lead_sends_is_what_its_teammate_reads_next() {
         .expect("an in-process teammate starts");
     asker.asked_nobody();
 
-    // The teammate has read its spawn prompt and stopped asking. Only then is
-    // the lead's script pushed, so the call below is the lead's and nobody
-    // else's.
-    let asked = quiet(&requests).await;
+    // The teammate has read its spawn prompt and spent both of its scripts.
+    // Only then is the lead's pushed, so the call below is the lead's and
+    // nobody else's.
+    let asked = spawn_turn_taken(&requests).await;
     provider.push(tool_call(
         send_message::ID,
         serde_json::json!({"to": "worker", "message": MEMO}),
