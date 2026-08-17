@@ -2,7 +2,8 @@
 //! addressed `uds:<path>` crosses from one process into another session's
 //! next turn; nothing structured crosses; a socket directory that is not a
 //! private one of ours is refused; and `ganja sessions --live` lists the
-//! sockets that answer and unlinks the ones nobody serves.
+//! sockets that answer, unlinks the ones nobody serves, and leaves a held
+//! name alone however silent it is.
 //!
 //! This is the one binary that holds **both processes together**: the far end
 //! of every socket here is a real `ganja_serve::serve` over a real engine that
@@ -30,7 +31,7 @@
 //! files inside one, and neither is a thing to do to the developer's own —
 //! which is what the hidden `--socket-dir` door on `sessions --live` exists
 //! for. The child processes get their environment on the `Command`, never
-//! through `set_var`, so this binary may hold its four tests.
+//! through `set_var`, so this binary may hold its six tests.
 
 #![cfg(unix)]
 
@@ -651,5 +652,152 @@ async fn sessions_live_lists_the_living_and_unlinks_the_dead() {
     assert!(living.exists(), "the living socket is untouched");
     assert!(living_lock.exists(), "and so is its lock");
 
+    handle.shutdown().await.expect("a clean stop");
+}
+
+/// The branch the design exists for: a socket that does not answer while a
+/// live binder holds its name's lock is **not** dead — a live server whose
+/// accept backlog is full refuses a connection exactly as an empty file does
+/// — so the listing leaves it where it is, lists it as live under a `(held)`
+/// mark of its own, and explains itself on stderr. The holder is a
+/// process other than the listing's — this test's own, the `flock` taken and
+/// kept across the whole run — which is what an advisory lock is judged
+/// against; a socket nobody accepts behind stands in for the full backlog,
+/// since it reaches the same silent-socket branch and needs no platform to
+/// block a connect (`ganja-serve/tests/uds.rs` makes the same substitution
+/// for the same reason).
+#[tokio::test]
+async fn a_held_name_that_does_not_answer_is_listed_and_left_in_place() {
+    use std::os::fd::AsRawFd as _;
+
+    let directory = private_dir();
+    let homes = TempDir::new().expect("homes for the listing");
+    let held = directory.path().join(format!("0198c1a2.{EXTENSION}"));
+    dead_socket(&held);
+    let lock_file = socket::lock_path(&held);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_file)
+        .expect("the lock file opens");
+    // SAFETY: an open descriptor and two flags; the test holds `lock` open
+    // for as long as the flock must stand.
+    let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(rc, 0, "the test takes the name's lock first");
+
+    let output = tokio::time::timeout(DEADLINE, sessions_live(directory.path(), &homes).output())
+        .await
+        .expect("the listing finishes within the deadline")
+        .expect("the listing runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the listing succeeds:\n{stdout}\n{stderr}"
+    );
+
+    assert!(
+        held.exists(),
+        "a held name is never unlinked, whatever the silence: {stderr}"
+    );
+    assert!(lock_file.exists(), "nor is its lock");
+    assert!(
+        stderr.contains("held by a live server that did not answer")
+            && stderr.contains(&held.display().to_string()),
+        "the silence is explained, by path: {stderr}"
+    );
+    let row = stdout
+        .lines()
+        .find(|line| line.contains(&held.display().to_string()))
+        .unwrap_or_else(|| panic!("a held socket is listed as live:\n{stdout}"));
+    assert!(
+        row.trim_start().starts_with("(held)"),
+        "under the held mark — nothing answered, which is not an unreadable answer: {row}"
+    );
+    assert!(
+        !stdout.contains("no live sessions"),
+        "stdout and stderr tell one story:\n{stdout}"
+    );
+
+    drop(lock);
+}
+
+/// The walk is seconds long — one silent socket burns the whole health
+/// deadline — and a peer that stops inside that window unlinks its own
+/// socket file exactly as `Handle::shutdown` does. A listing that read the
+/// directory before and inspects the entry after must walk past the gap:
+/// exit 0, the vanished entry skipped without a word, and the table about
+/// the sessions that *are* running still printed. Reproduced here as it was
+/// found: a stalled socket first in sort order (bound, never accepted, its
+/// lock held, so the health check waits its deadline out and the lock says
+/// live), a real session after it, and a dead file last that a task unlinks
+/// while the stall is still being waited on.
+#[tokio::test]
+async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
+    use std::os::fd::AsRawFd as _;
+
+    let directory = private_dir();
+    let homes = TempDir::new().expect("homes for the listing");
+    let (engine, _registry) = led_engine(homes.path());
+    let handle = serve_session(&engine, directory.path()).await;
+    let living = bound(&handle);
+
+    // Sorts before every UUIDv7-named socket: the walk meets it first.
+    let stalled = directory.path().join(format!("00000000.{EXTENSION}"));
+    let silent = std::os::unix::net::UnixListener::bind(&stalled).expect("the silent socket binds");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(socket::lock_path(&stalled))
+        .expect("the lock file opens");
+    // SAFETY: an open descriptor and two flags; the test holds `lock` open
+    // for as long as the flock must stand.
+    let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(rc, 0, "the test takes the stalled name's lock first");
+
+    // Sorts after: still unvisited while the stall is waited on.
+    let dead = directory.path().join(format!("ffffffff.{EXTENSION}"));
+    dead_socket(&dead);
+    let vanishing = dead.clone();
+    let unlinker = tokio::spawn(async move {
+        // Well inside the two-second stall, well after the directory read.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        fs::remove_file(&vanishing).expect("the peer unlinks its own socket");
+    });
+
+    let output = tokio::time::timeout(DEADLINE, sessions_live(directory.path(), &homes).output())
+        .await
+        .expect("the listing finishes within the deadline")
+        .expect("the listing runs");
+    unlinker.await.expect("the unlinker ran");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "a vanished entry does not end the listing:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains(&engine.session_id().as_str().to_owned())
+            && stdout.contains(&living.display().to_string()),
+        "the session that is running is still listed:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("(held)") && stdout.contains(&stalled.display().to_string()),
+        "and so is the stalled one, under its mark:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(&dead.display().to_string())
+            && !stderr.contains(&dead.display().to_string()),
+        "the vanished entry is skipped without a word:\n{stdout}\n{stderr}"
+    );
+    assert!(stalled.exists(), "the stalled socket was not unlinked");
+
+    drop(silent);
+    drop(lock);
     handle.shutdown().await.expect("a clean stop");
 }
