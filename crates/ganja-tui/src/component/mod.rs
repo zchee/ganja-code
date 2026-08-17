@@ -31,6 +31,7 @@ pub mod search;
 pub mod sessions;
 pub mod skill_menu;
 pub mod status;
+pub mod team;
 pub mod themes;
 pub mod usage;
 

@@ -258,7 +258,9 @@ mod tests {
         x: 0,
         y: 0,
         width: 76,
-        height: 34,
+        // One row per command, so this grows with the roster: `/team`
+        // (**D504**) is the row that made 34 one short of the whole card.
+        height: 35,
     };
 
     /// What an 80×24 terminal actually hands this dialog: the app draws it
