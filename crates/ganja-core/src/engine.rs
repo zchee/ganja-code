@@ -1768,7 +1768,7 @@ impl Engine {
     /// running a teammate whose transcript evaporates.
     #[must_use]
     pub fn with_teammates(mut self, registry: Arc<teammate::TeammateRegistry>) -> Self {
-        let lead = Arc::new(subagent::Postbox::lead(Arc::clone(&registry)));
+        let lead = Arc::new(subagent::Postbox::lead(&registry));
         let in_process: Arc<dyn teammate::TeammateBackend> = match self.storage() {
             Some(storage) => Arc::new(teammate::InProcess::lending(
                 Arc::clone(&self.provider),
