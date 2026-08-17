@@ -114,6 +114,8 @@ pub(crate) const fn peer_allowed(peer: u32, own: u32) -> bool {
 }
 
 #[cfg(unix)]
+pub use unix::NameLock;
+#[cfg(unix)]
 pub(crate) use unix::{PeerChecked, bind_path, bind_session};
 
 #[cfg(unix)]
@@ -123,7 +125,8 @@ mod unix {
         os::{
             fd::AsRawFd as _,
             unix::fs::{
-                DirBuilderExt as _, FileTypeExt as _, OpenOptionsExt as _, PermissionsExt as _,
+                DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
+                PermissionsExt as _,
             },
         },
         path::{Path, PathBuf},
@@ -156,15 +159,33 @@ mod unix {
     /// server's life and released by the kernel however that life ends. The
     /// descriptor is the lock: nothing reads it, and dropping it is the
     /// release.
-    struct NameLock {
+    ///
+    /// Public because the lister (`ganja sessions --live`) needs the same
+    /// token the binder holds, for the same window: a stale socket file may
+    /// be unlinked **only under this lock**, or a binder that claims the name
+    /// between the lister's probe and its unlink binds a live socket at the
+    /// very file the lister then removes — the server left holding an
+    /// unnamed inode and a lock nobody can see past. [`NameLock::claim`]
+    /// then [`NameLock::unlink_stale`], with the guard alive across both, is
+    /// the whole discipline; the binder's own `bind_path` is its first user.
+    pub struct NameLock {
         _file: fs::File,
+        socket: PathBuf,
     }
 
     impl NameLock {
         /// Claims the lock for `socket`'s name without waiting: [`None`] when
         /// a live binder holds it, an error when the lock file itself cannot
-        /// be opened.
-        fn claim(socket: &Path) -> io::Result<Option<Self>> {
+        /// be opened. Creates the lock file when it is absent — a lister
+        /// claiming a name leaves the same zero-byte `.lock` a binder would,
+        /// which is the price of closing the probe→unlink window for a
+        /// socket no binder ever locked, and lock files are never removed
+        /// anyway.
+        ///
+        /// # Errors
+        ///
+        /// What opening the lock file said.
+        pub fn claim(socket: &Path) -> io::Result<Option<Self>> {
             let file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -176,13 +197,54 @@ mod unix {
             // descriptor is owned by `file` for the whole call.
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if rc == 0 {
-                return Ok(Some(Self { _file: file }));
+                return Ok(Some(Self {
+                    _file: file,
+                    socket: socket.to_path_buf(),
+                }));
             }
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::WouldBlock {
                 return Ok(None);
             }
             Err(error)
+        }
+
+        /// The socket whose name this holds.
+        #[must_use]
+        pub fn socket(&self) -> &Path {
+            &self.socket
+        }
+
+        /// Unlinks the socket file a dead holder left at this name, the lock
+        /// being ours for the whole of it — so nothing can bind a live socket
+        /// there between the check and the unlink. Anything at the path that
+        /// is not a socket is left alone and named: this removes only what
+        /// the binder would itself have made. Nothing at the path is nothing
+        /// to do.
+        ///
+        /// # Errors
+        ///
+        /// What the OS said, and [`io::ErrorKind::AlreadyExists`] for a
+        /// non-socket at the path.
+        pub fn unlink_stale(&self) -> io::Result<()> {
+            let found = match fs::symlink_metadata(&self.socket) {
+                Ok(found) => found,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            if !found.file_type().is_socket() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "something that is not a socket is at the socket path; refusing to remove it",
+                ));
+            }
+
+            match fs::remove_file(&self.socket) {
+                Ok(()) => Ok(()),
+                // Gone between the stat and the unlink; nothing left to do.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
         }
     }
 
@@ -263,7 +325,7 @@ mod unix {
                 .ok_or_else(|| ServeError::SocketInUse {
                     path: path.to_path_buf(),
                 })?;
-        clear_stale(path)?;
+        lock.unlink_stale().map_err(bind_error)?;
 
         let listener = UnixListener::bind(path).map_err(bind_error)?;
         // The directory is what keeps other users out; the socket's own mode
@@ -297,6 +359,26 @@ mod unix {
             reason,
         };
 
+        // The window between vetting the directory and binding inside it is
+        // safe only because a foreign uid cannot rename or unlink an entry
+        // it does not own in the parent — which is what the sticky bit on a
+        // world-writable parent (`/tmp`) guarantees, and nothing else does.
+        // Asserted rather than assumed: a `/tmp` that has lost the bit is
+        // refused by name, before anything is made in it. A parent that is
+        // not world-writable needs no bit — nobody else can write there.
+        if let Some(parent) = directory.parent() {
+            let found = fs::symlink_metadata(parent)
+                .map_err(|error| refuse(DirectoryRefusal::Io(error)))?;
+            let mode = found.mode();
+            let world_writable = mode & 0o002 != 0;
+            let sticky = mode & 0o1000 != 0;
+            if world_writable && !sticky {
+                return Err(refuse(DirectoryRefusal::ParentNotSticky {
+                    parent: parent.to_path_buf(),
+                }));
+            }
+        }
+
         match fs::DirBuilder::new().mode(DIRECTORY_MODE).create(directory) {
             // Ours, this instant; the umask can only have removed bits, so put
             // the mode where the check below expects it.
@@ -311,33 +393,76 @@ mod unix {
         vet_directory(directory).map_err(refuse)
     }
 
-    /// Unlinks the socket file a dead holder left at `path`, the name's lock
-    /// being ours by the time this runs. Anything at the path that is not a
-    /// socket is left alone and named — this module removes only what it
-    /// would itself have made.
-    fn clear_stale(path: &Path) -> Result<(), ServeError> {
-        let bind_error = |source| ServeError::Bind {
-            address: Address::Unix(path.to_path_buf()),
-            source,
+    #[cfg(test)]
+    mod tests {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use axum::serve::Listener as _;
+        use tokio::{
+            io::{AsyncReadExt as _, AsyncWriteExt as _},
+            net::{UnixListener, UnixStream},
         };
 
-        let found = match fs::symlink_metadata(path) {
-            Ok(found) => found,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(bind_error(error)),
-        };
-        if !found.file_type().is_socket() {
-            return Err(bind_error(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "something that is not a socket is at the socket path; refusing to remove it",
-            )));
-        }
+        use super::{NameLock, PeerChecked, uid};
 
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            // Gone between the stat and the unlink; the bind makes a new one.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(bind_error(error)),
+        /// **L2 of the W7 boundary review**: the peer-uid refusal, on a real
+        /// accept. A `PeerChecked` measuring peers against a uid that is not
+        /// this process's — the one override no other test can arrange
+        /// without a second user — closes a same-uid connection unread: the
+        /// peer's write is swallowed and its read is a hang-up, and the
+        /// accept future never yields it. Measured against the real uid, the
+        /// same connection is handed over.
+        #[tokio::test]
+        async fn a_connection_from_another_uid_is_closed_unread() {
+            let directory = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .expect("a private directory");
+            let path = directory.path().join("0198c1a2.sock");
+            let lock = NameLock::claim(&path)
+                .expect("the lock file opens")
+                .expect("a fresh name is free");
+            let mut checked = PeerChecked {
+                listener: UnixListener::bind(&path).expect("a socket binds"),
+                // Every peer this test can produce is refused by this.
+                uid: uid().wrapping_add(1),
+                _lock: lock,
+            };
+
+            let accepting = tokio::spawn(async move {
+                let accepted =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), checked.accept())
+                        .await;
+                (checked, accepted.is_ok())
+            });
+            let mut peer = UnixStream::connect(&path)
+                .await
+                .expect("a same-uid connect");
+            let _ = peer.write_all(b"GET /global/health HTTP/1.1\r\n\r\n").await;
+            let mut answer = Vec::new();
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                peer.read_to_end(&mut answer),
+            )
+            .await
+            .expect("the refused peer is hung up on within the deadline");
+            assert!(
+                matches!(read, Ok(0)) || read.is_err(),
+                "closed unread: not a byte came back, got {read:?} / {answer:?}"
+            );
+            let (mut checked, accepted) = accepting.await.expect("the accept task ends");
+            assert!(!accepted, "the accept never yielded the foreign connection");
+
+            // Measured against the real uid, the same connection is accepted.
+            checked.uid = uid();
+            let accepting = tokio::spawn(async move { checked.accept().await });
+            let _peer = UnixStream::connect(&path)
+                .await
+                .expect("a same-uid connect");
+            let (_stream, _) = tokio::time::timeout(std::time::Duration::from_secs(5), accepting)
+                .await
+                .expect("the accept yields within the deadline")
+                .expect("the accept task ends");
         }
     }
 }

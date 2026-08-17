@@ -21,8 +21,9 @@
 //! set for itself: the other-uid legs. Everything here runs as one uid and
 //! nothing fakes another, so a directory owned by somebody else and a peer
 //! whose uid is not ours cannot be made without privilege. Those verdicts are
-//! pinned where they are decided — `ganja-serve/src/socket.rs`'s pure `vet`
-//! and `peer_allowed`, each arm a unit test — and what is held here is the
+//! pinned where they are decided — `ganja-tool/src/socket.rs`'s pure `vet`,
+//! each arm a unit test, and `ganja-serve/src/socket.rs`'s `PeerChecked` on a
+//! real accept against a test-only uid — and what is held here is the
 //! *mode* arm on a real directory, all the way through the client and through
 //! the shipped `sessions --live`.
 //!
@@ -468,11 +469,14 @@ async fn a_structured_message_does_not_cross_a_socket() {
 /// at where the socket would have been finds nothing — and the shipped
 /// listing will not read it, and above all will not unlink anything inside
 /// it. Held on the **mode** arm and the **link** arm, which one uid can
-/// make; the *owner* arm — the `/tmp` squat, and the peer whose uid is not
-/// ours — cannot be raised without a second uid and is pinned as the pure
-/// predicates' unit tests in `ganja-serve/src/socket.rs`.
+/// make. AC-9's other-uid leg is *not* what this test holds, and its name
+/// says so: the *owner* arm — the `/tmp` squat — cannot be raised without a
+/// second uid and is pinned as the pure `vet`'s unit test in
+/// `ganja-tool/src/socket.rs`; the peer whose uid is not ours is pinned on a
+/// real accept, against a test-only uid, in `ganja-serve/src/socket.rs`
+/// (`a_connection_from_another_uid_is_closed_unread`).
 #[tokio::test]
-async fn a_socket_owned_by_another_user_is_refused() {
+async fn a_socket_directory_that_is_not_private_is_refused_end_to_end() {
     let homes = TempDir::new().expect("homes for the listing");
     let (engine, _registry) = led_engine(homes.path());
 

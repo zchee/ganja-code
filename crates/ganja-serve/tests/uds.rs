@@ -44,7 +44,7 @@ use std::{
 use ganja_protocol::SessionId;
 use ganja_serve::{
     Address, DirectoryRefusal, Handle, Listen, ServeError,
-    socket::{self, EXTENSION, LOCK_EXTENSION, SHORTEST_NAME},
+    socket::{self, EXTENSION, LOCK_EXTENSION, NameLock, SHORTEST_NAME},
 };
 use support::{engine, loopback_config};
 
@@ -390,6 +390,149 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
     handle.shutdown().await.expect("a clean stop");
     assert!(shortest.exists(), "nor was it on the way out");
     drop(lock);
+}
+
+/// **M1 of the W7 boundary review**: the lister's reclaim of a stale socket
+/// is claim-then-unlink under one held lock, the binder's own `NameLock`.
+/// While the lister holds a name, a binder walking into it reads it as held
+/// and extends by a digit — it never binds a live socket at a file the
+/// lister is about to remove — and once the lister drops the lock the name
+/// is free and empty for the next binder. Pinned from both sides: the
+/// binder refused during the window, and served after it.
+#[tokio::test]
+async fn a_name_the_lister_holds_is_walked_past_and_its_stale_file_goes_under_the_lock() {
+    let directory = private_dir();
+    let id = session("0011");
+    let shortest = socket::candidates(directory.path(), &id)
+        .next()
+        .expect("a session has a name");
+    // A stale socket file at the name: bound once and dropped, as a dead
+    // server leaves it, its lock file left behind unheld.
+    drop(std::os::unix::net::UnixListener::bind(&shortest).expect("the socket binds"));
+    fs::write(socket::lock_path(&shortest), b"").expect("the stale lock file writes");
+
+    // The lister's claim: the name is free, so it is taken — and held.
+    let lock = NameLock::claim(&shortest)
+        .expect("the lock file opens")
+        .expect("nobody live holds a stale name");
+    assert_eq!(lock.socket(), shortest);
+
+    // A binder arriving inside the window is walked one digit on, never
+    // bound at the held name.
+    let racing = ganja_serve::serve(
+        engine(),
+        config(Listen::Session {
+            id: id.clone(),
+            directory: directory.path().to_path_buf(),
+        }),
+    )
+    .await
+    .expect("a held name is walked past, not fought over");
+    let landed = bound(&racing);
+    assert_ne!(landed, shortest, "the lister's name was not taken");
+    assert_eq!(
+        landed.file_name().and_then(|name| name.to_str()),
+        Some(&*format!("0198c1a20.{EXTENSION}")),
+        "one digit longer"
+    );
+    // The lister unlinks the stale file under the lock it still holds.
+    lock.unlink_stale().expect("a stale socket is unlinked");
+    assert!(!shortest.exists(), "the stale file is gone");
+    assert!(
+        landed.exists(),
+        "and the racing binder's live socket, at its own name, is untouched"
+    );
+    assert_eq!(health(&landed).await["healthy"], true);
+    racing.shutdown().await.expect("a clean stop");
+
+    // The window closes: with the lock dropped, the name is free and empty,
+    // and the next binder takes it.
+    drop(lock);
+    let next = ganja_serve::serve(
+        engine(),
+        config(Listen::Unix {
+            path: shortest.clone(),
+        }),
+    )
+    .await
+    .expect("a released name binds");
+    assert_eq!(bound(&next), shortest);
+    assert_eq!(health(&shortest).await["healthy"], true);
+    next.shutdown().await.expect("a clean stop");
+}
+
+/// The other side of M1: a name a live server holds is never claimed by
+/// the lister — [`NameLock::claim`] answers [`None`] and touches nothing —
+/// so a live socket cannot be reclaimed however silent it is.
+#[tokio::test]
+async fn a_live_name_is_never_claimed_by_the_lister() {
+    let directory = private_dir();
+    let id = session("0013");
+    let handle = ganja_serve::serve(
+        engine(),
+        config(Listen::Session {
+            id,
+            directory: directory.path().to_path_buf(),
+        }),
+    )
+    .await
+    .expect("a session socket comes up");
+    let path = bound(&handle);
+
+    assert!(
+        NameLock::claim(&path)
+            .expect("the lock file opens")
+            .is_none(),
+        "a live server's name is held, and the lister gets no lock to unlink under"
+    );
+    assert!(path.exists(), "the live socket is untouched");
+    assert_eq!(health(&path).await["healthy"], true);
+
+    handle.shutdown().await.expect("a clean stop");
+}
+
+/// **L1 of the W7 boundary review**: the one assumption the check→bind
+/// window rests on — a world-writable parent carries the sticky bit, so a
+/// foreign uid cannot swap the vetted directory out from under the bind —
+/// is asserted before anything is made, and refused by name when it does
+/// not hold. A parent that is not world-writable needs no bit.
+#[tokio::test]
+async fn a_socket_directory_under_a_world_writable_parent_without_the_sticky_bit_is_refused() {
+    let parent = tempfile::tempdir().expect("a parent");
+    // World-writable and not sticky: what /tmp must never be.
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o777))
+        .expect("the test may loosen its own directory");
+    let directory = parent.path().join("ganja");
+    let path = directory.join(format!("0198c1a2.{EXTENSION}"));
+
+    let refused = ganja_serve::serve(engine(), config(Listen::Unix { path: path.clone() })).await;
+    let error = match refused {
+        Err(error) => error,
+        Ok(handle) => panic!(
+            "a directory under a world-writable parent without the sticky bit must not be bound              into; it was, at {}",
+            handle.address()
+        ),
+    };
+    assert!(
+        matches!(
+            error,
+            ServeError::UnsafeSocketDirectory {
+                path: ref refused,
+                reason: DirectoryRefusal::ParentNotSticky { parent: ref named },
+            } if refused == &directory && named == parent.path()
+        ),
+        "the refusal names the parent and the bit: {error:?}"
+    );
+    assert!(!directory.exists(), "and nothing was made in it");
+
+    // With the bit, the same tree binds.
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o1777))
+        .expect("the test may set the sticky bit on its own directory");
+    let handle = ganja_serve::serve(engine(), config(Listen::Unix { path: path.clone() }))
+        .await
+        .expect("a sticky world-writable parent is /tmp's own shape");
+    assert_eq!(health(&path).await["healthy"], true);
+    handle.shutdown().await.expect("a clean stop");
 }
 
 /// Eight binders racing one bucket all come up, every one at a name of its

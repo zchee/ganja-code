@@ -1400,25 +1400,26 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
             Ok(Err(_)) | Err(_) => {
                 // Held is live, whatever the silence: it joins the table
                 // under its own mark, so what stdout lists and what stderr
-                // explains are one account.
-                if name_is_held(&path)? {
+                // explains are one account. Claimed rather than probed, and
+                // the claim held across the unlink — see `claim_name`.
+                let Some(lock) = claim_name(&path)? else {
                     eprintln!(
                         "note: {} is held by a live server that did not answer; left in place",
                         path.display()
                     );
                     live.push((HELD.to_owned(), path));
                     continue;
-                }
-                match fs::remove_file(&path) {
+                };
+                match lock.unlink_stale() {
                     Ok(()) => eprintln!("note: removed the dead socket {}", path.display()),
-                    // Gone between the probe and the unlink — its server
-                    // stopped and cleaned up after itself.
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                     Err(error) => {
                         return Err(error)
                             .with_context(|| format!("failed to remove {}", path.display()));
                     }
                 }
+                // The window closes here: only now may a binder take the
+                // name, and it finds no file to be misled by.
+                drop(lock);
             }
         }
     }
@@ -1462,42 +1463,28 @@ fn private_socket_directory(directory: &std::path::Path) -> Result<bool> {
     }
 }
 
-/// Whether a live binder holds `socket`'s name: an advisory `flock` on
-/// the `.lock` sibling, probed without waiting and released at once.
+/// The name's lock, claimed for the unlink, or [`None`] when a live binder
+/// holds it — the binder's own [`ganja_serve::socket::NameLock`], the same
+/// token, taken the same way (**M1** of the W7 boundary review).
 ///
-/// An absent lock file is a name no binder ever claimed — the binder
-/// makes the lock before it binds — so nobody holds it; and it is *not*
-/// created here, because a listing that left lock files behind would be
-/// a binder's footprint without a binder. The probe takes the lock for
-/// the instant it holds the descriptor: a binder racing that instant
-/// reads the name as held and extends by a digit, which is the routine
-/// case its walk exists for, never a failure.
+/// Claimed rather than probed-and-released, because the release *was* the
+/// bug: a binder that claimed the name between a released probe and the
+/// unlink bound a live socket at the very file the listing then removed,
+/// leaving a server nobody could reach and a name held forever. The lock is
+/// held from here through the unlink, so a binder racing this walk reads
+/// the name as held and extends by a digit — the routine case its walk
+/// exists for, never a failure — and never binds at a file about to go.
+/// The claim creates the lock file where none was: a socket no binder ever
+/// locked is exactly the one a racing binder could otherwise take under the
+/// listing's feet, and a zero-byte `.lock` is what a binder would leave.
 #[cfg(unix)]
-fn name_is_held(socket: &std::path::Path) -> Result<bool> {
-    use std::{fs, os::fd::AsRawFd as _};
-
-    use ganja_serve::socket::lock_path;
-
-    let lock = lock_path(socket);
-    let file = match fs::OpenOptions::new().read(true).write(true).open(&lock) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to open {}", lock.display()));
-        }
-    };
-    // SAFETY: `flock` takes an open descriptor and two flags, and the
-    // descriptor is owned by `file` for the whole call.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        return Ok(false);
-    }
-    let error = io::Error::last_os_error();
-    if error.kind() == io::ErrorKind::WouldBlock {
-        return Ok(true);
-    }
-
-    Err(error).with_context(|| format!("failed to probe {}", lock.display()))
+fn claim_name(socket: &std::path::Path) -> Result<Option<ganja_serve::socket::NameLock>> {
+    ganja_serve::socket::NameLock::claim(socket).with_context(|| {
+        format!(
+            "failed to claim {}",
+            ganja_serve::socket::lock_path(socket).display()
+        )
+    })
 }
 
 /// A Unix socket needs a Unix host; elsewhere the listing is refused as the
