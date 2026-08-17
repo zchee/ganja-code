@@ -1187,8 +1187,6 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use tokio_util::sync::CancellationToken;
-
     use super::{
         Collector, DEFAULT_TIMEOUT, KEEP, NoPosixShell, ShellTool, Spilled, accept_shell,
         posix_shell, tail,
@@ -1199,7 +1197,7 @@ mod tests {
     #[cfg(unix)]
     use super::{SPILL_THRESHOLD, Spill, assemble};
     use crate::{
-        FileTimes, Tool, ToolCtx, ToolError,
+        Tool, ToolCtx, ToolError,
         job::{JobRead, JobStatus, Jobs, JobsError, State},
         truncate,
     };
@@ -1253,18 +1251,7 @@ mod tests {
 
     /// A context rooted at `cwd`, with a cancel nobody has pulled.
     fn ctx(cwd: PathBuf) -> ToolCtx {
-        ToolCtx {
-            cwd,
-            cancel: CancellationToken::new(),
-            call_id: "call-1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: crate::Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        ToolCtx::fixture(cwd)
     }
 
     /// A [`Jobs`] that records the one call it expects and hands back a

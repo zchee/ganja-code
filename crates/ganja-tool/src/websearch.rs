@@ -589,10 +589,9 @@ mod tests {
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::TcpListener,
     };
-    use tokio_util::sync::CancellationToken;
 
     use super::{Keys, Service, WebsearchTool};
-    use crate::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{Tool, ToolCtx, ToolError};
 
     /// A loopback endpoint answering one connection with canned bytes, and
     /// keeping what it was sent.
@@ -708,18 +707,7 @@ mod tests {
         r#"{"result":{"content":[{"type":"text","text":"ganja is a rust port"}]}}"#;
 
     fn ctx() -> ToolCtx {
-        ToolCtx {
-            cwd: PathBuf::from("."),
-            cancel: CancellationToken::new(),
-            call_id: "call-1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: crate::Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        ToolCtx::fixture(PathBuf::from("."))
     }
 
     /// The tool pointed at `endpoint` for both services, which is what lets a

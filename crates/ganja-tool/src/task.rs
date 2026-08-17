@@ -485,7 +485,7 @@ mod tests {
         NotSpawned, Offered, ROSTER_HEADER, STARTED, Subagents, TaskTool, TeammateSpawn, Teammated,
         Unanswered, render,
     };
-    use crate::{Credentials, FileTimes, Tool as _, ToolCtx, ToolError};
+    use crate::{Tool as _, ToolCtx, ToolError};
 
     /// A seam that records what it was asked and answers a teammate spawn from
     /// a script. Delegation is not what these tests are about, so it is the
@@ -536,18 +536,9 @@ mod tests {
 
     /// A context whose only interesting field is the seam under test.
     fn ctx(spawn: Option<Arc<dyn Subagents>>) -> ToolCtx {
-        ToolCtx {
-            cwd: std::env::temp_dir(),
-            cancel: CancellationToken::new(),
-            call_id: "call_1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: Credentials::Unguarded,
-            spawn,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        let mut ctx = ToolCtx::fixture(std::env::temp_dir());
+        ctx.spawn = spawn;
+        ctx
     }
 
     fn tool() -> TaskTool {

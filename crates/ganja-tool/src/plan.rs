@@ -290,7 +290,7 @@ mod tests {
         Switcher, YES_LABEL,
     };
     use crate::{
-        Credentials, FileTimes, Tool, ToolCtx, ToolError,
+        Tool, ToolCtx, ToolError,
         question::{self, Answer, Asker, Choice, Prompt},
     };
 
@@ -352,18 +352,10 @@ mod tests {
     }
 
     fn ctx(asker: Option<Arc<dyn Asker>>, switcher: Option<Arc<dyn Switcher>>) -> ToolCtx {
-        ToolCtx {
-            cwd: std::env::temp_dir(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            call_id: "call_1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: asker,
-            switch: switcher,
-            jobs: None,
-        }
+        let mut ctx = ToolCtx::fixture(std::env::temp_dir());
+        ctx.ask = asker;
+        ctx.switch = switcher;
+        ctx
     }
 
     /// The prompt a door is expected to have posed.

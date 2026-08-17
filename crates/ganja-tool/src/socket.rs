@@ -56,19 +56,10 @@
 //! answer*; and the send side is bounded by **nothing yet** — no rate, no
 //! inbox ceiling, no batch cap (bead `ganja-code-qfk`).
 //!
-//! Authorization is the filesystem, twice over. The directory's mode keeps
-//! other users from reaching a socket at all, and it is *checked* rather than
-//! trusted — a directory that exists but is a symlink, is owned by somebody
-//! else, or is looser than `0700` is refused by name (AC-22 as replaced by
-//! Resolution 5). Then every accepted connection is held against the peer's
-//! uid, so a socket that somehow leaked serves nobody but the user who bound
-//! it. One assumption underwrites the check→bind window, and it is named
-//! rather than leaned on: `/tmp` carries the **sticky bit**, so a foreign uid
-//! cannot rename or unlink an entry it does not own and the vetted directory
-//! cannot be swapped out from under the bind. The same path-based checks in a
-//! world-writable directory *without* the sticky bit would be open to exactly
-//! that TOCTOU, which is why the literal `/tmp` is the only parent the binder
-//! is asked to trust — and why the binder asserts the bit before it binds.
+//! The directory clause is checked, not trusted: a symlink, a foreign owner,
+//! or a mode looser than `0700` is refused by name. The check→bind window,
+//! the sticky-bit assumption it rests on and the peer-uid check on accept are
+//! the binder's — `ganja-serve/src/socket.rs` — and are argued there.
 
 use std::{
     io,

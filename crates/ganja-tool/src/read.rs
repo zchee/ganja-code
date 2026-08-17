@@ -511,12 +511,10 @@ fn lossy_lines(file: std::fs::File) -> impl Iterator<Item = String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
-
-    use tokio_util::sync::CancellationToken;
+    use std::path::PathBuf;
 
     use super::ReadTool;
-    use crate::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{Tool, ToolCtx, ToolError};
 
     /// A model writes `docs/guide.md` on every platform, and the path this
     /// tool echoes back is built by joining that onto the session's directory.
@@ -552,18 +550,7 @@ mod tests {
     /// A context rooted at `cwd`, with a fresh, empty read log and no
     /// credential store to refuse.
     fn ctx(cwd: PathBuf) -> ToolCtx {
-        ToolCtx {
-            cwd,
-            cancel: CancellationToken::new(),
-            call_id: "call-1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: crate::Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        ToolCtx::fixture(cwd)
     }
 
     /// The same, told where the credentials are — which is what the engine

@@ -187,6 +187,31 @@ impl ToolCtx {
     }
 }
 
+#[cfg(test)]
+impl ToolCtx {
+    /// A call rooted at `cwd` with every seam empty and nothing guarded — what
+    /// an in-module test hands a tool when the seam under test is not one of
+    /// them; a test that is about a seam sets that one field on the result.
+    /// `cfg(test)` rather than `Default` on purpose: [`Credentials`]'s doc
+    /// names copying a test fixture as the way a new surface ships with the
+    /// guard off, and a constructor the production build cannot see keeps the
+    /// spelled-out literal the only shape a shipped `ToolCtx` can take.
+    pub(crate) fn fixture(cwd: PathBuf) -> Self {
+        Self {
+            cwd,
+            cancel: CancellationToken::new(),
+            call_id: "call".to_owned(),
+            files: Arc::new(FileTimes::default()),
+            credentials: Credentials::Unguarded,
+            spawn: None,
+            postbox: None,
+            ask: None,
+            switch: None,
+            jobs: None,
+        }
+    }
+}
+
 /// What a finished tool call hands back to the model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolOutput {
@@ -689,8 +714,6 @@ fn is_same_file(left: &Path, right: &Path) -> bool {
 mod tests {
     use std::{path::PathBuf, sync::Arc};
 
-    use tokio_util::sync::CancellationToken;
-
     use super::{
         Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, is_same_file,
         skill::{Roots, SkillTool},
@@ -699,18 +722,9 @@ mod tests {
     /// A call whose credential store is `store`, which is the only thing the
     /// guard tests below vary.
     fn ctx(store: Option<PathBuf>) -> ToolCtx {
-        ToolCtx {
-            cwd: std::env::temp_dir(),
-            cancel: CancellationToken::new(),
-            call_id: "call_1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: store.map_or(Credentials::Unguarded, Credentials::Guarded),
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        let mut ctx = ToolCtx::fixture(std::env::temp_dir());
+        ctx.credentials = store.map_or(Credentials::Unguarded, Credentials::Guarded);
+        ctx
     }
 
     /// Three tools refuse for one cause — a context with no jobs handle — and

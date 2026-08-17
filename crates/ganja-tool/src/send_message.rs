@@ -627,7 +627,7 @@ mod tests {
         cap_summary,
     };
     use crate::{
-        Credentials, Tool as _, ToolCtx, ToolError,
+        Tool as _, ToolCtx, ToolError,
         socket::AddressRefusal,
         team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered},
     };
@@ -757,18 +757,9 @@ mod tests {
     }
 
     fn ctx(postbox: Option<Arc<dyn Postbox>>) -> ToolCtx {
-        ToolCtx {
-            cwd: std::env::temp_dir(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            call_id: "call".to_owned(),
-            files: Arc::new(crate::FileTimes::default()),
-            credentials: Credentials::Unguarded,
-            spawn: None,
-            postbox,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        let mut ctx = ToolCtx::fixture(std::env::temp_dir());
+        ctx.postbox = postbox;
+        ctx
     }
 
     /// Runs one call against `postbox` and reports what the model would read.

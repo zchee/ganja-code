@@ -516,24 +516,10 @@ fn keyword_matches(query: &str, deferred: &[ToolDefinition], cap: usize) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use tokio_util::sync::CancellationToken;
-
     use super::*;
-    use crate::FileTimes;
 
     fn ctx() -> ToolCtx {
-        ToolCtx {
-            cwd: std::path::PathBuf::from("/"),
-            cancel: CancellationToken::new(),
-            call_id: "call-1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: crate::Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        ToolCtx::fixture(std::path::PathBuf::from("/"))
     }
 
     fn definition(name: &str, description: &str) -> ToolDefinition {

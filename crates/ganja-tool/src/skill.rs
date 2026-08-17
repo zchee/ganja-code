@@ -529,12 +529,10 @@ fn beside(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
-
-    use tokio_util::sync::CancellationToken;
+    use std::path::PathBuf;
 
     use super::{Roots, Skill, SkillTool};
-    use crate::{FileTimes, Tool as _, ToolCtx, ToolError};
+    use crate::{Tool as _, ToolCtx, ToolError};
 
     /// A skill directory tree: `<root>/<name>/SKILL.md` holding `text`.
     fn write(root: &std::path::Path, name: &str, text: &str) -> PathBuf {
@@ -547,18 +545,7 @@ mod tests {
     }
 
     fn ctx(cwd: &std::path::Path) -> ToolCtx {
-        ToolCtx {
-            cwd: cwd.to_path_buf(),
-            cancel: CancellationToken::new(),
-            call_id: "call-1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: crate::Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        ToolCtx::fixture(cwd.to_path_buf())
     }
 
     /// A skill whose frontmatter is the two fields upstream reads, and a body

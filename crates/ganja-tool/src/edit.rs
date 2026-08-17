@@ -1180,22 +1180,11 @@ mod tests {
         SEPARATOR, block, chars_from, is_disproportionate_match, levenshtein, line_spans,
         normalize_whitespace, remove_indentation, replace, trim_diff, unescape,
     };
-    use crate::{FileTimes, Tool, ToolCtx, ToolError, ToolOutput};
+    use crate::{Tool, ToolCtx, ToolError, ToolOutput};
 
     /// A context over `cwd` whose file log starts empty.
     fn ctx(cwd: &Path) -> ToolCtx {
-        ToolCtx {
-            cwd: cwd.to_owned(),
-            cancel: CancellationToken::new(),
-            call_id: "call_edit".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: crate::Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        ToolCtx::fixture(cwd.to_owned())
     }
 
     /// Writes `content` to `name` under `cwd` and marks it read, which is what

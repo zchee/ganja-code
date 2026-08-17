@@ -237,7 +237,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::{Answer, Asker, Choice, DISMISSED, Prompt, QuestionTool, Unanswered};
-    use crate::{Credentials, FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{Tool, ToolCtx, ToolError};
 
     /// An asker that answers whatever it was built with, and records what it
     /// was asked.
@@ -265,18 +265,9 @@ mod tests {
     }
 
     fn ctx(asker: Option<Arc<dyn Asker>>) -> ToolCtx {
-        ToolCtx {
-            cwd: std::env::temp_dir(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            call_id: "call_1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: asker,
-            switch: None,
-            jobs: None,
-        }
+        let mut ctx = ToolCtx::fixture(std::env::temp_dir());
+        ctx.ask = asker;
+        ctx
     }
 
     fn one() -> serde_json::Value {

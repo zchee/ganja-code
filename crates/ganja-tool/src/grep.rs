@@ -324,30 +324,20 @@ fn clamp_match_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::path::PathBuf;
 
     use tokio_util::sync::CancellationToken;
 
     use super::{GrepTool, search};
-    use crate::{FileTimes, Tool, ToolCtx, ToolError, read::ReadTool};
+    use crate::{Tool, ToolCtx, ToolError, read::ReadTool};
 
     /// A context rooted at `cwd`, with a cancel nobody has pulled and the
     /// credential store the engine would have named sitting under it.
     fn ctx(cwd: PathBuf) -> ToolCtx {
         let credentials = cwd.join("ganja").join("auth.json");
-
-        ToolCtx {
-            cwd,
-            cancel: CancellationToken::new(),
-            call_id: "call-1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: crate::Credentials::Guarded(credentials),
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        let mut ctx = ToolCtx::fixture(cwd);
+        ctx.credentials = crate::Credentials::Guarded(credentials);
+        ctx
     }
 
     #[tokio::test]

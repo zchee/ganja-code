@@ -129,27 +129,14 @@ impl Tool for WriteTool {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
-
-    use tokio_util::sync::CancellationToken;
+    use std::path::PathBuf;
 
     use super::WriteTool;
-    use crate::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{Tool, ToolCtx, ToolError};
 
     /// A context rooted at `cwd`, with a fresh, empty read log.
     fn ctx(cwd: PathBuf) -> ToolCtx {
-        ToolCtx {
-            cwd,
-            cancel: CancellationToken::new(),
-            call_id: "call-1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: crate::Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        ToolCtx::fixture(cwd)
     }
 
     #[tokio::test]

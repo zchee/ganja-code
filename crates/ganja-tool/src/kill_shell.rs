@@ -94,11 +94,10 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use tokio_util::sync::CancellationToken;
 
     use super::{ID, KillShellTool};
     use crate::{
-        Credentials, FileTimes, Tool as _, ToolCtx, ToolError,
+        Tool as _, ToolCtx, ToolError,
         job::{JobRead, JobStatus, Jobs, JobsError, State},
     };
 
@@ -129,18 +128,9 @@ mod tests {
     }
 
     fn ctx(jobs: Option<Arc<dyn Jobs>>) -> ToolCtx {
-        ToolCtx {
-            cwd: std::env::temp_dir(),
-            cancel: CancellationToken::new(),
-            call_id: "call_1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs,
-        }
+        let mut ctx = ToolCtx::fixture(std::env::temp_dir());
+        ctx.jobs = jobs;
+        ctx
     }
 
     #[tokio::test]

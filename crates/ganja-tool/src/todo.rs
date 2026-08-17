@@ -126,27 +126,14 @@ fn title(remaining: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
-
-    use tokio_util::sync::CancellationToken;
+    use std::path::PathBuf;
 
     use super::TodoWriteTool;
-    use crate::{FileTimes, Tool, ToolCtx, ToolError};
+    use crate::{Tool, ToolCtx, ToolError};
 
     /// A context no todo call looks at, since the list is not on disk.
     fn ctx() -> ToolCtx {
-        ToolCtx {
-            cwd: PathBuf::from("."),
-            cancel: CancellationToken::new(),
-            call_id: "call-1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: crate::Credentials::Unguarded,
-            spawn: None,
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        }
+        ToolCtx::fixture(PathBuf::from("."))
     }
 
     /// The list every test writes.
