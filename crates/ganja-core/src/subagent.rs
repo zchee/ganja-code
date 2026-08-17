@@ -1080,7 +1080,21 @@ impl Postbox {
 
         let socket = Socket::open(path)?;
         let view: TeamView = socket.get(TEAM_ROUTE).await?;
-        let lead = view.lead;
+        // The lead's name is the far end's word, and it goes into a URL: it
+        // is held to the member-name grammar before it does — which refuses
+        // `/`, `.`, `?`, `#` and everything else that could steer the POST
+        // to some other route on that server — so a listener in a session
+        // socket's shape cannot choose where this side posts.
+        // The grammar's own error is not repeated: it spells the name whole,
+        // and the name is the peer's word — `reflected` is the one place it
+        // is allowed to appear, cut.
+        let lead = MemberName::parse(&view.lead).map_err(|_| Undelivered::Failed {
+            reason: format!(
+                "{SOCKET_LEAD_UNNAMED} {}: {:?}.",
+                path.display(),
+                reflected(&view.lead)
+            ),
+        })?;
         let delivered: SocketDelivered = socket
             .post(
                 &format!("{TEAM_ROUTE}/{lead}{MESSAGE_ROUTE}"),
@@ -1592,6 +1606,10 @@ pub(crate) const SOCKET_REFUSED: &str = "The session at that socket refused the 
 /// The peer answered something this build has no type for.
 const SOCKET_UNREADABLE: &str =
     "The session at that socket answered a body this build cannot read. Socket";
+
+/// The peer named a lead the member-name grammar refuses — nothing this
+/// build's binder would ever answer, and a name that cannot go into a URL.
+pub(crate) const SOCKET_LEAD_UNNAMED: &str = "The session at that socket named a lead that is not a member name, so no message was posted to it. Socket";
 
 /// The peer answered more than this side reads — refused, not buffered.
 pub(crate) const SOCKET_OVERSIZED: &str = "The session at that socket answered more than a session ever does, and the answer was refused unread. Socket";
@@ -2200,10 +2218,11 @@ mod tests {
 
     use super::{
         Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Incoming, MemberName,
-        NOT_A_SESSION_SOCKET, NotReceived, PermissionReply, Postbox, Reserved, SOCKET_OVERSIZED,
-        SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent, SocketMessage, SpawnAsk, SpawnAsker,
-        SpawnRequest, TEAM_GONE, Teammate, TeammateRegistry, TeammateSpawn, Teammates, Undelivered,
-        Watched, async_trait, denies_task, mailbox, receive, roster, subagent_rules, team, watch,
+        NOT_A_SESSION_SOCKET, NotReceived, PermissionReply, Postbox, Reserved, SOCKET_LEAD_UNNAMED,
+        SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent, SocketMessage, SpawnAsk,
+        SpawnAsker, SpawnRequest, TEAM_GONE, Teammate, TeammateRegistry, TeammateSpawn, Teammates,
+        Undelivered, Watched, async_trait, denies_task, mailbox, receive, roster, subagent_rules,
+        team, watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -3219,6 +3238,84 @@ mod tests {
             reason.contains(&"no ".repeat(100)),
             "and what is left is the head of it: {reason}"
         );
+    }
+
+    /// **N1**: the lead's name a peer answers goes into a URL, so it is held
+    /// to the member-name grammar first — a listener in a session socket's
+    /// shape that names its lead `../../global/health` (traversal), one with
+    /// a `?` (a query), one with a `#` (a fragment, which reaches a different
+    /// path than traversal does), or one longer than any name is refused,
+    /// and no POST is formed at all: the stub records what arrived, and what
+    /// arrived is the one GET. The refusal repeats the peer's word cut to a
+    /// line, so the over-long name pins the length clause both ways.
+    #[tokio::test]
+    async fn a_lead_name_the_grammar_refuses_forms_no_post() {
+        let too_long = "a".repeat(ganja_protocol::team::DISPLAY_FIELD_CAP + 1);
+        for hostile in [
+            "../../global/health",
+            "team-lead?x=1",
+            "team-lead#f",
+            too_long.as_str(),
+        ] {
+            let team = Team::new().await;
+            let postbox: &dyn team::Postbox = &team.worker;
+            let path = team.session_socket_path("0198c1a2");
+            let named = hostile.to_owned();
+            let peer = PeerStub::serve(&path, move |method, route| {
+                if method == "GET" && route == "/team" {
+                    (
+                        200,
+                        serde_json::json!({
+                            "team": "session-feedbeef",
+                            "lead": named,
+                            "members": [],
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    (
+                        200,
+                        serde_json::json!({"to": "x", "note": "must not be reached"}).to_string(),
+                    )
+                }
+            })
+            .await;
+
+            let failed = postbox
+                .deliver(
+                    Address::Uds { path: path.clone() },
+                    Body::Text {
+                        text: "hello".to_owned(),
+                        summary: None,
+                    },
+                )
+                .await;
+            let Err(Undelivered::Failed { reason }) = failed else {
+                panic!("{hostile:?}: a refused lead name is a failure, not {failed:?}");
+            };
+            assert!(
+                reason.starts_with(SOCKET_LEAD_UNNAMED),
+                "{hostile:?}: named as the rule: {reason}"
+            );
+            assert!(
+                reason.chars().count() < hostile.chars().count() + 400,
+                "{hostile:?}: the peer's word is cut to a line, never repeated whole: {} chars",
+                reason.chars().count()
+            );
+            let requests = peer.requests();
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|(method, route, _)| format!("{method} {route}"))
+                    .collect::<Vec<_>>(),
+                vec!["GET /team"],
+                "{hostile:?}: no POST was formed"
+            );
+            assert!(
+                !requests.iter().any(|(method, _, _)| method == "POST"),
+                "{hostile:?}: not one POST"
+            );
+        }
     }
 
     /// The receiving end: a peer's message to the lead lands in the lead's

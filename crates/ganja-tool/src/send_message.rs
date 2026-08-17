@@ -20,13 +20,16 @@
 //! The premise has to hold across a socket too, and since D505 it is held
 //! there by rung 3 rather than assumed: a `uds:` address may name **only a
 //! session socket of this user's** — [`socket::vet_address`]'s clauses, the
-//! binder's own discipline turned toward the address — so an unasked call
-//! can reach exactly the same set of mailboxes a named teammate is one of,
-//! over a transport only this build's binder makes, and never `/var/run/`'s
-//! or anybody else's listener. What crosses is plain text into a same-uid
+//! binder's own discipline turned toward the address — so what an unasked
+//! call can reach is the lead of **any session of this user's, in any
+//! project on this machine** (not only this team's members), over a
+//! transport only this build's binder makes, and never `/var/run/`'s or
+//! anybody else's listener. What crosses is plain text into a same-uid
 //! lead's inbox; what comes back is bounded and read as typed answers by the
-//! deliverer. That, and not "nothing leaves the session", is what keeps the
-//! tool conversation rather than authority.
+//! deliverer; how *much* may be sent is bounded by nothing yet — no rate, no
+//! inbox ceiling, no batch cap (bead `ganja-code-qfk`). That, and not
+//! "nothing leaves the session", is what keeps the tool conversation rather
+//! than authority.
 //!
 //! # The ladder refuses in ganja's own words (**D497**)
 //!

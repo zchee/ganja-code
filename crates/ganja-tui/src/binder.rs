@@ -50,7 +50,8 @@
 //! can move its slot. [`SessionSocket`] still compares the engine's id
 //! against the bound one after every event the app handles rather than only
 //! at the app's own two doors, and the reason is now the cheaper one: it is
-//! one id compare per event, and it makes the socket follow the slot however
+//! one lock and one id compare per event (`Engine::session_id` locks the
+//! slot and clones the id), and it makes the socket follow the slot however
 //! it moves, so a door added later cannot leave a stale socket bound behind
 //! a session it no longer names. **Not** on first-prompt adoption, which
 //! gives the row the id the engine already had and moves nothing. Torn down
