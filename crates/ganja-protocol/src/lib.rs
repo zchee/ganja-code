@@ -22,6 +22,15 @@ pub mod team;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+/// The [`team`] types that appear in signatures outside the frame vocabulary:
+/// a trust boundary ([`LeadFrame`], [`PeerMessage`]), the classifier every
+/// messaging path asks ([`Frame`]), and the projection a frontend renders
+/// ([`TeamView`] and its two halves).
+///
+/// Everything else — the fifteen frame payloads, the two reserved-set consts,
+/// the display cap — stays behind `team::`, because a caller naming one of
+/// those is already inside that vocabulary and the qualification says so.
+pub use team::{Frame, LeadFrame, MemberBackend, MemberView, PeerMessage, TeamView};
 use uuid::Uuid;
 
 /// Milliseconds since the Unix epoch, saturating rather than failing when the
@@ -479,6 +488,81 @@ pub enum PartBody {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         output: String,
     },
+    /// Something another agent said, carried in this conversation (**D495**).
+    ///
+    /// No upstream counterpart: opencode has no teams and no second agent to
+    /// hear from. The specification is Claude Code's §5.3, whose
+    /// `formatTeammateMessage` renders exactly this into the request that
+    /// follows:
+    ///
+    /// ```text
+    /// <teammate-message teammate_id="w1" color="blue" summary="picked up W2">
+    /// starting on the protocol surface
+    /// </teammate-message>
+    /// ```
+    ///
+    /// The envelope itself is built where a request is assembled, not here —
+    /// this is the record it is built from, and the record is what a
+    /// transcript keeps.
+    ///
+    /// # Data, never authority
+    ///
+    /// This is the one part whose content was written by something that is
+    /// neither this session's model nor the person at the terminal, and §7-5
+    /// is what follows from that: a peer's words are information the model
+    /// reads, never an instruction it is bound by and never consent for
+    /// anything. [`team::PeerMessage`] states that rule as a type; this
+    /// variant states it on the wire, by staying **outside [`Part::as_text`]**
+    /// — that accessor titles a rewind checkpoint and answers the copy
+    /// surfaces, and a teammate's sentence standing in for what *this*
+    /// conversation said is a misattribution rather than a truncation.
+    ///
+    /// # Display-only is the wrong word for this one
+    ///
+    /// [`PartBody::ReasoningText`] and [`PartBody::ServerTool`] are drawn and
+    /// never sent. This part is drawn **and** sent — as the envelope above,
+    /// rendered into the user turn, never as a message of its own under a role
+    /// no vendor has. So a message whose only part is one of these does have
+    /// content ([`Message::has_content`]), where a message holding only
+    /// thinking does not: the model was told this, and a later request carries
+    /// it.
+    ///
+    /// # What an older build does with one
+    ///
+    /// Drops the part and keeps the rest of the message. The tag takes no
+    /// [`REASONING_TAG`]-shaped forward contract, because that contract exists
+    /// for state the *next request* must hand back and this is not that — but
+    /// the loss is real all the same, a message the model was told going
+    /// missing, which is why the tag is minted once here and never renamed.
+    Peer {
+        /// Which teammate wrote it: the bare member name that is also its
+        /// mailbox address.
+        ///
+        /// Never `main`. That word names the sender's own parent conversation
+        /// (§5.5.1) and is a member of nothing, so a part carrying it would
+        /// name a teammate that cannot exist.
+        from: String,
+        /// A one-line summary for the envelope's `summary` attribute, where
+        /// the sender wrote one.
+        ///
+        /// Capped at [`team::DISPLAY_FIELD_CAP`] characters **by whoever
+        /// builds the part**: [`team::PeerMessage::new`] is where that happens
+        /// on the path a message actually travels, and
+        /// [`team::cap_for_display`] is the function to call anywhere else.
+        /// This type deliberately does not re-cap — a stored part must read
+        /// back as the bytes it was written as, and a constructor that
+        /// silently shortened a decoded field would make that false.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        /// The member's assigned color, for a frontend to draw it in and for
+        /// the envelope's `color` attribute — which §5.3 writes only when it
+        /// validates, so absent here means "draw it plainly" rather than
+        /// "unknown".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        /// What the peer said, verbatim.
+        body: String,
+    },
     /// The model's own thinking, as the provider sealed it, kept so the next
     /// request can hand it back.
     ///
@@ -716,6 +800,35 @@ impl Part {
         }
     }
 
+    /// Builds a peer's message part with a fresh id (**D495**).
+    ///
+    /// Complete when it is minted, like a provider-run tool row and unlike a
+    /// reply's own text: a peer's words arrive whole through the mailbox, so
+    /// there is nothing here for a delta to grow.
+    ///
+    /// The arguments are in the field order, because two of them are
+    /// `Option<String>` and adjacent. `summary` is expected already capped — a
+    /// caller holding a [`team::PeerMessage`] passes
+    /// `message.summary().map(str::to_owned)`, which that type capped when it
+    /// took the message.
+    #[must_use]
+    pub fn peer(
+        from: impl Into<String>,
+        summary: Option<String>,
+        color: Option<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: PartId::ascending(),
+            body: PartBody::Peer {
+                from: from.into(),
+                summary,
+                color,
+                body: body.into(),
+            },
+        }
+    }
+
     /// Builds a reasoning part with a fresh id, carrying the state `provider`
     /// sealed under its own `item` id.
     ///
@@ -745,6 +858,11 @@ impl Part {
     /// what the copy surfaces read, and the model's scratch paper is not its
     /// answer. Thinking is [`PartBody::ReasoningText`], matched by name
     /// wherever it is wanted.
+    ///
+    /// Deliberately not a peer's words either, for the same accessor's sake
+    /// reached from the other side: [`PartBody::Peer`] is what somebody
+    /// *else's* agent said, and letting it answer here would title this
+    /// session's checkpoint with a sentence this session never uttered.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match &self.body {
@@ -756,6 +874,7 @@ impl Part {
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
             | PartBody::ServerTool { .. }
+            | PartBody::Peer { .. }
             | PartBody::Reasoning { .. } => None,
         }
     }
@@ -771,6 +890,7 @@ impl Part {
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
             | PartBody::ServerTool { .. }
+            | PartBody::Peer { .. }
             | PartBody::Reasoning { .. } => None,
         }
     }
@@ -782,6 +902,10 @@ impl Part {
     /// a frontend applying an event stream — is told a part's id and a fragment
     /// and is not told which of the two it is growing. Everything that *does*
     /// know reaches for the accessor that names what it means.
+    ///
+    /// A [`PartBody::Peer`] is neither, and not because of what it says: no
+    /// provider streams one. It arrives whole out of a mailbox, so there is no
+    /// event that would ever name its id and a fragment.
     pub fn streamed_mut(&mut self) -> Option<&mut String> {
         match &mut self.body {
             PartBody::Text { text } | PartBody::ReasoningText { text } => Some(text),
@@ -791,6 +915,7 @@ impl Part {
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
             | PartBody::ServerTool { .. }
+            | PartBody::Peer { .. }
             | PartBody::Reasoning { .. } => None,
         }
     }
@@ -889,11 +1014,18 @@ impl Message {
     /// one every later request would carry as an assistant turn that said
     /// nothing at all. That it is readable on screen does not make it
     /// something the model was told.
+    ///
+    /// A [`PartBody::Peer`] is **in**, and it is the one display-shaped part
+    /// that is: the request assembly renders it into the user turn as §5.3's
+    /// envelope, so a message carrying nothing but a teammate's words is a
+    /// message the model was told and a later request carries. Dropping it as
+    /// empty would lose the message and leave whatever the model did about it
+    /// standing there unexplained.
     #[must_use]
     pub fn has_content(&self) -> bool {
         self.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !text.is_empty(),
-            PartBody::Tool { .. } | PartBody::File { .. } => true,
+            PartBody::Tool { .. } | PartBody::File { .. } | PartBody::Peer { .. } => true,
             PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
@@ -1121,6 +1253,25 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
     },
+    /// Runs the rest of the session under a different permission posture
+    /// (**D-15**, **D496**).
+    ///
+    /// **Accepted while a turn streams**, unlike the three switches above it,
+    /// and applied at the **next** turn's start. The asymmetry is deliberate
+    /// and it is D474's discipline rather than [`Command::SwitchAgent`]'s
+    /// refusal: what sends this may be a team's lead answering a teammate's
+    /// `mode_set_request` ([`team::ModeSetRequest`]) mid-turn, and a refusal
+    /// there would drop a decision nobody would think to re-send. A switch of
+    /// agent, model or effort is typed by the person watching the turn, who
+    /// can wait for it to end.
+    ///
+    /// [`Event::PermissionModeChanged`] announces the acceptance, which is
+    /// earlier than the effect; that event's own documentation says when the
+    /// change bites.
+    SetPermissionMode {
+        /// The posture the next turn runs under.
+        mode: PermissionMode,
+    },
     /// Runs `command` in the shell on the user's behalf and puts both the
     /// command and its output in the transcript, where the next model request
     /// will read them. Upstream's `!` passthrough.
@@ -1210,6 +1361,105 @@ pub enum PermissionReply {
     /// Refuse the call. The model is told, and decides what to do next.
     Reject,
 }
+
+/// How much a session asks before it acts (**D496**).
+///
+/// **Two values, and they are ganja's own.** This build has no runtime
+/// permission-mode switch at all — the bypass trio
+/// (`--auto`/`--yolo`/`--dangerously-skip-permissions`, D479) resolves once at
+/// startup and everything after that is the rule engine's business. A team's
+/// lead may nonetheless send a `mode_set_request` ([`team::ModeSetRequest`])
+/// mid-session, so there has to be something the engine can be set *to*, and
+/// two postures is what ganja actually has to offer.
+///
+/// [`PermissionMode::from_claude_name`] is where Claude Code's four names
+/// become these two. A frame carries its mode as **text** precisely so that
+/// mapping — which has a refusal in it — happens at the applier, where a
+/// refusal can be reported to whoever asked, rather than at the decoder, where
+/// it would drop the frame before anything could name what was refused.
+///
+/// The rename attribute is this crate's `snake_case` rule, not a choice
+/// between spellings: two one-word variants are written identically by
+/// `snake_case` and `kebab-case`, so the rule that governs every other enum
+/// here governs this one too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// The rules decide, and a call they do not allow raises a dialog. What
+    /// every session runs as unless it was started otherwise.
+    Ask,
+    /// A raised dialog is answered "allow once" without asking anyone.
+    ///
+    /// **A deny rule still denies**: this is the startup trio's exact posture
+    /// (D479) reached at a turn boundary instead of at launch, and that trio
+    /// answers dialogs rather than repealing rules.
+    Bypass,
+}
+
+impl PermissionMode {
+    /// Reads Claude Code's mode vocabulary as one of ganja's two, or refuses
+    /// by name.
+    ///
+    /// The four names are `default`, `acceptEdits`, `bypassPermissions` and
+    /// `plan` (§10.3-4). Three of them arrive somewhere:
+    ///
+    /// - `bypassPermissions` → [`PermissionMode::Bypass`];
+    /// - `default` and `acceptEdits` → [`PermissionMode::Ask`], because what
+    ///   `acceptEdits` decides per mode ganja's rules already decide per tool.
+    ///   Collapsing the two is honest; minting a third value that nothing in
+    ///   this build enforces would not be.
+    /// - `plan` is **refused**, and it is the interesting one: this build
+    ///   already has that switch, as an agent
+    ///   ([`Command::SwitchAgent`] with `plan`), and two spellings of one
+    ///   thing is one too many.
+    ///
+    /// Anything else is refused as the name it was rather than falling back to
+    /// [`PermissionMode::Ask`], because a posture a peer asked for and did not
+    /// get is something its sender has to be told.
+    ///
+    /// # Errors
+    ///
+    /// [`UnknownPermissionMode`], carrying the sentence the caller reports.
+    pub fn from_claude_name(name: &str) -> Result<Self, UnknownPermissionMode> {
+        match name {
+            "bypassPermissions" => Ok(Self::Bypass),
+            "default" | "acceptEdits" => Ok(Self::Ask),
+            "plan" => Err(UnknownPermissionMode::Plan),
+            other => Err(UnknownPermissionMode::Unknown(other.to_owned())),
+        }
+    }
+}
+
+/// Why a mode name is not one of ganja's two
+/// ([`PermissionMode::from_claude_name`]).
+///
+/// The sentences are ganja's own words about ganja's own vocabulary — nothing
+/// here is Claude Code prose — and they are pinned by a test so the wording
+/// cannot drift silently out from under whoever quotes it back to a sender.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnknownPermissionMode {
+    /// `plan`: this build has it, and has it as an agent rather than a mode.
+    Plan,
+    /// A name outside the four the reference records.
+    Unknown(String),
+}
+
+impl std::fmt::Display for UnknownPermissionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plan => f.write_str(
+                "plan is an agent here, not a permission mode: switch to it with /agent plan",
+            ),
+            Self::Unknown(name) => write!(
+                f,
+                "{name} is not a permission mode this build knows: it takes \
+                 bypassPermissions, default or acceptEdits"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for UnknownPermissionMode {}
 
 /// One choice a question offers.
 ///
@@ -1508,6 +1758,20 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
     },
+    /// The engine took a [`Command::SetPermissionMode`] (**D-15**, **D496**).
+    ///
+    /// **Fired at acceptance, which is not when it bites.** The posture
+    /// applies at the start of the next turn, so one of these arriving
+    /// mid-stream says the engine is *holding* the change, never that the turn
+    /// on screen has moved to it. A frontend drawing the posture therefore
+    /// draws what the next turn will do — which is exactly what the sender of
+    /// the command was told, so the two never disagree.
+    PermissionModeChanged {
+        /// Session this happened in.
+        session_id: SessionId,
+        /// The posture the next turn runs under.
+        mode: PermissionMode,
+    },
     /// The turn ended and the engine is idle again. It is the last event of a
     /// turn, whatever went wrong during it, save for the one
     /// [`Event::AgentChanged`] a plan approval may announce immediately after
@@ -1555,6 +1819,7 @@ impl Event {
             | Event::RevertChanged { session_id, .. }
             | Event::AgentChanged { session_id, .. }
             | Event::EffortChanged { session_id, .. }
+            | Event::PermissionModeChanged { session_id, .. }
             | Event::MessageFinished { session_id, .. } => session_id,
         }
     }
@@ -1578,9 +1843,9 @@ mod tests {
 
     use super::{
         Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody,
-        PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption,
-        QuestionSource, REASONING_TAG, RevertInfo, RevertScope, Role, SessionId, ToolState, Usage,
-        is_uuidv7, uuidv7,
+        PartId, PermissionId, PermissionMode, PermissionReply, QuestionId, QuestionInfo,
+        QuestionOption, QuestionSource, REASONING_TAG, RevertInfo, RevertScope, Role, SessionId,
+        ToolState, UnknownPermissionMode, Usage, is_uuidv7, team, uuidv7,
     };
 
     /// The session every pinned event happens in.
@@ -1821,6 +2086,12 @@ mod tests {
                 effort: Some("max".to_owned()),
             },
             Command::SwitchEffort { effort: None },
+            Command::SetPermissionMode {
+                mode: PermissionMode::Ask,
+            },
+            Command::SetPermissionMode {
+                mode: PermissionMode::Bypass,
+            },
             Command::RunShell {
                 command: "git status".to_owned(),
             },
@@ -1936,6 +2207,10 @@ mod tests {
             Event::EffortChanged {
                 session_id: pinned_session(),
                 effort: None,
+            },
+            Event::PermissionModeChanged {
+                session_id: pinned_session(),
+                mode: PermissionMode::Bypass,
             },
         ];
 
@@ -2578,6 +2853,56 @@ mod tests {
                 }),
                 r#"{"type":"effort_changed","session_id":"ses_1"}"#,
             ),
+            // The posture a lead's `mode_set_request` ends up as, and the
+            // acceptance that answers it. Two names, spelled as this crate
+            // spells every other enum on the wire.
+            (
+                serde_json::to_string(&Command::SetPermissionMode {
+                    mode: PermissionMode::Bypass,
+                }),
+                r#"{"type":"set_permission_mode","mode":"bypass"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::SetPermissionMode {
+                    mode: PermissionMode::Ask,
+                }),
+                r#"{"type":"set_permission_mode","mode":"ask"}"#,
+            ),
+            (
+                serde_json::to_string(&Event::PermissionModeChanged {
+                    session_id: pinned_session(),
+                    mode: PermissionMode::Bypass,
+                }),
+                r#"{"type":"permission_mode_changed","session_id":"ses_1","mode":"bypass"}"#,
+            ),
+            // A peer's words, richest form first: both display fields
+            // present, then the shape a message with neither writes — a
+            // sender that wrote no summary and a member with no color assigned
+            // put no keys on the wire at all.
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::Peer {
+                        from: "w1".to_owned(),
+                        summary: Some("picked up W2".to_owned()),
+                        color: Some("blue".to_owned()),
+                        body: "starting on the protocol surface".to_owned(),
+                    },
+                }),
+                r#"{"id":"prt_1","type":"peer","from":"w1","summary":"picked up W2","color":"blue","body":"starting on the protocol surface"}"#,
+            ),
+            (
+                serde_json::to_string(&Part {
+                    id: PartId::from("prt_1".to_owned()),
+                    body: PartBody::Peer {
+                        from: "w1".to_owned(),
+                        summary: None,
+                        color: None,
+                        body: "done".to_owned(),
+                    },
+                }),
+                r#"{"id":"prt_1","type":"peer","from":"w1","body":"done"}"#,
+            ),
         ];
 
         for (encoded, expected) in cases {
@@ -2969,5 +3294,144 @@ mod tests {
 
         message.parts.push(Part::text("and here is the answer"));
         assert!(message.has_content());
+    }
+
+    /// AC-23's protocol half. A teammate's words are carried, drawn and sent —
+    /// and are still not this session's text, because `as_text` is what titles
+    /// a checkpoint and answers the copy surfaces, and what a peer said is not
+    /// what this conversation said.
+    #[test]
+    fn a_peer_part_is_not_text() {
+        let mut part = Part::peer(
+            "w1",
+            Some("picked up W2".to_owned()),
+            Some("blue".to_owned()),
+            "starting on the protocol surface",
+        );
+
+        assert_eq!(part.as_text(), None, "a peer's words are not the reply");
+        assert!(part.as_text_mut().is_none());
+        assert!(
+            part.streamed_mut().is_none(),
+            "a mailbox delivers a message whole; no delta ever names this part"
+        );
+
+        // The constructor's four arguments land where the field order says,
+        // which is worth pinning because two of them are adjacent options.
+        assert_eq!(
+            part.body,
+            PartBody::Peer {
+                from: "w1".to_owned(),
+                summary: Some("picked up W2".to_owned()),
+                color: Some("blue".to_owned()),
+                body: "starting on the protocol surface".to_owned(),
+            }
+        );
+
+        let encoded = serde_json::to_string(&part).expect("a part serializes");
+        let decoded: Part = serde_json::from_str(&encoded).expect("a part deserializes");
+        assert_eq!(decoded.body, part.body, "round trip changed {encoded}");
+    }
+
+    /// The cap belongs to whoever builds the part, and the part keeps what it
+    /// was built with: a decoded record that read back shorter than it was
+    /// written would be a store that quietly rewrote somebody's message.
+    #[test]
+    fn a_peer_part_keeps_the_summary_it_was_built_with() {
+        let long = "e".repeat(team::DISPLAY_FIELD_CAP * 2);
+        let message = team::PeerMessage::new("w1", long.clone(), Some(&long));
+
+        let capped = Part::peer(
+            message.from(),
+            message.summary().map(str::to_owned),
+            None,
+            message.body(),
+        );
+        let PartBody::Peer { summary, body, .. } = &capped.body else {
+            unreachable!("the constructor built a peer part")
+        };
+        assert_eq!(
+            summary.as_deref().map(str::len),
+            Some(team::DISPLAY_FIELD_CAP)
+        );
+        assert_eq!(body.len(), long.len(), "the body is not a display field");
+
+        // Handed a summary nobody capped, the part carries it as given — the
+        // type states where the cap lives rather than applying it twice.
+        let uncapped = Part::peer("w1", Some(long.clone()), None, "hi");
+        let PartBody::Peer { summary, .. } = &uncapped.body else {
+            unreachable!("the constructor built a peer part")
+        };
+        assert_eq!(summary.as_deref().map(str::len), Some(long.len()));
+    }
+
+    /// The one display-shaped part that is content: the request assembly
+    /// renders it into the user turn, so a message carrying only a teammate's
+    /// words is a message the model was told — where a message carrying only
+    /// thinking is not.
+    #[test]
+    fn a_message_carrying_only_a_peers_words_has_content() {
+        let message = Message {
+            id: MessageId::from("msg_1".to_owned()),
+            role: Role::User,
+            parts: vec![Part::peer("w1", None, None, "done")],
+            time: MessageTime {
+                created: 7,
+                completed: Some(7),
+            },
+            model: None,
+            usage: None,
+        };
+
+        assert!(message.has_content());
+    }
+
+    /// Claude Code's four names against ganja's two, refusals included: `plan`
+    /// is refused because this build already has that switch as an agent, and
+    /// an unrecognized name is refused as itself rather than quietly becoming
+    /// the safe value — a posture a sender asked for and did not get is
+    /// something it has to be told.
+    #[test]
+    fn claudes_mode_names_map_to_ganjas_two_or_are_refused_by_name() {
+        assert_eq!(
+            PermissionMode::from_claude_name("bypassPermissions"),
+            Ok(PermissionMode::Bypass)
+        );
+        assert_eq!(
+            PermissionMode::from_claude_name("default"),
+            Ok(PermissionMode::Ask)
+        );
+        assert_eq!(
+            PermissionMode::from_claude_name("acceptEdits"),
+            Ok(PermissionMode::Ask)
+        );
+
+        assert_eq!(
+            PermissionMode::from_claude_name("plan"),
+            Err(UnknownPermissionMode::Plan)
+        );
+        assert_eq!(
+            PermissionMode::from_claude_name("plan")
+                .unwrap_err()
+                .to_string(),
+            "plan is an agent here, not a permission mode: switch to it with /agent plan"
+        );
+
+        // Casing is somebody else's, so nothing here guesses at it: the four
+        // names are matched exactly and everything else is named back.
+        for name in ["bypasspermissions", "accept_edits", "", "ask"] {
+            assert_eq!(
+                PermissionMode::from_claude_name(name),
+                Err(UnknownPermissionMode::Unknown(name.to_owned())),
+                "{name} is not one of the four"
+            );
+        }
+        assert_eq!(
+            PermissionMode::from_claude_name("ask")
+                .unwrap_err()
+                .to_string(),
+            "ask is not a permission mode this build knows: it takes \
+             bypassPermissions, default or acceptEdits"
+        );
     }
 }
