@@ -340,6 +340,7 @@ async fn an_edit_that_breaks_a_type_comes_back_with_rust_analyzers_complaint_att
             text: "break it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts");

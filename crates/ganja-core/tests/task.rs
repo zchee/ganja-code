@@ -171,6 +171,7 @@ async fn a_task_call_runs_a_child_loop_and_hands_back_its_last_words() {
             text: "where is the thing".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -272,6 +273,7 @@ async fn a_childs_own_messages_never_reach_the_subscribed_stream() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -346,6 +348,7 @@ async fn a_running_child_reports_its_progress_on_the_parents_tool_part() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -408,6 +411,7 @@ async fn a_subagent_is_never_offered_the_tool_that_spawned_it() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -455,6 +459,7 @@ async fn delegating_asks_about_the_named_subagent_and_an_always_covers_the_tool(
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -494,6 +499,7 @@ async fn delegating_asks_about_the_named_subagent_and_an_always_covers_the_tool(
             text: "delegate again".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("a finished turn leaves the engine idle");
@@ -535,6 +541,7 @@ async fn an_always_the_parent_was_given_does_not_authorize_the_child() {
             text: "fetch it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -563,6 +570,7 @@ async fn an_always_the_parent_was_given_does_not_authorize_the_child() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("a finished turn leaves the engine idle");
@@ -605,6 +613,7 @@ async fn a_crossing_permission_dialog_carries_the_parents_session_id() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -685,6 +694,7 @@ async fn a_refusal_the_parent_is_under_reaches_the_child() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -741,6 +751,7 @@ async fn cancelling_the_parent_turn_ends_the_child_promptly() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -798,6 +809,7 @@ async fn cancelling_the_parent_turn_ends_the_child_promptly() {
             text: "again".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("a cancelled turn leaves the engine idle");
@@ -817,6 +829,7 @@ async fn delegating_to_an_agent_that_does_not_exist_is_information_not_an_abort(
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -852,6 +865,7 @@ async fn a_primary_agent_may_not_be_run_as_a_subagent() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -919,6 +933,7 @@ async fn a_delegated_child_is_stored_as_a_session_of_its_own_naming_its_parent()
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -989,6 +1004,7 @@ async fn a_task_id_naming_a_root_session_starts_a_fresh_child_instead() {
             text: "remember this".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -1017,6 +1033,7 @@ async fn a_task_id_naming_a_root_session_starts_a_fresh_child_instead() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("a finished turn leaves the engine idle");

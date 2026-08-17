@@ -142,6 +142,7 @@ async fn answered_turn(
             text: prompt.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -283,6 +284,7 @@ async fn a_yes_answer_lands_the_switch_when_the_turn_ends() {
             text: "go ahead".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         },
     )
     .await;
@@ -326,6 +328,7 @@ async fn a_no_answer_leaves_the_session_planning() {
             text: "keep refining".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         },
     )
     .await;
@@ -410,6 +413,7 @@ async fn a_cancel_after_yes_still_switches() {
             text: "here is the plan".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -444,6 +448,7 @@ async fn a_cancel_after_yes_still_switches() {
             text: "go ahead".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         },
     )
     .await;
@@ -485,6 +490,7 @@ async fn a_manual_switch_after_yes_supersedes_the_approval() {
             text: "keep planning".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("the switch left the engine idle");
@@ -545,6 +551,7 @@ async fn a_restart_between_yes_and_the_prompt_resumes_as_build_without_the_sente
             text: "go ahead".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("a resumed engine accepts a prompt");
@@ -578,6 +585,7 @@ async fn the_approval_sentence_rides_one_request_and_never_returns() {
                 text: prompt.to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             },
         )
         .await;
@@ -612,6 +620,7 @@ async fn a_manual_switch_mid_turn_is_still_refused_busy() {
             text: "here is the plan".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");
@@ -680,6 +689,7 @@ async fn a_yes_then_a_shell_turn_keeps_the_sentence_for_the_next_asking_prompt()
             text: "go ahead".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         },
     )
     .await;
@@ -729,6 +739,7 @@ async fn a_yes_then_a_model_switch_keeps_the_row_on_build() {
             text: "go ahead".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         },
     )
     .await;
@@ -756,6 +767,7 @@ async fn a_yes_then_a_new_session_starts_clean_with_no_sentence() {
             text: "a fresh start".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("a new session accepts a prompt");
@@ -809,6 +821,7 @@ async fn a_manual_switch_announces_itself_on_the_event_stream() {
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("the switch left the engine idle");

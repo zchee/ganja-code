@@ -2837,16 +2837,26 @@ impl Engine {
                 text,
                 mentions,
                 skills,
+                peers,
             } => {
-                self.start_turn(text, TurnKind::Prompt { mentions, skills }, None)
-                    .await
+                self.start_turn(
+                    text,
+                    TurnKind::Prompt {
+                        mentions,
+                        skills,
+                        peers,
+                    },
+                    None,
+                )
+                .await
             }
             Command::Steer {
                 id,
                 text,
                 mentions,
                 skills,
-            } => self.steer(id, text, mentions, skills).await,
+                peers,
+            } => self.steer(id, text, mentions, skills, peers).await,
             Command::CancelTurn => {
                 self.cancel_turn().await;
                 Ok(())
@@ -2957,6 +2967,7 @@ impl Engine {
                 // (`$ARGUMENTS`), not the composer's skill grammar: nothing
                 // in an expanded command is scanned for invocations.
                 skills: Vec::new(),
+                peers: Vec::new(),
             },
             overrides,
         )
@@ -4525,6 +4536,7 @@ impl Engine {
         text: String,
         mentions: Vec<crate::protocol::Mention>,
         skills: Vec<String>,
+        peers: Vec<crate::protocol::team::PeerPayload>,
     ) -> Result<(), EngineError> {
         let queued = self
             .turn
@@ -4540,6 +4552,7 @@ impl Engine {
                         text,
                         mentions,
                         skills,
+                        peers,
                     });
 
                 true
@@ -5094,6 +5107,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5177,6 +5191,7 @@ mod tests {
                     text: prompt.to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 })
                 .await
                 .expect("an idle engine accepts a prompt");
@@ -5234,6 +5249,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5256,6 +5272,7 @@ mod tests {
                 text: "again".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("a failed turn leaves the engine idle");
@@ -5276,6 +5293,7 @@ mod tests {
                     text: prompt.to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 })
                 .await
                 .expect("an idle engine accepts a prompt");
@@ -5362,6 +5380,7 @@ mod tests {
                 text: "next".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5549,6 +5568,7 @@ mod tests {
                 text: "fill the conversation a little".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5596,6 +5616,7 @@ mod tests {
                 text: "the first prompt".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5607,6 +5628,7 @@ mod tests {
                 text: "the second prompt, which the revert takes back".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5675,6 +5697,7 @@ mod tests {
                 text: "x".repeat(400),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5709,6 +5732,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5754,6 +5778,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5794,6 +5819,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5822,6 +5848,7 @@ mod tests {
                 text: "second".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("a fresh conversation accepts a prompt");
@@ -5857,6 +5884,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5871,6 +5899,7 @@ mod tests {
                     text: "second".to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 })
                 .await,
             Err(EngineError::Busy)
@@ -5892,6 +5921,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5924,6 +5954,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5950,6 +5981,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts a prompt");
@@ -5961,6 +5993,7 @@ mod tests {
                 text: "second".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("a finished turn leaves the engine idle");
@@ -6071,6 +6104,84 @@ mod tests {
             .collect()
     }
 
+    /// **AC-23**, end to end: a command carrying a teammate's message becomes
+    /// a [`PartBody::Peer`] part on the user's own message, and reaches the
+    /// wire as §5.3's envelope inside that turn's text (**D495**).
+    ///
+    /// The two halves are asserted in one test because each is worthless
+    /// without the other: a part nothing renders is a message the model was
+    /// never told, and an envelope nothing builds a part for is dead code.
+    ///
+    /// The prompt's text is empty on purpose — a delivery turn is a turn whose
+    /// content *is* what the teammate said — which is also the case that pins
+    /// the empty text part being dropped rather than sent as a blank block.
+    #[tokio::test]
+    async fn a_teammates_message_reaches_the_wire_as_the_envelope() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            ProviderEvent::TextDelta("thanks".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ]));
+        let seen = Arc::clone(&provider.seen);
+        let engine = bare(provider, "scripted-model");
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        engine
+            .send(Command::SendPrompt {
+                text: String::new(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+                peers: vec![crate::protocol::team::PeerPayload::new(
+                    "w1",
+                    Some("picked up W2".to_owned()),
+                    None,
+                    "on the protocol",
+                )],
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        let announced = drain(&mut events).await;
+
+        let Some(Event::MessageStarted { message: user, .. }) = announced.first() else {
+            panic!("a turn opens with the user's message, got {announced:?}");
+        };
+        assert_eq!(
+            user.parts.len(),
+            1,
+            "a delivery turn carries the teammate's words and no blank text part: {:?}",
+            user.parts
+        );
+        assert!(
+            matches!(
+                &user.parts[0].body,
+                crate::protocol::PartBody::Peer { from, body, .. }
+                    if from == "w1" && body == "on the protocol"
+            ),
+            "the payload became the part that says whose words these are: {:?}",
+            user.parts
+        );
+
+        let requests = seen.lock().expect("the request log is never poisoned");
+        let carried: Vec<&str> = requests
+            .first()
+            .expect("the turn asked the provider")
+            .messages
+            .last()
+            .expect("a request carries the user's message")
+            .parts
+            .iter()
+            .filter_map(crate::protocol::Part::as_text)
+            .collect();
+        assert_eq!(
+            carried,
+            vec![
+                "<teammate-message teammate_id=\"w1\" summary=\"picked up W2\">\n\
+                 on the protocol\n\
+                 </teammate-message>"
+            ],
+            "the wire carries the envelope and nothing else"
+        );
+    }
+
     #[tokio::test]
     async fn files_that_went_stale_are_named_to_the_model_once() {
         let dir = tempfile::tempdir().expect("a scratch directory");
@@ -6092,6 +6203,7 @@ mod tests {
                     text: prompt.to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 })
                 .await
                 .expect("an idle engine accepts a prompt");
@@ -6150,6 +6262,7 @@ mod tests {
                 text: "now what".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("a finished passthrough leaves the engine idle");

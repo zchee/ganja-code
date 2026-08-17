@@ -1139,6 +1139,22 @@ pub enum Command {
         /// when there are none, same as `mentions`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skills: Vec<String>,
+        /// Messages teammates wrote, which this prompt hands to the model as
+        /// [`PartBody::Peer`] parts rather than as text (**D495**).
+        ///
+        /// **A list, not one.** The lead's inbox is polled on a tick and can
+        /// hold several messages by the time it is read; a single-message
+        /// field would force the second and third into commands of their own,
+        /// which the one-turn-at-a-time rule then refuses. §5.3 has the same
+        /// shape for the same reason — its `formatTeammateMessages` is plural.
+        ///
+        /// The text beside them may be empty, and usually is: a delivery turn
+        /// is a turn whose content *is* what the teammates said. Absent from
+        /// the wire when there are none, like the two fields above it, so a
+        /// prompt that has nothing to do with a team is byte-for-byte the
+        /// prompt this protocol always sent.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peers: Vec<team::PeerPayload>,
     },
     /// Hands a message to the turn that is **already** streaming, which takes
     /// it on at its next step boundary rather than starting a turn of its own.
@@ -1185,6 +1201,14 @@ pub enum Command {
         /// there are none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skills: Vec<String>,
+        /// Messages teammates wrote, on [`Command::SendPrompt::peers`]' terms.
+        ///
+        /// A teammate that answers while a turn is running is answering *this*
+        /// turn, so the same reason steering exists at all applies to it:
+        /// waiting for the next turn would deliver the answer to a question
+        /// the model has already stopped asking.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peers: Vec<team::PeerPayload>,
     },
     /// Stops the turn that is streaming; a no-op when the engine is idle.
     /// When the turn is waiting on a permission, cancelling also refuses it.
@@ -2037,6 +2061,7 @@ mod tests {
                 text: "hello".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             },
             Command::SendPrompt {
                 text: "what does this do".to_owned(),
@@ -2045,6 +2070,7 @@ mod tests {
                     ..Default::default()
                 }],
                 skills: Vec::new(),
+                peers: Vec::new(),
             },
             Command::SendPrompt {
                 text: "explain these lines".to_owned(),
@@ -2054,12 +2080,14 @@ mod tests {
                     end: Some(20),
                 }],
                 skills: Vec::new(),
+                peers: Vec::new(),
             },
             Command::Steer {
                 id: "steer-1".to_owned(),
                 text: "actually, use the other file".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             },
             Command::Steer {
                 id: "steer-2".to_owned(),
@@ -2070,6 +2098,7 @@ mod tests {
                     end: Some(20),
                 }],
                 skills: Vec::new(),
+                peers: Vec::new(),
             },
             Command::CancelTurn,
             Command::ReplyPermission {
@@ -2275,6 +2304,7 @@ mod tests {
                     text: "hi".to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi"}"#,
             ),
@@ -2292,6 +2322,7 @@ mod tests {
                         },
                     ],
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs"},{"path":"README.md"}]}"#,
             ),
@@ -2306,6 +2337,7 @@ mod tests {
                         end: Some(40),
                     }],
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs","start":12,"end":40}]}"#,
             ),
@@ -2318,6 +2350,7 @@ mod tests {
                     text: "use the other file".to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 }),
                 r#"{"type":"steer","id":"steer-1","text":"use the other file"}"#,
             ),
@@ -2331,6 +2364,7 @@ mod tests {
                         end: Some(20),
                     }],
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 }),
                 r#"{"type":"steer","id":"steer-2","text":"this one","mentions":[{"path":"src/main.rs","start":10,"end":20}]}"#,
             ),
@@ -2342,6 +2376,7 @@ mod tests {
                     text: "use $porting here".to_owned(),
                     mentions: Vec::new(),
                     skills: vec!["porting".to_owned()],
+                    peers: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"use $porting here","skills":["porting"]}"#,
             ),
@@ -2351,8 +2386,42 @@ mod tests {
                     text: "and $tdd too".to_owned(),
                     mentions: Vec::new(),
                     skills: vec!["tdd".to_owned()],
+                    peers: Vec::new(),
                 }),
                 r#"{"type":"steer","id":"steer-3","text":"and $tdd too","skills":["tdd"]}"#,
+            ),
+            // A teammate's message rides beside them under the same absence
+            // rule, which is the whole of the backward-compatibility claim:
+            // every prompt above still writes the bytes it wrote before teams
+            // existed, because no `peers` key appears unless one is carried.
+            (
+                serde_json::to_string(&Command::SendPrompt {
+                    text: String::new(),
+                    mentions: Vec::new(),
+                    skills: Vec::new(),
+                    peers: vec![team::PeerPayload::new(
+                        "w1",
+                        Some("picked up W2".to_owned()),
+                        None,
+                        "on the protocol",
+                    )],
+                }),
+                r#"{"type":"send_prompt","text":"","peers":[{"from":"w1","summary":"picked up W2","body":"on the protocol"}]}"#,
+            ),
+            (
+                serde_json::to_string(&Command::Steer {
+                    id: "steer-4".to_owned(),
+                    text: String::new(),
+                    mentions: Vec::new(),
+                    skills: Vec::new(),
+                    peers: vec![team::PeerPayload::new(
+                        "w2",
+                        None,
+                        Some("red".to_owned()),
+                        "and I have it",
+                    )],
+                }),
+                r#"{"type":"steer","id":"steer-4","text":"","peers":[{"from":"w2","color":"red","body":"and I have it"}]}"#,
             ),
             (
                 serde_json::to_string(&Event::SteerConsumed {
@@ -2924,6 +2993,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             }
         );
 
@@ -2941,6 +3011,7 @@ mod tests {
                     end: None,
                 }],
                 skills: Vec::new(),
+                peers: Vec::new(),
             }
         );
     }
@@ -2962,6 +3033,7 @@ mod tests {
                 text: "use the other file".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             }
         );
 
@@ -2980,6 +3052,7 @@ mod tests {
                     end: None,
                 }],
                 skills: Vec::new(),
+                peers: Vec::new(),
             }
         );
     }
@@ -3363,6 +3436,40 @@ mod tests {
             unreachable!("the constructor built a peer part")
         };
         assert_eq!(summary.as_deref().map(str::len), Some(long.len()));
+    }
+
+    /// The wire's own door to that part caps on the way through, because it
+    /// goes through the constructor the cap lives in rather than around it —
+    /// which is what keeps a sender from spending the context window on a
+    /// display field by writing a long one.
+    #[test]
+    fn a_peer_payload_becomes_a_part_through_the_capping_constructor() {
+        let long = "e".repeat(team::DISPLAY_FIELD_CAP * 2);
+        let part = team::PeerPayload::new(
+            "w1",
+            Some(long.clone()),
+            Some("blue".to_owned()),
+            long.clone(),
+        )
+        .into_part();
+
+        let PartBody::Peer {
+            from,
+            summary,
+            color,
+            body,
+        } = &part.body
+        else {
+            unreachable!("a payload becomes a peer part and nothing else")
+        };
+        assert_eq!(from, "w1");
+        assert_eq!(
+            summary.as_deref().map(str::len),
+            Some(team::DISPLAY_FIELD_CAP),
+            "the display field is capped where every other path caps it"
+        );
+        assert_eq!(color.as_deref(), Some("blue"), "the color travels as given");
+        assert_eq!(body.len(), long.len(), "and the message itself is whole");
     }
 
     /// The one display-shaped part that is content: the request assembly

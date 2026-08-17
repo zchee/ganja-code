@@ -67,6 +67,7 @@ async fn a_provider_run_tool_is_recorded_rendered_and_never_executed() {
             text: "when did rust 2024 ship".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            peers: Vec::new(),
         })
         .await
         .expect("an idle engine accepts a prompt");

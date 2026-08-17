@@ -4239,6 +4239,7 @@ impl App {
                         text: prompt,
                         mentions,
                         skills,
+                        peers: Vec::new(),
                     })
                     .await
             }
@@ -4299,6 +4300,7 @@ impl App {
                 text: prompt.clone(),
                 mentions,
                 skills,
+                peers: Vec::new(),
             })
             .await;
 
@@ -5289,6 +5291,7 @@ mod tests {
                 text: "ask me".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts the prompt");
@@ -6977,6 +6980,7 @@ mod tests {
                 text: "run it".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                peers: Vec::new(),
             })
             .await
             .expect("an idle engine accepts the prompt");

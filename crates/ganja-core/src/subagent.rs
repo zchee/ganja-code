@@ -1118,6 +1118,7 @@ impl Child {
                 kind: TurnKind::Prompt {
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    peers: Vec::new(),
                 },
                 prompt: request.prompt.clone(),
                 permissions,
