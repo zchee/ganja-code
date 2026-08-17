@@ -89,9 +89,10 @@ pub enum Listen {
     },
     /// A Unix domain socket at exactly this path (**D505**). Its directory is
     /// created at `0700` when absent and refused when it is not ours at that
-    /// mode; a stale socket file there is unlinked, a live one is refused as
-    /// [`ServeError::SocketInUse`]; the bound socket is left at `0600` and
-    /// answers only peers of this process's uid.
+    /// mode; the name's lock is claimed — held by a live server, the name is
+    /// refused as [`ServeError::SocketInUse`] — a stale socket file there is
+    /// unlinked; the bound socket is left at `0600` and answers only peers of
+    /// this process's uid.
     Unix {
         /// The socket path.
         path: PathBuf,
@@ -250,10 +251,10 @@ pub enum ServeError {
         #[source]
         source: io::Error,
     },
-    /// A live server already answers at the socket path, and a live socket
-    /// is never stolen. [`Listen::Session`] walks past this to the next
-    /// name; [`Listen::Unix`] surfaces it.
-    #[error("a live server already answers at {}", path.display())]
+    /// A live server holds the socket's name — its lock, in [`socket`]'s
+    /// terms — and a live name is never touched. [`Listen::Session`] walks
+    /// past this to the next name; [`Listen::Unix`] surfaces it.
+    #[error("a live server already holds {}", path.display())]
     SocketInUse {
         /// The socket somebody else is holding.
         path: PathBuf,
@@ -318,12 +319,13 @@ impl Handle {
     ///
     /// What the accept loop failed with, when it failed rather than finished.
     pub async fn shutdown(self) -> io::Result<()> {
-        // A socket's name is given back *before* the listener closes, while it
-        // still answers: a peer binding into the same name meanwhile then
-        // finds nothing rather than a dead file — which it would unlink and
-        // replace, and which this side would then unlink again, taking the
-        // peer's live socket with it. Unlinking a bound socket only stops
-        // new connections; the ones open drain below like any other.
+        // A socket's file is unlinked *before* the server task — and with it
+        // the listener and the lock the name is held by — is torn down. Once
+        // the lock is released the next binder into this name may take it,
+        // unlink whatever file it finds as stale, and bind its own; an unlink
+        // from this side after that point would take the peer's live socket
+        // with it. Unlinking a bound socket only stops new connections; the
+        // ones open drain below like any other.
         if let Address::Unix(path) = &self.address
             && let Err(error) = std::fs::remove_file(path)
             && error.kind() != io::ErrorKind::NotFound
