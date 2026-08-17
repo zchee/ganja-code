@@ -700,7 +700,7 @@
     },
     "StatuslineElement": {
       "title": "Status bar element",
-      "description": "One thing the status bar can render: today's segments (activity, agent, effort, queued, jobs, tasks, dialogs, tokens, notice, hints), the HUD vocabulary the P14 screenshot pinned (git, model, context, session, cwd, todos), and rate, the tightest of the vendor's own rate-limit windows (D484). Plan and account meters are still absent: those need a vendor usage API ganja does not speak.",
+      "description": "One thing the status bar can render: today's segments (activity, agent, effort, queued, jobs, tasks, dialogs, teammates, tokens, notice, hints), the HUD vocabulary the P14 screenshot pinned (git, model, context, session, cwd, todos), and rate, the tightest of the vendor's own rate-limit windows (D484). Plan and account meters are still absent: those need a vendor usage API ganja does not speak.",
       "$comment": "crates/ganja-core/src/config.rs (StatuslineElement, rename_all = kebab-case).",
       "type": "string",
       "enum": [
@@ -711,6 +711,7 @@
         "jobs",
         "tasks",
         "dialogs",
+        "teammates",
         "tokens",
         "notice",
         "hints",

@@ -142,6 +142,8 @@ use crate::{
 
 /// A teammate that is a real `claude` pane (P25b).
 pub mod claude;
+/// The §6.2 pass the lead makes over its own inbox.
+pub mod lead_inbox;
 /// A teammate in a `ganja` pane of its own (P25b).
 pub mod pane;
 /// What a teammate may do, and who answers when it asks (**D-5**).
@@ -359,6 +361,41 @@ pub const RECENT_CALLS: usize = 8;
 
 /// §4.3's palette, assigned round-robin and memoized per name.
 const PALETTE: [&str; 4] = ["blue", "green", "pink", "purple"];
+
+/// Where the teams live under this build's own config home — Claude's
+/// `$CLAUDE_CONFIG_DIR/teams` (§2.1), read and written under ganja's home
+/// rather than under somebody else's.
+const TEAMS_DIR: &str = "teams";
+
+/// How much of a session id §2.1's implicit team name is built from.
+const TEAM_HEX: usize = 8;
+
+/// §2.1's implicit team for a session: `session-<first 8 hex of its id>`.
+///
+/// The id is a bare UUIDv7 since W1 (**D493**), so its first group is eight hex
+/// digits and this is a pure function of it — which is what lets a resumed
+/// session rejoin the team it left rather than orphaning one, and what lets a
+/// pane derive its lead's team from the `--parent-session-id` it was handed.
+///
+/// A stored id from before that migration is not UUID-shaped, and rather than
+/// mint a name [`TeamName::parse`] would refuse, such a session joins
+/// [`TeamName::default_team`] — §2.1's own fallback for a session with no team
+/// of its own, and the honest answer for an id there is no team name to derive.
+#[must_use]
+pub fn session_team(session_id: &str) -> TeamName {
+    let hex: String = session_id
+        .chars()
+        .take_while(|character| *character != '-')
+        .filter(char::is_ascii_hexdigit)
+        .take(TEAM_HEX)
+        .flat_map(char::to_lowercase)
+        .collect();
+    if hex.len() < TEAM_HEX {
+        return TeamName::default_team();
+    }
+
+    TeamName::parse(&format!("session-{hex}")).unwrap_or_else(|_| TeamName::default_team())
+}
 
 /// A `backend` argument nothing answers to.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -1013,6 +1050,32 @@ impl TeammateRegistry {
         }
     }
 
+    /// The registry a frontend installs for the session it has just opened.
+    ///
+    /// §2.1's implicit session team, resolved from the two things only a
+    /// frontend holds: where this build keeps its own directories, and which
+    /// conversation this process leads. The teams root is `<config home>/teams`
+    /// — Claude's `$CLAUDE_CONFIG_DIR/teams` under ganja's own home, because a
+    /// port that wrote into somebody else's config directory would be
+    /// discovering foreign state rather than interoperating with it.
+    ///
+    /// **The directory is not touched here.** A session that never spawns a
+    /// teammate leaves no team on disk, which is what makes installing this
+    /// unconditionally free: what a team costs is paid at the first spawn.
+    #[must_use]
+    pub fn for_session(
+        config_home: &std::path::Path,
+        session_id: &str,
+        cwd: impl Into<PathBuf>,
+    ) -> Self {
+        Self::new(
+            TeamsRoot::new(config_home.join(TEAMS_DIR)),
+            session_team(session_id),
+            session_id,
+            cwd,
+        )
+    }
+
     /// Sends every teammate's permission dialogs to `lead` (**D-5**).
     ///
     /// Called before anything is spawned: a teammate started without a surface
@@ -1103,6 +1166,73 @@ impl TeammateRegistry {
             lead: self.lead.as_str().to_owned(),
             members,
         }
+    }
+
+    /// What `teammate`'s backend can tell the lead about a delivery
+    /// (**D503**).
+    ///
+    /// Asked of the backend that spawned it rather than mapped from
+    /// [`MemberBackend`], so the answer is the implementation's own and there
+    /// is no second table to keep in step with the three [`Delivery`]
+    /// implementations. [`None`] for a name this registry does not hold —
+    /// including a peer some other process put in the team — and what a caller
+    /// makes of that is [`crate::teammate::lead_inbox::Delivered`]'s business.
+    #[must_use]
+    pub fn delivery_of(&self, teammate: &str) -> Option<Delivery> {
+        self.members()
+            .get(teammate)
+            .map(|member| member.surface.delivery())
+    }
+
+    /// Forgets `teammate`, and takes its record out of the team file (§6.2).
+    ///
+    /// What the lead does when it reads a `shutdown_approved`: the teammate has
+    /// already torn itself down on its own side, and this is the half that only
+    /// the lead can do — the roster it renders and the document a resumed
+    /// session would read both stop naming a conversation that has ended.
+    ///
+    /// The team file's read-modify-write is held under the same lock a spawn's
+    /// is, for the same reason: a retire racing a spawn would otherwise write
+    /// back a document missing whichever member the other had just added.
+    ///
+    /// Answers whether this registry was holding the name. A miss is ordinary
+    /// rather than exceptional — a shutdown read twice, or a peer another
+    /// process started — and the document is still looked at either way,
+    /// because the record is the half that outlives this process.
+    ///
+    /// **The roster is forgotten first, and a failing write does not put it
+    /// back.** Nothing is lost by that: the teammate has already torn itself
+    /// down — that is why its `shutdown_approved` exists — so what a re-added
+    /// member would buy is a row naming a conversation that has ended and a
+    /// shutdown with nothing to shut down. What the failure really costs is a
+    /// stale row in the *file*, which the caller says out loud.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError::TeamFile`] when the document could not be read or written,
+    /// and [`SpawnError::Lost`] when the blocking hop that does it did not come
+    /// back.
+    pub async fn retire(&self, teammate: &str) -> Result<bool, SpawnError> {
+        let held = self
+            .members
+            .lock()
+            .expect("the member map is never poisoned")
+            .remove(teammate)
+            .is_some();
+
+        let writing = self.team_file.lock().await;
+        let mut file = self.read_team().await?;
+        let before = file.members.len();
+        file.members.retain(|member| member.name != teammate);
+        if file.members.len() == before {
+            // Nothing to rewrite, and rewriting anyway would stage and rename a
+            // byte-identical document over a directory a real `claude` may be
+            // reading.
+            return Ok(held);
+        }
+        self.write_team(file, &writing).await?;
+
+        Ok(held)
     }
 
     /// Tells `teammate` that it is waiting on the lead's answer to
@@ -1683,7 +1813,7 @@ mod tests {
 
     use super::{
         DEFAULT_BACKEND, InProcess, MemberBackend, SpawnRequest, TeammateBackend, TeammateRegistry,
-        pane::GanjaPane,
+        pane::GanjaPane, session_team,
     };
     use crate::{
         Storage, permission::Permissions, provider::FakeProvider, tool::Registry as Tools,
@@ -1796,6 +1926,62 @@ mod tests {
         assert!(
             reserved(&registry).is_empty(),
             "a spawn that started nothing kept a name nobody can use"
+        );
+    }
+
+    /// §2.1's own example, and the property that makes it useful: one session
+    /// id always names one team, so a resume rejoins rather than orphans.
+    #[test]
+    fn a_session_names_its_own_team_and_a_pre_uuid_id_falls_back_to_the_default() {
+        assert_eq!(
+            session_team("224cbeab-4e62-497c-aa8f-d05cc33ce7ba").as_str(),
+            "session-224cbeab"
+        );
+        assert_eq!(
+            session_team("224CBEAB-4e62-497c-aa8f-d05cc33ce7ba").as_str(),
+            "session-224cbeab",
+            "the directory name is one spelling, whichever case the id is in"
+        );
+        // The per-process counter P1 minted and W1 retired: eight hex digits
+        // cannot be taken from it, so there is no team name to derive.
+        assert_eq!(session_team("ses_0001").as_str(), "default");
+        assert_eq!(session_team("").as_str(), "default");
+    }
+
+    /// The lead reading a `shutdown_approved` is what takes a member out of
+    /// both the roster it renders and the document a resume would read.
+    #[tokio::test]
+    async fn retiring_a_teammate_forgets_it_and_rewrites_the_team_file_without_it() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        registry
+            .spawn(
+                in_process(home.path()),
+                request("w1", DEFAULT_BACKEND, home.path()),
+            )
+            .await
+            .expect("the teammate starts");
+
+        assert_eq!(registry.view().members.len(), 2, "the lead and w1");
+        assert!(registry.retire("w1").await.expect("the team file rewrites"));
+
+        assert_eq!(
+            registry.view().members.len(),
+            1,
+            "only the lead is left in the roster"
+        );
+        let document = std::fs::read_to_string(registry.root().config_path(registry.team()))
+            .expect("the team file is on disk");
+        assert!(
+            !document.contains("\"w1\""),
+            "a retired member is out of the document too:\n{document}"
+        );
+        assert!(
+            !registry
+                .retire("w1")
+                .await
+                .expect("a second retire is fine"),
+            "a shutdown read twice is ordinary rather than an error"
         );
     }
 }

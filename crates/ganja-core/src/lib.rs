@@ -92,6 +92,19 @@ pub use ganja_protocol as protocol;
 /// provider/auth boundary carries no invariant anyone would gate — and both are
 /// named here so no caller had to notice.
 pub use ganja_provider::{auth, catalog};
+/// Claude's own team documents — the team file, the member records and the
+/// mailbox — as the module they would have been if they had not needed a crate
+/// of their own ([`crate::teammate`]'s neighbour, and its store).
+///
+/// Named here for the reason [`protocol`] and [`tool`] are: a frontend that
+/// leads a team has to be able to *write* one of these documents in a fixture,
+/// and reaching a second path dependency to do it would be a build-file change
+/// in every crate that ever tests a lead. What it deliberately does **not**
+/// invite is decoding one outside the engine: the classification a lead does
+/// over its own inbox lives in [`crate::teammate::lead_inbox`], beside the §6.1 loop
+/// that answers it, and a second copy of it in a frontend would be two readings
+/// of one format.
+pub use ganja_team as team;
 pub use ganja_tool as tool;
 pub use ganja_tool::watch;
 pub use lsp::Lsp;
