@@ -2579,6 +2579,7 @@ impl Engine {
             files: Arc::clone(&self.files),
             credentials: self.credentials.clone(),
             spawn: None,
+            postbox: None,
             ask: None,
             switch: None,
             jobs: None,

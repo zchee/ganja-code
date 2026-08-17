@@ -2992,6 +2992,7 @@ impl App {
             // credentials to guard, nothing to delegate to, and nobody to ask.
             credentials: Credentials::Unguarded,
             spawn: None,
+            postbox: None,
             ask: None,
             switch: None,
             jobs: None,

@@ -161,6 +161,7 @@ async fn a_files_own_write_does_not_condemn_it() {
         files: Arc::clone(&files),
         credentials: Credentials::Unguarded,
         spawn: None,
+        postbox: None,
         ask: None,
         switch: None,
         jobs: None,

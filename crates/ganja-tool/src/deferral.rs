@@ -529,6 +529,7 @@ mod tests {
             files: Arc::new(FileTimes::default()),
             credentials: crate::Credentials::Unguarded,
             spawn: None,
+            postbox: None,
             ask: None,
             switch: None,
             jobs: None,
