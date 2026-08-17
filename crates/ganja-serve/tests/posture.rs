@@ -6,14 +6,17 @@
 mod support;
 
 use base64::Engine as _;
-use ganja_serve::{Credentials, ServeError};
+use ganja_serve::{Credentials, Listen, ServeError};
 use secrecy::SecretString;
 use support::{base_url, engine, loopback_config};
 
 #[tokio::test]
 async fn a_non_loopback_bind_with_no_password_is_refused_at_startup() {
     let mut config = loopback_config();
-    config.hostname = "0.0.0.0".to_owned();
+    config.listen = Listen::Tcp {
+        hostname: "0.0.0.0".to_owned(),
+        port: Some(0),
+    };
     config.credentials = None;
 
     let refused = ganja_serve::serve(engine(), config).await;

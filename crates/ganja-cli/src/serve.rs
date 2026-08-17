@@ -86,8 +86,10 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     let handle = ganja_serve::serve(
         Arc::clone(&engine),
         ganja_serve::ServeConfig {
-            hostname: args.hostname.clone(),
-            port: args.port,
+            listen: ganja_serve::Listen::Tcp {
+                hostname: args.hostname.clone(),
+                port: args.port,
+            },
             credentials,
             directory: cwd,
             root: assembled.root,
@@ -100,12 +102,19 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     .await?;
 
     // Upstream's line (`serve.ts:20`) under this build's name: the payload a
-    // script parses, so stdout, flushed before anything waits.
-    println!(
-        "ganja server listening on http://{}:{}",
-        args.hostname,
-        handle.address().port()
-    );
+    // script parses, so stdout, flushed before anything waits. This
+    // subcommand asks for TCP, so the truth is a port; a socket, should the
+    // ask ever be one, is named as itself rather than dressed as a URL.
+    match handle.address() {
+        ganja_serve::Address::Tcp(bound) => {
+            println!(
+                "ganja server listening on http://{}:{}",
+                args.hostname,
+                bound.port()
+            );
+        }
+        socket => println!("ganja server listening on {socket}"),
+    }
     std::io::stdout()
         .flush()
         .context("failed to write the address line")?;

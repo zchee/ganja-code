@@ -13,7 +13,7 @@
 use std::{sync::Arc, time::Duration};
 
 use ganja_core::{Engine, permission::Permissions, provider::ProviderEvent, tool::Registry};
-use ganja_serve::{Handle, ServeConfig};
+use ganja_serve::{DEFAULT_HOSTNAME, Handle, Listen, ServeConfig};
 use ganja_testkit::{ScriptedProvider, says};
 
 /// A heartbeat quick enough that a suite sees one without waiting ten
@@ -56,15 +56,28 @@ pub fn engine() -> Arc<Engine> {
 pub fn loopback_config() -> ServeConfig {
     let directory = std::env::current_dir().expect("the working directory resolves");
     let mut config = ServeConfig::in_directory(directory);
-    config.port = Some(0);
+    config.listen = tcp(Some(0));
     config.heartbeat = FAST_HEARTBEAT;
 
     config
 }
 
-/// The base URL a suite drives `handle` at.
+/// A loopback TCP ask on `port` — the shape every suite here but the socket
+/// one binds.
+pub fn tcp(port: Option<u16>) -> Listen {
+    Listen::Tcp {
+        hostname: DEFAULT_HOSTNAME.to_owned(),
+        port,
+    }
+}
+
+/// The base URL a suite drives `handle` at — a TCP one; the socket suite
+/// speaks through a client bound to the path instead.
 pub fn base_url(handle: &Handle) -> String {
-    format!("http://{}", handle.address())
+    format!(
+        "http://{}",
+        handle.address().tcp().expect("these suites bind tcp")
+    )
 }
 
 /// One SSE frame: the event name and the data line.

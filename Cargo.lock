@@ -1407,6 +1407,7 @@ dependencies = [
  "ganja-core",
  "ganja-protocol",
  "ganja-testkit",
+ "libc",
  "reqwest",
  "secrecy",
  "serde",
