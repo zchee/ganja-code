@@ -101,8 +101,9 @@
 //! # Scope
 //!
 //! The construction path, the backend trait, the registry that owns a
-//! teammate's lifetime and the §6.1 runner ([`crate::teammate::runner`]). The
-//! permission posture is W5a/L4's, and the two pane bodies are P25b's —
+//! teammate's lifetime and the §6.1 runner ([`crate::teammate::runner`]). What
+//! a teammate is allowed to do, and who answers when it asks, is
+//! [`crate::teammate::posture`]'s; the two pane bodies are P25b's —
 //! [`crate::teammate::pane`] and [`crate::teammate::claude`] are the compiling
 //! skeletons they land in, declared here because this module owns every `mod`
 //! line in it.
@@ -143,6 +144,8 @@ use crate::{
 pub mod claude;
 /// A teammate in a `ganja` pane of its own (P25b).
 pub mod pane;
+/// What a teammate may do, and who answers when it asks (**D-5**).
+pub mod posture;
 /// Killing panes the lead left behind when it died (P25b).
 pub mod reaper;
 /// The §6.1 loop that drives one in-process teammate.
@@ -774,6 +777,14 @@ pub struct TeammateRegistry {
     /// The tasks a spawn started, kept so a shutdown can wait for them to
     /// actually finish rather than only ask them to.
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Where a teammate's permission dialogs are handed to the lead (**D-5**).
+    ///
+    /// [`None`] until a frontend attaches one, and a registry that never gets
+    /// one refuses every ask its teammates raise rather than leaving them
+    /// hanging — see [`crate::teammate::posture::Forwarding`]. Set rather than
+    /// constructed with, because the value a frontend has to build is a channel
+    /// it also drains, and a registry is useful to a test that has neither.
+    dialogs: Mutex<Option<tokio::sync::mpsc::Sender<posture::Forwarded>>>,
 }
 
 impl fmt::Debug for TeammateRegistry {
@@ -834,7 +845,20 @@ impl TeammateRegistry {
             members: Mutex::new(BTreeMap::new()),
             colors: Mutex::new(Colors::default()),
             tasks: Mutex::new(Vec::new()),
+            dialogs: Mutex::new(None),
         }
+    }
+
+    /// Sends every teammate's permission dialogs to `lead` (**D-5**).
+    ///
+    /// Called before anything is spawned: a teammate started without a surface
+    /// keeps the one it was started with for its whole life, because the
+    /// forwarding is a task of its own and the registry does not restart it.
+    pub fn forward_dialogs_to(&self, lead: tokio::sync::mpsc::Sender<posture::Forwarded>) {
+        *self
+            .dialogs
+            .lock()
+            .expect("the dialog surface is never poisoned") = Some(lead);
     }
 
     /// The team these teammates are members of.
@@ -1147,6 +1171,20 @@ impl TeammateRegistry {
         let mut tasks = self.tasks.lock().expect("the task list is never poisoned");
 
         if let Some(teammate) = handle.teammate() {
+            // Built before either task below is spawned, because building it is
+            // what registers its subscription: a forwarding that subscribed
+            // inside its own task would race the teammate's very first dialog
+            // (**D-5**).
+            let forwarding = posture::Forwarding::new(
+                Arc::clone(teammate),
+                posture::Posture::for_spawn(spec),
+                self.dialogs
+                    .lock()
+                    .expect("the dialog surface is never poisoned")
+                    .clone(),
+            );
+            tasks.push(tokio::spawn(forwarding.run(self.cancel.child_token())));
+
             let events = teammate.engine().subscribe_droppable();
             tasks.push(tokio::spawn(fold_calls(
                 events,
