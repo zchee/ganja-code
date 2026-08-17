@@ -599,11 +599,20 @@ pub fn ask_of(agent_id: &str, request: &Event) -> Option<PermissionRequest> {
 /// not by session, and the conversation whose screen this dialog lands on is
 /// the lead's — which is what a client filtering events by session would
 /// attribute it to anyway.
+///
+/// **The dialog's id is minted here, never taken from the frame.** The
+/// frame's `request_id` is a member-supplied string, and the lead's frontend
+/// keys its open dialogs — its own engine's and its teammates' — on the
+/// [`PermissionId`] this carries: two members reusing one id, or an id equal
+/// to one of the lead's own, would misroute or orphan a dialog. A fresh
+/// UUIDv7 keeps that keyspace the lead's alone; the frame's own id travels
+/// beside the dialog in whatever answers it (`lead_inbox`'s `Answer`), which
+/// is where it is spent — on the `permission_response` the asker reads back.
 #[must_use]
 pub fn dialog_of(session_id: SessionId, request: PermissionRequest) -> Event {
     Event::PermissionRequested {
         session_id,
-        id: PermissionId::from(request.request_id),
+        id: PermissionId::ascending(),
         call_id: request.tool_use_id,
         tool: request.tool_name,
         title: request.description,
@@ -992,7 +1001,11 @@ mod tests {
         else {
             panic!("a dialog is a permission request");
         };
-        assert_eq!(id.as_str(), "req-1");
+        assert_ne!(
+            id.as_str(),
+            "req-1",
+            "the dialog's id is the lead's own mint, never the member's string"
+        );
         assert_eq!(tool, "bash");
         assert_eq!(title, "rm -rf build");
         assert_eq!(args, &json!({"command": "rm -rf build"}));

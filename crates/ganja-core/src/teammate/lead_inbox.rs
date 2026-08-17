@@ -44,6 +44,16 @@
 //! that refusal is written back too, because a pane whose ask vanished into a
 //! file would wait on it forever.
 //!
+//! What a routed ask proves, and what it does not: that a member's **process**
+//! asked, not that its harness did — `permission_request` is agent-sendable
+//! (§5.1), so a member's model can compose one through `send_message` and
+//! its text reaches the lead's dialog. The teammate-name prefix the frontend
+//! puts on the title is the mitigation on the reading side, and a fabricated
+//! ask is harmless on the answering side only because the member's
+//! [`crate::teammate::member::Asks::resolve`] applies an answer solely to a
+//! request its own engine is still waiting on — a made-up id is answered into
+//! a mailbox and ignored there as stale.
+//!
 //! Two drops are deliberate rather than unimplemented, and §7-1 is why:
 //! `team_permission_update` never travels a mailbox in this build — the
 //! mailbox is not an escalation channel — and `permission_response` is the
@@ -884,10 +894,10 @@ mod tests {
                 forwarded.request
             );
         };
-        assert_eq!(
+        assert_ne!(
             id.as_str(),
             "req-1",
-            "the dialog id is the pane's request id"
+            "the dialog id is the lead's own mint, never the pane's string"
         );
         assert_eq!(tool, "bash");
         assert_eq!(title, "rm -rf build");
@@ -914,6 +924,67 @@ mod tests {
             crate::protocol::PermissionReply::Once,
             "and it says what the person said"
         );
+    }
+
+    /// A member-supplied request id never becomes the key a lead's dialogs
+    /// are held under: two members reusing one id get two dialogs the lead
+    /// can tell apart, and each answer lands in the inbox of the member that
+    /// asked, carrying that member's own id back.
+    #[tokio::test]
+    async fn two_members_reusing_one_request_id_get_two_dialogs_and_the_right_answers() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        let (surface, mut dialogs) = tokio::sync::mpsc::channel(4);
+        registry.forward_dialogs_to(surface);
+        write_frame(&registry.lead_inbox(), "w1", &ask("shared"));
+        write_frame(&registry.lead_inbox(), "w2", &ask("shared"));
+
+        let pass = LeadInbox::new(Arc::clone(&registry)).poll().await;
+        assert_eq!(pass.asked.len(), 2, "{pass:?}");
+
+        let first = dialogs.try_recv().expect("w1's dialog");
+        let second = dialogs.try_recv().expect("w2's dialog");
+        assert!(dialogs.try_recv().is_err());
+        assert_eq!(first.teammate, "w1");
+        assert_eq!(second.teammate, "w2");
+        let (
+            crate::protocol::Event::PermissionRequested { id: one, .. },
+            crate::protocol::Event::PermissionRequested { id: two, .. },
+        ) = (&first.request, &second.request)
+        else {
+            panic!("the channel carries permission requests");
+        };
+        assert_ne!(one, two, "one member's id cannot shadow another's dialog");
+
+        first
+            .reply
+            .send(crate::protocol::PermissionReply::Once)
+            .expect("w1's answer task is waiting");
+        second
+            .reply
+            .send(crate::protocol::PermissionReply::Reject)
+            .expect("w2's answer task is waiting");
+
+        for (name, reply) in [
+            ("w1", crate::protocol::PermissionReply::Once),
+            ("w2", crate::protocol::PermissionReply::Reject),
+        ] {
+            let inbox = registry.root().inbox_path(
+                registry.team(),
+                &MemberName::parse(name).expect("a member name"),
+            );
+            let held = answered(&inbox).await;
+            assert_eq!(held.len(), 1, "one answer for {name}: {held:?}");
+            let Some(Frame::PermissionResponse(response)) = held[0].frame() else {
+                panic!("the answer is a permission response: {:?}", held[0]);
+            };
+            assert_eq!(
+                response.request_id(),
+                "shared",
+                "the frame's own id goes back to {name}"
+            );
+            assert_eq!(member::reply_of(&response), reply, "{name}'s own answer");
+        }
     }
 
     /// An ask nobody can be shown — no dialog surface at all — is refused
