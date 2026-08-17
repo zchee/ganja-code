@@ -178,12 +178,18 @@ const WAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
 ///
 /// 1. **The primary keys are composite**, `(session_id, id)` on a message and
 ///    `(session_id, message_id, id)` on a part, which is exactly the key the
-///    file layout used: `message/<sid>/<mid>.json`. Ganja's ids are
-///    `<millis hex><process-local counter hex>` and are unique only within
-///    their parent — two `ganja` processes in one project can mint the same
-///    `msg_…` in the same millisecond, and under upstream's bare `id` primary
-///    key the upsert would silently overwrite the *other* session's message.
-///    The composite key makes that a different row, as it always was.
+///    file layout used: `message/<sid>/<mid>.json`. A session id is the
+///    namespace a message id is unique *in*, and the key says so. It was
+///    written when ganja's ids were `<millis hex><process-local counter hex>`,
+///    where two `ganja` processes in one project minting the same `msg_…` in
+///    one millisecond was not a risk but a certainty; ids are UUIDv7 now
+///    (**D493**) and that collision is merely astronomically unlikely. The key
+///    stays, for two reasons that outlive the arithmetic: it is the index the
+///    read path uses — `ORDER BY id` within a session, and the cascade's child
+///    lookup, both served by its prefix, as the paragraph below says — and it
+///    is what a collision costs nothing to survive. Under upstream's bare `id`
+///    an upsert that met one would silently overwrite the *other* session's
+///    message; here it lands in its own row, as it always did.
 /// 2. **A message names its session without a foreign key to it.** The only
 ///    deletion this store performs is [`Storage::delete_message`]; there is no
 ///    delete-session, so a cascade from `session` would never fire, and a
