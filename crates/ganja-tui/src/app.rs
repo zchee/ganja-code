@@ -5199,16 +5199,23 @@ mod tests {
 
         store_session(
             directory,
-            "ses_newest",
+            "0198f2c4-a1b0-7000-8000-000000000011",
             Some("porting the session store"),
             now,
             30 * 1_000,
             12_400,
         );
-        store_session(directory, "ses_middle", None, now, 5 * MINUTE, 1_234);
         store_session(
             directory,
-            "ses_oldest",
+            "0198f2c4-a1b0-7000-8000-000000000012",
+            None,
+            now,
+            5 * MINUTE,
+            1_234,
+        );
+        store_session(
+            directory,
+            "0198f2c4-a1b0-7000-8000-000000000013",
             Some("a first look at the tool registry"),
             now,
             3 * HOUR,
@@ -8033,7 +8040,7 @@ mod tests {
                 .as_ref()
                 .and_then(|sessions| sessions.selected())
                 .map(|info| info.id.as_str()),
-            Some("ses_middle"),
+            Some("0198f2c4-a1b0-7000-8000-000000000012"),
             "j should move down one row rather than reaching the editor"
         );
 
@@ -10427,13 +10434,17 @@ mod tests {
         let directory = temporary();
         store_session(
             &directory,
-            "ses_root",
+            "0198f2c4-a1b0-7000-8000-000000000014",
             Some("the conversation"),
             1_000,
             0,
             10,
         );
-        store_child(&directory, "ses_child", "ses_root");
+        store_child(
+            &directory,
+            "0198f2c4-a1b0-7000-8000-000000000015",
+            "0198f2c4-a1b0-7000-8000-000000000014",
+        );
         let mut app = persistent_app(&directory);
 
         app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
@@ -10460,7 +10471,7 @@ mod tests {
 
         assert_eq!(
             listed,
-            vec!["ses_root".to_owned()],
+            vec!["0198f2c4-a1b0-7000-8000-000000000014".to_owned()],
             "a delegated turn's session is not one to resume into"
         );
 
@@ -11711,7 +11722,7 @@ mod tests {
         let directory = temporary();
         store_session(
             &directory,
-            "ses_copied",
+            "0198f2c4-a1b0-7000-8000-000000000016",
             Some("a stored talk"),
             10_000,
             0,
@@ -11722,7 +11733,9 @@ mod tests {
         let mut app = persistent_app(&directory).with_clipboard(Box::new(clipboard));
         let stored = app
             .engine
-            .resume(&SessionId::from("ses_copied".to_owned()))
+            .resume(&SessionId::from(
+                "0198f2c4-a1b0-7000-8000-000000000016".to_owned(),
+            ))
             .await
             .expect("the stored session resumes");
         app.seed(stored);
@@ -11732,7 +11745,7 @@ mod tests {
         let copied = log.lock().expect("the lock holds").join("");
         assert!(copied.starts_with("# a stored talk\n\n"), "got: {copied}");
         assert!(
-            copied.contains("**Session ID:** ses_copied\n"),
+            copied.contains("**Session ID:** 0198f2c4-a1b0-7000-8000-000000000016\n"),
             "got: {copied}"
         );
         assert!(

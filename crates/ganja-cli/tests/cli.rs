@@ -969,8 +969,12 @@ fn a_session_a_task_call_spawned_is_not_listed_beside_the_one_that_asked_for_it(
     let data = data();
     let project = project();
     let storage = session_storage(&data, project.path());
-    store(&storage, "ses_root", None);
-    store(&storage, "ses_delegated", Some("ses_root"));
+    store(&storage, "0198f2c4-a1b0-7000-8000-000000000001", None);
+    store(
+        &storage,
+        "0198f2c4-a1b0-7000-8000-000000000002",
+        Some("0198f2c4-a1b0-7000-8000-000000000001"),
+    );
 
     ganja(&data)
         .current_dir(project.path())
@@ -978,8 +982,8 @@ fn a_session_a_task_call_spawned_is_not_listed_beside_the_one_that_asked_for_it(
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("ses_root")
-                .and(predicate::str::contains("ses_delegated").not()),
+            predicate::str::contains("0198f2c4-a1b0-7000-8000-000000000001")
+                .and(predicate::str::contains("0198f2c4-a1b0-7000-8000-000000000002").not()),
         );
 }
 
@@ -991,7 +995,11 @@ fn a_project_whose_every_session_is_delegated_reads_as_one_with_none() {
     let data = data();
     let project = project();
     let storage = session_storage(&data, project.path());
-    store(&storage, "ses_delegated", Some("ses_root"));
+    store(
+        &storage,
+        "0198f2c4-a1b0-7000-8000-000000000002",
+        Some("0198f2c4-a1b0-7000-8000-000000000001"),
+    );
 
     ganja(&data)
         .current_dir(project.path())
