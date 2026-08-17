@@ -17,6 +17,8 @@
 //! [`PartBody`] variants, changing nothing already on the wire — which is the
 //! pattern every further variant is expected to follow.
 
+pub mod team;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
