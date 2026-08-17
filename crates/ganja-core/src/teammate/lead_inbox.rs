@@ -60,6 +60,21 @@
 //! *answer* to a question, which the lead never asks over a frame. Both are
 //! named and pruned rather than left to be read again every second.
 //!
+//! # Two roots, because a real `claude` reads only one of them
+//!
+//! A lead's replies do not all arrive in the same directory. A `ganja` teammate —
+//! in-process or in a pane — writes into the team under ganja's own config home,
+//! which is where [`crate::teammate::TeammateRegistry`] keeps its documents. A
+//! real `claude` writes into `$CLAUDE_CONFIG_DIR/teams` and nothing will
+//! persuade it otherwise (§2.1), which is why
+//! [`crate::teammate::claude::teams_root`] is public. So a lead whose roster
+//! holds a claude-backed member reads **both** `team-lead` inboxes each pass
+//! (`LeadInbox::inboxes`), and a lead whose roster holds none reads only its
+//! own — reading, and on a delivery writing, inside another program's config
+//! directory is not something to do speculatively. When the two roots name one
+//! directory (AC-13 points the lead's own root at claude's) it is one read, not
+//! two: the same file twice in a pass would hand the same message out twice.
+//!
 //! # One write, not two
 //!
 //! [`crate::teammate::runner`]'s note applies unchanged: everything one pass finished
@@ -70,13 +85,19 @@
 //! in the pass and are pruned by the caller once they have really landed
 //! ([`crate::teammate::lead_inbox::LeadInbox::delivered`]).
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
-use ganja_protocol::team::{Frame, IdleNotification, PermissionRequest, ShutdownApproved};
-use ganja_team::{MailboxMessage, MemberName, mailbox, record};
+use ganja_protocol::team::{
+    Frame, IdleNotification, MemberBackend, PermissionRequest, ShutdownApproved,
+};
+use ganja_team::{MailboxMessage, MemberName, TeamsRoot, mailbox, record};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Delivery, TeammateRegistry, member, posture::Forwarded, runner::FRAME_HEAD};
+use super::{Delivery, TeammateRegistry, claude, member, posture::Forwarded, runner::FRAME_HEAD};
 use crate::protocol::{PermissionReply, SessionId};
 
 /// §6's lead cadence, and deliberately half the teammate's own
@@ -248,18 +269,96 @@ impl Pass {
 pub struct LeadInbox {
     registry: Arc<TeammateRegistry>,
     inbox: PathBuf,
+    /// Where a real `claude` teammate answers, when this machine resolves such a
+    /// root at all ([`claude::teams_root`]).
+    ///
+    /// Resolved once, at construction, because `CLAUDE_CONFIG_DIR` does not
+    /// change under a running process — and *held* rather than re-read per pass
+    /// so a tick does not touch the environment a thousand times an hour.
+    /// [`None`] only when neither that variable nor a home directory resolves,
+    /// which is [`claude::REFUSED_NO_CONFIG_DIR`]'s own case and one in which no
+    /// claude teammate could have been spawned either.
+    claude: Option<TeamsRoot>,
 }
 
 impl LeadInbox {
-    /// The inbox of the team `registry` leads.
+    /// The inbox of the team `registry` leads, and the root a `claude` teammate
+    /// answers into as this machine resolves it.
     #[must_use]
     pub fn new(registry: Arc<TeammateRegistry>) -> Self {
+        Self::reading(registry, claude::teams_root())
+    }
+
+    /// The same, over a claude root given as a **value**.
+    ///
+    /// [`LeadInbox::new`] reads that root off the environment; this takes it,
+    /// which is the split [`claude::teams_root`] and its own `root_under` already
+    /// keep — a caller that holds a root of its own (a test, or a lead told where
+    /// to look) does not have to mutate the process it runs in to be heard.
+    #[must_use]
+    pub fn reading(registry: Arc<TeammateRegistry>, claude: Option<TeamsRoot>) -> Self {
         let inbox = registry.lead_inbox();
 
-        Self { registry, inbox }
+        Self {
+            registry,
+            inbox,
+            claude,
+        }
+    }
+
+    /// Every inbox this lead's replies can arrive in, in the order they are read.
+    ///
+    /// Its own, always — and the `team-lead` inbox under **claude's** root for as
+    /// long as the roster holds a claude-backed member. That second read is the
+    /// whole of the fix: a real `claude` writes where a real `claude` reads
+    /// (§2.1), and a lead that polled only `<config home>/teams` never saw the
+    /// answer to anything it had asked. Both conditions are load-bearing —
+    /// without the roster check a lead with no claude teammate would be reading,
+    /// and on a delivery *writing*, inside somebody else's config directory for
+    /// no reason.
+    ///
+    /// One path when the two roots are the same directory, which is AC-13's own
+    /// configuration: the same file read twice in a pass would hand the same
+    /// message out twice.
+    fn inboxes(&self) -> Vec<PathBuf> {
+        let mut inboxes = vec![self.inbox.clone()];
+        if !self.registry.holds_backend(MemberBackend::Claude) {
+            return inboxes;
+        }
+        let Some(root) = self.claude.as_ref() else {
+            // Unreachable through a spawn — `ClaudePane::spawn` refuses before a
+            // member exists when this root cannot be had — so it is said once at
+            // debug rather than warned about on every tick.
+            tracing::debug!(
+                reason = claude::REFUSED_NO_CONFIG_DIR,
+                "a claude teammate is in the roster but its root cannot be resolved"
+            );
+
+            return inboxes;
+        };
+        let under_claude = root.inbox_path(self.registry.team(), self.registry.lead());
+        if under_claude != self.inbox {
+            inboxes.push(under_claude);
+        }
+
+        inboxes
     }
 
     /// One pass: read, act on the control frames, hand back the rest.
+    ///
+    /// Over every inbox `LeadInbox::inboxes` names, in one [`Pass`]: which
+    /// directory a teammate's answer arrived in is a fact about that teammate's
+    /// backend and nothing a frontend should have to know.
+    pub async fn poll(&self) -> Pass {
+        let mut pass = Pass::default();
+        for inbox in self.inboxes() {
+            self.poll_one(&inbox, &mut pass).await;
+        }
+
+        pass
+    }
+
+    /// One pass over one inbox.
     ///
     /// Control frames are pruned **here**, because acting on one is the whole
     /// of what it needed and leaving it would be acting on it again a second
@@ -268,27 +367,30 @@ impl LeadInbox {
     /// [`crate::teammate::lead_inbox::LeadInbox::delivered`] says so — a lead that quit between the read and
     /// the delivery loses nothing, which is the property a durable mailbox
     /// exists for.
-    pub async fn poll(&self) -> Pass {
-        let mut pass = Pass::default();
-        let path = self.inbox.clone();
+    async fn poll_one(&self, inbox: &Path, pass: &mut Pass) {
+        let path = inbox.to_path_buf();
         let contents = match tokio::task::spawn_blocking(move || mailbox::read(&path)).await {
             Ok(Ok(contents)) => contents,
             Ok(Err(error)) => {
-                tracing::warn!(%error, "the lead's inbox could not be read");
+                tracing::warn!(
+                    inbox = %inbox.display(),
+                    %error,
+                    "the lead's inbox could not be read"
+                );
 
-                return pass;
+                return;
             }
             Err(error) => {
                 tracing::warn!(%error, "an inbox read was lost");
 
-                return pass;
+                return;
             }
         };
         for report in &contents.reports {
             tracing::warn!("{report}");
         }
         if contents.valid.is_empty() {
-            return pass;
+            return;
         }
 
         let mut handled = Vec::new();
@@ -297,14 +399,12 @@ impl LeadInbox {
                 pass.messages.push(self.plain(message));
                 continue;
             };
-            self.apply(kind, message, &mut pass).await;
+            self.apply(kind, message, pass).await;
             handled.push(mailbox::identity(message));
         }
         if !handled.is_empty() {
-            self.prune(handled).await;
+            self.prune(inbox, handled).await;
         }
-
-        pass
     }
 
     /// Takes the messages a caller really delivered out of the inbox.
@@ -312,12 +412,20 @@ impl LeadInbox {
     /// Separate from [`crate::teammate::lead_inbox::LeadInbox::poll`] because only the caller knows: a batch
     /// the engine refused is left where it was and offered again next pass,
     /// which is a delivery delayed rather than a delivery lost.
+    ///
+    /// Every inbox the pass read, because a [`Delivered`] does not carry which
+    /// one it came from — §2.3's identity is a function of the message, so
+    /// pruning it from an inbox that never held it is a rewrite that changes
+    /// nothing rather than a wrong answer. That costs one extra write per
+    /// delivered batch, and only for a lead that really has a `claude` teammate.
     pub async fn delivered(&self, messages: &[Delivered]) {
         if messages.is_empty() {
             return;
         }
-        self.prune(messages.iter().map(Delivered::identity).collect())
-            .await;
+        let identities: Vec<mailbox::Identity> = messages.iter().map(Delivered::identity).collect();
+        for inbox in self.inboxes() {
+            self.prune(&inbox, identities.clone()).await;
+        }
     }
 
     /// A message nobody has to interpret, as the frontend takes it.
@@ -531,9 +639,9 @@ impl LeadInbox {
         pass.dropped.push(kind);
     }
 
-    /// Takes entries out of the inbox, in one write.
-    async fn prune(&self, handled: Vec<mailbox::Identity>) {
-        let path = self.inbox.clone();
+    /// Takes entries out of one inbox, in one write.
+    async fn prune(&self, inbox: &Path, handled: Vec<mailbox::Identity>) {
+        let path = inbox.to_path_buf();
         let outcome =
             tokio::task::spawn_blocking(move || mailbox::prune_delivered(&path, &handled))
                 .await
@@ -640,7 +748,10 @@ mod tests {
         Storage,
         permission::Permissions,
         provider::FakeProvider,
-        teammate::{DEFAULT_BACKEND, Delivery, InProcess, SpawnRequest, TeammateRegistry, member},
+        teammate::{
+            DEFAULT_BACKEND, Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec,
+            TeammateBackend, TeammateRegistry, Unsupported, member,
+        },
         tool::Registry as Tools,
     };
 
@@ -1127,6 +1238,186 @@ mod tests {
             !document.contains("\"w1\""),
             "and the document a resume reads no longer names it:\n{document}"
         );
+    }
+
+    /// A backend that answers `claude` and makes a pane out of nothing.
+    ///
+    /// A fixture rather than [`crate::teammate::claude::ClaudePane`], which would
+    /// need a tmux server and a `claude` on the machine to reach this test's one
+    /// question: what a lead does when the **roster** holds a claude-backed
+    /// member. `owns_inbox` mirrors the real one so no stray prompt lands under
+    /// the ganja root and the assertions below count only what they meant to.
+    #[derive(Debug)]
+    struct AsClaude;
+
+    #[async_trait::async_trait]
+    impl TeammateBackend for AsClaude {
+        fn backend(&self) -> MemberBackend {
+            MemberBackend::Claude
+        }
+
+        fn owns_inbox(&self) -> bool {
+            true
+        }
+
+        async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
+            Ok(Handle::Pane {
+                pane_id: "%17".to_owned(),
+                birth: "48213".to_owned(),
+            })
+        }
+
+        async fn kill(&self, _handle: &Handle) {}
+
+        fn delivery(&self) -> Delivery {
+            Delivery::FireAndForget
+        }
+    }
+
+    /// Puts a claude-backed `w1` in the roster.
+    async fn claude_member(registry: &Arc<TeammateRegistry>, cwd: &std::path::Path) {
+        registry
+            .spawn(
+                Arc::new(AsClaude),
+                SpawnRequest {
+                    name: "w1".to_owned(),
+                    backend: MemberBackend::Claude,
+                    agent_type: "general".to_owned(),
+                    model: "recorder-model".to_owned(),
+                    color: None,
+                    prompt: "hold the fort".to_owned(),
+                    cwd: cwd.to_path_buf(),
+                    plan_mode_required: false,
+                    bypass: false,
+                },
+            )
+            .await
+            .expect("the claude-backed member is registered");
+    }
+
+    /// One idle frame, as a `claude` pane's harness would write it.
+    fn went_idle() -> Frame {
+        Frame::IdleNotification(IdleNotification {
+            from: "w1".to_owned(),
+            timestamp: record::now_iso8601(),
+            idle_reason: None,
+            summary: Some("read the brief".to_owned()),
+            completed_task_id: None,
+            completed_status: None,
+            failure_reason: None,
+        })
+    }
+
+    /// **A real `claude` answers under its own root, and the lead reads it
+    /// there.**
+    ///
+    /// The gap this closes: `$CLAUDE_CONFIG_DIR/teams` is where a `claude`
+    /// teammate writes (§2.1) and `<ganja config home>/teams` is where the lead's
+    /// own inbox lives, so a pass over one root alone never saw the other's
+    /// replies at all. Both are read here, in one pass, and each is pruned where
+    /// its own entries were.
+    #[tokio::test]
+    async fn a_claude_teammates_answer_under_its_own_root_reaches_the_leads_pass() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let elsewhere = tempfile::tempdir().expect("a temporary claude config home");
+        let registry = registry(home.path());
+        let claude = ganja_team::TeamsRoot::new(elsewhere.path().join("teams"));
+        claude_member(&registry, home.path()).await;
+
+        // A frame in claude's root, and a plain message in the lead's own — so
+        // the pass has to have read both to hand back both.
+        let under_claude = claude.inbox_path(registry.team(), registry.lead());
+        write_frame(&under_claude, "w1", &went_idle());
+        write(&registry.lead_inbox(), "w2", "the parser is done");
+
+        let lead = LeadInbox::reading(Arc::clone(&registry), Some(claude.clone()));
+        let pass = lead.poll().await;
+
+        assert_eq!(pass.idle.len(), 1, "the claude root was read: {pass:?}");
+        assert_eq!(pass.idle[0].summary.as_deref(), Some("read the brief"));
+        assert_eq!(pass.messages.len(), 1, "and so was the lead's own");
+        assert_eq!(pass.messages[0].from, "w2");
+        assert!(
+            mailbox::read(&under_claude)
+                .expect("claude's inbox reads")
+                .valid
+                .is_empty(),
+            "a frame acted on is pruned in the root it was found in"
+        );
+        assert_eq!(
+            mailbox::read(&registry.lead_inbox())
+                .expect("the lead's inbox reads")
+                .valid
+                .len(),
+            1,
+            "and a plain message is still owed until the caller delivers it"
+        );
+
+        lead.delivered(&pass.messages).await;
+
+        assert!(
+            mailbox::read(&registry.lead_inbox())
+                .expect("the lead's inbox reads")
+                .valid
+                .is_empty(),
+            "a delivered message does not remain"
+        );
+    }
+
+    /// The gate: a lead with no claude teammate does not read — and on a
+    /// delivery, does not write — inside another program's config directory.
+    #[tokio::test]
+    async fn a_lead_with_no_claude_teammate_never_looks_in_claudes_root() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let elsewhere = tempfile::tempdir().expect("a temporary claude config home");
+        let registry = registry(home.path());
+        let claude = ganja_team::TeamsRoot::new(elsewhere.path().join("teams"));
+        let under_claude = claude.inbox_path(registry.team(), registry.lead());
+        write_frame(&under_claude, "w1", &went_idle());
+
+        let pass = LeadInbox::reading(Arc::clone(&registry), Some(claude.clone()))
+            .poll()
+            .await;
+
+        assert!(
+            pass.is_empty(),
+            "nothing of another program's is this lead's to read: {pass:?}"
+        );
+        assert_eq!(
+            mailbox::read(&under_claude)
+                .expect("claude's inbox reads")
+                .valid
+                .len(),
+            1,
+            "and nothing of it was pruned either"
+        );
+
+        // The same lead, once a claude member joins, does read it — so what the
+        // assertions above pin is the roster and not the path.
+        claude_member(&registry, home.path()).await;
+        let pass = LeadInbox::reading(Arc::clone(&registry), Some(claude))
+            .poll()
+            .await;
+        assert_eq!(pass.idle.len(), 1, "{pass:?}");
+    }
+
+    /// AC-13's configuration — the lead's own root pointed at claude's — is one
+    /// inbox, not two: a file read twice in a pass would hand the same message
+    /// out twice, and the second delivery is one the frontend cannot tell from a
+    /// teammate having said it again.
+    #[tokio::test]
+    async fn one_directory_reached_two_ways_is_still_read_once() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        claude_member(&registry, home.path()).await;
+        let collapsed = registry.root().clone();
+        write(&registry.lead_inbox(), "w1", "the parser is done");
+
+        let pass = LeadInbox::reading(Arc::clone(&registry), Some(collapsed))
+            .poll()
+            .await;
+
+        assert_eq!(pass.messages.len(), 1, "once, not twice: {pass:?}");
     }
 
     #[test]

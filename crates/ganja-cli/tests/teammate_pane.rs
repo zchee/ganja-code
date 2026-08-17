@@ -380,6 +380,40 @@ fn signal(pid: &str, signal: &str) {
     assert!(status.success(), "kill -{signal} {pid} failed: {status}");
 }
 
+/// A process held still (`SIGSTOP`), let go again however the test ends.
+///
+/// The release has to be a [`Drop`] rather than a line at the end of the
+/// bracket: every `wait_for` between the two signals panics on a timeout, and a
+/// trailing `kill -CONT` would then never run. A **stopped** process does not
+/// act on the `SIGHUP` a `kill-server` sends it either, so the lead, its pane's
+/// `ganja` and the tmux server would all outlive the run — a failing test
+/// leaving three processes behind, which is how a suite starts wedging the
+/// machine it runs on.
+struct Held {
+    pid: String,
+}
+
+impl Held {
+    /// Stops `pid` now, and answers with what will let it go.
+    fn stop(pid: &str) -> Self {
+        signal(pid, "STOP");
+
+        Self {
+            pid: pid.to_owned(),
+        }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // Deliberately not [`signal`]: that one asserts, and a `Drop` that
+        // panics while the test is already panicking aborts the process and
+        // takes the failure message with it. A `kill` that did not land is
+        // nothing this can do anything about anyway.
+        let _ = Command::new("kill").args(["-CONT", &self.pid]).status();
+    }
+}
+
 /// **AC-11.** `/team spawn w1 --backend pane` in a real lead makes a real pane
 /// teammate on a private tmux server; the member runs its seeded task and
 /// reports; `/team shutdown w1` ends in the lead reading the approval and the
@@ -459,7 +493,7 @@ fn a_pane_teammate_spawned_with_backend_pane_is_created_and_killed_on_shutdown_a
     // and asserted to have read it — the frame gone from an inbox that held
     // it. Two facts in sequence, neither of them a race.
     let lead_pid = tmux.pane_pid(&lead);
-    signal(&lead_pid, "STOP");
+    let held = Held::stop(&lead_pid);
     wait_for("the member's seeded turn", &tmux, &lead, || {
         tmux.screen(&pane).contains(REPLY).then_some(())
     });
@@ -475,7 +509,7 @@ fn a_pane_teammate_spawned_with_backend_pane_is_created_and_killed_on_shutdown_a
                 .then_some(())
         },
     );
-    signal(&lead_pid, "CONT");
+    drop(held);
     wait_for(
         "the lead to read the idle notification",
         &tmux,
