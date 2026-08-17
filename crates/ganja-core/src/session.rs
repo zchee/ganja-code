@@ -5275,6 +5275,7 @@ mod tests {
             persistence: None,
             jobs: None,
             hooks: None,
+            teammates: None,
         };
 
         let spawn = Spawn {

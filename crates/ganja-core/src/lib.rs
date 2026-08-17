@@ -58,11 +58,16 @@ pub mod provider;
 pub mod session;
 pub mod snapshot;
 pub mod storage;
-/// Runs the second agent loop a `task` call delegates to.
+/// Runs the second agent loop a `task` call delegates to, and starts the
+/// teammates that call's other door asks for.
 ///
 /// Crate-private: what a frontend may know about a subagent is the answer that
 /// comes back, and the trait that answer arrives through
-/// ([`tool::task::Subagents`]) is the only part of this that is public.
+/// ([`tool::task::Subagents`]) is one of the two parts of this that are public.
+/// The other is the teammate half — [`Teammates`], [`Backends`] and
+/// [`Postbox`], re-exported at the root below — because those are values a
+/// frontend leading a team **assembles**, where a subagent is one it only ever
+/// reads the answer of.
 pub(crate) mod subagent;
 /// A teammate's own conversation, running in the lead's process: a second
 /// [`Engine`] over a clone of the lead's [`Storage`] (**D500**). Public where
@@ -102,3 +107,9 @@ pub use snapshot::{RevertState, Snapshots};
 /// breaking the readers the old shape has.
 pub use storage::SessionId;
 pub use storage::{SessionInfo, Storage, StorageError};
+/// The two seams a session that leads a team installs into its tool contexts:
+/// the `task` tool's teammate door, and the one `send_message` posts through.
+/// Named at the root for the reason [`Snapshots`] and [`McpServers`] are — a
+/// frontend builds them and hands them to an engine — while everything else in
+/// `subagent` stays crate-private.
+pub use subagent::{Backends, Postbox, Teammates};
