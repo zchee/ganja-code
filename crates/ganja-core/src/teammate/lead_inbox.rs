@@ -18,22 +18,37 @@
 //! read here, beside the loop that answers them, and the frontend is handed
 //! values it only has to render and deliver.
 //!
-//! # The two frames a lead answers
+//! # The three frames a lead answers
 //!
 //! `shutdown_approved` retires the member — [`crate::teammate::TeammateRegistry::retire`]
-//! drops it from the roster and takes its record out of the team file — and
+//! drops it from the roster and takes its record out of the team file —
 //! `idle_notification` is recorded as what it is, a teammate reporting itself
-//! available. Everything else frame-shaped is **dropped by name** with the
-//! head of it, which is §6.1's own posture pointed the other way: a frame this
-//! side has no handler for is named rather than acted on by guess.
+//! available, and `permission_request` is **routed**: a pane teammate's
+//! dialog, put in front of the same person the in-process ones reach
+//! (**D-5**, the pane half). Everything else frame-shaped is **dropped by
+//! name** with the head of it, which is §6.1's own posture pointed the other
+//! way: a frame this side has no handler for is named rather than acted on by
+//! guess.
 //!
-//! Two of those drops are deliberate rather than unimplemented, and §7-1 is
-//! why: the permission family never travels the lead's mailbox in this build.
-//! An in-process teammate's dialog crosses on
-//! [`crate::teammate::posture::Forwarded`]'s channel, where it keeps the reply oneshot
-//! that makes a refusal expressible; a `permission_request` in a file is a
-//! question nothing could answer, so it is named and pruned rather than left
-//! to be read again every second.
+//! The routing rides the one dialog channel the frontend already drains.
+//! An in-process teammate's ask arrives on
+//! [`crate::teammate::posture::Forwarded`]'s channel with a reply oneshot;
+//! a pane's arrives in this file as §5's `permission_request`, and this pass
+//! wraps it in **the same** [`crate::teammate::posture::Forwarded`] — the
+//! frame's fields read back into the `PermissionRequested` a dialog is drawn
+//! from ([`crate::teammate::member::dialog_of`]) — and offers it on that same
+//! channel, so a frontend that answers one answers the other with no code of
+//! its own. What comes back on the oneshot is written to the asker's inbox as
+//! §5's `permission_response`; a channel nobody claimed, or one that is full,
+//! is the refusal it is for an in-process ask (`try_send`, never a wait), and
+//! that refusal is written back too, because a pane whose ask vanished into a
+//! file would wait on it forever.
+//!
+//! Two drops are deliberate rather than unimplemented, and §7-1 is why:
+//! `team_permission_update` never travels a mailbox in this build — the
+//! mailbox is not an escalation channel — and `permission_response` is the
+//! *answer* to a question, which the lead never asks over a frame. Both are
+//! named and pruned rather than left to be read again every second.
 //!
 //! # One write, not two
 //!
@@ -47,10 +62,12 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use ganja_protocol::team::{Frame, IdleNotification, ShutdownApproved};
-use ganja_team::{MailboxMessage, mailbox};
+use ganja_protocol::team::{Frame, IdleNotification, PermissionRequest, ShutdownApproved};
+use ganja_team::{MailboxMessage, MemberName, mailbox, record};
+use tokio::sync::{mpsc, oneshot};
 
-use super::{Delivery, TeammateRegistry, runner::FRAME_HEAD};
+use super::{Delivery, TeammateRegistry, member, posture::Forwarded, runner::FRAME_HEAD};
+use crate::protocol::{PermissionReply, SessionId};
 
 /// §6's lead cadence, and deliberately half the teammate's own
 /// ([`crate::teammate::runner::POLL`]): the teammate is the side that has to notice a
@@ -59,6 +76,21 @@ pub const POLL: Duration = Duration::from_millis(1000);
 
 /// What is logged when a frame arrives that the lead has no handler for.
 pub const DROPPED_FRAME: &str = "an inbox frame was dropped";
+
+/// What is logged when a pane's ask is answered with a refusal because nobody
+/// could be shown it — [`crate::teammate::posture::Forwarding`]'s own line,
+/// for the same two reasons it gives.
+pub const REFUSED_ASK: &str = "a pane's permission dialog was refused rather than made to wait";
+
+/// The error a refused ask carries back when this lead has no dialog surface
+/// at all — a headless lead, or a session nothing attached one to.
+pub const NO_DIALOG_SURFACE: &str = "the lead has no dialog to put this ask in front of anybody";
+
+/// The same, when the surface is there and its queue is full.
+pub const DIALOG_QUEUE_FULL: &str = "the lead's dialog queue is full";
+
+/// The same, when the lead's side of the channel has gone.
+pub const LEAD_GONE: &str = "the lead's side is gone";
 
 /// One plain message on its way into the lead's conversation.
 ///
@@ -149,6 +181,25 @@ pub struct Idle {
     pub summary: Option<String>,
 }
 
+/// A pane teammate's permission ask this pass read (**D-5**).
+///
+/// Carried for the record rather than for the caller to act on: the routing
+/// is done by the time a caller sees this — the dialog is on the channel, or
+/// the refusal is in the asker's inbox — and what a frontend does with a
+/// forwarded ask it already does for the in-process ones.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asked {
+    /// Who asked.
+    pub name: String,
+    /// The request id, which is the asking engine's own dialog id.
+    pub request_id: String,
+    /// The tool it asked about.
+    pub tool: String,
+    /// Whether it reached the dialog channel, or was refused on the spot
+    /// because nothing could show it.
+    pub raised: bool,
+}
+
 /// What one pass of §6.2 found and did.
 ///
 /// Returned rather than only logged, for [`crate::teammate::runner::Tick`]'s reason: the
@@ -163,6 +214,8 @@ pub struct Pass {
     pub retired: Vec<Retired>,
     /// The teammates that reported themselves available.
     pub idle: Vec<Idle>,
+    /// The pane asks this pass routed, or refused because it could not.
+    pub asked: Vec<Asked>,
     /// The frames this pass named and dropped, by kind.
     pub dropped: Vec<&'static str>,
 }
@@ -175,6 +228,7 @@ impl Pass {
         self.messages.is_empty()
             && self.retired.is_empty()
             && self.idle.is_empty()
+            && self.asked.is_empty()
             && self.dropped.is_empty()
     }
 }
@@ -276,10 +330,10 @@ impl LeadInbox {
     /// No [`ganja_protocol::team::LeadFrame`] check here, and the asymmetry is
     /// the point: §7-2's rule is that a *teammate* obeys only its lead, where
     /// the lead is the one everybody reports to. What guards this side instead
-    /// is that neither frame it acts on can be forged into authority — a
-    /// `shutdown_approved` only ever makes the lead forget a member, and the
-    /// name it forgets is the message's own sender, never a name the frame
-    /// carries.
+    /// is that none of the frames it acts on can be forged into authority — a
+    /// `shutdown_approved` only ever makes the lead forget a member, a
+    /// `permission_request` only ever *asks* a person, and the name each acts
+    /// on is the message's own sender, never a name the frame carries.
     async fn apply(&self, kind: &'static str, message: &MailboxMessage, pass: &mut Pass) {
         let Some(frame) = message.frame() else {
             self.drop_it(kind, message, pass);
@@ -289,8 +343,118 @@ impl LeadInbox {
         match frame {
             Frame::ShutdownApproved(approved) => self.retire(message, approved, pass).await,
             Frame::IdleNotification(idle) => Self::idle(message, idle, pass),
+            Frame::PermissionRequest(request) => self.route(message, request, pass).await,
+            // `permission_response` and `team_permission_update` land here on
+            // purpose (§7-1), beside everything else this side has no handler
+            // for; see the module doc.
             _ => self.drop_it(kind, message, pass),
         }
+    }
+
+    /// A pane teammate's ask, put in front of the person at this lead's dialog
+    /// (**D-5**), with the answer arranged to be written back.
+    ///
+    /// The answer goes to the **sender's** inbox — the envelope's `from`, the
+    /// same name [`LeadInbox::retire`] trusts — never to whatever the frame's
+    /// own `agent_id` claims: a member that could name somebody else there
+    /// could have another pane's asks answered on its behalf. A sender the
+    /// name grammar refuses cannot be written back to at all, so its ask is
+    /// dropped by name rather than raised for a person to answer into nowhere.
+    ///
+    /// **The handover never waits.** A `try_send`, exactly as
+    /// [`crate::teammate::posture::Forwarding`]'s is and for its reason: an
+    /// awaited send on a channel nobody claimed would park this pass — and the
+    /// frontend's tick behind it — forever. No surface, a full queue and a
+    /// closed one are one answer with three reasons, and the pane reads that
+    /// answer as a refusal rather than waiting on a dialog nobody will see.
+    async fn route(&self, message: &MailboxMessage, request: PermissionRequest, pass: &mut Pass) {
+        let Ok(asker) = MemberName::parse(&message.from) else {
+            tracing::warn!(
+                from = message.from,
+                request = request.request_id,
+                "a permission ask came from a name that cannot be answered, and was dropped"
+            );
+            pass.dropped.push("permission_request");
+
+            return;
+        };
+        let inbox = self
+            .registry
+            .root()
+            .inbox_path(self.registry.team(), &asker);
+        let asked = Asked {
+            name: message.from.clone(),
+            request_id: request.request_id.clone(),
+            tool: request.tool_name.clone(),
+            raised: false,
+        };
+        // What the answer needs, taken before the frame is spent on the
+        // dialog: the id it names, the tool an "always" is stored for, and
+        // the input echoed back as what the call may run with.
+        let answer = Answer {
+            lead: self.registry.lead().as_str().to_owned(),
+            inbox,
+            request_id: request.request_id.clone(),
+            tool: request.tool_name.clone(),
+            input: request.input.clone(),
+        };
+        let dialog = member::dialog_of(
+            SessionId::from(self.registry.lead_session_id().to_owned()),
+            request,
+        );
+
+        let Some(surface) = self.registry.dialog_surface() else {
+            tracing::warn!(
+                teammate = message.from,
+                request = asked.request_id,
+                reason = NO_DIALOG_SURFACE,
+                "{REFUSED_ASK}"
+            );
+            answer.refuse(NO_DIALOG_SURFACE).await;
+            pass.asked.push(asked);
+
+            return;
+        };
+        let (reply, waiting) = oneshot::channel();
+        if let Err(undelivered) = surface.try_send(Forwarded {
+            teammate: message.from.clone(),
+            request: dialog,
+            reply,
+        }) {
+            let reason = match undelivered {
+                mpsc::error::TrySendError::Full(_) => DIALOG_QUEUE_FULL,
+                mpsc::error::TrySendError::Closed(_) => LEAD_GONE,
+            };
+            tracing::warn!(
+                teammate = message.from,
+                request = asked.request_id,
+                reason,
+                "{REFUSED_ASK}"
+            );
+            answer.refuse(reason).await;
+            pass.asked.push(asked);
+
+            return;
+        }
+        tracing::info!(
+            teammate = message.from,
+            request = asked.request_id,
+            tool = asked.tool,
+            "a pane's permission ask was put in front of the lead"
+        );
+        // The wait for the answer runs in a task of its own so the pass keeps
+        // reading, exactly as the in-process handover does: a person takes as
+        // long as they take, and the inbox has other frames in it.
+        tokio::spawn(async move {
+            // A dropped sender is a lead that gave up on the dialog, which is
+            // the refusal it looks like.
+            let reply = waiting.await.unwrap_or(PermissionReply::Reject);
+            answer.write(reply).await;
+        });
+        pass.asked.push(Asked {
+            raised: true,
+            ..asked
+        });
     }
 
     /// A teammate saying it is done, which is the lead's cue to forget it.
@@ -375,6 +539,74 @@ impl LeadInbox {
     }
 }
 
+/// Everything the answer to one routed ask needs, held apart from the pass
+/// that read the ask so a task can carry it past the pass's own lifetime.
+///
+/// Owned paths and strings rather than the registry: a task waiting on a
+/// person must not keep the team alive, and needs nothing of it but where to
+/// write.
+struct Answer {
+    /// Whose name the response is stamped with — the lead's, by construction.
+    lead: String,
+    /// The asker's inbox.
+    inbox: PathBuf,
+    request_id: String,
+    tool: String,
+    input: serde_json::Value,
+}
+
+impl Answer {
+    /// Writes the person's decision back as a `permission_response`.
+    async fn write(&self, reply: PermissionReply) {
+        let response = member::response_of(&self.request_id, &self.tool, &self.input, reply);
+        self.deliver(Frame::PermissionResponse(response), "answered")
+            .await;
+    }
+
+    /// Writes a refusal back, for an ask nobody could be shown.
+    async fn refuse(&self, reason: &str) {
+        let response = member::refused(&self.request_id, reason);
+        self.deliver(Frame::PermissionResponse(response), "refused")
+            .await;
+    }
+
+    /// One write into the asker's inbox, said out loud when it fails: a pane
+    /// whose answer never landed is a pane still waiting, which is the thing
+    /// worth shouting about (§6.2's own posture for a plan approval).
+    async fn deliver(&self, frame: Frame, what: &'static str) {
+        let message = match MailboxMessage::from_frame(&self.lead, &frame, record::now_iso8601()) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!(
+                    request = self.request_id,
+                    %error,
+                    "a permission answer would not encode; the pane is still waiting on it"
+                );
+
+                return;
+            }
+        };
+        let path = self.inbox.clone();
+        let written = tokio::task::spawn_blocking(move || mailbox::write(&path, message))
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|written| written.map_err(|error| error.to_string()));
+        match written {
+            Ok(_) => tracing::info!(
+                request = self.request_id,
+                inbox = %self.inbox.display(),
+                "a pane's permission ask was {what} and the answer written back"
+            ),
+            Err(error) => tracing::warn!(
+                request = self.request_id,
+                inbox = %self.inbox.display(),
+                %error,
+                "FAILED to write a permission answer; the pane is still waiting on it"
+            ),
+        }
+    }
+}
+
 /// The first [`FRAME_HEAD`] characters, cut on a character boundary.
 fn head(text: &str) -> &str {
     match text.char_indices().nth(FRAME_HEAD) {
@@ -388,16 +620,17 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use ganja_protocol::team::{
-        Frame, IdleNotification, PermissionRequest, ShutdownApproved, TaskAssignment,
+        Frame, IdleNotification, PermissionRequest, PermissionResponse, PermissionResponseBody,
+        ShutdownApproved, TaskAssignment, TeamPermissionUpdate,
     };
-    use ganja_team::{MailboxMessage, mailbox, record};
+    use ganja_team::{LEAD, MailboxMessage, MemberName, mailbox, record};
 
-    use super::{Delivered, LeadInbox};
+    use super::{DIALOG_QUEUE_FULL, Delivered, LeadInbox, NO_DIALOG_SURFACE};
     use crate::{
         Storage,
         permission::Permissions,
         provider::FakeProvider,
-        teammate::{DEFAULT_BACKEND, Delivery, InProcess, SpawnRequest, TeammateRegistry},
+        teammate::{DEFAULT_BACKEND, Delivery, InProcess, SpawnRequest, TeammateRegistry, member},
         tool::Registry as Tools,
     };
 
@@ -506,31 +739,41 @@ mod tests {
         );
     }
 
-    /// §7-1: the permission family does not travel this file. An in-process
-    /// teammate's dialog crosses on the forwarding channel, which keeps the
-    /// reply oneshot a refusal needs.
+    /// §7-1, as this side keeps it after **D-5**'s pane half landed.
     ///
-    /// The permission frame is constructed rather than described, because it is
-    /// the reference's own first control: a build that grew a handler for it
-    /// here would be answering a question with no way to say no, and this is
-    /// what would notice.
+    /// The earlier revision of this test (V-C1) asserted that a
+    /// `permission_request` is dropped beside a `task_assignment` — correct
+    /// while the only asker was in-process and crossed on the forwarding
+    /// channel. A pane's asks travel §5's frames, so `permission_request` is
+    /// now **routed** (the two tests below), and what §7-1 forbids is pinned
+    /// by the two frames that stay dropped: `team_permission_update`, the
+    /// reference's own first control, and `permission_response`, an answer to
+    /// a question this side never asks over a frame. Both are constructed
+    /// rather than described, because a build that grew a handler for either
+    /// here would be taking a rule, or a decision, out of a file — and this
+    /// is what would notice.
     #[tokio::test]
-    async fn a_permission_frame_and_an_unhandled_one_are_both_dropped_by_name() {
+    async fn a_permission_update_an_answer_and_an_unhandled_frame_are_all_dropped_by_name() {
         let home = tempfile::tempdir().expect("a temporary home");
         let registry = registry(home.path());
         let inbox = registry.lead_inbox();
+        let mut payload = serde_json::Map::new();
+        payload.insert("mode".to_owned(), serde_json::json!("acceptEdits"));
         write_frame(
             &inbox,
             "w1",
-            &Frame::PermissionRequest(PermissionRequest {
-                request_id: "req-1".to_owned(),
-                agent_id: "w1@session-224cbeab".to_owned(),
-                tool_name: "bash".to_owned(),
-                tool_use_id: "call-1".to_owned(),
-                description: "rm -rf build".to_owned(),
-                input: serde_json::json!({"command": "rm -rf build"}),
-                permission_suggestions: Vec::new(),
-            }),
+            &Frame::TeamPermissionUpdate(TeamPermissionUpdate { payload }),
+        );
+        write_frame(
+            &inbox,
+            "w1",
+            &Frame::PermissionResponse(PermissionResponse::success(
+                "req-1",
+                PermissionResponseBody {
+                    updated_input: serde_json::json!({}),
+                    permission_updates: Vec::new(),
+                },
+            )),
         );
         write_frame(
             &inbox,
@@ -546,17 +789,205 @@ mod tests {
 
         let pass = LeadInbox::new(registry).poll().await;
 
-        assert_eq!(pass.dropped, ["permission_request", "task_assignment"]);
+        assert_eq!(
+            pass.dropped,
+            [
+                "team_permission_update",
+                "permission_response",
+                "task_assignment"
+            ]
+        );
         assert!(
             pass.messages.is_empty(),
             "a frame is never delivered as prose either"
         );
+        assert!(pass.asked.is_empty(), "and none of them is an ask");
         assert!(
             mailbox::read(&inbox)
                 .expect("the inbox reads")
                 .valid
                 .is_empty(),
             "a named drop leaves the inbox rather than being read again forever"
+        );
+    }
+
+    /// One `permission_request` as a pane writes it.
+    fn ask(request_id: &str) -> Frame {
+        Frame::PermissionRequest(PermissionRequest {
+            request_id: request_id.to_owned(),
+            agent_id: "w1@session-224cbeab".to_owned(),
+            tool_name: "bash".to_owned(),
+            tool_use_id: "call-1".to_owned(),
+            description: "rm -rf build".to_owned(),
+            input: serde_json::json!({"command": "rm -rf build"}),
+            permission_suggestions: Vec::new(),
+        })
+    }
+
+    /// The frames in `name`'s inbox, once there is at least one, or after a
+    /// bounded wait: the answer is written by a task the pass spawned.
+    async fn answered(inbox: &std::path::Path) -> Vec<MailboxMessage> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let held = mailbox::read(inbox)
+                .map(|contents| contents.valid)
+                .unwrap_or_default();
+            if !held.is_empty() || tokio::time::Instant::now() >= deadline {
+                return held;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A pane's ask is put on the same channel the in-process asks ride, as a
+    /// dialog the frontend already knows how to show, and the answer given
+    /// there lands in the asker's inbox as one `permission_response` — no
+    /// frontend code of its own on either side.
+    #[tokio::test]
+    async fn a_pane_permission_request_raises_one_dialog_and_its_answer_lands_in_the_askers_inbox()
+    {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        let (surface, mut dialogs) = tokio::sync::mpsc::channel(4);
+        registry.forward_dialogs_to(surface);
+        write_frame(&registry.lead_inbox(), "w1", &ask("req-1"));
+
+        let pass = LeadInbox::new(Arc::clone(&registry)).poll().await;
+
+        assert_eq!(pass.asked.len(), 1, "{pass:?}");
+        assert_eq!(pass.asked[0].name, "w1");
+        assert_eq!(pass.asked[0].request_id, "req-1");
+        assert_eq!(pass.asked[0].tool, "bash");
+        assert!(pass.asked[0].raised, "it reached the channel");
+        assert!(pass.dropped.is_empty(), "nothing was dropped: {pass:?}");
+        assert!(
+            mailbox::read(&registry.lead_inbox())
+                .expect("the inbox reads")
+                .valid
+                .is_empty(),
+            "a routed ask leaves the lead's inbox in the same pass"
+        );
+
+        let forwarded = dialogs.try_recv().expect("exactly one dialog was raised");
+        assert!(dialogs.try_recv().is_err(), "and only one");
+        assert_eq!(forwarded.teammate, "w1");
+        let crate::protocol::Event::PermissionRequested {
+            id,
+            tool,
+            title,
+            args,
+            ..
+        } = &forwarded.request
+        else {
+            panic!(
+                "the channel carries permission requests: {:?}",
+                forwarded.request
+            );
+        };
+        assert_eq!(
+            id.as_str(),
+            "req-1",
+            "the dialog id is the pane's request id"
+        );
+        assert_eq!(tool, "bash");
+        assert_eq!(title, "rm -rf build");
+        assert_eq!(args, &serde_json::json!({"command": "rm -rf build"}));
+
+        forwarded
+            .reply
+            .send(crate::protocol::PermissionReply::Once)
+            .expect("the answer task is waiting");
+
+        let inbox = registry.root().inbox_path(
+            registry.team(),
+            &MemberName::parse("w1").expect("a member name"),
+        );
+        let held = answered(&inbox).await;
+        assert_eq!(held.len(), 1, "one answer, in the asker's own inbox");
+        assert_eq!(held[0].from, LEAD, "stamped as the lead");
+        let Some(Frame::PermissionResponse(response)) = held[0].frame() else {
+            panic!("the answer is a permission response: {:?}", held[0]);
+        };
+        assert_eq!(response.request_id(), "req-1");
+        assert_eq!(
+            member::reply_of(&response),
+            crate::protocol::PermissionReply::Once,
+            "and it says what the person said"
+        );
+    }
+
+    /// An ask nobody can be shown — no dialog surface at all — is refused
+    /// into the asker's inbox rather than left to wait on a dialog nobody
+    /// will see; and a channel that is full is refused the same way.
+    #[tokio::test]
+    async fn a_pane_permission_request_nobody_can_be_shown_is_refused_into_its_inbox() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        let inbox = registry.root().inbox_path(
+            registry.team(),
+            &MemberName::parse("w1").expect("a member name"),
+        );
+
+        // No surface attached at all.
+        write_frame(&registry.lead_inbox(), "w1", &ask("req-1"));
+        let pass = LeadInbox::new(Arc::clone(&registry)).poll().await;
+        assert_eq!(pass.asked.len(), 1, "{pass:?}");
+        assert!(!pass.asked[0].raised, "it could not be raised");
+
+        let held = answered(&inbox).await;
+        assert_eq!(held.len(), 1);
+        let Some(Frame::PermissionResponse(response)) = held[0].frame() else {
+            panic!("the refusal is a permission response: {:?}", held[0]);
+        };
+        assert_eq!(response.request_id(), "req-1");
+        assert_eq!(response.error_message(), Some(NO_DIALOG_SURFACE));
+        assert_eq!(
+            member::reply_of(&response),
+            crate::protocol::PermissionReply::Reject
+        );
+        mailbox::prune_delivered(&inbox, &[mailbox::identity(&held[0])]).expect("pruned");
+
+        // A surface whose queue is full: one slot, already taken.
+        let (surface, mut dialogs) = tokio::sync::mpsc::channel(1);
+        registry.forward_dialogs_to(surface);
+        write_frame(&registry.lead_inbox(), "w1", &ask("req-2"));
+        write_frame(&registry.lead_inbox(), "w1", &ask("req-3"));
+        let pass = LeadInbox::new(Arc::clone(&registry)).poll().await;
+        assert_eq!(pass.asked.len(), 2, "{pass:?}");
+        assert!(pass.asked[0].raised, "the first takes the slot");
+        assert!(!pass.asked[1].raised, "the second finds it full");
+
+        let held = answered(&inbox).await;
+        assert_eq!(held.len(), 1, "only the refused one is answered so far");
+        let Some(Frame::PermissionResponse(response)) = held[0].frame() else {
+            panic!("the refusal is a permission response: {:?}", held[0]);
+        };
+        assert_eq!(response.request_id(), "req-3");
+        assert_eq!(response.error_message(), Some(DIALOG_QUEUE_FULL));
+
+        // The one that was raised is still waiting on the person.
+        let forwarded = dialogs.try_recv().expect("req-2 is on the channel");
+        drop(forwarded);
+        // Dropping the reply sender is the lead giving up on the dialog, which
+        // is written back as the refusal it is.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline
+            && mailbox::read(&inbox)
+                .map(|contents| contents.valid.len())
+                .unwrap_or_default()
+                < 2
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let held = mailbox::read(&inbox).expect("the inbox reads").valid;
+        assert_eq!(held.len(), 2, "{held:?}");
+        let Some(Frame::PermissionResponse(response)) = held[1].frame() else {
+            panic!("the refusal is a permission response: {:?}", held[1]);
+        };
+        assert_eq!(response.request_id(), "req-2");
+        assert_eq!(
+            member::reply_of(&response),
+            crate::protocol::PermissionReply::Reject
         );
     }
 
