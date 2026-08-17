@@ -14,9 +14,11 @@
 //! business — a whole spawn, a whole engine, a whole `ganja` in the window.
 //! What the reaper reads of a pane is narrower than any of that: whether it is
 //! live, and whether its first process's command line carries the member's
-//! `agentId`. So the panes here are shells started with the same flag a pane
-//! teammate carries (`--agent-id <name>@<team>`) and shells started without
-//! one, which is exactly the distinction under test and nothing else. The
+//! `agentId` **and** the session id of the lead sweeping it. So the panes here
+//! are shells started with the two flags a pane teammate carries
+//! (`--agent-id <name>@<team> --parent-session-id <uuid>`), shells started
+//! without them, and shells started with one lead's flags for another lead to
+//! meet — which is exactly the distinction under test and nothing else. The
 //! agent id is asked of [`MemberName::agent_id`] rather than spelled out, so it
 //! cannot drift from what a record writes.
 //!
@@ -247,10 +249,25 @@ fn agent_id(team: &str, member: &str) -> String {
         .agent_id(&TeamName::parse(team).expect("a team name"))
 }
 
-/// Splits a pane that looks like the teammate `agent_id` names: the flag a real
-/// pane teammate is launched with, and nothing else of one.
-fn teammate_pane(server: &PrivateServer, agent_id: &str) -> String {
-    server.split(&["/bin/sh", "-c", IDLE, "--agent-id", agent_id])
+/// Splits a pane that looks like the teammate `agent_id` names, launched by the
+/// lead `parent_session` names: the two flags the witness reads, and nothing
+/// else of a real one.
+///
+/// **Both** flags, because the witness wants both (verify-l4 F1 and F2) and
+/// every real launch line carries both — `teammate::pane::arguments` and
+/// `teammate::claude::arguments` put `--agent-id` and `--parent-session-id` on
+/// §4.1's own five. A stand-in wearing one of them would be testing a pane this
+/// build never spawns.
+fn teammate_pane(server: &PrivateServer, agent_id: &str, parent_session: &str) -> String {
+    server.split(&[
+        "/bin/sh",
+        "-c",
+        IDLE,
+        "--agent-id",
+        agent_id,
+        "--parent-session-id",
+        parent_session,
+    ])
 }
 
 /// Splits a pane belonging to nobody in this team — what a recycled `%N` is
@@ -264,7 +281,7 @@ fn stranger_pane(server: &PrivateServer) -> String {
 #[tokio::test]
 async fn an_orphaned_pane_is_reaped_at_lead_startup() {
     let server = PrivateServer::start();
-    let pane = teammate_pane(&server, &agent_id("session-01998ad0", "worker"));
+    let pane = teammate_pane(&server, &agent_id("session-01998ad0", "worker"), SESSION);
     let team = Team::written("session-01998ad0", SESSION, &[("worker", on(&pane))]);
     assert!(server.holds(&pane), "the stand-in pane is running");
 
@@ -316,7 +333,7 @@ async fn a_recycled_pane_id_is_not_killed() {
 #[tokio::test]
 async fn a_record_whose_pane_is_gone_is_dropped_without_a_kill() {
     let server = PrivateServer::start();
-    let pane = teammate_pane(&server, &agent_id("session-01998ad0", "worker"));
+    let pane = teammate_pane(&server, &agent_id("session-01998ad0", "worker"), SESSION);
     server.kill(&pane);
     let team = Team::written("session-01998ad0", SESSION, &[("worker", on(&pane))]);
 
@@ -332,7 +349,7 @@ async fn a_record_whose_pane_is_gone_is_dropped_without_a_kill() {
 #[tokio::test]
 async fn a_team_led_by_another_session_is_left_whole() {
     let server = PrivateServer::start();
-    let pane = teammate_pane(&server, &agent_id("default", "worker"));
+    let pane = teammate_pane(&server, &agent_id("default", "worker"), OTHER_SESSION);
     let team = Team::written("default", OTHER_SESSION, &[("worker", on(&pane))]);
 
     let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
@@ -346,6 +363,75 @@ async fn a_team_led_by_another_session_is_left_whole() {
         team.members(),
         vec!["team-lead".to_owned(), "worker".to_owned()],
         "and its record is untouched"
+    );
+}
+
+/// **verify-l4 F1.** A member whose name is a *suffix* of a sibling's: the
+/// sibling's live pane must survive a sweep looking for the dead one.
+///
+/// `build@session-01998ad0` is a substring of `rebuild@session-01998ad0`, so the
+/// witness this replaced (`argv.contains(agent_id)`) read `rebuild`'s pane as
+/// `build`'s the moment tmux reissued `build`'s dead `%N` to it — and killed a
+/// teammate that was working. Nothing about the two names is unusual; a team
+/// with `build` and `rebuild` in it is a team somebody would write.
+#[tokio::test]
+async fn a_siblings_pane_is_not_killed_because_its_name_ends_with_the_dead_ones() {
+    let server = PrivateServer::start();
+    // The live sibling, wearing its own agent id — and now wearing the pane id
+    // the record names, which is what a recycled `%N` looks like from here.
+    let pane = teammate_pane(&server, &agent_id("session-01998ad0", "rebuild"), SESSION);
+    let team = Team::written("session-01998ad0", SESSION, &[("build", on(&pane))]);
+
+    let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
+
+    assert_eq!(
+        swept.fate_of("build"),
+        Some(Fate::Recycled),
+        "`rebuild`'s pane is not `build`'s, however the two names read: {swept:?}"
+    );
+    assert!(
+        server.holds(&pane),
+        "and the sibling is still working: {pane} on {:?}",
+        server.socket()
+    );
+}
+
+/// **verify-l4 F2.** Two leads inside one 65.536-second team-name bucket share a
+/// team *file*, and the document keeps naming whichever of them wrote it first.
+/// A sweep by that lead must leave the co-tenant's **live** panes alone.
+///
+/// The file is stamped [`SESSION`], so the `leadSessionId` guard passes — this
+/// is that lead's own team by every fact on disk. What says otherwise is the
+/// pane itself: it carries [`OTHER_SESSION`] as its `--parent-session-id`,
+/// because lead B launched it and B is still running. Before the witness read
+/// that flag, this sweep killed B's teammates.
+///
+/// The record still goes, and that is the documented trade rather than an
+/// oversight: a `Recycled` verdict drops a row over a pane that is not this
+/// teammate's, and telling "somebody else's window" from "another lead's
+/// teammate" would need a fate this module does not have. The kill is the harm
+/// that had to stop.
+#[tokio::test]
+async fn a_co_tenant_leads_live_panes_survive_a_sweep_of_the_team_file_they_share() {
+    let server = PrivateServer::start();
+    let pane = teammate_pane(
+        &server,
+        &agent_id("session-01998ad0", "worker"),
+        OTHER_SESSION,
+    );
+    let team = Team::written("session-01998ad0", SESSION, &[("worker", on(&pane))]);
+
+    let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
+
+    assert_eq!(
+        swept.fate_of("worker"),
+        Some(Fate::Recycled),
+        "a pane another lead launched is not this lead's to end: {swept:?}"
+    );
+    assert!(
+        server.holds(&pane),
+        "and the other lead's teammate is still working: {pane} on {:?}",
+        server.socket()
     );
 }
 

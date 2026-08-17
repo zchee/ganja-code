@@ -335,6 +335,22 @@ pub async fn run(
                     engine.session_id().as_str(),
                     &cwd,
                 ));
+                // **D506**: panes a previous lead of this team left running,
+                // before this one spawns anything of its own. Best-effort by
+                // construction — it returns a `Swept` and never an error, and a
+                // session outside tmux sweeps nothing — so it is awaited here
+                // rather than guarded: the one thing it must be is *before* the
+                // first spawn, since that is what makes a pane member found in
+                // the file certainly not this lead's.
+                //
+                // The behavioural witness is `ganja-cli/tests/teammate_reaper.rs`
+                // (AC-12), which drives `reaper::sweep_on` against a private tmux
+                // server: `run` opens a real terminal, so there is no headless
+                // seam in this file to assert the call from.
+                let swept = ganja_core::teammate::reaper::sweep(&registry).await;
+                if !swept.is_empty() {
+                    tracing::info!(?swept, "a previous lead's panes were swept at startup");
+                }
 
                 (engine.with_teammates(Arc::clone(&registry)), Some(registry))
             }

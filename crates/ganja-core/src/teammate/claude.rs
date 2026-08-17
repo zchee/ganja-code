@@ -11,13 +11,20 @@
 //! [`crate::teammate::pane`]'s are: [`TeammateBackend::spawn`] makes the
 //! surface, the registry writes the member record, and
 //! [`TeammateBackend::launch`] runs afterwards — which is why the inbox work
-//! sits *there* rather than in `spawn`. That ordering is not a compromise, it
-//! is §4.1's own: surface (1), member record (2), pane title (3),
-//! `ensureInboxDirectory` (4), the prompt written into the inbox (5), the
-//! launch line (6). The `ganja` pane watches for its record because its body
-//! predates the hook; this one uses the hook, so a launch that cannot be made
-//! is unwound by the registry — the pane killed, the record taken back out,
-//! the name given back — instead of leaving a member holding an idle shell.
+//! sits *there* rather than in `spawn`. That ordering is §4.1's own —
+//! surface (1), member record (2), pane title (3), `ensureInboxDirectory` (4),
+//! the prompt written into the inbox (5), the launch line (6) — **with one
+//! departure, and it is step 3**: the title is set inside `spawn`, so it lands
+//! before the record rather than after it. The reason is that a title is
+//! cosmetic and a `spawn` that has just made a window is the only place holding
+//! the pane id without a second `tmux` round trip; nothing reads a pane's title,
+//! and a person watching the split would rather see the name immediately than in
+//! §4.1's order. Steps 4, 5 and 6 keep it exactly.
+//!
+//! The `ganja` pane watches for its record because its body predates the hook;
+//! this one uses the hook, so a launch that cannot be made is unwound by the
+//! registry — the pane killed, the record taken back out, the name given back —
+//! instead of leaving a member holding an idle shell.
 //!
 //! Three things are this backend's own:
 //!
@@ -41,17 +48,47 @@
 //!   message therefore names the lead, in ganja's own words (**D497**: no
 //!   Claude Code prose is copied here).
 //!
-//! # The shared inbox
+//! # The shared inbox, and the three things that follow from two roots
 //!
 //! A round trip needs *one* directory: this backend seeds
 //! `$CLAUDE_CONFIG_DIR/teams/<team>/inboxes/<name>.json` and the pane answers
-//! into `…/inboxes/<lead>.json` beside it, so a lead reading its own
-//! `<config home>/teams` sees nothing. That is stated rather than hidden: it is
-//! why [`teams_root`](crate::teammate::claude::teams_root) is public, and it is
-//! what AC-13's live test means by *the shared inbox* — it points the lead's own
-//! [`ganja_team::TeamsRoot`] at what that function answers, which is the one
-//! configuration in which a `claude` teammate and a `ganja` lead are members of
-//! the same team.
+//! into `…/inboxes/<lead>.json` beside it. Three consequences, all of them
+//! stated rather than hidden — the first two are why
+//! [`teams_root`](crate::teammate::claude::teams_root) is public.
+//!
+//! 1. **The lead has to read that root too.** A lead polling only
+//!    `<ganja config home>/teams` would never see the answer, because the answer
+//!    is in the other directory. So it reads both:
+//!    [`crate::teammate::lead_inbox::LeadInbox`] adds the claude root's
+//!    `team-lead` inbox to its pass for as long as the roster holds a
+//!    claude-backed member, and this backend seeds **both** inboxes under that
+//!    root at launch so the file exists before either side needs it. AC-13's
+//!    live test instead points the lead's own [`ganja_team::TeamsRoot`] at what
+//!    `teams_root` answers, collapsing the two roots into one — the tightest
+//!    configuration in which a `claude` teammate and a `ganja` lead are members
+//!    of the same team, and the one that would hide a lead that read only its
+//!    own root, which is why the production path does not depend on it.
+//! 2. **Only one process may write an inbox.** The registry seeds §4.1's steps 4
+//!    and 5 for every other backend and deliberately not for this one
+//!    ([`crate::teammate::TeammateBackend::owns_inbox`]): with the roots
+//!    collapsed, its bare-prompt message landed *ahead* of
+//!    [`preamble`](crate::teammate::claude::preamble) in the same file and a real
+//!    `claude` read the one message that does not name its lead; with the roots
+//!    apart, that copy rotted under the ganja root where nothing reads. So this
+//!    backend writes the teammate's inbox, and it prunes its own write when its
+//!    launch line cannot be typed.
+//! 3. **The member record is under the ganja root only**, and stays there. The
+//!    team file is [`crate::teammate::TeammateRegistry`]'s own document,
+//!    written where that registry lives, so `$CLAUDE_CONFIG_DIR/teams/<team>/
+//!    config.json` never names this member. What that means for the pane: a real
+//!    `claude` reading its own team's config finds no row for itself — no
+//!    roster, no peers, and nothing to read the colour, `agentType` or
+//!    `planModeRequired` this spawn recorded off. It does not stop the round
+//!    trip, because a mailbox is a file per name rather than a roster lookup,
+//!    and the flags on §4.1's launch line already carry the facts the pane needs
+//!    about itself. Writing a second team file under claude's root would be
+//!    inventing a document with two owners and no lock between them, so this
+//!    build does not.
 //!
 //! # What rides the launch line, and what does not
 //!
@@ -286,9 +323,16 @@ pub fn launch_line(binary: &Path, spec: &SpawnSpec) -> OsString {
 /// `PATH` holding an executable file by that name", and a crate for that would
 /// be a dependency carrying a `which` implementation nobody here would read.
 fn on_path(binary: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
+    resolve(&std::env::var_os("PATH")?, binary)
+}
 
-    std::env::split_paths(&path)
+/// [`on_path`]'s decision over a value rather than over the environment.
+///
+/// The same split [`teams_root`] and [`root_under`] keep, for the same reason: a
+/// test can hold a `PATH` of its own without mutating the process it runs in,
+/// which is what would otherwise cost this one function its own test binary.
+fn resolve(path: &std::ffi::OsStr, binary: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
         // An empty `PATH` entry means the working directory to a shell, and a
         // binary picked up out of whatever directory a turn happens to be in
         // is not a binary anybody asked for.
@@ -346,16 +390,27 @@ impl ClaudePane {
     /// §4.1 steps 4 and 5, under **claude's** root: the inboxes exist, and the
     /// task — behind [`preamble`] — is in the teammate's.
     ///
+    /// The **only** write into that inbox for this spawn, which is what
+    /// [`TeammateBackend::owns_inbox`] buys: the registry's own seed is skipped
+    /// for this backend, so what a real `claude` reads first is the preamble and
+    /// there is no second copy of the prompt anywhere.
+    ///
     /// The lead's inbox is seeded too, and that is not tidiness: the pane
     /// answers into it, and an inbox created by whoever writes first is an
-    /// inbox two processes can race to create. Seeding it here, from the side
-    /// that already knows the team, makes it exist before anybody needs it —
-    /// `mailbox::seed` tolerates one that is already there (§2.5).
-    async fn seed(spec: &SpawnSpec, root: &TeamsRoot) -> Result<(), Unsupported> {
+    /// inbox two processes can race to create — and since W5b's fix the lead
+    /// *reads* it, so it has to exist before the pane can write. Seeding it
+    /// here, from the side that already knows the team, makes it exist before
+    /// anybody needs it — `mailbox::seed` tolerates one that is already there
+    /// (§2.5).
+    ///
+    /// Answers with what identifies the entry, so a launch that fails after this
+    /// can take it back out ([`ClaudePane::unseed`]).
+    async fn seed(spec: &SpawnSpec, root: &TeamsRoot) -> Result<mailbox::Identity, Unsupported> {
         let inbox = root.inbox_path(&spec.team, &spec.name);
         let lead = root.inbox_path(&spec.team, &spec.lead);
         let message =
             MailboxMessage::new(spec.lead.as_str(), preamble(spec), record::now_iso8601());
+        let identity = mailbox::identity(&message);
 
         let seeding = tokio::task::spawn_blocking(move || -> Result<(), String> {
             for path in [&lead, &inbox] {
@@ -368,7 +423,7 @@ impl ClaudePane {
         .await;
 
         match seeding {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => Ok(identity),
             Ok(Err(reason)) => Err(Self::cannot(format!(
                 "the teammate's inbox under claude's own teams directory could not be written — \
                  {reason}"
@@ -378,12 +433,47 @@ impl ClaudePane {
             ))),
         }
     }
+
+    /// Takes [`ClaudePane::seed`]'s message back out, for a launch that was
+    /// refused after it landed.
+    ///
+    /// The unwind the registry cannot do for this backend: it never wrote the
+    /// entry and does not know the root it went to
+    /// ([`TeammateBackend::owns_inbox`]). Reported rather than returned, exactly
+    /// as `teammate.rs`'s own `unseed_inbox` is — the launch has already failed,
+    /// and a cleanup that failed too is a line in the log rather than a second
+    /// error for whoever asked to read.
+    async fn unseed(spec: &SpawnSpec, root: &TeamsRoot, seeded: mailbox::Identity) {
+        let inbox = root.inbox_path(&spec.team, &spec.name);
+        let path = inbox.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || mailbox::prune_delivered(&path, &[seeded]))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|pruned| pruned.map_err(|error| error.to_string()));
+
+        if let Err(error) = outcome {
+            tracing::warn!(
+                teammate = spec.name.as_str(),
+                inbox = %inbox.display(),
+                %error,
+                "a refused launch left its prompt in a claude teammate's inbox"
+            );
+        }
+    }
 }
 
 #[async_trait]
 impl TeammateBackend for ClaudePane {
     fn backend(&self) -> MemberBackend {
         MemberBackend::Claude
+    }
+
+    /// This backend's inbox is under claude's root and holds
+    /// [`preamble`]'s message rather than the bare prompt, so the registry must
+    /// not write one of its own — see the module doc's "the shared inbox".
+    fn owns_inbox(&self) -> bool {
+        true
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
@@ -453,13 +543,19 @@ impl TeammateBackend for ClaudePane {
         // §4.1 steps 4 and 5 before step 6, which is the order that matters:
         // the pane reads its inbox on its way up, so a process launched before
         // the task was in it would either idle or ask what it is for.
-        Self::seed(spec, &root).await?;
+        let seeded = Self::seed(spec, &root).await?;
 
         let line = launch_line(&binary, spec);
-        server
-            .type_line(&pane.id, &line)
-            .await
-            .map_err(|error| Self::refused(&error))?;
+        if let Err(error) = server.type_line(&pane.id, &line).await {
+            // The one failing path past the seed, and this backend's to unwind:
+            // the registry seeded nothing here and cannot prune what it does not
+            // know the root of (`TeammateBackend::owns_inbox`). A prompt left in
+            // an inbox nothing will read is the half of a failed spawn still
+            // visible tomorrow.
+            Self::unseed(spec, &root, seeded).await;
+
+            return Err(Self::refused(&error));
+        }
         tracing::info!(
             teammate = spec.name.as_str(),
             pane = pane.id,
@@ -511,11 +607,12 @@ mod tests {
     use std::{ffi::OsString, path::PathBuf};
 
     use ganja_protocol::team::MemberBackend;
-    use ganja_team::{MemberName, TeamName, TeamsRoot};
+    use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 
     use super::{
-        BYPASS_PERMISSIONS, ClaudePane, PERMISSION_MODE, PLAN_MODE_REQUIRED, TEAMS_DIRECTORY,
-        arguments, carried_env, launch_line, preamble, root_under,
+        BINARY, BYPASS_PERMISSIONS, ClaudePane, PERMISSION_MODE, PLAN_MODE_REQUIRED,
+        TEAMS_DIRECTORY, arguments, carried_env, executable, launch_line, preamble, resolve,
+        root_under,
     };
     use crate::teammate::{
         Delivery, SpawnSpec, TeammateBackend as _,
@@ -604,6 +701,13 @@ mod tests {
             "a one-word command would be re-read by a login shell: {line}"
         );
         assert!(line.contains("'/usr/local/bin/claude'"), "quoted: {line}");
+        // The canary again, on the *composed* line rather than on `arguments`
+        // alone (verify-l3 F-7): the line is what tmux is handed and what `ps`
+        // would print, so it is the value the §4.1-step-5 rule is really about.
+        assert!(
+            !line.contains("CANARY"),
+            "the prompt rides the mailbox: {line}"
+        );
     }
 
     /// The carried set is the `ganja` pane's closed list plus the one variable
@@ -692,5 +796,130 @@ mod tests {
     fn a_claude_pane_can_only_report_that_it_handed_a_message_over() {
         assert_eq!(ClaudePane.delivery(), Delivery::FireAndForget);
         assert_eq!(ClaudePane.backend(), MemberBackend::Claude);
+        assert!(
+            ClaudePane.owns_inbox(),
+            "the registry must not write a second message into this inbox"
+        );
+    }
+
+    /// **One** message in the teammate's inbox, and it is the preamble.
+    ///
+    /// The whole of verify-l3's F-1: with the registry seeding too, the bare
+    /// prompt landed here first and a real `claude` read the one message that
+    /// does not tell it how to address its lead. Drivable without a tmux server
+    /// or a `claude` on the machine, because seeding is file work and nothing
+    /// else — which is why it had no coverage at all and now does.
+    #[tokio::test]
+    async fn seeding_leaves_exactly_one_message_and_it_is_the_preamble() {
+        let home = tempfile::tempdir().expect("a temporary claude config home");
+        let root = TeamsRoot::new(home.path().join(TEAMS_DIRECTORY));
+        let spec = spec();
+
+        let seeded = ClaudePane::seed(&spec, &root)
+            .await
+            .expect("the seed lands");
+
+        let inbox = root.inbox_path(&spec.team, &spec.name);
+        let held = mailbox::read(&inbox).expect("the inbox reads").valid;
+        assert_eq!(held.len(), 1, "one writer, one message: {held:?}");
+        assert_eq!(held[0].from, spec.lead.as_str());
+        assert_eq!(held[0].text, preamble(&spec));
+        assert!(
+            held[0].text.contains("Do **not** address"),
+            "and it is the message that says so: {}",
+            held[0].text
+        );
+        assert_eq!(
+            mailbox::identity(&held[0]),
+            seeded,
+            "the identity handed back names the entry that landed"
+        );
+        // The lead's inbox exists before the pane can answer into it, which is
+        // what keeps two processes from racing to create it — and what the
+        // lead's own pass over this root reads.
+        assert!(
+            mailbox::read(&root.inbox_path(&spec.team, &spec.lead))
+                .expect("the lead's inbox reads")
+                .valid
+                .is_empty(),
+            "seeded, and empty"
+        );
+    }
+
+    /// A launch refused after the seed leaves nothing behind — the claude root's
+    /// inbox included, which the registry's own unwind cannot reach (F-4).
+    #[tokio::test]
+    async fn a_refused_launch_takes_the_seeded_prompt_back_out() {
+        let home = tempfile::tempdir().expect("a temporary claude config home");
+        let root = TeamsRoot::new(home.path().join(TEAMS_DIRECTORY));
+        let spec = spec();
+        let seeded = ClaudePane::seed(&spec, &root)
+            .await
+            .expect("the seed lands");
+
+        ClaudePane::unseed(&spec, &root, seeded).await;
+
+        let inbox = root.inbox_path(&spec.team, &spec.name);
+        assert!(
+            mailbox::read(&inbox)
+                .expect("the inbox reads")
+                .valid
+                .is_empty(),
+            "a prompt nothing will read does not stay in a mailbox"
+        );
+        assert!(inbox.exists(), "the inbox itself is left where it was");
+    }
+
+    /// The `PATH` walk: the first entry holding something runnable wins, a file
+    /// nobody may run is not it, a directory by that name is not it either, and
+    /// an empty entry is never the working directory.
+    ///
+    /// Unix-only, because the mode bit it turns on is what
+    /// [`executable`](super::executable) reads there and the other branch of
+    /// that function answers [`true`] for any file at all — windows support is
+    /// parked in this tree and has no compile signal, so a test asserting the
+    /// ordering would be asserting the wrong thing rather than nothing.
+    #[cfg(unix)]
+    #[test]
+    fn the_binary_is_the_first_path_entry_holding_something_runnable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = tempfile::tempdir().expect("a temporary PATH");
+        // A directory by the right name, then a file nobody may run, then the
+        // one a resolve should find.
+        let shadow = home.path().join("shadow");
+        let unrunnable = home.path().join("unrunnable");
+        let real = home.path().join("real");
+        std::fs::create_dir_all(shadow.join(BINARY)).expect("a directory in the way");
+        for directory in [&unrunnable, &real] {
+            std::fs::create_dir_all(directory).expect("a PATH entry");
+        }
+        let decoy = unrunnable.join(BINARY);
+        let found = real.join(BINARY);
+        for (path, mode) in [(&decoy, 0o644), (&found, 0o755)] {
+            std::fs::write(path, "#!/bin/sh\n").expect("a candidate is written");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .expect("its mode is set");
+        }
+
+        let path = std::env::join_paths([
+            std::path::Path::new(""),
+            shadow.as_path(),
+            unrunnable.as_path(),
+            real.as_path(),
+        ])
+        .expect("a PATH joins");
+
+        assert_eq!(resolve(&path, BINARY).as_deref(), Some(found.as_path()));
+        assert!(
+            resolve(std::ffi::OsStr::new(""), BINARY).is_none(),
+            "an empty PATH resolves nothing rather than the working directory"
+        );
+        assert!(
+            !executable(&shadow.join(BINARY)),
+            "a directory is not a file"
+        );
+        assert!(!executable(&decoy), "and a file nobody may run is not one");
+        assert!(!executable(&home.path().join("absent")));
     }
 }

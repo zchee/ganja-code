@@ -16918,17 +16918,21 @@ mod tests {
                         .expect("the engine asked"),
                     "the frame names the engine's own id"
                 );
+                // The lead's own encoder rather than a `PermissionResponse`
+                // built here: a hand-built success body exercises the `Once`
+                // spelling only, where `response_of` is the function a real
+                // lead calls for all three replies and whose round trip with
+                // `reply_of` core already pins.
                 ganja_core::team::mailbox::write(
                     &inbox,
                     ganja_core::team::MailboxMessage::from_frame(
                         "team-lead",
                         &ganja_protocol::team::Frame::PermissionResponse(
-                            ganja_protocol::team::PermissionResponse::success(
-                                request.request_id.clone(),
-                                ganja_protocol::team::PermissionResponseBody {
-                                    updated_input: request.input.clone(),
-                                    permission_updates: Vec::new(),
-                                },
+                            ganja_core::teammate::member::response_of(
+                                &request.request_id,
+                                &request.tool_name,
+                                &request.input,
+                                ganja_protocol::PermissionReply::Once,
                             ),
                         ),
                         ganja_core::team::record::now_iso8601(),

@@ -64,9 +64,13 @@ fn a_panes_ask_reaches_the_leads_dialog_and_the_leads_answer_lets_the_call_run()
     // window. Its title names the teammate, which is the lead-side pass's
     // own spelling for a forwarded ask.
     let dialog = lead.wait_for_screen(lead.pane(), |screen| screen.contains(DIALOG_OPTIONS));
+    // Scoped to the **title's** own separator (`app.rs`'s `"{teammate} · {title}"`)
+    // rather than to the name anywhere on the screen: a screen-wide `contains`
+    // was non-vacuous only because the dialog overlay happens to blank the
+    // transcript, so it would have gone quiet the day it stopped doing that.
     assert!(
-        dialog.contains(TEAMMATE),
-        "the lead's dialog names the teammate that asked:\n{dialog}"
+        dialog.contains(&format!("{TEAMMATE} \u{b7} ")),
+        "the lead's dialog titles the ask with the teammate that raised it:\n{dialog}"
     );
     assert!(
         !lead.screen(&pane).contains(DIALOG_OPTIONS),

@@ -577,9 +577,12 @@ impl SpawnSpec {
 ///
 /// Two shapes, and the pane's is a **pair** rather than an id: `%N` recycles,
 /// so a lead that killed panes by id alone would eventually kill somebody
-/// else's window. The birth time tmux reports beside the id is what makes the
-/// identity stable, and [`crate::teammate::reaper`] is where that comparison
-/// lives.
+/// else's window. What tmux reports beside the id is `#{pane_pid}` — there is no
+/// `pane_start_time` format, as [`crate::teammate::tmux`]'s module doc records
+/// against `man tmux` and against a live server — so **birth is that pid**, and
+/// it is what makes the identity stable for as long as the machine keeps
+/// running. [`crate::teammate::reaper`] is where the comparison lives, and where
+/// the cold-start case that pid cannot answer for is dealt with.
 pub enum Handle {
     /// A teammate running in this process, holding its own engine.
     InProcess(Arc<Teammate>),
@@ -587,7 +590,8 @@ pub enum Handle {
     Pane {
         /// The `%N` tmux gave it.
         pane_id: String,
-        /// The pane's start time, as tmux reports it.
+        /// `#{pane_pid}`: the process tmux forked into the pane, fixed for the
+        /// pane's life. Not a creation time — tmux reports none.
         birth: String,
     },
 }
@@ -689,6 +693,31 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
     /// back — and the caller reads one refusal.
     async fn launch(&self, _spec: &SpawnSpec, _handle: &Handle) -> Result<(), Unsupported> {
         Ok(())
+    }
+
+    /// Whether this backend seeds its teammate's inbox itself, and the registry
+    /// must therefore not.
+    ///
+    /// [`false`] for every backend whose inbox is the one [`SpawnSpec::inbox`]
+    /// names, which is all of them but one: the registry writes §4.1's steps 4
+    /// and 5 there before it spawns, and unwinds that write on every failing
+    /// path.
+    ///
+    /// [`crate::teammate::claude::ClaudePane`] answers [`true`], because its
+    /// teammate reads a **different root** — `$CLAUDE_CONFIG_DIR/teams`, which
+    /// nothing will persuade a real `claude` to look away from (§2.1) — and it
+    /// writes a different message there, [`crate::teammate::claude::preamble`]'s
+    /// rather than the bare prompt. Two writers over one spawn were a defect
+    /// both ways round (verify-l3 F-1): with the two roots pointed at one
+    /// directory (AC-13's own configuration) the teammate's inbox held the bare
+    /// task *ahead* of the preamble, so the first thing a real `claude` read was
+    /// the one message that does not tell it how to address its lead — §5.5.1's
+    /// exact failure; with the roots apart (the ordinary case) a second copy of
+    /// somebody's prompt sat under the ganja root where nothing would ever read
+    /// it. So a backend that owns the inbox owns all of it: the seed, the
+    /// message, and taking it back out when its own launch is refused.
+    fn owns_inbox(&self) -> bool {
+        false
     }
 
     /// Ends what [`TeammateBackend::spawn`] produced. Idempotent: a handle
@@ -1155,6 +1184,24 @@ impl TeammateRegistry {
         self.root.inbox_path(&self.team, &self.lead)
     }
 
+    /// Whether any member of this team runs on `backend`.
+    ///
+    /// What [`crate::teammate::lead_inbox::LeadInbox`] asks before it reads a
+    /// **second** teams root: a `claude` teammate answers under
+    /// `$CLAUDE_CONFIG_DIR/teams` (§2.1) rather than under ganja's own home, so a
+    /// lead with one in the roster has two inboxes to read and a lead without one
+    /// has no business looking inside somebody else's config directory.
+    ///
+    /// Counts every member this registry holds rather than only the live ones: a
+    /// pane's row is dropped by a retire, and until then whatever it wrote is
+    /// still owed a read.
+    #[must_use]
+    pub fn holds_backend(&self, backend: MemberBackend) -> bool {
+        self.members()
+            .values()
+            .any(|member| member.backend == backend)
+    }
+
     /// How many teammates are still running, which is what the status bar
     /// counts.
     #[must_use]
@@ -1363,6 +1410,13 @@ impl TeammateRegistry {
     /// the one failing path that runs after the team file names the member,
     /// so it is the one that has a record to unwind.
     ///
+    /// The inbox half of that is skipped for a backend that
+    /// [`owns`](TeammateBackend::owns_inbox) its own — one writer per inbox, and
+    /// therefore one unwinder: [`crate::teammate::claude::ClaudePane`] seeds in
+    /// its `launch` and prunes there too. Which also moves those two steps to
+    /// where §4.1 puts them for that backend (record, then inbox, then prompt,
+    /// then the launch line), rather than ahead of the surface.
+    ///
     /// # Two spawns at once
     ///
     /// The name is **claimed synchronously** before any of that begins
@@ -1411,11 +1465,19 @@ impl TeammateRegistry {
             parent_session_id: self.lead_session_id.clone(),
         };
 
-        let seeded = match seed_inbox(&spec).await {
-            Ok(seeded) => seeded,
-            Err(error) => {
-                self.release(&spec.name);
-                return Err(error);
+        // Skipped outright for a backend that seeds its own — see
+        // [`TeammateBackend::owns_inbox`] for what two writers over one spawn
+        // cost. `None` therefore means "there is nothing of ours in any inbox",
+        // and every unwind below reads it that way rather than as a failure.
+        let seeded = if backend.owns_inbox() {
+            None
+        } else {
+            match seed_inbox(&spec).await {
+                Ok(seeded) => Some(seeded),
+                Err(error) => {
+                    self.release(&spec.name);
+                    return Err(error);
+                }
             }
         };
         let handle = match backend.spawn(&spec).await {
@@ -1830,9 +1892,17 @@ async fn seed_inbox(spec: &SpawnSpec) -> Result<mailbox::Identity, SpawnError> {
 
 /// Takes a spawn prompt back out of an inbox a spawn never got to use.
 ///
+/// [`None`] is nothing to do rather than an error: a backend that
+/// [`owns`](TeammateBackend::owns_inbox) its inbox was never seeded here, and
+/// unwinding what it wrote is its own — the registry does not know the root, and
+/// would prune the wrong file if it guessed.
+///
 /// Reported rather than returned: the spawn has already failed, and a cleanup
 /// that failed too is a line in the log rather than a second error to explain.
-async fn unseed_inbox(spec: &SpawnSpec, seeded: mailbox::Identity) {
+async fn unseed_inbox(spec: &SpawnSpec, seeded: Option<mailbox::Identity>) {
+    let Some(seeded) = seeded else {
+        return;
+    };
     let path = spec.inbox();
     let outcome = tokio::task::spawn_blocking(move || mailbox::prune_delivered(&path, &[seeded]))
         .await

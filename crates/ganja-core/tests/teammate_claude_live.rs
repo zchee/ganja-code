@@ -305,12 +305,19 @@ async fn a_real_claude_pane_round_trips_over_the_shared_inbox() {
     // §4.1 step 5, from the pane's side of the directory: the task is in the
     // inbox the pane reads, and it was never on the command line.
     let seeded = mailbox::read(&root.inbox_path(&team, &worker)).expect("the inbox reads");
+    // The task and §5.5.1's preamble are **one** message, not two. With the two
+    // roots collapsed the way this test collapses them, a registry that seeded
+    // here as well put the bare task in ahead of the preamble — so the first
+    // thing a real `claude` read was the one message that does not tell it how to
+    // address its lead. `TeammateBackend::owns_inbox` is what stops that, and
+    // this is where a live pane would notice it coming back.
     assert!(
         seeded
             .valid
             .iter()
-            .any(|message| message.text.contains(TOKEN)),
-        "the task was seeded into the shared inbox: {:?}",
+            .any(|message| message.text.contains(TOKEN)
+                && message.text.contains("Do **not** address")),
+        "the task was seeded into the shared inbox, behind its preamble: {:?}",
         seeded.valid.len()
     );
 
