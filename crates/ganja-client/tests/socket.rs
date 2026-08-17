@@ -185,6 +185,32 @@ async fn a_dead_socket_is_a_transport_error_naming_the_socket() {
     }
 }
 
+/// A body past the client's cap is refused unread, whatever route answered
+/// it: the far end of a socket is another process's word, and a listing
+/// that walks every socket in a directory must not be made to buffer what a
+/// hostile one sends. Declared oversize here, so not a byte of it is read.
+#[tokio::test]
+async fn an_oversized_answer_is_refused_unread() {
+    let stub = Stub::on_socket(|_| Reply::Json {
+        status: 200,
+        body: "x".repeat(ganja_client::BODY_CAP + 1),
+    })
+    .await;
+
+    let refused = tokio::time::timeout(support::DEADLINE, stub.client().health())
+        .await
+        .expect("an oversized answer is refused within the deadline")
+        .expect_err("more than the cap");
+    match refused {
+        ClientError::Oversized { method, path, cap } => {
+            assert_eq!(method, "GET");
+            assert_eq!(path, "/global/health");
+            assert_eq!(cap, ganja_client::BODY_CAP);
+        }
+        other => panic!("an oversize refusal, not {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The same routes over TCP: one client, two forms, one wire.
 // ---------------------------------------------------------------------------
