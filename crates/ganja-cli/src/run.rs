@@ -821,7 +821,15 @@ impl<'a> Reporter<'a> {
                         let _ = writeln!(self.out, "{RAN} {}", printable(tool));
                     }
                 }
-                PartBody::Tool { .. }
+                // A teammate's message (**D495**) arrives whole out of a
+                // mailbox rather than in deltas, so there is nothing here to
+                // open and grow; and it is emitted under none of the six
+                // names, for `EffortChanged`'s reason below — what a peer
+                // said is not this run's own text, its thinking, or a tool it
+                // ran, and a seventh name is a shape no consumer was
+                // promised.
+                PartBody::Peer { .. }
+                | PartBody::Tool { .. }
                 | PartBody::File { .. }
                 | PartBody::Patch { .. }
                 | PartBody::Reasoning { .. } => {}
@@ -865,6 +873,11 @@ impl<'a> Reporter<'a> {
             // the six nd-JSON type names have no room for a shape no consumer
             // was promised.
             | Event::EffortChanged { .. }
+            // A permission-mode change (**D496**) is the same kind of thing
+            // and unreachable besides: what sends one is a team's lead
+            // answering a teammate mid-session, and a headless run holds no
+            // mailbox anything could reach it through.
+            | Event::PermissionModeChanged { .. }
             // The quad is a dialog's lifecycle, not an account of the turn:
             // a headless run refuses every question before one can be asked,
             // and `--format json`'s six type names have no room for a shape

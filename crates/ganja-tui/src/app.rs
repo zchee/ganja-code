@@ -4765,6 +4765,12 @@ impl App {
                 self.effort = effort;
                 self.sync_effort_status();
             }
+            // Taken and drawn nowhere yet (**D496**): the posture this
+            // announces belongs beside the agent and the effort in the status
+            // bar, and that surface lands with the rest of the team's own
+            // (W6). Applying it here would paint a segment no other frontend
+            // shows and no test pins.
+            CoreEvent::PermissionModeChanged { .. } => {}
             CoreEvent::MessageFinished {
                 message_id,
                 reason,

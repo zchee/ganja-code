@@ -2615,7 +2615,14 @@ fn serialize_message(message: &Message) -> String {
                 // summary is about what the conversation was for, and a file
                 // the model can read again is not what it needs to remember.
                 PartBody::File { path, .. } => Some(format!("[User]: @{path}")),
-                PartBody::Tool { .. }
+                // A teammate's words are not the user's, and `[User]:` is the
+                // only prefix this vocabulary has for a part on this message
+                // — rendering a peer under it would put a sentence this
+                // person never typed into the summary as theirs, which is the
+                // misattribution D495 keeps out of `Part::as_text` for the
+                // same reason.
+                PartBody::Peer { .. }
+                | PartBody::Tool { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
                 | PartBody::Patch { .. }
@@ -2666,7 +2673,12 @@ fn serialize_message(message: &Message) -> String {
                 // before it actually said — the model was told this tool's
                 // result by the gateway, inside a turn, and what it made of
                 // that is in the reply text above.
-                PartBody::File { .. }
+                // A peer's words are left out on the User arm's reason, which
+                // reaches further than it looks: this serializer's prefixes
+                // name the two authors a conversation has, and a teammate is
+                // neither of them (D495).
+                PartBody::Peer { .. }
+                | PartBody::File { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
                 | PartBody::Patch { .. }

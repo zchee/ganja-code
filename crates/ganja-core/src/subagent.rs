@@ -667,13 +667,16 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                 // parent's tool result carries.
                 // A gateway's own tool run is not a call this child made
                 // either — the parent's tool result reports what the child
-                // *did*, and this is something a vendor did for it.
+                // *did*, and this is something a vendor did for it. Neither
+                // is a teammate's message: it is something a child was told,
+                // and the accumulator below is what the child answered.
                 PartBody::File { .. }
                 | PartBody::StepStart
                 | PartBody::StepFinish { .. }
                 | PartBody::Patch { .. }
                 | PartBody::ReasoningText { .. }
                 | PartBody::ServerTool { .. }
+                | PartBody::Peer { .. }
                 | PartBody::Reasoning { .. } => {}
             },
             Event::PartDelta { part_id, delta, .. } => {
@@ -732,13 +735,14 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             // reverts; the arm exists because the parent's watcher reads the
             // whole event stream and must not be surprised by one of them.
             // The same holds for an agent change — a child is never handed the
-            // approval cell — and for an effort change, which only the
-            // engine's command paths announce. A steer cannot reach a child
-            // either: no handle of a child's ever enters the engine's slot, so
-            // its mailbox has no route in.
+            // approval cell — and for an effort change and a permission-mode
+            // change, which only the engine's command paths announce. A steer
+            // cannot reach a child either: no handle of a child's ever enters
+            // the engine's slot, so its mailbox has no route in.
             Event::RevertChanged { .. }
             | Event::AgentChanged { .. }
             | Event::SteerConsumed { .. }
+            | Event::PermissionModeChanged { .. }
             | Event::EffortChanged { .. } => {}
         }
     }

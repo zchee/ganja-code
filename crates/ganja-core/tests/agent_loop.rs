@@ -13,8 +13,8 @@ use ganja_core::{
     Engine, EngineError,
     permission::{Decision, Permissions},
     protocol::{
-        Command, Event, FinishReason, PartBody, PermissionId, PermissionReply, Role, ToolState,
-        Usage,
+        Command, Event, FinishReason, PartBody, PermissionId, PermissionMode, PermissionReply,
+        Role, ToolState, Usage,
     },
     provider::{ChatRequest, ProviderError, ProviderEvent},
     tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
@@ -120,6 +120,10 @@ fn shape(event: &Event) -> String {
             // Finished when it arrives, so the line names what ran rather
             // than a state it will pass through.
             PartBody::ServerTool { tool, .. } => format!("part:server_tool:{tool}"),
+            // Whole when it arrives too, and named by its sender: which
+            // teammate said a thing is the fact an order test would be
+            // written about, where the words themselves are prose.
+            PartBody::Peer { from, .. } => format!("part:peer:{from}"),
         },
         Event::PartDelta { delta, .. } => format!("delta:{delta}"),
         Event::PartUpdated { part, .. } => match &part.body {
@@ -160,6 +164,13 @@ fn shape(event: &Event) -> String {
         Event::EffortChanged { effort, .. } => {
             format!("effort_changed:{}", effort.as_deref().unwrap_or("default"))
         }
+        Event::PermissionModeChanged { mode, .. } => format!(
+            "permission_mode_changed:{}",
+            match mode {
+                PermissionMode::Ask => "ask",
+                PermissionMode::Bypass => "bypass",
+            }
+        ),
     }
 }
 

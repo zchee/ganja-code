@@ -327,6 +327,11 @@ fn newest_user_text(messages: &[Message]) -> String {
                 .iter()
                 .filter_map(|part| match &part.body {
                     PartBody::Text { text } => Some(text.as_str()),
+                    // Named rather than left to the fallback below, because
+                    // this one is a decision: a peer's words are rendered
+                    // into the user turn at request assembly (D495), and a
+                    // wire never encodes a peer part as its own message.
+                    PartBody::Peer { .. } => None,
                     _ => None,
                 })
                 .collect::<Vec<_>>()

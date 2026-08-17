@@ -190,6 +190,29 @@ fn formatted(part: &Part) -> String {
 
             rendered
         }
+        // A teammate's message renders for the server tool's reason and one
+        // more (**D495**): the model was told this, so a copy that dropped it
+        // would be a copy of a reply answering something the reader cannot
+        // see. The name leads it because this is the one part in a transcript
+        // that neither of the two headings above wrote, and a copy that let a
+        // peer's sentence pass for the session's own would misattribute it.
+        PartBody::Peer {
+            from,
+            summary,
+            body,
+            ..
+        } => {
+            let mut rendered = match summary {
+                Some(line) if !line.trim().is_empty() => {
+                    format!("**Teammate: {from}** — {line}\n\n")
+                }
+                _ => format!("**Teammate: {from}**\n\n"),
+            };
+            rendered.push_str(body);
+            rendered.push_str("\n\n");
+
+            rendered
+        }
         PartBody::File { .. }
         | PartBody::StepStart
         | PartBody::StepFinish { .. }
