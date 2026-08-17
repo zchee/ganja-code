@@ -67,6 +67,10 @@ pub enum Action {
     /// Open the `/plugin` dialog: every installed plugin's state and
     /// components, with the store's own actions beside them (**D474**).
     Plugin,
+    /// Open the `/team` dialog: every member of this session's team, what it
+    /// has been doing, and the doors onto starting, messaging and shutting
+    /// one down (**D503**, **D504**).
+    Team,
     /// Open the key and command reference.
     Help,
     /// Leave.
@@ -112,6 +116,7 @@ impl Action {
             | Self::Context
             | Self::Usage
             | Self::Plugin
+            | Self::Team
             | Self::Help
             | Self::Copy
             | Self::CopyMessage
@@ -313,6 +318,19 @@ pub const COMMANDS: &[Entry] = &[
         category: Category::System,
         suggested: false,
     },
+    // Filed with `/mcp` and `/plugin` rather than under `Agent`, for the
+    // reason that group's own doc gives: `Agent` is *who is answering this
+    // conversation*, and a teammate answers its own. A team is a facility
+    // running beside this session, which is what `System` is for.
+    Entry {
+        action: Action::Team,
+        name: "team",
+        aliases: &[],
+        title: "Teammates",
+        description: "See this session's team; start, message or shut down a member",
+        category: Category::System,
+        suggested: false,
+    },
     Entry {
         action: Action::Help,
         name: "help",
@@ -438,6 +456,212 @@ pub fn submitted(text: &str) -> Option<&'static Entry> {
     }
 
     lookup(name)
+}
+
+/// What a submitted `/team` line asked for.
+///
+/// The second door onto what [`Action::Team`] opens, and the only one that
+/// can carry arguments: the palette has nowhere to type them and the dropdown
+/// closes the moment a space follows the name, so a line with a subcommand
+/// has to be read off the buffer on submit exactly as [`submitted`] reads an
+/// argument-less one. That is what lets `/team spawn w1 --backend pane` — the
+/// spec's own spelling — reach the same spawn sequence the `task` tool's
+/// teammate door reaches (**D504**).
+///
+/// [`Team::List`] and [`Action::Team`] mean the same thing, so a bare `/team`
+/// opens the dialog whichever of the two doors the app reads first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Team {
+    /// Show the roster: a bare `/team`, and `/team list`.
+    List,
+    /// Start a teammate.
+    Spawn(TeamSpawn),
+    /// Ask a member to shut down, or — with no name — every one of them.
+    Shutdown {
+        /// The member named, or [`None`] for the whole team.
+        member: Option<String>,
+    },
+    /// The line said `/team` and then something this grammar has not got.
+    ///
+    /// One sentence rather than a kind, for [`crate::component::team::Team`]'s
+    /// notice line to show: nothing downstream branches on which mistake it
+    /// was, and a refusal a person cannot read is one they cannot act on.
+    Refused(String),
+}
+
+/// A `/team spawn` line, parsed.
+///
+/// Deliberately strings and [`Option`]s: which surfaces exist, which agent
+/// kinds are spawnable, and which names a team will take are every one of
+/// them the engine's to answer, and a second list here would be a second
+/// place for them to drift. What this grammar decides is only whether a value
+/// was *given*.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamSpawn {
+    /// The name asked for, unchecked.
+    pub name: String,
+    /// What `--backend` named, unchecked. [`None`] is the far side's default
+    /// rather than a value chosen here, exactly as it is on the `task` door.
+    pub backend: Option<String>,
+    /// What `--agent` named. [`None`] means the kind
+    /// [`crate::component::team::SpawnRequest`] fills in.
+    pub agent_type: Option<String>,
+    /// Whether `--bypass` was given: the one thing a person may ask for that
+    /// a model may not (D-5), which is why it is not a `task` argument.
+    pub bypass: bool,
+    /// What the teammate is being asked to do, verbatim from the first word
+    /// that is not a flag. Empty is allowed — AC-11's own spelling
+    /// (`/team spawn w1 --backend pane`) carries no prompt, and a teammate
+    /// started to be messaged afterwards is a real thing to want.
+    pub prompt: String,
+}
+
+/// The name `/team` is typed as.
+const TEAM: &str = "team";
+
+/// What `/team spawn` reads when the line names nothing to call the teammate.
+const SPAWN_NEEDS_A_NAME: &str = "`/team spawn` starts a teammate under a name: /team spawn <name> [--backend <surface>] [--agent <kind>] [--bypass] [what it should do]";
+
+/// What `--backend` reads when the line ends before its value. Which surfaces
+/// there are is not repeated here on purpose: the far side refuses an unknown
+/// one by name, and two lists would be two places for them to drift.
+const BACKEND_NEEDS_A_VALUE: &str =
+    "`--backend` names the surface a teammate runs on, and this line ends before naming one";
+
+/// What `--agent` reads when the line ends before its value.
+const AGENT_NEEDS_A_VALUE: &str =
+    "`--agent` names the kind of agent a teammate runs as, and this line ends before naming one";
+
+/// The `/team` command a submitted buffer names, or [`None`] when the buffer
+/// is not a `/team` line at all — in which case it is prose, and nothing here
+/// has an opinion about it.
+///
+/// A refused subcommand or flag comes back as [`Team::Refused`] rather than as
+/// [`None`]: a line that plainly says `/team` and then gets something wrong
+/// should be told so, not sent to the model as a question about itself.
+#[must_use]
+pub fn team(text: &str) -> Option<Team> {
+    let (name, rest) = split_word(text.strip_prefix('/')?);
+    if name != TEAM {
+        return None;
+    }
+
+    let (subcommand, rest) = split_word(rest);
+    // Trailing whitespace is nobody's argument, and leaving it on would put it
+    // inside the quotes of a refusal that names what it could not take.
+    let rest = rest.trim_end();
+    Some(match subcommand {
+        "" => Team::List,
+        "list" => match rest {
+            "" => Team::List,
+            extra => Team::Refused(format!(
+                "`/team list` takes nothing after it, and this line adds {extra:?}"
+            )),
+        },
+        "spawn" => match team_spawn(rest) {
+            Ok(spawn) => Team::Spawn(spawn),
+            Err(refusal) => Team::Refused(refusal),
+        },
+        "shutdown" => {
+            let (member, extra) = split_word(rest);
+            if extra.is_empty() {
+                Team::Shutdown {
+                    // No name is the whole team, which is what the caller fans
+                    // out over: one request per member is what the far side
+                    // takes, so "everybody" is expanded where the roster is
+                    // known rather than invented as a second kind of request.
+                    member: (!member.is_empty()).then(|| member.to_owned()),
+                }
+            } else {
+                Team::Refused(format!(
+                    "`/team shutdown` names one member, or nobody for the whole team, and this line adds {extra:?}"
+                ))
+            }
+        }
+        other => Team::Refused(format!(
+            "`/team` has no {other:?} subcommand: it lists the team, and takes `spawn`, `list` and `shutdown`"
+        )),
+    })
+}
+
+/// The arguments after `/team spawn`, parsed — the same grammar the dialog's
+/// own free-text step takes, so there is one spelling of a spawn rather than
+/// two that could drift.
+///
+/// Flags come before the prompt, and the first word that is not a flag begins
+/// it: from there the rest of the line is the prompt verbatim, dashes
+/// included, because a prompt is prose and prose has dashes in it. A word
+/// starting with `--` *before* that point and outside the three this grammar
+/// has is refused by name rather than swallowed, on the same reasoning the
+/// `task` tool refuses a `backend` with no `name`: the likeliest way to send
+/// one is a flag that was meant to work.
+///
+/// # Errors
+///
+/// One sentence, for the notice line: a missing name, a flag whose value the
+/// line ends before, or a flag this grammar has not got.
+pub fn team_spawn(text: &str) -> Result<TeamSpawn, String> {
+    let (name, mut rest) = split_word(text);
+    if name.is_empty() || name.starts_with('-') {
+        return Err(SPAWN_NEEDS_A_NAME.to_owned());
+    }
+
+    let mut spawn = TeamSpawn {
+        name: name.to_owned(),
+        backend: None,
+        agent_type: None,
+        bypass: false,
+        prompt: String::new(),
+    };
+    loop {
+        let (word, after) = split_word(rest);
+        match word {
+            "" => break,
+            "--backend" | "--agent" => {
+                let (value, tail) = split_word(after);
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(if word == "--backend" {
+                        BACKEND_NEEDS_A_VALUE.to_owned()
+                    } else {
+                        AGENT_NEEDS_A_VALUE.to_owned()
+                    });
+                }
+                if word == "--backend" {
+                    spawn.backend = Some(value.to_owned());
+                } else {
+                    spawn.agent_type = Some(value.to_owned());
+                }
+                rest = tail;
+            }
+            "--bypass" => {
+                spawn.bypass = true;
+                rest = after;
+            }
+            unknown if unknown.starts_with("--") => {
+                return Err(format!(
+                    "`/team spawn` has no {unknown:?} flag: it takes `--backend`, `--agent` and `--bypass`"
+                ));
+            }
+            // Not a flag, so the prompt starts here and runs to the end.
+            _ => {
+                spawn.prompt = rest.trim_end().to_owned();
+                break;
+            }
+        }
+    }
+
+    Ok(spawn)
+}
+
+/// The first whitespace-delimited word of `text`, and everything after it with
+/// the whitespace between them dropped — so the remainder of a line is always
+/// ready to be either parsed further or taken whole as a prompt.
+fn split_word(text: &str) -> (&str, &str) {
+    let text = text.trim_start();
+    match text.find(char::is_whitespace) {
+        Some(end) => (&text[..end], text[end..].trim_start()),
+        None => (text, ""),
+    }
 }
 
 /// One command the **engine** offers, as the dropdown lists it.
@@ -661,8 +885,8 @@ fn score(atom: &Atom, matcher: &mut Matcher, entry: &Entry, surface: Surface) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, COMMANDS, Category, Choice, EngineCommand, Surface, dropdown_matches, is_bare_exit,
-        lookup, matches, submitted,
+        Action, COMMANDS, Category, Choice, EngineCommand, Surface, Team, TeamSpawn,
+        dropdown_matches, is_bare_exit, lookup, matches, submitted, team,
     };
 
     /// The commands the engine offers a session that loaded no config: one,
@@ -692,6 +916,7 @@ mod tests {
             ("context", &[][..], Action::Context),
             ("usage", &[][..], Action::Usage),
             ("plugin", &[][..], Action::Plugin),
+            ("team", &[][..], Action::Team),
             ("help", &[][..], Action::Help),
             ("exit", &["quit", "q"][..], Action::Exit),
             ("copy", &[][..], Action::Copy),
@@ -983,6 +1208,112 @@ mod tests {
             "what about /models",
         ] {
             assert!(submitted(text).is_none(), "{text:?} should be prose");
+        }
+    }
+
+    /// The one command here that takes arguments, and the subcommands it
+    /// takes them for. A bare `/team` means the same thing as `/team list`,
+    /// which is why both reach [`Team::List`] rather than two kinds of open.
+    #[test]
+    fn a_team_line_reaches_every_subcommand_the_grammar_has() {
+        for text in ["/team", "/team ", "/team\n", "/team list", "/team list  "] {
+            assert_eq!(team(text), Some(Team::List), "{text:?} should list");
+        }
+        assert_eq!(
+            team("/team shutdown"),
+            Some(Team::Shutdown { member: None }),
+            "no name is the whole team"
+        );
+        assert_eq!(
+            team("/team shutdown w1"),
+            Some(Team::Shutdown {
+                member: Some("w1".to_owned())
+            })
+        );
+    }
+
+    /// Flags come before the prompt, and the first word that is not a flag
+    /// begins it — so AC-11's own spelling parses with no prompt at all, and a
+    /// prompt keeps its dashes.
+    #[test]
+    fn a_team_spawn_line_takes_its_flags_before_its_prompt() {
+        let cases = [
+            (
+                "/team spawn w1 --backend pane",
+                TeamSpawn {
+                    name: "w1".to_owned(),
+                    backend: Some("pane".to_owned()),
+                    agent_type: None,
+                    bypass: false,
+                    prompt: String::new(),
+                },
+            ),
+            (
+                "/team spawn w1",
+                TeamSpawn {
+                    name: "w1".to_owned(),
+                    backend: None,
+                    agent_type: None,
+                    bypass: false,
+                    prompt: String::new(),
+                },
+            ),
+            (
+                "/team spawn w1 --bypass --agent explore --backend claude read the tree --carefully",
+                TeamSpawn {
+                    name: "w1".to_owned(),
+                    backend: Some("claude".to_owned()),
+                    agent_type: Some("explore".to_owned()),
+                    bypass: true,
+                    prompt: "read the tree --carefully".to_owned(),
+                },
+            ),
+        ];
+
+        for (text, expected) in cases {
+            assert_eq!(team(text), Some(Team::Spawn(expected)), "{text:?}");
+        }
+    }
+
+    /// Every way of getting a `/team` line wrong is answered with a sentence
+    /// naming what could not be taken, rather than being sent to the model as
+    /// a question about itself.
+    #[test]
+    fn a_team_line_this_grammar_has_not_got_is_refused_by_name() {
+        let cases = [
+            ("/team nonesuch", "nonesuch"),
+            ("/team spawn", "/team spawn"),
+            ("/team spawn --backend pane", "/team spawn"),
+            ("/team spawn w1 --backend", "--backend"),
+            ("/team spawn w1 --agent", "--agent"),
+            ("/team spawn w1 --nonesuch go", "--nonesuch"),
+            ("/team list w1", "w1"),
+            ("/team shutdown w1 w2", "w2"),
+        ];
+
+        for (text, named) in cases {
+            let Some(Team::Refused(refusal)) = team(text) else {
+                panic!("{text:?} should be refused, got {:?}", team(text));
+            };
+            assert!(
+                refusal.contains(named),
+                "{text:?} should name {named:?}: {refusal}"
+            );
+        }
+    }
+
+    /// Nothing that is not a `/team` line has an opinion here — it is prose,
+    /// or it is another command's.
+    #[test]
+    fn only_a_team_line_reaches_the_team_grammar() {
+        for text in [
+            "/teammate w1",
+            "/models",
+            "team spawn w1",
+            "tell /team spawn w1",
+            "",
+        ] {
+            assert_eq!(team(text), None, "{text:?} is not a /team line");
         }
     }
 
