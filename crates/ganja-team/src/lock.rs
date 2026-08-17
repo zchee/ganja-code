@@ -412,23 +412,43 @@ impl Drop for Local {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
-        path::Path,
+        fs, io,
+        path::{Path, PathBuf},
         sync::{Arc, Mutex},
         thread,
-        time::Duration,
+        time::{Duration, SystemTime},
     };
 
     use backon::BackoffBuilder as _;
 
-    use super::{LOCK_SUFFIX, acquire, lock_path_of, schedule};
+    use super::{LOCK_SUFFIX, LockError, acquire, lock_path_of, schedule};
 
     /// An inbox that exists, because the protocol locks a real path.
-    fn inbox(home: &Path) -> std::path::PathBuf {
+    fn inbox(home: &Path) -> PathBuf {
         let path = home.join("worker-1.json");
         fs::write(&path, "[]").expect("the inbox is writable");
 
         path
+    }
+
+    /// The lock a peer would take on `inbox`, made the way a peer makes it: a
+    /// bare `mkdir` on the real path.
+    fn peers_lock(inbox: &Path) -> PathBuf {
+        let lock = lock_path_of(&fs::canonicalize(inbox).expect("the inbox is real"));
+        fs::create_dir(&lock).expect("a peer takes the lock");
+
+        lock
+    }
+
+    /// Dates a lock directory `to`, which is the only staleness signal the
+    /// protocol reads. Unix-gated because opening a *directory* to set its
+    /// times is a unix affordance — the same gate `tests/lock_break.rs` keeps.
+    #[cfg(unix)]
+    fn date(lock: &Path, to: SystemTime) {
+        fs::File::open(lock)
+            .expect("a lock is openable")
+            .set_modified(to)
+            .expect("a lock's modification time is settable");
     }
 
     #[test]
@@ -469,6 +489,87 @@ mod tests {
             Path::new("/teams/t/inboxes/worker-1.json.lock"),
         );
         assert!(LOCK_SUFFIX.starts_with('.'));
+    }
+
+    #[test]
+    fn an_unseeded_target_is_refused_as_not_found() {
+        let home = tempfile::tempdir().expect("a temp directory");
+        let missing = home.path().join("never-seeded.json");
+
+        // §2.5 seeds before it locks because the lock is on the target's real
+        // path, and a file that is not there has none. That arrives as the
+        // `realpath` failure it is, and it is not contention, so the ladder is
+        // not spent on it.
+        let refusal = acquire(&missing).expect_err("a target with no real path has no lock");
+        assert!(
+            matches!(&refusal, LockError::Io(error) if error.kind() == io::ErrorKind::NotFound),
+            "{refusal:?}"
+        );
+        assert!(
+            !lock_path_of(&missing).exists(),
+            "nothing was made on the way to the refusal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_lock_holding_a_file_is_reported_not_broken() {
+        let home = tempfile::tempdir().expect("a temp directory");
+        let path = inbox(home.path());
+
+        // A build that put a pid file inside its lock and then went away. Its
+        // `rmdir` — and a peer's — answers `ENOTEMPTY`, which is exactly the
+        // failure the module doc forbids a pid file for; ganja reports it and
+        // deletes nothing, because what is inside is somebody else's.
+        let lock = peers_lock(&path);
+        fs::write(lock.join("pid"), "1234\n").expect("the pid file is writable");
+        date(&lock, SystemTime::now() - Duration::from_secs(30));
+
+        let refusal = acquire(&path).expect_err("a directory that will not go cannot be taken");
+        assert!(
+            matches!(
+                &refusal,
+                LockError::Io(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty
+            ),
+            "{refusal:?}"
+        );
+        assert!(
+            lock.join("pid").is_file(),
+            "what was inside the lock is untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("the inbox reads"),
+            "[]",
+            "and so is the inbox"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_dated_in_the_future_reads_as_fresh_and_is_waited_for() {
+        let home = tempfile::tempdir().expect("a temp directory");
+        let path = inbox(home.path());
+
+        // A peer with a fast clock: half a minute ahead, which a signed age
+        // would read as long past stale and break.
+        let lock = peers_lock(&path);
+        date(&lock, SystemTime::now() + Duration::from_secs(30));
+        let dated = fs::metadata(&lock)
+            .expect("the lock is there")
+            .modified()
+            .expect("a lock has a modification time");
+
+        let refusal = acquire(&path).expect_err("a fresh lock is waited for, then refused");
+        assert!(matches!(refusal, LockError::Held { .. }), "{refusal:?}");
+        assert!(lock.is_dir(), "waited for, never broken");
+        assert_eq!(
+            fs::metadata(&lock)
+                .expect("the lock is still there")
+                .modified()
+                .expect("a lock has a modification time"),
+            dated,
+            "and not touched either",
+        );
     }
 
     #[test]
