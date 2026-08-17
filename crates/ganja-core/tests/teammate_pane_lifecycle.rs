@@ -131,8 +131,11 @@ async fn a_pane_teammate_spawned_with_backend_pane_is_created_and_killed_on_shut
     );
     let pane_id = member.tmux_pane_id.clone();
 
-    // 2. tmux agrees: the pane is live, and its birth is the pid the record's
-    // handle carries — read back through production's own listing.
+    // 2. tmux agrees: the pane is live, and the pair it is listed under —
+    // read back through production's own listing — is `(pane_id, pid)`.
+    // That the pair the registry *recorded* is this one is not read here (a
+    // handle is the registry's own); it is proved at the tail, where a kill by
+    // the recorded pair ends this very pane and a second one finds it gone.
     let live = Server::at(server.socket(), None)
         .panes()
         .await
