@@ -66,16 +66,27 @@
 //! closed — because in production the pane rides the user's own config home,
 //! whose store is the one that user logged into.
 //!
-//! # The second claim: which separator a colliding name gets
+//! # The second claim this test used to make, and why it cannot
 //!
-//! Open Question 3 asks whether Claude Code's registration writes `worker-2` or
-//! `worker2`, and **nothing in CI can settle it** — §1.1 says only "appends an
-//! incrementing counter starting at 2". This test is its only witness, so it
-//! takes one: with `worker` already in the shared team file, the pane is asked
-//! to register a teammate of its own by that same name, and whatever appears
-//! beside `worker` in the team file is what a real `claude` does. It is
-//! asserted against [`COLLISION_SEPARATOR`] rather than merely printed,
-//! because a witness that only whispers is not one.
+//! Open Question 3 — whether registration writes `worker-2` or `worker2` —
+//! was once asked here, by telling the pane to register a teammate of its own
+//! under the name it already had. **A teammate cannot answer that question**,
+//! and not because of a timeout: Claude Code forbids it. The 2.1.233 binary was
+//! observed to drop the `name` parameter from the Agent tool's own description
+//! — leaving "teammates cannot spawn teammates" in its place — for exactly a
+//! process launched with **both** `--agent-id` and `--team-name`, which is
+//! [`claude::ClaudePane`]'s launch line, every time. A pane teammate therefore
+//! has no `name` parameter to spawn *with*, only anonymous subagents that never
+//! earn a member record, so no second member was ever going to appear in the
+//! team file. The leg is gone rather than given a longer timeout.
+//!
+//! A lead `claude` could answer it, and cannot be made to: a lead mints its own
+//! `session-<eight hex>` team from its own session id, which is not the team
+//! this directory holds.
+//!
+//! It is settled anyway, and by better evidence than a live run — the same
+//! binary that refuses the witness performs the registration itself, observed
+//! directly. See [`ganja_team::COLLISION_SEPARATOR`], which records what it does.
 
 use std::{
     path::{Path, PathBuf},
@@ -98,9 +109,7 @@ use ganja_core::{
     },
     tool::{Registry, task::TeammateSpawn},
 };
-use ganja_team::{
-    COLLISION_SEPARATOR, LEAD, MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record,
-};
+use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 
 /// The opt-in every live test in this workspace shares.
 const LIVE: &str = "GANJA_LIVE_TEST";
@@ -127,9 +136,6 @@ const TOKEN: &str = "GANJA-AC13-ROUNDTRIP-OK";
 /// the timeout rather than hanging, because a live test nobody can interrupt is
 /// a live test nobody runs twice.
 const REPLY: Duration = Duration::from_secs(240);
-
-/// How long the pane is given to register a teammate of its own.
-const COLLISION: Duration = Duration::from_secs(240);
 
 /// How often the shared directory is looked at.
 const POLL: Duration = Duration::from_millis(500);
@@ -227,31 +233,8 @@ async fn until<T>(what: &str, limit: Duration, mut read: impl FnMut() -> Option<
     }
 }
 
-/// Every teammate named in the shared team file, the lead excluded.
-fn teammates(root: &TeamsRoot, team: &TeamName) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(root.config_path(team)) else {
-        return Vec::new();
-    };
-    let Ok(file) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
-    };
-
-    file.get("members")
-        .and_then(serde_json::Value::as_array)
-        .map(|members| {
-            members
-                .iter()
-                .filter_map(|member| member.get("name").and_then(serde_json::Value::as_str))
-                .filter(|name| *name != LEAD)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// The whole of AC-13: a real `claude` is spawned into a pane, reads the task
-/// out of the shared inbox, and answers into the lead's — and, with that
-/// proved, is asked for the one fact only it can give about a colliding name.
+/// out of the shared inbox, and answers into the lead's.
 #[tokio::test]
 #[ignore = "needs a real `claude` binary and a real `tmux`; opt in with GANJA_LIVE_TEST=1"]
 async fn a_real_claude_pane_round_trips_over_the_shared_inbox() {
@@ -380,40 +363,6 @@ async fn a_real_claude_pane_round_trips_over_the_shared_inbox() {
         answer.from, WORKER,
         "a teammate answers as itself: {:?}",
         answer.from
-    );
-
-    // Open Question 3's only witness. `worker` is already in the shared team
-    // file, so a `claude` registering that name again has to make it unique,
-    // and how it does that is the fact nothing else here can observe.
-    mailbox::write(
-        &root.inbox_path(&team, &worker),
-        MailboxMessage::new(
-            LEAD,
-            format!(
-                "Now spawn one teammate of your own, asking for the name \"{WORKER}\" — the same \
-                 name you have. Then tell me the name it was actually given."
-            ),
-            record::now_iso8601(),
-        ),
-    )
-    .expect("the follow-up is written");
-
-    let registered = until(
-        "a second teammate in the shared team file",
-        COLLISION,
-        || {
-            teammates(&root, &team)
-                .into_iter()
-                .find(|name| name != WORKER)
-        },
-    )
-    .await;
-    assert_eq!(
-        registered,
-        format!("{WORKER}{COLLISION_SEPARATOR}2"),
-        "a real claude made the colliding name {registered:?}; if this is the only failure, \
-         Open Question 3 is settled the other way and `COLLISION_SEPARATOR` is the one line to \
-         change"
     );
 
     registry.shutdown().await;
