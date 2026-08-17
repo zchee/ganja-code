@@ -24,7 +24,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use ganja_team::{MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record};
+use ganja_team::{
+    MailboxMessage, MemberName, MemberRecord, Spawn, Surface, TeamName, TeamsRoot, mailbox, record,
+};
 use tracing_subscriber::fmt::MakeWriter;
 
 /// The body of a message that is written, read and delivered normally.
@@ -33,6 +35,15 @@ const DELIVERED_CANARY: &str = "kaleidoscopic-otter-9174";
 /// The body of a message that is damaged on disk, so the drop-report path is
 /// the one carrying it.
 const DROPPED_CANARY: &str = "phosphorescent-gannet-3312";
+
+/// A spawn prompt, which §2.2 persists verbatim and which is therefore
+/// documented as a place a credential lands. The `Debug` of anything holding one
+/// is the leak this canary is for.
+const PROMPT_CANARY: &str = "incandescent-pangolin-5521";
+
+/// A message summary — the sender's own prose, and content by the same argument
+/// the body is.
+const SUMMARY_CANARY: &str = "vermillion-quokka-8807";
 
 /// A `tracing` writer a test can read back.
 #[derive(Clone, Default)]
@@ -121,6 +132,48 @@ fn a_message_body_never_reaches_a_log_line() {
         damaged.reports[0]
     );
 
+    // Every `Debug` in the crate that holds somebody's words. These are the
+    // renderings a caller reaches for without thinking — an error context, a
+    // `tracing` field, an `assert_eq!` failure — so each one is a way a body
+    // reaches a log that no amount of care inside this crate would catch.
+    let mut summarized = MailboxMessage::new("w", DELIVERED_CANARY, record::now_iso8601());
+    summarized.summary = Some(SUMMARY_CANARY.to_owned());
+    let message_debug = format!("{summarized:?}");
+    let contents_debug = format!("{held:?}");
+
+    let spawn = Spawn {
+        agent_type: "general-purpose".to_owned(),
+        model: "claude-opus-5[1m]".to_owned(),
+        color: "blue".to_owned(),
+        prompt: PROMPT_CANARY.to_owned(),
+        plan_mode_required: false,
+        surface: Surface::InProcess,
+        cwd: "/w".to_owned(),
+    };
+    let spawn_debug = format!("{spawn:?}");
+    let record_debug = format!("{:?}", MemberRecord::teammate(&worker, &team, spawn, 1));
+
+    // Redacted, not omitted: a size and a sender are what keep the rendering
+    // worth having, and a field that vanished would be its own bug.
+    for (what, rendered) in [
+        ("a message", &message_debug),
+        ("a spawn", &spawn_debug),
+        ("a member record", &record_debug),
+    ] {
+        assert!(
+            rendered.contains(" bytes>"),
+            "{what} renders its words as a size: {rendered}"
+        );
+    }
+    assert!(
+        message_debug.contains("from: \"w\""),
+        "a message still says who sent it: {message_debug}"
+    );
+    assert!(
+        record_debug.contains("demo-worker-1"),
+        "a record still says who it is: {record_debug}"
+    );
+
     let logged = capture.logged();
 
     // Not "something was captured": the three lines this library traces on the
@@ -138,17 +191,29 @@ fn a_message_body_never_reaches_a_log_line() {
         );
     }
 
-    for body in [DELIVERED_CANARY, DROPPED_CANARY] {
+    for body in [
+        DELIVERED_CANARY,
+        DROPPED_CANARY,
+        PROMPT_CANARY,
+        SUMMARY_CANARY,
+    ] {
         assert!(
             !logged.contains(body),
             "a message body reached the log:\n{logged}"
         );
-    }
-    for body in [DELIVERED_CANARY, DROPPED_CANARY] {
-        assert!(
-            !rendered.contains(body),
-            "a message body reached an identity's rendering: {rendered}"
-        );
+
+        for (what, rendered) in [
+            ("an identity", &rendered),
+            ("a message", &message_debug),
+            ("a read inbox", &contents_debug),
+            ("a spawn", &spawn_debug),
+            ("a member record", &record_debug),
+        ] {
+            assert!(
+                !rendered.contains(body),
+                "user content reached the `Debug` of {what}: {rendered}"
+            );
+        }
     }
 
     // The file is where a body does belong, and a test proving nothing rendered

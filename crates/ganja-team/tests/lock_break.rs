@@ -37,9 +37,19 @@ use ganja_team::{
 };
 
 /// What a fully contended acquire sleeps through: 5 + 10 + 20 + 40 + 80 +
-/// 100 × 5 ms.
-const LADDER: Duration = Duration::from_millis(655);
+/// 100 × 5 ms — **less three nanoseconds**.
+///
+/// Stated exactly rather than as a round 655 ms, so this file and
+/// `lock.rs`'s own `the_ladder_is_proper_lockfiles_own_five_to_a_hundred` agree
+/// about one number instead of about two that differ. The three nanoseconds are
+/// that test's own finding: backon doubles a delay through `f32` seconds, so the
+/// fourth delay is 39.999999 ms and the fifth 79.999998 ms. Rounding up would
+/// make the `waited >= LADDER` assertion below a bound the ladder provably
+/// cannot meet — it would pass only because a real `sleep` overshoots, which is
+/// a test resting on the scheduler rather than on the protocol.
+const LADDER: Duration = Duration::from_nanos(654_999_997);
 
+#[cfg(unix)]
 #[test]
 fn a_lock_directory_older_than_ten_seconds_is_broken_and_the_write_proceeds() {
     let (_home, inbox) = inbox("crashed");
@@ -108,6 +118,7 @@ fn a_fresh_lock_directory_held_by_a_peer_is_waited_for_not_broken() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn the_lock_is_a_directory_never_a_file() {
     let (home, inbox) = inbox("shaped");
@@ -212,6 +223,13 @@ fn lock_of(inbox: &Path) -> PathBuf {
 /// this builds for — `futimens` asks for ownership, not for a writable
 /// descriptor — and it is the only way to test a ten-second rule in a
 /// millisecond.
+///
+/// `#[cfg(unix)]` for exactly that reason, and to match `mailbox.rs`'s own
+/// mode-preservation test: `File::open` on a *directory* is a unix affordance,
+/// so this and the two tests that call it are unix-gated rather than left to
+/// discover the difference at some future port. Nothing is lost today — the
+/// windows lane is parked — and the gate is what says so out loud.
+#[cfg(unix)]
 fn backdate(path: &Path, by: Duration) {
     let handle = File::open(path).expect("a lock is openable");
     handle
