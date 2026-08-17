@@ -189,10 +189,15 @@ impl Delivered {
 
 /// A teammate whose `shutdown_approved` this pass read.
 ///
-/// The pane fields are carried rather than acted on: killing a pane is the
-/// backend's, and in this phase there are none. What the lead does here and
-/// now is forget the member, which [`crate::teammate::lead_inbox::LeadInbox::poll`] has already done by the
-/// time a caller sees this.
+/// The pane fields are **carried rather than acted on**, and now that two pane
+/// backends ship that is a rule rather than a phase: the pane is ended by
+/// [`crate::teammate::TeammateRegistry::retire`], through the backend that
+/// spawned it and against the `(pane_id, birth)` pair recorded then — never
+/// against the `paneId` this frame names, because a member that could name
+/// somebody else's there could have the lead kill a stranger's window. So these
+/// two fields are for the record and for a log line, and nothing reads them to
+/// decide anything. The retire has already happened by the time a caller sees
+/// this ([`crate::teammate::lead_inbox::LeadInbox::poll`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Retired {
     /// Who shut down.
@@ -268,7 +273,6 @@ impl Pass {
 #[derive(Debug)]
 pub struct LeadInbox {
     registry: Arc<TeammateRegistry>,
-    inbox: PathBuf,
     /// Where a real `claude` teammate answers, when this machine resolves such a
     /// root at all ([`claude::teams_root`]).
     ///
@@ -297,35 +301,36 @@ impl LeadInbox {
     /// to look) does not have to mutate the process it runs in to be heard.
     #[must_use]
     pub fn reading(registry: Arc<TeammateRegistry>, claude: Option<TeamsRoot>) -> Self {
-        let inbox = registry.lead_inbox();
-
-        Self {
-            registry,
-            inbox,
-            claude,
-        }
+        Self { registry, claude }
     }
 
-    /// Every inbox this lead's replies can arrive in, in the order they are read.
+    /// Every teams **root** this lead's replies can arrive under, in the order
+    /// they are read.
     ///
-    /// Its own, always — and the `team-lead` inbox under **claude's** root for as
-    /// long as the roster holds a claude-backed member. That second read is the
-    /// whole of the fix: a real `claude` writes where a real `claude` reads
-    /// (§2.1), and a lead that polled only `<config home>/teams` never saw the
-    /// answer to anything it had asked. Both conditions are load-bearing —
-    /// without the roster check a lead with no claude teammate would be reading,
-    /// and on a delivery *writing*, inside somebody else's config directory for
-    /// no reason.
+    /// Its own, always — and **claude's** for as long as the roster holds a
+    /// claude-backed member. That second one is the whole of the fix: a real
+    /// `claude` writes where a real `claude` reads (§2.1), and a lead that polled
+    /// only `<config home>/teams` never saw the answer to anything it had asked.
+    /// Both conditions are load-bearing — without the roster check a lead with no
+    /// claude teammate would be reading, and on a delivery *writing*, inside
+    /// somebody else's config directory for no reason.
     ///
-    /// One path when the two roots are the same directory, which is AC-13's own
+    /// One root when the two are the same directory, which is AC-13's own
     /// configuration: the same file read twice in a pass would hand the same
     /// message out twice.
-    fn inboxes(&self) -> Vec<PathBuf> {
-        let mut inboxes = vec![self.inbox.clone()];
+    ///
+    /// **Roots rather than the inbox paths they resolve to**, and that is the
+    /// half a reply *out of* this module needs: a routed ask is answered into the
+    /// asker's own inbox, and which directory that is follows from where the ask
+    /// was found. Carrying only the path a pass read would leave the write with
+    /// nothing but a guess ([`LeadInbox::route`]).
+    fn roots(&self) -> Vec<TeamsRoot> {
+        let own = self.registry.root().clone();
+        let mut roots = vec![own.clone()];
         if !self.registry.holds_backend(MemberBackend::Claude) {
-            return inboxes;
+            return roots;
         }
-        let Some(root) = self.claude.as_ref() else {
+        let Some(claude) = self.claude.as_ref() else {
             // Unreachable through a spawn — `ClaudePane::spawn` refuses before a
             // member exists when this root cannot be had — so it is said once at
             // debug rather than warned about on every tick.
@@ -334,31 +339,35 @@ impl LeadInbox {
                 "a claude teammate is in the roster but its root cannot be resolved"
             );
 
-            return inboxes;
+            return roots;
         };
-        let under_claude = root.inbox_path(self.registry.team(), self.registry.lead());
-        if under_claude != self.inbox {
-            inboxes.push(under_claude);
+        if *claude != own {
+            roots.push(claude.clone());
         }
 
-        inboxes
+        roots
+    }
+
+    /// The lead's own inbox under `root`.
+    fn lead_inbox_in(&self, root: &TeamsRoot) -> PathBuf {
+        root.inbox_path(self.registry.team(), self.registry.lead())
     }
 
     /// One pass: read, act on the control frames, hand back the rest.
     ///
-    /// Over every inbox `LeadInbox::inboxes` names, in one [`Pass`]: which
-    /// directory a teammate's answer arrived in is a fact about that teammate's
-    /// backend and nothing a frontend should have to know.
+    /// Over every root `LeadInbox::roots` names, in one [`Pass`]: which directory
+    /// a teammate's answer arrived in is a fact about that teammate's backend and
+    /// nothing a frontend should have to know.
     pub async fn poll(&self) -> Pass {
         let mut pass = Pass::default();
-        for inbox in self.inboxes() {
-            self.poll_one(&inbox, &mut pass).await;
+        for root in self.roots() {
+            self.poll_one(&root, &mut pass).await;
         }
 
         pass
     }
 
-    /// One pass over one inbox.
+    /// One pass over the lead's inbox under one root.
     ///
     /// Control frames are pruned **here**, because acting on one is the whole
     /// of what it needed and leaving it would be acting on it again a second
@@ -367,8 +376,9 @@ impl LeadInbox {
     /// [`crate::teammate::lead_inbox::LeadInbox::delivered`] says so — a lead that quit between the read and
     /// the delivery loses nothing, which is the property a durable mailbox
     /// exists for.
-    async fn poll_one(&self, inbox: &Path, pass: &mut Pass) {
-        let path = inbox.to_path_buf();
+    async fn poll_one(&self, root: &TeamsRoot, pass: &mut Pass) {
+        let inbox = self.lead_inbox_in(root);
+        let path = inbox.clone();
         let contents = match tokio::task::spawn_blocking(move || mailbox::read(&path)).await {
             Ok(Ok(contents)) => contents,
             Ok(Err(error)) => {
@@ -399,11 +409,11 @@ impl LeadInbox {
                 pass.messages.push(self.plain(message));
                 continue;
             };
-            self.apply(kind, message, pass).await;
+            self.apply(kind, message, pass, root).await;
             handled.push(mailbox::identity(message));
         }
         if !handled.is_empty() {
-            self.prune(inbox, handled).await;
+            self.prune(&inbox, handled).await;
         }
     }
 
@@ -423,8 +433,9 @@ impl LeadInbox {
             return;
         }
         let identities: Vec<mailbox::Identity> = messages.iter().map(Delivered::identity).collect();
-        for inbox in self.inboxes() {
-            self.prune(&inbox, identities.clone()).await;
+        for root in self.roots() {
+            self.prune(&self.lead_inbox_in(&root), identities.clone())
+                .await;
         }
     }
 
@@ -452,7 +463,17 @@ impl LeadInbox {
     /// `shutdown_approved` only ever makes the lead forget a member, a
     /// `permission_request` only ever *asks* a person, and the name each acts
     /// on is the message's own sender, never a name the frame carries.
-    async fn apply(&self, kind: &'static str, message: &MailboxMessage, pass: &mut Pass) {
+    ///
+    /// `root` is the teams root this frame was **found** under, carried because
+    /// one of the three answers back and has to answer into the same directory —
+    /// see [`LeadInbox::route`].
+    async fn apply(
+        &self,
+        kind: &'static str,
+        message: &MailboxMessage,
+        pass: &mut Pass,
+        root: &TeamsRoot,
+    ) {
         let Some(frame) = message.frame() else {
             self.drop_it(kind, message, pass);
 
@@ -461,7 +482,7 @@ impl LeadInbox {
         match frame {
             Frame::ShutdownApproved(approved) => self.retire(message, approved, pass).await,
             Frame::IdleNotification(idle) => Self::idle(message, idle, pass),
-            Frame::PermissionRequest(request) => self.route(message, request, pass).await,
+            Frame::PermissionRequest(request) => self.route(message, request, pass, root).await,
             // `permission_response` and `team_permission_update` land here on
             // purpose (§7-1), beside everything else this side has no handler
             // for; see the module doc.
@@ -479,13 +500,28 @@ impl LeadInbox {
     /// name grammar refuses cannot be written back to at all, so its ask is
     /// dropped by name rather than raised for a person to answer into nowhere.
     ///
+    /// **Under the root the ask was found beneath**, which is `root`, and not
+    /// this registry's own. A pass reads two of them ([`LeadInbox::roots`]), so a
+    /// real `claude` teammate's ask arrives from `$CLAUDE_CONFIG_DIR/teams`, and
+    /// an answer written into ganja's root instead would land in a file that
+    /// member never reads — a pane waiting forever on a dialog a person had
+    /// already answered. The origin is the only honest source for it: nothing in
+    /// the frame says which directory it came from, and the sender's *name* is
+    /// the same in both.
+    ///
     /// **The handover never waits.** A `try_send`, exactly as
     /// [`crate::teammate::posture::Forwarding`]'s is and for its reason: an
     /// awaited send on a channel nobody claimed would park this pass — and the
     /// frontend's tick behind it — forever. No surface, a full queue and a
     /// closed one are one answer with three reasons, and the pane reads that
     /// answer as a refusal rather than waiting on a dialog nobody will see.
-    async fn route(&self, message: &MailboxMessage, request: PermissionRequest, pass: &mut Pass) {
+    async fn route(
+        &self,
+        message: &MailboxMessage,
+        request: PermissionRequest,
+        pass: &mut Pass,
+        root: &TeamsRoot,
+    ) {
         let Ok(asker) = MemberName::parse(&message.from) else {
             tracing::warn!(
                 from = message.from,
@@ -496,10 +532,7 @@ impl LeadInbox {
 
             return;
         };
-        let inbox = self
-            .registry
-            .root()
-            .inbox_path(self.registry.team(), &asker);
+        let inbox = root.inbox_path(self.registry.team(), &asker);
         let asked = Asked {
             name: message.from.clone(),
             request_id: request.request_id.clone(),
@@ -609,10 +642,15 @@ impl LeadInbox {
     /// Recorded and logged rather than delivered: what a teammate did is
     /// already under its row in `/team`, and putting the harness's own
     /// bookkeeping into the model's context would be telling it something
-    /// nobody said. Nothing in this build raises one — `idle_notification` is
-    /// harness-only, so a teammate's own model cannot send it — which makes
-    /// this the answering half of a `claude` pane's loop, complete and waiting
-    /// on P25b's asking half.
+    /// nobody said.
+    ///
+    /// **A teammate's own model cannot raise one**, and that is the part worth
+    /// keeping: `idle_notification` is harness-only, written by the frontend at
+    /// a turn's end and never composable through `send_message`. The asking half
+    /// ships — `ganja-tui`'s `member::Inbox::report_idle` writes this frame every
+    /// time a pane teammate's turn ends, mapping completed / cancelled / failed
+    /// onto `available` / `interrupted` / `failed` — so what a lead reads here
+    /// arrives from a real pane on every turn rather than from nothing.
     fn idle(message: &MailboxMessage, idle: IdleNotification, pass: &mut Pass) {
         tracing::info!(
             teammate = message.from,
@@ -1399,6 +1437,68 @@ mod tests {
             .poll()
             .await;
         assert_eq!(pass.idle.len(), 1, "{pass:?}");
+    }
+
+    /// **An ask read under claude's root is answered under claude's root.**
+    ///
+    /// The write half of the two-root read, and the half that was still wrong
+    /// after the read was fixed: the answer went to this registry's own root
+    /// unconditionally, so a real `claude` teammate's `permission_request` — which
+    /// arrives from `$CLAUDE_CONFIG_DIR/teams` — was answered into a file that
+    /// member never reads, and its pane would wait forever on a dialog a person
+    /// had already answered. Nothing in the frame says which directory it came
+    /// from and the sender's *name* is the same in both, so the origin root is the
+    /// only thing that can decide it.
+    #[tokio::test]
+    async fn an_ask_found_under_claudes_root_is_answered_under_claudes_root() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let elsewhere = tempfile::tempdir().expect("a temporary claude config home");
+        let registry = registry(home.path());
+        let claude = ganja_team::TeamsRoot::new(elsewhere.path().join("teams"));
+        claude_member(&registry, home.path()).await;
+        let (surface, mut dialogs) = tokio::sync::mpsc::channel(4);
+        registry.forward_dialogs_to(surface);
+
+        write_frame(
+            &claude.inbox_path(registry.team(), registry.lead()),
+            "w1",
+            &ask("req-1"),
+        );
+
+        let lead = LeadInbox::reading(Arc::clone(&registry), Some(claude.clone()));
+        let pass = lead.poll().await;
+        assert_eq!(pass.asked.len(), 1, "{pass:?}");
+        assert!(pass.asked[0].raised, "it reached the channel");
+
+        dialogs
+            .try_recv()
+            .expect("the dialog was raised")
+            .reply
+            .send(crate::protocol::PermissionReply::Once)
+            .expect("the answer task is waiting");
+
+        let asker = MemberName::parse("w1").expect("a member name");
+        let under_claude = answered(&claude.inbox_path(registry.team(), &asker)).await;
+        assert_eq!(
+            under_claude.len(),
+            1,
+            "the answer is in the root the ask came from: {under_claude:?}"
+        );
+        let Some(Frame::PermissionResponse(response)) = under_claude[0].frame() else {
+            panic!("the answer is a permission response: {:?}", under_claude[0]);
+        };
+        assert_eq!(response.request_id(), "req-1");
+        assert_eq!(
+            member::reply_of(&response),
+            crate::protocol::PermissionReply::Once
+        );
+        assert!(
+            mailbox::read(&registry.root().inbox_path(registry.team(), &asker))
+                .expect("the ganja-root inbox reads")
+                .valid
+                .is_empty(),
+            "and nothing was written into the root the ask did not come from"
+        );
     }
 
     /// AC-13's configuration — the lead's own root pointed at claude's — is one

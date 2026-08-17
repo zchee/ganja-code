@@ -105,10 +105,10 @@
 //! The construction path, the backend trait, the registry that owns a
 //! teammate's lifetime and the §6.1 runner ([`crate::teammate::runner`]). What
 //! a teammate is allowed to do, and who answers when it asks, is
-//! [`crate::teammate::posture`]'s; the two pane bodies are P25b's —
-//! [`crate::teammate::pane`] and [`crate::teammate::claude`] are the compiling
-//! skeletons they land in, declared here because this module owns every `mod`
-//! line in it.
+//! [`crate::teammate::posture`]'s; the two pane bodies are
+//! [`crate::teammate::pane`]'s and [`crate::teammate::claude`]'s — both shipped,
+//! both real, one splitting a `ganja` of this very build and one a `claude` off
+//! `PATH` — declared here because this module owns every `mod` line in it.
 //!
 //! [`Registry`]: crate::tool::Registry
 

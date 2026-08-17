@@ -77,18 +77,20 @@
 //!    apart, that copy rotted under the ganja root where nothing reads. So this
 //!    backend writes the teammate's inbox, and it prunes its own write when its
 //!    launch line cannot be typed.
-//! 3. **The member record is under the ganja root only**, and stays there. The
-//!    team file is [`crate::teammate::TeammateRegistry`]'s own document,
-//!    written where that registry lives, so `$CLAUDE_CONFIG_DIR/teams/<team>/
-//!    config.json` never names this member. What that means for the pane: a real
-//!    `claude` reading its own team's config finds no row for itself — no
-//!    roster, no peers, and nothing to read the colour, `agentType` or
-//!    `planModeRequired` this spawn recorded off. It does not stop the round
-//!    trip, because a mailbox is a file per name rather than a roster lookup,
-//!    and the flags on §4.1's launch line already carry the facts the pane needs
-//!    about itself. Writing a second team file under claude's root would be
-//!    inventing a document with two owners and no lock between them, so this
-//!    build does not.
+//! 3. **The member record is written under the ganja root only.** The team file
+//!    is [`crate::teammate::TeammateRegistry`]'s own document, written where that
+//!    registry lives; this backend writes no second one. So unless a lead has
+//!    pointed its own root at claude's — the collapsed configuration point 1
+//!    describes, where the two are one directory and the question does not arise
+//!    — `$CLAUDE_CONFIG_DIR/teams/<team>/config.json` does not name this member.
+//!    What that means for the pane in the ordinary split-root case: a real
+//!    `claude` reading its own team's config finds no row for itself — no roster,
+//!    no peers, and nothing to read the colour, `agentType` or `planModeRequired`
+//!    this spawn recorded off. It does not stop the round trip, because a mailbox
+//!    is a file per name rather than a roster lookup, and the flags on §4.1's
+//!    launch line already carry the facts the pane needs about itself. Writing a
+//!    second team file under claude's root would be inventing a document with two
+//!    owners and no lock between them, so this build does not.
 //!
 //! # What rides the launch line, and what does not
 //!
@@ -116,7 +118,12 @@
 //! pasted; the inbox is neither, and it is the same channel every follow-up
 //! arrives on — one ordering, one lock, one audit point.
 //!
-//! # D502 — the environment, plus exactly one name
+//! # The environment, plus exactly one name
+//!
+//! This is the claude half of **D502** (minted in [`crate::teammate::pane`], the
+//! way [`crate::teammate::tmux`]'s own environment note points at the same one
+//! mint): the ruling is that backend's, and what follows is the one thing this
+//! one adds to it.
 //!
 //! A tmux pane inherits the **tmux server's** environment (§10.10), so the
 //! launch carries [`crate::teammate::pane::CARRIED_ENV`] — a closed list of

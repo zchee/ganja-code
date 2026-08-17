@@ -1121,8 +1121,17 @@ pub struct Engine {
     /// team has no directory on disk and should leave none.
     teammates: Option<Arc<subagent::Teammates>>,
     /// Where this session's own `send_message` calls are posted, stamped with
-    /// the lead's name (**D498**). Installed with the team above and by
-    /// nothing else, so the two cannot disagree about whether there is one.
+    /// **this engine's own** outbound identity (**D498**) — which is the lead's
+    /// name on a lead, and the member's own on either kind of member.
+    ///
+    /// Three installers, one per kind of session, and every one of them binds
+    /// the name at construction so nothing can choose it per send:
+    /// [`Engine::with_teammates`] for the lead, [`Engine::with_postbox`] for a
+    /// pane teammate speaking as itself, and [`Engine::install_postbox`] for an
+    /// in-process teammate — whose postbox only exists once
+    /// [`teammate::TeammateRegistry`] holds both the team and the teammate, which
+    /// is after this engine was built. That last one's own doc says why it is the
+    /// exception and why it is not public.
     postbox: std::sync::Mutex<Option<Arc<dyn crate::tool::team::Postbox>>>,
     /// Every teammate's permission dialogs, waiting for the lead side to claim
     /// the receiver (**D-5**). See [`Engine::teammate_dialogs`].
