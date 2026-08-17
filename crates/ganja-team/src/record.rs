@@ -763,8 +763,8 @@ pub struct MailboxMessage {
     /// reconciled by; that is [`crate::mailbox::identity`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub msg_id: Option<String>,
-    /// Normalized to [`MESSAGE_TYPE`] on read when absent, and forced to it on
-    /// write.
+    /// Absent in the legacy shapes and left absent on read, so they round-trip;
+    /// forced to [`MESSAGE_TYPE`] on write.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// The tombstone that is never written `true`. See the type's own note.
@@ -916,9 +916,10 @@ pub(crate) fn iso8601(millis: u64) -> String {
 
 /// Days since the epoch to a proleptic Gregorian date.
 ///
-/// Hinnant's `civil_from_days`, and the fifth copy of it in this workspace —
-/// `ganja-tui`'s `transcript.rs`, `ganja-cli`'s `main.rs`, `ganja-provider`'s
-/// `provider/retry.rs` and `ganja-core`'s `instruction.rs` each keep one.
+/// Hinnant's `civil_from_days`, and the fifth days↔date helper in this
+/// workspace — `ganja-cli`'s `main.rs` keeps the same algorithm, `ganja-tui`'s
+/// `transcript.rs` and `ganja-core`'s `instruction.rs` a loop-based one, and
+/// `ganja-provider`'s `provider/retry.rs` the inverse.
 ///
 /// **The layering does not forbid a shared one, and saying that it did was
 /// wrong.** Every crate holding a copy already depends on `ganja-protocol`, so

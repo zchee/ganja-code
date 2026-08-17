@@ -7,8 +7,8 @@ repository. It is committed as interop test data for `claude_format_interop.rs`
 test against documents this repo also wrote proves self-consistency and nothing
 about interop, which is why these bytes are here at all.
 
-`THIRD_PARTY_NOTICES.md` owes a line naming this directory as Claude Code's
-output. That line is W8/L1's to write; this file is the record it writes from.
+`THIRD_PARTY_NOTICES.md` names this directory as Claude Code's output; this
+file is the record that line was written from.
 
 **Do not reformat anything under this directory.** Not with an editor's
 save hook, not with `jq`, not with a formatter that thinks a JSON file wants a
@@ -23,7 +23,7 @@ the intended behavior and not a flake.
 | | |
 |---|---|
 | Captured | 2026-08-17 |
-| Captured by | P25 W3/L3, from the machine running the lane |
+| Captured by | this repository's P25 work, on the machine that ran it |
 | Source | `$CLAUDE_CONFIG_DIR/teams/<team>/`, with `CLAUDE_CONFIG_DIR` unset — so `~/.claude/teams/<team>/` |
 | Claude Code installed at capture | **2.1.233** (2026-08-15) |
 | Claude Code that wrote the files | 2.1.x, exact patch **not recoverable** — see below |
@@ -56,8 +56,8 @@ answers"). `claude_format.rs` pins that limitation as behavior.
 
 ## Why two directories
 
-The lane was told to capture one team holding a lead record, a teammate record
-and a non-empty inbox. **No such modern directory exists**, and the reason is a
+The brief was one team holding a lead record, a teammate record and a
+non-empty inbox. **No such modern directory exists**, and the reason is a
 property of the design rather than of this machine: delivered messages are
 pruned (§3.1), so a settled team's inboxes are all `[]`. Every modern team dir
 either has members and empty inboxes, or a message and no `config.json`.
@@ -119,7 +119,8 @@ Recorded here because the finding outlived the test run that produced it, and
 because a later reader deserves the evidence rather than the conclusion.
 
 Key orders as they are actually on disk, against `record.rs`'s declaration
-order:
+order **as it stood at capture** — the two `differs` verdicts are what
+de0b6fa corrected, and `record.rs` has emitted these orders since:
 
 | Shape | Verdict |
 |---|---|

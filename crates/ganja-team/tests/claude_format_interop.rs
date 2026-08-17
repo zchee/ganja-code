@@ -16,9 +16,7 @@
 //! day the fixture goes missing — a bad merge, a `.gitignore` line, a partial
 //! checkout — the suite would keep reporting the interop claim it is no longer
 //! testing. So the fixture is committed, and a `read_dir` that fails *is* the
-//! failure. That is Resolution 6 of the plan's open questions, and it replaces
-//! the earlier "skip with a named reason" shape, which existed only while the
-//! capture was still hypothetical.
+//! failure.
 //!
 //! The fixtures are read and never written. Where a test needs to mutate an
 //! inbox — delivery prunes, which is the whole of §3.1 — it copies the captured
@@ -43,8 +41,8 @@ struct Captured {
 }
 
 /// Where the capture lives, resolved off the manifest rather than the working
-/// directory: `cargo` runs a test binary from the workspace root, and this
-/// crate's fixtures are its own.
+/// directory — the package root under `cargo` and `nextest`, and wherever the
+/// shell happened to be for a binary run by hand.
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }

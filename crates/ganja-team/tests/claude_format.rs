@@ -24,11 +24,10 @@
 //! document, so it is asserted once, next door, against the captured bytes
 //! that are evidence for it. A second copy transcribed by hand into this file
 //! would be a claim with nothing behind it, and it would fight the first one
-//! the day a capture says the order is wrong — which is exactly what happened
-//! when this fixture landed. What is pinned here is everything that is true
-//! whatever the order: that a rewrite reproduces what was read, that the shape
-//! is Claude's, that an unknown key survives, and that a write stamps the
-//! envelope §2.3 says it does.
+//! the day a capture says the order is wrong. What is pinned here is
+//! everything that is true whatever the order: that a rewrite reproduces what
+//! was read, that the shape is Claude's, that an unknown key survives, and that
+//! a write stamps the envelope §2.3 says it does.
 //!
 //! No process-wide state is touched: the root is a temporary directory handed
 //! in as a value, which is exactly what `TeamsRoot` exists for.

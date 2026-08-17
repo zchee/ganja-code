@@ -47,14 +47,12 @@ pub const NAME_MAX: usize = 64;
 ///
 /// §1.1 says only that registration "appends an incrementing counter starting
 /// at 2" and does not say whether anything separates the two, so `worker2` and
-/// `worker-2` were both readings of the same sentence, and this build shipped
-/// `worker-2` unverified. **It is verified now**: Claude Code 2.1.233's own
+/// `worker-2` were both readings of the same sentence. Claude Code 2.1.233's own
 /// registration — the step that uniques a name against the team file before a
 /// member record is pushed — was observed to separate the name from its
 /// counter with a **hyphen**, to open the counter at **2**, to compare
 /// **case-insensitively** on both sides, and to reject `main` outright. That is
-/// [`resolve_unique`], behaviour for behaviour. It stays one constant, but no
-/// longer because it might be wrong.
+/// [`resolve_unique`], behaviour for behaviour.
 ///
 /// The observation is what settles it, because a live test cannot: the
 /// question needs a `claude` that *registers* a teammate, and a pane teammate

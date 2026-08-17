@@ -10,8 +10,7 @@
 //! libtest already accepts a filter, so `current_exe` plus `--exact` runs one
 //! named test in a child — which is why the one test below opens by asking
 //! whether it is the parent or one of the six. That keeps the whole thing in one
-//! file with no helper binary to declare in a manifest this lane does not own,
-//! and it keeps this binary at the one test the plan's ownership table gives it.
+//! file, with no helper binary to declare.
 //!
 //! The child's env is set on the `Command`, never on this process, so nothing
 //! here mutates process-wide state and the file stays honest about that too.

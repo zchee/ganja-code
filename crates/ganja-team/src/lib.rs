@@ -4,9 +4,9 @@
 //! **Upstream opencode has no counterpart.** It has no teams, no mailbox and
 //! no second agent to address, so unlike almost everything else in this
 //! workspace there is no TypeScript to port behavior from. The specification is
-//! Claude Code's, read out of `docs/references/claude-teammates.en.md`: §2 for
-//! the on-disk data model and §3 for the mailbox surface. The divergences and
-//! the reasons for them are **D497**.
+//! Claude Code's, read out of the Claude Code teammates reference (kept outside
+//! this repository): §2 for the on-disk data model and §3 for the mailbox
+//! surface. The divergences and the reasons for them are **D497**.
 //!
 //! # Why this is a crate
 //!

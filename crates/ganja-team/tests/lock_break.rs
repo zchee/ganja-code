@@ -10,7 +10,7 @@
 //!
 //! *The clock is not waited on.* A ten-second sleep in a unit suite is ten
 //! seconds every developer pays forever; the lock's own signal is the
-//! directory's mtime, so the test writes an old mtime with `File::set_times`
+//! directory's mtime, so the test writes an old mtime with `File::set_modified`
 //! and the protocol reads exactly what it would have read.
 //!
 //! *The peer never lets go.* The alternative — release the lock mid-ladder and
