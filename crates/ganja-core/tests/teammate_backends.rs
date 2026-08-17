@@ -188,10 +188,14 @@ fn the_default_backend_is_the_one_in_this_process() {
 /// a lead waiting for an acknowledgement from one would wait forever.
 #[tokio::test]
 async fn each_backend_says_what_it_can_promise_about_a_delivery() {
+    // Bound rather than used inline: a temporary directory dropped at the end
+    // of the statement takes the tree out from under the store handle that is
+    // about to be asked questions.
+    let home = ganja_testkit::temp_dir();
     let in_process = InProcess::new(
         Arc::new(FakeProvider::new("on it", Duration::ZERO)),
         Arc::new(Registry::new(Vec::new())),
-        Storage::open(ganja_testkit::temp_dir().path().join("storage")),
+        Storage::open(home.path().join("storage")),
         |_| Permissions::default(),
     );
 
@@ -275,6 +279,13 @@ async fn the_two_pane_backends_refuse_identically_until_p25b() {
 /// the race **deterministic** rather than likely: the taken-names read hops to
 /// the blocking pool, so the first spawn is guaranteed to yield there and the
 /// second is guaranteed to read the same snapshot it did.
+///
+/// What this shape reaches is the *overlapping* window — both spawns still in
+/// flight. The one it cannot stage is a spawn that begins and **finishes**
+/// inside another claimer's snapshot, which would need that claimer's task to
+/// be woken and then starved for the length of a whole spawn. That case is
+/// closed by the reservation set never shrinking on success, pinned beside the
+/// code in `teammate.rs`'s `a_name_a_completed_spawn_took_stays_claimed`.
 #[tokio::test]
 async fn two_spawns_of_one_name_at_once_get_two_teammates() {
     let home = ganja_testkit::temp_dir();

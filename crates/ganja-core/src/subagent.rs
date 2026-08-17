@@ -86,7 +86,11 @@
 //! lead's name, and [`Postbox::of`] takes the [`Teammate`] itself rather than
 //! a string precisely so the name cannot be chosen by whoever builds it.
 
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{
+    fmt,
+    path::PathBuf,
+    sync::{Arc, Weak},
+};
 
 use async_trait::async_trait;
 use ganja_protocol::team::{Frame, MemberBackend};
@@ -730,7 +734,17 @@ pub struct Postbox {
     sender: String,
     /// The team, for the roster this caller may address and the inbox each of
     /// those names resolves to.
-    registry: Arc<TeammateRegistry>,
+    ///
+    /// **Weak, and it has to be.** The registry holds every teammate, a
+    /// teammate holds its [`Engine`], and that engine holds the postbox
+    /// installed into it — so a strong handle here closes a cycle, and no
+    /// teammate's engine would ever be dropped, shutdown or not. The team
+    /// outliving its postboxes is the honest direction of that lifetime
+    /// anyway: a postbox is a *view* onto a team, and a view of a team that
+    /// has gone is nothing rather than a team kept alive to be looked at.
+    ///
+    /// [`Engine`]: crate::Engine
+    registry: Weak<TeammateRegistry>,
 }
 
 /// Renders which team and which sender this speaks for, and nothing of the
@@ -738,9 +752,13 @@ pub struct Postbox {
 /// the reason it states it: this lands in a `{:?}` of somebody's `ToolCtx`.
 impl fmt::Debug for Postbox {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A team that has gone renders as `None` rather than as a remembered
+        // name: this is a debug view of a live handle, and printing the team
+        // it *used* to speak for would read as one it still reaches.
+        let registry = self.registry.upgrade();
         formatter
             .debug_struct("Postbox")
-            .field("team", self.registry.team())
+            .field("team", &registry.as_ref().map(|registry| registry.team()))
             .field("sender", &self.sender)
             .finish_non_exhaustive()
     }
@@ -748,11 +766,15 @@ impl fmt::Debug for Postbox {
 
 impl Postbox {
     /// The lead's own postbox.
+    ///
+    /// Takes the [`Arc`] rather than a [`Weak`] because the sender's name is
+    /// read off the team here and now; what is *kept* is the downgrade, so a
+    /// postbox never keeps alive the team that holds the engine that holds it.
     #[must_use]
-    pub fn lead(registry: Arc<TeammateRegistry>) -> Self {
+    pub fn lead(registry: &Arc<TeammateRegistry>) -> Self {
         Self {
             sender: registry.lead().as_str().to_owned(),
-            registry,
+            registry: Arc::downgrade(registry),
         }
     }
 
@@ -764,11 +786,39 @@ impl Postbox {
     /// the registry's own `spawn` resolved, so a caller
     /// building this cannot choose a different one either.
     #[must_use]
-    pub fn of(registry: Arc<TeammateRegistry>, teammate: &Teammate) -> Self {
+    pub fn of(registry: &Arc<TeammateRegistry>, teammate: &Teammate) -> Self {
         Self {
             sender: teammate.name().to_owned(),
-            registry,
+            registry: Arc::downgrade(registry),
         }
+    }
+
+    /// The team as this caller may address it, once somebody holding the team
+    /// has proved it is still there.
+    ///
+    /// Takes the registry rather than reaching for it, so a call that has to
+    /// both resolve a recipient and write to it upgrades exactly once and
+    /// cannot get two different answers about whether the team exists.
+    fn peers(&self, registry: &TeammateRegistry) -> Vec<Peer> {
+        registry
+            .view()
+            .members
+            .into_iter()
+            // A caller is not in its own roster. There is nothing to say to
+            // yourself that a turn cannot say directly, and a message written
+            // into your own inbox is one you read back as if somebody else had
+            // sent it.
+            .filter(|member| !member.name.eq_ignore_ascii_case(&self.sender))
+            .map(|member| Peer {
+                description: Some(if member.is_lead {
+                    LEADS.to_owned()
+                } else {
+                    format!("{RUNS_ON} {} backend", backend_name(member.backend))
+                }),
+                lead: member.is_lead,
+                name: member.name,
+            })
+            .collect()
     }
 
     /// The member `name` names, as the team's own names are matched.
@@ -778,8 +828,8 @@ impl Postbox {
     /// case-insensitive filesystem reads the inbox file it resolves to. So the
     /// canonical spelling comes back from the roster rather than from the
     /// arguments, and [`Sent::to`] reports what was really written to.
-    fn recipient(&self, name: &str) -> Option<Peer> {
-        team::Postbox::roster(self)
+    fn recipient(&self, registry: &TeammateRegistry, name: &str) -> Option<Peer> {
+        self.peers(registry)
             .into_iter()
             .find(|peer| peer.name.eq_ignore_ascii_case(name))
     }
@@ -810,7 +860,16 @@ impl team::Postbox for Postbox {
                 });
             }
         };
-        let Some(recipient) = self.recipient(&name) else {
+        // Answered before the roster is consulted, and answered as a failure
+        // rather than as `Unknown`: nothing is wrong with the *name* — the
+        // team it belonged to has been shut down — and a model told that
+        // nobody answers to it would go looking for a name that does.
+        let Some(registry) = self.registry.upgrade() else {
+            return Err(Undelivered::Failed {
+                reason: TEAM_GONE.to_owned(),
+            });
+        };
+        let Some(recipient) = self.recipient(&registry, &name) else {
             return Err(Undelivered::Unknown);
         };
         // A roster name was resolved through the name grammar before it was
@@ -832,10 +891,7 @@ impl team::Postbox for Postbox {
         let mut message = MailboxMessage::new(&self.sender, text, record::now_iso8601());
         message.summary = summary;
 
-        let path = self
-            .registry
-            .root()
-            .inbox_path(self.registry.team(), &member);
+        let path = registry.root().inbox_path(registry.team(), &member);
         let written = tokio::task::spawn_blocking(move || mailbox::write(&path, message))
             .await
             .map_err(|error| error.to_string())
@@ -853,25 +909,13 @@ impl team::Postbox for Postbox {
     }
 
     fn roster(&self) -> Vec<Peer> {
+        // A team that has gone is an empty roster rather than a refusal: this
+        // answers "who may I address", and the honest answer is nobody. The
+        // sentence explaining why belongs to the call that tried to send —
+        // `deliver` — where there is something to explain.
         self.registry
-            .view()
-            .members
-            .into_iter()
-            // A caller is not in its own roster. There is nothing to say to
-            // yourself that a turn cannot say directly, and a message written
-            // into your own inbox is one you read back as if somebody else had
-            // sent it.
-            .filter(|member| !member.name.eq_ignore_ascii_case(&self.sender))
-            .map(|member| Peer {
-                description: Some(if member.is_lead {
-                    LEADS.to_owned()
-                } else {
-                    format!("{RUNS_ON} {} backend", backend_name(member.backend))
-                }),
-                lead: member.is_lead,
-                name: member.name,
-            })
-            .collect()
+            .upgrade()
+            .map_or_else(Vec::new, |registry| self.peers(&registry))
     }
 }
 
@@ -906,6 +950,15 @@ const UNADDRESSABLE: &str = "This team is holding a member under a name that can
 
 /// A write that did not land, ahead of what the mailbox said about it.
 const UNWRITTEN: &str = "The message could not be written to that teammate's inbox:";
+
+/// Why a message written after the team itself has gone reaches nobody.
+///
+/// Read as a failure rather than as an unknown recipient on purpose: the name
+/// may well have been right, and there is nothing to retry with. Distinct
+/// from the tool's own `NO_TEAM`, which is the answer for a session that never
+/// had a team at all — this one is a team that has ended.
+const TEAM_GONE: &str =
+    "The team this session led has been shut down; there is nobody left to deliver to.";
 
 /// What became of a message that did land.
 const WRITTEN: &str = "It is in that inbox and will be read on the next pass.";
@@ -1479,9 +1532,9 @@ mod tests {
 
     use super::{
         Address, Backends, Body, Caller, DEFAULT_BACKEND, MemberName, NO_SOCKET, PermissionReply,
-        Postbox, Reserved, SpawnAsk, SpawnAsker, SpawnRequest, Teammate, TeammateRegistry,
-        TeammateSpawn, Teammates, Undelivered, Watched, async_trait, denies_task, mailbox, roster,
-        subagent_rules, team, watch,
+        Postbox, Reserved, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, Teammate,
+        TeammateRegistry, TeammateSpawn, Teammates, Undelivered, Watched, async_trait, denies_task,
+        mailbox, roster, subagent_rules, team, watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -1829,7 +1882,7 @@ mod tests {
                 Permissions::default(),
                 crate::Storage::open(home.path().join("storage")),
             );
-            let worker = Postbox::of(Arc::clone(&registry), &teammate);
+            let worker = Postbox::of(&registry, &teammate);
 
             Self {
                 _home: home,
@@ -2087,7 +2140,7 @@ mod tests {
     #[tokio::test]
     async fn a_recipient_is_matched_without_regard_to_case_and_reported_in_the_teams_spelling() {
         let team = Team::new().await;
-        let lead = Postbox::lead(Arc::clone(&team.registry));
+        let lead = Postbox::lead(&team.registry);
         let lead: &dyn team::Postbox = &lead;
 
         let sent = lead
@@ -2176,7 +2229,7 @@ mod tests {
         );
         assert_eq!(seen.iter().filter(|peer| peer.lead).count(), 1);
 
-        let seen = team::Postbox::roster(&Postbox::lead(Arc::clone(&team.registry)));
+        let seen = team::Postbox::roster(&Postbox::lead(&team.registry));
         assert_eq!(
             seen.iter()
                 .map(|peer| peer.name.as_str())
@@ -2188,6 +2241,60 @@ mod tests {
             seen.iter().filter(|peer| peer.lead).count(),
             0,
             "so a roster carries at most one lead, and this one carries none"
+        );
+    }
+
+    /// **A postbox does not keep the team it speaks for alive.**
+    ///
+    /// The cycle it would otherwise close is the whole point: the registry
+    /// holds every teammate, a teammate holds its engine, and that engine
+    /// holds the postbox installed into it — so a strong handle back to the
+    /// registry means no teammate's engine is ever dropped, shut down or not,
+    /// and the leak is the entire team rather than a stray `Arc`.
+    ///
+    /// What makes this a pin rather than a hope: the roster below can only be
+    /// empty if the last strong handle really went with the `drop`. Held
+    /// strongly, the upgrade would still succeed and the lead would still be
+    /// listed. The two answers are the ones a caller is owed — nobody to
+    /// address, and a send that says the team has ended rather than blaming
+    /// the name it was given.
+    #[tokio::test]
+    async fn a_postbox_outliving_its_team_answers_that_the_team_has_gone() {
+        let Team {
+            _home,
+            root: _root,
+            team: _team,
+            registry,
+            worker,
+        } = Team::new().await;
+
+        // Non-vacuous: there is a team to lose, and this postbox can see it.
+        assert!(
+            !team::Postbox::roster(&worker).is_empty(),
+            "the fixture's postbox speaks for a team that exists"
+        );
+
+        registry.shutdown().await;
+        drop(registry);
+
+        assert!(
+            team::Postbox::roster(&worker).is_empty(),
+            "a postbox that outlived its team has nobody to address"
+        );
+        assert_eq!(
+            team::Postbox::deliver(
+                &worker,
+                Address::Local("team-lead".to_owned()),
+                Body::Text {
+                    text: "anyone there?".to_owned(),
+                    summary: None,
+                },
+            )
+            .await,
+            Err(Undelivered::Failed {
+                reason: TEAM_GONE.to_owned(),
+            }),
+            "and says so, rather than reporting a name nobody answers to"
         );
     }
 }

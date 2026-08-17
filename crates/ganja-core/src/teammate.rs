@@ -710,8 +710,12 @@ impl InProcess {
     ///
     /// `defer_threshold` is the lead's own; see [`Teammate`]'s `deferring` for
     /// why a teammate must not be given a different one.
+    ///
+    /// `pub(crate)` for the same reason `install_postbox` is: the live tool
+    /// handle it closes over is the *engine's* own, so the only caller that
+    /// can honestly build one is the engine.
     #[must_use]
-    pub fn lending(
+    pub(crate) fn lending(
         provider: Arc<dyn Provider>,
         tools: impl Fn() -> Arc<Registry> + Send + Sync + 'static,
         storage: Storage,
@@ -898,7 +902,8 @@ pub struct TeammateRegistry {
     /// all and no turn's cancel ends any of them.
     cancel: CancellationToken,
     members: Mutex<BTreeMap<String, Arc<Member>>>,
-    /// Names a spawn has resolved but not yet registered.
+    /// Every name this registry has ever spent, plus the ones a spawn is
+    /// still in the middle of spending.
     ///
     /// The whole of what keeps two concurrent spawns of one name apart. A
     /// spawn crosses four awaits between reading what is taken and inserting
@@ -909,9 +914,20 @@ pub struct TeammateRegistry {
     /// would drop the first out of the map: a teammate still running that
     /// nothing can shut down, because nothing holds it any more.
     ///
-    /// Entries live from the moment a name is resolved to the moment
-    /// [`TeammateRegistry::start`] has put it in the map, and are given back
-    /// on every path that fails in between.
+    /// **The set only grows.** A name whose spawn *completed* is deliberately
+    /// never given back, and a shutdown does not clear it either, because
+    /// [`TeammateRegistry::claim`] resolves against a `taken()` snapshot read
+    /// before its own await: a whole spawn that began and finished inside that
+    /// window is in neither the snapshot nor — if the name were released — the
+    /// reservation set, so the next claimer would resolve to the same name and
+    /// its registration would evict a teammate that is already running.
+    /// Monotonicity closes that window without a retry loop, and what it costs
+    /// is one `String` per teammate this session ever started, beside a member
+    /// map that already holds one entry each and never shrinks.
+    ///
+    /// Only a **failed** spawn gives its name back
+    /// ([`TeammateRegistry::release`]): nothing was registered under it, so
+    /// nothing would be evicted by handing it to somebody else.
     reserved: Mutex<BTreeSet<String>>,
     /// Held across the team file's whole read-modify-write; see
     /// [`TeammateRegistry::record`] for what is lost without it.
@@ -1203,11 +1219,10 @@ impl TeammateRegistry {
             delivery: backend.delivery(),
             note: SPAWNED,
         };
-        // Registered, and only then given back: the name is in the member map
-        // from the instant it leaves the reservation set, so there is no
-        // moment at which a concurrent spawn could see it as free.
+        // Registered, and never given back: a spent name stays reserved for
+        // the life of the registry. Why that is the fix rather than an
+        // oversight is on [`TeammateRegistry::reserved`].
         self.start(&spec, handle, backend);
-        self.release(&spec.name);
 
         Ok(spawned)
     }
@@ -1217,11 +1232,18 @@ impl TeammateRegistry {
     /// The reservation and the resolution that produced it are **one critical
     /// section**. `taken()` reads a file and can only ever be a snapshot, so
     /// the resolution is done again inside the lock over that snapshot plus
-    /// whatever is reserved *now* — and everything in flight is reserved, since
-    /// nothing writes a member record or a team file before claiming its name.
-    /// A second spawn asking for the same name therefore resolves past it
-    /// rather than colliding with it, and no retry loop is needed because
-    /// nothing here can lose a race it then has to run again.
+    /// whatever is reserved *now* — and everything ever claimed is reserved,
+    /// since nothing writes a member record or a team file before claiming its
+    /// name and nothing but a failure gives one back. A second spawn asking
+    /// for the same name therefore resolves past it rather than colliding with
+    /// it, and no retry loop is needed because nothing here can lose a race it
+    /// then has to run again.
+    ///
+    /// The "ever" is load-bearing rather than sloppy bookkeeping: a spawn that
+    /// runs to completion between this snapshot being read and this lock being
+    /// taken is invisible to the snapshot, so a reservation set that forgot
+    /// spent names would hand this claimer the running teammate's name. See
+    /// [`TeammateRegistry::reserved`].
     async fn claim(self: &Arc<Self>, desired: &str) -> Result<MemberName, SpawnError> {
         let taken = self.taken().await?;
         let mut reserved = self
@@ -1240,7 +1262,12 @@ impl TeammateRegistry {
         Ok(name)
     }
 
-    /// Gives a claimed name back, whether it was spent or refused.
+    /// Gives back a name whose spawn **failed**, which is the only kind of
+    /// claim that is ever given back.
+    ///
+    /// A failed spawn registered nothing, so a later teammate taking the name
+    /// evicts nobody; a spawn that succeeded holds its name for the life of
+    /// the registry, for the reason on [`TeammateRegistry::reserved`].
     fn release(&self, name: &MemberName) {
         self.reserved
             .lock()
@@ -1379,11 +1406,11 @@ impl TeammateRegistry {
             },
             record::now_millis(),
         );
-        let _writing = self.team_file.lock().await;
+        let writing = self.team_file.lock().await;
         let mut file = self.read_team().await?;
         file.members.retain(|member| member.name != record.name);
         file.members.push(record);
-        self.write_team(file).await
+        self.write_team(file, &writing).await
     }
 
     /// Writes the team file whole, through a staged file and a rename: a reader
@@ -1393,11 +1420,16 @@ impl TeammateRegistry {
     /// The staged name is unique per **process**, which is all it needs to be
     /// and less than it looks: two writes from *this* process would share it,
     /// and the second would rename a file the first had already renamed away.
-    /// Nothing here re-derives that safety — [`TeammateRegistry::record`] is
-    /// the only caller and it holds a lock across the whole read-modify-write,
-    /// so this is never entered twice at once. A second caller would owe the
-    /// same lock.
-    async fn write_team(&self, file: TeamFile) -> Result<(), SpawnError> {
+    /// What keeps that from happening is the `team_file` lock — and it is
+    /// taken as an **argument** rather than described in a sentence, so a
+    /// second caller cannot forget to hold it: the guard is unused inside, and
+    /// borrowing it is the point. `_writing` names what it is because the
+    /// compiler is the reader that matters here.
+    async fn write_team(
+        &self,
+        file: TeamFile,
+        _writing: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> Result<(), SpawnError> {
         let path = self.root.config_path(&self.team);
 
         blocking(move || {
@@ -1452,10 +1484,7 @@ impl TeammateRegistry {
         if let Some(teammate) = handle.teammate() {
             teammate
                 .engine()
-                .install_postbox(Arc::new(crate::subagent::Postbox::of(
-                    Arc::clone(self),
-                    teammate,
-                )));
+                .install_postbox(Arc::new(crate::subagent::Postbox::of(self, teammate)));
 
             // Built before either task below is spawned, because building it is
             // what registers its subscription: a forwarding that subscribed
@@ -1643,5 +1672,130 @@ async fn fold_calls(
                 ring.push_back(line);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
+
+    use ganja_team::{TeamName, TeamsRoot};
+
+    use super::{
+        DEFAULT_BACKEND, InProcess, MemberBackend, SpawnRequest, TeammateBackend, TeammateRegistry,
+        pane::GanjaPane,
+    };
+    use crate::{
+        Storage, permission::Permissions, provider::FakeProvider, tool::Registry as Tools,
+    };
+
+    /// An empty registry over a tree that goes away with `home`.
+    fn registry(home: &Path) -> Arc<TeammateRegistry> {
+        Arc::new(TeammateRegistry::new(
+            TeamsRoot::new(home.join("teams")),
+            TeamName::parse("session-abcd1234").expect("a team name"),
+            "01998ad0-0000-7000-8000-000000000000",
+            home,
+        ))
+    }
+
+    /// A backend that really starts a teammate, over a store under `home`.
+    fn in_process(home: &Path) -> Arc<dyn TeammateBackend> {
+        Arc::new(InProcess::new(
+            Arc::new(FakeProvider::new("on it", Duration::ZERO)),
+            Arc::new(Tools::new(Vec::new())),
+            Storage::open(home.join("storage")),
+            |_| Permissions::default(),
+        ))
+    }
+
+    /// A spawn asking for `name` on `backend`, at its dullest.
+    fn request(name: &str, backend: MemberBackend, home: &Path) -> SpawnRequest {
+        SpawnRequest {
+            name: name.to_owned(),
+            backend,
+            agent_type: "general".to_owned(),
+            model: "recorder-model".to_owned(),
+            color: None,
+            prompt: "hold the fort".to_owned(),
+            cwd: home.to_path_buf(),
+            plan_mode_required: false,
+            bypass: false,
+        }
+    }
+
+    /// What the registry is still holding names for.
+    fn reserved(registry: &TeammateRegistry) -> BTreeSet<String> {
+        registry
+            .reserved
+            .lock()
+            .expect("the reserved names are never poisoned")
+            .clone()
+    }
+
+    /// **A name a completed spawn took is claimed for good.**
+    ///
+    /// The defect this answers is a stale snapshot rather than a lost lock:
+    /// [`TeammateRegistry::claim`] compares against a `taken()` view read
+    /// before its own await, so a spawn that *began and finished* inside that
+    /// window is in neither that view nor — if a spent name were released — the
+    /// reservation set. The next claimer would then resolve to the same name
+    /// and its `start` would evict a teammate that is already running, which is
+    /// exactly the orphan the reservation exists to prevent.
+    ///
+    /// Read off the set directly, and deliberately: staging that interleave
+    /// through the public door would need one claimer's task to be woken and
+    /// then starved for the whole of another spawn, which no scheduler here
+    /// promises. The property that closes the window is that the set never
+    /// shrinks on success, and that is a fact this can assert without a race.
+    /// `two_spawns_of_one_name_at_once_get_two_teammates` covers the
+    /// overlapping-spawn half through the door itself.
+    #[tokio::test]
+    async fn a_name_a_completed_spawn_took_stays_claimed() {
+        let home = ganja_testkit::temp_dir();
+        let registry = registry(home.path());
+
+        let started = registry
+            .spawn(
+                in_process(home.path()),
+                request("worker", DEFAULT_BACKEND, home.path()),
+            )
+            .await
+            .expect("a teammate joins");
+        assert_eq!(started.name.as_str(), "worker");
+
+        assert!(
+            reserved(&registry).contains("worker"),
+            "a spent name given back is a name a stale claimer would take"
+        );
+
+        registry.shutdown().await;
+        assert!(
+            reserved(&registry).contains("worker"),
+            "and a teammate that has been shut down still holds the name it \
+             ran under: its transcript and its member record both still say so"
+        );
+    }
+
+    /// A refused spawn's name is free again, because nothing was registered
+    /// under it: there is no member for a later teammate of that name to evict,
+    /// and holding it would refuse a name for no reason anybody could see.
+    #[tokio::test]
+    async fn a_name_a_refused_spawn_never_spent_is_free_again() {
+        let home = ganja_testkit::temp_dir();
+        let registry = registry(home.path());
+
+        registry
+            .spawn(
+                Arc::new(GanjaPane),
+                request("worker", MemberBackend::Pane, home.path()),
+            )
+            .await
+            .expect_err("this build has no panes yet");
+
+        assert!(
+            reserved(&registry).is_empty(),
+            "a spawn that started nothing kept a name nobody can use"
+        );
     }
 }
