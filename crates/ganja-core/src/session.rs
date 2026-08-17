@@ -369,7 +369,16 @@ pub(crate) struct PendingReplies {
 
 impl PendingReplies {
     /// Registers a permission dialog nobody has answered yet.
-    fn open_permission(&mut self, id: PermissionId, sender: oneshot::Sender<PermissionReply>) {
+    ///
+    /// Crate-visible rather than module-private since P25: `subagent.rs`'s
+    /// teammate door raises a dialog of its own — the spawn gate's — on the
+    /// calling turn's fanout, and a request published without an entry here
+    /// would be one no reply could ever reach.
+    pub(crate) fn open_permission(
+        &mut self,
+        id: PermissionId,
+        sender: oneshot::Sender<PermissionReply>,
+    ) {
         self.permissions.insert(id, sender);
     }
 
@@ -380,7 +389,10 @@ impl PendingReplies {
 
     /// Forgets one request, by its own id. Called by the wait that opened it,
     /// on every path that leaves without an answer.
-    fn close_permission(&mut self, id: &PermissionId) {
+    ///
+    /// Crate-visible for [`PendingReplies::open_permission`]'s reason: whoever
+    /// may open one owes the close on every path that gives up.
+    pub(crate) fn close_permission(&mut self, id: &PermissionId) {
         self.permissions.remove(id);
     }
 

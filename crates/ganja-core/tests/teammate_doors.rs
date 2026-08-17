@@ -27,12 +27,16 @@
 //! about. Everything past the seam is the real thing: the real registry, the
 //! real backends, the real team file.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ganja_core::{
-    Backends, Storage, Teammates,
+    Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
     permission::Permissions,
+    protocol::PermissionReply,
     provider::FakeProvider,
     teammate::{InProcess, REFUSED_UNTIL_P25B, TeammateRegistry},
     tool::{
@@ -69,8 +73,10 @@ const TEAM: &str = "session-abcd1234";
 #[derive(Debug)]
 struct Door {
     teammates: Teammates,
-    model: String,
-    cwd: PathBuf,
+    caller: Caller,
+    /// Every spawn a person was asked about, which for a teammate working
+    /// inside the project should be none at all.
+    asked: Arc<Mutex<Vec<SpawnAsk>>>,
 }
 
 #[async_trait]
@@ -84,9 +90,16 @@ impl Subagents for Door {
     }
 
     async fn spawn_teammate(&self, request: TeammateSpawn) -> Result<Teammated, NotSpawned> {
-        self.teammates
-            .start(request, self.model.clone(), self.cwd.clone())
-            .await
+        self.teammates.start(request, &self.caller, self).await
+    }
+}
+
+#[async_trait]
+impl SpawnAsker for Door {
+    async fn ask(&self, request: SpawnAsk) -> PermissionReply {
+        self.asked.lock().expect("no panic").push(request);
+
+        PermissionReply::Once
     }
 }
 
@@ -125,7 +138,9 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         "01998ad0-0000-7000-8000-000000000000",
         home.path(),
     ));
+    let asked: Arc<Mutex<Vec<SpawnAsk>>> = Arc::default();
     let door = Door {
+        asked: Arc::clone(&asked),
         teammates: Teammates::new(
             Arc::clone(&registry),
             Backends {
@@ -139,8 +154,14 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
                 claude: Arc::new(ganja_core::teammate::claude::ClaudePane),
             },
         ),
-        model: "recorder-model".to_owned(),
-        cwd: home.path().to_path_buf(),
+        caller: Caller {
+            model: "recorder-model".to_owned(),
+            cwd: home.path().to_path_buf(),
+            permissions: Arc::new(Mutex::new(Permissions::default())),
+            // The teammate works where the calling turn works, so the spawn
+            // gate has nothing to disclose and nobody to ask.
+            project_root: home.path().to_path_buf(),
+        },
     };
     let tool = TaskTool::new(&[Offered {
         name: "general".to_owned(),
@@ -216,6 +237,11 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         "and the identity the tool reported: {member:?}"
     );
     assert_eq!(registry.running(), 1, "and the teammate is running");
+    assert!(
+        asked.lock().expect("no panic").is_empty(),
+        "a teammate working inside the project asks nobody: {:?}",
+        asked.lock().expect("no panic")
+    );
 
     // The two pane values refuse identically, and through this door: a door
     // that spawned where the other refused would be two behaviours wearing one

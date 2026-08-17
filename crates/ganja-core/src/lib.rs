@@ -111,5 +111,7 @@ pub use storage::{SessionInfo, Storage, StorageError};
 /// the `task` tool's teammate door, and the one `send_message` posts through.
 /// Named at the root for the reason [`Snapshots`] and [`McpServers`] are — a
 /// frontend builds them and hands them to an engine — while everything else in
-/// `subagent` stays crate-private.
-pub use subagent::{Backends, Postbox, Teammates};
+/// `subagent` stays crate-private. [`Caller`] is what one spawn's calling turn
+/// brings, and [`SpawnAsker`] is where a spawn the rules do not settle is put
+/// in front of somebody.
+pub use subagent::{Backends, Caller, Postbox, SpawnAsk, SpawnAsker, Teammates};
