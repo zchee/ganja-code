@@ -1,0 +1,55 @@
+[package]
+name = "ganja-team"
+description = "Claude Code's teams directory: the member records and the file-backed mailboxes teammates are addressed through."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io. Also load-bearing for deny.toml: with every
+# member unpublished, `allow-wildcard-paths` exempts the workspace's own path
+# dependencies from `wildcards = "deny"`.
+publish = false
+
+# One internal entry, and CI asserts it stays one. This crate is file I/O over
+# somebody else's document format; it must not learn where ganja keeps its
+# homes (that arrives as a `TeamsRoot`), what a session is, or what a
+# permission decides — every one of those would put the engine's answers
+# underneath the engine.
+[dependencies]
+# The mailbox lock's retry ladder, and nothing else: the workspace declaration
+# explains why it is proper-lockfile's schedule rather than a default one.
+# Used by `lock.rs` alone, which is what keeps the rest of the crate free of a
+# retry crate's vocabulary.
+backon.workspace = true
+# The frames a message body carries when it is not prose, and the UUIDv7 mint
+# a written message is stamped with (D493). The only crate of ours in this
+# list: a mailbox writes what the protocol already declares rather than a
+# second spelling of it.
+ganja-protocol.workspace = true
+# Insertion-ordered, behind `#[serde(flatten)]`: a key Claude writes that this
+# build has never heard of survives a rewrite in the position it arrived in.
+# The whole reason the record shapes live here and not in `ganja-protocol`,
+# whose posture is to refuse an unknown field rather than carry it.
+indexmap.workspace = true
+serde.workspace = true
+# Claude's documents are checked as values and decoded from raw bytes, because
+# §2.4's validation is field-level — a dropped entry has to say which key
+# failed and how, which a whole-document decode cannot. `raw_value` is what
+# lets those be two passes over one entry without a second parse of the file:
+# a `Value` would do for the check alone, but decoding through one would sort
+# every unknown key, since `serde_json::Map` is a `BTreeMap` here.
+serde_json = { workspace = true, features = ["raw_value"] }
+# An inbox rewrite is `NamedTempFile::new_in(parent)` → write → `persist`, so
+# a reader either sees the old array or the new one. Normal rather than dev
+# here — this is the write path, not a test fixture.
+tempfile.workspace = true
+thiserror.workspace = true
+# Counts, paths and a lock's fate. Never a message body: what a teammate wrote
+# is user content, and `tests/no_bodies_in_logs.rs` is the canary that says so.
+tracing.workspace = true
+
+[dev-dependencies]
+# The canary reads its own log back, which needs a subscriber it can write
+# into — the same shape `ganja-core`'s `secrets_env.rs` uses for credentials.
+tracing-subscriber.workspace = true

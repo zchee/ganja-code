@@ -74,6 +74,18 @@ jobs:
           internal="$(cargo tree -p ganja-core -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-core$' | sort -u | tr '\n' ' ')"
           test "$internal" = "ganja-permission ganja-protocol ganja-provider ganja-tool "
 
+      # The teams directory is file I/O over a document format ganja does not
+      # own, so the list that matters is the one it must never grow: the
+      # engine (its answers would end up underneath it), the permission crate
+      # (a mailbox decides nothing), the tools. It reads the protocol for the
+      # frames a message body carries and the id a write is stamped with, and
+      # that is all — asserted closed from the crate's first commit, before
+      # there is a convenient edge to add.
+      - name: ganja-team's internal dependencies are exactly the protocol
+        run: |
+          internal="$(cargo tree -p ganja-team -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-team$' | sort -u | tr '\n' ' ')"
+          test "$internal" = "ganja-protocol "
+
       # And for the wires. `ganja-permission` is here transitively, through
       # `ganja-tool`: a request offers the model `ToolDefinition`s, which is the
       # only thing this crate wants of the tools. What the allowlist forbids is
