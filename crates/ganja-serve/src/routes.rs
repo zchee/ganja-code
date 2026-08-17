@@ -28,15 +28,17 @@
 //!
 //! Spec: Claude Code's teammates (§5.6, cross-session addressing) — upstream
 //! opencode has no teammates and no counterpart to any of it. Two routes,
-//! and the router is built twice from the one function below with the
-//! transport as its flag: `GET /team` answers on TCP and on the session's
-//! own Unix socket alike, read-only, one JSON body of the engine's
-//! `TeamView`; `POST /team/{name}/message` is **registered on the socket
-//! router only**, so on TCP it is not there — `404`, the same answer as any
-//! route that does not exist, rather than a `403` that would announce a
-//! door and refuse it. Both reach the team through engine accessors and
-//! never through the team crate: serve invents no state, holds no team, and
-//! keeps its dependency list where it was.
+//! and two route tables built by the transport: `GET /team` answers on TCP
+//! and on the session's own Unix socket alike, read-only, one JSON body of
+//! the engine's `TeamView`; `POST /team/{name}/message` is **registered on
+//! the socket router only**, so on TCP it is not there — `404`, the same
+//! answer as any route that does not exist, rather than a `403` that would
+//! announce a door and refuse it. And the socket's table is *only* those
+//! two plus `GET /global/health` — see [`socket_routes`] — so a listener
+//! that takes no credential serves nothing that mutates a session. Both
+//! team routes reach the team through engine accessors and never through
+//! the team crate: serve invents no state, holds no team, and keeps its
+//! dependency list where it was.
 
 use axum::{
     Json,
@@ -66,7 +68,20 @@ use crate::{
 pub const DIRECTORY_HEADER: &str = "x-ganja-directory";
 
 pub(crate) fn router(state: AppState) -> axum::Router {
-    let router = axum::Router::new()
+    let router = match state.transport {
+        Transport::Tcp => tcp_routes(),
+        Transport::Socket => socket_routes(),
+    };
+
+    router
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
+        .with_state(state)
+}
+
+/// Every route a TCP listener serves — upstream's surface, and this build's
+/// additions to it — behind the credential the transport asks for.
+fn tcp_routes() -> axum::Router<AppState> {
+    axum::Router::new()
         .route("/global/health", get(health))
         .route("/config", get(config))
         .route("/path", get(path))
@@ -98,18 +113,30 @@ pub(crate) fn router(state: AppState) -> axum::Router {
         .route("/permission/{id}/reply", post(reply_permission))
         // Read-only, on both transports: the roster is no more secret than
         // `GET /session` and no more writable than `GET /permission`.
-        .route("/team", get(team));
-    // The write half exists on the socket alone. Not registered rather than
-    // registered-and-refused, so a TCP client is told there is no such route
-    // (D-13; AC-15).
-    let router = match state.transport {
-        Transport::Socket => router.route("/team/{name}/message", post(team_message)),
-        Transport::Tcp => router,
-    };
+        .route("/team", get(team))
+}
 
-    router
-        .layer(middleware::from_fn_with_state(state.clone(), guard))
-        .with_state(state)
+/// Every route a session's socket serves — **exactly three**, the ones its
+/// consumers use, and nothing else (**D505**, the ruling recorded in the
+/// crate docs): `GET /global/health` for `ganja sessions --live`, `GET /team`
+/// for whoever asks who leads, and `POST /team/{name}/message` for a peer's
+/// plain message. Every route that mutates the session — a prompt, an abort,
+/// a shell line, a permission reply, the switches — is TCP's alone, and on
+/// the socket does not exist: `404`, the same answer as any route that is
+/// not there, rather than a `403` that would announce a door and refuse it.
+///
+/// The socket takes no credential, so this table is the whole of what a
+/// same-uid peer may do to a session; and same-uid is not the same as
+/// trusted — `ganja-permission`'s own premise is that code this user runs
+/// (an MCP server, a hook, the model's `bash`) is not the user, and a socket
+/// that served the write API to it would hand every such thing a prompt into
+/// every session on the machine. What the socket is for is a peer reaching
+/// the lead and the lead reaching its members, and that is what it serves.
+fn socket_routes() -> axum::Router<AppState> {
+    axum::Router::new()
+        .route("/global/health", get(health))
+        .route("/team", get(team))
+        .route("/team/{name}/message", post(team_message))
 }
 
 /// Every request passes here first: one log line that is **method and path

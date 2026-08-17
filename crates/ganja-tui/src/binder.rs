@@ -42,15 +42,20 @@
 //! lazy create, replaced by a resume, re-minted by `NewSession`. The socket is
 //! named by the id, so it follows the id and only the id: bound once at
 //! startup, **after** the startup resume; rebound whenever a resume or a
-//! `NewSession` moves the slot — the picker's, `/new`'s, **or a peer's over
-//! the socket itself**, since `POST /session` mints and every
-//! `/session/{id}/…` route installs its id — which is why [`SessionSocket`]
-//! compares the engine's id against the bound one after every event the app
-//! handles rather than only at the app's own two doors (a peer's `NewSession`
-//! publishes no event, so the lead's own tick is what catches it, within its
-//! mailbox cadence); and **not** on first-prompt adoption, which gives the
-//! row the id the engine already had and moves nothing. Torn down at the tail
-//! of the app's run, on the same exit path as the MCP servers and the jobs.
+//! `NewSession` moves the slot — the picker's, or `/new`'s. **Not a peer's
+//! over the socket**: the socket serves three routes and no session route
+//! (D505's ruling — `GET /global/health`, `GET /team`, `POST
+//! /team/{name}/message`; `POST /session` and every `/session/{id}/…` route
+//! are TCP's alone), so nothing that reaches a session through its socket
+//! can move its slot. [`SessionSocket`] still compares the engine's id
+//! against the bound one after every event the app handles rather than only
+//! at the app's own two doors, and the reason is now the cheaper one: it is
+//! one id compare per event, and it makes the socket follow the slot however
+//! it moves, so a door added later cannot leave a stale socket bound behind
+//! a session it no longer names. **Not** on first-prompt adoption, which
+//! gives the row the id the engine already had and moves nothing. Torn down
+//! at the tail of the app's run, on the same exit path as the MCP servers
+//! and the jobs.
 //!
 //! The old socket is shut down **before** the new one is bound, and the two
 //! are sequential on purpose: two sessions minted inside one 65-second

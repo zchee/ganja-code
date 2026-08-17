@@ -1,6 +1,10 @@
 //! The REST surface against a live loopback socket: the informational
 //! routes, the session round-trips against a seeded store, and the
 //! error-mapping table — 404, 409, 400 — each observed through a real route.
+//!
+//! This is the **TCP** surface. A session's Unix socket serves three routes
+//! of it and no others (D505's ruling); which three, and that the rest
+//! answer `404` there, is enumerated route by route in `tests/team.rs`.
 
 mod support;
 

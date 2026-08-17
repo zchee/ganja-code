@@ -28,16 +28,29 @@
 //!   protocol event, but there is no `/question` or
 //!   `/question/{id}/reply` route yet. Mirroring the existing `GET
 //!   /permission` plus `POST /permission/{id}/reply` pair is follow-up work.
-//! * **A Unix socket serves the same routes to the same user and nobody
-//!   else** (**D505**, no upstream counterpart — opencode serves TCP only).
+//! * **A Unix socket serves three routes to the same user and nobody else**
+//!   (**D505**, no upstream counterpart — opencode serves TCP only).
 //!   [`Listen`] names the transport, [`Address`] reports the one bound, and
-//!   [`socket`] holds the scheme: a private `/tmp/ganja-<uid>/` directory the
-//!   bind refuses unless it is ours at `0700`, one `0600` socket per session
-//!   named by its id, a stale file reused and a live one never stolen, and a
-//!   peer-uid check on every accepted connection. The password posture is
-//!   untouched — a socket takes no password because the filesystem already
-//!   said who may connect — and the guard that reads the transport is
-//!   `routes.rs`'s.
+//!   [`socket`] holds the binder's half of the scheme (the scheme itself is
+//!   `ganja_tool::socket`'s, re-exported): a private `/tmp/ganja-<uid>/`
+//!   directory the bind refuses unless it is ours at `0700`, one `0600`
+//!   socket per session named by its id, a stale file reused and a live one
+//!   never stolen, and a peer-uid check on every accepted connection. The
+//!   password posture is untouched — a socket takes no password because the
+//!   filesystem already said who may connect — and the guard that reads the
+//!   transport is `routes.rs`'s. **What the socket serves is exactly what
+//!   its consumers use** (ruling, W7 boundary review): `GET /global/health`,
+//!   `GET /team` and `POST /team/{name}/message`, and nothing else — every
+//!   session-mutating route (a prompt, an abort, a shell line, a command, a
+//!   revert, an agent or model switch, a permission reply) and every other
+//!   read of the session is TCP's alone and answers `404` on the socket.
+//!   The socket exists so a peer reaches the lead and the lead reaches its
+//!   members; and same-uid is not trusted — `ganja-permission`'s premise is
+//!   that code this user runs (an MCP server, a hook, the model's `bash`) is
+//!   not the user, and a credential-less socket that served the write API
+//!   would hand every such thing a prompt into every session on the machine.
+//!   A route added to the socket later is added deliberately, named in
+//!   `routes::socket_routes`' doc, and pinned by `tests/team.rs`.
 
 mod auth;
 mod error;
