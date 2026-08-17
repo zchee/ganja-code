@@ -36,6 +36,7 @@ pub mod read;
 pub mod send_message;
 pub mod shell;
 pub mod skill;
+pub mod socket;
 pub mod task;
 pub mod team;
 pub mod todo;
