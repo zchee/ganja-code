@@ -39,6 +39,33 @@
 //! members of the same team, and is what this test's name means. Nothing here
 //! touches the developer's own `~/.claude`.
 //!
+//! # What a private config home takes away with it
+//!
+//! `CLAUDE_CONFIG_DIR` does not only move the teams directory. A real `claude`
+//! derives the **name of its credential store** from it as well — on macOS the
+//! keychain service is `Claude Code-credentials` under the default home and
+//! `Claude Code-credentials-<eight hex of the path>` under any other — which is
+//! how that one variable serves several accounts at once. So a config home a
+//! test invents is a config home nobody has ever logged into: the pane starts,
+//! reads its inbox, addresses its lead correctly and then answers *"Anthropic
+//! profile login expired"* instead of taking its turn. That is an authentication
+//! failure wearing an interop failure's clothes, and it is the whole reason this
+//! test spent its first real run timing out on an inbox that was never going to
+//! be written to.
+//!
+//! [`SECURE_STORAGE_ENV`] is claude's own door out of it: set — the empty string
+//! counts as set — it, rather than `CLAUDE_CONFIG_DIR`, is what the store's
+//! identity comes from, and empty selects the default store. Setting it empty
+//! here buys exactly the distinction this test needs, between a private teams
+//! **directory** and a private **login**: the first is what a shared inbox under
+//! a temporary root means, the second was only ever an accident of asking for
+//! the first.
+//!
+//! It is test scaffolding and nothing else. `ganja` neither sets this variable
+//! nor carries it — it is not in `claude::carried_env`, and D502's list stays
+//! closed — because in production the pane rides the user's own config home,
+//! whose store is the one that user logged into.
+//!
 //! # The second claim: which separator a colliding name gets
 //!
 //! Open Question 3 asks whether Claude Code's registration writes `worker-2` or
@@ -77,6 +104,11 @@ use ganja_team::{
 
 /// The opt-in every live test in this workspace shares.
 const LIVE: &str = "GANJA_LIVE_TEST";
+
+/// The variable that decides which credential store a real `claude` reads,
+/// independently of its config home — see the module doc for why this test has
+/// to say anything about it at all.
+const SECURE_STORAGE_ENV: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 
 /// The lead's session, and therefore the team: `session-01998ad0`.
 const SESSION_ID: &str = "01998ad0-0000-7000-8000-000000000000";
@@ -231,6 +263,17 @@ async fn a_real_claude_pane_round_trips_over_the_shared_inbox() {
     let home = ganja_testkit::temp_dir();
     let config_dir = home.path().join("claude");
     let socket = home.path().join("tmux.sock");
+
+    // SAFETY: as below — one test in this binary, so nothing else here is
+    // reading the environment. It is written *before* the server rather than
+    // beside the other three because a pane inherits the tmux **server's**
+    // environment (§10.10) and this one travels no other way: it is not in
+    // `claude::carried_env`, so no `-e` carries it, and a value written after
+    // the next line would reach nothing.
+    unsafe {
+        std::env::set_var(SECURE_STORAGE_ENV, "");
+    }
+
     let (server, pane) = Tmux::start(&socket);
 
     // SAFETY: this binary holds exactly one test, so nothing else in this

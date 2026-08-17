@@ -162,6 +162,17 @@ use crate::teammate::{
 
 /// The variable naming the directory a real `claude` keeps its own things in,
 /// and therefore the parent of the teams directory it reads (§2.1).
+///
+/// It reaches further than the teams directory, and a caller that sets one for
+/// a session should know it: a real `claude` derives the identity of its
+/// **credential store** from this path too — on macOS the keychain service is
+/// `Claude Code-credentials` under the default home and
+/// `Claude Code-credentials-<eight hex of the path>` under any other — which is
+/// how one variable serves several accounts. Nothing here needs to act on that,
+/// because a pane under the user's own config home reads the store that user
+/// logged into; it is recorded because a *fresh* config home is a fresh login,
+/// and a pane that starts, reads its inbox and then refuses to take a turn looks
+/// nothing like an authentication problem until somebody knows this.
 pub const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 
 /// Where a `claude` with no [`CONFIG_DIR_ENV`] keeps them, under the user's
