@@ -191,8 +191,17 @@ async fn a_task_call_runs_a_child_loop_and_hands_back_its_last_words() {
     let ToolState::Completed { output, .. } = task_part(&seen) else {
         panic!("the delegated call completed");
     };
+    let id = output
+        .strip_prefix("<task id=\"")
+        .and_then(|rest| rest.split_once('"'))
+        .map(|(id, _)| id)
+        .expect("the wrapper names an id");
     assert!(
-        output.starts_with("<task id=\"ses_") && output.contains("state=\"completed\""),
+        ganja_protocol::is_uuidv7(id),
+        "the delegated child's own session id, a bare UUIDv7: {id}"
+    );
+    assert!(
+        output.contains("\" state=\"completed\""),
         "a delegated answer is wrapped so the model can tell it apart: {output}"
     );
     assert!(
