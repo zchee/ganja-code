@@ -65,6 +65,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+pub mod lock;
 pub mod mailbox;
 pub mod record;
 pub mod team;

@@ -43,7 +43,10 @@ use std::{
 use serde_json::Value;
 use tempfile::NamedTempFile;
 
-use crate::record::{MESSAGE_TYPE, MESSAGE_VERSION, MailboxMessage, document};
+use crate::{
+    lock::{self, LockError},
+    record::{MESSAGE_TYPE, MESSAGE_VERSION, MailboxMessage, document},
+};
 
 /// What a brand-new inbox holds (§2.5's `writeExclusive(path, "[]")`).
 pub const EMPTY_INBOX: &str = "[]";
@@ -97,6 +100,14 @@ pub enum MailboxError {
         /// expectation and the type found — never the value found.
         issues: Vec<String>,
     },
+    /// The inbox could not be held while it was rewritten.
+    ///
+    /// Carried transparently because [`LockError`] already says everything
+    /// there is to say — which path, and after how many retries — and because
+    /// the two are not really different failures to a caller: the write did not
+    /// happen, and the file is exactly as it was.
+    #[error(transparent)]
+    Lock(#[from] LockError),
     /// The file would not be read, written or replaced.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -334,18 +345,22 @@ pub fn prune_invalid(path: &Path) -> Result<usize, MailboxError> {
 /// public mutator above refuses *before* getting here, so there is no path that
 /// takes a hold and then decides not to write.
 ///
-/// **W3/L2 lands the cross-process lock here**, as the first statement of this
-/// function: `realpath` the target, `mkdir("${path}.lock")` to acquire,
-/// `remove_dir` in a guard's `Drop` to release. It is one statement because the
-/// seed above already guarantees the target exists, which is what that
-/// protocol's `realpath` step requires. Until it lands, two processes writing
-/// one inbox can lose a message — which is exactly what W3/L2's own
-/// `contention.rs` is written to prove they no longer do.
+/// The two steps below are §2.5's own order and not an implementation detail:
+/// the seed comes first because the lock is on `realpath(target) + ".lock"` and
+/// a file that is not there has no real path, and the hold covers the read as
+/// well as the write because the whole point is that nothing lands on top of an
+/// entry that arrived after this read. Everything under it — [`crate::lock`]'s
+/// protocol, its ladder and its stale break — is somebody else's decision,
+/// reproduced so a real `claude` sharing this inbox agrees about who holds it.
+///
+/// The binding is named rather than `_`, which would drop the guard where it
+/// stands and hold nothing at all.
 fn update<T>(
     path: &Path,
     change: impl FnOnce(&mut Vec<MailboxMessage>, usize) -> T,
 ) -> Result<T, MailboxError> {
     seed(path)?;
+    let _hold = lock::acquire(path)?;
 
     let contents = read(path)?;
     let mut messages = contents.valid;
