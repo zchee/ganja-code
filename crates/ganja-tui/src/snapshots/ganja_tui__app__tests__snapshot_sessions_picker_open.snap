@@ -5,7 +5,7 @@ expression: screen(&terminal)
                                                                                 
   ┌ sessions ────────────────────────────────────────────────────────────────┐  
   │> porting the session store                         just now  12.4k tokens│  
-  │  ses_middle                                          5m ago   1.2k tokens│  
+  │  0198f2c4-a1b0-7000-8000-000000000012                5m ago   1.2k tokens│  
   │  a first look at the tool registry                   3h ago     42 tokens│  
   │                                                                          │  
   │[j/k] [up/down] move   [Enter] resume   [Esc] close                       │  
