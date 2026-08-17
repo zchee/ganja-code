@@ -37,6 +37,12 @@ ganja-protocol.workspace = true
 # that reads a `Config` — `ganja_core::provider`. One way only: a wire has no
 # idea a session exists.
 ganja-provider.workspace = true
+# Claude Code's teams directory: the member records a spawn writes and the
+# file-backed mailboxes a teammate's runner polls. The engine is what owns a
+# teammate's lifetime, so it is the crate that names this — and it names it
+# rather than reimplementing the documents, because a real `claude` process
+# reads and writes the same directory.
+ganja-team.workspace = true
 # The builtin tools and the read log, re-exported as `ganja_core::tool` and
 # `ganja_core::watch`. The dependency runs one way only: nothing in there may
 # name this crate.

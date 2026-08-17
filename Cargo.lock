@@ -1323,6 +1323,7 @@ dependencies = [
  "ganja-permission",
  "ganja-protocol",
  "ganja-provider",
+ "ganja-team",
  "ganja-testkit",
  "ganja-tool",
  "ignore",
