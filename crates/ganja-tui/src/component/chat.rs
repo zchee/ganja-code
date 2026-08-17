@@ -51,7 +51,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState};
+use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState, team};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -1275,18 +1275,36 @@ impl Entry {
                 // member's assigned `color` is deliberately unread: a palette
                 // this pane never mixed is not one it can trust against an
                 // arbitrary theme.
+                //
+                // The lead is chosen the way the file chip's is, and for the
+                // invariant stated at the top of this loop: a prompt is *one*
+                // block, so a message whose text part already drew the caret
+                // hangs this one under it rather than drawing a second one.
+                // The role is read for the same reason — a peer part reaching
+                // an assistant message is not something a person said, and a
+                // `>` on it would claim it was.
                 PartBody::Peer {
                     from,
                     summary,
                     body,
                     ..
                 } => {
+                    // Capped here as well as at `PeerMessage::new`: this
+                    // renderer draws whatever the stored part holds, and a
+                    // part is deliberately storable with a summary that never
+                    // came through that constructor.
                     let heading = match summary {
-                        Some(line) if !line.trim().is_empty() => format!("{from}: {line}"),
+                        Some(line) if !line.trim().is_empty() => {
+                            format!("{from}: {}", team::cap_for_display(line))
+                        }
                         _ => from.clone(),
                     };
-                    let hang = " ".repeat(PROMPT.width());
-                    let mut rows = vec![Row::new(PROMPT, heading, theme.dim)];
+                    let prefix = match self.role {
+                        Role::User => prompt_lead(lines.is_empty()),
+                        Role::Assistant => BULLET.to_owned(),
+                    };
+                    let hang = " ".repeat(prefix.width());
+                    let mut rows = vec![Row::new(&prefix, heading, theme.dim)];
                     rows.extend(
                         body.lines()
                             .map(|line| Row::new(&hang, line.to_owned(), theme.fg)),
@@ -2422,6 +2440,74 @@ mod tests {
             lines.iter().any(|line| line == "\u{25cf} first")
                 && lines.iter().any(|line| line == "\u{25cf} second"),
             "both parts should render, each behind a bullet of its own, got {lines:?}"
+        );
+    }
+
+    /// The invariant stated where this loop begins: a prompt is one block
+    /// however many parts it was built from. A peer part arriving beside what
+    /// the person typed hangs under the caret that part already drew, because
+    /// two carets on one entry would claim two things were said.
+    #[test]
+    fn a_prompt_carrying_a_peers_words_draws_one_caret_for_the_whole_entry() {
+        // Wider and taller than `VIEWPORT`: this entry is four rows and the
+        // question is which glyph leads each of them, so none may scroll off.
+        const AREA: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 30,
+            height: 12,
+        };
+
+        let mut chat = Chat::default();
+        let prompt = Message::user("what did w1 say");
+        chat.start_message(prompt.clone());
+        chat.start_part(
+            &prompt.id,
+            Part::peer(
+                "w1",
+                Some("picked up W2".to_owned()),
+                None,
+                "on the protocol",
+            ),
+        );
+        chat.start_part(&prompt.id, Part::peer("w2", None, None, "and I have it"));
+
+        let lines = rendered(&mut chat, AREA);
+        let carets = lines
+            .iter()
+            .filter(|line| line.starts_with("\u{3e} "))
+            .count();
+
+        assert_eq!(carets, 1, "one entry, one caret, got {lines:?}");
+        assert!(
+            lines.iter().any(|line| line == "\u{3e} what did w1 say"),
+            "the caret leads what the person typed, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "  w1: picked up W2")
+                && lines.iter().any(|line| line == "  w2"),
+            "both peers hang under that caret, got {lines:?}"
+        );
+    }
+
+    /// The same part on a reply is not something a person said, so it takes
+    /// the reply's own marker rather than the caret.
+    #[test]
+    fn a_peers_words_on_a_reply_take_the_bullet_and_not_the_caret() {
+        let mut chat = Chat::default();
+        let reply = Message::assistant("canned");
+        chat.start_message(reply.clone());
+        chat.start_part(&reply.id, Part::peer("w1", None, None, "relayed"));
+
+        let lines = rendered(&mut chat, VIEWPORT);
+
+        assert!(
+            lines.iter().any(|line| line == "\u{25cf} w1"),
+            "a peer part on a reply is bulleted, got {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.starts_with("\u{3e} ")),
+            "nothing on a reply claims a person said it, got {lines:?}"
         );
     }
 

@@ -325,14 +325,25 @@ fn newest_user_text(messages: &[Message]) -> String {
             message
                 .parts
                 .iter()
+                // Every variant is named, and the wildcard that used to stand
+                // here is gone on purpose: this was the one place in the
+                // workspace where a new `PartBody` would compile silently into
+                // "not text", and a part this wire ought to send is not
+                // something to discover from a user's bug report.
                 .filter_map(|part| match &part.body {
                     PartBody::Text { text } => Some(text.as_str()),
-                    // Named rather than left to the fallback below, because
-                    // this one is a decision: a peer's words are rendered
-                    // into the user turn at request assembly (D495), and a
-                    // wire never encodes a peer part as its own message.
-                    PartBody::Peer { .. } => None,
-                    _ => None,
+                    // A peer's words are rendered into the user turn at
+                    // request assembly (D495); a wire never encodes a peer
+                    // part as a message of its own.
+                    PartBody::Peer { .. }
+                    | PartBody::File { .. }
+                    | PartBody::Tool { .. }
+                    | PartBody::ServerTool { .. }
+                    | PartBody::Reasoning { .. }
+                    | PartBody::ReasoningText { .. }
+                    | PartBody::StepStart
+                    | PartBody::StepFinish { .. }
+                    | PartBody::Patch { .. } => None,
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n")
