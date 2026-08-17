@@ -23,7 +23,8 @@
 //!   the CI lane rather than prove anything. The design makes the backlog's
 //!   state irrelevant (liveness is the lock, and no connect is ever made),
 //!   and `a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it`
-//!   asserts that with a held lock and a listener nobody accepts on.
+//!   asserts that with a held lock over a socket file nothing listens behind
+//!   — the state a probe cannot tell from a dead name.
 //!
 //! Every directory is a fresh `tempfile` one rather than the real
 //! `/tmp/ganja-<uid>/`: the refusal cases have to chmod and plant files where
@@ -321,13 +322,17 @@ async fn a_stale_socket_file_is_unlinked_and_the_name_reused() {
 }
 
 /// The liveness token is the lock, not a connection: a name whose lock is
-/// held is walked past untouched even when nothing behind its socket accepts
-/// — the case a connect probe misreads, because a full accept backlog
-/// refuses exactly the way an empty socket file does. A backlog is not
-/// filled here on purpose: Linux blocks a connect into a full Unix backlog
-/// rather than refusing it, and a test that hangs on one platform proves
-/// nothing on the other. The design makes the backlog's state irrelevant,
-/// and that is what this asserts.
+/// held is walked past untouched even when there is **nothing** behind its
+/// socket file — the one state a connect probe cannot tell from a dead name
+/// (it is refused either way), and exactly the claim→bind window a live
+/// binder is in. The setup is a held lock and a socket file whose listener
+/// has been dropped; the connect-probe design unlinks it and binds at the
+/// shortest name, the lock design walks. A full accept backlog would be a
+/// second such state, and is not staged here on purpose: Linux blocks a
+/// connect into a full Unix backlog rather than refusing it, and a test that
+/// hangs on one platform proves nothing on the other. The design makes the
+/// backlog's state irrelevant, and the dropped-listener state asserts that
+/// with no flood at all.
 #[tokio::test]
 async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
     let directory = private_dir();
@@ -336,8 +341,10 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
         .next()
         .expect("a session has a name");
 
-    // Somebody live, from this test's point of view: the lock held, a socket
-    // bound at the name, and nobody ever calling accept on it.
+    // Somebody live, from this test's point of view: the lock held, and a
+    // socket file at the name that nothing is listening behind — a binder
+    // between its claim and its bind, or one whose backlog is full, look
+    // exactly like this to anything that connects.
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -349,8 +356,13 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
     // for as long as the flock must stand.
     let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     assert_eq!(rc, 0, "the test takes the name's lock first");
-    let silent =
-        std::os::unix::net::UnixListener::bind(&shortest).expect("the silent socket binds");
+    let bound_then_dropped =
+        std::os::unix::net::UnixListener::bind(&shortest).expect("the socket binds");
+    drop(bound_then_dropped);
+    assert!(
+        std::os::unix::net::UnixStream::connect(&shortest).is_err(),
+        "nothing answers at the held name — the state a probe misreads as dead"
+    );
 
     let handle = ganja_serve::serve(
         engine(),
@@ -371,13 +383,12 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
     );
     assert!(
         shortest.exists(),
-        "and the silent socket's file was not unlinked"
+        "and the held name's file was not unlinked"
     );
     assert_eq!(health(&landed).await["healthy"], true);
 
     handle.shutdown().await.expect("a clean stop");
     assert!(shortest.exists(), "nor was it on the way out");
-    drop(silent);
     drop(lock);
 }
 
