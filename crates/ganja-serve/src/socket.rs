@@ -331,10 +331,7 @@ mod unix {
         if let Err(source) = fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE)) {
             drop(listener);
             let _ = fs::remove_file(path);
-            return Err(ServeError::Bind {
-                address: Address::Unix(path.to_path_buf()),
-                source,
-            });
+            return Err(bind_error(source));
         }
 
         Ok(PeerChecked {

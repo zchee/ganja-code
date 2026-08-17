@@ -10,11 +10,13 @@
 // nothing useful to say here.
 #![allow(dead_code)]
 
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
+use base64::Engine as _;
 use ganja_core::{Engine, permission::Permissions, provider::ProviderEvent, tool::Registry};
-use ganja_serve::{DEFAULT_HOSTNAME, Handle, Listen, ServeConfig};
+use ganja_serve::{Credentials, DEFAULT_HOSTNAME, Handle, Listen, ServeConfig};
 use ganja_testkit::{ScriptedProvider, says};
+use secrecy::SecretString;
 
 /// A heartbeat quick enough that a suite sees one without waiting ten
 /// seconds.
@@ -69,6 +71,46 @@ pub fn tcp(port: Option<u16>) -> Listen {
         hostname: DEFAULT_HOSTNAME.to_owned(),
         port,
     }
+}
+
+/// The loopback fixture with its listen swapped for `listen` — the same
+/// directory, the same fast heartbeat, bound wherever the suite says.
+pub fn with_listen(listen: Listen) -> ServeConfig {
+    let mut config = loopback_config();
+    config.listen = listen;
+
+    config
+}
+
+/// The URL a socket-bound client is given: the host is a label, unread by
+/// the router, because `reqwest` resolves nothing once a socket is set.
+pub const SOCKET_URL: &str = "http://ganja";
+
+/// A client bound to `path` and nothing else — one per socket, the rule
+/// every caller of `unix_socket` in this workspace keeps.
+pub fn socket_client(path: &Path) -> reqwest::Client {
+    reqwest::Client::builder()
+        .unix_socket(path)
+        .build()
+        .expect("a socket-bound client builds")
+}
+
+/// The credential a `GANJA_SERVER_PASSWORD` export resolves to
+/// (`Credentials::from_env`), built directly so no suite here mutates the
+/// process environment.
+pub fn credentials() -> Credentials {
+    Credentials {
+        username: "ganja".to_owned(),
+        password: SecretString::from("hunter2".to_owned()),
+    }
+}
+
+/// The `Authorization` header for [`credentials`].
+pub fn basic() -> String {
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("ganja:hunter2")
+    )
 }
 
 /// The base URL a suite drives `handle` at — a TCP one; the socket suite

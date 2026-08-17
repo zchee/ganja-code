@@ -455,8 +455,14 @@ fn session_socket(path: &std::path::Path) -> Result<(), Refused> {
 /// Rungs 5 and 7 judge plain text and rungs 6 and 8 judge the structured form,
 /// so the two branches never race each other — what the order buys is that
 /// *within* a branch the earlier rung always answers first, and that the
-/// address is settled before the body is judged at all.
-fn validate(args: Args, postbox: &dyn Postbox) -> Result<(Address, Body), Refused> {
+/// address is settled before the body is judged at all. `lead` is the roster's
+/// lead where it names one, read once by the caller for rung 8 and for the
+/// sentence a refusal is rendered with.
+fn validate(
+    args: Args,
+    postbox: &dyn Postbox,
+    lead: Option<&str>,
+) -> Result<(Address, Body), Refused> {
     // Rung 1.
     if args.to == BROADCAST_TO {
         return Err(Refused::Broadcast);
@@ -506,8 +512,14 @@ fn validate(args: Args, postbox: &dyn Postbox) -> Result<(Address, Body), Refuse
                 }
                 Reserved::AgentSendable { kind } => kind,
             };
-            // D499's first clause.
-            if kind == SHUTDOWN_APPROVED && !is_lead(name, postbox) {
+            // D499's first clause. Compared case-insensitively: a name
+            // differing only in case is not another teammate — the name
+            // grammar admits both spellings of one identity — and the
+            // reference's own peer-DM check compares the lead's name the same
+            // way.
+            if kind == SHUTDOWN_APPROVED
+                && !lead.is_some_and(|lead| lead.eq_ignore_ascii_case(name))
+            {
                 return Err(Refused::ShutdownApprovedNotToLead);
             }
 
@@ -516,18 +528,6 @@ fn validate(args: Args, postbox: &dyn Postbox) -> Result<(Address, Body), Refuse
     };
 
     Ok((address, body))
-}
-
-/// Whether `name` is this team's lead.
-///
-/// Compared case-insensitively: a name differing only in case is not another
-/// teammate — the name grammar admits both spellings of one identity — and the
-/// reference's own peer-DM check compares the lead's name the same way.
-fn is_lead(name: &str, postbox: &dyn Postbox) -> bool {
-    postbox
-        .roster()
-        .iter()
-        .any(|peer| peer.lead && peer.name.eq_ignore_ascii_case(name))
 }
 
 /// §5.3's cap, applied before the summary crosses the seam. A summary that is
@@ -580,7 +580,7 @@ impl Tool for SendMessageTool {
         // registry was built is addressable this turn, and a stale lead name
         // would refuse a shutdown answer that is in fact correctly addressed.
         let lead = lead_of(&postbox.roster());
-        let (address, body) = match validate(args, postbox.as_ref()) {
+        let (address, body) = match validate(args, postbox.as_ref(), lead.as_deref()) {
             Ok(sending) => sending,
             Err(refused) => {
                 return Err(ToolError::Failed(refused.sentence(&to, lead.as_deref())));
@@ -624,7 +624,7 @@ mod tests {
         LIFECYCLE_FRAME, NO_TEAM, NOT_A_SESSION_SOCKET, PROTOCOL_FRAME, ROSTER_HEADER, Refused,
         SCOPED_RECIPIENT, SHUTDOWN_APPROVED_NOT_TO_LEAD, STRUCTURED_NOT_A_FRAME,
         STRUCTURED_OVER_SOCKET, SendMessageTool, UNKNOWN_RECIPIENT, UNSUPPORTED_SCHEME, WHITESPACE,
-        cap_summary,
+        cap_summary, lead_of,
     };
     use crate::{
         Tool as _, ToolCtx, ToolError,
@@ -895,7 +895,7 @@ mod tests {
         }))
         .expect("the fixture matches the argument schema");
 
-        super::validate(args, postbox)
+        super::validate(args, postbox, lead_of(&postbox.roster()).as_deref())
     }
 
     /// `did:` is recognized by §5.6's parser and named by no rung of §5.2's

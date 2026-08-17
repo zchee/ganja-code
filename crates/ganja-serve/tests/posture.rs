@@ -6,9 +6,8 @@
 mod support;
 
 use base64::Engine as _;
-use ganja_serve::{Credentials, Listen, ServeError};
-use secrecy::SecretString;
-use support::{base_url, engine, loopback_config};
+use ganja_serve::{Listen, ServeError};
+use support::{base_url, credentials, engine, loopback_config};
 
 #[tokio::test]
 async fn a_non_loopback_bind_with_no_password_is_refused_at_startup() {
@@ -102,10 +101,7 @@ async fn a_request_naming_another_directory_is_refused_with_400() {
 #[tokio::test]
 async fn a_configured_password_gates_every_route() {
     let mut config = loopback_config();
-    config.credentials = Some(Credentials {
-        username: "ganja".to_owned(),
-        password: SecretString::from("hunter2"),
-    });
+    config.credentials = Some(credentials());
     let handle = ganja_serve::serve(engine(), config)
         .await
         .expect("a loopback server comes up");

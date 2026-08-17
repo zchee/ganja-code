@@ -36,7 +36,7 @@ mod support;
 
 use std::{
     fs,
-    os::{fd::AsRawFd as _, unix::fs::PermissionsExt as _},
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -46,7 +46,7 @@ use ganja_serve::{
     Address, DirectoryRefusal, Handle, Listen, ServeError,
     socket::{self, EXTENSION, LOCK_EXTENSION, NameLock, SHORTEST_NAME},
 };
-use support::{engine, loopback_config};
+use support::{SOCKET_URL, engine, socket_client, with_listen};
 
 /// A fresh directory at `0700` — what the socket directory has to be, where
 /// `tempdir()`'s default is whatever the umask leaves (`0755`, usually).
@@ -63,22 +63,11 @@ fn session(suffix: &str) -> SessionId {
     SessionId::from(format!("0198c1a2-{suffix}-7d5e-8f60-718293a4b5c6"))
 }
 
-/// The config every test binds: the loopback fixture with its listen swapped
-/// for `listen`.
-fn config(listen: Listen) -> ganja_serve::ServeConfig {
-    let mut config = loopback_config();
-    config.listen = listen;
-    config
-}
-
 /// `GET /global/health` over the socket at `path`, through a client bound
 /// to that path alone — the one-client-per-socket rule the plan states.
 async fn health(path: &Path) -> serde_json::Value {
-    reqwest::Client::builder()
-        .unix_socket(path.to_path_buf())
-        .build()
-        .expect("a socket client builds")
-        .get("http://ganja/global/health")
+    socket_client(path)
+        .get(format!("{SOCKET_URL}/global/health"))
         .send()
         .await
         .expect("the socket answers")
@@ -111,7 +100,7 @@ async fn a_session_socket_binds_in_a_private_directory_and_answers_health() {
 
     let handle = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id: id.clone(),
             directory: directory.path().to_path_buf(),
         }),
@@ -154,7 +143,7 @@ async fn an_absent_socket_directory_is_created_private() {
 
     let handle = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id: session("0001"),
             directory: directory.clone(),
         }),
@@ -176,7 +165,7 @@ async fn a_socket_directory_that_is_not_private_is_refused_naming_its_mode() {
 
     let refused = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id: session("0002"),
             directory: directory.path().to_path_buf(),
         }),
@@ -225,7 +214,7 @@ async fn a_symlink_or_plain_file_where_the_directory_should_be_is_refused() {
     fs::write(&file, b"not a directory").expect("the decoy writes");
     let refused = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id: session("0003"),
             directory: file.clone(),
         }),
@@ -249,7 +238,7 @@ async fn a_symlink_or_plain_file_where_the_directory_should_be_is_refused() {
     std::os::unix::fs::symlink(real.path(), &link).expect("the link is made");
     let refused = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id: session("0004"),
             directory: link.clone(),
         }),
@@ -293,7 +282,7 @@ async fn a_stale_socket_file_is_unlinked_and_the_name_reused() {
 
     let handle = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id,
             directory: directory.path().to_path_buf(),
         }),
@@ -345,17 +334,9 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
     // socket file at the name that nothing is listening behind — a binder
     // between its claim and its bind, or one whose backlog is full, look
     // exactly like this to anything that connects.
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(socket::lock_path(&shortest))
-        .expect("the lock file opens");
-    // SAFETY: an open descriptor and two flags; the test holds `lock` open
-    // for as long as the flock must stand.
-    let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    assert_eq!(rc, 0, "the test takes the name's lock first");
+    let lock = NameLock::claim(&shortest)
+        .expect("the lock file opens")
+        .expect("the test takes the name's lock first");
     let bound_then_dropped =
         std::os::unix::net::UnixListener::bind(&shortest).expect("the socket binds");
     drop(bound_then_dropped);
@@ -366,7 +347,7 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
 
     let handle = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id,
             directory: directory.path().to_path_buf(),
         }),
@@ -421,7 +402,7 @@ async fn a_name_the_lister_holds_is_walked_past_and_its_stale_file_goes_under_th
     // bound at the held name.
     let racing = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id: id.clone(),
             directory: directory.path().to_path_buf(),
         }),
@@ -450,7 +431,7 @@ async fn a_name_the_lister_holds_is_walked_past_and_its_stale_file_goes_under_th
     drop(lock);
     let next = ganja_serve::serve(
         engine(),
-        config(Listen::Unix {
+        with_listen(Listen::Unix {
             path: shortest.clone(),
         }),
     )
@@ -470,7 +451,7 @@ async fn a_live_name_is_never_claimed_by_the_lister() {
     let id = session("0013");
     let handle = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id,
             directory: directory.path().to_path_buf(),
         }),
@@ -505,7 +486,8 @@ async fn a_socket_directory_under_a_world_writable_parent_without_the_sticky_bit
     let directory = parent.path().join("ganja");
     let path = directory.join(format!("0198c1a2.{EXTENSION}"));
 
-    let refused = ganja_serve::serve(engine(), config(Listen::Unix { path: path.clone() })).await;
+    let refused =
+        ganja_serve::serve(engine(), with_listen(Listen::Unix { path: path.clone() })).await;
     let error = match refused {
         Err(error) => error,
         Ok(handle) => panic!(
@@ -529,7 +511,7 @@ async fn a_socket_directory_under_a_world_writable_parent_without_the_sticky_bit
     // With the bit, the same tree binds.
     fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o1777))
         .expect("the test may set the sticky bit on its own directory");
-    let handle = ganja_serve::serve(engine(), config(Listen::Unix { path: path.clone() }))
+    let handle = ganja_serve::serve(engine(), with_listen(Listen::Unix { path: path.clone() }))
         .await
         .expect("a sticky world-writable parent is /tmp's own shape");
     assert_eq!(health(&path).await["healthy"], true);
@@ -568,7 +550,7 @@ async fn binders_racing_one_bucket_all_come_up_at_different_names() {
                     go.wait().await;
                     ganja_serve::serve(
                         engine(),
-                        config(Listen::Session {
+                        with_listen(Listen::Session {
                             id,
                             directory: dir.to_path_buf(),
                         }),
@@ -615,7 +597,7 @@ async fn a_live_socket_is_never_stolen_and_a_colliding_session_extends_its_name(
 
     let holder = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id: first.clone(),
             directory: directory.path().to_path_buf(),
         }),
@@ -625,7 +607,8 @@ async fn a_live_socket_is_never_stolen_and_a_colliding_session_extends_its_name(
     let held = bound(&holder);
 
     // The exact-path ask names the live socket and is refused, not served.
-    let refused = ganja_serve::serve(engine(), config(Listen::Unix { path: held.clone() })).await;
+    let refused =
+        ganja_serve::serve(engine(), with_listen(Listen::Unix { path: held.clone() })).await;
     assert!(
         matches!(refused, Err(ServeError::SocketInUse { ref path }) if *path == held),
         "a live socket is somebody's: {refused:?}"
@@ -639,7 +622,7 @@ async fn a_live_socket_is_never_stolen_and_a_colliding_session_extends_its_name(
     // The session ask walks past it: the same eight digits, one more digit.
     let extended = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id: second.clone(),
             directory: directory.path().to_path_buf(),
         }),
@@ -682,7 +665,7 @@ async fn something_that_is_not_a_socket_at_the_path_is_left_alone() {
 
     let refused = ganja_serve::serve(
         engine(),
-        config(Listen::Session {
+        with_listen(Listen::Session {
             id,
             directory: directory.path().to_path_buf(),
         }),

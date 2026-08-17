@@ -13,13 +13,13 @@ mod support;
 
 use std::{path::PathBuf, sync::Arc};
 
-use base64::Engine as _;
 use ganja_core::{Engine, permission::Permissions, teammate::TeammateRegistry, tool::Registry};
 use ganja_protocol::team::TeamView;
-use ganja_serve::{Credentials, Listen, ServeConfig};
+use ganja_serve::Listen;
 use ganja_testkit::{ScriptedProvider, says};
-use secrecy::SecretString;
-use support::{base_url, loopback_config};
+use support::{
+    SOCKET_URL, base_url, basic, credentials, loopback_config, socket_client, with_listen,
+};
 
 /// The session every team here is led by. A fixed id, so the team's name —
 /// a function of it — is a fixed thing the assertions can spell.
@@ -44,51 +44,11 @@ fn led_engine(home: &std::path::Path) -> (Arc<Engine>, Arc<TeammateRegistry>) {
     )
 }
 
-/// A socket config beside [`loopback_config`]: the same directory, the same
-/// fast heartbeat, listening at exactly `path`.
-fn socket_config(path: PathBuf) -> ServeConfig {
-    let mut config = loopback_config();
-    config.listen = Listen::Unix { path };
-
-    config
-}
-
 /// A socket path short enough for `sun_path` on every platform this runs
 /// on: the temp root, one directory the binder creates at `0700` for
 /// itself, and a few bytes of name.
 fn socket_path(home: &tempfile::TempDir, name: &str) -> PathBuf {
     home.path().join("run").join(name)
-}
-
-/// A client bound to `path` and nothing else — one per socket, the rule
-/// every caller of `unix_socket` in this workspace keeps.
-fn socket_client(path: &std::path::Path) -> reqwest::Client {
-    reqwest::Client::builder()
-        .unix_socket(path)
-        .build()
-        .expect("a socket-bound client builds")
-}
-
-/// The URL a socket-bound client is given: the host is a label, unread by
-/// the router, because `reqwest` resolves nothing once a socket is set.
-const SOCKET_URL: &str = "http://ganja";
-
-/// The credential a `GANJA_SERVER_PASSWORD` export resolves to
-/// (`Credentials::from_env`), built directly so no test here mutates the
-/// process environment — the posture suite's own way of setting one.
-fn credentials() -> Credentials {
-    Credentials {
-        username: "ganja".to_owned(),
-        password: SecretString::from("hunter2".to_owned()),
-    }
-}
-
-/// The `Authorization` header for [`credentials`].
-fn basic() -> String {
-    format!(
-        "Basic {}",
-        base64::engine::general_purpose::STANDARD.encode("ganja:hunter2")
-    )
 }
 
 /// The lead's inbox under `registry`, read as the JSON array §2.3 stores —
@@ -118,9 +78,12 @@ async fn get_team_answers_identically_on_tcp_and_socket() {
     let tcp = ganja_serve::serve(Arc::clone(&engine), loopback_config())
         .await
         .expect("the TCP server comes up");
-    let socket = ganja_serve::serve(Arc::clone(&engine), socket_config(path.clone()))
-        .await
-        .expect("the socket server comes up");
+    let socket = ganja_serve::serve(
+        Arc::clone(&engine),
+        with_listen(Listen::Unix { path: path.clone() }),
+    )
+    .await
+    .expect("the socket server comes up");
 
     let over_tcp = reqwest::get(format!("{}/team", base_url(&tcp)))
         .await
@@ -167,9 +130,12 @@ async fn post_team_message_is_not_registered_on_tcp() {
     let tcp = ganja_serve::serve(Arc::clone(&engine), loopback_config())
         .await
         .expect("the TCP server comes up");
-    let socket = ganja_serve::serve(Arc::clone(&engine), socket_config(path.clone()))
-        .await
-        .expect("the socket server comes up");
+    let socket = ganja_serve::serve(
+        Arc::clone(&engine),
+        with_listen(Listen::Unix { path: path.clone() }),
+    )
+    .await
+    .expect("the socket server comes up");
 
     let over_tcp = reqwest::Client::new()
         .post(format!("{}/team/team-lead/message", base_url(&tcp)))
@@ -227,7 +193,7 @@ async fn a_uds_request_needs_no_password_while_a_tcp_request_still_does() {
 
     let mut tcp_config = loopback_config();
     tcp_config.credentials = Some(credentials());
-    let mut socket_config = socket_config(path.clone());
+    let mut socket_config = with_listen(Listen::Unix { path: path.clone() });
     socket_config.credentials = Some(credentials());
 
     let tcp = ganja_serve::serve(Arc::clone(&engine), tcp_config)
@@ -292,9 +258,12 @@ async fn a_structured_frame_is_refused_on_the_socket_post() {
     let home = ganja_testkit::temp_dir();
     let (engine, registry) = led_engine(home.path());
     let path = socket_path(&home, "s.sock");
-    let socket = ganja_serve::serve(Arc::clone(&engine), socket_config(path.clone()))
-        .await
-        .expect("the socket server comes up");
+    let socket = ganja_serve::serve(
+        Arc::clone(&engine),
+        with_listen(Listen::Unix { path: path.clone() }),
+    )
+    .await
+    .expect("the socket server comes up");
     let client = socket_client(&path);
 
     // A frame in the text — the JSON of a lead-only frame, as a peer might
@@ -395,7 +364,7 @@ async fn the_socket_serves_three_routes_and_tcp_serves_the_rest_behind_its_crede
     let path = socket_path(&home, "s.sock");
     let mut tcp_config = loopback_config();
     tcp_config.credentials = Some(credentials());
-    let mut socket_config = socket_config(path.clone());
+    let mut socket_config = with_listen(Listen::Unix { path: path.clone() });
     socket_config.credentials = Some(credentials());
     let tcp = ganja_serve::serve(Arc::clone(&engine), tcp_config)
         .await
@@ -564,9 +533,12 @@ async fn health_names_the_session_the_socket_serves() {
     let home = ganja_testkit::temp_dir();
     let (engine, _registry) = led_engine(home.path());
     let path = socket_path(&home, "s.sock");
-    let socket = ganja_serve::serve(Arc::clone(&engine), socket_config(path.clone()))
-        .await
-        .expect("the socket server comes up");
+    let socket = ganja_serve::serve(
+        Arc::clone(&engine),
+        with_listen(Listen::Unix { path: path.clone() }),
+    )
+    .await
+    .expect("the socket server comes up");
 
     let health: serde_json::Value = socket_client(&path)
         .get(format!("{SOCKET_URL}/global/health"))
@@ -596,9 +568,12 @@ async fn a_session_leading_no_team_answers_not_found_on_both_routes() {
     let tcp = ganja_serve::serve(Arc::clone(&engine), loopback_config())
         .await
         .expect("the TCP server comes up");
-    let socket = ganja_serve::serve(Arc::clone(&engine), socket_config(path.clone()))
-        .await
-        .expect("the socket server comes up");
+    let socket = ganja_serve::serve(
+        Arc::clone(&engine),
+        with_listen(Listen::Unix { path: path.clone() }),
+    )
+    .await
+    .expect("the socket server comes up");
 
     let over_tcp = reqwest::get(format!("{}/team", base_url(&tcp)))
         .await
