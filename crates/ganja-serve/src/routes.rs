@@ -636,9 +636,13 @@ async fn team(State(state): State<AppState>) -> Result<Json<TeamView>, ApiError>
 /// its [`SocketDelivered`]. What is refused, and how, is the engine's ladder
 /// ([`NotReceived`]) mapped onto the status table this crate already keeps:
 /// nothing to deliver into is `404`, a name nobody answers to is `404`, a
-/// body that is blank, structured, or from a sender that will not name
-/// itself as a peer is `400`, and an inbox that would not take the message
-/// is `500`. A structured frame never crosses (§5.2-6): a `text` that parses
+/// body that is blank, structured, from a sender that will not name itself
+/// as a peer, or addressed to anyone but the lead is `400`, and an inbox
+/// that would not take the message is `500`. **The `{name}` a peer may
+/// address is the lead's, and only the lead's** (M4, ruled deliberately
+/// rather than inherited): the outbound arm addresses nobody else, no
+/// caller does, and a session's socket delivers to the session — a member
+/// is reached through its lead. A structured frame never crosses (§5.2-6): a `text` that parses
 /// as one is refused by the engine's classify, and a body that carries a
 /// frame *instead of* text does not parse as this body at all.
 async fn team_message(
@@ -663,7 +667,8 @@ async fn team_message(
             }
             NotReceived::Blank
             | NotReceived::Frame { .. }
-            | NotReceived::NotAPeerIdentity { .. } => ApiError::Invalid(refused.to_string()),
+            | NotReceived::NotAPeerIdentity { .. }
+            | NotReceived::NotTheLead { .. } => ApiError::Invalid(refused.to_string()),
             NotReceived::Failed { .. } => ApiError::Internal(refused.to_string()),
         })?;
 

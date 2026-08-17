@@ -115,7 +115,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ganja_protocol::team::{Frame, MemberBackend, ShutdownRequest, TeamView};
+use ganja_protocol::team::{
+    DISPLAY_FIELD_CAP, Frame, MemberBackend, ShutdownRequest, TeamView, cap_for_display,
+};
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
@@ -997,10 +999,18 @@ impl Postbox {
     /// what lets it reach the lead: the socket's own reason to exist is that a
     /// message addressed `uds:<path>` lands in **that session's** next turn.
     ///
+    /// The identity is also *bounded* here, because it lands in the lead's
+    /// prompt as the `teammate_id` of a `<teammate-message>` envelope: it
+    /// may carry no control character (the renderer escapes the attribute,
+    /// and a bounded, printable name is still the right thing to hand it)
+    /// and no more than [`DISPLAY_FIELD_CAP`] characters — the cap every
+    /// display-only field of a peer message already wears. Refused rather
+    /// than truncated: cutting an identity could make two peers read as one.
+    ///
     /// # Errors
     ///
     /// [`NotReceived::NotAPeerIdentity`] when `identity` is not
-    /// `<name>@<team>` with both halves present.
+    /// `<name>@<team>` with both halves present, plain, and within the cap.
     pub(crate) fn peer(
         registry: &Arc<TeammateRegistry>,
         identity: &str,
@@ -1008,9 +1018,11 @@ impl Postbox {
         let derived = identity
             .split_once('@')
             .is_some_and(|(name, team)| !name.is_empty() && !team.is_empty());
-        if !derived {
+        let plain = !identity.chars().any(char::is_control);
+        let bounded = identity.chars().count() <= DISPLAY_FIELD_CAP;
+        if !derived || !plain || !bounded {
             return Err(NotReceived::NotAPeerIdentity {
-                identity: identity.to_owned(),
+                identity: reflected(identity),
             });
         }
 
@@ -1344,19 +1356,37 @@ pub enum NotReceived {
     },
     /// The sender did not name itself the way a peer does.
     #[error(
-        "A peer session names itself by its derived identity, <name>@<team>, and {identity:?} \
-         is not one."
+        "A peer session names itself by its derived identity, <name>@<team> — plain text, no \
+         longer than a summary — and {identity:?} is not one."
     )]
     NotAPeerIdentity {
-        /// What it wrote instead.
+        /// What it wrote instead, cut to a line.
         identity: String,
     },
     /// This session leads no team, so there is no inbox here to deliver into.
     #[error("This session leads no team; there is nobody here to deliver to.")]
     NoTeam,
-    /// Nobody in this team goes by the name the route carried. Sentenced
-    /// here rather than borrowed from `send_message`, because the reader is a
-    /// *peer's* model, which has no roster of this team to retry against.
+    /// The route named a member other than the lead. The socket delivers to
+    /// the session — its lead — and to nobody else (**M4** of the W7 boundary
+    /// review): the outbound arm never addresses anyone else, no caller does,
+    /// and a door left wider than its one use is a door to state later.
+    #[error(
+        "A message over a session's socket is for that session's lead, {lead:?}, and this one \
+         was addressed to {name:?}; a member of the team is reached through its lead."
+    )]
+    NotTheLead {
+        /// The name the route carried.
+        name: String,
+        /// The one name it may carry.
+        lead: String,
+    },
+    /// Nobody in this team goes by the name the route carried. Unreachable
+    /// while [`NotTheLead`](Self::NotTheLead) stands in front of the
+    /// delivery — the lead is always in its own roster — and kept as the
+    /// arm the deliverer's own `Unknown` maps onto, answered rather than
+    /// unwrapped. Sentenced here rather than borrowed from `send_message`,
+    /// because the reader is a *peer's* model, which has no roster of this
+    /// team to retry against.
     #[error("Nobody in this team answers to {name:?}; GET /team lists who does.")]
     Unknown {
         /// The name that matched no member.
@@ -1377,8 +1407,13 @@ pub enum NotReceived {
 /// The rungs are the tool's own, applied on the side that has no tool in
 /// front of it: blank text (rung 5), a frame in the text (rung 7, and rung 6
 /// with it — nothing structured crosses), the identity's shape
-/// ([`Postbox::peer`]), and then the delivery every local message gets, so a
-/// peer's message to the lead is written by the same code a teammate's is.
+/// ([`Postbox::peer`]), the recipient — **the lead, and the lead alone**
+/// (M4): a `uds:` address names a session and a session's next turn is its
+/// lead's, so that is the one member this door delivers to — and then the
+/// delivery every local message gets, so a peer's message to the lead is
+/// written by the same code a teammate's is. The summary is capped here as
+/// it is at every other seam it crosses (L3): the type says it arrives
+/// capped, and a peer's word for that is not enough.
 ///
 /// # Errors
 ///
@@ -1394,6 +1429,17 @@ pub async fn receive(
         return Err(NotReceived::Frame { kind });
     }
     let postbox = Postbox::peer(registry, &incoming.from)?;
+    let lead = registry.lead().as_str();
+    if !incoming.to.eq_ignore_ascii_case(lead) {
+        return Err(NotReceived::NotTheLead {
+            name: reflected(&incoming.to),
+            lead: lead.to_owned(),
+        });
+    }
+    let summary = incoming
+        .summary
+        .filter(|summary| !summary.trim().is_empty())
+        .map(|summary| cap_for_display(&summary).to_owned());
 
     let name = incoming.to;
     team::Postbox::deliver(
@@ -1401,7 +1447,7 @@ pub async fn receive(
         Address::Local(name.clone()),
         Body::Text {
             text: incoming.text,
-            summary: incoming.summary,
+            summary,
         },
     )
     .await
@@ -3202,25 +3248,97 @@ mod tests {
         assert_eq!(inbox[0].text, "how far along is W7");
         assert_eq!(inbox[0].summary.as_deref(), Some("W7"));
 
-        // And a member is reachable the same way, through the same rungs.
+        // The lead is matched as every name here is — without regard to
+        // case — and a member is *not* reachable this way (M4): the socket
+        // delivers to the session, which is its lead, and the refusal names
+        // the lead so the peer knows where to write.
+        assert!(
+            receive(
+                &team.registry,
+                Incoming {
+                    from: "team-lead@session-feedbeef".to_owned(),
+                    to: "Team-Lead".to_owned(),
+                    text: "again".to_owned(),
+                    summary: None,
+                },
+            )
+            .await
+            .is_ok()
+        );
+        let seeded = team.inbox("worker");
+        assert_eq!(
+            receive(
+                &team.registry,
+                Incoming {
+                    from: "team-lead@session-feedbeef".to_owned(),
+                    to: "worker".to_owned(),
+                    text: "and you".to_owned(),
+                    summary: None,
+                },
+            )
+            .await,
+            Err(NotReceived::NotTheLead {
+                name: "worker".to_owned(),
+                lead: "team-lead".to_owned(),
+            })
+        );
+        assert_eq!(team.inbox("worker"), seeded, "nothing reached the member");
+    }
+
+    /// **M2, L3**: what a peer says about itself is bounded before it lands
+    /// in the lead's prompt — an identity with a control character or past
+    /// the display cap is refused (never truncated: two peers must not read
+    /// as one), and a summary past it is cut as it is at every other seam.
+    #[tokio::test]
+    async fn a_peers_identity_is_plain_and_bounded_and_its_summary_is_capped() {
+        let team = Team::new().await;
+        let peer = |from: &str, summary: Option<&str>| Incoming {
+            from: from.to_owned(),
+            to: "team-lead".to_owned(),
+            text: "hello".to_owned(),
+            summary: summary.map(str::to_owned),
+        };
+
+        for bad in [
+            "team-lead@session-\x1b[31mred",
+            "team-lead@session-\nfeedbeef",
+            &format!("team-lead@{}", "s".repeat(300)),
+        ] {
+            assert!(
+                matches!(
+                    receive(&team.registry, peer(bad, None)).await,
+                    Err(NotReceived::NotAPeerIdentity { .. })
+                ),
+                "{bad:?} is refused as a peer identity"
+            );
+        }
+        assert!(team.inbox("team-lead").is_empty(), "and nothing landed");
+
+        let long = "w".repeat(1_000);
         receive(
             &team.registry,
-            Incoming {
-                from: "team-lead@session-feedbeef".to_owned(),
-                to: "worker".to_owned(),
-                text: "and you".to_owned(),
-                summary: None,
-            },
+            peer("team-lead@session-feedbeef", Some(&long)),
         )
         .await
-        .expect("a peer reaches a member");
-        assert!(
-            team.inbox("worker")
-                .iter()
-                .any(|message| message.from == "team-lead@session-feedbeef"),
-            "the peer's message is in the worker's inbox: {:?}",
-            team.inbox("worker")
+        .expect("a peer with a long summary is delivered");
+        let inbox = team.inbox("team-lead");
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(
+            inbox[0]
+                .summary
+                .as_ref()
+                .map(|summary| summary.chars().count()),
+            Some(ganja_protocol::team::DISPLAY_FIELD_CAP),
+            "the summary is capped at the display cap"
         );
+        // A blank summary is no summary.
+        receive(
+            &team.registry,
+            peer("team-lead@session-feedbeef", Some("   ")),
+        )
+        .await
+        .expect("delivered");
+        assert_eq!(team.inbox("team-lead")[1].summary, None);
     }
 
     /// The receiving rungs, each refused in its own sentence and none of them
@@ -3283,9 +3401,11 @@ mod tests {
         }
         assert_eq!(
             receive(&team.registry, peer("nobody", "hello")).await,
-            Err(NotReceived::Unknown {
-                name: "nobody".to_owned()
-            })
+            Err(NotReceived::NotTheLead {
+                name: "nobody".to_owned(),
+                lead: "team-lead".to_owned(),
+            }),
+            "a name that is not the lead's is refused before the roster is asked"
         );
 
         assert!(
