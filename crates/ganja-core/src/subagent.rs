@@ -89,16 +89,35 @@
 //! by some other session's lead — is [`crate::teammate::member::MemberPostbox`],
 //! which binds its sender from the launch line the same way and reads its
 //! roster off the team file rather than a registry it has no share of.
+//!
+//! # The cross-session tail (**D505**)
+//!
+//! Spec: §5.6's `uds:` scheme, whose wire the reference never traced (D-12:
+//! ganja's is `ganja-serve`'s own HTTP over a Unix socket, one per session).
+//! Both ends of it are here, beside the postbox they are two arms of.
+//! Outbound, a validated `uds:<path>` address goes through
+//! [`Postbox::deliver_over_socket`]: `GET /team` to learn who leads the
+//! session at that socket, then `POST /team/{lead}/message` with plain text
+//! stamped `<sender>@<team>`. Inbound, `ganja-serve`'s socket-only route
+//! hands what arrived to [`receive`], which climbs the tool's rungs on the
+//! side that has no tool in front of it and delivers through
+//! [`Postbox::peer`] — a postbox bound to the peer's derived identity, which
+//! the `@` in it keeps from ever spelling a member of this team. Nothing
+//! structured crosses in either direction (§5.2-6): the tool refuses it at
+//! rung 6, the outbound arm refuses it again, and the inbound arm classifies
+//! the text before anything is written.
 
 use std::{
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Weak},
+    time::Duration,
 };
 
 use async_trait::async_trait;
-use ganja_protocol::team::{Frame, MemberBackend, ShutdownRequest};
+use ganja_protocol::team::{Frame, MemberBackend, ShutdownRequest, TeamView};
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -956,6 +975,385 @@ impl Postbox {
             .into_iter()
             .find(|peer| peer.name.eq_ignore_ascii_case(name))
     }
+
+    /// A postbox speaking for **another session**, stamped with the identity
+    /// that session presented over this one's socket (**D505**).
+    ///
+    /// The third way a sender gets bound, and the one that has to be argued:
+    /// [`Postbox::lead`] and [`Postbox::of`] read the name off a value the
+    /// caller could not have forged, where this one takes a string that
+    /// arrived in a request body. What makes it safe to bind is the shape the
+    /// string is held to — a peer names itself by §2.2's derived identity,
+    /// `<name>@<team>`, and `@` is a character the member-name grammar refuses
+    /// — so whatever a peer claims, the stamp cannot spell a member of *this*
+    /// team. Two leads both called `team-lead` (the default, so the common
+    /// case) therefore never read as one another, and a claim of a local
+    /// name is refused at the door rather than written into an inbox as if a
+    /// sibling had said it. That is the whole of the guarantee: the transport
+    /// is same-uid cleartext (D-12), so a peer's word is a peer's word, and
+    /// this makes it *visibly* a peer's.
+    ///
+    /// Not being a member, a peer is filtered out of nobody's roster, which is
+    /// what lets it reach the lead: the socket's own reason to exist is that a
+    /// message addressed `uds:<path>` lands in **that session's** next turn.
+    ///
+    /// # Errors
+    ///
+    /// [`NotReceived::NotAPeerIdentity`] when `identity` is not
+    /// `<name>@<team>` with both halves present.
+    pub(crate) fn peer(
+        registry: &Arc<TeammateRegistry>,
+        identity: &str,
+    ) -> Result<Self, NotReceived> {
+        let derived = identity
+            .split_once('@')
+            .is_some_and(|(name, team)| !name.is_empty() && !team.is_empty());
+        if !derived {
+            return Err(NotReceived::NotAPeerIdentity {
+                identity: identity.to_owned(),
+            });
+        }
+
+        Ok(Self {
+            sender: identity.to_owned(),
+            registry: Arc::downgrade(registry),
+        })
+    }
+
+    /// The cross-session arm of `deliver` (**D505**): the message crosses to
+    /// the session listening at `path`, over that session's own
+    /// `ganja-serve` socket, and lands in **its lead's** inbox — a `uds:`
+    /// address names a session, and a session's next turn is its lead's.
+    ///
+    /// Two requests, and the first is not overhead: `GET /team` is how this
+    /// side learns the peer's lead's name and team without assuming either,
+    /// and it is the one probe that tells a dead socket from a live one
+    /// before anything is written. What then crosses is **plain text only**
+    /// (§5.2-6): a frame is refused here as well as at the tool's rung 6,
+    /// because [`team::Postbox`] is a public trait and this arm is what every
+    /// caller of it gets. The sender is stamped `<name>@<team>` — the same
+    /// derived identity the far side's [`Postbox::peer`] holds it to, so both
+    /// ends agree on what a peer's name looks like without a second rule.
+    ///
+    /// One `reqwest::Client` per socket path, **built per send** rather than
+    /// cached: a cross-session message is a rare thing (one `send_message`
+    /// call), a client bound to a socket is a small object with nothing to
+    /// warm up, and a cache would need an eviction story for the sockets that
+    /// die — which is every one of them, eventually — that nothing here is
+    /// placed to know. Bound to exactly one path and never switched, which is
+    /// the plan's rule; every failure is a typed [`Undelivered`] naming the
+    /// socket, under a deadline, never a hang.
+    async fn deliver_over_socket(&self, path: &Path, body: Body) -> Result<Sent, Undelivered> {
+        let Body::Text { text, summary } = body else {
+            return Err(Undelivered::Failed {
+                reason: FRAME_OVER_SOCKET.to_owned(),
+            });
+        };
+        let Some(registry) = self.registry.upgrade() else {
+            return Err(Undelivered::Failed {
+                reason: TEAM_GONE.to_owned(),
+            });
+        };
+        let from = format!("{}@{}", self.sender, registry.team());
+        drop(registry);
+
+        let socket = Socket::open(path)?;
+        let view: TeamView = socket.get(TEAM_ROUTE).await?;
+        let lead = view.lead;
+        let delivered: SocketDelivered = socket
+            .post(
+                &format!("{TEAM_ROUTE}/{lead}{MESSAGE_ROUTE}"),
+                &SocketMessage {
+                    from,
+                    text,
+                    summary,
+                },
+            )
+            .await?;
+
+        Ok(Sent {
+            // The far side answers with the bare name it wrote to; what this
+            // side reports back is that name *in that session*, so a transcript
+            // never reads a peer's `team-lead` as this team's.
+            to: format!("{}@{}", delivered.to, view.team),
+            note: delivered.note,
+        })
+    }
+}
+
+/// The socket route's request body, as both ends of the wire spell it: what
+/// the outbound `uds:` arm of `Postbox::deliver` sends and what the engine's
+/// receiving door takes in.
+///
+/// One struct rather than two so the two ends cannot drift — the sender is
+/// this crate, and the receiver is `ganja-serve`'s handler feeding
+/// [`Incoming`], which reads exactly these three names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SocketMessage {
+    /// The sender's derived identity, `<name>@<team>`.
+    pub from: String,
+    /// What the recipient reads.
+    pub text: String,
+    /// The sender's one line about it, when it wrote one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// What the socket route answers when the message landed — [`Sent`] as it
+/// crosses the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SocketDelivered {
+    /// The bare member name the far side wrote to.
+    pub to: String,
+    /// What became of it, in the far side's words.
+    pub note: String,
+}
+
+/// A refusal as `ganja-serve` puts one on the wire: its tag and its sentence.
+/// Read here so a peer's refusal reaches the model in the peer's own words.
+#[derive(Debug, Deserialize)]
+struct SocketRefusal {
+    #[serde(default)]
+    message: String,
+}
+
+/// The two routes this side drives, spelled once. `ganja-serve` registers the
+/// second only on its socket router (D-13), which is what makes a TCP `ganja
+/// serve` unreachable through this arm by construction rather than by
+/// credential.
+const TEAM_ROUTE: &str = "/team";
+const MESSAGE_ROUTE: &str = "/message";
+
+/// The scheme and host every socket request is spelled under. `reqwest`
+/// resolves nothing when a client is bound to a socket, so the host is a
+/// label rather than an address; it is the URL's, and the peer's router does
+/// not read it.
+const SOCKET_URL: &str = "http://ganja";
+
+/// How long one request to a peer may take, end to end. A local socket
+/// answers in milliseconds or not at all — a connect that fails is instant,
+/// and a peer that accepted and then went silent is what this bounds — so
+/// this is a ceiling on a hang, not a budget a healthy exchange approaches.
+const SOCKET_DEADLINE: Duration = Duration::from_secs(10);
+
+/// One session's socket, as this side speaks to it: a `reqwest::Client`
+/// bound to that path and nothing else, and the path itself for every
+/// sentence a failure is read in.
+struct Socket {
+    http: reqwest::Client,
+    path: PathBuf,
+}
+
+impl Socket {
+    /// Binds a client to `path`. Nothing is connected yet — a socket that is
+    /// not there fails the first request, in that request's words.
+    fn open(path: &Path) -> Result<Self, Undelivered> {
+        let http = reqwest::Client::builder()
+            .unix_socket(path)
+            .timeout(SOCKET_DEADLINE)
+            .build()
+            .map_err(|error| Undelivered::Failed {
+                reason: format!("{SOCKET_CLIENT_FAILED} {}: {error}", path.display()),
+            })?;
+
+        Ok(Self {
+            http,
+            path: path.to_path_buf(),
+        })
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(&self, route: &str) -> Result<T, Undelivered> {
+        let response = self
+            .http
+            .get(format!("{SOCKET_URL}{route}"))
+            .send()
+            .await
+            .map_err(|error| self.unreachable(error))?;
+
+        self.read(response).await
+    }
+
+    async fn post<T: serde::de::DeserializeOwned>(
+        &self,
+        route: &str,
+        body: &impl Serialize,
+    ) -> Result<T, Undelivered> {
+        let response = self
+            .http
+            .post(format!("{SOCKET_URL}{route}"))
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| self.unreachable(error))?;
+
+        self.read(response).await
+    }
+
+    /// The answer, or the peer's refusal in the peer's own sentence.
+    async fn read<T: serde::de::DeserializeOwned>(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<T, Undelivered> {
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|error| self.unreachable(error))?;
+        if !status.is_success() {
+            let message = serde_json::from_str::<SocketRefusal>(&text)
+                .map(|refusal| refusal.message)
+                .ok()
+                .filter(|message| !message.is_empty())
+                .unwrap_or(text);
+
+            return Err(Undelivered::Failed {
+                reason: format!(
+                    "{SOCKET_REFUSED} {} ({}): {message}",
+                    self.path.display(),
+                    status.as_u16()
+                ),
+            });
+        }
+
+        serde_json::from_str(&text).map_err(|error| Undelivered::Failed {
+            reason: format!(
+                "{SOCKET_UNREADABLE} {}: {error}. The two sessions are different \
+                 versions of ganja.",
+                self.path.display()
+            ),
+        })
+    }
+
+    /// Nothing answered, or the connection died under the request.
+    fn unreachable(&self, error: reqwest::Error) -> Undelivered {
+        // `reqwest::Error`'s Display nests its causes only one level deep, and
+        // the level that says *why* — no such file, connection refused — is
+        // the innermost. Walked so the model reads the reason and not "error
+        // sending request".
+        let mut cause: &dyn std::error::Error = &error;
+        while let Some(source) = cause.source() {
+            cause = source;
+        }
+
+        Undelivered::Failed {
+            reason: format!("{SOCKET_UNREACHABLE} {}: {cause}", self.path.display()),
+        }
+    }
+}
+
+/// A plain message another session sent over **this** session's socket, as
+/// the socket route hands it in (**D505**, the receiving end of the outbound
+/// `uds:` arm of `Postbox::deliver`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Incoming {
+    /// The peer's derived identity, `<name>@<team>` — what the message is
+    /// stamped with, once the receiving side's shape rule (`Postbox::peer`)
+    /// has accepted it.
+    pub from: String,
+    /// The bare name of the member of this team it is for. The lead's own
+    /// name is the usual answer, and a valid one: a peer is nobody's sibling,
+    /// so no roster filters it away from the lead.
+    pub to: String,
+    /// What the recipient reads.
+    pub text: String,
+    /// The peer's one line about it, when it wrote one.
+    pub summary: Option<String>,
+}
+
+/// Why a message that arrived over the socket went no further.
+///
+/// The receiving side's rungs, in the order they are climbed. Each carries
+/// its own sentence because that sentence is what crosses back to the peer —
+/// through `ganja-serve`'s refusal envelope and into the sender's
+/// [`Undelivered::Failed`] — and the peer's model reads it next.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum NotReceived {
+    /// The message is empty once its whitespace is gone.
+    #[error("A message needs some text; this one is whitespace.")]
+    Blank,
+    /// The text parses as a protocol frame. Nothing structured crosses a
+    /// session, whichever of §5.1's two sets it belongs to (§5.2-6).
+    #[error(
+        "A protocol frame does not cross a socket, and this text is a {kind} frame; a peer \
+         session sends plain text."
+    )]
+    Frame {
+        /// The frame's own `type`.
+        kind: &'static str,
+    },
+    /// The sender did not name itself the way a peer does.
+    #[error(
+        "A peer session names itself by its derived identity, <name>@<team>, and {identity:?} \
+         is not one."
+    )]
+    NotAPeerIdentity {
+        /// What it wrote instead.
+        identity: String,
+    },
+    /// This session leads no team, so there is no inbox here to deliver into.
+    #[error("This session leads no team; there is nobody here to deliver to.")]
+    NoTeam,
+    /// Nobody in this team goes by the name the route carried. Sentenced
+    /// here rather than borrowed from `send_message`, because the reader is a
+    /// *peer's* model, which has no roster of this team to retry against.
+    #[error("Nobody in this team answers to {name:?}; GET /team lists who does.")]
+    Unknown {
+        /// The name that matched no member.
+        name: String,
+    },
+    /// The recipient exists and the message did not land, in the deliverer's
+    /// own words — an inbox that would not open, most of all.
+    #[error("{reason}")]
+    Failed {
+        /// What went wrong.
+        reason: String,
+    },
+}
+
+/// The receiving end of the socket route: one message from a peer, judged
+/// and delivered (**D505**).
+///
+/// The rungs are the tool's own, applied on the side that has no tool in
+/// front of it: blank text (rung 5), a frame in the text (rung 7, and rung 6
+/// with it — nothing structured crosses), the identity's shape
+/// ([`Postbox::peer`]), and then the delivery every local message gets, so a
+/// peer's message to the lead is written by the same code a teammate's is.
+///
+/// # Errors
+///
+/// A [`NotReceived`], one per rung.
+pub async fn receive(
+    registry: &Arc<TeammateRegistry>,
+    incoming: Incoming,
+) -> Result<Sent, NotReceived> {
+    if incoming.text.trim().is_empty() {
+        return Err(NotReceived::Blank);
+    }
+    if let Some(kind) = Frame::reserved_kind(&incoming.text) {
+        return Err(NotReceived::Frame { kind });
+    }
+    let postbox = Postbox::peer(registry, &incoming.from)?;
+
+    let name = incoming.to;
+    team::Postbox::deliver(
+        &postbox,
+        Address::Local(name.clone()),
+        Body::Text {
+            text: incoming.text,
+            summary: incoming.summary,
+        },
+    )
+    .await
+    .map_err(|undelivered| match undelivered {
+        Undelivered::Unknown => NotReceived::Unknown { name },
+        // A local address never wants a transport; the arm is the enum's,
+        // answered rather than unwrapped.
+        Undelivered::NoTransport { reason } | Undelivered::Failed { reason } => {
+            NotReceived::Failed { reason }
+        }
+    })
 }
 
 #[async_trait]
@@ -975,13 +1373,9 @@ impl team::Postbox for Postbox {
     async fn deliver(&self, to: Address, body: Body) -> Result<Sent, Undelivered> {
         let name = match to {
             Address::Local(name) => name,
-            // Validated by the tool, deliverable by nobody yet: the ladder is
-            // complete and only the transport waits.
-            Address::Uds { .. } => {
-                return Err(Undelivered::NoTransport {
-                    reason: NO_SOCKET.to_owned(),
-                });
-            }
+            // Validated by the tool, and delivered over the other session's own
+            // socket (**D505**).
+            Address::Uds { path } => return self.deliver_over_socket(&path, body).await,
         };
         // Answered before the roster is consulted, and answered as a failure
         // rather than as `Unknown`: nothing is wrong with the *name* — the
@@ -1064,8 +1458,30 @@ const REFUSED_BY_RULE: &str = "a rule refuses this spawn";
 const REFUSED_BY_HAND: &str =
     "the spawn was refused at the permission dialog; nothing was started and no team was joined";
 
-/// Why a `uds:` address is validated and then not delivered.
-pub(crate) const NO_SOCKET: &str = "A message to another session travels over that session's socket, and this build has no such transport yet. A member of this team is reached by its bare name.";
+/// Why a `uds:` address is validated and then not delivered — by the one
+/// postbox that still does not speak the socket, a pane member's
+/// ([`crate::teammate::member::MemberPostbox`]). The lead's and an in-process
+/// teammate's do (**D505**, [`Postbox::deliver_over_socket`]).
+pub(crate) const NO_SOCKET: &str = "A message to another session travels over that session's socket, and this teammate's postbox does not speak it yet. A member of this team is reached by its bare name; another session, through the lead.";
+
+/// A structured message offered to the socket arm — refused at the tool's
+/// rung 6 already, and refused here again for whoever reaches the trait
+/// without the tool in front of it (§5.2-6).
+pub(crate) const FRAME_OVER_SOCKET: &str = "A protocol frame does not cross a socket: a session reached at a uds: address takes plain text. Send prose, or address a member of this team by name.";
+
+/// A client that would not build for a socket path — ahead of what reqwest
+/// said, and unreachable for any path the tool's rung 3 let through.
+const SOCKET_CLIENT_FAILED: &str = "The socket could not be opened at";
+
+/// Nothing answered at the socket, ahead of the OS's own reason.
+pub(crate) const SOCKET_UNREACHABLE: &str = "The session at that socket did not answer; it may have ended, and `ganja sessions --live` lists the ones still there. Socket";
+
+/// The peer answered with a refusal, ahead of its status and its sentence.
+pub(crate) const SOCKET_REFUSED: &str = "The session at that socket refused the message. Socket";
+
+/// The peer answered something this build has no type for.
+const SOCKET_UNREADABLE: &str =
+    "The session at that socket answered a body this build cannot read. Socket";
 
 /// A member of the team whose name the name grammar refuses — impossible
 /// through this build's own registration, and answered rather than trusted.
@@ -1670,10 +2086,11 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Address, Backends, Body, Caller, DEFAULT_BACKEND, MemberName, NO_SOCKET, PermissionReply,
-        Postbox, Reserved, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, Teammate,
-        TeammateRegistry, TeammateSpawn, Teammates, Undelivered, Watched, async_trait, denies_task,
-        mailbox, roster, subagent_rules, team, watch,
+        Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Incoming, MemberName,
+        NotReceived, PermissionReply, Postbox, Reserved, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent,
+        SocketMessage, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, Teammate, TeammateRegistry,
+        TeammateSpawn, Teammates, Undelivered, Watched, async_trait, denies_task, mailbox, receive,
+        roster, subagent_rules, team, watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -2407,29 +2824,417 @@ mod tests {
         );
     }
 
-    /// A validated socket address is delivery's problem, and delivery says in
-    /// its own words that it has no such transport.
+    /// The socket arm carries prose and nothing else (§5.2-6): a frame is
+    /// refused before any client is built, so no connection is even tried —
+    /// the socket named here does not exist, and the refusal must not be
+    /// about that.
     #[tokio::test]
-    async fn a_socket_address_is_answered_by_naming_the_transport_that_is_missing() {
+    async fn a_frame_addressed_to_a_socket_is_refused_before_anything_is_sent() {
         let team = Team::new().await;
         let postbox: &dyn team::Postbox = &team.worker;
 
+        let refused = postbox
+            .deliver(
+                Address::Uds {
+                    path: "/nonexistent/ganja.sock".into(),
+                },
+                Body::Frame(serde_json::json!({"type": "idle_notification"})),
+            )
+            .await;
+
         assert_eq!(
-            postbox
-                .deliver(
-                    Address::Uds {
-                        path: "/tmp/ganja.sock".into(),
-                    },
-                    Body::Text {
-                        text: "hello".to_owned(),
-                        summary: None,
-                    },
-                )
-                .await,
-            Err(Undelivered::NoTransport {
-                reason: NO_SOCKET.to_owned(),
+            refused,
+            Err(Undelivered::Failed {
+                reason: FRAME_OVER_SOCKET.to_owned(),
+            }),
+            "the frame is refused as a rule, not as a dead socket"
+        );
+    }
+
+    /// A socket nothing listens at is a typed failure that names the socket
+    /// and the OS's reason, under the deadline — never a hang, never a panic.
+    #[tokio::test]
+    async fn a_dead_socket_is_a_typed_failure_naming_the_socket() {
+        let team = Team::new().await;
+        let postbox: &dyn team::Postbox = &team.worker;
+        let path = team._home.path().join("nobody-listens.sock");
+
+        let failed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            postbox.deliver(
+                Address::Uds { path: path.clone() },
+                Body::Text {
+                    text: "anyone there".to_owned(),
+                    summary: None,
+                },
+            ),
+        )
+        .await
+        .expect("a dead socket answers within the deadline");
+
+        let Err(Undelivered::Failed { reason }) = failed else {
+            panic!("a dead socket is a failure, not {failed:?}");
+        };
+        assert!(
+            reason.starts_with(SOCKET_UNREACHABLE),
+            "the sentence says the session may be gone: {reason}"
+        );
+        assert!(
+            reason.contains(&path.display().to_string()),
+            "and names the socket: {reason}"
+        );
+        assert!(
+            team.inbox("team-lead").is_empty(),
+            "and nothing local was written"
+        );
+    }
+
+    /// **Contract-level**, not end to end: the far end here is a hand-rolled
+    /// responder that answers the two routes with the bytes `ganja-serve`'s
+    /// socket router puts on the wire, so what this pins is *this* side —
+    /// which routes it drives, in which order, and what it stamps the message
+    /// with. The real server end is pinned in `ganja-serve/tests/team.rs`,
+    /// and the two processes together in `ganja-cli/tests/uds.rs` (AC-9).
+    #[tokio::test]
+    async fn a_socket_delivery_asks_who_leads_and_posts_to_them_stamped_with_its_identity() {
+        let team = Team::new().await;
+        let postbox: &dyn team::Postbox = &team.worker;
+        let path = team._home.path().join("peer.sock");
+        let peer = PeerStub::listen(&path).await;
+
+        let sent = postbox
+            .deliver(
+                Address::Uds { path: path.clone() },
+                Body::Text {
+                    text: "the release is out".to_owned(),
+                    summary: Some("release".to_owned()),
+                },
+            )
+            .await
+            .expect("a listening peer takes the message");
+
+        assert_eq!(
+            sent,
+            Sent {
+                to: "team-lead@session-feedbeef".to_owned(),
+                note: "It is in that inbox and will be read on the next pass.".to_owned(),
+            },
+            "the far side's answer is reported in the far side's terms"
+        );
+
+        let requests = peer.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|(method, route, _)| format!("{method} {route}"))
+                .collect::<Vec<_>>(),
+            vec!["GET /team", "POST /team/team-lead/message"],
+            "who leads is asked before anything is posted"
+        );
+        let posted: SocketMessage =
+            serde_json::from_str(&requests[1].2).expect("the body is the wire shape");
+        assert_eq!(
+            posted,
+            SocketMessage {
+                from: "worker@session-abcd1234".to_owned(),
+                text: "the release is out".to_owned(),
+                summary: Some("release".to_owned()),
+            },
+            "stamped with the sender's derived identity, never a bare name"
+        );
+    }
+
+    /// A peer that answers with a refusal is reported in the peer's own
+    /// sentence, so the model reads why rather than a status code.
+    #[tokio::test]
+    async fn a_peers_refusal_reaches_the_sender_in_the_peers_words() {
+        let team = Team::new().await;
+        let postbox: &dyn team::Postbox = &team.worker;
+        let path = team._home.path().join("refusing.sock");
+        let _peer = PeerStub::listen_refusing(&path, 404, "This session leads no team").await;
+
+        let failed = postbox
+            .deliver(
+                Address::Uds { path: path.clone() },
+                Body::Text {
+                    text: "hello".to_owned(),
+                    summary: None,
+                },
+            )
+            .await;
+
+        let Err(Undelivered::Failed { reason }) = failed else {
+            panic!("a refusal is a failure, not {failed:?}");
+        };
+        assert!(reason.starts_with(SOCKET_REFUSED), "{reason}");
+        assert!(reason.contains("(404)"), "the status is there: {reason}");
+        assert!(
+            reason.contains("This session leads no team"),
+            "and the peer's own sentence: {reason}"
+        );
+    }
+
+    /// The receiving end: a peer's message to the lead lands in the lead's
+    /// inbox stamped with the peer's derived identity — the one recipient the
+    /// lead's own postbox could never reach, and the whole reason the socket
+    /// exists.
+    #[tokio::test]
+    async fn a_received_peer_message_reaches_the_lead_stamped_as_a_peer() {
+        let team = Team::new().await;
+
+        let sent = receive(
+            &team.registry,
+            Incoming {
+                from: "team-lead@session-feedbeef".to_owned(),
+                to: "team-lead".to_owned(),
+                text: "how far along is W7".to_owned(),
+                summary: Some("W7".to_owned()),
+            },
+        )
+        .await
+        .expect("a peer reaches the lead");
+        assert_eq!(sent.to, "team-lead");
+
+        let inbox = team.inbox("team-lead");
+        assert_eq!(inbox.len(), 1, "one message landed: {inbox:?}");
+        assert_eq!(inbox[0].from, "team-lead@session-feedbeef");
+        assert_eq!(inbox[0].text, "how far along is W7");
+        assert_eq!(inbox[0].summary.as_deref(), Some("W7"));
+
+        // And a member is reachable the same way, through the same rungs.
+        receive(
+            &team.registry,
+            Incoming {
+                from: "team-lead@session-feedbeef".to_owned(),
+                to: "worker".to_owned(),
+                text: "and you".to_owned(),
+                summary: None,
+            },
+        )
+        .await
+        .expect("a peer reaches a member");
+        assert!(
+            team.inbox("worker")
+                .iter()
+                .any(|message| message.from == "team-lead@session-feedbeef"),
+            "the peer's message is in the worker's inbox: {:?}",
+            team.inbox("worker")
+        );
+    }
+
+    /// The receiving rungs, each refused in its own sentence and none of them
+    /// writing anything: whitespace, a frame in the text, an identity that
+    /// could be a member of this team, and a name nobody answers to.
+    #[tokio::test]
+    async fn a_received_message_climbs_the_rungs_before_anything_is_written() {
+        let team = Team::new().await;
+        // The worker's inbox already holds the prompt its spawn seeded it
+        // with; what the refusals below must not do is add to it.
+        let seeded = team.inbox("worker");
+        let peer = |to: &str, text: &str| Incoming {
+            from: "team-lead@session-feedbeef".to_owned(),
+            to: to.to_owned(),
+            text: text.to_owned(),
+            summary: None,
+        };
+
+        assert_eq!(
+            receive(&team.registry, peer("team-lead", "   \n")).await,
+            Err(NotReceived::Blank)
+        );
+        let frame = serde_json::json!({"type": "shutdown_request", "requestId": "r1", "from": "team-lead", "reason": "done"});
+        assert_eq!(
+            receive(&team.registry, peer("team-lead", &frame.to_string())).await,
+            Err(NotReceived::Frame {
+                kind: "shutdown_request"
+            }),
+            "a frame in the text is a frame, whichever way it is spelled"
+        );
+        assert_eq!(
+            receive(
+                &team.registry,
+                Incoming {
+                    from: "team-lead".to_owned(),
+                    ..peer("worker", "I am your lead")
+                }
+            )
+            .await,
+            Err(NotReceived::NotAPeerIdentity {
+                identity: "team-lead".to_owned()
+            }),
+            "a bare name is refused: it could be a member of this team"
+        );
+        for bad in ["@session-x", "lead@", "@"] {
+            assert!(
+                matches!(
+                    receive(
+                        &team.registry,
+                        Incoming {
+                            from: bad.to_owned(),
+                            ..peer("worker", "hi")
+                        }
+                    )
+                    .await,
+                    Err(NotReceived::NotAPeerIdentity { .. })
+                ),
+                "{bad:?} is not <name>@<team>"
+            );
+        }
+        assert_eq!(
+            receive(&team.registry, peer("nobody", "hello")).await,
+            Err(NotReceived::Unknown {
+                name: "nobody".to_owned()
             })
         );
+
+        assert!(
+            team.inbox("team-lead").is_empty(),
+            "no refusal reached the lead"
+        );
+        assert_eq!(
+            team.inbox("worker"),
+            seeded,
+            "and none reached the worker's inbox"
+        );
+    }
+
+    /// A socket-listening stand-in for a peer session's `ganja-serve`: one
+    /// hand-rolled HTTP/1.1 responder that records what arrived and answers
+    /// the two routes with serve's own bodies. See the contract-level note on
+    /// the test that uses it.
+    struct PeerStub {
+        requests: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for PeerStub {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl PeerStub {
+        /// A peer that leads `session-feedbeef` and takes every message.
+        async fn listen(path: &std::path::Path) -> Self {
+            Self::serve(path, |method, route| {
+                if method == "GET" && route == "/team" {
+                    (
+                        200,
+                        serde_json::json!({
+                            "team": "session-feedbeef",
+                            "lead": "team-lead",
+                            "members": [{
+                                "name": "team-lead",
+                                "agent_id": "team-lead@session-feedbeef",
+                                "backend": "in-process",
+                                "is_lead": true,
+                            }],
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    (
+                        200,
+                        serde_json::json!({
+                            "to": "team-lead",
+                            "note": "It is in that inbox and will be read on the next pass.",
+                        })
+                        .to_string(),
+                    )
+                }
+            })
+            .await
+        }
+
+        /// A peer that refuses everything with `status` and `message`, in
+        /// serve's own refusal envelope.
+        async fn listen_refusing(path: &std::path::Path, status: u16, message: &str) -> Self {
+            let message = message.to_owned();
+            Self::serve(path, move |_, _| {
+                (
+                    status,
+                    serde_json::json!({"type": "not_found", "message": message}).to_string(),
+                )
+            })
+            .await
+        }
+
+        async fn serve(
+            path: &std::path::Path,
+            answer: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static,
+        ) -> Self {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+            let listener = tokio::net::UnixListener::bind(path).expect("a socket binds");
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = Arc::clone(&requests);
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let mut buffer = Vec::new();
+                    // Read to the end of the head, then the declared body.
+                    let head = loop {
+                        let mut chunk = [0u8; 1024];
+                        let Ok(read) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        buffer.extend_from_slice(&chunk[..read]);
+                        if let Some(end) =
+                            buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            break end;
+                        }
+                    };
+                    let text = String::from_utf8_lossy(&buffer[..head]).into_owned();
+                    let mut lines = text.lines();
+                    let mut request = lines.next().unwrap_or_default().split_whitespace();
+                    let method = request.next().unwrap_or_default().to_owned();
+                    let route = request.next().unwrap_or_default().to_owned();
+                    let length = lines
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let mut body = buffer[head + 4..].to_vec();
+                    while body.len() < length {
+                        let mut chunk = [0u8; 1024];
+                        let Ok(read) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&chunk[..read]);
+                    }
+                    let body = String::from_utf8_lossy(&body).into_owned();
+                    let (status, answer) = answer(&method, &route);
+                    seen.lock()
+                        .expect("the request log is never poisoned")
+                        .push((method, route, body));
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                }
+            });
+
+            Self { requests, task }
+        }
+
+        fn requests(&self) -> Vec<(String, String, String)> {
+            self.requests
+                .lock()
+                .expect("the request log is never poisoned")
+                .clone()
+        }
     }
 
     /// A caller is not in its own roster, and exactly one row leads — the

@@ -14,13 +14,14 @@
 #![allow(dead_code)]
 
 use std::{
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
+    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
+    net::TcpListener,
 };
 
 /// How long any single wait may take before the fixture is declared broken.
@@ -59,8 +60,15 @@ impl Reply {
 }
 
 /// A server that answers whatever the closure it was built with returns.
+///
+/// Listens on a loopback port ([`Stub::answering`]) or on a Unix socket
+/// ([`Stub::on_socket`]); the same responder serves both, because the client
+/// under test speaks the same bytes to both — which is the whole point of
+/// the socket form.
 pub struct Stub {
     address: String,
+    /// The socket file, when this stub listens on one — unlinked on drop.
+    socket: Option<PathBuf>,
     received: Arc<Mutex<Vec<Recorded>>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -68,6 +76,9 @@ pub struct Stub {
 impl Drop for Stub {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(socket) = &self.socket {
+            let _ = std::fs::remove_file(socket);
+        }
     }
 }
 
@@ -104,6 +115,52 @@ impl Stub {
 
         Arc::new(Self {
             address,
+            socket: None,
+            received,
+            task,
+        })
+    }
+
+    /// Binds a Unix socket in the temp directory and answers every request
+    /// with `answer`. The path is short — the temp root plus a few bytes —
+    /// so it fits `sun_path` on every platform this runs on, and unique per
+    /// process and per call so parallel suites cannot collide.
+    #[cfg(unix)]
+    pub async fn on_socket(
+        answer: impl Fn(&Recorded) -> Reply + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ganja-client-{}-{}.sock",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).expect("a socket is bindable");
+        let received = Arc::new(Mutex::new(Vec::new()));
+
+        let answer = Arc::new(answer);
+        let task = tokio::spawn({
+            let received = Arc::clone(&received);
+            async move {
+                loop {
+                    let Ok((socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let answer = Arc::clone(&answer);
+                    let received = Arc::clone(&received);
+                    tokio::spawn(async move {
+                        serve_one(socket, answer.as_ref(), &received).await;
+                    });
+                }
+            }
+        });
+
+        Arc::new(Self {
+            address: path.display().to_string(),
+            socket: Some(path),
             received,
             task,
         })
@@ -119,9 +176,19 @@ impl Stub {
         &self.address
     }
 
-    /// A client pointed at this stub.
+    /// A client pointed at this stub, in whichever address form it listens
+    /// on.
     pub fn client(&self) -> ganja_client::Client {
-        ganja_client::Client::new(&self.address, None).expect("the stub's address is usable")
+        match &self.socket {
+            #[cfg(unix)]
+            Some(socket) => {
+                ganja_client::Client::on_socket(socket).expect("the stub's socket is usable")
+            }
+            #[cfg(not(unix))]
+            Some(_) => unreachable!("a socket stub is never built off unix"),
+            None => ganja_client::Client::new(&self.address, None)
+                .expect("the stub's address is usable"),
+        }
     }
 
     /// Every request it has received, in order.
@@ -142,8 +209,8 @@ impl Stub {
 }
 
 /// Reads one request off `socket`, records it, and writes the answer.
-async fn serve_one(
-    mut socket: TcpStream,
+async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
+    mut socket: S,
     answer: &(dyn Fn(&Recorded) -> Reply + Send + Sync),
     received: &Mutex<Vec<Recorded>>,
 ) {
@@ -196,7 +263,7 @@ async fn serve_one(
 }
 
 /// The request head plus its body, or [`None`] when the peer left first.
-async fn read_request(socket: &mut TcpStream) -> Option<Recorded> {
+async fn read_request<S: AsyncRead + Unpin>(socket: &mut S) -> Option<Recorded> {
     let mut buffer = Vec::new();
     let head = loop {
         if let Some(end) = find_head_end(&buffer) {

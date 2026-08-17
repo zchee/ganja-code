@@ -14,6 +14,23 @@
 //! asserts it: a client that linked the engine would quietly become a second
 //! frontend instead of a consumer of the served one.
 //!
+//! # Two address forms, one wire (**D505**)
+//!
+//! A server is reached at a TCP base ([`Client::new`]) or at a session's own
+//! Unix socket ([`Client::on_socket`]), and everything above the connection is
+//! the same routes over the same bytes — `ganja-serve` serves one router on
+//! either listener. The socket form rides `reqwest`'s own
+//! `ClientBuilder::unix_socket`, which routes **every** request of that
+//! `reqwest::Client` through the one path, so a [`Client`] is bound to
+//! exactly one socket for its whole life and never switches: one client per
+//! socket path, which is also why the form takes no credential — a same-uid
+//! socket is authorized by the filesystem, and the server's guard asks it for
+//! none. Two routes are the socket's reason to exist: [`Client::team`]
+//! answers on both forms, and [`Client::send_team_message`] is registered on
+//! the socket alone, so calling it on a TCP client is refused by the server
+//! with `404` rather than by anything here — this crate declares routes, it
+//! does not second-guess which listener answers them.
+//!
 //! # Version skew is unsupported, and refused readably
 //!
 //! [`Event`] is internally tagged with no unknown-variant tolerance, so a
@@ -40,8 +57,13 @@
 
 pub mod sse;
 
+#[cfg(unix)]
+use std::path::Path;
+
 use futures::{Stream, StreamExt as _, stream::BoxStream};
-pub use ganja_protocol::{Event, Mention, PermissionId, PermissionReply, SessionId};
+pub use ganja_protocol::{
+    Event, Mention, PermissionId, PermissionReply, SessionId, team::TeamView,
+};
 use serde::{Deserialize, Serialize};
 
 /// The credential a password-protected server requires on every route.
@@ -88,6 +110,14 @@ pub enum ClientError {
     Address {
         /// What was given.
         address: String,
+        /// Why it cannot be used.
+        reason: String,
+    },
+    /// The socket path is not one a client can be bound to.
+    #[error("{path} is not a socket path this client can be bound to: {reason}")]
+    SocketPath {
+        /// What was given.
+        path: String,
         /// Why it cannot be used.
         reason: String,
     },
@@ -152,6 +182,12 @@ pub struct Health {
     /// The server's own version, which is the first thing to compare when
     /// [`ClientError::Skew`] shows up.
     pub version: String,
+    /// The session the server is serving right now (**D505**) — what maps a
+    /// live socket, named by a prefix of its session's id, back to the one
+    /// session it belongs to. Required, as this crate requires every field
+    /// it declares: a server that omits it is a version this build does not
+    /// speak to.
+    pub session_id: SessionId,
 }
 
 /// One row of `GET /session`, narrowed to what a client acts on.
@@ -240,14 +276,82 @@ impl Prompt {
     }
 }
 
+/// What `POST /team/{name}/message` carries: a plain message from another
+/// session, as `ganja-serve`'s socket route takes it (**D505**).
+///
+/// Declared here as a client declares every body it sends; the server's side
+/// is `ganja-core`'s `SocketMessage`, three fields of the same names, and a
+/// drift between the two is refused by the server rather than guessed at.
+/// Plain text only, by shape: there is no field a protocol frame could ride
+/// in, which is §5.2-6's rule made a type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TeamMessage {
+    /// The sender's derived identity, `<name>@<team>` — what the receiving
+    /// session stamps the message with. A bare member name is refused there,
+    /// since it could name a member of *that* team.
+    pub from: String,
+    /// What the recipient reads.
+    pub text: String,
+    /// One line about it, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+impl TeamMessage {
+    /// A message from `from` saying `text`, with nothing summarized.
+    #[must_use]
+    pub fn new(from: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            text: text.into(),
+            summary: None,
+        }
+    }
+
+    /// Adds the one-line summary.
+    #[must_use]
+    pub fn summarized(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
+    }
+}
+
+/// What `POST /team/{name}/message` answers when the message landed:
+/// `ganja-core`'s `SocketDelivered`, declared whole and closed.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Delivered {
+    /// The bare member name the server wrote to.
+    pub to: String,
+    /// What became of it, in the server's words.
+    pub note: String,
+}
+
+/// The scheme and host every socket request is spelled under. `reqwest`
+/// resolves nothing once a client is bound to a socket, so the host is a
+/// label the URL needs and the server's router never reads.
+const SOCKET_URL: &str = "http://ganja";
+
+/// The scheme a socket address is *shown* under — §5.6's own spelling of a
+/// Unix-socket address, so an error about one reads the way a `send_message`
+/// call would have written it.
+const SOCKET_SCHEME: &str = "uds:";
+
 /// A connection to a served engine.
 ///
 /// Nothing here holds a session: the server does, and every call names the one
 /// it acts on — which is what lets one client drive a session another client
 /// started.
+///
+/// Two fields carry the address, on purpose: `address` is what a person reads
+/// in every error and every `Debug`, and `base` is what the requests are
+/// spelled under. They are one string for a TCP client and differ for a
+/// socket-bound one, whose requests need an `http://` base the socket does
+/// not have and whose errors should name the socket, not the label.
 pub struct Client {
     http: reqwest::Client,
     address: String,
+    base: String,
     credentials: Option<Credentials>,
 }
 
@@ -283,12 +387,63 @@ impl Client {
             });
         }
 
+        // Trailing slashes are stripped so every route below can be written
+        // the way the router spells it.
+        let address = address.trim_end_matches('/').to_owned();
+
         Ok(Self {
             http: reqwest::Client::new(),
-            // Trailing slashes are stripped so every route below can be
-            // written the way the router spells it.
-            address: address.trim_end_matches('/').to_owned(),
+            base: address.clone(),
+            address,
             credentials,
+        })
+    }
+
+    /// A client bound to the session socket at `path` (**D505**).
+    ///
+    /// One `reqwest::Client` per socket path, and this is where that rule is
+    /// kept: `unix_socket` routes every request of the client it is set on
+    /// through that path, so a client that switched addresses would be
+    /// sending to the wrong session. No credential, because the server's
+    /// transport-aware guard asks a same-uid socket for none — the
+    /// filesystem already answered who may connect.
+    ///
+    /// Available on Unix only, where the socket is; the type is not.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::SocketPath`] when `path` is empty or carries a NUL,
+    /// neither of which any socket can be bound at — refused here in words
+    /// rather than at the first request as an OS error about a name.
+    #[cfg(unix)]
+    pub fn on_socket(path: impl AsRef<Path>) -> Result<Self, ClientError> {
+        let path = path.as_ref();
+        let shown = path.display().to_string();
+        if shown.is_empty() {
+            return Err(ClientError::SocketPath {
+                path: shown,
+                reason: "it is empty".to_owned(),
+            });
+        }
+        if path.as_os_str().as_encoded_bytes().contains(&0) {
+            return Err(ClientError::SocketPath {
+                path: shown,
+                reason: "it carries a NUL byte".to_owned(),
+            });
+        }
+        let http = reqwest::Client::builder()
+            .unix_socket(path)
+            .build()
+            .map_err(|error| ClientError::SocketPath {
+                path: shown.clone(),
+                reason: error.to_string(),
+            })?;
+
+        Ok(Self {
+            http,
+            address: format!("{SOCKET_SCHEME}{shown}"),
+            base: SOCKET_URL.to_owned(),
+            credentials: None,
         })
     }
 
@@ -310,6 +465,45 @@ impl Client {
     /// The transport, credential and skew refusals above.
     pub async fn health(&self) -> Result<Health, ClientError> {
         self.get("/global/health").await
+    }
+
+    /// `GET /team` (D-13): the team the served session leads, on either
+    /// address form.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::health`], plus [`ClientError::Refused`] carrying `404`
+    /// when the session leads no team.
+    pub async fn team(&self) -> Result<TeamView, ClientError> {
+        self.get("/team").await
+    }
+
+    /// `POST /team/{name}/message` (D-13): a plain message to `name`, a
+    /// member of the served session's team — its lead's own name included,
+    /// which is how a message reaches that session's next turn.
+    ///
+    /// The route is served on the socket alone. Called on a TCP client it is
+    /// refused by the server with `404`, exactly as any route that is not
+    /// there — declared here all the same, because which listener answers a
+    /// route is the server's fact and not this crate's to pre-empt.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::health`], plus [`ClientError::Refused`] carrying `404`
+    /// (no team, no such member, or a TCP server), `400` (a blank text, a
+    /// protocol frame, or a `from` that is not `<name>@<team>`) or `500` (an
+    /// inbox that would not take it), each with the server's own sentence.
+    pub async fn send_team_message(
+        &self,
+        name: &str,
+        message: &TeamMessage,
+    ) -> Result<Delivered, ClientError> {
+        let body = serde_json::to_value(message).map_err(|error| ClientError::Skew {
+            detail: format!("a team message does not serialize: {error}"),
+        })?;
+
+        self.send("POST", &format!("/team/{name}/message"), Some(body))
+            .await
     }
 
     /// `POST /session`: points the server's engine at a fresh session and
@@ -451,7 +645,7 @@ impl Client {
 
     /// A request with the credential attached, when there is one.
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let builder = self.http.request(method, format!("{}{path}", self.address));
+        let builder = self.http.request(method, format!("{}{path}", self.base));
 
         match &self.credentials {
             Some(credentials) => {
@@ -654,7 +848,10 @@ impl Stream for Events {
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, Credentials};
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt as _;
+
+    use super::{Client, ClientError, Credentials};
 
     /// Nothing may render a password — the canary every credential-carrying
     /// type in this workspace is held to.
@@ -693,5 +890,45 @@ mod tests {
     fn a_trailing_slash_does_not_double_up_in_a_route() {
         let client = Client::new("http://127.0.0.1:4096/", None).expect("an address with a slash");
         assert_eq!(client.address(), "http://127.0.0.1:4096");
+    }
+
+    /// A socket-bound client is shown under §5.6's own `uds:` spelling, so
+    /// an error about it reads as the address a `send_message` call would
+    /// have written, while its requests are spelled under the one `http://`
+    /// base the socket needs and never resolves.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_client_is_shown_as_uds_and_spells_its_requests_under_the_socket_base() {
+        let client =
+            Client::on_socket("/tmp/ganja/abcd1234.sock").expect("a socket path is usable");
+        assert_eq!(client.address(), "uds:/tmp/ganja/abcd1234.sock");
+        assert_eq!(client.base, super::SOCKET_URL);
+        assert!(
+            client.credentials.is_none(),
+            "a same-uid socket presents no credential"
+        );
+        assert!(
+            format!("{client:?}").contains("uds:/tmp/ganja/abcd1234.sock"),
+            "and Debug shows the socket, not the label"
+        );
+    }
+
+    /// The two paths no socket can be bound at are refused here, in words,
+    /// rather than at the first request as an OS error about a name.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_or_nul_bearing_socket_path_is_refused_in_words() {
+        let empty = Client::on_socket("").expect_err("nothing listens at nowhere");
+        assert!(
+            matches!(empty, ClientError::SocketPath { ref reason, .. } if reason.contains("empty")),
+            "{empty}"
+        );
+
+        let path = std::ffi::OsStr::from_bytes(b"/tmp/ganja/bad\0name.sock");
+        let nul = Client::on_socket(path).expect_err("a NUL cannot travel in a socket path");
+        assert!(
+            matches!(nul, ClientError::SocketPath { ref reason, .. } if reason.contains("NUL")),
+            "{nul}"
+        );
     }
 }

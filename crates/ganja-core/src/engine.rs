@@ -1825,6 +1825,48 @@ impl Engine {
         self.teammates.as_ref()
     }
 
+    /// The team this session leads, as anything that only *renders* it reads
+    /// it — `GET /team` on either of `ganja-serve`'s transports (D-13,
+    /// **D505**), and the same value the `/team` dialog draws.
+    ///
+    /// Polled, exactly as [`Engine::teammates`] is, and derived from it: one
+    /// [`view`](teammate::TeammateRegistry::view) over the registry, so a
+    /// socket and a terminal looking at the same session at the same moment
+    /// see the same roster. [`None`] is a session that leads no team, which
+    /// is a different answer from a team of nobody — the first has no
+    /// directory on disk, and a route serves it as "not found" rather than as
+    /// an empty roster.
+    #[must_use]
+    pub fn team_view(&self) -> Option<ganja_protocol::team::TeamView> {
+        self.teammates.as_ref().map(|team| team.registry().view())
+    }
+
+    /// A plain message another session sent over **this** session's socket,
+    /// delivered into this team (**D505**) — the engine's side of
+    /// `ganja-serve`'s socket-only `POST /team/{name}/message`.
+    ///
+    /// The route reaches the team through this rather than through the
+    /// registry so that serve invents no state and holds no team: the rungs
+    /// a peer's message climbs, and the postbox it is delivered through, are
+    /// `subagent::receive`'s, the same code a local teammate's message goes
+    /// through, and the identity it is stamped with is decided there
+    /// (`Postbox::peer`) and nowhere a route could choose.
+    ///
+    /// # Errors
+    ///
+    /// [`NotReceived::NoTeam`](crate::NotReceived::NoTeam) when this session
+    /// leads no team, and otherwise whichever rung the message failed.
+    pub async fn receive_peer_message(
+        &self,
+        incoming: crate::Incoming,
+    ) -> Result<crate::tool::team::Sent, crate::NotReceived> {
+        let Some(team) = &self.teammates else {
+            return Err(crate::NotReceived::NoTeam);
+        };
+
+        subagent::receive(team.registry(), incoming).await
+    }
+
     /// The queue this session's teammates raise their permission dialogs on
     /// (**D-5**), claimed once by whoever is going to answer them.
     ///

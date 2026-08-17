@@ -13,7 +13,35 @@ use ganja_core::{Config, Engine, Storage};
 use ganja_protocol::{PermissionId, SessionId};
 use serde::Serialize;
 
-use crate::{Credentials, ServeConfig};
+use crate::{Credentials, Listen, ServeConfig};
+
+/// Which kind of listener a router answers on — the one fact the guard and
+/// the route table are told (**D505**).
+///
+/// A server binds exactly one listener, so this is a property of the whole
+/// `AppState` rather than of a request: a session that wants both a TCP
+/// `serve` and its own socket runs two servers over one engine, each with a
+/// state of its own, and the flag on each is decided once at bind. Derived
+/// from the config here — the one place the listener enum is read outside
+/// the bind itself — so a respelling of that enum is a one-line change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Transport {
+    /// A TCP bind, loopback or not; the credential rule applies.
+    Tcp,
+    /// A same-uid Unix domain socket; the filesystem is the credential.
+    Socket,
+}
+
+impl Transport {
+    pub(crate) fn of(config: &ServeConfig) -> Self {
+        match config.listen {
+            Listen::Tcp { .. } => Self::Tcp,
+            // A path named outright and a session's own door are one
+            // transport: both bind a Unix socket the binder has vouched for.
+            Listen::Unix { .. } | Listen::Session { .. } => Self::Socket,
+        }
+    }
+}
 
 /// One permission request the engine is waiting on, as `GET /permission`
 /// lists it — the fields of `Event::PermissionRequested`, held until
@@ -109,6 +137,9 @@ impl ServedDirectory {
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) engine: Arc<Engine>,
+    /// What this router listens on, which decides whether `credentials` is
+    /// consulted at all and which routes exist — see the guard.
+    pub(crate) transport: Transport,
     pub(crate) credentials: Option<Arc<Credentials>>,
     pub(crate) directory: Arc<ServedDirectory>,
     pub(crate) root: Arc<PathBuf>,
@@ -134,6 +165,7 @@ impl AppState {
     ) -> Self {
         Self {
             engine,
+            transport: Transport::of(&config),
             credentials: config.credentials.map(Arc::new),
             directory: Arc::new(ServedDirectory::new(config.directory)),
             root: Arc::new(config.root),
