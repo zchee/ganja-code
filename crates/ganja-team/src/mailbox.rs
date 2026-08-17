@@ -819,6 +819,65 @@ mod tests {
     }
 
     #[test]
+    fn a_message_whose_extra_shadows_a_schema_key_is_refused_before_the_file_is_touched() {
+        let (_home, path) = inbox();
+        write(&path, MailboxMessage::new("w", "kept", WHEN)).expect("a message writes");
+        let before = fs::read_to_string(&path).expect("the inbox is readable");
+
+        // Two shadowing keys, so the refusal is pinned as naming every
+        // offender rather than the first one it met.
+        let mut shadowing = MailboxMessage::new("w", "impostor", WHEN);
+        shadowing
+            .extra
+            .insert("text".to_owned(), json!("a second body"));
+        shadowing.extra.insert("read".to_owned(), json!(true));
+        let refusal = write(&path, shadowing).expect_err("a shadowed schema key is refused");
+        let MailboxError::SchemaInvalid { issues } = refusal else {
+            panic!("expected a schema refusal, got {refusal:?}");
+        };
+        assert_eq!(
+            issues,
+            [
+                "text: the schema declares this key, so it may not also be carried".to_owned(),
+                "read: the schema declares this key, so it may not also be carried".to_owned(),
+            ]
+        );
+
+        // Refused before the file was touched, which is the half that matters:
+        // a rejected write must not cost the messages already queued, and it
+        // must not have taken a hold to find out.
+        assert_eq!(
+            fs::read_to_string(&path).expect("the inbox is readable"),
+            before
+        );
+        assert!(
+            !std::path::PathBuf::from(format!("{}.lock", path.display())).exists(),
+            "a refusal that never reached the disk took no lock"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_passes_its_field_checks_and_still_will_not_decode_is_dropped_by_name() {
+        let (_home, path) = inbox();
+        seed(&path).expect("the inbox seeds");
+        // `msgV` is checked as a whole number (§2.4's `is_u64`), and 2^32 is
+        // one — it is also one more than the `u32` the envelope declares, so
+        // the field check passes and the typed decode does not.
+        fs::write(
+            &path,
+            r#"[{"from": "w", "text": "s3cret-body", "timestamp": "t", "msgV": 4294967296}]"#,
+        )
+        .expect("the inbox is writable");
+
+        let held = read(&path).expect("the inbox reads");
+        assert!(held.valid.is_empty());
+        assert_eq!(held.dropped, 1);
+        // The constant and nothing else: the decoder's own sentence can quote
+        // the value it choked on, and a value is a message body.
+        assert_eq!(held.reports, [super::DROPPED_UNDECODABLE.to_owned()]);
+    }
+
+    #[test]
     fn a_dropped_entry_names_the_field_and_never_the_value() {
         let (_home, path) = inbox();
         seed(&path).expect("the inbox seeds");
