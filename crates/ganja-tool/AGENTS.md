@@ -5,7 +5,7 @@
 
 ## Purpose
 
-What the model can do besides talk: `read`, `edit`, `write`, `glob`, `grep`, `bash`, `todowrite`, `webfetch`, `task`, the `Tool` trait they implement, the `Registry` that offers them, and the read-before-write log every one of them answers to. The stale-read watcher lives here too, because what it reports is a state on that log.
+What the model can do besides talk: `read`, `edit`, `write`, `glob`, `grep`, `bash`, `todowrite`, `webfetch`, `task`, `send_message`, the `Tool` trait they implement, the `Registry` that offers them, and the read-before-write log every one of them answers to. The stale-read watcher lives here too, because what it reports is a state on that log. So does `socket.rs`, which is not a tool at all but the one spelling of what a session socket is (**D505**) — four readers at four heights of the tree need that answer, and this crate is the lowest of them.
 
 Its own crate for one reason, and it is the reason worth stating: **the engine is not in this crate's dependency graph, and never may be.** A tool answers to the rules and to the filesystem, never to the loop that called it. That used to be a convention a reviewer had to keep holding; now it is the compiler's rule, and a `use ganja_core::…` here does not build.
 
