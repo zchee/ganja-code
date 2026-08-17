@@ -4,7 +4,8 @@
 //! the only thing some of them need: rendering a transcript, asserting on an
 //! event, or later driving a session from the far end of a socket takes none of
 //! the engine. The dependency list is that boundary made visible, and it is
-//! `serde` and the value type a tool call's arguments arrive as.
+//! `serde`, the value type a tool call's arguments arrive as, and the one
+//! crate that mints an id ([`uuidv7`]).
 //!
 //! Every type here is serde-serializable so that the same values can later
 //! cross a socket unchanged, and so that a stored session is these values
@@ -16,28 +17,10 @@
 //! [`PartBody`] variants, changing nothing already on the wire — which is the
 //! pattern every further variant is expected to follow.
 
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-
-/// Prefix upstream gives message ids, kept so transcripts read the same.
-const MESSAGE_PREFIX: &str = "msg";
-
-/// Prefix upstream gives part ids.
-const PART_PREFIX: &str = "prt";
-
-/// Prefix for permission request ids.
-const PERMISSION_PREFIX: &str = "perm";
-
-/// Prefix for question request ids, matching upstream's `que_`
-/// (`packages/schema/src/v1/question.ts`).
-const QUESTION_PREFIX: &str = "que";
-
-/// Prefix session ids carry, matching upstream's `ses_` ids.
-const SESSION_PREFIX: &str = "ses";
+use uuid::Uuid;
 
 /// Milliseconds since the Unix epoch, saturating rather than failing when the
 /// clock is set before 1970.
@@ -52,23 +35,66 @@ pub fn now() -> u64 {
         })
 }
 
-/// Mints an identifier that sorts after every identifier minted before it.
+/// Mints an identifier that sorts after every identifier minted before it: a
+/// standard lowercase hyphenated UUIDv7, and nothing else — no prefix
+/// (**D493**).
 ///
-/// The layout mirrors upstream's ascending ids: a millisecond timestamp
-/// followed by a per-process counter, both fixed-width hex, so ids sort
-/// lexicographically by creation time and cannot collide inside one process.
-/// Ordering across processes is only as good as the clock, which is the same
-/// guarantee upstream makes.
+/// What this replaced was upstream's layout, `<prefix>_<millis hex><counter
+/// hex>` off a **process-local** counter starting at zero. Inside one process
+/// it was sound; across two it was not, and not merely by bad luck: the first
+/// id every process mints ends in six zeroes, so two `ganja` processes reaching
+/// engine construction in the same millisecond were *guaranteed* to mint the
+/// same session id. A team is exactly that — several processes started
+/// together — so the layout had to go rather than be defended
+/// (`ganja-code-76w`). UUIDv7 fills what the counter left deterministic with
+/// random bits, so a collision now needs the same millisecond *and* the same
+/// 41-bit seed *and* the same trailing entropy.
 ///
-/// Public so that a stored session's ids are minted by this counter too: two
+/// The prefixes went with it. `ses_`/`msg_`/`prt_`/`perm_`/`que_` are never
+/// minted again, because a session id is written into files whose format is
+/// somebody else's, where a `ses_` would be a foreign body.
+///
+/// *Ordering survives the change.* The four hyphens sit at fixed positions in
+/// every UUID, so they never discriminate between two of them, and `'0'..='9'`
+/// precedes `'a'..='f'` in ASCII exactly as their values order. A lexicographic
+/// sort of these strings is therefore still a sort by creation time, and
+/// storage's `ORDER BY id` still means what it always meant.
+///
+/// *Within one millisecond it is not luck either.* Plain UUIDv7's 74 random
+/// bits are unordered, and a streaming turn mints many part ids per
+/// millisecond — an unordered sequence would scramble a transcript on
+/// reassembly. So the mint takes RFC 9562's monotonic-counter method through
+/// [`Uuid::now_v7`], whose process-global `ContextV7` reseeds a 42-bit counter
+/// on each new millisecond, increments it within one, and carries the timestamp
+/// forward when it wraps. That context lives behind a mutex in the crate's own
+/// static, which is the synchronization this needs and the reason there is no
+/// second one here.
+///
+/// Public so that a stored session's ids are minted here too: two
 /// implementations of "sorts after everything before it" is one too many.
-pub fn ascending(prefix: &str) -> String {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[must_use]
+pub fn uuidv7() -> String {
+    Uuid::now_v7().hyphenated().to_string()
+}
 
-    let millis = now();
-    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed) & 0xff_ffff;
+/// Whether a string is spelled the way [`uuidv7`] spells what it mints.
+///
+/// Strict, and the strictness is the point: the text must parse as a UUID,
+/// carry version 7, and be the thirty-six-character lowercase hyphenated form.
+/// The same UUID written braced, as a URN, unhyphenated or in uppercase is
+/// refused, because the question this answers is "did a build of this tree mint
+/// this id" and not "is this text a UUID somewhere".
+///
+/// Public because two callers outside this crate ask it: the store, deciding
+/// whether the rows it just opened predate this mint and must be set aside, and
+/// the tests that pin the mint itself.
+#[must_use]
+pub fn is_uuidv7(id: &str) -> bool {
+    let mut hyphenated = [0_u8; uuid::fmt::Hyphenated::LENGTH];
 
-    format!("{prefix}_{millis:011x}{sequence:06x}")
+    Uuid::try_parse(id).is_ok_and(|parsed| {
+        parsed.get_version_num() == 7 && parsed.hyphenated().encode_lower(&mut hyphenated) == id
+    })
 }
 
 /// Identifies a [`Message`] within a session.
@@ -80,7 +106,7 @@ impl MessageId {
     /// Mints an id that sorts after every id minted before it.
     #[must_use]
     pub fn ascending() -> Self {
-        Self(ascending(MESSAGE_PREFIX))
+        Self(uuidv7())
     }
 
     /// The id as it travels the wire.
@@ -91,9 +117,9 @@ impl MessageId {
 }
 
 impl From<String> for MessageId {
-    /// Adopts a stored id. The prefix is a convention rather than an
-    /// invariant: a transcript read back from disk keeps whatever it was
-    /// written with.
+    /// Adopts a stored id verbatim. Being a UUIDv7 is what [`uuidv7`] mints,
+    /// never something this door enforces: a transcript read back from disk —
+    /// or a test's pinned fixture — keeps exactly what it was written with.
     fn from(id: String) -> Self {
         Self(id)
     }
@@ -108,7 +134,7 @@ impl PartId {
     /// Mints an id that sorts after every id minted before it.
     #[must_use]
     pub fn ascending() -> Self {
-        Self(ascending(PART_PREFIX))
+        Self(uuidv7())
     }
 
     /// The id as it travels the wire.
@@ -134,7 +160,7 @@ impl PermissionId {
     /// Mints an id that sorts after every id minted before it.
     #[must_use]
     pub fn ascending() -> Self {
-        Self(ascending(PERMISSION_PREFIX))
+        Self(uuidv7())
     }
 
     /// The id as it travels the wire.
@@ -165,7 +191,7 @@ impl QuestionId {
     /// Mints an id that sorts after every id minted before it.
     #[must_use]
     pub fn ascending() -> Self {
-        Self(ascending(QUESTION_PREFIX))
+        Self(uuidv7())
     }
 
     /// The id as it travels the wire.
@@ -197,7 +223,7 @@ impl SessionId {
     /// Mints an id that sorts after every id minted before it.
     #[must_use]
     pub fn ascending() -> Self {
-        Self(ascending(SESSION_PREFIX))
+        Self(uuidv7())
     }
 
     /// The id as it travels the wire, and as it appears in rows and listings.
@@ -1546,10 +1572,13 @@ pub enum FinishReason {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeSet, sync::Mutex, thread};
+
     use super::{
         Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody,
         PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption,
         QuestionSource, REASONING_TAG, RevertInfo, RevertScope, Role, SessionId, ToolState, Usage,
+        is_uuidv7, uuidv7,
     };
 
     /// The session every pinned event happens in.
@@ -1599,25 +1628,105 @@ mod tests {
     }
 
     #[test]
-    fn ids_sort_in_creation_order_and_carry_their_prefix() {
+    fn uuidv7_ids_sort_in_creation_order() {
         let ids: Vec<MessageId> = (0..64).map(|_| MessageId::ascending()).collect();
 
         assert!(
-            ids.iter().all(|id| id.as_str().starts_with("msg_")),
-            "ids should carry the upstream prefix: {ids:?}"
+            ids.iter().all(|id| is_uuidv7(id.as_str())),
+            "ids should be bare lowercase hyphenated UUIDv7: {ids:?}"
         );
         assert!(
             ids.windows(2).all(|pair| pair[0] < pair[1]),
             "ids should sort in creation order: {ids:?}"
         );
+        let distinct: BTreeSet<&str> = ids.iter().map(MessageId::as_str).collect();
+        assert_eq!(distinct.len(), ids.len(), "no id should repeat: {ids:?}");
 
         let parts: Vec<PartId> = (0..64).map(|_| PartId::ascending()).collect();
-        assert!(parts.iter().all(|id| id.as_str().starts_with("prt_")));
+        assert!(parts.iter().all(|id| is_uuidv7(id.as_str())));
         assert!(parts.windows(2).all(|pair| pair[0] < pair[1]));
 
         let sessions: Vec<SessionId> = (0..64).map(|_| SessionId::ascending()).collect();
-        assert!(sessions.iter().all(|id| id.as_str().starts_with("ses_")));
+        assert!(sessions.iter().all(|id| is_uuidv7(id.as_str())));
         assert!(sessions.windows(2).all(|pair| pair[0] < pair[1]));
+
+        // The two ids nothing above mints, so that "every id here" is every id.
+        assert!(is_uuidv7(PermissionId::ascending().as_str()));
+        assert!(is_uuidv7(QuestionId::ascending().as_str()));
+    }
+
+    #[test]
+    fn is_uuidv7_accepts_only_the_spelling_the_mint_writes() {
+        let minted = uuidv7();
+        assert!(is_uuidv7(&minted));
+
+        // The same UUID, spelled four other legal ways. Each is refused,
+        // because the callers outside this crate — the store deciding whether
+        // its rows predate this mint — are asking whether *this* wrote the id.
+        assert!(!is_uuidv7(&minted.to_uppercase()));
+        assert!(!is_uuidv7(&minted.replace('-', "")));
+        assert!(!is_uuidv7(&format!("{{{minted}}}")));
+        assert!(!is_uuidv7(&format!("urn:uuid:{minted}")));
+
+        // The layout D493 retired, a UUID of another version, and text that is
+        // no UUID at all.
+        assert!(!is_uuidv7("ses_0198f2c4a1b000001"));
+        assert!(!is_uuidv7("00000000-0000-4000-8000-000000000000"));
+        assert!(!is_uuidv7(""));
+    }
+
+    #[test]
+    fn ids_are_monotonic_within_one_millisecond_across_threads() {
+        /// A UUIDv7's leading `xxxxxxxx-xxxx` is the 48-bit millisecond, so two
+        /// ids sharing this prefix were minted inside the same one.
+        fn millisecond(id: &str) -> &str {
+            &id[..13]
+        }
+
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 512;
+
+        // Minting and recording happen inside one critical section, so the
+        // vector's order *is* the order the mints happened in. That is what
+        // lets this assert "each id sorts after the one minted before it"
+        // outright instead of settling for a claim about each thread alone —
+        // and it is deterministic, where sorting afterwards would be a race
+        // this test would sometimes lose.
+        let minted: Mutex<Vec<String>> = Mutex::new(Vec::with_capacity(THREADS * PER_THREAD));
+
+        thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    for _ in 0..PER_THREAD {
+                        let mut minted = minted.lock().expect("no mint may panic under the lock");
+                        minted.push(uuidv7());
+                    }
+                });
+            }
+        });
+
+        let minted = minted
+            .into_inner()
+            .expect("no mint may panic under the lock");
+
+        assert_eq!(minted.len(), THREADS * PER_THREAD);
+        assert!(minted.iter().all(|id| is_uuidv7(id)));
+        assert!(
+            minted.windows(2).all(|pair| pair[0] < pair[1]),
+            "ids should sort in mint order even when eight threads mint them"
+        );
+
+        let distinct: BTreeSet<&String> = minted.iter().collect();
+        assert_eq!(distinct.len(), minted.len(), "no id should repeat");
+
+        // Without this the run could have spent a millisecond per id and told
+        // us nothing about the case the counter exists for.
+        assert!(
+            minted
+                .windows(2)
+                .any(|pair| millisecond(&pair[0]) == millisecond(&pair[1])),
+            "four thousand mints should have shared a millisecond somewhere"
+        );
     }
 
     #[test]
