@@ -1,0 +1,33 @@
+{
+  "name": "session-62633995",
+  "createdAt": 1786343288174,
+  "leadAgentId": "team-lead@session-62633995",
+  "leadSessionId": "62633995-26da-4f1d-a578-3d33072823ef",
+  "members": [
+    {
+      "agentId": "team-lead@session-62633995",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "joinedAt": 1786343288174,
+      "tmuxPaneId": "leader",
+      "cwd": "redactedredactedredactedredactedredactedredactedr",
+      "subscriptions": [],
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "kv-review-2@session-62633995",
+      "name": "kv-review-2",
+      "color": "blue",
+      "joinedAt": 1786343357947,
+      "tmuxPaneId": "%7",
+      "subscriptions": [],
+      "agentType": "fable-advisor:fable-advisor",
+      "model": "fable",
+      "prompt": "redactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedre\n\ndactedredactedredacte\n\ndredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedred\n\nactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedreda\nctedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedred\nactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedre\ndactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedreda\nctedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedreda\nctedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredac\n\ntedredactedredactedredactedredactedredactedredac\n\ntedredactedredactedredactedredactedredactedred\nactedredactedredactedredactedredactedredactedredacted\nredactedredactedredactedredactedredactedredactedredact\nedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedreda\nctedredactedredactedredactedredactedredactedredac\ntedredactedredactedredactedredactedredactedr\n\nedactedredactedredactedredacted\n\nredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedr\nedactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredact\nedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredactedre\n\ndactedredactedredactedredactedredactedredactedredactedredactedredactedredactedredact",
+      "planModeRequired": false,
+      "cwd": "redactedredactedredactedredactedredactedredactedr",
+      "backendType": "tmux",
+      "isActive": false
+    }
+  ]
+}
