@@ -64,6 +64,12 @@ pub mod storage;
 /// comes back, and the trait that answer arrives through
 /// ([`tool::task::Subagents`]) is the only part of this that is public.
 pub(crate) mod subagent;
+/// A teammate's own conversation, running in the lead's process: a second
+/// [`Engine`] over a clone of the lead's [`Storage`] (**D500**). Public where
+/// `subagent` is crate-private, because a teammate is a session a frontend
+/// addresses by name and resumes tomorrow, not an answer that comes back from
+/// a tool call.
+pub mod teammate;
 
 pub use agent::{Agent, AgentError, Registry as AgentRegistry};
 pub use auth::{AuthError, Credential};
