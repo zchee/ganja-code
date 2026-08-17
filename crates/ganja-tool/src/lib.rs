@@ -33,9 +33,11 @@ pub mod kill_shell;
 pub mod plan;
 pub mod question;
 pub mod read;
+pub mod send_message;
 pub mod shell;
 pub mod skill;
 pub mod task;
+pub mod team;
 pub mod todo;
 pub mod truncate;
 /// The stale-read watcher, here because [`FileTimes`] is here: it is built on
@@ -115,6 +117,18 @@ pub struct ToolCtx {
     /// [`None`] on every turn that has no agents to spawn — and on every
     /// *child* turn, which is the entire depth guard stated a second way.
     pub spawn: Option<Arc<dyn task::Subagents>>,
+    /// What a call sends a teammate a message through, which only
+    /// [`send_message::SendMessageTool`] does.
+    ///
+    /// [`None`] wherever there is no team — every fixture, every session that
+    /// never spawned a teammate — and the tool is then not registered at all,
+    /// so a call reaching a `None` here is a build that offered a tool it
+    /// cannot serve and gets told so in words rather than a panic.
+    ///
+    /// The sender's identity is **inside** this value rather than in any
+    /// argument: one postbox per engine, carrying the name that engine sends
+    /// as. See [`team::Postbox`] for why that is a mechanism and not a taste.
+    pub postbox: Option<Arc<dyn team::Postbox>>,
     /// What a call asks the person a question through, which only
     /// [`question::QuestionTool`] does.
     ///
@@ -691,6 +705,7 @@ mod tests {
             files: Arc::new(FileTimes::default()),
             credentials: store.map_or(Credentials::Unguarded, Credentials::Guarded),
             spawn: None,
+            postbox: None,
             ask: None,
             switch: None,
             jobs: None,

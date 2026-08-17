@@ -22,6 +22,7 @@ fn ctx() -> ToolCtx {
         files: Arc::new(FileTimes::default()),
         credentials: Credentials::Unguarded,
         spawn: None,
+        postbox: None,
         ask: None,
         switch: None,
         jobs: None,
