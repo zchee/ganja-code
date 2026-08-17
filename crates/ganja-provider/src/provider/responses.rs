@@ -1249,12 +1249,15 @@ fn split(
             // bill rather than content, and `StepStart` was consumed as the
             // boundary this step was cut at. `ReasoningText` is thinking this
             // build renders rather than replays — what this API asked to have
-            // handed back is the sealed item, which the arm above sends.
+            // handed back is the sealed item, which the arm above sends. A
+            // `Peer` part is rendered into the user turn at request assembly
+            // (D495) and never encoded here as a message of its own.
             PartBody::File { content: None, .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::ReasoningText { .. }
             | PartBody::ServerTool { .. }
+            | PartBody::Peer { .. }
             | PartBody::Patch { .. } => {}
         }
     }

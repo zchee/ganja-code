@@ -476,13 +476,16 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
             //
             // Sealed reasoning belongs to the wire that sealed it, and chat
             // completions has no item for one; readable thinking is rendered
-            // rather than replayed. See the same arm in `anthropic.rs`.
+            // rather than replayed. A `Peer` part is rendered into the user
+            // turn at request assembly (D495) and never encoded here as a
+            // message of its own. See the same arm in `anthropic.rs`.
             PartBody::File { .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
             | PartBody::ServerTool { .. }
+            | PartBody::Peer { .. }
             | PartBody::Reasoning { .. } => {}
         }
     }

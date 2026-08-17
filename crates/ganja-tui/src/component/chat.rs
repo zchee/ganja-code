@@ -1263,6 +1263,36 @@ impl Entry {
                 // An empty one is a part the provider opened and has not
                 // filled yet; a marker alone would be a claim about nothing.
                 PartBody::ReasoningText { .. } => {}
+                // What a teammate said (**D495**), under the caret rather
+                // than a marker of its own: this part is rendered into the
+                // *user* turn at request assembly, so what it is to this
+                // conversation is something it was told, which is exactly
+                // what `>` claims. What keeps it from reading as the person
+                // at the terminal is the name — dimmed, heading the block,
+                // carrying the sender's own one-line summary where it wrote
+                // one — with what it said hanging under that name in prose,
+                // the same split a call's header and its result use. The
+                // member's assigned `color` is deliberately unread: a palette
+                // this pane never mixed is not one it can trust against an
+                // arbitrary theme.
+                PartBody::Peer {
+                    from,
+                    summary,
+                    body,
+                    ..
+                } => {
+                    let heading = match summary {
+                        Some(line) if !line.trim().is_empty() => format!("{from}: {line}"),
+                        _ => from.clone(),
+                    };
+                    let hang = " ".repeat(PROMPT.width());
+                    let mut rows = vec![Row::new(PROMPT, heading, theme.dim)];
+                    rows.extend(
+                        body.lines()
+                            .map(|line| Row::new(&hang, line.to_owned(), theme.fg)),
+                    );
+                    lines.extend(lay_out(&rows, columns));
+                }
                 // Sealed reasoning has no rendering: what it holds is opaque
                 // to everything but the provider, so a line about it would be
                 // a line about a blob.

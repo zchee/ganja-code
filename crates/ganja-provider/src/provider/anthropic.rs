@@ -599,12 +599,17 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
             // handed back, and sending the readable half beside it would be
             // sending the same thought twice, once in a form nothing asked
             // for.
+            //
+            // A `Peer` part is rendered into the user turn at request
+            // assembly (D495); a wire never encodes one as its own message,
+            // because no vendor has a role for "somebody else's agent".
             PartBody::File { content: None, .. }
             | PartBody::StepStart
             | PartBody::StepFinish { .. }
             | PartBody::Patch { .. }
             | PartBody::ReasoningText { .. }
             | PartBody::ServerTool { .. }
+            | PartBody::Peer { .. }
             | PartBody::Reasoning { .. } => {}
         }
     }

@@ -2493,6 +2493,17 @@ impl Engine {
             Command::SwitchAgent { name } => self.switch_agent(name).await,
             Command::SwitchModel { model } => self.switch_model(model).await,
             Command::SwitchEffort { effort } => self.switch_effort(effort).await,
+            // Accepted, and so far only accepted: the wire type is complete
+            // (AC-19) ahead of the seam that stores the posture and applies it
+            // at the next turn's start, which lands in W5a/L2. Taking it
+            // silently is the honest half — nothing changed, so no
+            // `Event::PermissionModeChanged` is published — and refusing it
+            // would teach a lead's `mode_set_request` to retry against a
+            // command this build does accept.
+            Command::SetPermissionMode { mode } => {
+                tracing::debug!(?mode, "a permission mode was set before it is applied");
+                Ok(())
+            }
             Command::RunShell { command } => {
                 self.start_turn(command.clone(), TurnKind::Shell { command }, None)
                     .await
@@ -4169,6 +4180,22 @@ fn message_chars(message: &Message) -> (usize, usize) {
             // *gateway's* tokens, spent inside a request this side never
             // composed, and counting them against this window would report a
             // context filling with what somebody else sent.
+            // A peer's words count, and they are the one part here that is
+            // drawn *and* sent (D495): the request assembly renders them into
+            // the user turn, so a meter that skipped them would report a
+            // window emptier than the one the next request fills. They count
+            // as generated rather than as a result — a teammate wrote them,
+            // and no tool of this session's answered with them.
+            PartBody::Peer {
+                from,
+                summary,
+                body,
+                ..
+            } => {
+                generated += from.chars().count()
+                    + summary.as_deref().map_or(0, |line| line.chars().count())
+                    + body.chars().count();
+            }
             PartBody::ReasoningText { .. }
             | PartBody::ServerTool { .. }
             | PartBody::StepStart
@@ -4492,6 +4519,7 @@ mod tests {
                 | Event::QuestionRejected { .. }
                 | Event::RevertChanged { .. }
                 | Event::AgentChanged { .. }
+                | Event::PermissionModeChanged { .. }
                 | Event::EffortChanged { .. } => {}
             }
         }
