@@ -5,12 +5,19 @@
 //! is reused and a live one is never stolen — a second session sharing the
 //! first eight hex digits extends its name instead.
 //!
-//! What this binary cannot hold: the peer-uid **refusal**. Every connection a
-//! test makes carries the test's own uid, so the same-uid *acceptance* is
-//! what the health checks prove, and the refusal leg — a peer whose uid is
-//! not ours closed unread — is pinned only as the pure predicate's unit test
-//! in `socket.rs`. Proving it on a live socket needs a second uid on the box,
-//! which no test here fakes.
+//! What this binary cannot hold, both for the same reason — everything a
+//! test does here carries the test's own uid, and nothing fakes another:
+//!
+//! * the peer-uid **refusal** — the same-uid *acceptance* is what every
+//!   health check proves; the refusal leg, a peer whose uid is not ours
+//!   closed unread, is pinned as the pure predicate's unit test in
+//!   `socket.rs`;
+//! * the **foreign-owner** directory refusal, the /tmp-squat check — a
+//!   directory owned by somebody else cannot be made without privilege, so
+//!   the verdict is pinned where it is decided: `socket.rs`'s pure `vet`
+//!   over `(owner, mode, own uid)`, its three arms each a unit test. What the
+//!   integration tests hold is the not-a-directory and mode arms on real
+//!   directories, and that the refusal reaches `serve()`'s caller by name.
 //!
 //! Every directory is a fresh `tempfile` one rather than the real
 //! `/tmp/ganja-<uid>/`: the refusal cases have to chmod and plant files where
@@ -22,14 +29,15 @@ mod support;
 
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
+    os::{fd::AsRawFd as _, unix::fs::PermissionsExt as _},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use ganja_protocol::SessionId;
 use ganja_serve::{
     Address, DirectoryRefusal, Handle, Listen, ServeError,
-    socket::{self, EXTENSION, SHORTEST_NAME},
+    socket::{self, EXTENSION, LOCK_EXTENSION, SHORTEST_NAME},
 };
 use support::{engine, loopback_config};
 
@@ -288,7 +296,136 @@ async fn a_stale_socket_file_is_unlinked_and_the_name_reused() {
 
     assert_eq!(bound(&handle), shortest, "the same name, not the next one");
     assert_eq!(health(&shortest).await["healthy"], true);
+    let lock = socket::lock_path(&shortest);
+    assert_eq!(
+        lock.extension().and_then(|extension| extension.to_str()),
+        Some(LOCK_EXTENSION)
+    );
+    assert_eq!(
+        mode(&lock),
+        0o600,
+        "the lock file is as private as the socket"
+    );
     handle.shutdown().await.expect("a clean stop");
+    assert!(!shortest.exists(), "the socket file goes");
+    assert!(
+        lock.exists(),
+        "the lock file stays: unlinking it would reopen the race"
+    );
+}
+
+/// The liveness token is the lock, not a connection: a name whose lock is
+/// held is walked past untouched even when nothing behind its socket accepts
+/// — the case a connect probe misreads, because a full accept backlog
+/// refuses exactly the way an empty socket file does. A backlog is not
+/// filled here on purpose: Linux blocks a connect into a full Unix backlog
+/// rather than refusing it, and a test that hangs on one platform proves
+/// nothing on the other. The design makes the backlog's state irrelevant,
+/// and that is what this asserts.
+#[tokio::test]
+async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
+    let directory = private_dir();
+    let id = session("0007");
+    let shortest = socket::candidates(directory.path(), &id)
+        .next()
+        .expect("a session has a name");
+
+    // Somebody live, from this test's point of view: the lock held, a socket
+    // bound at the name, and nobody ever calling accept on it.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(socket::lock_path(&shortest))
+        .expect("the lock file opens");
+    // SAFETY: an open descriptor and two flags; the test holds `lock` open
+    // for as long as the flock must stand.
+    let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(rc, 0, "the test takes the name's lock first");
+    let silent =
+        std::os::unix::net::UnixListener::bind(&shortest).expect("the silent socket binds");
+
+    let handle = ganja_serve::serve(
+        engine(),
+        config(Listen::Session {
+            id,
+            directory: directory.path().to_path_buf(),
+        }),
+    )
+    .await
+    .expect("a held name is walked past, not fought over");
+
+    let landed = bound(&handle);
+    assert_ne!(landed, shortest, "the held name was not taken");
+    assert_eq!(
+        landed.file_name().and_then(|name| name.to_str()),
+        Some(&*format!("0198c1a20.{EXTENSION}")),
+        "one digit longer"
+    );
+    assert!(
+        shortest.exists(),
+        "and the silent socket's file was not unlinked"
+    );
+    assert_eq!(health(&landed).await["healthy"], true);
+
+    handle.shutdown().await.expect("a clean stop");
+    assert!(shortest.exists(), "nor was it on the way out");
+    drop(silent);
+    drop(lock);
+}
+
+/// Two — here eight — binders racing one bucket all come up, every one at a
+/// name of its own: the lock serializes the walk, so a loser reads the name
+/// as held and extends by a digit instead of dying on `EADDRINUSE`.
+#[tokio::test]
+async fn binders_racing_one_bucket_all_come_up_at_different_names() {
+    let directory = private_dir();
+    // Eight ids that agree on their first eleven hex digits and differ in the
+    // twelfth, so the walk has to go three digits deep before it can spread.
+    let ids: Vec<SessionId> = (0..8).map(|n| session(&format!("3b4{n:x}"))).collect();
+    let dir: Arc<Path> = Arc::from(directory.path());
+
+    let racing = ids.iter().cloned().map(|id| {
+        let dir = Arc::clone(&dir);
+        tokio::spawn(async move {
+            ganja_serve::serve(
+                engine(),
+                config(Listen::Session {
+                    id,
+                    directory: dir.to_path_buf(),
+                }),
+            )
+            .await
+        })
+    });
+    let mut handles = Vec::new();
+    for task in racing {
+        let handle = task
+            .await
+            .expect("the task ran")
+            .expect("every racer comes up: the lock hands out names, it does not fail binds");
+        handles.push(handle);
+    }
+
+    let mut names: Vec<PathBuf> = handles.iter().map(bound).collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        handles.len(),
+        "no two racers share a name: {names:?}"
+    );
+    for handle in &handles {
+        assert_eq!(health(&bound(handle)).await["healthy"], true);
+    }
+    for handle in handles {
+        handle.shutdown().await.expect("a clean stop");
+    }
+    assert!(
+        names.iter().all(|name| !name.exists()),
+        "every socket file was given back"
+    );
 }
 
 #[tokio::test]

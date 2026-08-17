@@ -25,13 +25,36 @@
 //! else, or is looser than `0700` is refused by name (AC-22 as replaced by
 //! Resolution 5). Then every accepted connection is held against the peer's
 //! uid, so a socket that somehow leaked serves nobody but the user who bound
-//! it.
+//! it. One assumption underwrites the check→bind window, and it is named
+//! rather than leaned on: `/tmp` carries the **sticky bit**, so a foreign uid
+//! cannot rename or unlink an entry it does not own and the vetted directory
+//! cannot be swapped out from under the bind. The same path-based checks in a
+//! world-writable directory *without* the sticky bit would be open to exactly
+//! that TOCTOU, which is why the literal `/tmp` is the only parent this
+//! module is asked to trust.
 //!
-//! A stale file — a socket left by a process that died — is unlinked at bind
-//! and the name reused. Stale is decided by connecting: a socket whose peer
-//! answers is live and is **never** stolen; one that refuses the connection
-//! has nobody behind it. That probe is the whole difference between reusing a
-//! crashed session's name and knocking a running one off the air.
+//! **Liveness is a lock, not a probe.** Beside every socket sits a sibling
+//! `<stem>.lock`, and a binder holds an advisory `flock(LOCK_EX | LOCK_NB)` on
+//! it for as long as it serves; the lock is the one token that says "this
+//! name is live". A name whose lock is held is **never** touched — its file
+//! is not unlinked and its bind is not attempted, whatever a connection to it
+//! would or would not do — and one whose lock is free is stale by definition:
+//! the kernel released it when the holder exited, cleanly or not, so the file
+//! left behind is unlinked and the name reused. Connecting was the first
+//! draft's probe and is gone on purpose: a live listener refuses a connection
+//! whenever its accept backlog is full — the window between a bind and the
+//! first accept included — so "refused" never meant "nobody home", and two
+//! binders racing one name could both read it as free and one die on
+//! `EADDRINUSE` in the case the paragraph above calls routine. The lock
+//! serializes the walk instead: the loser fails `LOCK_NB`, reads the name as
+//! held, and extends by a digit.
+//!
+//! Lock files are created and never removed. Unlinking one at shutdown would
+//! reopen the classic race — a peer that opened the old inode before the
+//! unlink locks a file nobody else can see, and a third opens a fresh one, so
+//! two binders each believe they hold the name. A zero-byte `.lock` per name
+//! ever bound is the price, and a listing that wants the sockets filters by
+//! [`EXTENSION`] and never sees them.
 
 use std::{
     io,
@@ -43,6 +66,17 @@ use ganja_protocol::SessionId;
 /// The extension every session socket carries, so a listing can tell a
 /// socket from anything else somebody left in the directory.
 pub const EXTENSION: &str = "sock";
+
+/// The extension of the lock file beside every socket — the liveness token
+/// the module doc describes. Created once per name and never removed.
+pub const LOCK_EXTENSION: &str = "lock";
+
+/// The lock file that holds `socket`'s name: the same stem, [`LOCK_EXTENSION`]
+/// in place of [`EXTENSION`].
+#[must_use]
+pub fn lock_path(socket: &Path) -> PathBuf {
+    socket.with_extension(LOCK_EXTENSION)
+}
 
 /// The fewest hex digits of a session id a socket is named by. Eight is
 /// tmux's own visual weight for a short id, and enough that a listing reads
@@ -97,6 +131,25 @@ pub(crate) const fn peer_allowed(peer: u32, own: u32) -> bool {
     peer == own
 }
 
+/// The verdict on a directory found at the socket directory's path, from
+/// what `stat` said about it: ours (`owner == own`) at exactly `0700`, or
+/// refused by name. Pure, so the three refusals — the /tmp-squat check among
+/// them, which no test can raise without a second uid — are pinned as unit
+/// tests the way [`peer_allowed`] is.
+pub(crate) const fn vet(owner: u32, mode: u32, own: u32) -> Result<(), DirectoryRefusal> {
+    if owner != own {
+        return Err(DirectoryRefusal::ForeignOwner { owner, uid: own });
+    }
+    let mode = mode & 0o777;
+    if mode != DIRECTORY_MODE {
+        return Err(DirectoryRefusal::Permissions { mode });
+    }
+    Ok(())
+}
+
+/// The mode the socket directory is created with and must be found at.
+pub(crate) const DIRECTORY_MODE: u32 = 0o700;
+
 /// The calling process's effective uid: what owns the directory, and what
 /// every peer is measured against.
 #[cfg(unix)]
@@ -140,8 +193,12 @@ pub(crate) use unix::{PeerChecked, bind_path, bind_session};
 mod unix {
     use std::{
         fs, io,
-        os::unix::fs::{
-            DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, PermissionsExt as _,
+        os::{
+            fd::AsRawFd as _,
+            unix::fs::{
+                DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
+                PermissionsExt as _,
+            },
         },
         path::{Path, PathBuf},
     };
@@ -150,23 +207,57 @@ mod unix {
     use ganja_protocol::SessionId;
     use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
 
-    use super::{DirectoryRefusal, candidates, peer_allowed, uid};
+    use super::{DIRECTORY_MODE, DirectoryRefusal, candidates, lock_path, peer_allowed, uid, vet};
     use crate::{Address, ServeError};
 
-    /// The mode the socket directory is created with and must be found at.
-    const DIRECTORY_MODE: u32 = 0o700;
-
-    /// The mode a bound socket is left at.
+    /// The mode a bound socket, and the lock file beside it, are left at.
     const SOCKET_MODE: u32 = 0o600;
 
     /// A listener that answers only its own user: every accepted connection
     /// is checked against the peer's uid, and one from anybody else is closed
     /// unread and logged. Built on axum's own [`Listener`] for
     /// [`UnixListener`] — its accept-error handling included — rather than an
-    /// accept loop of its own.
+    /// accept loop of its own. It carries the name's lock: the two go into
+    /// axum's serve future together and drop together, so the name reads as
+    /// live for exactly as long as something accepts behind it.
     pub(crate) struct PeerChecked {
         listener: UnixListener,
         uid: u32,
+        _lock: NameLock,
+    }
+
+    /// The advisory `flock` on a socket's `.lock` sibling, held open for the
+    /// server's life and released by the kernel however that life ends. The
+    /// descriptor is the lock: nothing reads it, and dropping it is the
+    /// release.
+    struct NameLock {
+        _file: fs::File,
+    }
+
+    impl NameLock {
+        /// Claims the lock for `socket`'s name without waiting: [`None`] when
+        /// a live binder holds it, an error when the lock file itself cannot
+        /// be opened.
+        fn claim(socket: &Path) -> io::Result<Option<Self>> {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(SOCKET_MODE)
+                .open(lock_path(socket))?;
+            // SAFETY: `flock` takes an open descriptor and two flags, and the
+            // descriptor is owned by `file` for the whole call.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                return Ok(Some(Self { _file: file }));
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            Err(error)
+        }
     }
 
     impl Listener for PeerChecked {
@@ -223,24 +314,32 @@ mod unix {
         })
     }
 
-    /// Binds exactly `path`: its directory prepared and checked, a stale
-    /// socket file there unlinked, a live one refused, and the bound socket
-    /// left at mode `0600`.
+    /// Binds exactly `path`: its directory prepared and checked, its name's
+    /// lock claimed — held by a live binder, the name is refused untouched —
+    /// a stale socket file there unlinked, and the bound socket left at mode
+    /// `0600`. `EADDRINUSE` from the bind itself is unreachable under the
+    /// lock and is reported as the plain bind failure it would be.
     pub(crate) async fn bind_path(path: &Path) -> Result<PeerChecked, ServeError> {
-        let directory = path.parent().ok_or_else(|| ServeError::Bind {
-            address: Address::Unix(path.to_path_buf()),
-            source: io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a socket path needs a directory",
-            ),
-        })?;
-        prepare_directory(directory)?;
-        clear_stale(path).await?;
-
-        let listener = UnixListener::bind(path).map_err(|source| ServeError::Bind {
+        let bind_error = |source| ServeError::Bind {
             address: Address::Unix(path.to_path_buf()),
             source,
+        };
+        let directory = path.parent().ok_or_else(|| {
+            bind_error(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a socket path needs a directory",
+            ))
         })?;
+        prepare_directory(directory)?;
+        let lock =
+            NameLock::claim(path)
+                .map_err(bind_error)?
+                .ok_or_else(|| ServeError::SocketInUse {
+                    path: path.to_path_buf(),
+                })?;
+        clear_stale(path)?;
+
+        let listener = UnixListener::bind(path).map_err(bind_error)?;
         // The directory is what keeps other users out; the socket's own mode
         // is the second lock, and it is set after the bind rather than through
         // the umask because the umask is process-wide.
@@ -256,6 +355,7 @@ mod unix {
         Ok(PeerChecked {
             listener,
             uid: uid(),
+            _lock: lock,
         })
     }
 
@@ -289,27 +389,15 @@ mod unix {
         if !found.file_type().is_dir() {
             return Err(refuse(DirectoryRefusal::NotADirectory));
         }
-        let own = uid();
-        if found.uid() != own {
-            return Err(refuse(DirectoryRefusal::ForeignOwner {
-                owner: found.uid(),
-                uid: own,
-            }));
-        }
-        let mode = found.mode() & 0o777;
-        if mode != DIRECTORY_MODE {
-            return Err(refuse(DirectoryRefusal::Permissions { mode }));
-        }
 
-        Ok(())
+        vet(found.uid(), found.mode(), uid()).map_err(refuse)
     }
 
-    /// Unlinks a socket file at `path` that nobody is listening behind, and
-    /// refuses one somebody is. Decided by connecting: a live server accepts,
-    /// a dead one's file refuses the connection. Anything at the path that
-    /// is not a socket is left alone and named — this module removes only
-    /// what it would itself have made.
-    async fn clear_stale(path: &Path) -> Result<(), ServeError> {
+    /// Unlinks the socket file a dead holder left at `path`, the name's lock
+    /// being ours by the time this runs. Anything at the path that is not a
+    /// socket is left alone and named — this module removes only what it
+    /// would itself have made.
+    fn clear_stale(path: &Path) -> Result<(), ServeError> {
         let bind_error = |source| ServeError::Bind {
             address: Address::Unix(path.to_path_buf()),
             source,
@@ -327,16 +415,9 @@ mod unix {
             )));
         }
 
-        match UnixStream::connect(path).await {
-            // Live: the stream drops closed and the name stays theirs.
-            Ok(_live) => Err(ServeError::SocketInUse {
-                path: path.to_path_buf(),
-            }),
-            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                fs::remove_file(path).map_err(bind_error)
-            }
-            // The file went away between the stat and the connect — fine, the
-            // bind will make a new one.
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            // Gone between the stat and the unlink; the bind makes a new one.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(bind_error(error)),
         }
@@ -349,7 +430,10 @@ mod tests {
 
     use ganja_protocol::SessionId;
 
-    use super::{EXTENSION, SHORTEST_NAME, candidates, peer_allowed};
+    use super::{
+        DirectoryRefusal, EXTENSION, LOCK_EXTENSION, SHORTEST_NAME, candidates, lock_path,
+        peer_allowed, vet,
+    };
 
     #[test]
     fn a_session_is_named_by_its_first_eight_hex_digits_then_one_more_per_step() {
@@ -378,6 +462,68 @@ mod tests {
         let names: Vec<_> = candidates(Path::new("/d"), &id).collect();
 
         assert_eq!(names, vec![Path::new("/d/abc.sock").to_path_buf()]);
+    }
+
+    #[test]
+    fn a_directory_is_ours_at_0700_or_refused_by_the_first_thing_wrong_with_it() {
+        assert!(
+            vet(501, 0o040_700, 501).is_ok(),
+            "the type bits are not the mode"
+        );
+
+        assert!(
+            matches!(
+                vet(0, 0o700, 501),
+                Err(DirectoryRefusal::ForeignOwner { owner: 0, uid: 501 })
+            ),
+            "root's directory is somebody else's — the /tmp squat"
+        );
+        assert!(
+            matches!(
+                vet(502, 0o700, 501),
+                Err(DirectoryRefusal::ForeignOwner {
+                    owner: 502,
+                    uid: 501
+                })
+            ),
+            "so is another user's, however private they made it"
+        );
+        assert!(
+            matches!(
+                vet(501, 0o755, 501),
+                Err(DirectoryRefusal::Permissions { mode: 0o755 })
+            ),
+            "world-readable"
+        );
+        assert!(
+            matches!(
+                vet(501, 0o770, 501),
+                Err(DirectoryRefusal::Permissions { mode: 0o770 })
+            ),
+            "group-readable"
+        );
+        assert!(
+            matches!(
+                vet(501, 0o600, 501),
+                Err(DirectoryRefusal::Permissions { mode: 0o600 })
+            ),
+            "tighter than 0700 is refused too: the owner could not enter it"
+        );
+        assert!(
+            matches!(
+                vet(0, 0o755, 501),
+                Err(DirectoryRefusal::ForeignOwner { .. })
+            ),
+            "ownership is judged before mode: whose it is comes first"
+        );
+    }
+
+    #[test]
+    fn a_socket_name_is_locked_by_its_sibling_lock_file() {
+        assert_eq!(
+            lock_path(Path::new("/tmp/ganja-501/0198c1a2.sock")),
+            Path::new(&format!("/tmp/ganja-501/0198c1a2.{LOCK_EXTENSION}"))
+        );
     }
 
     #[test]
