@@ -84,7 +84,11 @@
 //! teammate's postbox can only ever write that teammate's name on a message.
 //! There is one per engine and nothing is shared: the lead's carries the
 //! lead's name, and [`Postbox::of`] takes the [`Teammate`] itself rather than
-//! a string precisely so the name cannot be chosen by whoever builds it.
+//! a string precisely so the name cannot be chosen by whoever builds it. The
+//! third implementation — for a process that *is* a member, a pane launched
+//! by some other session's lead — is [`crate::teammate::member::MemberPostbox`],
+//! which binds its sender from the launch line the same way and reads its
+//! roster off the team file rather than a registry it has no share of.
 
 use std::{
     fmt,
@@ -1061,14 +1065,15 @@ const REFUSED_BY_HAND: &str =
     "the spawn was refused at the permission dialog; nothing was started and no team was joined";
 
 /// Why a `uds:` address is validated and then not delivered.
-const NO_SOCKET: &str = "A message to another session travels over that session's socket, and this build has no such transport yet. A member of this team is reached by its bare name.";
+pub(crate) const NO_SOCKET: &str = "A message to another session travels over that session's socket, and this build has no such transport yet. A member of this team is reached by its bare name.";
 
 /// A member of the team whose name the name grammar refuses — impossible
 /// through this build's own registration, and answered rather than trusted.
-const UNADDRESSABLE: &str = "This team is holding a member under a name that cannot be addressed:";
+pub(crate) const UNADDRESSABLE: &str =
+    "This team is holding a member under a name that cannot be addressed:";
 
 /// A write that did not land, ahead of what the mailbox said about it.
-const UNWRITTEN: &str = "The message could not be written to that teammate's inbox:";
+pub(crate) const UNWRITTEN: &str = "The message could not be written to that teammate's inbox:";
 
 /// Why a message written after the team itself has gone reaches nobody.
 ///
@@ -1080,7 +1085,7 @@ const TEAM_GONE: &str =
     "The team this session led has been shut down; there is nobody left to deliver to.";
 
 /// What became of a message that did land.
-const WRITTEN: &str = "It is in that inbox and will be read on the next pass.";
+pub(crate) const WRITTEN: &str = "It is in that inbox and will be read on the next pass.";
 
 /// The reason a lead gives a teammate it is asking to stop.
 ///
@@ -1097,10 +1102,10 @@ const SHUTDOWN_ASKED: &str = "the lead asked this teammate to stop";
 const UNENCODABLE: &str = "The shutdown request could not be written:";
 
 /// What the roster says about the one member that is not a teammate.
-const LEADS: &str = "the session that leads this team";
+pub(crate) const LEADS: &str = "the session that leads this team";
 
 /// What it says about the ones that are, ahead of the surface each runs on.
-const RUNS_ON: &str = "a teammate on the";
+pub(crate) const RUNS_ON: &str = "a teammate on the";
 
 /// The agents `caller` may delegate to, as the task tool lists them.
 ///

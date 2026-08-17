@@ -144,6 +144,9 @@ use crate::{
 pub mod claude;
 /// The §6.2 pass the lead makes over its own inbox.
 pub mod lead_inbox;
+/// What a process that *is* a member holds: its postbox, and its asks on their
+/// way to the lead over §5's frames.
+pub mod member;
 /// A teammate in a `ganja` pane of its own (P25b).
 pub mod pane;
 /// What a teammate may do, and who answers when it asks (**D-5**).
@@ -1100,6 +1103,27 @@ impl TeammateRegistry {
     #[must_use]
     pub fn lead(&self) -> &MemberName {
         &self.lead
+    }
+
+    /// The session this team's lead is, as its `leadSessionId` records it —
+    /// what a dialog raised on the lead's behalf is stamped with.
+    #[must_use]
+    pub fn lead_session_id(&self) -> &str {
+        &self.lead_session_id
+    }
+
+    /// Where a teammate's dialogs go, when a frontend has said (**D-5**).
+    ///
+    /// A clone of the sender rather than the slot: [`crate::teammate::lead_inbox`]
+    /// offers a pane's forwarded ask on it exactly as
+    /// [`crate::teammate::posture::Forwarding`] offers an in-process one —
+    /// `try_send`, never a wait — and a registry nobody attached a surface to
+    /// answers [`None`], which both callers read as a refusal.
+    pub(crate) fn dialog_surface(&self) -> Option<tokio::sync::mpsc::Sender<posture::Forwarded>> {
+        self.dialogs
+            .lock()
+            .expect("the dialog surface is never poisoned")
+            .clone()
     }
 
     /// Where the team's documents live.

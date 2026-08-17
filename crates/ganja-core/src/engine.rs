@@ -1838,6 +1838,31 @@ impl Engine {
             .take()
     }
 
+    /// Gives this session the postbox its own `send_message` calls are posted
+    /// through — the door for a process that **is** a teammate (§4.1, §10.3).
+    ///
+    /// Consuming, like [`Engine::with_teammates`], and for the same reason:
+    /// whose name a session writes under is decided once, before anything can
+    /// be streaming. A pane launched by some other session's lead installs a
+    /// [`teammate::member::MemberPostbox`] here, stamped with the name its
+    /// launch line carried, and is offered `send_message` from its first turn
+    /// — presence is ability, the same rule [`Engine::with_teammates`]
+    /// registers the tool under, and the same composition path, so a
+    /// `/plugin` Reload cannot quietly drop it. Nothing else changes: this
+    /// session leads no team, [`Engine::teammates`] stays [`None`], and no
+    /// dialog channel is opened, because a member's asks travel the other way.
+    ///
+    /// The identity is the postbox's own — bound when it was built, never a
+    /// parameter here — so what this hands the engine is a value that already
+    /// cannot say anything but its own name.
+    #[must_use]
+    pub fn with_postbox(self, postbox: Arc<dyn crate::tool::team::Postbox>) -> Self {
+        self.install_postbox(postbox);
+        self.recompose_tools();
+
+        self
+    }
+
     /// Installs the postbox one engine's `send_message` calls are posted
     /// through.
     ///
@@ -1845,14 +1870,17 @@ impl Engine {
     /// [`teammate::TeammateRegistry`] once it holds both the team and the
     /// teammate, and a teammate engine is reachable only by shared reference
     /// (which is what keeps it from being given snapshots). The lead's own is
-    /// installed by [`Engine::with_teammates`] and never through here.
+    /// installed by [`Engine::with_teammates`], a member process's by
+    /// [`Engine::with_postbox`], and neither through here.
     ///
     /// `pub(crate)` because a postbox is an engine's **outbound identity** —
     /// the name every message it writes is stamped with, bound at construction
-    /// precisely so nothing can choose it per send. A public setter would hand
-    /// that choice back: any caller holding an `&Engine` could re-stamp a
-    /// running conversation as somebody else, which is the forgery
-    /// [`crate::subagent::Postbox`] exists to make impossible.
+    /// precisely so nothing can choose it per send. A public setter on `&self`
+    /// would hand that choice back: any caller holding an `&Engine` could
+    /// re-stamp a running conversation as somebody else, which is the forgery
+    /// [`crate::subagent::Postbox`] exists to make impossible. The public door
+    /// is the consuming builder above, which can only run before the engine
+    /// is anybody's to hold.
     pub(crate) fn install_postbox(&self, postbox: Arc<dyn crate::tool::team::Postbox>) {
         *self.postbox.lock().expect("the postbox is never poisoned") = Some(postbox);
     }
@@ -6369,6 +6397,44 @@ mod tests {
         assert!(
             engine.tools().get(send_message::ID).is_some(),
             "a session with a team is offered the tool that addresses it"
+        );
+
+        engine.replace_base_tools(Arc::new(Registry::with_builtins()));
+
+        assert!(
+            engine.tools().get(send_message::ID).is_some(),
+            "a reload rebuilds through the shared composition path, which offers it again"
+        );
+    }
+
+    /// A process that *is* a member is offered the messaging tool off its own
+    /// postbox, leads no team, and keeps the tool across a reload — the same
+    /// composition path as the lead's, entered through the other door.
+    ///
+    /// The negative half is the same one the lead's test opens with, and it
+    /// is asserted again here rather than assumed: the whole claim is that
+    /// presence of the tool tracks presence of a postbox, and only that.
+    #[test]
+    fn a_member_engine_with_a_postbox_is_offered_send_message_and_leads_no_team() {
+        assert!(
+            engine().tools().get(send_message::ID).is_none(),
+            "a session with no postbox has nobody to address"
+        );
+
+        let postbox = Arc::new(teammate::member::MemberPostbox::new(
+            ganja_team::MemberName::parse("worker").expect("a member name"),
+            ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
+            ganja_team::TeamsRoot::new(std::path::PathBuf::from("/nonexistent/teams")),
+        ));
+        let mut engine = engine().with_postbox(postbox);
+        assert!(
+            engine.tools().get(send_message::ID).is_some(),
+            "a member is offered the tool that addresses its team"
+        );
+        assert!(engine.teammates().is_none(), "and leads no team of its own");
+        assert!(
+            engine.teammate_dialogs().is_none(),
+            "so no dialog channel is opened for it"
         );
 
         engine.replace_base_tools(Arc::new(Registry::with_builtins()));

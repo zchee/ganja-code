@@ -32,13 +32,23 @@
 //! |---|---|---|
 //! | [`BypassAtSpawn`] | nobody, afterwards — the spawn *was* the answer | a spawn carrying `bypass`, once the door approved it |
 //! | [`ForwardToLead`] | the person sitting at the lead's dialog | **the default** |
-//! | [`HumanAttended`] | the person sitting at the teammate's own terminal | a pane, in P25b |
+//! | [`HumanAttended`] | the person sitting at the teammate's own terminal | a pane whose frontend forwards nothing |
 //!
 //! None of the three changes a single rule, which is why the posture is not an
 //! argument of [`permissions_for`]: what it decides is where an *ask* is
 //! carried, and an ask only ever happens where the rules already said "ask".
 //! A bypassing teammate is refused exactly what a forwarding one is
 //! (**D479**'s own rule, kept unchanged) — it is only spared the round trip.
+//!
+//! [`ForwardToLead`] has two carriers, one per kind of teammate, and this
+//! module holds the in-process one: [`Forwarding`] rides the dialog channel
+//! and its reply oneshot. A **pane** has no channel into the lead's process,
+//! so its asks ride §5's `permission_request`/`permission_response` frames
+//! through the mailbox instead — [`crate::teammate::member::Asks`] on the
+//! pane's side, [`crate::teammate::lead_inbox`] on the lead's — landing on
+//! the very same channel from the file, so the person answering cannot tell
+//! which kind of teammate asked. A pane runs [`HumanAttended`] only when its
+//! frontend forwards nothing at all.
 //!
 //! [`HumanAttended`] has no meaning in this process: an in-process teammate has
 //! no terminal of its own to put a dialog on, so [`for_spawn`] never chooses it
