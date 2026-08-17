@@ -29,7 +29,7 @@
 //! following **D24**, which made the same call for the prompt's date block.
 
 use ganja_core::SessionInfo;
-use ganja_protocol::{Part, PartBody, Role, ToolState};
+use ganja_protocol::{Part, PartBody, Role, ToolState, team};
 
 /// What a session with no title of its own is headed with. Upstream's title
 /// is always a string; ganja's is absent until a title call has named the
@@ -202,9 +202,13 @@ fn formatted(part: &Part) -> String {
             body,
             ..
         } => {
+            // The summary is capped here as well as at `PeerMessage::new`,
+            // because a part is storable with one that never came through that
+            // constructor and this formatter draws what the part holds. The
+            // body is not: `/copy` copies what was said, whole.
             let mut rendered = match summary {
                 Some(line) if !line.trim().is_empty() => {
-                    format!("**Teammate: {from}** — {line}\n\n")
+                    format!("**Teammate: {from}** — {}\n\n", team::cap_for_display(line))
                 }
                 _ => format!("**Teammate: {from}**\n\n"),
             };

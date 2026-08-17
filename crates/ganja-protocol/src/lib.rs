@@ -3339,7 +3339,7 @@ mod tests {
     #[test]
     fn a_peer_part_keeps_the_summary_it_was_built_with() {
         let long = "e".repeat(team::DISPLAY_FIELD_CAP * 2);
-        let message = team::PeerMessage::new("w1", long.clone(), Some(&long));
+        let message = team::PeerMessage::new("w1", long.clone(), Some(long.clone()));
 
         let capped = Part::peer(
             message.from(),

@@ -4171,15 +4171,6 @@ fn message_chars(message: &Message) -> (usize, usize) {
             PartBody::Reasoning { encrypted, .. } => {
                 generated += encrypted.as_deref().map_or(0, |blob| blob.chars().count());
             }
-            // Readable thinking counts nothing for the bookkeeping parts'
-            // reason: no wire carries it. It is on the screen, not in the
-            // request, and a meter that counted it would report a window
-            // filling with words the model is never sent.
-            // A provider-run tool counts nothing for the same reason, and
-            // it is the sharper case: its arguments and its result were the
-            // *gateway's* tokens, spent inside a request this side never
-            // composed, and counting them against this window would report a
-            // context filling with what somebody else sent.
             // A peer's words count, and they are the one part here that is
             // drawn *and* sent (D495): the request assembly renders them into
             // the user turn, so a meter that skipped them would report a
@@ -4196,6 +4187,16 @@ fn message_chars(message: &Message) -> (usize, usize) {
                     + summary.as_deref().map_or(0, |line| line.chars().count())
                     + body.chars().count();
             }
+            // Readable thinking counts nothing for the bookkeeping parts'
+            // reason: no wire carries it. It is on the screen, not in the
+            // request, and a meter that counted it would report a window
+            // filling with words the model is never sent.
+            //
+            // A provider-run tool counts nothing for the same reason, and
+            // it is the sharper case: its arguments and its result were the
+            // *gateway's* tokens, spent inside a request this side never
+            // composed, and counting them against this window would report a
+            // context filling with what somebody else sent.
             PartBody::ReasoningText { .. }
             | PartBody::ServerTool { .. }
             | PartBody::StepStart

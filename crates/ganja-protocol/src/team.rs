@@ -29,8 +29,6 @@
 //! attached, and a `Deserialize` impl is precisely a constructor that skips
 //! it.
 
-use std::ops::Deref;
-
 use serde::{Deserialize, Serialize};
 
 /// How many characters of a display-only field ever reach a rendered
@@ -108,20 +106,20 @@ pub struct IdleNotification {
     /// ISO-8601, as every frame timestamp here is.
     pub timestamp: String,
     /// Absent on the frames Claude mints without one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_reason: Option<IdleReason>,
     /// Capped at [`DISPLAY_FIELD_CAP`] wherever it is rendered.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     /// The task this teammate was carrying, if it was carrying one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_task_id: Option<String>,
     /// How that task ended.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_status: Option<CompletedStatus>,
     /// Capped at [`DISPLAY_FIELD_CAP`] wherever it is rendered, by §5.3's
     /// second cap.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
 }
 
@@ -152,7 +150,7 @@ pub struct PlanApprovalResponse {
     /// it is the one a reader guesses wrong.
     pub approved: bool,
     /// What the lead wants changed, when it wants something changed.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<String>,
     /// ISO-8601.
     pub timestamp: String,
@@ -160,7 +158,7 @@ pub struct PlanApprovalResponse {
     /// `PermissionMode`: the two are not the same set, and mapping one to the
     /// other is a decision with a refusal in it (D496), which belongs to
     /// whoever applies the frame rather than to the type that carries it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
 }
 
@@ -173,7 +171,7 @@ pub struct ShutdownRequest {
     /// The member name asking.
     pub from: String,
     /// Why, when there is a why.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// ISO-8601.
     pub timestamp: String,
@@ -193,11 +191,11 @@ pub struct ShutdownApproved {
     /// this field with `"leader"` and `"in-process"` sentinels; ganja reads
     /// what it is given and models its own surface as a backend type instead
     /// (§8.4).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
     /// Claude's backend vocabulary — observed as `"tmux"` and
     /// `"in-process"`, and therefore not ganja's [`MemberBackend`].
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_type: Option<String>,
 }
 
@@ -239,15 +237,15 @@ pub struct TaskAssignment {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskCompleted {
     /// Who completed it, when the frame says.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     /// The task. The one field of this frame that is never absent.
     pub task_id: String,
     /// The subject, repeated so a reader needs no lookup.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_subject: Option<String>,
     /// ISO-8601, and optional here where the other frames require it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
 }
 
@@ -283,6 +281,21 @@ pub struct ModeSetRequest {
 /// This family is where Claude's casing splits: it is built by a constructor
 /// rather than by a schema, and the constructor writes snake_case. Kept
 /// verbatim under D494.
+///
+/// # Stricter than the reference attests, deliberately
+///
+/// §5 attests `be` — schema strictness — for the **ten** frames above and
+/// says of this family only that it is constructor-built, so
+/// `deny_unknown_fields` on these four is ganja's choice rather than a
+/// reading. It is kept because the failure it causes is the safe one: an
+/// unknown key from a real `claude` peer makes the *ask* fail to decode,
+/// and a permission ask that does not decode is one nobody is asked about
+/// — where the tolerant reading would let a frame this build only half
+/// understands drive a dialog. [`Frame::reserved_kind`] still recognizes it
+/// by tag, so the message is refused as a frame rather than delivered as
+/// prose either way. Revisit at AC-13's live run against a real `claude`
+/// binary, which is the only thing that can show a key this does not
+/// declare.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionRequest {
@@ -331,24 +344,28 @@ pub struct PermissionResponseBody {
 /// express that shape beside a shared `request_id` through `#[serde(flatten)]`
 /// — which is mutually exclusive with the `deny_unknown_fields` every other
 /// frame here carries. Strictness won: the union becomes a tag and two
-/// optional arms, and [`PermissionResponse::success`] and
-/// [`PermissionResponse::error`] are the only constructors, so no *minted*
-/// value can carry the wrong pair. A **decoded** one still can, because the
-/// wire belongs to somebody else; [`PermissionResponse::is_consistent`]
-/// answers that question for a reader who cares.
+/// optional arms.
+///
+/// The fields are **private**, following [`PeerMessage`]'s rule for the same
+/// reason: a `pub` field is a constructor, and a struct literal writing
+/// `subtype: Success` beside `error: Some(…)` would mint exactly the crossed
+/// pair the union was supposed to make unrepresentable.
+/// [`PermissionResponse::success`] and [`PermissionResponse::error`] are
+/// therefore the only ways to build one, and they cannot cross the arms.
+///
+/// A **decoded** value still can, because the wire belongs to somebody else
+/// and serde reaches the fields whatever their visibility;
+/// [`PermissionResponse::is_consistent`] is what a reader asks about one of
+/// those.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionResponse {
-    /// The request this answers.
-    pub request_id: String,
-    /// Which arm below is the live one.
-    pub subtype: PermissionResponseSubtype,
-    /// Set on the error arm.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Set on the success arm.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response: Option<PermissionResponseBody>,
+    request_id: String,
+    subtype: PermissionResponseSubtype,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response: Option<PermissionResponseBody>,
 }
 
 impl PermissionResponse {
@@ -372,6 +389,30 @@ impl PermissionResponse {
             error: Some(error.into()),
             response: None,
         }
+    }
+
+    /// The request this answers.
+    #[must_use]
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    /// Which arm the frame claims is the live one.
+    #[must_use]
+    pub fn subtype(&self) -> PermissionResponseSubtype {
+        self.subtype
+    }
+
+    /// The reason, on the error arm.
+    #[must_use]
+    pub fn error_message(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// The answer, on the success arm.
+    #[must_use]
+    pub fn response(&self) -> Option<&PermissionResponseBody> {
+        self.response.as_ref()
     }
 
     /// Whether the arms match the tag — true for everything the two
@@ -451,6 +492,13 @@ pub struct SandboxPermissionResponse {
 /// code path from a message to a permission-rule write. The variant exists so
 /// the drop can name what it dropped, and so a body nobody parses cannot
 /// become the reason a frame is mistaken for prose.
+///
+/// One asymmetry follows from the passthrough and is worth naming: decoding
+/// strips the `type` tag before this struct sees it, so a `payload` that
+/// *contains* its own `"type"` key can only have been put there by hand, and
+/// re-encoding such a value writes the tag twice. Nothing in this tree does
+/// that — the frame is never minted here, only decoded and dropped — and no
+/// round trip of a decoded value can reach it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TeamPermissionUpdate {
     /// Whatever the sender put beside the tag, kept verbatim and unread.
@@ -462,9 +510,16 @@ pub struct TeamPermissionUpdate {
 ///
 /// The enum is the anti-spoofing check (§8.4): a validator asks
 /// [`Frame::is_agent_sendable`] once instead of carrying two hardcoded string
-/// lists that can drift apart, and a new variant cannot be added without the
-/// compiler demanding an arm in [`Frame::kind`] and one of the two consts
-/// above growing — both of which the tests then catch.
+/// lists that can drift apart.
+///
+/// A sixteenth variant cannot be classified by accident, and that is the
+/// compiler's doing rather than a review's: [`Frame::kind`] and
+/// [`Frame::is_agent_sendable`] are both exhaustive matches, so adding one
+/// without deciding which reserved set it belongs to does not build. The two
+/// consts are then checked *against* those matches by
+/// `the_two_reserved_sets_are_disjoint_and_total`, which is what keeps the
+/// name lists — the form [`Frame::is_agent_sendable_kind`] and
+/// [`Frame::reserved_kind`] answer in — from drifting away from the types.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Frame {
@@ -530,9 +585,46 @@ impl Frame {
     /// refuses them as *plain text* while accepting them in structured form;
     /// the other five have no legitimate agent sender at all and are refused
     /// with no escape hatch.
+    ///
+    /// Written as an exhaustive match rather than as a lookup in
+    /// [`AGENT_SENDABLE`], because a lookup answers `false` for a name it has
+    /// never heard of — so a sixteenth variant would compile, classify itself
+    /// harness-only without anyone deciding that, and be missed by
+    /// [`Frame::reserved_kind`] at the same time, which is delivery as prose.
+    /// The match makes that a build failure instead.
     #[must_use]
     pub fn is_agent_sendable(&self) -> bool {
-        AGENT_SENDABLE.contains(&self.kind())
+        match self {
+            Self::PermissionRequest(_)
+            | Self::PermissionResponse(_)
+            | Self::SandboxPermissionRequest(_)
+            | Self::SandboxPermissionResponse(_)
+            | Self::ShutdownRequest(_)
+            | Self::ShutdownApproved(_)
+            | Self::TeamPermissionUpdate(_)
+            | Self::ModeSetRequest(_)
+            | Self::PlanApprovalRequest(_)
+            | Self::PlanApprovalResponse(_) => true,
+            Self::IdleNotification(_)
+            | Self::TeammateTerminated(_)
+            | Self::TaskAssignment(_)
+            | Self::TaskCompleted(_)
+            | Self::ShutdownRejected(_) => false,
+        }
+    }
+
+    /// The same question asked of a `type` discriminator rather than of a
+    /// decoded frame.
+    ///
+    /// A validator that has classified some text with [`Frame::reserved_kind`]
+    /// holds a kind and nothing else — the body may be one it cannot decode,
+    /// which is exactly the case rung 7 exists for — so it needs this rather
+    /// than a `contains` of its own on [`AGENT_SENDABLE`]. Answers `false` for
+    /// any name outside the fifteen, which is the same answer as "not
+    /// something an agent may send".
+    #[must_use]
+    pub fn is_agent_sendable_kind(kind: &str) -> bool {
+        AGENT_SENDABLE.contains(&kind)
     }
 
     /// The reserved kind some text names, if it names one (§5.2 rung 7).
@@ -550,10 +642,26 @@ impl Frame {
     ///
     /// The returned name is this module's own `'static` spelling, not a
     /// borrow of the caller's text.
+    ///
+    /// Reads the tag through a struct holding only it, rather than through a
+    /// whole [`serde_json::Value`]: this runs on **every** outbound message,
+    /// most of which are prose, and materializing a megabyte of somebody's
+    /// pasted JSON as a tree to look at one string is a cost with no answer
+    /// in it. The struct declares no other field and denies none, so an object
+    /// with a `type` and anything else beside it still classifies.
     #[must_use]
     pub fn reserved_kind(text: &str) -> Option<&'static str> {
-        let value: serde_json::Value = serde_json::from_str(text).ok()?;
-        let tag = value.as_object()?.get("type")?.as_str()?;
+        /// Everything of a candidate frame this question needs.
+        #[derive(Deserialize)]
+        struct TagOnly {
+            #[serde(rename = "type")]
+            tag: String,
+        }
+
+        // A non-object, an object with no `type`, and one whose `type` is not
+        // a string all fail here — the three cases the doc above promises
+        // answer `None`, answered by the shape rather than by three branches.
+        let TagOnly { tag } = serde_json::from_str(text).ok()?;
 
         AGENT_SENDABLE
             .into_iter()
@@ -573,6 +681,12 @@ impl Frame {
 /// [`LeadFrame::parse`] is the **only** way to build one. The inner field is
 /// private, there is no `From` impl, and there is no `Deserialize` impl —
 /// deserializing one would be a second constructor that never saw a sender.
+///
+/// There is no [`Deref`](std::ops::Deref) either, and for [`PeerMessage`]'s
+/// reason rather than a safety one: reaching the frame goes through
+/// [`LeadFrame::frame`] or [`LeadFrame::into_inner`] by name, so a reviewer
+/// asking "where is lead authority actually spent" greps two identifiers
+/// instead of reading every method call to find the implicit ones.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LeadFrame(Frame);
 
@@ -600,14 +714,6 @@ impl LeadFrame {
     }
 }
 
-impl Deref for LeadFrame {
-    type Target = Frame;
-
-    fn deref(&self) -> &Frame {
-        &self.0
-    }
-}
-
 /// Content authored by another agent.
 ///
 /// §7-5 and §8.4: peer output is **data, never authority**. The original
@@ -617,9 +723,13 @@ impl Deref for LeadFrame {
 /// means asking for [`PeerMessage::body`] by name, which is a thing a reviewer
 /// can grep for, where an `.into()` on the way into a user message is not.
 ///
-/// Construction caps `summary` at [`DISPLAY_FIELD_CAP`] (§5.3), so no path can
-/// emit an unbounded display field — the cap is in the constructor rather than
-/// at each renderer for exactly that reason.
+/// Construction caps `summary` at [`DISPLAY_FIELD_CAP`] (§5.3), so no path
+/// **through this type** can emit an unbounded display field — the cap is in
+/// the constructor rather than at each renderer for exactly that reason. It is
+/// not the only path: `Part::peer` takes whatever summary it is handed, on
+/// purpose, because a stored part must read back as the bytes it was written
+/// as. So a renderer drawing a summary that did not come through here calls
+/// [`cap_for_display`] itself, and the two frontends do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerMessage {
     from: String,
@@ -629,12 +739,21 @@ pub struct PeerMessage {
 
 impl PeerMessage {
     /// Takes a peer's message, capping the one field that is display-only.
+    ///
+    /// Takes the summary owned rather than borrowed, so a caller holding the
+    /// `Option<String>` a frame decoded into hands it over instead of
+    /// `.as_deref()`-ing it into a borrow this constructor would copy anyway.
     #[must_use]
-    pub fn new(from: impl Into<String>, body: impl Into<String>, summary: Option<&str>) -> Self {
+    pub fn new(from: impl Into<String>, body: impl Into<String>, summary: Option<String>) -> Self {
         Self {
             from: from.into(),
             body: body.into(),
-            summary: summary.map(|summary| cap_for_display(summary).to_owned()),
+            summary: summary.map(|mut summary| {
+                // Truncated in place: `cap_for_display` measures where the cut
+                // goes, and the owned string is already here to be cut.
+                summary.truncate(cap_for_display(&summary).len());
+                summary
+            }),
         }
     }
 
@@ -660,11 +779,19 @@ impl PeerMessage {
 
 /// Truncates a display-only field to [`DISPLAY_FIELD_CAP`] characters.
 ///
-/// Counts characters and cuts on a character boundary, so a field of CJK or
-/// emoji is shortened rather than panicked on. Public because it is the one
-/// place the cap lives: [`PeerMessage::new`] applies it to a summary, and
-/// whoever renders an [`IdleNotification::failure_reason`] applies the same
-/// function rather than a second constant of its own.
+/// Counts `char`s and cuts on a `char` boundary, so a field of CJK is
+/// shortened rather than panicked on. A `char` is not a grapheme: a flag or a
+/// ZWJ sequence sitting across the two-hundredth one is cut inside itself and
+/// draws as a different glyph. That is accepted rather than fixed — the cut is
+/// always valid UTF-8 and never panics, and a segmentation dependency to make
+/// the last glyph of a truncated summary prettier is not a trade this crate's
+/// three-entry dependency list should make.
+///
+/// Public because it is the one place the cap lives: [`PeerMessage::new`]
+/// applies it to a summary, and whoever renders an
+/// [`IdleNotification::failure_reason`] — or a summary that reached them by
+/// some other path — applies the same function rather than a second constant
+/// of its own.
 #[must_use]
 pub fn cap_for_display(text: &str) -> &str {
     match text.char_indices().nth(DISPLAY_FIELD_CAP) {
@@ -709,7 +836,7 @@ pub struct MemberView {
     /// The surface it runs on.
     pub backend: MemberBackend,
     /// Its assigned color, where one was assigned.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// Whether this member is the team's lead.
     pub is_lead: bool,
@@ -742,10 +869,10 @@ mod tests {
         AGENT_SENDABLE, CompletedStatus, DISPLAY_FIELD_CAP, Frame, HARNESS_ONLY, HostPattern,
         IdleNotification, IdleReason, LeadFrame, MemberBackend, MemberView, ModeSetRequest,
         PeerMessage, PermissionRequest, PermissionResponse, PermissionResponseBody,
-        PlanApprovalRequest, PlanApprovalResponse, SandboxPermissionRequest,
-        SandboxPermissionResponse, ShutdownApproved, ShutdownRejected, ShutdownRequest,
-        TaskAssignment, TaskCompleted, TeamPermissionUpdate, TeamView, TeammateTerminated,
-        cap_for_display,
+        PermissionResponseSubtype, PlanApprovalRequest, PlanApprovalResponse,
+        SandboxPermissionRequest, SandboxPermissionResponse, ShutdownApproved, ShutdownRejected,
+        ShutdownRequest, TaskAssignment, TaskCompleted, TeamPermissionUpdate, TeamView,
+        TeammateTerminated, cap_for_display,
     };
 
     /// The timestamp every pinned frame carries, so a golden differs from its
@@ -938,41 +1065,74 @@ mod tests {
         );
     }
 
-    /// §5.1's split, as a partition rather than as two lists somebody keeps in
-    /// sync by hand.
+    /// §5.1's split, as a partition — and, since the classification lives in
+    /// [`Frame::is_agent_sendable`]'s exhaustive match, as the check that the
+    /// two name lists still say what the match says.
+    ///
+    /// The direction matters. The match is the authority, because the compiler
+    /// enforces it; the consts are a projection of it into strings, for the
+    /// callers that hold only a kind. So the sets are *derived from the frames*
+    /// here and the consts are compared against them, which is what makes a
+    /// const that fell behind a failure rather than a silent second opinion.
     #[test]
     fn the_two_reserved_sets_are_disjoint_and_total() {
         let frames = every_variant();
-        let sendable: BTreeSet<&str> = AGENT_SENDABLE.into_iter().collect();
-        let harness: BTreeSet<&str> = HARNESS_ONLY.into_iter().collect();
 
-        assert_eq!(sendable.len(), AGENT_SENDABLE.len(), "no name repeats");
-        assert_eq!(harness.len(), HARNESS_ONLY.len(), "no name repeats");
+        let (sendable, harness): (BTreeSet<&str>, BTreeSet<&str>) = frames
+            .iter()
+            .map(|frame| (frame.kind(), frame.is_agent_sendable()))
+            .fold(
+                (BTreeSet::new(), BTreeSet::new()),
+                |(mut sendable, mut harness), (kind, may_send)| {
+                    if may_send {
+                        sendable.insert(kind);
+                    } else {
+                        harness.insert(kind);
+                    }
+                    (sendable, harness)
+                },
+            );
+
+        let kinds: BTreeSet<&str> = frames.iter().map(Frame::kind).collect();
+        assert_eq!(kinds.len(), frames.len(), "no two variants share a kind");
         assert!(
             sendable.is_disjoint(&harness),
             "a frame an agent may send is a frame the harness does not own alone"
         );
-
-        let kinds: BTreeSet<&str> = frames.iter().map(Frame::kind).collect();
-        assert_eq!(kinds.len(), frames.len(), "no two variants share a kind");
         assert_eq!(
-            kinds,
-            sendable.union(&harness).copied().collect(),
-            "the two sets together are exactly the variants"
+            sendable.len() + harness.len(),
+            kinds.len(),
+            "every variant lands in exactly one set"
         );
 
+        // The consts, against the match rather than beside it.
+        assert_eq!(
+            sendable,
+            AGENT_SENDABLE.into_iter().collect(),
+            "AGENT_SENDABLE has drifted from what the match classifies"
+        );
+        assert_eq!(
+            harness,
+            HARNESS_ONLY.into_iter().collect(),
+            "HARNESS_ONLY has drifted from what the match classifies"
+        );
+        assert_eq!(AGENT_SENDABLE.len(), sendable.len(), "no name repeats");
+        assert_eq!(HARNESS_ONLY.len(), harness.len(), "no name repeats");
+
+        // And the by-kind form answers identically for every one of them, so a
+        // validator holding only a string is never told something else.
         for frame in &frames {
             let kind = frame.kind();
             assert_eq!(
+                Frame::is_agent_sendable_kind(kind),
                 frame.is_agent_sendable(),
-                sendable.contains(kind),
-                "{kind} answers its own set"
-            );
-            assert!(
-                sendable.contains(kind) != harness.contains(kind),
-                "{kind} belongs to exactly one set"
+                "{kind} answers differently by kind than by frame"
             );
         }
+        assert!(
+            !Frame::is_agent_sendable_kind("message"),
+            "a name outside the fifteen is not something an agent may send"
+        );
     }
 
     /// Rung 7 refuses frame-*shaped* text, which is not the same as text that
@@ -1023,7 +1183,7 @@ mod tests {
         let lead = LeadFrame::parse("team-lead", "team-lead", frame.clone())
             .expect("the lead's own frame parses");
         assert_eq!(lead.frame(), &frame);
-        assert_eq!(lead.kind(), "mode_set_request");
+        assert_eq!(lead.frame().kind(), "mode_set_request");
         assert_eq!(lead.into_inner(), frame);
     }
 
@@ -1031,7 +1191,7 @@ mod tests {
     #[test]
     fn a_peer_messages_summary_is_capped_at_the_display_length() {
         let long = "e".repeat(DISPLAY_FIELD_CAP * 2);
-        let message = PeerMessage::new("w1", long.clone(), Some(&long));
+        let message = PeerMessage::new("w1", long.clone(), Some(long.clone()));
 
         assert_eq!(message.from(), "w1");
         assert_eq!(
@@ -1058,8 +1218,10 @@ mod tests {
         assert_eq!(cap_for_display(&exact), exact);
     }
 
-    /// The strictness the reference calls out (`be`), and the one frame that
-    /// deliberately does not have it.
+    /// The strictness the reference attests for the ten §5 frames (`be`), the
+    /// same strictness carried further onto the constructor-built permission
+    /// family by this crate's own choice (see [`PermissionRequest`]), and the
+    /// one frame that deliberately has none of it.
     #[test]
     fn a_strict_frame_refuses_a_key_it_does_not_declare() {
         assert!(
@@ -1089,23 +1251,36 @@ mod tests {
         assert_eq!(update.payload.len(), 2);
     }
 
-    /// The two arms of the one frame serde cannot express as a union.
+    /// The two arms of the one frame serde cannot express as a union — which
+    /// the two constructors are therefore the only way to build, since the
+    /// fields are private precisely so a struct literal cannot cross them.
     #[test]
     fn a_permission_response_carries_one_arm_and_says_which() {
         let success = PermissionResponse::success(
             "req-3",
             PermissionResponseBody {
-                updated_input: serde_json::json!({}),
+                updated_input: serde_json::json!({"command": "ls"}),
                 permission_updates: Vec::new(),
             },
         );
         assert!(success.is_consistent());
+        assert_eq!(success.request_id(), "req-3");
+        assert_eq!(success.subtype(), PermissionResponseSubtype::Success);
+        assert_eq!(success.error_message(), None);
+        assert_eq!(
+            success.response().map(|body| &body.updated_input),
+            Some(&serde_json::json!({"command": "ls"}))
+        );
 
         let error = PermissionResponse::error("req-3", "denied");
         assert!(error.is_consistent());
+        assert_eq!(error.subtype(), PermissionResponseSubtype::Error);
+        assert_eq!(error.error_message(), Some("denied"));
+        assert!(error.response().is_none());
 
-        // A frame off the wire may still disagree with itself, which is why
-        // the question is answerable rather than assumed.
+        // A frame off the wire may still disagree with itself — serde reaches
+        // the fields whatever their visibility — which is why the question is
+        // answerable rather than assumed.
         let crossed: PermissionResponse =
             serde_json::from_str(r#"{"request_id":"req-3","subtype":"success","error":"denied"}"#)
                 .expect("the shape decodes");
