@@ -355,7 +355,8 @@ async fn a_structured_frame_is_refused_on_the_socket_post() {
         "a bare name is refused as a peer identity: {said}"
     );
 
-    // And a member nobody has.
+    // And a name that is not the lead's — the socket delivers to the
+    // session, which is its lead (M4), and says so.
     let refused = client
         .post(format!("{SOCKET_URL}/team/nobody/message"))
         .json(&serde_json::json!({
@@ -365,7 +366,12 @@ async fn a_structured_frame_is_refused_on_the_socket_post() {
         .send()
         .await
         .expect("the socket answers");
-    assert_eq!(refused.status(), 404);
+    assert_eq!(refused.status(), 400);
+    let said = refused.text().await.expect("a body");
+    assert!(
+        said.contains("for that session's lead") && said.contains("team-lead"),
+        "the refusal names the lead: {said}"
+    );
 
     assert!(
         lead_inbox(&registry).is_empty(),

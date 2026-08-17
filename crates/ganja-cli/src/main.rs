@@ -1435,10 +1435,30 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
 
     println!("{:<36}  SOCKET", "SESSION");
     for (session, path) in live {
-        println!("{session:<36}  {}", path.display());
+        println!("{:<36}  {}", printable_session(&session), path.display());
     }
 
     Ok(())
+}
+
+/// The session column, safe to print: what a socket answered for its
+/// session id is another process's word — a listener that is not a session
+/// could put an escape sequence there and drive the terminal through this
+/// listing — so anything that is not a printable ASCII character is shown
+/// as `?`, and the column is cut to an id's width. An id this build minted
+/// is hex and dashes and passes untouched.
+fn printable_session(session: &str) -> String {
+    session
+        .chars()
+        .take(36)
+        .map(|character| {
+            if character.is_ascii_graphic() {
+                character
+            } else {
+                '?'
+            }
+        })
+        .collect()
 }
 
 /// Whether `directory` is a real directory of ours at exactly `0700` — the
@@ -2139,9 +2159,32 @@ mod tests {
     use ganja_protocol::Usage;
 
     use super::{
-        Cli, Command, UNTITLED, age, billed_tokens, matching, per_mtok, providers, resolve_filter,
-        title,
+        Cli, Command, UNTITLED, age, billed_tokens, matching, per_mtok, printable_session,
+        providers, resolve_filter, title,
     };
+
+    /// **L4 of the W7 boundary review**: the session column of `sessions
+    /// --live` is a peer's word, and a peer that is not a session could put
+    /// an escape sequence in it; the column shows an id untouched and
+    /// anything else as `?` per character, cut to an id's width.
+    #[test]
+    fn a_peers_session_id_is_printed_plain_or_not_at_all() {
+        assert_eq!(
+            printable_session("01998ad0-0000-7000-8000-00000000d505"),
+            "01998ad0-0000-7000-8000-00000000d505",
+            "an id this build mints passes untouched"
+        );
+        assert_eq!(
+            printable_session("\x1b[31mred\x1b[0m\n"),
+            "?[31mred?[0m?",
+            "escapes and newlines are shown as ?"
+        );
+        assert_eq!(
+            printable_session(&"a".repeat(100)).chars().count(),
+            36,
+            "and the column is cut to an id's width"
+        );
+    }
 
     /// The log's name carries the machine's own civil date, zero-padded so
     /// the directory sorts by age (2026-08-15, retiring the stock appender's
