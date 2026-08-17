@@ -548,7 +548,10 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
     let Event::PermissionRequested { id: asked_id, .. } = &request else {
         unreachable!("selected above");
     };
-    assert_eq!(id, asked_id, "the dialog id is the member's own request id");
+    assert_ne!(
+        id, asked_id,
+        "the dialog id is the lead's own mint, never the member's request id"
+    );
     assert_eq!(tool, "bash");
 
     // 3. The person answers at the lead's dialog.
@@ -579,7 +582,10 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
     let Resolved::Answered { id, reply } = asks.resolve(lead_frame) else {
         panic!("the answer names the ask that is waiting");
     };
-    assert_eq!(&id, asked_id);
+    assert_eq!(
+        &id, asked_id,
+        "the answer names the member's own request id, so its own dialog is the one answered"
+    );
     assert_eq!(reply, PermissionReply::Once);
     assert_eq!(asks.waiting(), 0);
     engine

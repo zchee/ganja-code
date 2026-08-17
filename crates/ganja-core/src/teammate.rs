@@ -689,7 +689,12 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
     /// A hook rather than a watch for the record from inside `spawn`, because
     /// a call has an unwind path and a poll does not: a launch line that could
     /// not be typed after the record was written would otherwise be a
-    /// registered member holding an idle shell that nothing cleans up.
+    /// registered member holding an idle shell that nothing cleans up. That is
+    /// the intent, not yet a description of the shipped pane backend: this
+    /// build's [`crate::teammate::pane::GanjaPane`] still launches off its own
+    /// internal record-watch — typing the line only once the team file names
+    /// the member — and this hook is the migration target it moves onto
+    /// (bead `ganja-code-ipg`).
     ///
     /// # Errors
     ///
