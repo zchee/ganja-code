@@ -23,17 +23,17 @@
 //! Every hold here is a bare `create_dir`, never ganja's own `acquire`, because
 //! a bare `mkdir` is precisely what the peer this protocol exists for does.
 
+mod support;
+
 use std::{
     fs::{self, File},
-    path::{Path, PathBuf},
+    path::Path,
     time::{Duration, Instant, SystemTime},
 };
 
 use ganja_team::{
-    MailboxMessage, MemberName, TeamName, TeamsRoot,
     lock::{self, LockError},
     mailbox::{self, MailboxError},
-    record,
 };
 
 /// What a fully contended acquire sleeps through: 5 + 10 + 20 + 40 + 80 +
@@ -52,15 +52,16 @@ const LADDER: Duration = Duration::from_nanos(654_999_997);
 #[cfg(unix)]
 #[test]
 fn a_lock_directory_older_than_ten_seconds_is_broken_and_the_write_proceeds() {
-    let (_home, inbox) = inbox("crashed");
-    mailbox::write(&inbox, message("first")).expect("a message writes");
+    let (_home, root, team) = support::root("session-224cbeab");
+    let inbox = support::inbox_of(&root, &team, "crashed");
+    mailbox::write(&inbox, support::message("first")).expect("a message writes");
 
-    let held = lock_of(&inbox);
+    let held = support::naive_lock_of(&inbox);
     fs::create_dir(&held).expect("a peer takes the lock");
     backdate(&held, Duration::from_secs(30));
 
     let started = Instant::now();
-    mailbox::write(&inbox, message("second")).expect("a stale lock does not stop a write");
+    mailbox::write(&inbox, support::message("second")).expect("a stale lock does not stop a write");
     let waited = started.elapsed();
 
     assert!(
@@ -74,10 +75,11 @@ fn a_lock_directory_older_than_ten_seconds_is_broken_and_the_write_proceeds() {
 
 #[test]
 fn a_fresh_lock_directory_held_by_a_peer_is_waited_for_not_broken() {
-    let (_home, inbox) = inbox("busy");
-    mailbox::write(&inbox, message("first")).expect("a message writes");
+    let (_home, root, team) = support::root("session-224cbeab");
+    let inbox = support::inbox_of(&root, &team, "busy");
+    mailbox::write(&inbox, support::message("first")).expect("a message writes");
 
-    let held = lock_of(&inbox);
+    let held = support::naive_lock_of(&inbox);
     fs::create_dir(&held).expect("a peer takes the lock");
     let taken = fs::metadata(&held)
         .expect("the lock is there")
@@ -85,7 +87,8 @@ fn a_fresh_lock_directory_held_by_a_peer_is_waited_for_not_broken() {
         .expect("a lock has a modification time");
 
     let started = Instant::now();
-    let refusal = mailbox::write(&inbox, message("second")).expect_err("a held inbox refuses");
+    let refusal =
+        mailbox::write(&inbox, support::message("second")).expect_err("a held inbox refuses");
     let waited = started.elapsed();
 
     assert!(
@@ -121,11 +124,12 @@ fn a_fresh_lock_directory_held_by_a_peer_is_waited_for_not_broken() {
 #[cfg(unix)]
 #[test]
 fn the_lock_is_a_directory_never_a_file() {
-    let (home, inbox) = inbox("shaped");
-    mailbox::write(&inbox, message("first")).expect("a message writes");
+    let (_home, root, team) = support::root("session-224cbeab");
+    let inbox = support::inbox_of(&root, &team, "shaped");
+    mailbox::write(&inbox, support::message("first")).expect("a message writes");
 
     // What ganja itself takes is a directory, and it is gone when the hold ends.
-    let held = lock_of(&inbox);
+    let held = support::naive_lock_of(&inbox);
     let hold = lock::acquire(&inbox).expect("an unheld inbox is takeable");
     assert!(held.is_dir(), "an acquire makes a directory, not a file");
     // The naive spelling above and the protocol's own realpath one name one
@@ -133,7 +137,7 @@ fn the_lock_is_a_directory_never_a_file() {
     // `TMPDIR` that is a symlink) contend with ganja rather than beside it.
     assert_eq!(
         held.canonicalize().expect("the lock is real"),
-        lock_of(&inbox.canonicalize().expect("the inbox is real")),
+        support::naive_lock_of(&inbox.canonicalize().expect("the inbox is real")),
         "the two spellings are the same lock",
     );
     assert!(
@@ -150,12 +154,13 @@ fn the_lock_is_a_directory_never_a_file() {
     // would leave. Fresh, it reads as held — `mkdir` answers `EEXIST` for a file
     // exactly as it does for a directory — so the ladder runs and the refusal is
     // the ordinary one.
-    let contested = inbox_in(home.path(), "filed");
-    mailbox::write(&contested, message("first")).expect("a message writes");
-    let file = lock_of(&contested);
+    let contested = support::inbox_of(&root, &team, "filed");
+    mailbox::write(&contested, support::message("first")).expect("a message writes");
+    let file = support::naive_lock_of(&contested);
     fs::write(&file, "1234\n").expect("a lock-shaped file is writable");
 
-    let refusal = mailbox::write(&contested, message("second")).expect_err("a fresh file holds");
+    let refusal =
+        mailbox::write(&contested, support::message("second")).expect_err("a fresh file holds");
     assert!(
         matches!(refusal, MailboxError::Lock(LockError::Held { .. })),
         "{refusal:?}",
@@ -166,7 +171,8 @@ fn the_lock_is_a_directory_never_a_file() {
     // its acquire errors out. Ganja reports the same thing rather than unlinking
     // somebody else's file because the name matched.
     backdate(&file, Duration::from_secs(30));
-    let refusal = mailbox::write(&contested, message("second")).expect_err("a file is not a lock");
+    let refusal =
+        mailbox::write(&contested, support::message("second")).expect_err("a file is not a lock");
     assert!(
         matches!(refusal, MailboxError::Lock(LockError::NotADirectory { .. })),
         "{refusal:?}",
@@ -184,29 +190,6 @@ fn the_lock_is_a_directory_never_a_file() {
         1,
         "and neither was the inbox",
     );
-}
-
-/// A temporary home, and one member's inbox path under it. The inbox itself is
-/// made by the first write, which is what seeds it.
-fn inbox(member: &str) -> (tempfile::TempDir, PathBuf) {
-    let home = tempfile::tempdir().expect("a temp directory");
-    let path = inbox_in(home.path(), member);
-
-    (home, path)
-}
-
-/// The same path, under a home somebody else is already holding.
-fn inbox_in(home: &Path, member: &str) -> PathBuf {
-    let root = TeamsRoot::new(home.join("teams"));
-    let team = TeamName::parse("session-224cbeab").expect("a valid team name");
-    let member = MemberName::parse(member).expect("a valid member name");
-
-    root.inbox_path(&team, &member)
-}
-
-/// `${path}.lock`, as a peer that canonicalized nothing would spell it.
-fn lock_of(inbox: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.lock", inbox.display()))
 }
 
 /// Makes a lock look `by` older than it is.
@@ -227,9 +210,4 @@ fn backdate(path: &Path, by: Duration) {
     handle
         .set_modified(SystemTime::now() - by)
         .expect("a lock's modification time is settable");
-}
-
-/// One message, timestamped now.
-fn message(text: &str) -> MailboxMessage {
-    MailboxMessage::new("team-lead", text, record::now_iso8601())
 }

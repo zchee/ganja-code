@@ -55,7 +55,7 @@ use tempfile::NamedTempFile;
 
 use crate::{
     lock::{self, LockError},
-    record::{MESSAGE_TYPE, MESSAGE_VERSION, MailboxMessage, document},
+    record::{MESSAGE_TYPE, MESSAGE_VERSION, MailboxMessage, SCHEMA_KEYS, document, shadowed},
 };
 
 /// What a brand-new inbox holds (§2.5's `writeExclusive(path, "[]")`).
@@ -292,20 +292,13 @@ pub fn write(path: &Path, mut message: MailboxMessage) -> Result<String, Mailbox
         .unwrap_or_else(ganja_protocol::uuidv7);
     message.msg_id = Some(msg_id.clone());
 
-    // A passthrough map holding a key the schema also declares would emit that
-    // key twice, and a reader taking the last one would read a body its sender
-    // never wrote. Nothing in this build puts one there; a document read off
-    // disk cannot, because a known key is captured by its field before the
-    // flatten map ever sees it. It is checked anyway, because the cost of
-    // being wrong is a corrupt shared file.
-    let shadowed: Vec<String> = message
-        .extra
-        .keys()
-        .filter(|key| SCHEMA_KEYS.contains(&key.as_str()))
-        .map(|key| format!("{key}: the schema declares this key, so it may not also be carried"))
-        .collect();
-    if !shadowed.is_empty() {
-        return Err(MailboxError::SchemaInvalid { issues: shadowed });
+    // The guard `record::shadowed` documents: a schema key arriving through
+    // the passthrough would be emitted twice. Nothing in this build puts one
+    // there, and it is checked anyway because the cost of being wrong is a
+    // corrupt shared file.
+    let issues = shadowed(&message.extra, &SCHEMA_KEYS);
+    if !issues.is_empty() {
+        return Err(MailboxError::SchemaInvalid { issues });
     }
 
     update(path, move |messages| messages.push(message))?;
@@ -424,24 +417,6 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
     Ok(())
 }
-
-/// The schema's own keys (§2.3), which a passthrough map may not shadow.
-///
-/// Tied to [`MailboxMessage`]'s declaration and to [`validate`]'s field lists by
-/// `the_schema_key_list_is_exactly_what_a_message_serializes`, because all three
-/// are hand-written and a tenth field would otherwise be governed by none of
-/// them.
-const SCHEMA_KEYS: [&str; 9] = [
-    "type",
-    "from",
-    "text",
-    "timestamp",
-    "read",
-    "color",
-    "summary",
-    "msgV",
-    "msg_id",
-];
 
 /// §2.4's `safeParse`, in ganja's vocabulary.
 ///
@@ -641,16 +616,7 @@ fn first_report(reported: &mut HashSet<u64>, key: u64) -> bool {
 
 /// The first `cap` bytes of `text`, cut on a character boundary.
 fn clamp(text: &str, cap: usize) -> &str {
-    if text.len() <= cap {
-        return text;
-    }
-
-    let mut end = cap;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    &text[..end]
+    &text[..text.floor_char_boundary(cap)]
 }
 
 #[cfg(test)]
@@ -663,7 +629,7 @@ mod tests {
         Contents, MailboxError, first_report, identity, prune_delivered, read, seed, validate,
         write,
     };
-    use crate::record::MailboxMessage;
+    use crate::record::{MailboxMessage, SCHEMA_KEYS};
 
     const WHEN: &str = "2026-08-17T00:00:00.000Z";
 
@@ -672,6 +638,24 @@ mod tests {
         let path = home.path().join("teams/t/inboxes/worker.json");
 
         (home, path)
+    }
+
+    /// The body of the entry [`damaged_pair`] plants beside a clean one.
+    const DAMAGED_BODY: &str = "s3cret-body";
+
+    /// An inbox holding one entry that reads and one that does not — its
+    /// `timestamp` is a number — with [`DAMAGED_BODY`] in the damaged one.
+    fn damaged_pair(path: &std::path::Path) {
+        seed(path).expect("the inbox seeds");
+        fs::write(
+            path,
+            serde_json::to_string(&json!([
+                {"from": "w", "text": "kept", "timestamp": WHEN},
+                {"from": "w", "text": DAMAGED_BODY, "timestamp": 7},
+            ]))
+            .expect("the fixture encodes"),
+        )
+        .expect("the inbox is writable");
     }
 
     #[test]
@@ -788,8 +772,10 @@ mod tests {
         assert_eq!(
             issues,
             [
-                "text: the schema declares this key, so it may not also be carried".to_owned(),
-                "read: the schema declares this key, so it may not also be carried".to_owned(),
+                "text: the shape declares this key, so a passthrough map may not also carry it"
+                    .to_owned(),
+                "read: the shape declares this key, so a passthrough map may not also carry it"
+                    .to_owned(),
             ]
         );
 
@@ -830,16 +816,7 @@ mod tests {
     #[test]
     fn a_dropped_entry_names_the_field_and_never_the_value() {
         let (_home, path) = inbox();
-        seed(&path).expect("the inbox seeds");
-        fs::write(
-            &path,
-            serde_json::to_string(&json!([
-                {"from": "w", "text": "kept", "timestamp": WHEN},
-                {"from": "w", "text": "s3cret-body", "timestamp": 7},
-            ]))
-            .expect("the fixture encodes"),
-        )
-        .expect("the inbox is writable");
+        damaged_pair(&path);
 
         let held = read(&path).expect("the inbox reads");
         assert_eq!(held.valid.len(), 1);
@@ -847,7 +824,7 @@ mod tests {
         assert_eq!(held.reports.len(), 1);
         assert!(held.reports[0].contains("timestamp: expected a string, found a number"));
         assert!(
-            !held.reports[0].contains("s3cret-body"),
+            !held.reports[0].contains(DAMAGED_BODY),
             "a drop report names fields and types, never a body: {}",
             held.reports[0]
         );
@@ -928,14 +905,14 @@ mod tests {
 
         assert_eq!(
             fields.keys().map(String::as_str).collect::<HashSet<_>>(),
-            super::SCHEMA_KEYS.iter().copied().collect::<HashSet<_>>(),
+            SCHEMA_KEYS.iter().copied().collect::<HashSet<_>>(),
             "every declared field is a schema key and every schema key is a field",
         );
 
         // And every one of them is a key `validate` actually checks: give each
         // in turn a type no field of the schema accepts, and the refusal has to
         // name that key.
-        for key in super::SCHEMA_KEYS {
+        for key in SCHEMA_KEYS {
             let mut broken = fields.clone();
             broken[key] = json!([]);
             let refusal = super::validate(&serde_json::Value::Object(broken))
@@ -950,31 +927,14 @@ mod tests {
     #[test]
     fn a_write_also_deletes_a_damaged_neighbour() {
         let (_home, path) = inbox();
-        seed(&path).expect("the inbox seeds");
-        fs::write(
-            &path,
-            serde_json::to_string(&json!([
-                {"from": "w", "text": "kept", "timestamp": WHEN},
-                {"from": "w", "text": "damaged-neighbour", "timestamp": 7},
-            ]))
-            .expect("the fixture encodes"),
-        )
-        .expect("the inbox is writable");
+        damaged_pair(&path);
 
-        // A read reports the damage, counts it, and changes nothing.
-        let held = read(&path).expect("the inbox reads");
-        assert_eq!(held.valid.len(), 1);
-        assert_eq!(held.dropped, 1);
-        assert_eq!(held.reports.len(), 1);
-        assert!(
-            held.reports[0].contains("timestamp: expected a string, found a number"),
-            "{:?}",
-            held.reports[0]
-        );
+        // A read changes nothing.
+        read(&path).expect("the inbox reads");
         assert!(
             fs::read_to_string(&path)
                 .expect("the inbox is readable")
-                .contains("damaged-neighbour"),
+                .contains(DAMAGED_BODY),
             "a read is not a rewrite",
         );
 
@@ -985,7 +945,7 @@ mod tests {
 
         let after = fs::read_to_string(&path).expect("the inbox is readable");
         assert!(
-            !after.contains("damaged-neighbour"),
+            !after.contains(DAMAGED_BODY),
             "a write rewrites only what read cleanly, so the damaged entry is deleted: {after}",
         );
         let held = read(&path).expect("the inbox reads");
@@ -998,6 +958,33 @@ mod tests {
             ["kept", "new"],
             "the readable neighbour and the new message both survive, in order",
         );
+    }
+
+    #[test]
+    fn a_report_key_is_clamped_on_a_character_boundary() {
+        // Three-byte characters, so the cap falls inside one: 2048 is not a
+        // multiple of three, and a byte-indexed cut there would panic.
+        let wide = "€".repeat(1_000);
+        let cut = super::clamp(&wide, super::REPORT_KEY_CAP);
+        assert_eq!(cut.len(), 2_046);
+        assert!(cut.chars().all(|character| character == '€'));
+        assert_eq!(super::clamp("short", super::REPORT_KEY_CAP), "short");
+
+        // And through the door that clamps: an entry longer than the cap with
+        // such a character straddling it is dropped and reported, not a panic.
+        // The raw entry is what `report` clamps, so it is the raw entry whose
+        // cap must fall mid-character.
+        let entry = format!(r#"{{"from":"ww","text":"{wide}","timestamp":7}}"#);
+        assert!(
+            !entry.is_char_boundary(super::REPORT_KEY_CAP),
+            "the fixture straddles the cap"
+        );
+        let (_home, path) = inbox();
+        seed(&path).expect("the inbox seeds");
+        fs::write(&path, format!("[{entry}]")).expect("the inbox is writable");
+        let held = read(&path).expect("the inbox reads");
+        assert_eq!(held.dropped, 1);
+        assert_eq!(held.reports.len(), 1);
     }
 
     #[test]

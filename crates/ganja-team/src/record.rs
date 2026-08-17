@@ -334,13 +334,34 @@ const TEAM_FILE_KEYS: [&str; 5] = [
     "members",
 ];
 
-/// Refuses a passthrough key that a declared field already spells.
+/// Every key a [`MailboxMessage`] emits (§2.3), and so the ones a message's
+/// passthrough map may not carry.
 ///
-/// The same guard [`crate::mailbox::write`] takes before it touches an inbox,
-/// and for the same reason: a map holding a key the shape also declares would
-/// emit that key **twice**, and a reader taking the last one would read
-/// something the writer never meant. JSON does not forbid it and `serde_json`
-/// will happily write it, so the refusal has to be here.
+/// Tied to that struct's declaration and to `mailbox::validate`'s field lists
+/// by `the_schema_key_list_is_exactly_what_a_message_serializes`, because all
+/// three are hand-written and a tenth field would otherwise be governed by none
+/// of them.
+pub(crate) const SCHEMA_KEYS: [&str; 9] = [
+    "type",
+    "from",
+    "text",
+    "timestamp",
+    "read",
+    "color",
+    "summary",
+    "msgV",
+    "msg_id",
+];
+
+/// The passthrough keys a declared field already spells, each as the sentence
+/// the refusal carries.
+///
+/// The guard [`crate::mailbox::write`] takes before it touches an inbox and
+/// the two [`Serialize`] impls below take before they emit a byte, for one
+/// reason: a map holding a key the shape also declares would emit that key
+/// **twice**, and a reader taking the last one would read something the writer
+/// never meant. JSON does not forbid it and `serde_json` will happily write it,
+/// so the refusal has to be here.
 ///
 /// Unreachable from a document read off disk — a declared key is captured by its
 /// field before the flatten map ever sees it — and unreachable from either
@@ -348,19 +369,28 @@ const TEAM_FILE_KEYS: [&str; 5] = [
 /// way to get here is hand-building a record, the cost of being wrong is a
 /// corrupt file in a directory somebody else is reading, and the check is a
 /// lookup against a fixed list.
+pub(crate) fn shadowed(extra: &IndexMap<String, Value>, declared: &[&str]) -> Vec<String> {
+    extra
+        .keys()
+        .filter(|key| declared.contains(&key.as_str()))
+        .map(|key| {
+            format!(
+                "{key}: the shape declares this key, so a passthrough map may not also carry it"
+            )
+        })
+        .collect()
+}
+
+/// [`shadowed`], as the error a [`Serialize`] impl answers with — the first
+/// offender, since a serializer error carries one sentence.
 fn refuse_shadowed<E>(extra: &IndexMap<String, Value>, declared: &[&str]) -> Result<(), E>
 where
     E: ser::Error,
 {
-    for key in extra.keys() {
-        if declared.contains(&key.as_str()) {
-            return Err(E::custom(format!(
-                "{key}: the shape declares this key, so a passthrough map may not also carry it"
-            )));
-        }
+    match shadowed(extra, declared).into_iter().next() {
+        Some(first) => Err(E::custom(first)),
+        None => Ok(()),
     }
-
-    Ok(())
 }
 
 /// The two orders of §2.2, chosen by the record's own shape.

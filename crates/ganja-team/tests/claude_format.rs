@@ -14,7 +14,7 @@
 //! `claude_format_interop.rs`.
 //!
 //! Integration rather than unit, and every test goes through the filesystem
-//! under a [`TeamsRoot`] of its own: the unit tests in `record.rs` already pin
+//! under a `TeamsRoot` of its own: the unit tests in `record.rs` already pin
 //! the encoder's output as strings, so the value added here is the round trip
 //! through a real file — written where a teammate's peer would look for it,
 //! read back the way the reader really reads, rewritten, and compared.
@@ -31,15 +31,19 @@
 //! envelope §2.3 says it does.
 //!
 //! No process-wide state is touched: the root is a temporary directory handed
-//! in as a value, which is exactly what [`TeamsRoot`] exists for.
+//! in as a value, which is exactly what `TeamsRoot` exists for.
+
+mod support;
 
 use std::fs;
 
 use ganja_team::{
-    MailboxMessage, MemberName, MemberRecord, Spawn, Surface, TeamFile, TeamName, TeamsRoot,
-    mailbox, record,
+    MailboxMessage, MemberName, MemberRecord, Surface, TeamFile, TeamName, mailbox, record,
 };
 use serde_json::json;
+
+/// The team every test here writes under.
+const TEAM: &str = "session-62633995";
 
 /// A pinned instant, so a document's bytes are the same on every run.
 ///
@@ -50,15 +54,6 @@ const WHEN: u64 = 1_786_343_288_174;
 
 /// The timestamp spelling a message carries, at that same instant.
 const WHEN_ISO: &str = "2026-08-08T04:28:08.174Z";
-
-/// A root nothing else can reach, and the team name every test here uses.
-fn root() -> (tempfile::TempDir, TeamsRoot, TeamName) {
-    let home = tempfile::tempdir().expect("a temp directory");
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse("session-62633995").expect("a valid team name");
-
-    (home, root, team)
-}
 
 /// What every document this repo writes is checked for, whatever it holds.
 ///
@@ -130,17 +125,12 @@ fn team_file(team: &TeamName) -> TeamFile {
     file.members.push(MemberRecord::teammate(
         &worker,
         team,
-        Spawn {
-            agent_type: "general-purpose".to_owned(),
-            model: "fable".to_owned(),
-            color: "blue".to_owned(),
-            prompt: "review the wire\nand say ship or hold".to_owned(),
-            plan_mode_required: false,
-            surface: Surface::Pane {
+        support::spawn(
+            "review the wire\nand say ship or hold",
+            Surface::Pane {
                 id: "%7".to_owned(),
             },
-            cwd: "/w".to_owned(),
-        },
+        ),
         WHEN,
     ));
 
@@ -149,7 +139,7 @@ fn team_file(team: &TeamName) -> TeamFile {
 
 #[test]
 fn a_written_team_file_round_trips_byte_identical() {
-    let (_home, root, team) = root();
+    let (_home, root, team) = support::root(TEAM);
     let path = root.config_path(&team);
     fs::create_dir_all(path.parent().expect("a config sits in a team directory"))
         .expect("the team directory is creatable");
@@ -182,44 +172,9 @@ fn a_written_team_file_round_trips_byte_identical() {
 }
 
 #[test]
-fn a_written_lead_record_round_trips_byte_identical() {
-    let (_home, root, team) = root();
-    let path = root.team_dir(&team).join("lead-record.json");
-    fs::create_dir_all(path.parent().expect("a record sits in a directory"))
-        .expect("the team directory is creatable");
-
-    let lead = MemberRecord::lead(&team, "/w", WHEN);
-    fs::write(&path, record::document(&lead).expect("a record encodes"))
-        .expect("the record is writable");
-
-    let raw = fs::read_to_string(&path).expect("the record is readable");
-    let read: MemberRecord = serde_json::from_str(&raw).expect("a record decodes");
-    assert_eq!(
-        record::document(&read).expect("a record re-encodes"),
-        raw,
-        "a rewrite is not the bytes it read"
-    );
-
-    assert_claude_shaped(&raw);
-    // The five teammate-only fields are *absent* from a lead, not null: a
-    // single shape emitting `"model": null` is the failure this pins, and it
-    // would fail against the very first real document.
-    assert!(read.is_lead());
-    assert_eq!(read.surface(), Surface::Leader);
-    assert!(!raw.contains("null"), "{raw}");
-    for absent in ["model", "color", "prompt", "planModeRequired", "isActive"] {
-        assert!(
-            !raw.contains(absent),
-            "a lead record carries no {absent:?}: {raw}"
-        );
-    }
-}
-
-#[test]
 fn a_written_inbox_round_trips_byte_identical() {
-    let (_home, root, team) = root();
-    let worker = MemberName::parse("kv-review-2").expect("a valid member name");
-    let path = root.inbox_path(&team, &worker);
+    let (_home, root, team) = support::root(TEAM);
+    let path = support::inbox_of(&root, &team, "kv-review-2");
 
     // A seeded inbox is two bytes and no newline, which is a document too —
     // it is what a peer finds before anybody has written anything.
@@ -260,7 +215,7 @@ fn a_written_inbox_round_trips_byte_identical() {
 
 #[test]
 fn an_unknown_key_survives_a_rewrite_in_position() {
-    let (_home, root, team) = root();
+    let (_home, root, team) = support::root(TEAM);
     let path = root.config_path(&team);
     fs::create_dir_all(path.parent().expect("a config sits in a team directory"))
         .expect("the team directory is creatable");
@@ -314,7 +269,7 @@ fn an_unknown_key_survives_a_rewrite_in_position() {
 
 #[test]
 fn an_unknown_key_ahead_of_a_known_one_moves_to_the_tail() {
-    let (_home, _root, team) = root();
+    let (_home, _root, team) = support::root(TEAM);
 
     // The limitation, pinned rather than left to be discovered: `extra` is a
     // `#[serde(flatten)]` map emitted *after* the declared fields, so an

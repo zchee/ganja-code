@@ -16,9 +16,11 @@
 //! The child's env is set on the `Command`, never on this process, so nothing
 //! here mutates process-wide state and the file stays honest about that too.
 
+mod support;
+
 use std::{env, path::PathBuf, process::Command};
 
-use ganja_team::{MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record};
+use ganja_team::{MailboxMessage, mailbox, record};
 
 /// How many processes write at once.
 const WRITERS: usize = 6;
@@ -58,11 +60,8 @@ fn n_processes_writing_one_inbox_lose_no_message() {
         return write_as(&writer);
     }
 
-    let home = tempfile::tempdir().expect("a temp directory");
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse("session-224cbeab").expect("a valid team name");
-    let worker = MemberName::parse("shared-inbox").expect("a valid member name");
-    let inbox = root.inbox_path(&team, &worker);
+    let (_home, root, team) = support::root("session-224cbeab");
+    let inbox = support::inbox_of(&root, &team, "shared-inbox");
     // §2.5's step 1, and the reason it is step 1: the lock is on the target's
     // *real* path, so the target has to be there before anybody locks it. Every
     // child would seed it anyway; doing it here means all six race the lock
@@ -129,7 +128,7 @@ fn n_processes_writing_one_inbox_lose_no_message() {
 
     // And nobody left a hold behind.
     assert!(
-        !PathBuf::from(format!("{}.lock", inbox.display())).exists(),
+        !support::naive_lock_of(&inbox).exists(),
         "the last writer released the lock",
     );
 }

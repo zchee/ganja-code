@@ -19,14 +19,14 @@
 //! matter, and asserting that library-internal lines *arrived* is what proves
 //! the search space was not empty.
 
+mod support;
+
 use std::{
     fs, io,
     sync::{Arc, Mutex},
 };
 
-use ganja_team::{
-    MailboxMessage, MemberName, MemberRecord, Spawn, Surface, TeamName, TeamsRoot, mailbox, record,
-};
+use ganja_team::{MailboxMessage, MemberName, MemberRecord, Surface, mailbox, record};
 use tracing_subscriber::fmt::MakeWriter;
 
 /// The body of a message that is written, read and delivered normally.
@@ -89,18 +89,12 @@ fn a_message_body_never_reaches_a_log_line() {
     tracing::subscriber::set_global_default(subscriber)
         .expect("this binary holds one test, so nothing else has installed one");
 
-    let home = tempfile::tempdir().expect("a temp directory");
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse("session-224cbeab").expect("a valid team name");
+    let (_home, root, team) = support::root("session-224cbeab");
     let worker = MemberName::parse("demo-worker-1").expect("a valid member name");
     let inbox = root.inbox_path(&team, &worker);
 
     // Written, read, delivered, pruned — the whole ordinary path.
-    mailbox::write(
-        &inbox,
-        MailboxMessage::new("team-lead", DELIVERED_CANARY, record::now_iso8601()),
-    )
-    .expect("a message writes");
+    mailbox::write(&inbox, support::message(DELIVERED_CANARY)).expect("a message writes");
 
     let held = mailbox::read(&inbox).expect("the inbox reads");
     assert_eq!(held.valid.len(), 1, "the write is the search space");
@@ -141,15 +135,7 @@ fn a_message_body_never_reaches_a_log_line() {
     let message_debug = format!("{summarized:?}");
     let contents_debug = format!("{held:?}");
 
-    let spawn = Spawn {
-        agent_type: "general-purpose".to_owned(),
-        model: "claude-opus-5[1m]".to_owned(),
-        color: "blue".to_owned(),
-        prompt: PROMPT_CANARY.to_owned(),
-        plan_mode_required: false,
-        surface: Surface::InProcess,
-        cwd: "/w".to_owned(),
-    };
+    let spawn = support::spawn(PROMPT_CANARY, Surface::InProcess);
     let spawn_debug = format!("{spawn:?}");
     let record_debug = format!("{:?}", MemberRecord::teammate(&worker, &team, spawn, 1));
 
@@ -218,11 +204,7 @@ fn a_message_body_never_reaches_a_log_line() {
 
     // The file is where a body does belong, and a test proving nothing rendered
     // one because nothing ever held one would prove nothing at all.
-    mailbox::write(
-        &inbox,
-        MailboxMessage::new("team-lead", DELIVERED_CANARY, record::now_iso8601()),
-    )
-    .expect("a message writes");
+    mailbox::write(&inbox, support::message(DELIVERED_CANARY)).expect("a message writes");
     assert!(
         fs::read_to_string(&inbox)
             .expect("the inbox is readable")
