@@ -75,7 +75,12 @@
 //! once the backend has answered, because the record names the pane the split
 //! returned, so a pane process is always older than its own record by a few
 //! milliseconds. `planModeRequired` becomes the `plan` agent, which is what
-//! plan mode is in this build.
+//! plan mode is in this build — and **no more than that**: the
+//! `plan_approval_request` round trip is not wired, so a member's `plan_exit`
+//! door behaves as it does in any session and asks nobody at the lead. The
+//! record's flag today means "starts as the plan agent"; the lead-side
+//! approval flow is future scope, and a reader who took the flag for the
+//! whole of §5's plan handshake would be reading more than is there.
 //!
 //! # One write, not two
 //!
