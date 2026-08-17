@@ -2090,6 +2090,41 @@ mod tests {
         }
     }
 
+    /// Why [`Never`] refuses.
+    const NEVER: &str = "this door spawns nothing";
+
+    /// A backend that spawns nothing at all, refusing in its own sentence.
+    ///
+    /// A fixture rather than a real pane backend, because a real one spawns:
+    /// a door test that leaned on `GanjaPane` refusing would split a pane into
+    /// whichever tmux session the developer happens to be sitting in the day
+    /// its body lands.
+    #[derive(Debug)]
+    struct Never;
+
+    #[async_trait]
+    impl crate::teammate::TeammateBackend for Never {
+        fn backend(&self) -> ganja_protocol::team::MemberBackend {
+            ganja_protocol::team::MemberBackend::InProcess
+        }
+
+        async fn spawn(
+            &self,
+            _spec: &crate::teammate::SpawnSpec,
+        ) -> Result<crate::teammate::Handle, crate::teammate::Unsupported> {
+            Err(crate::teammate::Unsupported {
+                backend: ganja_protocol::team::MemberBackend::InProcess,
+                reason: NEVER.to_owned(),
+            })
+        }
+
+        async fn kill(&self, _handle: &crate::teammate::Handle) {}
+
+        fn delivery(&self) -> crate::teammate::Delivery {
+            crate::teammate::Delivery::FireAndForget
+        }
+    }
+
     /// A door onto one team, over a backend that spawns nothing at all.
     ///
     /// The refusal that backend answers with is not what these tests read — a
@@ -2107,9 +2142,9 @@ mod tests {
         Teammates::new(
             registry,
             Backends {
-                in_process: Arc::new(crate::teammate::pane::GanjaPane),
-                pane: Arc::new(crate::teammate::pane::GanjaPane),
-                claude: Arc::new(crate::teammate::claude::ClaudePane),
+                in_process: Arc::new(Never),
+                pane: Arc::new(Never),
+                claude: Arc::new(Never),
             },
         )
     }
@@ -2133,7 +2168,7 @@ mod tests {
             .expect_err("the backend under this door spawns nothing");
 
         assert!(
-            refused.reason.contains(crate::teammate::REFUSED_UNTIL_P25B),
+            refused.reason.contains(NEVER),
             "an approved spawn reaches the backend: {refused:?}"
         );
         let seen = asked.seen();
@@ -2185,7 +2220,7 @@ mod tests {
             "the gate's own sentence reaches the model: {refused:?}"
         );
         assert!(
-            !refused.reason.contains(crate::teammate::REFUSED_UNTIL_P25B),
+            !refused.reason.contains(NEVER),
             "and the backend was never reached: {refused:?}"
         );
         assert!(
