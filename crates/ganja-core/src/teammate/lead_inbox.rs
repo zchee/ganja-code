@@ -107,7 +107,15 @@ impl Delivered {
     }
 
     /// The identity [`crate::teammate::lead_inbox::LeadInbox::delivered`] prunes it by.
-    fn identity(&self) -> mailbox::Identity {
+    ///
+    /// Public because **delivery is not idempotent and only pruning is**: a
+    /// plain message stays in the inbox until a caller says it landed, so
+    /// every pass in between hands the same message out again, and a caller
+    /// holding one in flight across passes has nothing but this key to
+    /// recognise it by. Deriving it costs the three fields §2.3 composes it
+    /// from, all of which are on this value.
+    #[must_use]
+    pub fn identity(&self) -> mailbox::Identity {
         mailbox::identity(&MailboxMessage::new(
             self.from.clone(),
             self.body.clone(),
@@ -377,13 +385,21 @@ fn head(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
-    use ganja_protocol::team::{Frame, IdleNotification, ShutdownApproved, TaskAssignment};
+    use ganja_protocol::team::{
+        Frame, IdleNotification, PermissionRequest, ShutdownApproved, TaskAssignment,
+    };
     use ganja_team::{MailboxMessage, mailbox, record};
 
     use super::{Delivered, LeadInbox};
-    use crate::teammate::{Delivery, TeammateRegistry};
+    use crate::{
+        Storage,
+        permission::Permissions,
+        provider::FakeProvider,
+        teammate::{DEFAULT_BACKEND, Delivery, InProcess, SpawnRequest, TeammateRegistry},
+        tool::Registry as Tools,
+    };
 
     /// A registry over a throwaway teams root, with the lead's inbox seeded.
     fn registry(home: &std::path::Path) -> Arc<TeammateRegistry> {
@@ -493,11 +509,29 @@ mod tests {
     /// §7-1: the permission family does not travel this file. An in-process
     /// teammate's dialog crosses on the forwarding channel, which keeps the
     /// reply oneshot a refusal needs.
+    ///
+    /// The permission frame is constructed rather than described, because it is
+    /// the reference's own first control: a build that grew a handler for it
+    /// here would be answering a question with no way to say no, and this is
+    /// what would notice.
     #[tokio::test]
     async fn a_permission_frame_and_an_unhandled_one_are_both_dropped_by_name() {
         let home = tempfile::tempdir().expect("a temporary home");
         let registry = registry(home.path());
         let inbox = registry.lead_inbox();
+        write_frame(
+            &inbox,
+            "w1",
+            &Frame::PermissionRequest(PermissionRequest {
+                request_id: "req-1".to_owned(),
+                agent_id: "w1@session-224cbeab".to_owned(),
+                tool_name: "bash".to_owned(),
+                tool_use_id: "call-1".to_owned(),
+                description: "rm -rf build".to_owned(),
+                input: serde_json::json!({"command": "rm -rf build"}),
+                permission_suggestions: Vec::new(),
+            }),
+        );
         write_frame(
             &inbox,
             "w1",
@@ -512,14 +546,84 @@ mod tests {
 
         let pass = LeadInbox::new(registry).poll().await;
 
-        assert_eq!(pass.dropped, ["task_assignment"]);
-        assert!(pass.messages.is_empty());
+        assert_eq!(pass.dropped, ["permission_request", "task_assignment"]);
+        assert!(
+            pass.messages.is_empty(),
+            "a frame is never delivered as prose either"
+        );
         assert!(
             mailbox::read(&inbox)
                 .expect("the inbox reads")
                 .valid
                 .is_empty(),
             "a named drop leaves the inbox rather than being read again forever"
+        );
+    }
+
+    /// The other half of a `shutdown_approved`, which the frame test above
+    /// cannot see: the member it names is really in the roster and really in
+    /// the team file, and one pass takes it out of both.
+    ///
+    /// Driven through [`LeadInbox::poll`] rather than through
+    /// [`TeammateRegistry::retire`] directly, because the pass is what a lead
+    /// runs and the rewrite is the half only the lead can do — a document that
+    /// went on naming a conversation that has ended is what a resumed session
+    /// would read back.
+    #[tokio::test]
+    async fn a_shutdown_approved_takes_the_member_out_of_the_roster_and_the_team_file() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        registry
+            .spawn(
+                Arc::new(InProcess::new(
+                    Arc::new(FakeProvider::new("on it", Duration::ZERO)),
+                    Arc::new(Tools::new(Vec::new())),
+                    Storage::open(home.path().join("storage")),
+                    |_| Permissions::default(),
+                )),
+                SpawnRequest {
+                    name: "w1".to_owned(),
+                    backend: DEFAULT_BACKEND,
+                    agent_type: "general".to_owned(),
+                    model: "recorder-model".to_owned(),
+                    color: None,
+                    prompt: "hold the fort".to_owned(),
+                    cwd: home.path().to_path_buf(),
+                    plan_mode_required: false,
+                    bypass: false,
+                },
+            )
+            .await
+            .expect("the teammate starts");
+        assert_eq!(registry.view().members.len(), 2, "the lead and w1");
+
+        let inbox = registry.lead_inbox();
+        write_frame(
+            &inbox,
+            "w1",
+            &Frame::ShutdownApproved(ShutdownApproved {
+                request_id: "req-1".to_owned(),
+                from: "w1".to_owned(),
+                timestamp: record::now_iso8601(),
+                pane_id: None,
+                backend_type: Some("in-process".to_owned()),
+            }),
+        );
+
+        let pass = LeadInbox::new(Arc::clone(&registry)).poll().await;
+
+        assert_eq!(pass.retired.len(), 1);
+        assert_eq!(pass.retired[0].name, "w1");
+        assert_eq!(
+            registry.view().members.len(),
+            1,
+            "only the lead is left in the roster"
+        );
+        let document = std::fs::read_to_string(registry.root().config_path(registry.team()))
+            .expect("the team file is on disk");
+        assert!(
+            !document.contains("\"w1\""),
+            "and the document a resume reads no longer names it:\n{document}"
         );
     }
 

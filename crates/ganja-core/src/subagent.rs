@@ -93,7 +93,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ganja_protocol::team::{Frame, MemberBackend};
+use ganja_protocol::team::{Frame, MemberBackend, ShutdownRequest};
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -719,6 +719,86 @@ impl Teammates {
         })
     }
 
+    /// Asks one teammate to shut down (§6.1).
+    ///
+    /// A **frame through the mailbox** rather than a call into the registry,
+    /// and deliberately: the teammate's own runner is what tears it down, in
+    /// the order §6.1 fixes — a `shutdown_request` jumps ahead of everything
+    /// else in its inbox — and it answers with the `shutdown_approved` that the
+    /// lead's own inbox pass retires it on
+    /// ([`crate::teammate::lead_inbox::LeadInbox::poll`]). A registry call would
+    /// skip that loop and leave the answer nobody wrote.
+    ///
+    /// It lives here rather than in the frontend that asks, for the reading
+    /// half's own argument: **encoding a §6.1 frame is engine knowledge.**
+    /// Which frames exist, which of them a lead may send, and what order the
+    /// far side reads them in are facts this crate already owns, so a frontend
+    /// that built the document would be a second place for one wire to drift.
+    ///
+    /// The sender is not an argument here either — [`Postbox::lead`] binds it
+    /// from the team — so nothing above can stamp another member's name on a
+    /// shutdown.
+    ///
+    /// # Errors
+    ///
+    /// [`Undelivered`], exactly as an ordinary message would be: a name nobody
+    /// on this team answers to, a team that has been shut down, or an inbox
+    /// that would not be written.
+    pub async fn ask_shutdown(&self, member: &str) -> Result<Sent, Undelivered> {
+        use team::Postbox as _;
+
+        let request = Frame::ShutdownRequest(ShutdownRequest {
+            request_id: crate::protocol::uuidv7(),
+            // The team's own lead name rather than a constant spelled here: it
+            // is what the postbox is about to stamp on the envelope, and two
+            // spellings of one identity is one more than a reader can check.
+            from: self.registry.lead().as_str().to_owned(),
+            reason: Some(SHUTDOWN_ASKED.to_owned()),
+            timestamp: record::now_iso8601(),
+        });
+        let document = serde_json::to_value(&request).map_err(|error| Undelivered::Failed {
+            reason: format!("{UNENCODABLE} {error}"),
+        })?;
+
+        Postbox::lead(&self.registry)
+            .deliver(Address::Local(member.to_owned()), Body::Frame(document))
+            .await
+    }
+
+    /// Asks every teammate to stop, and says what each one answered.
+    ///
+    /// The lead is skipped, and not as a special case worth a guard: it is the
+    /// one member of the roster that is not a teammate, and a lead writing a
+    /// shutdown request into its own inbox would read it back as a stranger's.
+    ///
+    /// One outcome per teammate, in roster order, so the caller says **one**
+    /// sentence about the whole fan-out rather than a notice per member that
+    /// the next one overwrites. An empty answer is a team that is only its
+    /// lead — worded by the caller, because "nobody to stop" is a sentence
+    /// about the question somebody asked rather than about the team.
+    ///
+    /// Sequential rather than concurrent: every write takes the same team
+    /// directory's lock, so asking at once would only queue in a different
+    /// place.
+    pub async fn ask_whole_team_to_stop(&self) -> Vec<(String, Result<Sent, Undelivered>)> {
+        let members: Vec<String> = self
+            .registry
+            .view()
+            .members
+            .into_iter()
+            .filter(|member| !member.is_lead)
+            .map(|member| member.name)
+            .collect();
+
+        let mut outcomes = Vec::with_capacity(members.len());
+        for member in members {
+            let outcome = self.ask_shutdown(&member).await;
+            outcomes.push((member, outcome));
+        }
+
+        outcomes
+    }
+
     /// The spawn **as it is being asked for**, which is what the gate judges.
     ///
     /// [`crate::teammate::TeammateRegistry::spawn`] builds the real
@@ -1001,6 +1081,20 @@ const TEAM_GONE: &str =
 
 /// What became of a message that did land.
 const WRITTEN: &str = "It is in that inbox and will be read on the next pass.";
+
+/// The reason a lead gives a teammate it is asking to stop.
+///
+/// Worded without naming a door, because both of them — `/team shutdown` and
+/// whatever asks next — write the same frame, and the teammate reading it is
+/// told why rather than where from.
+const SHUTDOWN_ASKED: &str = "the lead asked this teammate to stop";
+
+/// A frame that would not encode, ahead of what serde said about it.
+///
+/// Unreachable through [`ShutdownRequest`], whose every field is a string —
+/// answered rather than unwrapped because the cost of being wrong is a panic
+/// in somebody's event loop.
+const UNENCODABLE: &str = "The shutdown request could not be written:";
 
 /// What the roster says about the one member that is not a teammate.
 const LEADS: &str = "the session that leads this team";
