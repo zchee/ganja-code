@@ -48,9 +48,13 @@
 //! stated:** what stays reachable is a socket this same uid deliberately
 //! made in a session socket's shape — hex-named, owned by it, in a `0700`
 //! directory of its own — which is inside the trust line the socket's own
-//! route table draws (a same-uid peer may reach a lead and nothing else),
-//! and no listener anybody else set up. Bounding what a peer may *answer* is
-//! a separate rule, in the deliverer, and neither stands in for the other.
+//! route table draws (a same-uid peer may reach **any lead of this user's,
+//! in any project on this machine — not only this team's members** — and
+//! nothing else), and no listener anybody else set up. Three rules bound
+//! the crossing and each covers its own edge, none the others': this gate
+//! bounds *where* a message may go; the deliverer bounds *what a peer may
+//! answer*; and the send side is bounded by **nothing yet** — no rate, no
+//! inbox ceiling, no batch cap (bead `ganja-code-qfk`).
 //!
 //! Authorization is the filesystem, twice over. The directory's mode keeps
 //! other users from reaching a socket at all, and it is *checked* rather than
@@ -190,7 +194,8 @@ pub enum DirectoryRefusal {
     /// bind — the one assumption the check→bind window rests on, refused
     /// when it does not hold rather than leaned on.
     #[error(
-        "its parent {parent} is world-writable without the sticky bit, so the directory could          be swapped out from under a bind"
+        "its parent {parent} is world-writable without the sticky bit, so the directory could \
+         be swapped out from under a bind"
     )]
     ParentNotSticky {
         /// The parent that lacks the bit.
@@ -420,6 +425,21 @@ mod tests {
             ),
             "ownership is judged before mode: whose it is comes first"
         );
+
+        // Every refusal is one sentence, single-spaced: a continuation
+        // that forgot its backslash reads as a run of blanks in the middle
+        // of what a person is told.
+        for refusal in [
+            DirectoryRefusal::NotADirectory,
+            DirectoryRefusal::ForeignOwner { owner: 0, uid: 501 },
+            DirectoryRefusal::Permissions { mode: 0o755 },
+            DirectoryRefusal::ParentNotSticky {
+                parent: "/tmp".into(),
+            },
+        ] {
+            let sentence = refusal.to_string();
+            assert!(!sentence.contains("  "), "single-spaced: {sentence:?}");
+        }
     }
 
     #[test]
