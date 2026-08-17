@@ -101,8 +101,12 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
     drop(loser);
 
     // The loser read the old ids off its own descriptor and still did not
-    // rename: it saw the path naming another file and reopened that one, which
-    // is the store the winner created.
+    // rename. What decides that is the quarantine lock and the re-probe taken
+    // inside it: the loser lets its connection go before it waits, and by the
+    // time it holds the lock and asks again, the path names the winner's fresh
+    // store and has nothing old in it. The inode compare is the belt behind
+    // that brace — it guards the unlocked rename `Inner::start` performs on an
+    // *unreadable* database — and this drill never reaches it.
     let listed = listed.expect("the parked store opens rather than failing");
     assert_eq!(
         listed
