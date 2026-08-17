@@ -65,7 +65,10 @@ async fn served(reply: &str) -> (Arc<Engine>, ganja_serve::Handle) {
 
     let directory = std::env::current_dir().expect("the working directory resolves");
     let mut config = ganja_serve::ServeConfig::in_directory(directory);
-    config.port = Some(0);
+    config.listen = ganja_serve::Listen::Tcp {
+        hostname: ganja_serve::DEFAULT_HOSTNAME.to_owned(),
+        port: Some(0),
+    };
     config.heartbeat = FAST_HEARTBEAT;
 
     let handle = ganja_serve::serve(Arc::clone(&engine), config)
@@ -89,7 +92,7 @@ impl Reader {
     /// Opens the stream and reads past the response head, which is asserted on
     /// the way through.
     async fn open(handle: &ganja_serve::Handle) -> Self {
-        let mut socket = TcpStream::connect(handle.address())
+        let mut socket = TcpStream::connect(handle.address().tcp().expect("a tcp server"))
             .await
             .expect("the server accepts");
         socket
