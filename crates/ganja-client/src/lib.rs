@@ -18,8 +18,11 @@
 //!
 //! A server is reached at a TCP base ([`Client::new`]) or at a session's own
 //! Unix socket ([`Client::on_socket`]), and everything above the connection is
-//! the same routes over the same bytes — `ganja-serve` serves one router on
-//! either listener. The socket form rides `reqwest`'s own
+//! the same bytes — one wire, spoken by one client. What differs is *which
+//! routes answer*: `ganja-serve`'s socket serves exactly three — `GET
+//! /global/health`, `GET /team`, `POST /team/{name}/message` — and every
+//! other route this client declares is TCP's alone, `404` over a socket.
+//! The socket form rides `reqwest`'s own
 //! `ClientBuilder::unix_socket`, which routes **every** request of that
 //! `reqwest::Client` through the one path, so a [`Client`] is bound to
 //! exactly one socket for its whole life and never switches: one client per
@@ -112,6 +115,20 @@ pub enum ClientError {
         address: String,
         /// Why it cannot be used.
         reason: String,
+    },
+    /// The server answered more than this client reads. Every route here
+    /// answers a bounded document — a roster, a listing, a receipt — and a
+    /// body past [`BODY_CAP`] is not one of them, whatever it says it is; it
+    /// is refused rather than buffered, because a socket's far end is
+    /// another process's word.
+    #[error("the ganja server answered {method} {path} with more than {cap} bytes; refused unread")]
+    Oversized {
+        /// The method that was answered.
+        method: &'static str,
+        /// The route that was answered.
+        path: String,
+        /// The most this client reads.
+        cap: usize,
     },
     /// The socket path is not one a client can be bound to.
     #[error("{path} is not a socket path this client can be bound to: {reason}")]
@@ -332,6 +349,26 @@ pub struct Delivered {
 /// label the URL needs and the server's router never reads.
 const SOCKET_URL: &str = "http://ganja";
 
+/// How long a socket-bound client waits to connect: a Unix socket connects
+/// in microseconds or fails at once, so this bounds only a peer that
+/// accepted the connection and then went silent before its first byte.
+#[cfg(unix)]
+const SOCKET_CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a socket-bound client waits between bytes of an answer before
+/// it gives the peer up. A per-read bound rather than a whole-request one,
+/// deliberately: the same client may open `GET /event`, whose body is
+/// endless by design and heartbeats every ten seconds, and a total deadline
+/// would end that stream while a per-read one only ends a silent peer.
+#[cfg(unix)]
+const SOCKET_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The most of any answer this client reads into memory, in bytes — a
+/// refusal's envelope included. Every route here answers a bounded document;
+/// the event stream is read frame by frame and never through this. Past it,
+/// [`ClientError::Oversized`].
+pub const BODY_CAP: usize = 8 << 20;
+
 /// The scheme a socket address is *shown* under — §5.6's own spelling of a
 /// Unix-socket address, so an error about one reads the way a `send_message`
 /// call would have written it.
@@ -408,6 +445,14 @@ impl Client {
     /// transport-aware guard asks a same-uid socket for none — the
     /// filesystem already answered who may connect.
     ///
+    /// Bounded in time as well as in bytes: a connect that does not complete
+    /// inside two seconds and a read that stalls past thirty are transport
+    /// failures rather than hangs, and every body is read under [`BODY_CAP`]. The far end of a socket is
+    /// another process's word, and a client that would wait on it forever or
+    /// buffer whatever it sent is a client a hostile listener could stall or
+    /// bloat — `ganja sessions --live` walks every socket in the directory
+    /// through this.
+    ///
     /// Available on Unix only, where the socket is; the type is not.
     ///
     /// # Errors
@@ -433,6 +478,8 @@ impl Client {
         }
         let http = reqwest::Client::builder()
             .unix_socket(path)
+            .connect_timeout(SOCKET_CONNECT_DEADLINE)
+            .read_timeout(SOCKET_READ_DEADLINE)
             .build()
             .map_err(|error| ClientError::SocketPath {
                 path: shown.clone(),
@@ -677,7 +724,7 @@ impl Client {
         }
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
+            let body = self.bounded(method, path, response).await?;
 
             return Err(ClientError::Refused {
                 method,
@@ -688,6 +735,41 @@ impl Client {
         }
 
         Ok(response)
+    }
+
+    /// The whole body, read under [`BODY_CAP`]: a declared length past the
+    /// cap is refused before a byte, an undeclared or lying one the moment
+    /// the cap is passed.
+    async fn bounded(
+        &self,
+        method: &'static str,
+        path: &str,
+        mut response: reqwest::Response,
+    ) -> Result<String, ClientError> {
+        let oversized = || ClientError::Oversized {
+            method,
+            path: path.to_owned(),
+            cap: BODY_CAP,
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length > BODY_CAP as u64)
+        {
+            return Err(oversized());
+        }
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|source| self.transport(source))?
+        {
+            if body.len() + chunk.len() > BODY_CAP {
+                return Err(oversized());
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        Ok(String::from_utf8_lossy(&body).into_owned())
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
@@ -737,10 +819,7 @@ impl Client {
             .map_err(|source| self.transport(source))?;
         let response = self.checked(method, path, response).await?;
 
-        response
-            .text()
-            .await
-            .map_err(|source| self.transport(source))
+        self.bounded(method, path, response).await
     }
 }
 

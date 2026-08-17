@@ -1083,9 +1083,10 @@ impl Postbox {
         Ok(Sent {
             // The far side answers with the bare name it wrote to; what this
             // side reports back is that name *in that session*, so a transcript
-            // never reads a peer's `team-lead` as this team's.
-            to: format!("{}@{}", delivered.to, view.team),
-            note: delivered.note,
+            // never reads a peer's `team-lead` as this team's. Both are the
+            // peer's words, and are cut to a line before the model reads them.
+            to: reflected(&format!("{}@{}", delivered.to, view.team)),
+            note: reflected(&delivered.note),
         })
     }
 }
@@ -1147,6 +1148,31 @@ const SOCKET_URL: &str = "http://ganja";
 /// this is a ceiling on a hang, not a budget a healthy exchange approaches.
 const SOCKET_DEADLINE: Duration = Duration::from_secs(10);
 
+/// The most of a peer's answer this side will read, in bytes. What a peer
+/// answers is a `TeamView` — a roster of some names and each member's capped
+/// ring of one-line calls, kilobytes at the outside — or a two-field
+/// receipt, or a refusal envelope; a body past this is not one of those,
+/// whatever it says it is, and is refused rather than buffered. The rule
+/// exists because the far end is another process's word: a peer that is not
+/// a `ganja-serve` at all must not be able to hand this one an unbounded
+/// body to hold, let alone to read back to a model.
+const SOCKET_BODY_CAP: usize = 1 << 20;
+
+/// The most of a peer's *words* — the sentence of a refusal, the note of a
+/// receipt, the name it wrote to — that reaches this side's model. Every one
+/// of those is a string the peer composed and this side reads next, so each
+/// is cut here to a line's worth of characters; the body cap above bounds
+/// what is held, and this bounds what is repeated.
+const REFLECTED_CAP: usize = 512;
+
+/// `text`, cut to [`REFLECTED_CAP`] characters on a character boundary.
+fn reflected(text: &str) -> String {
+    match text.char_indices().nth(REFLECTED_CAP) {
+        Some((cut, _)) => text[..cut].to_owned(),
+        None => text.to_owned(),
+    }
+}
+
 /// One session's socket, as this side speaks to it: a `reqwest::Client`
 /// bound to that path and nothing else, and the path itself for every
 /// sentence a failure is read in.
@@ -1200,28 +1226,52 @@ impl Socket {
         self.read(response).await
     }
 
-    /// The answer, or the peer's refusal in the peer's own sentence.
+    /// The answer, or the peer's refusal in the peer's own sentence — read
+    /// under [`SOCKET_BODY_CAP`], and refused past it, whatever the status.
     async fn read<T: serde::de::DeserializeOwned>(
         &self,
-        response: reqwest::Response,
+        mut response: reqwest::Response,
     ) -> Result<T, Undelivered> {
         let status = response.status();
-        let text = response
-            .text()
+        let oversized = || Undelivered::Failed {
+            reason: format!(
+                "{SOCKET_OVERSIZED} {}: more than {SOCKET_BODY_CAP} bytes.",
+                self.path.display()
+            ),
+        };
+        // A declared length past the cap is refused before a byte is read;
+        // an undeclared or lying one is refused the moment the cap is passed.
+        if response
+            .content_length()
+            .is_some_and(|length| length > SOCKET_BODY_CAP as u64)
+        {
+            return Err(oversized());
+        }
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|error| self.unreachable(error))?;
+            .map_err(|error| self.unreachable(error))?
+        {
+            if body.len() + chunk.len() > SOCKET_BODY_CAP {
+                return Err(oversized());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8_lossy(&body);
         if !status.is_success() {
             let message = serde_json::from_str::<SocketRefusal>(&text)
                 .map(|refusal| refusal.message)
                 .ok()
                 .filter(|message| !message.is_empty())
-                .unwrap_or(text);
+                .unwrap_or_else(|| text.to_string());
 
             return Err(Undelivered::Failed {
                 reason: format!(
-                    "{SOCKET_REFUSED} {} ({}): {message}",
+                    "{SOCKET_REFUSED} {} ({}): {}",
                     self.path.display(),
-                    status.as_u16()
+                    status.as_u16(),
+                    reflected(&message)
                 ),
             });
         }
@@ -1496,6 +1546,9 @@ pub(crate) const SOCKET_REFUSED: &str = "The session at that socket refused the 
 /// The peer answered something this build has no type for.
 const SOCKET_UNREADABLE: &str =
     "The session at that socket answered a body this build cannot read. Socket";
+
+/// The peer answered more than this side reads — refused, not buffered.
+pub(crate) const SOCKET_OVERSIZED: &str = "The session at that socket answered more than a session ever does, and the answer was refused unread. Socket";
 
 /// A member of the team whose name the name grammar refuses — impossible
 /// through this build's own registration, and answered rather than trusted.
@@ -2101,10 +2154,10 @@ mod tests {
 
     use super::{
         Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Incoming, MemberName,
-        NOT_A_SESSION_SOCKET, NotReceived, PermissionReply, Postbox, Reserved, SOCKET_REFUSED,
-        SOCKET_UNREACHABLE, Sent, SocketMessage, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE,
-        Teammate, TeammateRegistry, TeammateSpawn, Teammates, Undelivered, Watched, async_trait,
-        denies_task, mailbox, receive, roster, subagent_rules, team, watch,
+        NOT_A_SESSION_SOCKET, NotReceived, PermissionReply, Postbox, Reserved, SOCKET_OVERSIZED,
+        SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent, SocketMessage, SpawnAsk, SpawnAsker,
+        SpawnRequest, TEAM_GONE, Teammate, TeammateRegistry, TeammateSpawn, Teammates, Undelivered,
+        Watched, async_trait, denies_task, mailbox, receive, roster, subagent_rules, team, watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -3042,6 +3095,83 @@ mod tests {
         assert!(
             reason.contains("This session leads no team"),
             "and the peer's own sentence: {reason}"
+        );
+    }
+
+    /// **H1(b)**: what a peer answers is read under a cap and refused past
+    /// it — declared oversize before a byte, undeclared oversize the moment
+    /// the cap is passed — so a listener that is not a session cannot hand
+    /// this side an unbounded body to hold. The refusal names the socket, and
+    /// nothing is posted after it.
+    #[tokio::test]
+    async fn an_oversized_answer_is_refused_unread_and_nothing_is_posted() {
+        let team = Team::new().await;
+        let postbox: &dyn team::Postbox = &team.worker;
+        let path = team.session_socket_path("0198c1a2");
+        let peer =
+            PeerStub::serve(&path, |_, _| (200, "x".repeat(super::SOCKET_BODY_CAP + 1))).await;
+
+        let failed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            postbox.deliver(
+                Address::Uds { path: path.clone() },
+                Body::Text {
+                    text: "hello".to_owned(),
+                    summary: None,
+                },
+            ),
+        )
+        .await
+        .expect("an oversized answer is refused within the deadline");
+
+        let Err(Undelivered::Failed { reason }) = failed else {
+            panic!("an oversized answer is a failure, not {failed:?}");
+        };
+        assert!(reason.starts_with(SOCKET_OVERSIZED), "{reason}");
+        assert!(reason.contains(&path.display().to_string()), "{reason}");
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .map(|(method, route, _)| format!("{method} {route}"))
+                .collect::<Vec<_>>(),
+            vec!["GET /team"],
+            "the roster read was refused, and nothing was posted after it"
+        );
+    }
+
+    /// A peer's *words* — its refusal's sentence here — are cut to a line
+    /// before the model reads them: the body cap bounds what is held, this
+    /// bounds what is repeated.
+    #[tokio::test]
+    async fn a_peers_sentence_is_cut_to_a_line_before_the_model_reads_it() {
+        let team = Team::new().await;
+        let postbox: &dyn team::Postbox = &team.worker;
+        let path = team.session_socket_path("0198c1a2");
+        let long = "no ".repeat(2_000);
+        let _peer = PeerStub::listen_refusing(&path, 404, &long).await;
+
+        let failed = postbox
+            .deliver(
+                Address::Uds { path: path.clone() },
+                Body::Text {
+                    text: "hello".to_owned(),
+                    summary: None,
+                },
+            )
+            .await;
+
+        let Err(Undelivered::Failed { reason }) = failed else {
+            panic!("a refusal is a failure, not {failed:?}");
+        };
+        assert!(reason.starts_with(SOCKET_REFUSED), "{reason}");
+        assert!(
+            reason.chars().count() < long.chars().count(),
+            "the peer's sentence was cut: {} chars",
+            reason.chars().count()
+        );
+        assert!(
+            reason.contains(&"no ".repeat(100)),
+            "and what is left is the head of it: {reason}"
         );
     }
 
