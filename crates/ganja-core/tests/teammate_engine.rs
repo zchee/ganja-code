@@ -100,15 +100,36 @@ fn caller(home: &std::path::Path) -> Caller {
     }
 }
 
-/// A person who says yes. Nothing below asks it anything — a spawn inside the
-/// project with no bypass has nothing to ask about — so this exists to prove
-/// the gate's *absence* rather than its answer.
-#[derive(Debug)]
-struct Allowing;
+/// A person who says yes, and a record of every time they were asked.
+///
+/// Recorded rather than only answered, `teammate_doors.rs`'s shape: what these
+/// tests want from the gate is its **silence** — a teammate working inside the
+/// project with no bypass has nothing anybody needs to approve — and an asker
+/// that only said yes would let that silence break without a test noticing.
+#[derive(Debug, Default)]
+struct Allowing {
+    asked: std::sync::Mutex<Vec<SpawnAsk>>,
+}
+
+impl Allowing {
+    /// Fails naming what was asked, which is the whole diagnostic.
+    fn asked_nobody(&self) {
+        let asked = self.asked.lock().expect("the ask log is never poisoned");
+        assert!(
+            asked.is_empty(),
+            "a teammate working inside the project asks nobody: {asked:?}"
+        );
+    }
+}
 
 #[async_trait::async_trait]
 impl SpawnAsker for Allowing {
-    async fn ask(&self, _request: SpawnAsk) -> ganja_core::protocol::PermissionReply {
+    async fn ask(&self, request: SpawnAsk) -> ganja_core::protocol::PermissionReply {
+        self.asked
+            .lock()
+            .expect("the ask log is never poisoned")
+            .push(request);
+
         ganja_core::protocol::PermissionReply::Once
     }
 }
@@ -156,6 +177,7 @@ async fn a_team_gives_both_engines_a_postbox_and_the_teammate_a_store() {
         says("a title"),
         says("another title"),
     ]);
+    let asker = Allowing::default();
     let registry = Arc::new(TeammateRegistry::new(
         root.clone(),
         team.clone(),
@@ -199,10 +221,11 @@ async fn a_team_gives_both_engines_a_postbox_and_the_teammate_a_store() {
                 prompt: TEAMMATE_PROMPT.to_owned(),
             },
             &caller(home.path()),
-            &Allowing,
+            &asker,
         )
         .await
         .expect("an in-process teammate starts on a session that has a store");
+    asker.asked_nobody();
     assert_eq!(started.name, "worker");
     assert_eq!(started.backend, "in-process");
 
@@ -292,6 +315,7 @@ async fn a_teammates_message_reaches_the_lead_stamped_with_the_teammates_own_nam
         says("reported"),
         says("a title"),
     ]);
+    let asker = Allowing::default();
     let registry = Arc::new(TeammateRegistry::new(
         root.clone(),
         team.clone(),
@@ -321,10 +345,11 @@ async fn a_teammates_message_reaches_the_lead_stamped_with_the_teammates_own_nam
                 prompt: TEAMMATE_PROMPT.to_owned(),
             },
             &caller(home.path()),
-            &Allowing,
+            &asker,
         )
         .await
         .expect("an in-process teammate starts");
+    asker.asked_nobody();
 
     let inbox = registry.lead_inbox();
     let deadline = tokio::time::Instant::now() + EVENTUALLY;
@@ -373,6 +398,7 @@ async fn what_the_lead_sends_is_what_its_teammate_reads_next() {
     let team = TeamName::parse("session-abcd1234").expect("a team name");
     let (provider, requests) =
         ScriptedProvider::new(vec![says("on it"), says("the teammate's title")]);
+    let asker = Allowing::default();
     let registry = Arc::new(TeammateRegistry::new(
         root.clone(),
         team.clone(),
@@ -402,10 +428,11 @@ async fn what_the_lead_sends_is_what_its_teammate_reads_next() {
                 prompt: TEAMMATE_PROMPT.to_owned(),
             },
             &caller(home.path()),
-            &Allowing,
+            &asker,
         )
         .await
         .expect("an in-process teammate starts");
+    asker.asked_nobody();
 
     // The teammate has read its spawn prompt and stopped asking. Only then is
     // the lead's script pushed, so the call below is the lead's and nobody
