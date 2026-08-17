@@ -2170,11 +2170,11 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
         files: Arc::clone(&turn.files),
         credentials: turn.credentials.clone(),
         spawn: None,
+        postbox: None,
         // A `!` passthrough is the person at the terminal running a command,
         // not the model calling a tool. There is no call to ask about and
         // nothing that could ask — and nothing that could approve a plan, so
         // the switch seam stays empty too.
-        postbox: None,
         ask: None,
         switch: None,
         jobs: None,
@@ -3791,6 +3791,7 @@ async fn start(
                 part_id: prepared.call.part_id.clone(),
             }) as Arc<dyn crate::tool::task::Subagents>
         }),
+        postbox: None,
         // Built per call for the same reason, and out of the same three
         // pieces the permission wait uses: a dialog names the call it came
         // from, and a reply has to reach the turn that is blocked in it.
@@ -3798,7 +3799,6 @@ async fn start(
         // cross to the parent exactly as its permission dialogs do. What
         // keeps a headless run from being asked is a standing rule
         // refusing `question`, not the absence of this.
-        postbox: None,
         ask: Some(Arc::new(Ask {
             events: Arc::clone(&turn.events),
             session_id: turn.session_id.clone(),

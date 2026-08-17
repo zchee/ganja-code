@@ -53,6 +53,14 @@
 //!   the frame schemas, so its equivalent failure is a schema error rather
 //!   than a rung.
 //!
+//! # Rung 4 judges names only
+//!
+//! §5.2's rung 4 refuses an `@` in `to`, and ganja applies it on the bare-name
+//! branch alone: the rung is there to keep `name@team` scoping out of a build
+//! with one team per session, and a scope is a thing a *name* carries. A
+//! socket path is a filename, which may hold an `@` meaning nothing by it, so
+//! `uds:/tmp/a@b.sock` is an address rather than a scoped recipient.
+//!
 //! # The cross-session tail
 //!
 //! A `uds:` address is validated here and delivered elsewhere. Until the
@@ -135,7 +143,13 @@ const SHUTDOWN_APPROVED: &str = "shutdown_approved";
 /// limit is not redundancy — it means no path can hand an unbounded
 /// model-authored string across the seam in the first place, whatever the far
 /// side later does with it.
-const SUMMARY_CAP: usize = 200;
+///
+/// Public because it is the near half of a number written twice: the far half
+/// is `ganja_protocol::team::DISPLAY_FIELD_CAP`, which this crate may not name
+/// — the internal-dependency allowlist is exactly `ganja-permission` — so the
+/// two cannot share a definition. `ganja-core` sees both and owes the one-line
+/// equality pin that keeps them from drifting apart in silence.
+pub const SUMMARY_CAP: usize = 200;
 
 /// What a delivered message reads back as, ahead of the deliverer's own
 /// account of what became of it.
@@ -146,8 +160,7 @@ const DELIVERED: &str = "Message sent to";
 const NO_TEAM: &str = "This session has no team to send a message to.";
 
 /// Rung 1: broadcast.
-const BROADCAST: &str =
-    "There is no broadcast here: address one teammate by name, and send a message per recipient.";
+const BROADCAST: &str = "There is no broadcast here: a call carries one recipient, named, so reaching three teammates is three calls.";
 
 /// Rung 2: a scheme this build carries no transport for.
 const UNSUPPORTED_SCHEME: &str = "A teammate is addressed by its bare name, and another session by a uds: socket path. There is no transport here for the scheme";
@@ -694,8 +707,12 @@ mod tests {
         }
     }
 
-    /// The whole point of the ladder is its order, so every case here fails
-    /// **more than one** rung and asserts the earlier one answers.
+    /// The whole point of the ladder is its order, so the cases here are of
+    /// two kinds and each is labelled as the one it is. Five fail **more than
+    /// one** rung and assert that the earlier one answers — those are the
+    /// order. The other six reach a rung nothing else is racing them for and
+    /// assert only that it classifies what it was handed, because two rungs
+    /// one argument cannot fail at once have no order to claim.
     #[tokio::test]
     async fn the_validation_ladder_refuses_in_order() {
         let postbox = Fake::new();
@@ -722,7 +739,10 @@ mod tests {
             validate(&postbox, "worker-1@other", json!("   "), None),
             Err(Refused::ScopedRecipient)
         );
-        // 5 before 7: blank text is blank before it is anything else.
+        // 5, classified: whitespace is no frame and a frame is no whitespace,
+        // so 5 and 7 cannot both be failed by one text and have no order
+        // between them. What this asserts is that blank text is refused as
+        // blank.
         assert_eq!(
             validate(&postbox, "worker-1", json!("   "), None),
             Err(Refused::Whitespace)
@@ -751,15 +771,23 @@ mod tests {
                 kind: "idle_notification"
             })
         );
-        // 8, all three clauses.
+        // 8, all three clauses, and all three classified rather than ordered:
+        // the clauses key on disjoint verdicts — no frame is both unclassified
+        // and harness-only, and the recipient clause wants a
+        // `shutdown_approved`, which is agent-sendable and so never reaches
+        // the harness-only arm. Hoisting the recipient clauses above the
+        // harness-only one changes no outcome here, which is the proof there
+        // is no order between them to assert.
         assert_eq!(
             validate(&postbox, "worker-1", json!({"kind": "not a frame"}), None),
             Err(Refused::StructuredNotAFrame)
         );
+        // Addressed to a non-lead, so the refusal is visibly the frame's own
+        // and not something the recipient earned (D499's second clause).
         assert_eq!(
             validate(
                 &postbox,
-                "team-lead",
+                "worker-1",
                 json!({"type": "shutdown_rejected", "reason": "no"}),
                 None
             ),

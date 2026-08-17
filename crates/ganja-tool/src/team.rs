@@ -149,6 +149,10 @@ pub struct Peer {
     /// `shutdown_approved` may carry (§5.2's rung 8). A flag on the row
     /// rather than a method on [`Postbox`], because the roster is already the
     /// answer to "who may I address", and who leads is part of that answer.
+    /// At most one row in a roster may set it: rung 8 names the lead by taking
+    /// the first that does, so a second would be a lead the refusal never
+    /// names, and keeping there to be only one is the team registry's
+    /// invariant to hold rather than something a tool re-checks per call.
     pub lead: bool,
 }
 
