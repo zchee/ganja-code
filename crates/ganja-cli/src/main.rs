@@ -222,7 +222,12 @@ impl BypassArgs {
 ///       [--agent-color <color>] --parent-session-id <lead session id>
 /// ```
 ///
-/// `--model`/`--agent` are `SelectArgs`' own and ride beside; the bypass trio
+/// The first line's `[--model P/M] [--agent NAME]` are `SelectArgs`' own — they
+/// are shown because clap accepts them on *any* invocation, including one wearing
+/// these flags, and **not** because a lead ever composes them: a spawn's model
+/// travels in the member record (see below) and its agent is that record's
+/// `planModeRequired`. The bracketed pair is what a person could type, not part
+/// of the contract another lane composes against. The bypass trio
 /// is the pane's posture (D-5): carried, the teammate answers its own dialogs
 /// (D479); absent, it forwards every ask to the lead as a §5 frame. The pane
 /// id is not on the line — the pane reads `TMUX_PANE` from the environment

@@ -65,16 +65,23 @@
 //! app sends — once, always or reject, exactly as the person at the lead's
 //! dialog answered *this member's own* open ask. [`Posture::BypassAtSpawn`]
 //! is the launch line's bypass trio (D479), which a lead composes exactly when
-//! the spawn it approved asked to skip dialogs, and the same answer the app
-//! already gives its own dialogs; nothing selects [`Posture::HumanAttended`]
-//! yet, and the plan selects it by nothing either.
+//! the spawn it approved asked to skip dialogs, and which this app answers with
+//! the allow-once it already answers its own dialogs with; nothing selects
+//! [`Posture::HumanAttended`] yet, and the plan selects it by nothing either.
 //!
 //! The member record — the model this teammate was spawned to run, and
 //! whether it must start in plan mode — is read off the team file **after a
-//! bounded wait** ([`Membership::await_record`]): the registry writes it only
-//! once the backend has answered, because the record names the pane the split
-//! returned, so a pane process is always older than its own record by a few
-//! milliseconds. `planModeRequired` becomes the `plan` agent, which is what
+//! bounded wait** ([`Membership::await_record`]), and that wait is now
+//! **defensive rather than expected**. The lead orders the two the other way
+//! round: the registry writes the record once the backend's `spawn` has answered
+//! with the pane it made, and only *then* is the launch line typed — through
+//! `GanjaPane`'s own watch for that record, or through the `launch` hook the
+//! registry calls after its record write. So by the time this process exists at
+//! all, its row is on disk. What the wait covers is a lead that died between the
+//! two, a rename this process's filesystem view has not caught up with, and the
+//! case where somebody started a `ganja` with these flags by hand — none of them
+//! ordinary, all of them better answered by a sentence naming the file than by a
+//! panic. `planModeRequired` becomes the `plan` agent, which is what
 //! plan mode is in this build — and **no more than that**: the
 //! `plan_approval_request` round trip is not wired, so a member's `plan_exit`
 //! door behaves as it does in any session and asks nobody at the lead. The
@@ -266,8 +273,15 @@ impl Membership {
         self.posture
     }
 
-    /// The team file's record of this member, or [`None`] while the lead has
-    /// not written it yet.
+    /// The team file's record of this member, or [`None`] when the document does
+    /// not name it — including when there is no document at all.
+    ///
+    /// An absent file is [`None`] rather than an error, and that tolerance is
+    /// **defensive** now rather than the ordinary path: the lead writes the record
+    /// before it launches this process (see [`Membership::await_record`]). What it
+    /// answers for is a lead that died in between, or a `ganja` started with these
+    /// flags by hand — cases where "no record" is the honest answer and a failure
+    /// would name the wrong thing.
     ///
     /// # Errors
     ///
@@ -292,10 +306,14 @@ impl Membership {
 
     /// Waits for the lead to write this member's record, and hands it back.
     ///
-    /// Bounded by `limit`, polled rather than watched: the write is one
-    /// rename by a process that has just launched this one, so it is a few
-    /// milliseconds away in every case but the one where the lead died, and
-    /// that case is what the bound is for.
+    /// Bounded by `limit`, polled rather than watched, and expected to answer on
+    /// its **first** look: the lead writes the record before it types this
+    /// process's launch line (see the module doc), so the row is already there.
+    /// The loop is what covers the cases where it is not — a lead that died
+    /// between the record and the launch, a rename not yet visible here, or a
+    /// `ganja` somebody started with these flags by hand — and the bound is what
+    /// turns all three into a sentence naming the file rather than a wait nobody
+    /// can end.
     ///
     /// # Errors
     ///
