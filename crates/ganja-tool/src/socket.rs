@@ -185,6 +185,17 @@ pub enum DirectoryRefusal {
         /// The permission bits as found.
         mode: u32,
     },
+    /// Its parent is world-writable without the sticky bit, so anybody could
+    /// rename or unlink the directory between the binder's check and its
+    /// bind — the one assumption the check→bind window rests on, refused
+    /// when it does not hold rather than leaned on.
+    #[error(
+        "its parent {parent} is world-writable without the sticky bit, so the directory could          be swapped out from under a bind"
+    )]
+    ParentNotSticky {
+        /// The parent that lacks the bit.
+        parent: PathBuf,
+    },
     /// Creating or inspecting it failed for a reason the OS named.
     #[error("it could not be prepared: {0}")]
     Io(io::Error),
