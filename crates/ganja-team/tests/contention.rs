@@ -25,6 +25,25 @@ const WRITERS: usize = 6;
 
 /// How many messages each of them writes. Every one is a whole read-modify-write
 /// under its own acquire, so this is thirty contended holds, not six.
+///
+/// **These numbers are a flakiness budget, and the budget is the retry ladder.**
+/// A writer that cannot take the lock within proper-lockfile's ten delays
+/// (≈655 ms — `lock.rs`'s `schedule`) gets `LockError::Held`, panics in
+/// [`write_as`], and fails this test. Six writers × five rounds is comfortable
+/// on an idle machine, where a hold is a sub-millisecond rewrite of a file with
+/// at most thirty short entries. It is *not* unconditionally safe: on a CI box
+/// loaded enough that a single hold — seed, canonicalize, mkdir, read, encode,
+/// temp-write, fsync, rename, rmdir — is descheduled past 655 ms while five
+/// peers queue behind it, the ladder can genuinely run out and this test fails
+/// for a reason that is not a bug in the protocol.
+///
+/// Left as it is deliberately: raising the ladder would mean diverging from the
+/// peer's own schedule, which is the one thing this module may not do, and
+/// lowering these counts would weaken the very contention the test exists to
+/// create. So the note is the mitigation — a failure here reading
+/// `another writer holds this inbox` is the first thing to blame on the machine
+/// rather than on the change under review, and the second thing to confirm by
+/// re-running it alone.
 const EACH: usize = 5;
 
 /// Set on a child, absent in the parent: which writer this process is.

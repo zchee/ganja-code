@@ -146,11 +146,15 @@ impl LockError {
 
 /// A held inbox. Dropping it releases the lock, on both paths.
 ///
-/// The field order is load-bearing: Rust runs [`Drop::drop`] and *then* drops
-/// the fields, so the directory is removed before the in-process hold is
-/// released — the mirror of the order [`acquire`] takes them in, which is what
-/// keeps a thread woken by the in-process release from finding a directory
-/// still there.
+/// **The [`Drop`] impl is what is load-bearing here, not the field order.**
+/// Rust runs a type's own `Drop::drop` *first* and only then drops its fields in
+/// declaration order — so the `remove_dir` below happens before `local` is
+/// dropped and the in-process hold released, which is the mirror of the order
+/// [`acquire`] takes them in and is what keeps a thread woken by the in-process
+/// release from finding the directory still there. Reordering the two fields
+/// would change nothing, because `dir` is a [`PathBuf`] whose own drop releases
+/// memory and no lock; deleting the `Drop` impl, or moving the `remove_dir` into
+/// something that dropped after `local`, would break it.
 #[derive(Debug)]
 pub struct Guard {
     /// The lock directory this guard made and will remove.
@@ -198,6 +202,28 @@ impl Drop for Guard {
 /// path is a thing a real file has. [`crate::mailbox::seed`] is what guarantees
 /// it, and it is why the seed is the step *before* this one rather than the
 /// step after.
+///
+/// # Hazards
+///
+/// **This is not reentrant.** A thread that already holds an inbox and calls
+/// `acquire` on that same inbox again will **never return**: the in-process half
+/// parks on this module's condvar waiting for a release only this thread could
+/// perform, and that wait has no timeout by design — a thread of this process
+/// holding a lock is a thread this process is running, so there is nothing to
+/// time out *on*. Nothing in this crate re-enters, because the mailbox's own
+/// read-modify-write is the one caller and it takes exactly one hold; a future
+/// caller that wants to do two things under one hold must pass the [`Guard`]
+/// down rather than acquire again.
+///
+/// **A contended inbox serializes this process's own writers.** The in-process
+/// half is taken first, so when an *external* process holds the inbox only one
+/// thread here runs the ladder at a time: N waiting threads cost up to
+/// N × ≈655 ms before the last of them reports [`LockError::Held`], rather than
+/// all N spending the ladder at once. That is the intended trade — it keeps this
+/// process from hammering a peer's lock with N `mkdir`s per delay — but it means
+/// a wedged peer's cost to a busy lead grows with how many teammates are writing,
+/// and it is the reason `ganja-core` wraps a mailbox write in `spawn_blocking`
+/// rather than awaiting it on the runtime.
 ///
 /// # Errors
 ///

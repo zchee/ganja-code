@@ -51,10 +51,16 @@
 //! module first shipped. Each shape says which documents settled it, and says
 //! plainly where the evidence is thin.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
+use serde::{
+    Deserialize, Serialize, Serializer,
+    ser::{self, SerializeMap as _},
+};
 use serde_json::Value;
 
 use crate::team::{LEAD, MemberName, TeamName};
@@ -155,7 +161,11 @@ impl Surface {
 /// instructions after a restart would be a different feature — which is why it
 /// is said here, in `AGENTS.md`, and once more in the spawn confirmation a
 /// person sees.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Which is also why its [`Debug`] is hand-written and renders `prompt` as a
+/// byte count: the field is documented as a place credentials land, so it must
+/// not be the field a `{:?}` in some caller's error path prints.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Spawn {
     /// `agentType`, which is the `task` tool's `subagent_type` (§2.2).
     pub agent_type: String,
@@ -172,6 +182,21 @@ pub struct Spawn {
     pub surface: Surface,
     /// The working directory it was spawned in.
     pub cwd: String,
+}
+
+impl fmt::Debug for Spawn {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Spawn")
+            .field("agent_type", &self.agent_type)
+            .field("model", &self.model)
+            .field("color", &self.color)
+            .field("prompt", &Redacted(Some(&self.prompt)))
+            .field("plan_mode_required", &self.plan_mode_required)
+            .field("surface", &self.surface)
+            .field("cwd", &self.cwd)
+            .finish()
+    }
 }
 
 /// One member of a team, in Claude's own document shape (§2.2).
@@ -219,7 +244,7 @@ pub struct Spawn {
 /// The name is a `String` rather than a [`MemberName`] on purpose: the type
 /// marks the door a *created* name goes through, and refusing to decode a
 /// document a real `claude` wrote is not this crate's call to make.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberRecord {
     /// `<name>@<team>` — derived, never minted (§2.2).
@@ -278,65 +303,199 @@ pub struct MemberRecord {
     pub extra: IndexMap<String, Value>,
 }
 
+/// Every key a [`MemberRecord`] can emit — the union of §2.2's two orders.
+///
+/// Exists so the passthrough guard has something to check against and so a test
+/// can assert the emitted key set never leaves it. Order is the teammate one,
+/// which is the superset; the lead order is a subset in a different sequence,
+/// which is the whole reason [`Serialize`] is hand-written.
+const MEMBER_KEYS: [&str; 13] = [
+    "agentId",
+    "name",
+    "color",
+    "joinedAt",
+    "tmuxPaneId",
+    "subscriptions",
+    "agentType",
+    "model",
+    "prompt",
+    "planModeRequired",
+    "cwd",
+    "backendType",
+    "isActive",
+];
+
+/// Every key a [`TeamFile`] emits (§2.2).
+const TEAM_FILE_KEYS: [&str; 5] = [
+    "name",
+    "createdAt",
+    "leadAgentId",
+    "leadSessionId",
+    "members",
+];
+
+/// Refuses a passthrough key that a declared field already spells.
+///
+/// The same guard [`crate::mailbox::write`] takes before it touches an inbox,
+/// and for the same reason: a map holding a key the shape also declares would
+/// emit that key **twice**, and a reader taking the last one would read
+/// something the writer never meant. JSON does not forbid it and `serde_json`
+/// will happily write it, so the refusal has to be here.
+///
+/// Unreachable from a document read off disk — a declared key is captured by its
+/// field before the flatten map ever sees it — and unreachable from either
+/// constructor, which start `extra` empty. It is checked anyway, because the one
+/// way to get here is hand-building a record, the cost of being wrong is a
+/// corrupt file in a directory somebody else is reading, and the check is a
+/// lookup against a fixed list.
+fn refuse_shadowed<E>(extra: &IndexMap<String, Value>, declared: &[&str]) -> Result<(), E>
+where
+    E: ser::Error,
+{
+    for key in extra.keys() {
+        if declared.contains(&key.as_str()) {
+            return Err(E::custom(format!(
+                "{key}: the shape declares this key, so a passthrough map may not also carry it"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// The two orders of §2.2, chosen by the record's own shape.
 ///
 /// A `serialize_map` rather than a `serialize_struct` because the key set is
 /// decided at runtime — which is also what the derive does under a
 /// `#[serde(flatten)]`, so this changes the machinery not at all, only which
 /// keys go through it and when.
+///
+/// **The opening destructure is the exhaustiveness net.** A hand-written
+/// `Serialize` is the one place in this crate where adding a field to a struct
+/// and forgetting it here compiles cleanly and silently drops the value on every
+/// rewrite — of somebody else's document. Binding every field by name means the
+/// next field added to [`MemberRecord`] is a compile error in this function
+/// instead, and the bindings are what the body emits so a stale `self.` access
+/// cannot creep back in.
 impl Serialize for MemberRecord {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
+        let Self {
+            agent_id,
+            name,
+            color,
+            joined_at,
+            tmux_pane_id,
+            subscriptions,
+            agent_type,
+            model,
+            prompt,
+            plan_mode_required,
+            cwd,
+            backend_type,
+            is_active,
+            extra,
+        } = self;
+        refuse_shadowed(extra, &MEMBER_KEYS)?;
+
         let mut map = serializer.serialize_map(None)?;
 
         // The two orders share only their first two keys; from `agentType`
         // onwards nothing lines up, which is why this is a branch and not a
         // pair of conditional inserts.
-        map.serialize_entry("agentId", &self.agent_id)?;
-        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("agentId", agent_id)?;
+        map.serialize_entry("name", name)?;
 
         if self.carries_teammate_fields() {
-            if let Some(color) = &self.color {
+            if let Some(color) = color {
                 map.serialize_entry("color", color)?;
             }
-            map.serialize_entry("joinedAt", &self.joined_at)?;
-            map.serialize_entry("tmuxPaneId", &self.tmux_pane_id)?;
-            map.serialize_entry("subscriptions", &self.subscriptions)?;
-            map.serialize_entry("agentType", &self.agent_type)?;
-            if let Some(model) = &self.model {
+            map.serialize_entry("joinedAt", joined_at)?;
+            map.serialize_entry("tmuxPaneId", tmux_pane_id)?;
+            map.serialize_entry("subscriptions", subscriptions)?;
+            map.serialize_entry("agentType", agent_type)?;
+            if let Some(model) = model {
                 map.serialize_entry("model", model)?;
             }
-            if let Some(prompt) = &self.prompt {
+            if let Some(prompt) = prompt {
                 map.serialize_entry("prompt", prompt)?;
             }
-            if let Some(plan_mode_required) = &self.plan_mode_required {
+            if let Some(plan_mode_required) = plan_mode_required {
                 map.serialize_entry("planModeRequired", plan_mode_required)?;
             }
-            map.serialize_entry("cwd", &self.cwd)?;
-            if let Some(backend_type) = &self.backend_type {
+            map.serialize_entry("cwd", cwd)?;
+            if let Some(backend_type) = backend_type {
                 map.serialize_entry("backendType", backend_type)?;
             }
-            if let Some(is_active) = &self.is_active {
+            if let Some(is_active) = is_active {
                 map.serialize_entry("isActive", is_active)?;
             }
         } else {
-            map.serialize_entry("agentType", &self.agent_type)?;
-            map.serialize_entry("joinedAt", &self.joined_at)?;
-            map.serialize_entry("tmuxPaneId", &self.tmux_pane_id)?;
-            map.serialize_entry("cwd", &self.cwd)?;
-            map.serialize_entry("subscriptions", &self.subscriptions)?;
-            if let Some(backend_type) = &self.backend_type {
+            map.serialize_entry("agentType", agent_type)?;
+            map.serialize_entry("joinedAt", joined_at)?;
+            map.serialize_entry("tmuxPaneId", tmux_pane_id)?;
+            map.serialize_entry("cwd", cwd)?;
+            map.serialize_entry("subscriptions", subscriptions)?;
+            if let Some(backend_type) = backend_type {
                 map.serialize_entry("backendType", backend_type)?;
             }
         }
 
-        for (key, value) in &self.extra {
+        for (key, value) in extra {
             map.serialize_entry(key, value)?;
         }
 
         map.end()
+    }
+}
+
+/// Renders everything except the spawn prompt, which is rendered as its size.
+///
+/// §2.2 persists the **full spawn prompt verbatim** (see [`Spawn::prompt`]), so
+/// a credential a caller put in one is in this struct. A derived `Debug` would
+/// put it into every `{:?}` — an error context, a `tracing` field, a panic
+/// message — which is the leak `tests/no_bodies_in_logs.rs` exists to catch.
+/// Everything else here is addressing: a name, a pane, a model, a directory, and
+/// keeping those is what makes a record still debuggable.
+impl fmt::Debug for MemberRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MemberRecord")
+            .field("agent_id", &self.agent_id)
+            .field("name", &self.name)
+            .field("color", &self.color)
+            .field("joined_at", &self.joined_at)
+            .field("tmux_pane_id", &self.tmux_pane_id)
+            .field("subscriptions", &self.subscriptions)
+            .field("agent_type", &self.agent_type)
+            .field("model", &self.model)
+            .field("prompt", &Redacted(self.prompt.as_deref()))
+            .field("plan_mode_required", &self.plan_mode_required)
+            .field("cwd", &self.cwd)
+            .field("backend_type", &self.backend_type)
+            .field("is_active", &self.is_active)
+            .field("extra", &self.extra)
+            .finish()
+    }
+}
+
+/// A string rendered as its length, for the fields that carry somebody's words.
+///
+/// `<11 bytes>` and `None` are both answers a person debugging can use; the
+/// eleven bytes themselves are content, and content does not belong in a
+/// rendering that anything at all might log. The spelling matches
+/// [`crate::mailbox::Identity`]'s, so one grep finds every place this rule is
+/// applied.
+struct Redacted<'a>(Option<&'a str>);
+
+impl fmt::Debug for Redacted<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(text) => write!(formatter, "<{} bytes>", text.len()),
+            None => formatter.write_str("None"),
+        }
     }
 }
 
@@ -421,7 +580,15 @@ impl MemberRecord {
 }
 
 /// A team's `config.json` (§2.2).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Its key order **is** its declaration order — all 29 documents in the survey
+/// agree, and the 2026-03 era differs only by an unknown `description` the
+/// passthrough carries. So unlike [`MemberRecord`] this needs no branch; it has
+/// a hand-written [`Serialize`] anyway, for the one thing a derive cannot do:
+/// refuse a passthrough key that shadows a declared one. A `Debug` is derived,
+/// because the only field that could carry somebody's words is `members`, and a
+/// [`MemberRecord`]'s own `Debug` already redacts the prompt.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamFile {
     /// The team's name, which is also its directory.
@@ -439,6 +606,43 @@ pub struct TeamFile {
     /// the order they arrived.
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
+}
+
+/// Declaration order, plus the shadow refusal a derive has no way to express.
+///
+/// The destructure is the same exhaustiveness net [`MemberRecord`]'s
+/// [`Serialize`] takes, and for the same reason: this file's whole job is
+/// round-tripping somebody else's document, so a field added and forgotten here
+/// would delete data rather than fail.
+impl Serialize for TeamFile {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let Self {
+            name,
+            created_at,
+            lead_agent_id,
+            lead_session_id,
+            members,
+            extra,
+        } = self;
+        refuse_shadowed(extra, &TEAM_FILE_KEYS)?;
+
+        let mut map = serializer.serialize_map(None)?;
+
+        map.serialize_entry("name", name)?;
+        map.serialize_entry("createdAt", created_at)?;
+        map.serialize_entry("leadAgentId", lead_agent_id)?;
+        map.serialize_entry("leadSessionId", lead_session_id)?;
+        map.serialize_entry("members", members)?;
+
+        for (key, value) in extra {
+            map.serialize_entry(key, value)?;
+        }
+
+        map.end()
+    }
 }
 
 impl TeamFile {
@@ -507,7 +711,7 @@ impl TeamFile {
 /// put it exactly there, directly before `read`. Should a modern message ever
 /// carry one and disagree, this is one line to move; **AC-13**'s live capture
 /// against a real `claude` is what would say so, and nothing in CI can.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct MailboxMessage {
     /// Who sent it — a member name, or [`crate::team::LEAD`].
     pub from: String,
@@ -540,6 +744,32 @@ pub struct MailboxMessage {
     /// the order they arrived.
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
+}
+
+/// Renders everything except what the sender wrote, which is rendered as a size.
+///
+/// `text` is a message body and `summary` is the sender's own prose about it —
+/// both are user content, and a derived `Debug` would carry them into any `{:?}`
+/// a caller reaches for. This is the same rule
+/// [`Identity`](crate::mailbox::Identity) states and the same spelling, so one
+/// grep finds every place it is applied; `tests/no_bodies_in_logs.rs` is what
+/// keeps it true from the outside.
+impl fmt::Debug for MailboxMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MailboxMessage")
+            .field("from", &self.from)
+            .field("text", &Redacted(Some(&self.text)))
+            .field("summary", &Redacted(self.summary.as_deref()))
+            .field("timestamp", &self.timestamp)
+            .field("color", &self.color)
+            .field("msg_v", &self.msg_v)
+            .field("msg_id", &self.msg_id)
+            .field("kind", &self.kind)
+            .field("read", &self.read)
+            .field("extra", &self.extra)
+            .finish()
+    }
 }
 
 impl MailboxMessage {
@@ -639,7 +869,14 @@ pub fn now_iso8601() -> String {
 /// looking right: the timestamp is one third of the identity key deliveries are
 /// reconciled by (§2.3), so two builds spelling one instant differently would
 /// deliver the same message twice.
-fn iso8601(millis: u64) -> String {
+///
+/// Public because the milliseconds this module stores are not only its own to
+/// read back: `joinedAt` and `createdAt` are `u64`s in [`MemberRecord`] and
+/// [`TeamFile`], and whoever renders a team — a `/team` dialog, a `ganja team`
+/// listing — needs the one spelling this crate agrees with a peer about rather
+/// than a sixth date formatter.
+#[must_use]
+pub fn iso8601(millis: u64) -> String {
     let seconds = i64::try_from(millis / 1_000).unwrap_or(i64::MAX);
     let subsecond = millis % 1_000;
     let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
@@ -655,9 +892,21 @@ fn iso8601(millis: u64) -> String {
 
 /// Days since the epoch to a proleptic Gregorian date.
 ///
-/// Hinnant's `civil_from_days`, the same arithmetic three other crates in this
-/// workspace each keep a copy of — the copies exist because the layering
-/// forbids a shared one, not because anybody thinks four is a good number.
+/// Hinnant's `civil_from_days`, and the fifth copy of it in this workspace —
+/// `ganja-tui`'s `transcript.rs`, `ganja-cli`'s `main.rs`, `ganja-provider`'s
+/// `provider/retry.rs` and `ganja-core`'s `instruction.rs` each keep one.
+///
+/// **The layering does not forbid a shared one, and saying that it did was
+/// wrong.** Every crate holding a copy already depends on `ganja-protocol`, so
+/// a helper there would be reachable from all five. What is missing is a *place*:
+/// `ganja-protocol` is a vocabulary crate — the types the wire and the
+/// transcript speak — and putting date arithmetic in it would make it the
+/// workspace's utility crate, which is a decision about the whole dependency
+/// graph and not one this module gets to take on the way past. So the
+/// duplication is a **standing cost, accepted and unpaid**, not a constraint:
+/// twenty lines of arithmetic that has not changed since 2013, pinned in each
+/// copy by its own edge-case test. Whoever decides where shared leaf utilities
+/// live in this workspace is who collapses these five.
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     // Shift the epoch to 0000-03-01, so a leap day lands at the end of a year
     // and the month arithmetic below needs no special case for February.
@@ -682,10 +931,13 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use ganja_protocol::team::{Frame, IdleNotification, IdleReason};
 
     use super::{
-        MailboxMessage, MemberRecord, Spawn, Surface, TeamFile, document, iso8601, now_millis,
+        MailboxMessage, MemberRecord, Spawn, Surface, TeamFile, Value, document, iso8601,
+        now_millis,
     };
     use crate::team::{MemberName, TeamName};
 
@@ -875,6 +1127,105 @@ mod tests {
 
             assert_eq!(document(&message).expect("a message encodes"), original);
         }
+    }
+
+    #[test]
+    fn neither_key_order_ever_emits_a_key_outside_the_declared_list() {
+        // The guard below checks a passthrough key against `MEMBER_KEYS`, so
+        // that list being the real emitted set is what makes the guard mean
+        // anything. Both branches are walked, because the lead order is a
+        // subset and only the teammate order is the whole of it.
+        for record in [MemberRecord::lead(&team(), "/w", 1), worker()] {
+            let Value::Object(fields) = serde_json::to_value(&record).expect("a record encodes")
+            else {
+                panic!("a record is an object");
+            };
+
+            for key in fields.keys() {
+                assert!(
+                    super::MEMBER_KEYS.contains(&key.as_str()),
+                    "{key} is emitted and is not in MEMBER_KEYS",
+                );
+            }
+        }
+
+        let Value::Object(fields) = serde_json::to_value(worker()).expect("a record encodes")
+        else {
+            panic!("a record is an object");
+        };
+        assert_eq!(
+            fields.len(),
+            super::MEMBER_KEYS.len(),
+            "the teammate order is the whole list, which is what makes it the union",
+        );
+
+        // A team file's list, the same way. Only the key *set* is asserted here:
+        // `to_value` hands back a `serde_json::Map`, which is the `BTreeMap`
+        // this module's own doc warns about, so it alphabetizes and can say
+        // nothing about order. Order is what the byte pins above are for.
+        let Value::Object(fields) = serde_json::to_value(TeamFile::new(&team(), "s", "/w", 1))
+            .expect("a team file encodes")
+        else {
+            panic!("a team file is an object");
+        };
+        assert_eq!(
+            fields.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            super::TEAM_FILE_KEYS.into_iter().collect::<BTreeSet<_>>(),
+            "and a team file emits exactly its declared list",
+        );
+    }
+
+    #[test]
+    fn a_passthrough_key_that_shadows_a_declared_one_is_refused() {
+        // The same refusal `mailbox::write` takes before it touches an inbox,
+        // and for the same reason: emitting a declared key out of the
+        // passthrough writes a document whose reader gets an answer the writer
+        // never meant. Unreachable from a decode — a declared key is captured by
+        // its field first — so a hand-built value is what this pins.
+        let mut record = MemberRecord::lead(&team(), "/w", 1);
+        record
+            .extra
+            .insert("name".to_owned(), Value::String("impostor".to_owned()));
+        let refusal = document(&record).expect_err("a shadowed key is refused");
+        assert!(
+            refusal
+                .to_string()
+                .contains("name: the shape declares this"),
+            "{refusal}",
+        );
+
+        // Including a key this record's own order would not have emitted:
+        // `isActive` is declared, so it may not arrive from the map either.
+        let mut record = MemberRecord::lead(&team(), "/w", 1);
+        record
+            .extra
+            .insert("isActive".to_owned(), Value::Bool(true));
+        assert!(
+            document(&record).is_err(),
+            "a lead record declares isActive"
+        );
+
+        // And a team file, whose declared list is a different one.
+        let mut file = TeamFile::new(&team(), "s", "/w", 1);
+        file.extra
+            .insert("members".to_owned(), Value::Array(Vec::new()));
+        let refusal = document(&file).expect_err("a shadowed key is refused");
+        assert!(
+            refusal
+                .to_string()
+                .contains("members: the shape declares this"),
+            "{refusal}",
+        );
+
+        // A key that shadows nothing is exactly what the passthrough is for, and
+        // still rides along.
+        let mut record = MemberRecord::lead(&team(), "/w", 1);
+        record.extra.insert("zeta".to_owned(), Value::Bool(true));
+        assert!(
+            document(&record)
+                .expect("an unknown key is the point of the passthrough")
+                .contains("\"zeta\": true"),
+        );
     }
 
     #[test]
