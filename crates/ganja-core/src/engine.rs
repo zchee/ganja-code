@@ -3365,6 +3365,7 @@ impl Engine {
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks.clone(),
             concurrency: self.concurrency,
+            teammates: None,
         }))
     }
 
