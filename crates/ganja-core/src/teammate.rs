@@ -965,8 +965,12 @@ impl TeammateRegistry {
     /// unique, [`SpawnError::Unsupported`] for a surface this build or this
     /// session cannot have, and the two I/O variants for a team file or a
     /// mailbox that would not be written.
+    ///
+    /// Takes `self` as an [`Arc`] because a teammate's own postbox is bound to
+    /// the team it belongs to ([`crate::subagent::Postbox::of`]), and this is
+    /// where the two exist together for the first time.
     pub async fn spawn(
-        &self,
+        self: &Arc<Self>,
         backend: Arc<dyn TeammateBackend>,
         request: SpawnRequest,
     ) -> Result<Spawned, SpawnError> {
@@ -1165,12 +1169,31 @@ impl TeammateRegistry {
     /// a lossless lane registered at construction, and an unclaimed one fills
     /// and then makes the teammate's own first turn wait on nobody. Both are
     /// registered before the runner's first pass can prompt.
-    fn start(&self, spec: &SpawnSpec, handle: Handle, backend: Arc<dyn TeammateBackend>) {
+    ///
+    /// This is also where a teammate's outbound identity is installed, and it
+    /// has to be here: [`crate::subagent::Postbox::of`] takes the
+    /// [`Teammate`] itself so that nobody building one can choose the name it
+    /// stamps, and this is the first place the team and that value exist
+    /// together. Installed before the runner starts, so the teammate's first
+    /// turn already has somewhere to post.
+    fn start(
+        self: &Arc<Self>,
+        spec: &SpawnSpec,
+        handle: Handle,
+        backend: Arc<dyn TeammateBackend>,
+    ) {
         let recent = Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_CALLS)));
         let alive = Arc::new(AtomicBool::new(true));
         let mut tasks = self.tasks.lock().expect("the task list is never poisoned");
 
         if let Some(teammate) = handle.teammate() {
+            teammate
+                .engine()
+                .install_postbox(Arc::new(crate::subagent::Postbox::of(
+                    Arc::clone(self),
+                    teammate,
+                )));
+
             // Built before either task below is spawned, because building it is
             // what registers its subscription: a forwarding that subscribed
             // inside its own task would race the teammate's very first dialog

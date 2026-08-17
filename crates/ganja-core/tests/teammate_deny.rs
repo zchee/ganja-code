@@ -107,12 +107,12 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
     let lead = Arc::new(std::sync::Mutex::new(Permissions::load(project.path())));
 
     let storage = Storage::open(project.path().join("storage"));
-    let registry = TeammateRegistry::new(
+    let registry = Arc::new(TeammateRegistry::new(
         TeamsRoot::new(project.path().join("teams")),
         TeamName::parse("session-abcd1234").expect("a team name"),
         "01998ad0-0000-7000-8000-000000000000",
         project.path(),
-    );
+    ));
     // The lead's dialog surface really exists, so "nobody was asked" is read
     // off a channel that could have carried the question rather than off the
     // absence of a channel.
