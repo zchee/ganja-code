@@ -576,6 +576,43 @@ impl Teammates {
         caller: &Caller,
         asker: &dyn SpawnAsker,
     ) -> Result<Teammated, NotSpawned> {
+        // The `task` door's bypass is `false` and is not an argument, which is
+        // the whole of **D-5**'s asymmetry: skipping a teammate's dialogs is a
+        // thing a person may ask for and a model may not.
+        self.start_with_bypass(request, false, caller, asker).await
+    }
+
+    /// The same spawn, for the door a **person** typed at (**D-5**,
+    /// Resolution 4).
+    ///
+    /// `bypass` is the one field the two doors differ on, and it is a separate
+    /// entry rather than a field on [`TeammateSpawn`] precisely so that it
+    /// cannot become one: `TeammateSpawn` is the `task` tool's own argument
+    /// struct, deserialized from what a model wrote, and a `bypass` key on it
+    /// would be a model asking for its teammate's dialogs to be skipped —
+    /// which is what [`Teammates::start`] hard-codes `false` to prevent. Here
+    /// the flag comes from `/team spawn --bypass`, typed by the person the
+    /// dialogs would otherwise have been shown to.
+    ///
+    /// Asking for it is not getting it. The flag travels into
+    /// [`crate::teammate::posture::spawn_gate`]'s own bypass clause, so a rule
+    /// that denies [`crate::teammate::posture::BYPASS`] refuses the spawn and a
+    /// rule that has no opinion raises the dialog — and the posture it produces
+    /// is clamped at [`crate::permission::Decision::Ask`] regardless
+    /// ([`crate::teammate::posture::Posture::for_spawn`]). What the flag buys
+    /// is that the clause is *reachable at all*, which through the other door
+    /// it is not.
+    ///
+    /// # Errors
+    ///
+    /// [`Teammates::start`]'s, unchanged: one sentence the caller shows.
+    pub async fn start_with_bypass(
+        &self,
+        request: TeammateSpawn,
+        bypass: bool,
+        caller: &Caller,
+        asker: &dyn SpawnAsker,
+    ) -> Result<Teammated, NotSpawned> {
         let backend = match request.backend.as_deref() {
             Some(named) => parse_backend(named).map_err(refused)?,
             // Absence is the default and never an inference: what a session
@@ -583,7 +620,7 @@ impl Teammates {
             // whether a *named* surface can run, never which one is chosen.
             None => DEFAULT_BACKEND,
         };
-        let asked = self.requested(&request, backend, caller)?;
+        let asked = self.requested(&request, backend, bypass, caller)?;
         let gate = posture::spawn_gate(
             &caller
                 .permissions
@@ -659,13 +696,14 @@ impl Teammates {
                     color: None,
                     prompt: request.prompt,
                     cwd: caller.cwd.clone(),
-                    // Neither is this door's to ask for: **D501** gives both
-                    // doors exactly `name` and `backend`, so a teammate that
-                    // must start in plan mode or that wants dialogs bypassed
-                    // is asked for by a person at `/team spawn`, not by a
-                    // model in a tool call.
+                    // Not this door's to ask for either way: **D501** gives
+                    // both doors `name` and `backend`, so a teammate that must
+                    // start in plan mode is asked for by a person — and that
+                    // door does not exist yet, where the bypass one now does.
                     plan_mode_required: false,
-                    bypass: false,
+                    // Whatever the gate above was judged against, so what was
+                    // asked about and what is spawned cannot disagree.
+                    bypass,
                 },
             )
             .await
@@ -701,6 +739,7 @@ impl Teammates {
         &self,
         request: &TeammateSpawn,
         backend: MemberBackend,
+        bypass: bool,
         caller: &Caller,
     ) -> Result<SpawnSpec, NotSpawned> {
         Ok(SpawnSpec {
@@ -715,7 +754,7 @@ impl Teammates {
             prompt: request.prompt.clone(),
             cwd: caller.cwd.clone(),
             plan_mode_required: false,
-            bypass: false,
+            bypass,
             parent_session_id: String::new(),
         })
     }
@@ -2081,6 +2120,51 @@ mod tests {
 
         assert_eq!(refused.reason, super::REFUSED_BY_HAND);
         assert_eq!(asked.seen().len(), 1, "and it was asked exactly once");
+    }
+
+    /// **D-5, Resolution 4**: the human door carries `--bypass` into the gate,
+    /// so its bypass clause is reachable at all — and the `task` door's is not,
+    /// because a model may not ask for its teammate's dialogs to be skipped.
+    ///
+    /// Asserted on the *dialog* rather than on a started teammate, because the
+    /// gate is the whole of the difference: what a person is asked about is what
+    /// the spawn was judged as.
+    #[tokio::test]
+    async fn only_the_human_door_can_ask_for_a_bypass_and_the_gate_is_told_which() {
+        let home = ganja_testkit::temp_dir();
+        let elsewhere = ganja_testkit::temp_dir();
+        let asked = Asked::answering(PermissionReply::Reject);
+        // A directory outside the project, so **both** doors have something to
+        // be asked about and the two dialogs are comparable. Without it the
+        // task door's spawn is simply allowed, which would prove nothing about
+        // what it was judged as.
+        let caller = caller(Vec::new(), elsewhere.path(), home.path());
+
+        // The `task` door, which has no argument for a bypass.
+        let _ = door(home.path()).start(wanted(), &caller, &asked).await;
+        // The human door, asking for one.
+        let _ = door(home.path())
+            .start_with_bypass(wanted(), true, &caller, &asked)
+            .await;
+
+        let seen = asked.seen();
+        assert_eq!(
+            seen.len(),
+            2,
+            "both doors put their spawn in front of somebody"
+        );
+        assert_eq!(
+            seen[0].args.get("bypass"),
+            Some(&serde_json::Value::Bool(false)),
+            "a tool call cannot ask for one: {:?}",
+            seen[0]
+        );
+        assert_eq!(
+            seen[1].args.get("bypass"),
+            Some(&serde_json::Value::Bool(true)),
+            "a person can, and the dialog says so: {:?}",
+            seen[1]
+        );
     }
 
     /// The frame vocabulary is read here and nowhere else, by one parse: the

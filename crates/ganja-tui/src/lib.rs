@@ -30,6 +30,7 @@ use ganja_core::{
     AgentRegistry, Engine, SessionId, Storage, catalog,
     config::{Config, Overrides, ThemeMode},
     instruction, provider,
+    teammate::TeammateRegistry,
 };
 use ganja_permission::Project;
 use ganja_protocol::Message;
@@ -236,6 +237,44 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
         Some(resume) => stored_transcript(&engine, resume).await?,
         None => Vec::new(),
     };
+
+    // **After the resume**, and that is the whole of why it is here rather
+    // than up in the builder chain: §2.1 names a team after the session that
+    // leads it, and a resume replaces the id the engine was minted with. A
+    // team decided before that point would name a conversation nobody opened,
+    // and `--continue` would join a different team every launch instead of
+    // rejoining the one it left. The team name is a pure function of the id
+    // (`teammate::session_team`), so the same session always finds the same
+    // directory.
+    //
+    // Once, and never again: `Engine::with_teammates`' own doc says the team a
+    // session leads is decided before anything can be streaming. A `/new`
+    // therefore keeps this team rather than minting one — the lead is the
+    // process, and its teammates outlive the conversation that started them.
+    // Re-minting on `NewSession` would need a seam the engine does not have
+    // and would strand every running teammate in a team nothing was reading.
+    //
+    // A build with no config home has nowhere to keep a team, so it leads
+    // none: `Engine::teammates()` answers `None`, the `send_message` tool is
+    // never registered, and the frontend's whole lead side is inert.
+    let (engine, teammates) = match ganja_core::config::config_home() {
+        Some(home) => {
+            let registry = Arc::new(TeammateRegistry::for_session(
+                &home,
+                engine.session_id().as_str(),
+                &cwd,
+            ));
+
+            (engine.with_teammates(Arc::clone(&registry)), Some(registry))
+        }
+        None => {
+            tracing::warn!(
+                "no config home, so this session leads no team and cannot spawn teammates"
+            );
+
+            (engine, None)
+        }
+    };
     // The builtins, the user's own themes, and the theme they last picked —
     // then whatever the config asks for on top, because a `theme` written in a
     // file outranks a runtime pick permanently rather than until the next one.
@@ -315,6 +354,14 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
     // Nothing is waiting on the loops, but a background task that outlives the
     // screen it was feeding is a leak whichever way the run ended.
     background.cancel();
+    // Teammates first, and the order is a requirement rather than a
+    // preference: a shutdown **settles** each teammate's turn rather than
+    // killing it, because its transcript is a session somebody may open
+    // tomorrow — and a turn still settling may still be calling an MCP tool.
+    // Held apart for the reason `jobs` is: the engine moved into the app.
+    if let Some(teammates) = teammates {
+        teammates.shutdown().await;
+    }
     // Every local server's process group ends here. Through this handle rather
     // than through `Engine::shutdown_mcp`, which is the same call one layer
     // down: the engine moved into the app, and `App::run` consumes it.

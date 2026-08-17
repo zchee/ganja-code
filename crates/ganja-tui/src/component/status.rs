@@ -222,6 +222,12 @@ pub struct Status {
     /// one dialog with a second already queued has to be told there is a
     /// second.
     queued_dialogs: usize,
+    /// How many teammates this session is leading (**D503**). Shown only while
+    /// there are any, the same posture as the three above — and needed more
+    /// than any of them, because the default backend runs in this process with
+    /// no window of its own: without a count, a session leading four teammates
+    /// looks exactly like one leading none.
+    teammates: usize,
     /// Whether this session answers its own permission dialogs (**D479**).
     ///
     /// Standing, not transient: every other segment here says what is
@@ -289,6 +295,7 @@ impl Status {
             running_jobs: 0,
             running_tasks: 0,
             queued_dialogs: 0,
+            teammates: 0,
             yolo: false,
             elements: None,
             max_width: None,
@@ -442,6 +449,11 @@ impl Status {
         self.queued_dialogs = queued_dialogs;
     }
 
+    /// Records how many teammates this session is leading (**D503**).
+    pub fn set_teammates(&mut self, teammates: usize) {
+        self.teammates = teammates;
+    }
+
     /// Records what the engine is doing now.
     pub fn set_activity(&mut self, activity: Activity) {
         if self.activity != activity {
@@ -504,7 +516,7 @@ impl Status {
         }
         left.push_str(&self.activity.label());
         // The tail is [`Self::hud_segment`]'s, walked in the order this bar
-        // has always drawn it: every one of these six appears only while it
+        // has always drawn it: every one of these seven appears only while it
         // has something to say, and every one is a single accent span whose
         // text is exactly what this loop used to spell by hand. The rules
         // themselves — and the reasons for them — live there now, once.
@@ -520,6 +532,7 @@ impl Status {
             StatuslineElement::Jobs,
             StatuslineElement::Tasks,
             StatuslineElement::Dialogs,
+            StatuslineElement::Teammates,
             StatuslineElement::Tokens,
             StatuslineElement::Notice,
         ] {
@@ -717,6 +730,26 @@ impl Status {
                             "dialog"
                         } else {
                             "dialogs"
+                        }
+                    ))
+                })
+                .flatten(),
+            // The fourth of the same family, and the one with the least else
+            // on screen to fall back on (**D503**): a background job writes
+            // into a log a `bash_output` call can drain and a `task` has its
+            // own inline row, where an in-process teammate has neither — it is
+            // a whole conversation happening in this process with no window.
+            // From none rather than from one, because a lone teammate is not
+            // named anywhere else at all.
+            StatuslineElement::Teammates => (self.teammates > 0)
+                .then(|| {
+                    plain(format!(
+                        "{} {}",
+                        self.teammates,
+                        if self.teammates == 1 {
+                            "teammate"
+                        } else {
+                            "teammates"
                         }
                     ))
                 })
@@ -1243,6 +1276,27 @@ mod tests {
 
         status.set_running_jobs(0);
         assert!(!rendered(&status, 100).contains("bash running"));
+    }
+
+    /// The same posture on the segment the default backend needs most: a
+    /// teammate running in this process has no window to look at (**D503**).
+    #[test]
+    fn the_bar_names_the_teammates_this_session_leads_only_while_there_are_any() {
+        let mut status = Status::new(None);
+        assert!(!rendered(&status, 100).contains("teammate"));
+
+        status.set_teammates(1);
+        let line = rendered(&status, 100);
+        assert!(
+            line.contains("1 teammate") && !line.contains("1 teammates"),
+            "from one, unlike the task segment, and singular at one: got {line:?}"
+        );
+
+        status.set_teammates(3);
+        assert!(rendered(&status, 100).contains("3 teammates"));
+
+        status.set_teammates(0);
+        assert!(!rendered(&status, 100).contains("teammate"));
     }
 
     /// The two segments concurrent children brought with them, under the same

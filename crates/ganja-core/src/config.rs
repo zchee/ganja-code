@@ -1047,6 +1047,15 @@ pub enum StatuslineElement {
     Tasks,
     /// How many permission dialogs are waiting behind the open one.
     Dialogs,
+    /// How many teammates this session is leading (**D503**).
+    ///
+    /// Beside [`Self::Jobs`] and [`Self::Tasks`] because it answers their
+    /// question about a third kind of work this session started and no longer
+    /// waits on. It earns its place more than either: the default backend is
+    /// in-process and has no window of its own, so without a count a teammate
+    /// that is thinking and a teammate that has wedged look identical — which
+    /// is what the segment, and `/team`'s ring under it, exist to tell apart.
+    Teammates,
     /// The session's token and dollar totals.
     Tokens,
     /// The notice beside the state — failures, MCP servers out of reach.
