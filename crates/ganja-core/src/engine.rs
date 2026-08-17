@@ -961,7 +961,12 @@ pub struct Engine {
     /// Behind a lock, like the three siblings below that the `/plugin`
     /// dialog's Reload swaps (**D474**): a lead's engine is shared with the
     /// socket that serves it (**D505**), so the frontend no longer holds it
-    /// exclusively and a `&mut` seam would be one it could not reach.
+    /// exclusively and a `&mut` seam would be one it could not reach. The
+    /// lock is a `std::sync::Mutex` and is **never held across an await**:
+    /// every reader clones the value out and drops the guard, and every
+    /// writer is a synchronous swap — three of the four are read on the
+    /// turn path, so a guard that lived across an await would be a guard a
+    /// turn could block on.
     environment: std::sync::Mutex<Option<Arc<Environment>>>,
     /// Agents this session may run as. [`None`] leaves every turn on the base
     /// prompt with no agent rules, which is what an engine built for a golden
