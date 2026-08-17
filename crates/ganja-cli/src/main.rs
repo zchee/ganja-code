@@ -337,13 +337,34 @@ enum Command {
     /// else requires GANJA_SERVER_PASSWORD, and every route then asks for it.
     Serve(serve::ServeArgs),
     /// List the stored sessions of the project this was run in.
-    Sessions,
+    Sessions(SessionsArgs),
     /// List the skills a session can load — the roster `$name` invokes.
     ///
     /// The same discovery a session runs: ganja's two homes, whatever
     /// `skills.paths` names, and every enabled plugin's skills/, with the
     /// later tier winning a name collision.
     Skills,
+}
+
+/// `ganja sessions`: the stored listing, or with `--live` the running one.
+#[derive(Debug, Args)]
+struct SessionsArgs {
+    /// List the sessions running right now instead of the stored ones.
+    ///
+    /// Every running session serves a socket in this user's socket directory;
+    /// each one that answers is listed under the session it reports, and each
+    /// one nobody is serving behind is removed. Every project, not only this
+    /// one: a socket names a session, and a session knows its own project.
+    #[arg(long)]
+    live: bool,
+    /// The socket directory to enumerate instead of this user's own.
+    ///
+    /// Hidden exactly as the spawn flags are: a test door, so the suite can
+    /// list — and unlink the dead sockets of — a directory of its own rather
+    /// than whatever the developer's `/tmp/ganja-<uid>/` holds. Meaningless
+    /// without `--live`, and refused without it.
+    #[arg(long, hide = true, value_name = "DIR", requires = "live")]
+    socket_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -709,7 +730,7 @@ async fn main() -> Result<()> {
         Some(Command::Plugin { action }) => plugin::plugin_command(action),
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Serve(args)) => serve::serve(args).await,
-        Some(Command::Sessions) => sessions_command(),
+        Some(Command::Sessions(args)) => sessions_command(args).await,
         Some(Command::Skills) => {
             let cwd = std::env::current_dir().context("failed to read the working directory")?;
             skills::skills_command(&cwd)
@@ -1196,7 +1217,15 @@ fn address(server: &ganja_core::config::McpServer) -> String {
 /// for it. Filtering before the count is what makes a project whose every
 /// session is a child read as one that has none, rather than as a table with
 /// no rows.
-fn sessions_command() -> Result<()> {
+///
+/// `--live` is the other listing (**D505**): not what was stored but what is
+/// running, read off the sockets rather than the store — see
+/// [`live_sessions_command`].
+async fn sessions_command(args: SessionsArgs) -> Result<()> {
+    if args.live {
+        return live_sessions_command(args.socket_dir).await;
+    }
+
     let sessions: Vec<SessionInfo> = session_storage()?
         .list_sessions()
         .context("failed to read the stored sessions")?
@@ -1227,6 +1256,220 @@ fn sessions_command() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Lists the sessions running right now (**D505**): every socket in the
+/// socket directory that answers `GET /global/health`, under the session id
+/// the server itself reports — the name in the filename is a prefix of that
+/// id and no more, since every session minted in one 65-second window shares
+/// its first eight hex digits.
+///
+/// The directory is `ganja_serve::socket::directory()`'s, and it is **vetted
+/// before it is read** by the binder's own rule: a real directory of ours at
+/// exactly `0700`, or refused by name — because this listing unlinks files,
+/// and unlinking inside a directory somebody else made in a world-writable
+/// `/tmp` is not something to do on a hunch. Absent, there is nothing
+/// running, and the listing says so rather than creating one.
+///
+/// Health decides *live*; the lock decides *dead*. A socket that answers is
+/// listed. One that does not is unlinked only when nobody holds its name's
+/// lock — the liveness token `ganja_serve::socket` keeps beside every socket
+/// precisely because a connection is not one: a live server whose accept
+/// backlog is full refuses exactly the way an empty file does, and a listing
+/// that unlinked on that evidence would take a live socket with it. Such a
+/// socket is named as held and left alone. The `.lock` files themselves are
+/// never touched — created once per name and kept, by that module's design.
+///
+/// The health check rides `ganja-client`'s socket form, one client per
+/// socket path (the plan's rule for `unix_socket`); this binary names the
+/// client and never `reqwest`.
+#[cfg(unix)]
+async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
+    use std::{fs, os::unix::fs::FileTypeExt as _};
+
+    use ganja_serve::socket::EXTENSION;
+
+    /// How long one socket is given to answer before it is treated as
+    /// silent. Local, and the answer is a few hundred bytes; a socket that
+    /// takes longer than this is not one a listing should wait on.
+    const HEALTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+    let directory = directory.unwrap_or_else(ganja_serve::socket::directory);
+    if !private_socket_directory(&directory)? {
+        println!(
+            "no live sessions; nothing serves a socket under {}",
+            directory.display()
+        );
+
+        return Ok(());
+    }
+
+    let mut entries: Vec<PathBuf> = fs::read_dir(&directory)
+        .with_context(|| format!("failed to read {}", directory.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        // By extension, and by extension only: the lock siblings, and
+        // anything else somebody left here, are not sockets to probe.
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some(EXTENSION))
+        .collect();
+    entries.sort();
+
+    let mut live: Vec<(String, PathBuf)> = Vec::new();
+    for path in entries {
+        // `symlink_metadata`, and only what this binary's own binder makes is
+        // ever probed or removed: a plain file or a link wearing the
+        // extension is named and left where it is.
+        let found = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if !found.file_type().is_socket() {
+            eprintln!("note: {} is not a socket; left in place", path.display());
+            continue;
+        }
+
+        let client = ganja_client::Client::on_socket(&path)?;
+        let answered = tokio::time::timeout(HEALTH_DEADLINE, client.health()).await;
+        match answered {
+            Ok(Ok(health)) => live.push((health.session_id.as_str().to_owned(), path)),
+            // Something answered and it was not health as this build reads
+            // it: a server all the same, listed as one, with the session it
+            // would not say.
+            Ok(Err(
+                refusal @ (ganja_client::ClientError::Refused { .. }
+                | ganja_client::ClientError::Unauthorized { .. }
+                | ganja_client::ClientError::Skew { .. }),
+            )) => {
+                eprintln!(
+                    "note: {} answered, but not with a session: {refusal}",
+                    path.display()
+                );
+                live.push(("?".to_owned(), path));
+            }
+            Ok(Err(_)) | Err(_) => {
+                if name_is_held(&path)? {
+                    eprintln!(
+                        "note: {} is held by a live server that did not answer; left in place",
+                        path.display()
+                    );
+                    continue;
+                }
+                match fs::remove_file(&path) {
+                    Ok(()) => eprintln!("note: removed the dead socket {}", path.display()),
+                    // Gone between the probe and the unlink — its server
+                    // stopped and cleaned up after itself.
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("failed to remove {}", path.display()));
+                    }
+                }
+            }
+        }
+    }
+
+    if live.is_empty() {
+        println!(
+            "no live sessions; nothing serves a socket under {}",
+            directory.display()
+        );
+
+        return Ok(());
+    }
+
+    println!("{:<36}  SOCKET", "SESSION");
+    for (session, path) in live {
+        println!("{session:<36}  {}", path.display());
+    }
+
+    Ok(())
+}
+
+/// Whether `directory` is a real directory of ours at exactly `0700` —
+/// [`ganja_serve::socket`]'s own verdict, refused by name through that
+/// crate's own [`ganja_serve::ServeError::UnsafeSocketDirectory`] so the
+/// listing and the binder disagree about nothing, spelled here because
+/// the binder's check is its own private step. `Ok(false)` when there is
+/// nothing at the path: nothing has served a socket, and a listing is
+/// not the thing that should make the directory.
+#[cfg(unix)]
+fn private_socket_directory(directory: &std::path::Path) -> Result<bool> {
+    use std::{fs, os::unix::fs::MetadataExt as _};
+
+    use ganja_serve::{DirectoryRefusal, ServeError};
+
+    let refuse = |reason| {
+        anyhow::Error::from(ServeError::UnsafeSocketDirectory {
+            path: directory.to_path_buf(),
+            reason,
+        })
+    };
+    // The link case is the reason for `symlink_metadata`: a link to a
+    // perfectly good directory is still a link somebody planted in `/tmp`.
+    let found = match fs::symlink_metadata(directory) {
+        Ok(found) => found,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(refuse(DirectoryRefusal::Io(error))),
+    };
+    if !found.file_type().is_dir() {
+        return Err(refuse(DirectoryRefusal::NotADirectory));
+    }
+    // SAFETY: `geteuid` takes nothing, touches nothing, and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    if found.uid() != uid {
+        return Err(refuse(DirectoryRefusal::ForeignOwner {
+            owner: found.uid(),
+            uid,
+        }));
+    }
+    let mode = found.mode() & 0o777;
+    if mode != 0o700 {
+        return Err(refuse(DirectoryRefusal::Permissions { mode }));
+    }
+
+    Ok(true)
+}
+
+/// Whether a live binder holds `socket`'s name: an advisory `flock` on
+/// the `.lock` sibling, probed without waiting and released at once.
+///
+/// An absent lock file is a name no binder ever claimed — the binder
+/// makes the lock before it binds — so nobody holds it; and it is *not*
+/// created here, because a listing that left lock files behind would be
+/// a binder's footprint without a binder. The probe takes the lock for
+/// the instant it holds the descriptor: a binder racing that instant
+/// reads the name as held and extends by a digit, which is the routine
+/// case its walk exists for, never a failure.
+#[cfg(unix)]
+fn name_is_held(socket: &std::path::Path) -> Result<bool> {
+    use std::{fs, os::fd::AsRawFd as _};
+
+    use ganja_serve::socket::LOCK_EXTENSION;
+
+    let lock = socket.with_extension(LOCK_EXTENSION);
+    let file = match fs::OpenOptions::new().read(true).write(true).open(&lock) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to open {}", lock.display()));
+        }
+    };
+    // SAFETY: `flock` takes an open descriptor and two flags, and the
+    // descriptor is owned by `file` for the whole call.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(false);
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return Ok(true);
+    }
+
+    Err(error).with_context(|| format!("failed to probe {}", lock.display()))
+}
+
+/// A Unix socket needs a Unix host; elsewhere the listing is refused as the
+/// bind that could never have happened, in `ganja_serve`'s own posture.
+#[cfg(not(unix))]
+async fn live_sessions_command(_directory: Option<PathBuf>) -> Result<()> {
+    bail!("live sessions are served over unix sockets, which need a unix host")
 }
 
 /// The session store of the project this was run in.
@@ -2047,6 +2290,44 @@ mod tests {
             );
         }
         assert!(help.contains("--model"), "and the visible flags still show");
+    }
+
+    /// The live listing's directory door is hidden for the spawn flags'
+    /// reason — nothing a person types — and meaningless without `--live`,
+    /// so clap refuses the pair rather than this code ignoring half of it.
+    #[test]
+    fn the_socket_directory_door_is_hidden_and_needs_live() {
+        use clap::CommandFactory as _;
+
+        let mut help = Vec::new();
+        Cli::command()
+            .find_subcommand_mut("sessions")
+            .expect("sessions is a subcommand")
+            .write_long_help(&mut help)
+            .expect("the help renders");
+        let help = String::from_utf8(help).expect("the help is UTF-8");
+        assert!(
+            !help.contains("--socket-dir"),
+            "--socket-dir is hidden from --help:\n{help}"
+        );
+        assert!(help.contains("--live"), "and the visible flag still shows");
+
+        assert!(
+            Cli::try_parse_from(["ganja", "sessions", "--socket-dir", "/tmp/x"]).is_err(),
+            "a directory to list live sockets in, without --live, is refused"
+        );
+        let Ok(Cli {
+            command: Some(Command::Sessions(args)),
+            ..
+        }) = Cli::try_parse_from(["ganja", "sessions", "--live", "--socket-dir", "/tmp/x"])
+        else {
+            panic!("the pair parses");
+        };
+        assert!(args.live);
+        assert_eq!(
+            args.socket_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/x"))
+        );
     }
 
     #[test]
