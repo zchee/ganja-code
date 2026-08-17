@@ -23,6 +23,20 @@
 //! `model` fields on the prompt body, and explicit `POST
 //! /session/{id}/agent` / `…/model` routes (deviation:
 //! switches-are-state-not-prompt-fields).
+//!
+//! # The team routes (D-13, **D505**)
+//!
+//! Spec: Claude Code's teammates (§5.6, cross-session addressing) — upstream
+//! opencode has no teammates and no counterpart to any of it. Two routes,
+//! and the router is built twice from the one function below with the
+//! transport as its flag: `GET /team` answers on TCP and on the session's
+//! own Unix socket alike, read-only, one JSON body of the engine's
+//! `TeamView`; `POST /team/{name}/message` is **registered on the socket
+//! router only**, so on TCP it is not there — `404`, the same answer as any
+//! route that does not exist, rather than a `403` that would announce a
+//! door and refuse it. Both reach the team through engine accessors and
+//! never through the team crate: serve invents no state, holds no team, and
+//! keeps its dependency list where it was.
 
 use axum::{
     Json,
@@ -33,15 +47,17 @@ use axum::{
     response::{IntoResponse as _, Response},
     routing::{get, post},
 };
-use ganja_core::{EngineError, config::AgentMode};
-use ganja_protocol::{Command, Mention, PermissionId, PermissionReply, SessionId};
+use ganja_core::{
+    EngineError, Incoming, NotReceived, SocketDelivered, SocketMessage, config::AgentMode,
+};
+use ganja_protocol::{Command, Mention, PermissionId, PermissionReply, SessionId, team::TeamView};
 use serde::Deserialize;
 
 use crate::{
     auth::{self, WWW_AUTHENTICATE},
     error::ApiError,
     sse,
-    state::AppState,
+    state::{AppState, Transport},
 };
 
 /// The header a client names its directory in — upstream's
@@ -50,7 +66,7 @@ use crate::{
 pub const DIRECTORY_HEADER: &str = "x-ganja-directory";
 
 pub(crate) fn router(state: AppState) -> axum::Router {
-    axum::Router::new()
+    let router = axum::Router::new()
         .route("/global/health", get(health))
         .route("/config", get(config))
         .route("/path", get(path))
@@ -80,13 +96,41 @@ pub(crate) fn router(state: AppState) -> axum::Router {
         .route("/session/{id}/model", post(switch_model))
         .route("/permission", get(list_permissions))
         .route("/permission/{id}/reply", post(reply_permission))
+        // Read-only, on both transports: the roster is no more secret than
+        // `GET /session` and no more writable than `GET /permission`.
+        .route("/team", get(team));
+    // The write half exists on the socket alone. Not registered rather than
+    // registered-and-refused, so a TCP client is told there is no such route
+    // (D-13; AC-15).
+    let router = match state.transport {
+        Transport::Socket => router.route("/team/{name}/message", post(team_message)),
+        Transport::Tcp => router,
+    };
+
+    router
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
 
 /// Every request passes here first: one log line that is **method and path
 /// only** — never the query, which may carry `auth_token` — then the
-/// credential when one is configured, then the directory.
+/// credential when the transport wants one, then the directory.
+///
+/// # The credential is the transport's to ask for (**D505**)
+///
+/// The invariant, stated once: **a request is served when it arrives over
+/// loopback TCP with the configured credential, over non-loopback TCP with
+/// the configured credential, or over a same-uid Unix socket with none** —
+/// and a bind with no credential is still refused at startup unless it is
+/// loopback or a socket (that refusal is the binder's, in `lib.rs`; this is
+/// the request half of the same rule). On the socket the filesystem already
+/// decided who may connect — the binder keeps the directory `0700` and the
+/// socket `0600` and refuses a peer whose uid is not this process's at
+/// accept — so a password there would guard nothing and would break the one
+/// thing the socket is for: `GANJA_SERVER_PASSWORD` exported for a TCP
+/// `serve` must not silently lock every local teammate out of the same
+/// session's socket. A credential configured on a socket-bound server is
+/// therefore carried and never consulted, which is what AC-26 pins.
 async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
     tracing::debug!(
         method = %request.method(),
@@ -94,7 +138,8 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
         "serving"
     );
 
-    if let Some(credentials) = &state.credentials
+    if state.transport == Transport::Tcp
+        && let Some(credentials) = &state.credentials
         && !auth::authorized(request.headers(), request.uri().query(), credentials)
     {
         // Upstream's challenge, empty-bodied
@@ -166,11 +211,20 @@ async fn ensure_session(state: &AppState, id: &str) -> Result<SessionId, ApiErro
     }
 }
 
-/// `GET /global/health` (`groups/global.ts:76`).
-async fn health() -> Json<serde_json::Value> {
+/// `GET /global/health` (`groups/global.ts:76`), plus one field upstream's
+/// has no need of: the id of the session this server is currently serving
+/// (**D505**). A session's socket is named by the first hex digits of its
+/// id, and two sessions born in one 65-second UUIDv7 bucket share them, so
+/// mapping a live socket back to *which* session is something only the
+/// server can say — `ganja sessions --live` asks here. The engine's current
+/// slot rather than the socket's birth name: a resume moves the slot and the
+/// socket keeps its file name, and what a caller wants to know is what
+/// answers now.
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "healthy": true,
         "version": env!("CARGO_PKG_VERSION"),
+        "session_id": state.engine.session_id().as_str(),
     }))
 }
 
@@ -530,6 +584,72 @@ async fn switch_model(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// `GET /team` (D-13): the team this session leads, as its `/team` dialog
+/// draws it — the engine's own `TeamView`, whole, on either transport.
+///
+/// A session that leads no team is `404` rather than an empty roster: the
+/// engine draws that distinction (no directory on disk versus a team of
+/// nobody), and a client asking after a team should be told there is none to
+/// ask after rather than handed a roster with no lead in it.
+async fn team(State(state): State<AppState>) -> Result<Json<TeamView>, ApiError> {
+    state
+        .engine
+        .team_view()
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(NO_TEAM.to_owned()))
+}
+
+/// `POST /team/{name}/message` (D-13, socket router only): a plain message
+/// from another session, delivered into this team through the engine's own
+/// postbox — never written by this crate.
+///
+/// The body is `ganja-core`'s [`SocketMessage`], the same struct the sending
+/// side serializes, so the two ends of the wire cannot drift; the answer is
+/// its [`SocketDelivered`]. What is refused, and how, is the engine's ladder
+/// ([`NotReceived`]) mapped onto the status table this crate already keeps:
+/// nothing to deliver into is `404`, a name nobody answers to is `404`, a
+/// body that is blank, structured, or from a sender that will not name
+/// itself as a peer is `400`, and an inbox that would not take the message
+/// is `500`. A structured frame never crosses (§5.2-6): a `text` that parses
+/// as one is refused by the engine's classify, and a body that carries a
+/// frame *instead of* text does not parse as this body at all.
+async fn team_message(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<Json<SocketDelivered>, ApiError> {
+    let body: SocketMessage = parse(&body)?;
+
+    let sent = state
+        .engine
+        .receive_peer_message(Incoming {
+            from: body.from,
+            to: name,
+            text: body.text,
+            summary: body.summary,
+        })
+        .await
+        .map_err(|refused| match refused {
+            NotReceived::NoTeam | NotReceived::Unknown { .. } => {
+                ApiError::NotFound(refused.to_string())
+            }
+            NotReceived::Blank
+            | NotReceived::Frame { .. }
+            | NotReceived::NotAPeerIdentity { .. } => ApiError::Invalid(refused.to_string()),
+            NotReceived::Failed { .. } => ApiError::Internal(refused.to_string()),
+        })?;
+
+    Ok(Json(SocketDelivered {
+        to: sent.to,
+        note: sent.note,
+    }))
+}
+
+/// What `GET /team` says when this session leads no team. Its own sentence
+/// rather than the engine's, because the engine answers with an absence and
+/// a route answers with words.
+const NO_TEAM: &str = "this session leads no team";
 
 /// `GET /permission`: every request the engine is waiting on, oldest first —
 /// what a client that just connected reads before it can answer anything.

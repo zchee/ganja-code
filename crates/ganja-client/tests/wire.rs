@@ -52,11 +52,19 @@ async fn drain(events: &mut ganja_client::Events) -> Vec<Result<Event, ClientErr
 
 #[tokio::test]
 async fn health_answers_what_the_server_says_it_is() {
-    let stub = Stub::always(Reply::ok(r#"{"healthy":true,"version":"0.1.0"}"#)).await;
+    let stub = Stub::always(Reply::ok(
+        r#"{"healthy":true,"version":"0.1.0","session_id":"01998ad0-0000-7000-8000-00000000d505"}"#,
+    ))
+    .await;
 
     let health = stub.client().health().await.expect("health answers");
     assert!(health.healthy);
     assert_eq!(health.version, "0.1.0");
+    assert_eq!(
+        health.session_id.as_str(),
+        "01998ad0-0000-7000-8000-00000000d505",
+        "and which session it is serving"
+    );
     assert_eq!(stub.only_request().path, "/global/health");
 }
 
@@ -197,7 +205,10 @@ async fn a_reply_names_the_dialog_and_the_decision() {
 
 #[tokio::test]
 async fn a_configured_credential_travels_as_basic_auth_on_every_route() {
-    let stub = Stub::always(Reply::ok(r#"{"healthy":true,"version":"0.1.0"}"#)).await;
+    let stub = Stub::always(Reply::ok(
+        r#"{"healthy":true,"version":"0.1.0","session_id":"01998ad0-0000-7000-8000-00000000d505"}"#,
+    ))
+    .await;
     let client = Client::new(stub.address(), Some(Credentials::new("ganja", "hunter2")))
         .expect("the stub's address is usable");
 

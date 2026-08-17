@@ -126,5 +126,11 @@ pub use storage::{SessionInfo, Storage, StorageError};
 /// frontend builds them and hands them to an engine — while everything else in
 /// `subagent` stays crate-private. [`Caller`] is what one spawn's calling turn
 /// brings, and [`SpawnAsker`] is where a spawn the rules do not settle is put
-/// in front of somebody.
-pub use subagent::{Backends, Caller, Postbox, SpawnAsk, SpawnAsker, Teammates};
+/// in front of somebody. [`Incoming`], [`NotReceived`], [`SocketMessage`]
+/// and [`SocketDelivered`] are the socket route's half (**D505**): what
+/// `ganja-serve` hands [`Engine::receive_peer_message`] and reads back, and
+/// the two wire bodies both ends of `uds:` delivery spell.
+pub use subagent::{
+    Backends, Caller, Incoming, NotReceived, Postbox, SocketDelivered, SocketMessage, SpawnAsk,
+    SpawnAsker, Teammates,
+};
