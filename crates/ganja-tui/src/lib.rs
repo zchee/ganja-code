@@ -104,29 +104,67 @@ pub async fn run(
     member: Option<member::Flags>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = Config::load_with(&cwd, &overrides).context("failed to read the configuration")?;
     // Resolved first, and refused readably before anything else is built: a
     // pane teammate is launched by a program rather than a person, and a bad
     // launch line has to reach the lead's log as a sentence rather than as a
     // pane that flashed and died. The teams root is the lead's own — asked of
     // the same registry a lead builds, so both sides read one directory — and
     // a launch line with no config home has nowhere to read from at all.
+    //
+    // The bypass trio is the pane's bypass posture (`BypassAtSpawn` when
+    // carried, `ForwardToLead` otherwise): the record carries no such field —
+    // Claude's shape holds `planModeRequired` and nothing else about it — and
+    // the spawn's own approved answer is the one fact a lead can put on the
+    // line without putting a secret there. The record itself — the model this
+    // teammate was spawned to run, and whether it must start in plan mode —
+    // is **waited for**, because the lead writes it after the split answers,
+    // and a pane is always a few milliseconds older than its own record.
+    // Before the config loads, because plan mode is an agent here, and the
+    // agent a session starts on is the config's to resolve.
     let membership = match member {
         Some(flags) => {
             let home = ganja_core::config::config_home()
                 .context("a pane teammate needs a config home to find its team in")?;
             let pane = std::env::var(member::TMUX_PANE).ok();
+            let membership = member::Membership::resolve(flags, &home, &cwd, pane, yolo)?;
+            let record = membership
+                .await_record(member::RECORD_WAIT)
+                .await
+                .context("this pane teammate's lead never registered it")?;
 
-            Some(member::Membership::resolve(flags, &home, &cwd, pane)?)
+            Some((membership, record))
         }
         None => None,
     };
+    // `planModeRequired` is the `plan` agent: read-only rules and the
+    // `plan_exit` door, which is what plan mode is in this build. Below the
+    // flag tier, so a hand-typed `--agent` still wins over the record.
+    let overrides = match &membership {
+        Some((_, record))
+            if record.plan_mode_required.unwrap_or(false) && overrides.agent.is_none() =>
+        {
+            Overrides {
+                agent: Some(ganja_core::agent::PLAN.to_owned()),
+                ..overrides
+            }
+        }
+        _ => overrides,
+    };
+    let config = Config::load_with(&cwd, &overrides).context("failed to read the configuration")?;
     let keys =
         Keybinds::from_config(&config.keybinds).context("failed to read the key bindings")?;
     let selection = provider::select(&config).context("failed to select a provider")?;
     // Captured before the provider is handed to the engine: the model list is
     // narrowed to this provider, and `Selection` gives it up on the move.
     let provider_id = selection.provider.id().to_owned();
+    // A pane teammate runs the model its spawn decided — the record's, a bare
+    // id the lead's own engine was serving — over the provider this build's
+    // config selects; `--model` is not on §4.1's line, and a record naming no
+    // model leaves the selection's default standing.
+    let model = membership
+        .as_ref()
+        .and_then(|(_, record)| record.model.clone())
+        .unwrap_or(selection.model);
     // Sessions live per project, so opening `src/` and opening the repository
     // root reach the same history.
     let project = Project::resolve(&cwd);
@@ -189,7 +227,7 @@ pub async fn run(
     )));
     let mut engine = Engine::persistent(
         selection.provider,
-        selection.model,
+        model,
         Arc::new(tools),
         ganja_permission::Permissions::load(&cwd),
         storage,
@@ -300,7 +338,19 @@ pub async fn run(
 
                 (engine.with_teammates(Arc::clone(&registry)), Some(registry))
             }
-            None if membership.is_some() => (engine, None),
+            // A member speaks as itself: its `send_message` posts through the
+            // postbox stamped with the name its launch line carried, over the
+            // same teams root its lead writes into — the roster read off the team
+            // file per call, the lead always addressable, and this session still
+            // leading no team of its own.
+            None if let Some((membership, _)) = &membership => (
+                engine.with_postbox(Arc::new(ganja_core::teammate::member::MemberPostbox::new(
+                    membership.name().clone(),
+                    membership.team().clone(),
+                    membership.root().clone(),
+                ))),
+                None,
+            ),
             None => {
                 tracing::warn!(
                     "no config home, so this session leads no team and cannot spawn teammates"
@@ -312,7 +362,7 @@ pub async fn run(
     // What the status bar says about who this process is, beside the provider
     // and theme notices: a person looking at a pane should be able to tell it
     // from the lead's window at a glance.
-    let member_notice = membership.as_ref().map(|membership| {
+    let member_notice = membership.as_ref().map(|(membership, _)| {
         tracing::info!(
             team = membership.team().as_str(),
             name = membership.name().as_str(),
@@ -409,7 +459,7 @@ pub async fn run(
             // The member's inbox, on the tick that already polls everything
             // else here; a session nobody launched as a teammate installs
             // nothing and reads nothing (§10.3).
-            if let Some(membership) = membership {
+            if let Some((membership, _)) = membership {
                 app = app.with_member(member::Inbox::new(membership));
             }
             app.seed(seed);

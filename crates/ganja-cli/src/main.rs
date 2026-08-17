@@ -223,9 +223,11 @@ impl BypassArgs {
 /// ```
 ///
 /// `--model`/`--agent` are `SelectArgs`' own and ride beside; the bypass trio
-/// is how a lead spawns a teammate that answers its own dialogs (D479). The
-/// pane id is not on the line: the pane reads `TMUX_PANE` from the environment
-/// tmux gives it.
+/// is the pane's posture (D-5): carried, the teammate answers its own dialogs
+/// (D479); absent, it forwards every ask to the lead as a §5 frame. The pane
+/// id is not on the line — the pane reads `TMUX_PANE` from the environment
+/// tmux gives it — and neither is the model, which the pane takes from the
+/// member record its lead writes.
 #[derive(Debug, Args)]
 struct MemberArgs {
     #[arg(
