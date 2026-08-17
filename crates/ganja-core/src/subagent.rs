@@ -1057,6 +1057,15 @@ impl Postbox {
         let from = format!("{}@{}", self.sender, registry.team());
         drop(registry);
 
+        // The tool's rung 3 has already judged the address; it is judged
+        // once more here because [`team::Postbox`] is a public trait and this
+        // arm is what every caller of it gets — the last gate before a
+        // connection is the one that has to hold by construction, whoever
+        // called. Same predicate, one spelling (`ganja_tool::socket`).
+        crate::tool::socket::vet_address(path).map_err(|why| Undelivered::Failed {
+            reason: format!("{NOT_A_SESSION_SOCKET} {}: {why}.", path.display()),
+        })?;
+
         let socket = Socket::open(path)?;
         let view: TeamView = socket.get(TEAM_ROUTE).await?;
         let lead = view.lead;
@@ -1468,6 +1477,11 @@ pub(crate) const NO_SOCKET: &str = "A message to another session travels over th
 /// rung 6 already, and refused here again for whoever reaches the trait
 /// without the tool in front of it (§5.2-6).
 pub(crate) const FRAME_OVER_SOCKET: &str = "A protocol frame does not cross a socket: a session reached at a uds: address takes plain text. Send prose, or address a member of this team by name.";
+
+/// A `uds:` address that is not a session socket of ours (**D505**, the
+/// D498 premise held across a socket): the tool refuses it at rung 3, and
+/// this arm refuses it again ahead of the clause it failed.
+pub(crate) const NOT_A_SESSION_SOCKET: &str = "A uds: address names another ganja session's socket — a session-named socket of this user's, in a private socket directory of this user's — and this one does not. Socket";
 
 /// A client that would not build for a socket path — ahead of what reqwest
 /// said, and unreachable for any path the tool's rung 3 let through.
@@ -2087,10 +2101,10 @@ mod tests {
 
     use super::{
         Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Incoming, MemberName,
-        NotReceived, PermissionReply, Postbox, Reserved, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent,
-        SocketMessage, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, Teammate, TeammateRegistry,
-        TeammateSpawn, Teammates, Undelivered, Watched, async_trait, denies_task, mailbox, receive,
-        roster, subagent_rules, team, watch,
+        NOT_A_SESSION_SOCKET, NotReceived, PermissionReply, Postbox, Reserved, SOCKET_REFUSED,
+        SOCKET_UNREACHABLE, Sent, SocketMessage, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE,
+        Teammate, TeammateRegistry, TeammateSpawn, Teammates, Undelivered, Watched, async_trait,
+        denies_task, mailbox, receive, roster, subagent_rules, team, watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -2447,6 +2461,25 @@ mod tests {
                 registry,
                 worker,
             }
+        }
+
+        /// A session-named socket path in a private (`0700`) directory under
+        /// this team's home — what the deliver arm's address gate admits.
+        /// Nothing is bound at it; the caller decides what listens there.
+        fn session_socket_path(&self, stem: &str) -> std::path::PathBuf {
+            use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+            let run = self._home.path().join("run");
+            if !run.exists() {
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&run)
+                    .expect("a private socket directory is made");
+                std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700))
+                    .expect("and held at 0700 whatever the umask");
+            }
+
+            run.join(format!("{stem}.sock"))
         }
 
         /// Every message in `name`'s inbox that checked out.
@@ -2851,13 +2884,51 @@ mod tests {
         );
     }
 
-    /// A socket nothing listens at is a typed failure that names the socket
-    /// and the OS's reason, under the deadline — never a hang, never a panic.
+    /// **D505, the D498 premise held at the last gate**: the deliver arm
+    /// judges the address as the tool's rung 3 does — a session socket of
+    /// ours, or refused by the clause it fails — before any client is built,
+    /// so a caller reaching the trait without the tool in front of it is
+    /// still kept off every other listener on this machine.
+    #[tokio::test]
+    async fn an_address_that_is_not_a_session_socket_of_ours_is_refused_before_anything_is_sent() {
+        let team = Team::new().await;
+        let postbox: &dyn team::Postbox = &team.worker;
+
+        for to in [
+            "/var/run/docker.sock",
+            "/tmp/tmux-501/default",
+            "/nonexistent-ganja/0198c1a2.sock",
+        ] {
+            let refused = postbox
+                .deliver(
+                    Address::Uds { path: to.into() },
+                    Body::Text {
+                        text: "anyone".to_owned(),
+                        summary: None,
+                    },
+                )
+                .await;
+            let Err(Undelivered::Failed { reason }) = refused else {
+                panic!("{to}: refused as not a session socket, not {refused:?}");
+            };
+            assert!(
+                reason.starts_with(NOT_A_SESSION_SOCKET) && reason.contains(to),
+                "{to}: the sentence names the rule and the socket: {reason}"
+            );
+        }
+    }
+
+    /// A session socket nothing listens at any more — bound once and dropped,
+    /// its file left behind — passes the address gate and is a typed failure
+    /// that names the socket and the OS's reason, under the deadline: never a
+    /// hang, never a panic.
     #[tokio::test]
     async fn a_dead_socket_is_a_typed_failure_naming_the_socket() {
         let team = Team::new().await;
         let postbox: &dyn team::Postbox = &team.worker;
-        let path = team._home.path().join("nobody-listens.sock");
+        let path = team.session_socket_path("0198c1a2");
+        drop(std::os::unix::net::UnixListener::bind(&path).expect("a socket binds"));
+        assert!(path.exists(), "the file outlives its listener");
 
         let failed = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -2899,7 +2970,7 @@ mod tests {
     async fn a_socket_delivery_asks_who_leads_and_posts_to_them_stamped_with_its_identity() {
         let team = Team::new().await;
         let postbox: &dyn team::Postbox = &team.worker;
-        let path = team._home.path().join("peer.sock");
+        let path = team.session_socket_path("0198c1a2");
         let peer = PeerStub::listen(&path).await;
 
         let sent = postbox
@@ -2950,7 +3021,7 @@ mod tests {
     async fn a_peers_refusal_reaches_the_sender_in_the_peers_words() {
         let team = Team::new().await;
         let postbox: &dyn team::Postbox = &team.worker;
-        let path = team._home.path().join("refusing.sock");
+        let path = team.session_socket_path("0198c1a2");
         let _peer = PeerStub::listen_refusing(&path, 404, "This session leads no team").await;
 
         let failed = postbox

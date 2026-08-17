@@ -9,13 +9,24 @@
 //!
 //! `send_message` is deliberately **not** in
 //! [`ASK_BY_DEFAULT`](ganja_permission::permission::ASK_BY_DEFAULT). Sending a
-//! message to a named teammate is conversation, not authority: nothing outside
-//! the session changes, whatever the recipient goes on to *do* is gated by the
-//! recipient's own rules, and the tool is offered at all only where a team
-//! already exists. The permission that matters was answered at **spawn** —
-//! whether this session may run a teammate, and under which posture — and
-//! raising a dialog per message would train a person to click through the one
-//! dialog that does carry a decision.
+//! message to a named teammate is conversation, not authority: what changes
+//! is one entry in a mailbox this user already owns, whatever the recipient
+//! goes on to *do* is gated by the recipient's own rules, and the tool is
+//! offered at all only where a team already exists. The permission that
+//! matters was answered at **spawn** — whether this session may run a
+//! teammate, and under which posture — and raising a dialog per message would
+//! train a person to click through the one dialog that does carry a decision.
+//!
+//! The premise has to hold across a socket too, and since D505 it is held
+//! there by rung 3 rather than assumed: a `uds:` address may name **only a
+//! session socket of this user's** — [`socket::vet_address`]'s clauses, the
+//! binder's own discipline turned toward the address — so an unasked call
+//! can reach exactly the same set of mailboxes a named teammate is one of,
+//! over a transport only this build's binder makes, and never `/var/run/`'s
+//! or anybody else's listener. What crosses is plain text into a same-uid
+//! lead's inbox; what comes back is bounded and read as typed answers by the
+//! deliverer. That, and not "nothing leaves the session", is what keeps the
+//! tool conversation rather than authority.
 //!
 //! # The ladder refuses in ganja's own words (**D497**)
 //!
@@ -61,19 +72,24 @@
 //! socket path is a filename, which may hold an `@` meaning nothing by it, so
 //! `uds:/tmp/a@b.sock` is an address rather than a scoped recipient.
 //!
-//! # The cross-session tail
+//! # The cross-session tail (**D505**)
 //!
-//! A `uds:` address is validated here and delivered elsewhere. Until the
-//! socket lands, a valid one reaches [`Postbox::deliver`] and comes back
-//! [`Undelivered::NoTransport`] carrying that side's own sentence: the ladder
-//! is complete from this phase and only delivery waits.
+//! A `uds:` address is judged here and delivered elsewhere. Rung 3 refuses
+//! one that names nothing usable (empty, or carrying a NUL) and then one that
+//! is not a session socket of ours ([`socket::vet_address`], every clause by
+//! name); one that passes reaches [`Postbox::deliver`], whose lead-side
+//! implementation crosses to that session's own socket, vets the address
+//! once more before it connects, and answers with what the far side said or
+//! an [`Undelivered::Failed`] naming the socket. A pane member's postbox
+//! still answers [`Undelivered::NoTransport`] in its own words — that arm is
+//! the one caller of the variant left.
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::{
-    Tool, ToolCtx, ToolError, ToolOutput,
+    Tool, ToolCtx, ToolError, ToolOutput, socket,
     team::{Address, Body, Peer, Postbox, Reserved, Undelivered},
 };
 
@@ -169,6 +185,10 @@ const UNSUPPORTED_SCHEME: &str = "A teammate is addressed by its bare name, and 
 const INVALID_SOCKET_PATH: &str =
     "A uds: address must name the socket to reach, and this one names nothing usable:";
 
+/// Rung 3: a socket address that is not a session socket of ours — the
+/// clause it failed follows.
+const NOT_A_SESSION_SOCKET: &str = "A uds: address names another ganja session's socket — a session-named socket of this user's, in a private socket directory of this user's — and this one does not:";
+
 /// Rung 4: a scoped recipient.
 const SCOPED_RECIPIENT: &str = "There is one team per session, so a recipient is a bare name rather than a name scoped to somewhere:";
 
@@ -224,6 +244,12 @@ pub enum Refused {
     },
     /// Rung 3: a `uds:` address whose path is empty or unusable.
     InvalidSocketPath,
+    /// Rung 3: a `uds:` address that names something other than a session
+    /// socket of ours, by the first clause it failed (**D505**).
+    NotASessionSocket {
+        /// Which clause of the address gate refused it.
+        why: socket::AddressRefusal,
+    },
     /// Rung 4: `to` was scoped with `@` rather than a bare name.
     ScopedRecipient,
     /// Rung 5: the message was whitespace.
@@ -268,6 +294,7 @@ impl Refused {
             Self::Broadcast => BROADCAST.to_owned(),
             Self::UnsupportedScheme { scheme } => format!("{UNSUPPORTED_SCHEME} {scheme}"),
             Self::InvalidSocketPath => format!("{INVALID_SOCKET_PATH} {to:?}"),
+            Self::NotASessionSocket { why } => format!("{NOT_A_SESSION_SOCKET} {to:?}: {why}."),
             Self::ScopedRecipient => format!("{SCOPED_RECIPIENT} {to:?}"),
             Self::Whitespace => WHITESPACE.to_owned(),
             Self::StructuredOverSocket => STRUCTURED_OVER_SOCKET.to_owned(),
@@ -386,7 +413,14 @@ fn parse_address(to: &str) -> Result<Address, Refused> {
         if path.is_empty() || path.contains('\0') {
             return Err(Refused::InvalidSocketPath);
         }
-        return Ok(Address::Uds { path: path.into() });
+        let path = std::path::PathBuf::from(path);
+        // Rung 3 still, and the clause that makes the tool safe to run
+        // unasked (D498, D505): only a session socket of ours is an address.
+        // Inspected here, before the body is judged, so a call aimed at some
+        // other listener on this machine is refused before anything is
+        // composed for it.
+        session_socket(&path)?;
+        return Ok(Address::Uds { path });
     }
     if let Some(scheme) = UNSUPPORTED_SCHEMES
         .iter()
@@ -403,6 +437,21 @@ fn parse_address(to: &str) -> Result<Address, Refused> {
     }
 
     Ok(Address::Local(to.to_owned()))
+}
+
+/// Rung 3's second clause: `path` is a session socket of ours, or the
+/// clause it fails. A build without Unix sockets has no such socket to name
+/// and refuses every one.
+fn session_socket(path: &std::path::Path) -> Result<(), Refused> {
+    #[cfg(unix)]
+    {
+        socket::vet_address(path).map_err(|why| Refused::NotASessionSocket { why })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(Refused::InvalidSocketPath)
+    }
 }
 
 /// §5.2's ladder, in its order: what this call may send, or the first rung it
@@ -582,15 +631,50 @@ mod tests {
 
     use super::{
         BROADCAST, DELIVERED, DESCRIPTION, HARNESS_ONLY_FRAME, INVALID_SOCKET_PATH, LEAD_MARK,
-        LIFECYCLE_FRAME, NO_TEAM, PROTOCOL_FRAME, ROSTER_HEADER, Refused, SCOPED_RECIPIENT,
-        SHUTDOWN_APPROVED_NOT_TO_LEAD, STRUCTURED_NEEDS_LOCAL_RECIPIENT, STRUCTURED_NOT_A_FRAME,
-        STRUCTURED_OVER_SOCKET, SendMessageTool, UNKNOWN_RECIPIENT, UNSUPPORTED_SCHEME, WHITESPACE,
-        cap_summary,
+        LIFECYCLE_FRAME, NO_TEAM, NOT_A_SESSION_SOCKET, PROTOCOL_FRAME, ROSTER_HEADER, Refused,
+        SCOPED_RECIPIENT, SHUTDOWN_APPROVED_NOT_TO_LEAD, STRUCTURED_NEEDS_LOCAL_RECIPIENT,
+        STRUCTURED_NOT_A_FRAME, STRUCTURED_OVER_SOCKET, SendMessageTool, UNKNOWN_RECIPIENT,
+        UNSUPPORTED_SCHEME, WHITESPACE, cap_summary,
     };
     use crate::{
         Credentials, Tool as _, ToolCtx, ToolError,
+        socket::AddressRefusal,
         team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered},
     };
+
+    /// A session socket of ours a `uds:` address may name: a real socket at
+    /// a session's name inside a private directory of this user's — what
+    /// rung 3 admits and nothing else. The listener is held so the socket
+    /// stays a socket; nothing here connects to it.
+    struct SessionSocket {
+        _directory: tempfile::TempDir,
+        _listener: std::os::unix::net::UnixListener,
+        path: std::path::PathBuf,
+    }
+
+    impl SessionSocket {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let directory = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .expect("a private directory");
+            let path = directory.path().join("0198c1a2.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&path).expect("a socket binds");
+
+            Self {
+                _directory: directory,
+                _listener: listener,
+                path,
+            }
+        }
+
+        /// The address as a model writes it.
+        fn address(&self) -> String {
+            format!("uds:{}", self.path.display())
+        }
+    }
 
     /// A handful of §5.1's ten, which is all any test here needs: the real
     /// answer is one `Frame::is_agent_sendable` call on the engine's side.
@@ -747,10 +831,25 @@ mod tests {
             validate(&postbox, "worker-1", json!("   "), None),
             Err(Refused::Whitespace)
         );
+        // 3 before 6: an address that is not a session socket of ours is
+        // refused before its structured body is looked at — the clause that
+        // keeps an unasked call off every other listener on this machine.
+        assert_eq!(
+            validate(
+                &postbox,
+                "uds:/var/run/docker.sock",
+                json!(frame.clone()),
+                None
+            ),
+            Err(Refused::NotASessionSocket {
+                why: AddressRefusal::NotASessionName
+            })
+        );
         // 6 before 8: a socket refuses structure before the frame's own
         // clauses are reached.
+        let socket = SessionSocket::new();
         assert_eq!(
-            validate(&postbox, "uds:/tmp/peer.sock", json!(frame.clone()), None),
+            validate(&postbox, &socket.address(), json!(frame.clone()), None),
             Err(Refused::StructuredOverSocket)
         );
         // 7, the ten and the five, each naming the frame it read.
@@ -898,18 +997,21 @@ mod tests {
         );
     }
 
-    /// A validated socket address is delivery's problem, and until the socket
-    /// lands delivery says so in its own words.
+    /// A socket address that passes rung 3 is delivery's problem, and what
+    /// delivery says about it — a pane member's postbox still answering that
+    /// it has no such transport, or the lead's naming a socket that did not
+    /// answer — is passed through in the deliverer's own words.
     #[tokio::test]
-    async fn a_socket_address_reaches_delivery_and_reads_back_its_absence() {
-        let absence = "This build has no cross-session socket yet.";
+    async fn a_socket_address_reaches_delivery_and_reads_back_the_deliverers_sentence() {
+        let socket = SessionSocket::new();
+        let absence = "This postbox does not speak the socket.";
         let postbox = Arc::new(Fake::answering(Err(Undelivered::NoTransport {
             reason: absence.to_owned(),
         })));
 
         let message = refusal(
             &postbox,
-            json!({"to": "uds:/tmp/peer.sock", "message": "hello"}),
+            json!({"to": socket.address(), "message": "hello"}),
         )
         .await;
 
@@ -921,9 +1023,94 @@ mod tests {
         assert_eq!(
             delivered.first().map(|(to, _)| to.clone()),
             Some(Address::Uds {
-                path: "/tmp/peer.sock".into()
+                path: socket.path.clone()
             }),
             "the address was validated here and handed over whole"
+        );
+    }
+
+    /// **D505, the D498 premise across a socket**: a `uds:` address may name
+    /// only a session socket of ours. The listeners a prompt-injected call
+    /// would go for are each refused by name at rung 3 — before the body is
+    /// composed and before anything is connected — and the sentence names the
+    /// clause, so a model that meant a real session can see what a session
+    /// socket looks like.
+    #[tokio::test]
+    async fn a_uds_address_that_is_not_a_session_socket_of_ours_is_refused_by_name() {
+        let postbox = Arc::new(Fake::answering(Ok(Sent {
+            to: "nobody".to_owned(),
+            note: "must not be reached".to_owned(),
+        })));
+
+        for (to, clause) in [
+            ("uds:/var/run/docker.sock", AddressRefusal::NotASessionName),
+            ("/var/run/docker.sock", AddressRefusal::NotASessionName),
+            ("uds:/tmp/tmux-501/default", AddressRefusal::NotASessionName),
+            (
+                "uds:/tmp/ssh-abc/agent.123",
+                AddressRefusal::NotASessionName,
+            ),
+            (
+                "uds:tmp/ganja-501/0198c1a2.sock",
+                AddressRefusal::NotPlainAbsolute,
+            ),
+            (
+                "uds:/tmp/../tmp/ganja-501/0198c1a2.sock",
+                AddressRefusal::NotPlainAbsolute,
+            ),
+            (
+                "uds:/nonexistent-ganja-dir/0198c1a2.sock",
+                AddressRefusal::DirectoryUnreadable,
+            ),
+        ] {
+            let message = refusal(&postbox, json!({"to": to, "message": "hello"})).await;
+            assert!(
+                message.starts_with(NOT_A_SESSION_SOCKET),
+                "{to}: the refusal is rung 3's own: {message}"
+            );
+            assert!(
+                message.contains(&clause.to_string()),
+                "{to}: and it names the clause: {message}"
+            );
+            assert_eq!(
+                validate(&postbox, to, json!("hello"), None),
+                Err(Refused::NotASessionSocket { why: clause }),
+                "{to}"
+            );
+        }
+        // A hex-named socket in a directory that is not private is refused for
+        // the directory, whatever is inside it.
+        let loose = tempfile::tempdir().expect("a directory");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(loose.path(), std::fs::Permissions::from_mode(0o755))
+                .expect("the test may loosen its own directory");
+        }
+        let planted = loose.path().join("0198c1a2.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&planted).expect("a socket binds");
+        assert_eq!(
+            validate(
+                &postbox,
+                &format!("uds:{}", planted.display()),
+                json!("hello"),
+                None
+            ),
+            Err(Refused::NotASessionSocket {
+                why: AddressRefusal::DirectoryNotOurs
+            })
+        );
+
+        assert!(
+            postbox.delivered.lock().expect("no panic").is_empty(),
+            "nothing reached the deliverer"
+        );
+
+        // And one that is a session socket of ours passes rung 3 and reaches
+        // delivery.
+        let socket = SessionSocket::new();
+        assert!(
+            validate(&postbox, &socket.address(), json!("hello"), None).is_ok(),
+            "a session socket of ours is an address"
         );
     }
 
@@ -978,6 +1165,7 @@ mod tests {
                 Refused::Broadcast => BROADCAST,
                 Refused::UnsupportedScheme { .. } => UNSUPPORTED_SCHEME,
                 Refused::InvalidSocketPath => INVALID_SOCKET_PATH,
+                Refused::NotASessionSocket { .. } => NOT_A_SESSION_SOCKET,
                 Refused::ScopedRecipient => SCOPED_RECIPIENT,
                 Refused::Whitespace => WHITESPACE,
                 Refused::StructuredOverSocket => STRUCTURED_OVER_SOCKET,
@@ -995,6 +1183,9 @@ mod tests {
             Refused::Broadcast,
             Refused::UnsupportedScheme { scheme: "did:" },
             Refused::InvalidSocketPath,
+            Refused::NotASessionSocket {
+                why: AddressRefusal::NotASessionName,
+            },
             Refused::ScopedRecipient,
             Refused::Whitespace,
             Refused::StructuredOverSocket,
@@ -1014,7 +1205,7 @@ mod tests {
 
         // The count moves with the ladder, and moving it is the moment to ask
         // whether the new rung earned its place.
-        assert_eq!(every.len(), 13, "every kind the ladder can produce");
+        assert_eq!(every.len(), 14, "every kind the ladder can produce");
         for refused in every {
             let sentence = refused.sentence("worker-1", Some("team-lead"));
             assert!(

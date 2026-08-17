@@ -1,17 +1,18 @@
-//! Where a session's socket lives and how it is bound. D505's cross-session
-//! transport is this crate's own HTTP over a Unix domain socket, and this
-//! module is the socket half: the directory, the name a session earns inside
-//! it, and the bind that keeps both private to the user who owns them.
+//! How a session's socket is bound. D505's cross-session transport is this
+//! crate's own HTTP over a Unix domain socket, and this module is the
+//! binder's half: the name walk over a session's candidates, the lock that
+//! says a name is live, the directory prepared and vetted, and the peer-uid
+//! check on every accepted connection.
 //!
-//! No upstream counterpart: opencode serves TCP only. The scheme is tmux's
-//! (`/tmp/tmux-<uid>/`; plan Resolution 5): a **literal** `/tmp/ganja-<uid>/`
-//! — never `std::env::temp_dir()`, whose macOS value is long enough to
-//! threaten `sun_path`'s 104 bytes, and never `$XDG_RUNTIME_DIR`, which macOS
-//! does not have — owned by the calling uid at mode `0700`, and inside it one
-//! socket per session at mode `0600`, named by the first eight hex digits of
-//! the session's UUIDv7 and extended a digit at a time past a name a live
-//! peer already holds. By construction the path is some thirty bytes, which
-//! is why the length refusal the plan first drafted is not here.
+//! No upstream counterpart: opencode serves TCP only. **The scheme itself
+//! lives one crate lower** — `ganja_tool::socket`, reached here as
+//! [`ganja_core::tool::socket`] and re-exported below under the names this
+//! module always had — because four readers at four heights of the tree
+//! spell it: the `send_message` tool judging a `uds:` address at rung 3, the
+//! engine's deliver arm judging it again before it connects, this binder,
+//! and `ganja sessions --live`. The literal `/tmp/ganja-<uid>/`, the
+//! `<hex>.sock` name, the `0700`/`0600` modes and the directory predicate
+//! are that module's; what is here is what only a server can do with them.
 //!
 //! Extension is routine rather than rare: a UUIDv7's first eight hex digits
 //! are the top thirty-two bits of a millisecond clock, so every session minted
@@ -68,46 +69,15 @@
 //! ever bound is the price, and a listing that wants the sockets filters by
 //! [`EXTENSION`] and never sees them.
 
-use std::{
-    io,
-    path::{Path, PathBuf},
+use std::path::{Path, PathBuf};
+
+pub use ganja_core::tool::socket::{
+    DIRECTORY_MODE, DirectoryRefusal, EXTENSION, LOCK_EXTENSION, LONGEST_NAME, SHORTEST_NAME,
+    SOCKET_MODE, lock_path, vet,
 };
-
-use ganja_protocol::SessionId;
-
-/// The extension every session socket carries, so a listing can tell a
-/// socket from anything else somebody left in the directory.
-pub const EXTENSION: &str = "sock";
-
-/// The extension of the lock file beside every socket — the liveness token
-/// the module doc describes. Created once per name and never removed.
-pub const LOCK_EXTENSION: &str = "lock";
-
-/// The lock file that holds `socket`'s name: the same stem, [`LOCK_EXTENSION`]
-/// in place of [`EXTENSION`].
-#[must_use]
-pub fn lock_path(socket: &Path) -> PathBuf {
-    socket.with_extension(LOCK_EXTENSION)
-}
-
-/// The fewest hex digits of a session id a socket is named by. Eight is
-/// tmux's own visual weight for a short id, and enough that a listing reads
-/// as ids rather than noise; a collision extends past it, one digit at a
-/// time.
-pub const SHORTEST_NAME: usize = 8;
-
-/// The directory this user's session sockets live in: the literal
-/// `/tmp/ganja-<uid>/`, exactly as tmux keeps `/tmp/tmux-<uid>/`.
-///
-/// Literal on purpose (Resolution 5): `std::env::temp_dir()` honors `$TMPDIR`,
-/// which macOS sets to a `/var/folders/…/T/` path long enough to press on
-/// `sun_path`, and a socket path that varies with the environment is a socket
-/// two processes can fail to agree on.
 #[cfg(unix)]
-#[must_use]
-pub fn directory() -> PathBuf {
-    PathBuf::from(format!("/tmp/ganja-{}", uid()))
-}
+pub use ganja_core::tool::socket::{directory, uid, vet_directory};
+use ganja_protocol::SessionId;
 
 /// Every name `id`'s socket may take under `directory`, shortest first: the
 /// first [`SHORTEST_NAME`] hex digits of the id, then one digit more per
@@ -143,63 +113,6 @@ pub(crate) const fn peer_allowed(peer: u32, own: u32) -> bool {
     peer == own
 }
 
-/// The verdict on a directory found at the socket directory's path, from
-/// what `stat` said about it: ours (`owner == own`) at exactly `0700`, or
-/// refused by name. Pure, so the three refusals — the /tmp-squat check among
-/// them, which no test can raise without a second uid — are pinned as unit
-/// tests the way [`peer_allowed`] is.
-pub(crate) const fn vet(owner: u32, mode: u32, own: u32) -> Result<(), DirectoryRefusal> {
-    if owner != own {
-        return Err(DirectoryRefusal::ForeignOwner { owner, uid: own });
-    }
-    let mode = mode & 0o777;
-    if mode != DIRECTORY_MODE {
-        return Err(DirectoryRefusal::Permissions { mode });
-    }
-    Ok(())
-}
-
-/// The mode the socket directory is created with and must be found at.
-pub(crate) const DIRECTORY_MODE: u32 = 0o700;
-
-/// The calling process's effective uid: what owns the directory, and what
-/// every peer is measured against.
-#[cfg(unix)]
-pub(crate) fn uid() -> u32 {
-    // SAFETY: `geteuid` takes nothing, touches nothing, and cannot fail.
-    unsafe { libc::geteuid() }
-}
-
-/// Why a socket directory was refused rather than used.
-#[derive(Debug, thiserror::Error)]
-pub enum DirectoryRefusal {
-    /// Something is at the path, and it is not a directory — a plain file, or
-    /// a symlink, which is refused even when it points at a good directory:
-    /// `/tmp` is world-writable, and a link somebody planted there is the one
-    /// way a socket meant to be private ends up somewhere it is not.
-    #[error("it is not a directory")]
-    NotADirectory,
-    /// Somebody else made it. Nothing inside it can be trusted to be ours.
-    #[error("it is owned by uid {owner}, not by this process's uid {uid}")]
-    ForeignOwner {
-        /// Who owns the directory.
-        owner: u32,
-        /// Who is asking.
-        uid: u32,
-    },
-    /// Its mode lets a group or the world in, or keeps the owner out.
-    #[error("its mode is {mode:04o}, not 0700")]
-    Permissions {
-        /// The permission bits as found.
-        mode: u32,
-    },
-    /// Creating or inspecting it failed for a reason the OS named.
-    #[error("it could not be prepared: {0}")]
-    Io(io::Error),
-}
-
-#[cfg(unix)]
-pub use unix::vet_directory;
 #[cfg(unix)]
 pub(crate) use unix::{PeerChecked, bind_path, bind_session};
 
@@ -210,8 +123,7 @@ mod unix {
         os::{
             fd::AsRawFd as _,
             unix::fs::{
-                DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
-                PermissionsExt as _,
+                DirBuilderExt as _, FileTypeExt as _, OpenOptionsExt as _, PermissionsExt as _,
             },
         },
         path::{Path, PathBuf},
@@ -221,11 +133,11 @@ mod unix {
     use ganja_protocol::SessionId;
     use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
 
-    use super::{DIRECTORY_MODE, DirectoryRefusal, candidates, lock_path, peer_allowed, uid, vet};
+    use super::{
+        DIRECTORY_MODE, DirectoryRefusal, SOCKET_MODE, candidates, lock_path, peer_allowed, uid,
+        vet_directory,
+    };
     use crate::{Address, ServeError};
-
-    /// The mode a bound socket, and the lock file beside it, are left at.
-    const SOCKET_MODE: u32 = 0o600;
 
     /// A listener that answers only its own user: every accepted connection
     /// is checked against the peer's uid, and one from anybody else is closed
@@ -399,34 +311,6 @@ mod unix {
         vet_directory(directory).map_err(refuse)
     }
 
-    /// The verdict on what sits at `directory`, as the binder forms it
-    /// before it binds: a real directory of ours at exactly `0700`, or the
-    /// first thing wrong with it — the same `vet` over what `stat` said,
-    /// with the not-a-directory arm in front. Public because a listing that
-    /// unlinks dead sockets (`ganja sessions --live`) has to ask the very
-    /// same question before it reads the directory, and a second spelling of
-    /// this predicate would be the day the two disagree. Inspects only —
-    /// creating the directory is the binder's own step, and a caller that
-    /// finds nothing at the path is told so through the
-    /// [`DirectoryRefusal::Io`] arm and decides for itself.
-    ///
-    /// # Errors
-    ///
-    /// [`DirectoryRefusal::NotADirectory`] for a file or a link — a link to a
-    /// perfectly good directory included, since a link is what somebody
-    /// plants in a world-writable `/tmp` — then `vet`'s owner and mode
-    /// refusals; [`DirectoryRefusal::Io`] when the path could not be
-    /// inspected at all, an absent one included.
-    pub fn vet_directory(directory: &Path) -> Result<(), DirectoryRefusal> {
-        // `symlink_metadata`, not `metadata`: a link is refused as a link.
-        let found = fs::symlink_metadata(directory).map_err(DirectoryRefusal::Io)?;
-        if !found.file_type().is_dir() {
-            return Err(DirectoryRefusal::NotADirectory);
-        }
-
-        vet(found.uid(), found.mode(), uid())
-    }
-
     /// Unlinks the socket file a dead holder left at `path`, the name's lock
     /// being ours by the time this runs. Anything at the path that is not a
     /// socket is left alone and named — this module removes only what it
@@ -464,10 +348,7 @@ mod tests {
 
     use ganja_protocol::SessionId;
 
-    use super::{
-        DirectoryRefusal, EXTENSION, LOCK_EXTENSION, SHORTEST_NAME, candidates, lock_path,
-        peer_allowed, vet,
-    };
+    use super::{EXTENSION, SHORTEST_NAME, candidates, peer_allowed};
 
     #[test]
     fn a_session_is_named_by_its_first_eight_hex_digits_then_one_more_per_step() {
@@ -499,83 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_is_ours_at_0700_or_refused_by_the_first_thing_wrong_with_it() {
-        assert!(
-            vet(501, 0o040_700, 501).is_ok(),
-            "the type bits are not the mode"
-        );
-
-        assert!(
-            matches!(
-                vet(0, 0o700, 501),
-                Err(DirectoryRefusal::ForeignOwner { owner: 0, uid: 501 })
-            ),
-            "root's directory is somebody else's — the /tmp squat"
-        );
-        assert!(
-            matches!(
-                vet(502, 0o700, 501),
-                Err(DirectoryRefusal::ForeignOwner {
-                    owner: 502,
-                    uid: 501
-                })
-            ),
-            "so is another user's, however private they made it"
-        );
-        assert!(
-            matches!(
-                vet(501, 0o755, 501),
-                Err(DirectoryRefusal::Permissions { mode: 0o755 })
-            ),
-            "world-readable"
-        );
-        assert!(
-            matches!(
-                vet(501, 0o770, 501),
-                Err(DirectoryRefusal::Permissions { mode: 0o770 })
-            ),
-            "group-readable"
-        );
-        assert!(
-            matches!(
-                vet(501, 0o600, 501),
-                Err(DirectoryRefusal::Permissions { mode: 0o600 })
-            ),
-            "tighter than 0700 is refused too: the owner could not enter it"
-        );
-        assert!(
-            matches!(
-                vet(0, 0o755, 501),
-                Err(DirectoryRefusal::ForeignOwner { .. })
-            ),
-            "ownership is judged before mode: whose it is comes first"
-        );
-    }
-
-    #[test]
-    fn a_socket_name_is_locked_by_its_sibling_lock_file() {
-        assert_eq!(
-            lock_path(Path::new("/tmp/ganja-501/0198c1a2.sock")),
-            Path::new(&format!("/tmp/ganja-501/0198c1a2.{LOCK_EXTENSION}"))
-        );
-    }
-
-    #[test]
     fn a_peer_is_allowed_exactly_when_it_is_the_same_user() {
         assert!(peer_allowed(501, 501));
         assert!(!peer_allowed(502, 501));
         assert!(!peer_allowed(0, 501), "root is another user too");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_directory_is_the_literal_tmp_ganja_uid() {
-        let directory = super::directory();
-
-        assert_eq!(
-            directory,
-            Path::new(&format!("/tmp/ganja-{}", super::uid())),
-            "not temp_dir(), not XDG_RUNTIME_DIR: tmux's own scheme"
-        );
     }
 }
