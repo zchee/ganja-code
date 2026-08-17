@@ -276,6 +276,20 @@ impl Server {
     /// reports the last as a pane that dies at once rather than an error
     /// here), or an answer that is not [`PANE_FORMAT`].
     pub async fn split(&self, launch: Launch<'_>) -> Result<Pane, TmuxError> {
+        // The module doc's security fact, as something a build can trip over:
+        // a one-word command is handed to the person's **login shell**, which
+        // sources its startup files first, so a `.zshenv` that exports a
+        // credential puts back exactly what the enumerated environment (D502)
+        // withheld. A debug assertion rather than a refusal because every
+        // caller in this tree composes its argv from a constant — this is here
+        // to fail the suite the day one stops, not to answer at run time for a
+        // mistake the type system cannot catch.
+        debug_assert!(
+            launch.argv.len() >= 2,
+            "a one-word pane command is re-read by the person's login shell, which would \
+             re-import the credentials D502 withheld: {:?}",
+            launch.argv
+        );
         let mut command = self.command();
         command
             .arg("split-window")

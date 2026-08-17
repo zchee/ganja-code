@@ -127,11 +127,11 @@ async fn a_pane_spawn_without_tmux_is_refused_readably() {
     };
 
     // The assertion is on the words: the variable that is missing, and the way
-    // out — which is not "wait for another phase". The `claude` value joins
-    // this same loop when W5b/L3's `claude.rs` body lands (its skeleton still
-    // refuses naming the phase); one binary, amended across lanes, the way
-    // `teammate_session.rs` is.
-    for backend in ["pane"] {
+    // out — which is not "wait for another phase". Both pane values are in the
+    // loop because both have real bodies now, and the claim is that they
+    // refuse in **one** sentence: a `claude` spawn that said something else
+    // about a missing session would be two behaviours wearing one argument.
+    for backend in ["pane", "claude"] {
         let refused = door
             .start(request("worker", Some(backend)), &caller, &Yes)
             .await
