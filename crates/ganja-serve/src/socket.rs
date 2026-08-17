@@ -45,7 +45,14 @@
 //! descriptor, so a holder that exits, crashes, or is `SIGKILL`ed releases
 //! the name without running a line of cleanup, and a stale lock can no more
 //! wedge a name than a stale socket file can — the file left behind is
-//! unlinked and the name reused. Connecting was the first
+//! unlinked and the name reused. Two edges of that definition, named: "live"
+//! means *holds our lock* — a socket bound by something that never took the
+//! lock is stale by definition, which is fine while every binder is this
+//! module and would matter only if the lock ever shipped incrementally; and
+//! a same-uid process is inside the trust boundary, not the threat model — a
+//! hostile holder of a `.lock` costs a colliding session one digit, never a
+//! failure, and even all of a session's names held is answered as
+//! [`crate::ServeError::SocketInUse`] rather than waited on. Connecting was the first
 //! draft's probe and is gone on purpose: a live listener refuses a connection
 //! whenever its accept backlog is full — the window between a bind and the
 //! first accept included — so "refused" never meant "nobody home", and two
