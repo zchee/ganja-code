@@ -5,6 +5,7 @@
 //! [`Event`](ganja_protocol::Event)s into frames.
 
 pub mod app;
+pub mod binder;
 pub mod clipboard;
 pub mod command;
 pub mod component;
@@ -78,7 +79,12 @@ pub enum Resume {
 /// with "allow once" instead of raising them, and remembers none of it.
 /// `member` is §4.1's launch line, when a lead started this process as a pane
 /// teammate of its team: the session then reads its own inbox instead of
-/// leading a team, and tells the lead when its turns end (§10.3).
+/// leading a team, and tells the lead when its turns end (§10.3). `binder` is
+/// how a **lead** session's socket gets bound (**D505**, [`binder`]): the
+/// binary that links the server hands one in, and this crate — which may not
+/// name that server — decides when it is asked, which is only for a session
+/// that leads a team; a pane member and a build with no config home hand it
+/// back unused, and a caller with no server passes [`None`].
 ///
 /// Everything that can refuse does so *before* the terminal is taken over: a
 /// config file that will not parse, a key binding this build cannot read, a
@@ -102,6 +108,7 @@ pub async fn run(
     overrides: Overrides,
     yolo: bool,
     member: Option<member::Flags>,
+    binder: Option<Box<dyn binder::Binder>>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Resolved first, and refused readably before anything else is built: a
@@ -173,12 +180,10 @@ pub async fn run(
     let agents = Arc::new(
         AgentRegistry::build(&config, project.root()).context("failed to resolve the agents")?,
     );
-    let storage = Storage::open(
-        project
-            .data_dir()
-            .context("failed to locate the project's data directory")?
-            .join(STORAGE),
-    );
+    let data = project
+        .data_dir()
+        .context("failed to locate the project's data directory")?;
+    let storage = Storage::open(data.join(STORAGE));
     // `/init`'s template names the worktree it is being run in, so the roster
     // is resolved against the project root rather than against whichever
     // subdirectory the terminal happened to be opened in.
@@ -230,7 +235,9 @@ pub async fn run(
         model,
         Arc::new(tools),
         ganja_permission::Permissions::load(&cwd),
-        storage,
+        // Cloned, not moved: the socket a lead serves answers its session
+        // routes from the same store, handed over in the lead arm below.
+        storage.clone(),
     )
     .with_agents(agents)
     .with_commands(commands)
@@ -327,7 +334,7 @@ pub async fn run(
     // registry is skipped outright, which is also what keeps the lead's
     // `send_message` from being offered under the lead's name to a process
     // that is not the lead.
-    let (engine, teammates) =
+    let (engine, teammates, socket) =
         match ganja_core::config::config_home().filter(|_| membership.is_none()) {
             Some(home) => {
                 let registry = Arc::new(TeammateRegistry::for_session(
@@ -352,13 +359,36 @@ pub async fn run(
                     tracing::info!(?swept, "a previous lead's panes were swept at startup");
                 }
 
-                (engine.with_teammates(Arc::clone(&registry)), Some(registry))
+                (
+                    engine.with_teammates(Arc::clone(&registry)),
+                    Some(registry),
+                    // The lead's socket rides the same gate as its team
+                    // (**D505**): a session that leads is one a peer session
+                    // has a reason to reach, and the socket's team routes have
+                    // something to answer. Not bound here — the app binds on
+                    // its first pass, so the id it binds under is the one the
+                    // resume above installed.
+                    binder.map(|binder| {
+                        (
+                            binder,
+                            binder::Served {
+                                directory: cwd.clone(),
+                                root: project.root().to_path_buf(),
+                                data: Some(data),
+                                storage: Some(storage),
+                                config: Some(config.clone()),
+                            },
+                        )
+                    }),
+                )
             }
             // A member speaks as itself: its `send_message` posts through the
             // postbox stamped with the name its launch line carried, over the
             // same teams root its lead writes into — the roster read off the team
             // file per call, the lead always addressable, and this session still
-            // leading no team of its own.
+            // leading no team of its own. And it binds no socket: a member is
+            // addressed through its lead's team, by the same line that keeps
+            // it from leading one (**D505**).
             None if let Some((membership, _)) = &membership => (
                 engine.with_postbox(Arc::new(ganja_core::teammate::member::MemberPostbox::new(
                     membership.name().clone(),
@@ -366,13 +396,14 @@ pub async fn run(
                     membership.root().clone(),
                 ))),
                 None,
+                None,
             ),
             None => {
                 tracing::warn!(
                     "no config home, so this session leads no team and cannot spawn teammates"
                 );
 
-                (engine, None)
+                (engine, None, None)
             }
         };
     // What the status bar says about who this process is, beside the provider
@@ -477,6 +508,9 @@ pub async fn run(
             // nothing and reads nothing (§10.3).
             if let Some((membership, _)) = membership {
                 app = app.with_member(member::Inbox::new(membership));
+            }
+            if let Some((binder, served)) = socket {
+                app = app.with_socket(binder, served);
             }
             app.seed(seed);
             // `SessionEnd` fires at the tail of this call rather than beside

@@ -957,21 +957,27 @@ pub struct Engine {
     /// way to compose it. [`None`] leaves whatever
     /// [`Engine::with_system_parts`] was given standing for the session, which
     /// is what every scripted and golden run wants.
-    environment: Option<Arc<Environment>>,
+    ///
+    /// Behind a lock, like the three siblings below that the `/plugin`
+    /// dialog's Reload swaps (**D474**): a lead's engine is shared with the
+    /// socket that serves it (**D505**), so the frontend no longer holds it
+    /// exclusively and a `&mut` seam would be one it could not reach.
+    environment: std::sync::Mutex<Option<Arc<Environment>>>,
     /// Agents this session may run as. [`None`] leaves every turn on the base
     /// prompt with no agent rules, which is what an engine built for a golden
     /// run wants.
     agents: Option<Arc<agent::Registry>>,
     /// Tools as the caller handed them over, without the task tool and
     /// without anything an MCP server lent. What every rebuild below starts
-    /// from.
-    base_tools: Arc<Registry>,
+    /// from. Locked for `environment`'s reason.
+    base_tools: std::sync::Mutex<Arc<Registry>>,
     /// Where a turn's `$name` invocations load skills from — the same value
     /// the frontend's `skill` tool was installed over, handed here through
     /// [`Engine::with_skill_roots`] so a user invocation and a model's
     /// `skill` call read one list. Empty by default, which keeps every
-    /// fixture and golden run off the machine it happens to be on.
-    skill_roots: crate::tool::skill::Roots,
+    /// fixture and golden run off the machine it happens to be on. Locked
+    /// for `environment`'s reason.
+    skill_roots: std::sync::Mutex<crate::tool::skill::Roots>,
     /// [`Engine::base_tools`] plus whatever the connected MCP servers are
     /// currently lending. What a subagent is offered — the same set the parent
     /// has, minus the task tool it never gets.
@@ -1152,8 +1158,9 @@ pub struct Engine {
     permission_mode: std::sync::Mutex<PermissionMode>,
     /// What a config asked to be run at the nine moments [`crate::hook`]
     /// names. [`None`] is an engine whose config asked for none, which does no
-    /// hook work at all rather than inert hook work at nine seams.
-    hooks: Option<Arc<hook::Hooks>>,
+    /// hook work at all rather than inert hook work at nine seams. Locked
+    /// for `environment`'s reason.
+    hooks: std::sync::Mutex<Option<Arc<hook::Hooks>>>,
     /// What a `SessionStart` hook asked to put in front of the model, waiting
     /// for a turn that can deliver it.
     ///
@@ -1251,13 +1258,13 @@ impl Engine {
             base_prompt: std::sync::Mutex::new(None),
             base_follows_model: false,
             prompt_suffix: std::sync::Mutex::new(None),
-            environment: None,
+            environment: std::sync::Mutex::new(None),
             agents: None,
             // The task tool is never one of these: it exists only once the
             // engine knows which agents it may spawn, which is
             // `with_agents`'s business.
-            base_tools: Arc::clone(&tools),
-            skill_roots: crate::tool::skill::Roots::none(),
+            base_tools: std::sync::Mutex::new(Arc::clone(&tools)),
+            skill_roots: std::sync::Mutex::new(crate::tool::skill::Roots::none()),
             lent_tools: Arc::new(std::sync::Mutex::new(Arc::clone(&tools))),
             mcp: None,
             mcp_installed: std::sync::Mutex::new(0),
@@ -1293,7 +1300,7 @@ impl Engine {
             teammate_dialogs: std::sync::Mutex::new(None),
             team_roster: std::sync::Mutex::new(Vec::new()),
             permission_mode: std::sync::Mutex::new(PermissionMode::Ask),
-            hooks: None,
+            hooks: std::sync::Mutex::new(None),
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
             small_model: None,
@@ -1407,10 +1414,13 @@ impl Engine {
     /// install one of these.
     #[must_use]
     pub fn with_environment(
-        mut self,
+        self,
         compose: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
     ) -> Self {
-        self.environment = Some(Arc::new(compose));
+        *self
+            .environment
+            .lock()
+            .expect("the environment composer is never poisoned") = Some(Arc::new(compose));
         self.recompose_environment();
 
         self
@@ -1423,15 +1433,20 @@ impl Engine {
     /// move the `<available_skills>` block the closure composes too, or the
     /// prompt keeps advertising skills the tool no longer serves.
     ///
-    /// `&mut self` rather than a lock of its own, deliberately: the one
-    /// caller is a frontend that owns its engine outright, and the borrow is
-    /// what keeps this impossible to reach while a turn holds the engine
-    /// through that same owner.
+    /// `&self` over the field's lock rather than `&mut self`, since P25: the
+    /// one caller is a frontend, but a lead's engine is also the one its
+    /// session socket serves (**D505**), held through an [`Arc`] by both, so
+    /// an exclusive borrow is not something that frontend can produce. The
+    /// contract is unchanged — a turn clones what it needs at its start and
+    /// keeps it, so a swap lands at the next turn and never under one.
     pub fn replace_environment(
-        &mut self,
+        &self,
         compose: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
     ) {
-        self.environment = Some(Arc::new(compose));
+        *self
+            .environment
+            .lock()
+            .expect("the environment composer is never poisoned") = Some(Arc::new(compose));
         self.recompose_environment();
     }
 
@@ -1448,7 +1463,12 @@ impl Engine {
     /// Does nothing when no way to compose one was installed, which is what
     /// leaves a scripted engine's literal suffix alone.
     fn recompose_environment(&self) {
-        let Some(compose) = self.environment.as_ref() else {
+        let compose = self
+            .environment
+            .lock()
+            .expect("the environment composer is never poisoned")
+            .clone();
+        let Some(compose) = compose else {
             return;
         };
         let composed = compose(&self.model());
@@ -2041,8 +2061,8 @@ impl Engine {
     /// constructor that spawned somebody's shell command would be a constructor
     /// that can hang.
     #[must_use]
-    pub fn with_hooks(mut self, hooks: Arc<hook::Hooks>) -> Self {
-        self.hooks = Some(hooks);
+    pub fn with_hooks(self, hooks: Arc<hook::Hooks>) -> Self {
+        self.replace_hooks(Some(hooks));
 
         self
     }
@@ -2055,8 +2075,8 @@ impl Engine {
     /// list. An engine never given roots expands every name to the tool's
     /// own not-found sentence — honest, and exactly what a fixture wants.
     #[must_use]
-    pub fn with_skill_roots(mut self, roots: crate::tool::skill::Roots) -> Self {
-        self.skill_roots = roots;
+    pub fn with_skill_roots(self, roots: crate::tool::skill::Roots) -> Self {
+        self.replace_skill_roots(roots);
 
         self
     }
@@ -2066,8 +2086,11 @@ impl Engine {
     /// turn's `$` invocations read the same list its rebuilt `skill` tool
     /// does. A running turn keeps the roots it started with, like every
     /// other value a turn clones at its start.
-    pub fn replace_skill_roots(&mut self, roots: crate::tool::skill::Roots) {
-        self.skill_roots = roots;
+    pub fn replace_skill_roots(&self, roots: crate::tool::skill::Roots) {
+        *self
+            .skill_roots
+            .lock()
+            .expect("the skill roots are never poisoned") = roots;
     }
 
     /// The roots [`Engine::with_skill_roots`] installed, for a frontend
@@ -2075,7 +2098,10 @@ impl Engine {
     /// expand them from.
     #[must_use]
     pub fn skill_roots(&self) -> crate::tool::skill::Roots {
-        self.skill_roots.clone()
+        self.skill_roots
+            .lock()
+            .expect("the skill roots are never poisoned")
+            .clone()
     }
 
     /// Replaces what runs at the nine hook moments, in place — the hooks
@@ -2088,8 +2114,27 @@ impl Engine {
     /// [`None`] uninstalls: a reload that leaves no hooks table behind
     /// leaves an engine that does no hook work, exactly like one whose
     /// config never asked.
-    pub fn replace_hooks(&mut self, hooks: Option<Arc<hook::Hooks>>) {
-        self.hooks = hooks;
+    pub fn replace_hooks(&self, hooks: Option<Arc<hook::Hooks>>) {
+        *self.hooks.lock().expect("the hooks are never poisoned") = hooks;
+    }
+
+    /// The hooks as they currently stand, cloned out from under the lock so a
+    /// caller never holds it across an await.
+    fn hooks(&self) -> Option<Arc<hook::Hooks>> {
+        self.hooks
+            .lock()
+            .expect("the hooks are never poisoned")
+            .clone()
+    }
+
+    /// The base tools as they currently stand.
+    fn base_tools(&self) -> Arc<Registry> {
+        Arc::clone(
+            &self
+                .base_tools
+                .lock()
+                .expect("the base tools are never poisoned"),
+        )
     }
 
     /// Fires `SessionStart` with the source a fresh session has, and keeps
@@ -2155,7 +2200,7 @@ impl Engine {
     /// Runs one session-level hook and files what it said: notices to the log,
     /// context to the queue the next turn drains.
     async fn fire_session_hook(&self, payload: hook::Payload) {
-        let Some(hooks) = &self.hooks else {
+        let Some(hooks) = self.hooks() else {
             return;
         };
         let event = payload.event();
@@ -3636,7 +3681,7 @@ impl Engine {
         *installed = generation;
         drop(installed);
 
-        let lent = Arc::new(self.base_tools.with_all(servers.tools()));
+        let lent = Arc::new(self.base_tools().with_all(servers.tools()));
         *self
             .lent_tools
             .lock()
@@ -3683,11 +3728,14 @@ impl Engine {
     /// A turn already holding a snapshot keeps the tools it started with —
     /// the same contract the MCP rebuild keeps — and the next turn is
     /// offered the new set.
-    pub fn replace_base_tools(&mut self, tools: Arc<Registry>) {
-        self.base_tools = tools;
+    pub fn replace_base_tools(&self, tools: Arc<Registry>) {
+        *self
+            .base_tools
+            .lock()
+            .expect("the base tools are never poisoned") = Arc::clone(&tools);
         let lent = match &self.mcp {
-            Some(servers) => Arc::new(self.base_tools.with_all(servers.tools())),
-            None => Arc::clone(&self.base_tools),
+            Some(servers) => Arc::new(tools.with_all(servers.tools())),
+            None => tools,
         };
         *self
             .lent_tools
@@ -3893,7 +3941,7 @@ impl Engine {
             lsp: self.lsp.clone(),
             persistence: self.persistence.clone(),
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
-            hooks: self.hooks.clone(),
+            hooks: self.hooks(),
             concurrency: self.concurrency,
             // No team for a child, which is the depth guard the missing `task`
             // tool already states: a delegated turn does not start teammates.
@@ -4337,7 +4385,7 @@ impl Engine {
         // happened, and the frontend keeps the text.
         let mut hook_context = Vec::new();
         if matches!(kind, TurnKind::Prompt { .. })
-            && let Some(hooks) = &self.hooks
+            && let Some(hooks) = self.hooks()
         {
             let outcome = hooks
                 .fire(
@@ -4550,7 +4598,7 @@ impl Engine {
             reminders,
             kind,
             tools: self.tools(),
-            skill_roots: self.skill_roots.clone(),
+            skill_roots: self.skill_roots(),
             deferral: self.deferral(),
             permissions,
             cwd: self.cwd.clone(),
@@ -4570,7 +4618,7 @@ impl Engine {
             history: Arc::clone(&self.history),
             pending_switch: self.pending_for_turn(),
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
-            hooks: self.hooks.clone(),
+            hooks: self.hooks(),
             postbox: self
                 .postbox
                 .lock()
@@ -6406,7 +6454,7 @@ mod tests {
     /// same private accessor the turn assembly reads.
     #[test]
     fn replacing_the_base_tools_is_what_the_next_turn_is_offered() {
-        let mut engine = engine();
+        let engine = engine();
         assert!(
             engine.tools().get("read").is_none(),
             "the fixture starts with an empty registry, or the swap proves nothing"
@@ -6439,7 +6487,7 @@ mod tests {
             "a session with no team has nobody to address"
         );
 
-        let mut engine = engine().with_teammates(Arc::new(teammate::TeammateRegistry::new(
+        let engine = engine().with_teammates(Arc::new(teammate::TeammateRegistry::new(
             ganja_team::TeamsRoot::new(std::path::PathBuf::from("/nonexistent/teams")),
             ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
             "session-abcd1234",
@@ -6477,7 +6525,7 @@ mod tests {
             ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
             ganja_team::TeamsRoot::new(std::path::PathBuf::from("/nonexistent/teams")),
         ));
-        let mut engine = engine().with_postbox(postbox);
+        let engine = engine().with_postbox(postbox);
         assert!(
             engine.tools().get(send_message::ID).is_some(),
             "a member is offered the tool that addresses its team"
@@ -6515,8 +6563,8 @@ mod tests {
     /// [`None`] uninstalls rather than leaving the old table standing.
     #[test]
     fn replacing_the_hooks_installs_for_the_next_fire_and_none_uninstalls() {
-        let mut engine = engine();
-        assert!(engine.hooks.is_none(), "the fixture starts hookless");
+        let engine = engine();
+        assert!(engine.hooks().is_none(), "the fixture starts hookless");
 
         let table = std::collections::BTreeMap::from([(
             "Stop".to_owned(),
@@ -6535,15 +6583,14 @@ mod tests {
         engine.replace_hooks(Some(hooks));
         assert!(
             engine
-                .hooks
-                .as_ref()
+                .hooks()
                 .is_some_and(|hooks| hooks.fires(crate::hook::HookEvent::Stop)),
             "the swapped-in table is the one the next fire reads"
         );
 
         engine.replace_hooks(None);
         assert!(
-            engine.hooks.is_none(),
+            engine.hooks().is_none(),
             "a reload that found no hooks leaves an engine that does no hook work"
         );
     }
@@ -6552,7 +6599,7 @@ mod tests {
     /// the spot, so the suffix the next request carries already reflects it.
     #[test]
     fn replacing_the_environment_recomposes_the_suffix_immediately() {
-        let mut engine = engine();
+        let engine = engine();
         assert_eq!(engine.environment_half(), None);
 
         engine.replace_environment(|model| Some(format!("environment for {model}")));

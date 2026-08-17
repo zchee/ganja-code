@@ -47,7 +47,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    NOTICE_SEPARATOR, clipboard, command,
+    NOTICE_SEPARATOR, binder, clipboard, command,
     component::{
         chat::{self, Chat, WHEEL_LINES, Working},
         context,
@@ -377,7 +377,11 @@ fn permission_reply(code: KeyCode) -> Option<PermissionReply> {
 
 /// The whole terminal application.
 pub struct App {
-    engine: Engine,
+    /// Shared rather than owned since P25: a lead's engine is also the one
+    /// its session socket serves (**D505**), and the server holds a clone of
+    /// this for as long as it accepts. Every seam this app reaches through it
+    /// takes `&self`.
+    engine: Arc<Engine>,
     /// Provider this session runs on, which is what the model list is narrowed
     /// to: switching model is same-provider only, so offering the rest of the
     /// catalog would be offering refusals.
@@ -695,6 +699,12 @@ pub struct App {
     /// When the member's §6.1 pass last ran, for [`App::team_polled`]'s
     /// reason at the member's own cadence.
     member_polled: Option<Instant>,
+    /// The socket a lead session serves under its current id (**D505**),
+    /// kept in step with the engine's session slot after every event and
+    /// closed at the tail of the run. [`None`] for every session that is not
+    /// a lead handed a binder — a pane member, a build with no config home,
+    /// every test — which binds nothing and costs nothing.
+    socket: Option<binder::SessionSocket>,
     /// A `shutdown_request` this member has taken and not yet answered,
     /// because a turn was still running when it arrived.
     ///
@@ -815,7 +825,7 @@ impl App {
         let (spawn_asker, spawn_asks) = tokio::sync::mpsc::channel(SPAWN_ASKS);
 
         Self {
-            engine,
+            engine: Arc::new(engine),
             provider: String::new(),
             model,
             // A fresh engine runs no effort, and a resumed one announces its
@@ -896,6 +906,7 @@ impl App {
             settled: Vec::new(),
             member: None,
             member_polled: None,
+            socket: None,
             member_shutdown: None,
             member_finished: None,
             member_asks: Vec::new(),
@@ -1002,6 +1013,20 @@ impl App {
     #[must_use]
     pub fn with_member(mut self, inbox: member::Inbox) -> Self {
         self.member = Some(inbox);
+
+        self
+    }
+
+    /// Serves this session on a socket bound through `binder` (**D505**).
+    ///
+    /// A builder because only the startup lane knows whether this session is
+    /// a lead and holds the binder the binary handed in: the default binds
+    /// nothing, so a test that does not opt in serves nothing. Nothing is
+    /// bound here — the first [`App::run`] pass binds under the id the
+    /// engine is on by then, which is after any startup resume.
+    #[must_use]
+    pub fn with_socket(mut self, binder: Box<dyn binder::Binder>, served: binder::Served) -> Self {
+        self.socket = Some(binder::SessionSocket::new(binder, served));
 
         self
     }
@@ -1123,7 +1148,18 @@ impl App {
     /// Returns an error if the engine refuses a subscription, or if the
     /// terminal cannot be read from or drawn to.
     pub async fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        // Bound before the first frame and after every startup resume, which
+        // is what `lib.rs` has done by the time it hands the app over: the
+        // first socket is named by the session the screen opens on.
+        self.sync_socket().await;
         let outcome = self.drive(terminal).await;
+        // The socket first, whichever way the loop ended: nobody here will
+        // read a peer's message once the loop is over, and the file is what
+        // `ganja sessions --live` would otherwise list as dead. Held here for
+        // the reason `session_end` is — `run` consumes the app.
+        if let Some(socket) = &mut self.socket {
+            socket.shutdown().await;
+        }
         // Whichever way the loop ended, the error paths included: this session
         // is over, and a `SessionEnd` hook that only fired on the clean exits
         // would miss exactly the endings somebody would want to hear about.
@@ -1133,6 +1169,25 @@ impl App {
         self.engine.session_end(ganja_core::hook::EXIT_REASON).await;
 
         outcome
+    }
+
+    /// Keeps the session socket bound under the engine's current id, when
+    /// this session serves one: after every event, because the slot can move
+    /// through this app's own doors (`/new`, the picker) **and** through a
+    /// peer's request over the socket itself, and one comparison of an id is
+    /// cheaper than knowing every door. A refusal reaches the status bar
+    /// once per id (**D505**, best-effort by design).
+    async fn sync_socket(&mut self) {
+        let Some(socket) = &mut self.socket else {
+            return;
+        };
+        match socket.sync(&self.engine).await {
+            binder::Synced::Unchanged | binder::Synced::Bound(_) => {}
+            binder::Synced::Refused(sentence) => {
+                self.status.set_notice(Some(sentence));
+                self.dirty = true;
+            }
+        }
     }
 
     /// The loop itself; see [`App::run`], which owns what happens after it.
@@ -1245,6 +1300,7 @@ impl App {
                 self.replay_queued().await;
             }
         }
+        self.sync_socket().await;
 
         Ok(())
     }
@@ -9586,6 +9642,93 @@ mod tests {
         insta::assert_snapshot!(screen(&terminal));
     }
 
+    // ---- D505: the session socket follows the slot through the app's doors ----
+
+    /// The socket a lead serves follows the engine's session slot through
+    /// this app's own two doors (**D505**): bound on the first pass under the
+    /// id the engine was minted with, moved to the stored session the picker
+    /// resumes — the old one shut down first — moved again by `/new`, and
+    /// shut down on the exit path. The fake binder records the ids; the real
+    /// one is proved end to end in `ganja-cli/tests/session_socket.rs`.
+    #[tokio::test]
+    async fn the_session_socket_follows_the_picker_and_new_through_the_apps_doors() {
+        let directory = temporary();
+        store_pickable_sessions(&directory);
+        let recording = Arc::new(crate::binder::fake::Recording::default());
+        let mut app = persistent_app(&directory).with_socket(
+            Box::new(Arc::clone(&recording)),
+            crate::binder::fake::served(),
+        );
+        let minted = app.engine.session_id();
+
+        // The first pass, whatever event carries it, binds under the minted id.
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        assert_eq!(
+            recording.bound.lock().expect("not poisoned").as_slice(),
+            std::slice::from_ref(&minted),
+            "bound once, under the id the engine started on"
+        );
+
+        // The picker: Ctrl-S opens it and Enter resumes the row under the
+        // cursor, which is a stored session with an id of its own.
+        app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-s is handled");
+        let chosen = app
+            .sessions
+            .as_ref()
+            .and_then(|sessions| sessions.selected())
+            .map(|info| info.id.clone())
+            .expect("the picker has a row under the cursor");
+        assert_ne!(chosen, minted);
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert_eq!(app.engine.session_id(), chosen, "the resume moved the slot");
+        assert_eq!(
+            recording.bound.lock().expect("not poisoned").as_slice(),
+            &[minted.clone(), chosen.clone()],
+            "the resume rebound under the stored session's id"
+        );
+        assert_eq!(
+            recording.closed.lock().expect("not poisoned").as_slice(),
+            &[crate::binder::fake::Recording::path_for(&minted)],
+            "and the minted session's socket was shut down first"
+        );
+
+        // `/new` through the composer, as a person types it.
+        for event in typing("/new") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        let fresh = app.engine.session_id();
+        assert_ne!(fresh, chosen, "/new re-minted the id");
+        assert_eq!(
+            recording.bound.lock().expect("not poisoned").as_slice(),
+            &[minted.clone(), chosen.clone(), fresh.clone()],
+            "and the socket followed it"
+        );
+        assert_eq!(
+            recording.closed.lock().expect("not poisoned").len(),
+            2,
+            "the resumed session's socket was shut down before the fresh bind"
+        );
+
+        // The exit path: what `App::run` does after the loop.
+        app.socket
+            .as_mut()
+            .expect("this app serves a socket")
+            .shutdown()
+            .await;
+        assert_eq!(
+            recording.closed.lock().expect("not poisoned").last(),
+            Some(&crate::binder::fake::Recording::path_for(&fresh)),
+            "exit shuts the bound socket down"
+        );
+    }
+
     /// An engine carrying the four builtin agents, which is what the agent
     /// list and Tab both read.
     fn agentic_app() -> App {
@@ -10947,7 +11090,7 @@ mod tests {
     /// An app whose engine holds `root` as its skill roots — the same seam
     /// the real assembly wires (`with_skill_roots`).
     fn app_with_skills(root: &TempDir) -> App {
-        let mut app = app();
+        let app = app();
         app.engine.replace_skill_roots(
             ganja_tool::skill::Roots::none().with_paths([root.path().to_path_buf()]),
         );
