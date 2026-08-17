@@ -170,9 +170,17 @@ impl Runner {
     /// Records that this teammate is waiting on `request_id`, so the lead's
     /// answer to it is applied rather than ignored as stale.
     ///
-    /// The seam the plan-approval path calls when it asks: what makes an
-    /// approval *not* stale is that somebody is waiting, and this is where a
-    /// waiter says so.
+    /// What makes an approval *not* stale is that somebody is waiting, and this
+    /// is where a waiter says so. It is reached through
+    /// [`crate::teammate::TeammateRegistry::awaiting_plan_approval`], which is
+    /// why [`Runner::run`] takes `&self`: a loop that consumed the value would
+    /// leave this method with no live receiver at all, and every approval the
+    /// lead ever sent would be ignored as answering nothing.
+    ///
+    /// **What does not exist yet is the asking side.** Nothing in this build
+    /// raises a `plan_approval_request`, so nothing calls this except a test;
+    /// the frame handler below and this seam are the answering half, complete
+    /// and reachable, waiting on the half that asks.
     pub fn awaiting_plan_approval(&self, request_id: impl Into<String>) {
         *self.awaiting.lock().expect("the wait is never poisoned") = Some(request_id.into());
     }
@@ -186,7 +194,11 @@ impl Runner {
     /// publisher — the teammate's own turn — wait. What this loop does with
     /// those events is nothing; what it does with the *lane* is keep it moving.
     /// The events somebody reads are the registry's droppable subscription.
-    pub async fn run(self) -> Stopped {
+    ///
+    /// Borrows rather than consumes, so the value stays reachable while its
+    /// loop runs — see [`Runner::awaiting_plan_approval`], which is worth
+    /// nothing if the only thing holding a `Runner` is the task inside it.
+    pub async fn run(&self) -> Stopped {
         let Ok(mut events) = self.teammate.engine().subscribe().await else {
             return Stopped::Gone;
         };

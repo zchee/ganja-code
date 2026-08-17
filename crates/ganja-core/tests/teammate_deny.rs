@@ -22,12 +22,12 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use ganja_core::{
-    Storage,
+    Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
     permission::{self, Permissions},
     project::Project,
-    protocol::{Part, PartBody, Role, ToolState},
-    teammate::{DEFAULT_BACKEND, InProcess, SpawnRequest, TeammateRegistry, posture},
-    tool::Registry,
+    protocol::{Part, PartBody, PermissionReply, Role, ToolState},
+    teammate::{InProcess, TeammateRegistry, claude::ClaudePane, pane::GanjaPane, posture},
+    tool::{Registry, task::TeammateSpawn},
 };
 use ganja_team::{TeamName, TeamsRoot};
 
@@ -42,6 +42,39 @@ const CHECK: Duration = Duration::from_millis(25);
 /// How long the lead's dialog surface is watched for a question it must never
 /// be asked. The turn it would have come from has already finished by then.
 const NOTHING_ARRIVES: Duration = Duration::from_millis(200);
+
+/// A person the spawn gate could reach, and a record of every time it did.
+///
+/// Recorded rather than only answered: what this test wants from the gate is
+/// its **silence**, and an asker that only said yes would let that silence
+/// break without anything noticing.
+#[derive(Debug, Default)]
+struct Recording {
+    asked: std::sync::Mutex<Vec<SpawnAsk>>,
+}
+
+impl Recording {
+    /// Fails naming what was asked, which is the whole diagnostic.
+    fn asked_nobody(&self) {
+        let asked = self.asked.lock().expect("the ask log is never poisoned");
+        assert!(
+            asked.is_empty(),
+            "a teammate working inside the project asks nobody: {asked:?}"
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl SpawnAsker for Recording {
+    async fn ask(&self, request: SpawnAsk) -> PermissionReply {
+        self.asked
+            .lock()
+            .expect("the ask log is never poisoned")
+            .push(request);
+
+        PermissionReply::Once
+    }
+}
 
 /// Waits for `claim` to hold, or fails saying what it was waiting for.
 async fn eventually(what: &str, mut claim: impl FnMut() -> bool) {
@@ -135,32 +168,50 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
             ganja_testkit::says("the rules refuse that"),
         ],
     );
-    let backend = Arc::new(InProcess::new(
-        provider,
-        Arc::new(Registry::with_builtins()),
-        storage.clone(),
-        // The seam this whole lane lands in: the teammate's engine takes the
-        // lead's ruleset, derived rather than invented.
-        posture::from_lead(Arc::clone(&lead), Vec::new()),
-    ));
+    // Through the gated door, which is the only one there is: the registry's
+    // own spawn is crate-internal so that nothing can start a teammate the
+    // permission gate never saw.
+    let door = Teammates::new(
+        Arc::clone(&registry),
+        Backends {
+            in_process: Arc::new(InProcess::new(
+                provider,
+                Arc::new(Registry::with_builtins()),
+                storage.clone(),
+                // The seam this whole lane lands in: the teammate's engine
+                // takes the lead's ruleset, derived rather than invented.
+                posture::from_lead(Arc::clone(&lead), Vec::new()),
+            )),
+            pane: Arc::new(GanjaPane),
+            claude: Arc::new(ClaudePane),
+        },
+    );
+    // A third place a question could have gone, so "nobody was asked" is read
+    // off every surface that could have carried one rather than off one of
+    // them. The teammate works inside the project and asks for no bypass, so
+    // the spawn gate has nothing to raise either.
+    let spawn_asks = Recording::default();
 
-    registry
-        .spawn(
-            backend,
-            SpawnRequest {
-                name: "worker".to_owned(),
-                backend: DEFAULT_BACKEND,
-                agent_type: "general".to_owned(),
-                model: "recorder-model".to_owned(),
-                color: None,
-                prompt: "leave a note in notes.md".to_owned(),
-                cwd: project.path().to_path_buf(),
-                plan_mode_required: false,
-                bypass: false,
-            },
-        )
-        .await
-        .expect("an in-process teammate spawns");
+    door.start(
+        TeammateSpawn {
+            name: "worker".to_owned(),
+            backend: None,
+            agent_type: "general".to_owned(),
+            prompt: "leave a note in notes.md".to_owned(),
+        },
+        &Caller {
+            model: "recorder-model".to_owned(),
+            cwd: project.path().to_path_buf(),
+            // The lead's own live handle — the rules the deny was stored in,
+            // which is what the gate has to be judging by.
+            permissions: Arc::clone(&lead),
+            project_root: project.path().to_path_buf(),
+        },
+        &spawn_asks,
+    )
+    .await
+    .expect("an in-process teammate spawns");
+    spawn_asks.asked_nobody();
 
     eventually("the teammate's own session to exist", || {
         !storage.list_sessions().expect("the store lists").is_empty()

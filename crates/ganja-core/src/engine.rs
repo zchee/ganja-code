@@ -75,9 +75,15 @@ pub const EVENT_CAPACITY: usize = 1024;
 ///
 /// Small on purpose, and much smaller than the event queue above: a dialog is
 /// a question somebody has to answer, so a lead holding dozens unanswered is a
-/// lead nobody is at. A full queue makes the *forwarding task* wait, never the
-/// teammate's turn — the forwarding reads a droppable subscription, so what a
-/// wedged lead eventually costs is that subscription rather than the teammate.
+/// lead nobody is at.
+///
+/// A full queue **refuses** the ask rather than waiting for room, and nothing
+/// on that path ever blocks: the forwarding offers a question with
+/// `try_send`, and a question that will not fit is answered
+/// [`PermissionReply::Reject`] exactly as a question with nowhere to go at all
+/// is. Waiting was the alternative and it was not a smaller bug — an awaited
+/// send on this channel hangs the teammate's turn on a receiver nobody
+/// claimed, with no timeout and no cancel path.
 const TEAMMATE_DIALOGS: usize = 16;
 
 /// Why a session with no store has no in-process teammates; see [`Storeless`].
@@ -971,8 +977,12 @@ pub struct Engine {
     /// has, minus the task tool it never gets.
     ///
     /// Behind its own lock because a connect finishing has to change it
-    /// without disturbing a turn that is already holding a snapshot.
-    lent_tools: std::sync::Mutex<Arc<Registry>>,
+    /// without disturbing a turn that is already holding a snapshot, and
+    /// behind an [`Arc`] because one thing outside this engine has to read it
+    /// *live*: the in-process teammate backend composes each teammate's set at
+    /// the spawn rather than at the install, and a handle is the only way to
+    /// do that without the backend holding the engine that holds the backend.
+    lent_tools: Arc<std::sync::Mutex<Arc<Registry>>>,
     /// MCP servers this session was configured with, once somebody installed
     /// them. [`None`] is every engine that was never given any, which is every
     /// scripted and golden run.
@@ -1239,7 +1249,7 @@ impl Engine {
             // `with_agents`'s business.
             base_tools: Arc::clone(&tools),
             skill_roots: crate::tool::skill::Roots::none(),
-            lent_tools: std::sync::Mutex::new(Arc::clone(&tools)),
+            lent_tools: Arc::new(std::sync::Mutex::new(Arc::clone(&tools))),
             mcp: None,
             mcp_installed: std::sync::Mutex::new(0),
             activated_tools: Arc::default(),
@@ -1738,13 +1748,19 @@ impl Engine {
     /// under.
     ///
     /// **What a teammate is offered** is the *lent* set — this build's tools
-    /// plus whatever the MCP servers were lending when the team was installed
-    /// — with `send_message` on it and nothing else: no `task`, for the reason
+    /// plus whatever the MCP servers are lending **at the moment that teammate
+    /// is spawned**, which is not the moment the team was installed: the
+    /// servers dial in the background, and a set snapshotted here would be the
+    /// empty one they had not filled yet — with `send_message` on it and
+    /// nothing else: no `task`, for the reason
     /// a subagent has none (a teammate is not a place to nest a second team),
     /// and no plan doors, which want an agent roster a teammate engine has
     /// not got. Its description names the lead, the one peer that exists
     /// before any teammate does and cannot go away; who *else* it may address
-    /// is answered per call by its own postbox, which is live.
+    /// is answered per call by its own postbox, which is live. That set is
+    /// then composed under this session's own `tool_defer_threshold`, so a
+    /// teammate holding the lead's `mcp__*` names defers exactly what the lead
+    /// defers and is offered the same `tool_search` back in (**D492**).
     ///
     /// **A session with no store gets the team and no in-process backend.** A
     /// teammate's conversation is a root row somebody may resume (D-8), and
@@ -1754,11 +1770,14 @@ impl Engine {
     pub fn with_teammates(mut self, registry: Arc<teammate::TeammateRegistry>) -> Self {
         let lead = Arc::new(subagent::Postbox::lead(Arc::clone(&registry)));
         let in_process: Arc<dyn teammate::TeammateBackend> = match self.storage() {
-            Some(storage) => Arc::new(teammate::InProcess::new(
+            Some(storage) => Arc::new(teammate::InProcess::lending(
                 Arc::clone(&self.provider),
                 self.teammate_tools(&registry),
                 storage,
                 self.teammate_permissions(),
+                // The lead's own budget, so a teammate offered the lead's MCP
+                // tools defers the same set of them (**D492**).
+                self.defer_threshold,
             )),
             None => Arc::new(Storeless),
         };
@@ -1822,13 +1841,19 @@ impl Engine {
     /// Installs the postbox one engine's `send_message` calls are posted
     /// through.
     ///
-    /// `&self` and public for exactly one caller: a teammate's own postbox is
-    /// built by [`teammate::TeammateRegistry`] once it holds both the team and
-    /// the teammate, and a teammate engine is reachable only by shared
-    /// reference (which is what keeps it from being given snapshots). The
-    /// lead's own is installed by [`Engine::with_teammates`] and never
-    /// through here.
-    pub fn install_postbox(&self, postbox: Arc<dyn crate::tool::team::Postbox>) {
+    /// `&self` for exactly one caller: a teammate's own postbox is built by
+    /// [`teammate::TeammateRegistry`] once it holds both the team and the
+    /// teammate, and a teammate engine is reachable only by shared reference
+    /// (which is what keeps it from being given snapshots). The lead's own is
+    /// installed by [`Engine::with_teammates`] and never through here.
+    ///
+    /// `pub(crate)` because a postbox is an engine's **outbound identity** —
+    /// the name every message it writes is stamped with, bound at construction
+    /// precisely so nothing can choose it per send. A public setter would hand
+    /// that choice back: any caller holding an `&Engine` could re-stamp a
+    /// running conversation as somebody else, which is the forgery
+    /// [`crate::subagent::Postbox`] exists to make impossible.
+    pub(crate) fn install_postbox(&self, postbox: Arc<dyn crate::tool::team::Postbox>) {
         *self.postbox.lock().expect("the postbox is never poisoned") = Some(postbox);
     }
 
@@ -1857,19 +1882,41 @@ impl Engine {
         self.persistence.as_ref().map(|state| state.storage.clone())
     }
 
-    /// The tool set a teammate of this session is offered; see
-    /// [`Engine::with_teammates`] for what is in it and why.
-    fn teammate_tools(&self, registry: &Arc<teammate::TeammateRegistry>) -> Arc<Registry> {
+    /// The tool set a teammate of this session is offered, as a factory the
+    /// backend runs **at each spawn**; see [`Engine::with_teammates`] for what
+    /// is in it and why.
+    ///
+    /// A factory rather than a set, and the reason is timing: MCP servers are
+    /// dialled in the background at startup, and a team is installed while the
+    /// engine is being assembled. A set built here would therefore be whatever
+    /// the servers had lent by the time the *builder* ran — in practice
+    /// nothing — and every teammate of that session would be offered no MCP
+    /// tools at all, for the whole session, however long the lead had been
+    /// using them. Read per spawn, a teammate gets what the lead's own next
+    /// turn would get.
+    ///
+    /// The roster it describes `send_message` against is fixed, and may be:
+    /// the lead is the one peer that exists before any teammate does and
+    /// cannot go away, and who *else* a teammate may address is answered per
+    /// call by its own postbox.
+    fn teammate_tools(
+        &self,
+        registry: &Arc<teammate::TeammateRegistry>,
+    ) -> impl Fn() -> Arc<Registry> + Send + Sync + use<> {
         let lead = Peer {
             name: registry.lead().as_str().to_owned(),
             description: None,
             lead: true,
         };
+        let lent = Arc::clone(&self.lent_tools);
 
-        Arc::new(
-            self.lent()
-                .with(Arc::new(send_message::SendMessageTool::new(&[lead]))),
-        )
+        move || {
+            let base = Arc::clone(&lent.lock().expect("the tool registry is never poisoned"));
+
+            Arc::new(base.with(Arc::new(send_message::SendMessageTool::new(
+                std::slice::from_ref(&lead),
+            ))))
+        }
     }
 
     /// The ruleset each teammate engine is built with (**D-5**).

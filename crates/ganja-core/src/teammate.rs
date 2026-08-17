@@ -111,7 +111,7 @@
 //! [`Registry`]: crate::tool::Registry
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     path::PathBuf,
     sync::{
@@ -197,9 +197,46 @@ impl Teammate {
         permissions: Permissions,
         storage: Storage,
     ) -> Self {
+        Self::deferring(
+            name,
+            provider,
+            model,
+            tools,
+            permissions,
+            storage,
+            crate::config::DEFAULT_TOOL_DEFER_THRESHOLD,
+        )
+    }
+
+    /// The same teammate under a named advertised-schema budget (**D492**).
+    ///
+    /// Crate-internal because the only caller with a budget to pass is
+    /// [`InProcess`], which reads the **lead's** own: a teammate offered the
+    /// lead's MCP tools under a different budget from the lead's would defer a
+    /// different set of them, which is one session answering two ways about
+    /// one config key.
+    ///
+    /// The builder is what does the work, and it does it for
+    /// [`Teammate::new`] too: `Engine::persistent` installs the set it is
+    /// handed **verbatim**, so without a composition pass a teammate holding
+    /// `mcp__*` names would advertise every one of them and be offered no
+    /// `tool_search` to fetch a deferred schema back with. Composing here is
+    /// also why nothing recomposes later — a teammate engine dials no MCP
+    /// servers of its own, so the set it starts with is the set it keeps.
+    #[must_use]
+    pub(crate) fn deferring(
+        name: impl Into<String>,
+        provider: Arc<dyn Provider>,
+        model: impl Into<String>,
+        tools: Arc<Registry>,
+        permissions: Permissions,
+        storage: Storage,
+        defer_threshold: usize,
+    ) -> Self {
         Self {
             name: name.into(),
-            engine: Engine::persistent(provider, model, Arc::clone(&tools), permissions, storage),
+            engine: Engine::persistent(provider, model, Arc::clone(&tools), permissions, storage)
+                .with_defer_threshold(defer_threshold),
             tools,
         }
     }
@@ -238,9 +275,32 @@ impl Teammate {
     /// called: those handles belong to the lead when a teammate has any, and
     /// they die with it.
     ///
-    /// Returns whether the engine really went idle within `limit`.
+    /// A turn that outlasts `limit` is **cancelled** rather than left running,
+    /// and then given [`CANCELLED`] to unwind. Waiting is the courtesy a
+    /// teammate's transcript is owed; waiting forever is not one anybody asked
+    /// for, and a turn still streaming into a store the process is about to
+    /// drop is the outcome both sides lose by. A cancelled turn is stored the
+    /// way any cancelled turn is, so nothing is lost that was not already
+    /// going to be.
+    ///
+    /// Returns whether the turn ended **on its own**, before anything
+    /// cancelled it — which is what the callers that warn are warning about.
     pub async fn shutdown(&self, limit: Duration) -> bool {
         let settled = self.engine.settle(limit).await;
+        if !settled && let Err(error) = self.engine.send(crate::protocol::Command::CancelTurn).await
+        {
+            tracing::warn!(
+                teammate = self.name,
+                %error,
+                "a teammate's turn could not be cancelled on the way out"
+            );
+        }
+        if !settled && !self.engine.settle(CANCELLED).await {
+            tracing::warn!(
+                teammate = self.name,
+                "a teammate's turn did not end even after it was cancelled"
+            );
+        }
         self.engine.shutdown_jobs().await;
 
         settled
@@ -274,6 +334,13 @@ pub const REFUSED_UNTIL_P25B: &str =
 /// slot — so this is spent per teammate at shutdown rather than once. Five
 /// seconds is the same bound the isolation suite settles a single turn under.
 pub const SETTLE: Duration = Duration::from_secs(5);
+
+/// How long a teammate whose turn outlasted [`SETTLE`] is given to unwind
+/// after being cancelled ([`Teammate::shutdown`]).
+///
+/// Short, and short on purpose: what is being waited for here is the tail of a
+/// step that has already been told to stop, not a model's answer.
+pub const CANCELLED: Duration = Duration::from_secs(1);
 
 /// What the door reports back when a spawn succeeded.
 ///
@@ -399,7 +466,7 @@ pub enum Delivery {
 /// backend value. So a `SpawnSpec` is cheap to build in a test and carries
 /// nothing a caller would have to invent.
 ///
-/// `name` is the **resolved** name: [`TeammateRegistry::spawn`] runs the
+/// `name` is the **resolved** name: [`TeammateRegistry`]'s own `spawn` runs the
 /// desired one through [`ganja_team::team::resolve_unique`] first, so no
 /// backend ever sees a name that could collide with a member already in the
 /// team.
@@ -577,16 +644,29 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
 
 /// A teammate in the lead's own process: the D500 shape, as a backend.
 ///
-/// Holds what the *host* lends — every argument [`Teammate::new`] takes that a
-/// spawn does not decide. `permissions` is a factory rather than a value
-/// because [`Permissions`] is not [`Clone`] and each teammate engine takes its
-/// own ruleset; it is also the one seam W5a/L4's posture lands in, which is why
-/// it takes the whole [`SpawnSpec`] rather than nothing.
+/// Holds what the *host* lends — every argument [`Teammate`]'s own `deferring` takes
+/// that a spawn does not decide. Two of them are **factories rather than
+/// values**, for two different reasons that come to the same thing: what the
+/// host lends is live, and a backend built once at install time must not hand
+/// out what was true then.
+///
+/// - `permissions`, because [`Permissions`] is not [`Clone`] and each teammate
+///   engine takes its own ruleset; it is also the seam the posture lands in,
+///   which is why it takes the whole [`SpawnSpec`].
+/// - `tools`, because the lead's MCP servers are dialled **in the background
+///   at startup** and a team installed before they answer would otherwise lend
+///   every teammate of that session the empty set those servers had not filled
+///   yet. Read per spawn, a teammate started after a dial gets what the dial
+///   brought, and one started before it does not — which is the same rule the
+///   lead's own turns run under.
 pub struct InProcess {
     provider: Arc<dyn Provider>,
-    tools: Arc<Registry>,
+    tools: Box<dyn Fn() -> Arc<Registry> + Send + Sync>,
     storage: Storage,
     permissions: Box<dyn Fn(&SpawnSpec) -> Permissions + Send + Sync>,
+    /// The lead's own `tool_defer_threshold`, so a teammate offered the lead's
+    /// MCP tools defers the same set of them (**D492**).
+    defer_threshold: usize,
 }
 
 impl fmt::Debug for InProcess {
@@ -610,11 +690,40 @@ impl InProcess {
         storage: Storage,
         permissions: impl Fn(&SpawnSpec) -> Permissions + Send + Sync + 'static,
     ) -> Self {
+        Self::lending(
+            provider,
+            move || Arc::clone(&tools),
+            storage,
+            permissions,
+            crate::config::DEFAULT_TOOL_DEFER_THRESHOLD,
+        )
+    }
+
+    /// The same backend over a tool set that is **read at each spawn** and a
+    /// budget somebody named.
+    ///
+    /// What [`Engine::with_teammates`] builds, and the only shape that can:
+    /// the engine's lent set moves as its MCP servers answer, so the handle a
+    /// teammate is built from has to be the live one rather than a snapshot of
+    /// it. Its sibling above is the fixed-set shape — what a caller who is not
+    /// an engine has, and what a test wants.
+    ///
+    /// `defer_threshold` is the lead's own; see [`Teammate`]'s `deferring` for
+    /// why a teammate must not be given a different one.
+    #[must_use]
+    pub fn lending(
+        provider: Arc<dyn Provider>,
+        tools: impl Fn() -> Arc<Registry> + Send + Sync + 'static,
+        storage: Storage,
+        permissions: impl Fn(&SpawnSpec) -> Permissions + Send + Sync + 'static,
+        defer_threshold: usize,
+    ) -> Self {
         Self {
             provider,
-            tools,
+            tools: Box::new(tools),
             storage,
             permissions: Box::new(permissions),
+            defer_threshold,
         }
     }
 }
@@ -626,13 +735,14 @@ impl TeammateBackend for InProcess {
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
-        Ok(Handle::InProcess(Arc::new(Teammate::new(
+        Ok(Handle::InProcess(Arc::new(Teammate::deferring(
             spec.name.as_str(),
             Arc::clone(&self.provider),
             spec.model.clone(),
-            Arc::clone(&self.tools),
+            (self.tools)(),
             (self.permissions)(spec),
             self.storage.clone(),
+            self.defer_threshold,
         ))))
     }
 
@@ -725,6 +835,21 @@ pub enum SpawnError {
     /// The inbox could not be seeded or written.
     #[error(transparent)]
     Mailbox(#[from] ganja_team::MailboxError),
+    /// The teammate's own inbox could not be created.
+    ///
+    /// Its own variant rather than [`SpawnError::TeamFile`], which is what it
+    /// used to be reported as: the team file and an inbox are two different
+    /// documents in two different places, and a sentence naming the wrong one
+    /// sends whoever reads it to look at a file that is fine. Its own variant
+    /// rather than [`SpawnError::Mailbox`] too, because [`ganja_team`]'s I/O
+    /// error carries no path and the path is the useful half here.
+    #[error("the inbox at {path} could not be created: {source}")]
+    Inbox {
+        /// Where it would have been.
+        path: String,
+        /// What went wrong.
+        source: std::io::Error,
+    },
     /// The team file could not be read or written.
     #[error("the team file at {path} could not be {doing}: {source}")]
     TeamFile {
@@ -773,7 +898,31 @@ pub struct TeammateRegistry {
     /// all and no turn's cancel ends any of them.
     cancel: CancellationToken,
     members: Mutex<BTreeMap<String, Arc<Member>>>,
-    colors: Mutex<Colors>,
+    /// Names a spawn has resolved but not yet registered.
+    ///
+    /// The whole of what keeps two concurrent spawns of one name apart. A
+    /// spawn crosses four awaits between reading what is taken and inserting
+    /// itself into [`TeammateRegistry::members`] — an inbox seed, a backend, a
+    /// team-file write — and tool bodies really do run several at once
+    /// (`agents.concurrency`, **D462**), so without this both would resolve to
+    /// `worker`, seed one inbox between them, and the second registration
+    /// would drop the first out of the map: a teammate still running that
+    /// nothing can shut down, because nothing holds it any more.
+    ///
+    /// Entries live from the moment a name is resolved to the moment
+    /// [`TeammateRegistry::start`] has put it in the map, and are given back
+    /// on every path that fails in between.
+    reserved: Mutex<BTreeSet<String>>,
+    /// Held across the team file's whole read-modify-write; see
+    /// [`TeammateRegistry::record`] for what is lost without it.
+    team_file: tokio::sync::Mutex<()>,
+    /// How many colours §4.3's palette has handed out, which is the whole of
+    /// the assignment. A map from name to colour used to sit beside it, and it
+    /// was dead weight with a leak in it: the name it was keyed on is unique
+    /// for the life of the registry by construction, so it was never asked
+    /// twice about one name, and nothing ever removes a member — so the map
+    /// only grew.
+    next_color: Mutex<usize>,
     /// The tasks a spawn started, kept so a shutdown can wait for them to
     /// actually finish rather than only ask them to.
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -813,14 +962,11 @@ struct Member {
     /// Cleared when the runner's task ends, so a teammate that shut itself
     /// down stops being listed without the registry having to be told.
     alive: Arc<AtomicBool>,
-}
-
-/// §4.3's colour assignment: `palette[index % len]`, with a monotonically
-/// increasing index, memoized per name.
-#[derive(Debug, Default)]
-struct Colors {
-    assignments: BTreeMap<String, String>,
-    index: usize,
+    /// The mailbox loop driving this teammate, for the one thing a caller has
+    /// to be able to tell it: what it is waiting for
+    /// ([`TeammateRegistry::awaiting_plan_approval`]). [`None`] for a pane,
+    /// which runs its own loop in its own process.
+    runner: Option<Arc<runner::Runner>>,
 }
 
 impl TeammateRegistry {
@@ -843,7 +989,9 @@ impl TeammateRegistry {
             cwd: cwd.into(),
             cancel: CancellationToken::new(),
             members: Mutex::new(BTreeMap::new()),
-            colors: Mutex::new(Colors::default()),
+            reserved: Mutex::new(BTreeSet::new()),
+            team_file: tokio::sync::Mutex::new(()),
+            next_color: Mutex::new(0),
             tasks: Mutex::new(Vec::new()),
             dialogs: Mutex::new(None),
         }
@@ -941,6 +1089,25 @@ impl TeammateRegistry {
         }
     }
 
+    /// Tells `teammate` that it is waiting on the lead's answer to
+    /// `request_id`, so that answer is applied rather than ignored as stale.
+    ///
+    /// The registry is where this belongs because the registry is what holds a
+    /// teammate's loop: the answering half is that loop's own `plan_approval`,
+    /// and what makes an answer *not* stale is a waiter recorded here first.
+    ///
+    /// Answers whether anybody was told — [`false`] for a name this team has
+    /// never had, and for a pane, which keeps its own wait in its own process.
+    pub fn awaiting_plan_approval(&self, teammate: &str, request_id: impl Into<String>) -> bool {
+        let member = self.members().get(teammate).map(Arc::clone);
+        let Some(runner) = member.as_ref().and_then(|member| member.runner.as_ref()) else {
+            return false;
+        };
+        runner.awaiting_plan_approval(request_id);
+
+        true
+    }
+
     /// Registers a teammate, seeds its mailbox with the task it was given, and
     /// starts it.
     ///
@@ -959,6 +1126,21 @@ impl TeammateRegistry {
     /// somebody's instructions in a mailbox nothing will ever read is the one
     /// half of a failed spawn that would still be visible tomorrow.
     ///
+    /// # Two spawns at once
+    ///
+    /// The name is **claimed synchronously** before any of that begins
+    /// ([`TeammateRegistry::claim`]), and given back on every failing path,
+    /// because everything between resolving a name and registering it is
+    /// `await`. Two `task` calls in one assistant step really do run at once.
+    ///
+    /// # Not a door
+    ///
+    /// `pub(crate)`, and deliberately: the gate a spawn passes —
+    /// [`crate::teammate::posture::spawn_gate`], and whoever it asks — lives at
+    /// [`crate::subagent::Teammates::start`], which is this method's one
+    /// caller. A second public entry here would be a way to start a teammate
+    /// that no rule was ever consulted about.
+    ///
     /// # Errors
     ///
     /// [`SpawnError::Name`] for a name that is refused or cannot be made
@@ -969,17 +1151,13 @@ impl TeammateRegistry {
     /// Takes `self` as an [`Arc`] because a teammate's own postbox is bound to
     /// the team it belongs to ([`crate::subagent::Postbox::of`]), and this is
     /// where the two exist together for the first time.
-    pub async fn spawn(
+    pub(crate) async fn spawn(
         self: &Arc<Self>,
         backend: Arc<dyn TeammateBackend>,
         request: SpawnRequest,
     ) -> Result<Spawned, SpawnError> {
-        let taken = self.taken().await?;
-        let name = resolve_unique(&request.name, taken.iter().map(String::as_str))?;
-        let color = request
-            .color
-            .clone()
-            .unwrap_or_else(|| self.color_for(name.as_str()));
+        let name = self.claim(&request.name).await?;
+        let color = request.color.clone().unwrap_or_else(|| self.color_for());
         let spec = SpawnSpec {
             name,
             team: self.team.clone(),
@@ -996,17 +1174,25 @@ impl TeammateRegistry {
             parent_session_id: self.lead_session_id.clone(),
         };
 
-        let seeded = seed_inbox(&spec).await?;
+        let seeded = match seed_inbox(&spec).await {
+            Ok(seeded) => seeded,
+            Err(error) => {
+                self.release(&spec.name);
+                return Err(error);
+            }
+        };
         let handle = match backend.spawn(&spec).await {
             Ok(handle) => handle,
             Err(unsupported) => {
                 unseed_inbox(&spec, seeded).await;
+                self.release(&spec.name);
                 return Err(SpawnError::Unsupported(unsupported));
             }
         };
         if let Err(error) = self.record(&spec, &handle).await {
             backend.kill(&handle).await;
             unseed_inbox(&spec, seeded).await;
+            self.release(&spec.name);
             return Err(error);
         }
 
@@ -1017,9 +1203,49 @@ impl TeammateRegistry {
             delivery: backend.delivery(),
             note: SPAWNED,
         };
+        // Registered, and only then given back: the name is in the member map
+        // from the instant it leaves the reservation set, so there is no
+        // moment at which a concurrent spawn could see it as free.
         self.start(&spec, handle, backend);
+        self.release(&spec.name);
 
         Ok(spawned)
+    }
+
+    /// Resolves a free name and holds it until the spawn is registered.
+    ///
+    /// The reservation and the resolution that produced it are **one critical
+    /// section**. `taken()` reads a file and can only ever be a snapshot, so
+    /// the resolution is done again inside the lock over that snapshot plus
+    /// whatever is reserved *now* — and everything in flight is reserved, since
+    /// nothing writes a member record or a team file before claiming its name.
+    /// A second spawn asking for the same name therefore resolves past it
+    /// rather than colliding with it, and no retry loop is needed because
+    /// nothing here can lose a race it then has to run again.
+    async fn claim(self: &Arc<Self>, desired: &str) -> Result<MemberName, SpawnError> {
+        let taken = self.taken().await?;
+        let mut reserved = self
+            .reserved
+            .lock()
+            .expect("the reserved names are never poisoned");
+        let name = resolve_unique(
+            desired,
+            taken
+                .iter()
+                .map(String::as_str)
+                .chain(reserved.iter().map(String::as_str)),
+        )?;
+        reserved.insert(name.as_str().to_owned());
+
+        Ok(name)
+    }
+
+    /// Gives a claimed name back, whether it was spent or refused.
+    fn release(&self, name: &MemberName) {
+        self.reserved
+            .lock()
+            .expect("the reserved names are never poisoned")
+            .remove(name.as_str());
     }
 
     /// Ends every teammate and waits for each one to really be gone.
@@ -1031,13 +1257,22 @@ impl TeammateRegistry {
     /// handles are the lead's, shut down one layer below the engine by the
     /// frontend that owns them, and a teammate closing them would be a second
     /// close of somebody else's servers.
+    ///
+    /// The kills run **together**, and that is a bound rather than a tidy-up:
+    /// a kill waits out one teammate's [`SETTLE`], so a serial loop costs the
+    /// exit path that wait once per teammate — a team of six holding the
+    /// process open for half a minute, where nothing about the waits makes
+    /// them owe each other an order.
     pub async fn shutdown(&self) {
         self.cancel.cancel();
 
         let members: Vec<Arc<Member>> = self.members().values().map(Arc::clone).collect();
-        for member in members {
-            member.surface.kill(&member.handle).await;
-        }
+        futures::future::join_all(
+            members
+                .iter()
+                .map(|member| member.surface.kill(&member.handle)),
+        )
+        .await;
 
         let tasks =
             std::mem::take(&mut *self.tasks.lock().expect("the task list is never poisoned"));
@@ -1052,17 +1287,19 @@ impl TeammateRegistry {
             .expect("the member map is never poisoned")
     }
 
-    /// §4.3's assignment, memoized: asking twice for one name answers twice
-    /// with one colour, and the index only ever moves forward.
-    fn color_for(&self, name: &str) -> String {
-        let mut colors = self.colors.lock().expect("the palette is never poisoned");
-        if let Some(color) = colors.assignments.get(name) {
-            return color.clone();
-        }
-
-        let color = PALETTE[colors.index % PALETTE.len()].to_owned();
-        colors.index += 1;
-        colors.assignments.insert(name.to_owned(), color.clone());
+    /// §4.3's assignment: the next colour round the palette, and the index only
+    /// ever moves forward.
+    ///
+    /// Takes no name, because the colour a teammate keeps is the one recorded
+    /// on its own [`Member`] and its own [`MemberRecord`]; this is asked once,
+    /// at the spawn that mints it.
+    fn color_for(&self) -> String {
+        let mut index = self
+            .next_color
+            .lock()
+            .expect("the palette is never poisoned");
+        let color = PALETTE[*index % PALETTE.len()].to_owned();
+        *index += 1;
 
         color
     }
@@ -1111,6 +1348,22 @@ impl TeammateRegistry {
 
     /// Adds this teammate to the team file, re-reading it under the same
     /// blocking hop that writes it back.
+    ///
+    /// The read and the write are **one critical section**, and they have to
+    /// be: this is a read-modify-write of a whole document, so two spawns
+    /// running it at once both read a file without the other's member in it
+    /// and the second write puts back a document missing the first — a
+    /// teammate that is running, holds a mailbox, and no team file remembers.
+    /// The reservation in [`TeammateRegistry::claim`] keeps their *names*
+    /// apart; nothing about that keeps their *records* apart.
+    ///
+    /// A [`tokio::sync::Mutex`] because the section spans two blocking hops.
+    /// It covers this process only — a real `claude` sharing the directory is
+    /// held off by nothing here, and what keeps that case from being worse
+    /// than a lost record is [`TeammateRegistry::write_team`]'s staged rename,
+    /// which at least never shows anybody half a document. Locking the file
+    /// across processes is the pane phase's problem, where a second writer
+    /// starts existing.
     async fn record(&self, spec: &SpawnSpec, handle: &Handle) -> Result<(), SpawnError> {
         let record = MemberRecord::teammate(
             &spec.name,
@@ -1126,6 +1379,7 @@ impl TeammateRegistry {
             },
             record::now_millis(),
         );
+        let _writing = self.team_file.lock().await;
         let mut file = self.read_team().await?;
         file.members.retain(|member| member.name != record.name);
         file.members.push(record);
@@ -1135,6 +1389,14 @@ impl TeammateRegistry {
     /// Writes the team file whole, through a staged file and a rename: a reader
     /// sharing this directory — a real `claude` among them — sees the old
     /// document or the new one and never half of either.
+    ///
+    /// The staged name is unique per **process**, which is all it needs to be
+    /// and less than it looks: two writes from *this* process would share it,
+    /// and the second would rename a file the first had already renamed away.
+    /// Nothing here re-derives that safety — [`TeammateRegistry::record`] is
+    /// the only caller and it holds a lock across the whole read-modify-write,
+    /// so this is never entered twice at once. A second caller would owe the
+    /// same lock.
     async fn write_team(&self, file: TeamFile) -> Result<(), SpawnError> {
         let path = self.root.config_path(&self.team);
 
@@ -1184,6 +1446,7 @@ impl TeammateRegistry {
     ) {
         let recent = Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_CALLS)));
         let alive = Arc::new(AtomicBool::new(true));
+        let mut held: Option<Arc<runner::Runner>> = None;
         let mut tasks = self.tasks.lock().expect("the task list is never poisoned");
 
         if let Some(teammate) = handle.teammate() {
@@ -1217,19 +1480,25 @@ impl TeammateRegistry {
                 self.cancel.child_token(),
             )));
 
-            let runner = runner::Runner::new(
+            // Kept beyond the task that drives it, which is what makes
+            // `Runner::awaiting_plan_approval` a seam rather than a method
+            // nothing can reach: the loop borrows the value it runs on, so the
+            // registry can still tell this teammate what it is waiting for.
+            let runner = Arc::new(runner::Runner::new(
                 Arc::clone(teammate),
                 self.lead.clone(),
                 spec.inbox(),
                 spec.lead_inbox(),
                 handle.surface(),
                 self.cancel.child_token(),
-            );
+            ));
+            let running = Arc::clone(&runner);
             let alive = Arc::clone(&alive);
             tasks.push(tokio::spawn(async move {
-                runner.run().await;
+                running.run().await;
                 alive.store(false, Ordering::Relaxed);
             }));
+            held = Some(runner);
         }
 
         self.members().insert(
@@ -1243,6 +1512,7 @@ impl TeammateRegistry {
                 surface: backend,
                 recent,
                 alive,
+                runner: held,
             }),
         );
     }
@@ -1278,10 +1548,9 @@ async fn seed_inbox(spec: &SpawnSpec) -> Result<mailbox::Identity, SpawnError> {
     let identity = mailbox::identity(&message);
 
     blocking(move || {
-        mailbox::seed(&path).map_err(|error| SpawnError::TeamFile {
-            doing: "seeded",
+        mailbox::seed(&path).map_err(|error| SpawnError::Inbox {
             path: path.display().to_string(),
-            source: Box::new(error),
+            source: error,
         })?;
         mailbox::write(&path, message)?;
 
@@ -1330,6 +1599,11 @@ async fn fold_calls(
     teammate: String,
     cancel: CancellationToken,
 ) {
+    // The part the ring was last told about. A running call republishes its
+    // part on every streaming update, so this is what keeps `describe` — which
+    // formats a whole argument object into a fresh `String` — from running
+    // once per update for a call the ring already names.
+    let mut named = None;
     loop {
         let next = tokio::select! {
             () = cancel.cancelled() => return,
@@ -1349,11 +1623,19 @@ async fn fold_calls(
         if let Event::PartUpdated { part, .. } = event
             && let PartBody::Tool { tool, state, .. } = &part.body
             && let ToolState::Running { input, .. } = state
+            // Cheap first, and it is the common case by a wide margin: the
+            // same part arriving again is the same call still streaming, and
+            // there is nothing new to name.
+            && named.as_ref() != Some(&part.id)
         {
+            named = Some(part.id.clone());
             let line = tools
                 .get(tool)
                 .map_or_else(|| tool.clone(), |found| found.describe(input));
             let mut ring = recent.lock().expect("the call ring is never poisoned");
+            // A different call that reads identically to the last one is still
+            // one row: the ring is a live view of what a teammate is doing, and
+            // two of the same line say nothing the one line did not.
             if ring.back() != Some(&line) {
                 if ring.len() == RECENT_CALLS {
                     ring.pop_front();

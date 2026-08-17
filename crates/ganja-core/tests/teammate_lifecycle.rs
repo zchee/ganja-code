@@ -13,15 +13,15 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use ganja_core::{
-    Storage,
+    Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
     permission::Permissions,
     protocol::{
-        Role,
+        PermissionReply, Role,
         team::{Frame, ShutdownRequest},
     },
     provider::FakeProvider,
-    teammate::{InProcess, SpawnRequest, TeammateRegistry},
-    tool::Registry,
+    teammate::{InProcess, TeammateRegistry, claude::ClaudePane, pane::GanjaPane},
+    tool::{Registry, task::TeammateSpawn},
 };
 use ganja_team::{
     LEAD, MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record, record::TeamFile,
@@ -55,6 +55,18 @@ fn team_file(path: &Path) -> TeamFile {
     serde_json::from_str(&text).expect("the team file reads back")
 }
 
+/// Says yes, and is asked nothing: the spawn below works inside its own
+/// project and asks for no bypass, so the gate answers `Allow` on its own.
+#[derive(Debug)]
+struct Yes;
+
+#[async_trait::async_trait]
+impl SpawnAsker for Yes {
+    async fn ask(&self, _request: SpawnAsk) -> PermissionReply {
+        PermissionReply::Once
+    }
+}
+
 #[tokio::test]
 async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     // SAFETY: this binary holds exactly one test, so nothing else in the
@@ -70,33 +82,47 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
         "01998ad0-0000-7000-8000-000000000000",
         home.path(),
     ));
-    let backend = Arc::new(InProcess::new(
-        Arc::new(FakeProvider::new("on it", Duration::ZERO)),
-        Arc::new(Registry::new(Vec::new())),
-        storage.clone(),
-        |_| Permissions::default(),
-    ));
+    // Through the gated door, which is the only one there is: the registry's
+    // own spawn is crate-internal so that nothing can start a teammate the
+    // permission gate never saw.
+    let door = Teammates::new(
+        Arc::clone(&registry),
+        Backends {
+            in_process: Arc::new(InProcess::new(
+                Arc::new(FakeProvider::new("on it", Duration::ZERO)),
+                Arc::new(Registry::new(Vec::new())),
+                storage.clone(),
+                |_| Permissions::default(),
+            )),
+            pane: Arc::new(GanjaPane),
+            claude: Arc::new(ClaudePane),
+        },
+    );
+    // `cwd` and `project_root` are one directory, which is the case that
+    // discloses nothing and asks nobody.
+    let caller = Caller {
+        model: "recorder-model".to_owned(),
+        cwd: home.path().to_path_buf(),
+        permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
+        project_root: home.path().to_path_buf(),
+    };
 
     // §4.1: the spawn registers the member, seeds the inbox with the task and
     // returns at once — the call does not wait for any of the work.
-    let spawned = registry
-        .spawn(
-            backend,
-            SpawnRequest {
+    let spawned = door
+        .start(
+            TeammateSpawn {
                 name: "worker".to_owned(),
-                backend: ganja_core::teammate::DEFAULT_BACKEND,
+                backend: None,
                 agent_type: "general".to_owned(),
-                model: "recorder-model".to_owned(),
-                color: None,
                 prompt: "have a look at the parser".to_owned(),
-                cwd: home.path().to_path_buf(),
-                plan_mode_required: false,
-                bypass: false,
             },
+            &caller,
+            &Yes,
         )
         .await
         .expect("an in-process teammate spawns");
-    assert_eq!(spawned.name.as_str(), "worker");
+    assert_eq!(spawned.name, "worker");
     assert_eq!(spawned.agent_id, "worker@session-abcd1234");
 
     let member = team_file(&root.config_path(&team))

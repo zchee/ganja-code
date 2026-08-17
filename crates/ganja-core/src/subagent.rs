@@ -239,6 +239,17 @@ pub(crate) struct Spawn {
     pub(crate) message_id: MessageId,
     /// The part this call's progress is reported on.
     pub(crate) part_id: PartId,
+    /// This call's own token, so a dialog raised here is retired when the turn
+    /// that raised it is cancelled.
+    ///
+    /// A **delegated turn** takes its cancel token as an argument, because the
+    /// call waits for the whole child loop; a **spawn** does not — it hands a
+    /// teammate its task and returns — so the only thing here that can outlive
+    /// a cancel is the permission dialog, and this is what closes it. The
+    /// teammate itself is deliberately outside this token's reach: its
+    /// lifetime is the registry's and not a turn's, which is the whole of
+    /// **D500**.
+    pub(crate) cancel: CancellationToken,
 }
 
 impl std::fmt::Debug for Spawn {
@@ -334,9 +345,18 @@ impl SpawnAsker for Spawn {
     /// which is free to take a reply precisely because the parent is blocked
     /// inside this call.
     ///
-    /// A dropped sender is a refusal. That covers a cancelled turn and a
-    /// frontend that went away, and refusing is the honest reading of both: a
-    /// spawn nobody could be asked about is one nobody approved.
+    /// A dropped sender is a refusal, and so is a cancel. Refusing is the
+    /// honest reading of both: a spawn nobody could be asked about is one
+    /// nobody approved.
+    ///
+    /// The cancel arm is not redundant with the dropped sender, and that is
+    /// worth saying because it looks like it should be. Nothing closes this
+    /// call's entry in the pending-reply registry when a turn is cancelled —
+    /// the registry is an `Arc` this value holds, so it outlives the turn —
+    /// which means the sender is never dropped and this wait never ends. What
+    /// is left behind without the arm is a spawn dialog still on somebody's
+    /// screen with no `PermissionReplied` ever coming, and a registry entry
+    /// nothing will ever take.
     async fn ask(&self, request: SpawnAsk) -> PermissionReply {
         let (sender, receiver) = oneshot::channel();
         let id = PermissionId::ascending();
@@ -374,7 +394,25 @@ impl SpawnAsker for Spawn {
             return PermissionReply::Reject;
         }
 
-        let reply = receiver.await.unwrap_or(PermissionReply::Reject);
+        let received = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => None,
+            reply = receiver => reply.ok(),
+        };
+        let reply = match received {
+            Some(reply) => reply,
+            None => {
+                // Retired **by its own id**, never by clearing the registry: a
+                // step's batched calls each hold an entry, and taking them all
+                // would abandon a sibling's open dialog (**D462**).
+                self.pending
+                    .lock()
+                    .expect("the pending replies are never poisoned")
+                    .close_permission(&id);
+
+                PermissionReply::Reject
+            }
+        };
         // Terminal either way, so a frontend may retire its dialog
         // unconditionally — the contract every other permission wait here
         // keeps.
@@ -486,7 +524,7 @@ pub trait SpawnAsker: Send + Sync {
 /// turn reaches this through what it already holds for the session rather than
 /// building one beside each call. What a single call decides is only a name, a
 /// surface and a task; everything else a spawn needs is the team's, and
-/// [`crate::teammate::TeammateRegistry::spawn`] fills it in.
+/// the registry's own `spawn` fills it in.
 #[derive(Debug)]
 pub struct Teammates {
     registry: Arc<TeammateRegistry>,
@@ -563,8 +601,16 @@ impl Teammates {
             Decision::Ask => {
                 let reply = asker
                     .ask(SpawnAsk {
+                        // The name **asked for**, which is not always the name
+                        // that answers: the registry resolves a collision by
+                        // appending a counter, and it does so after this
+                        // dialog because resolving first would mean holding a
+                        // name across a wait for a person who may say no. So
+                        // the sentence says what is certain and admits what is
+                        // not, rather than naming a teammate that may never
+                        // exist under that name.
                         title: format!(
-                            "start teammate {} on the {} backend",
+                            "start teammate {} on the {} backend (a name already taken gets a counter)",
                             asked.name,
                             backend_name(backend)
                         ),
@@ -715,7 +761,7 @@ impl Postbox {
     /// Takes the [`Teammate`] rather than a name because that is what makes
     /// the binding a mechanism: the only string that answers
     /// [`Teammate::name`] is the one
-    /// [`crate::teammate::TeammateRegistry::spawn`] resolved, so a caller
+    /// the registry's own `spawn` resolved, so a caller
     /// building this cannot choose a different one either.
     #[must_use]
     pub fn of(registry: Arc<TeammateRegistry>, teammate: &Teammate) -> Self {
