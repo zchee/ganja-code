@@ -91,20 +91,23 @@ use std::{fmt, path::PathBuf, sync::Arc};
 use async_trait::async_trait;
 use ganja_protocol::team::{Frame, MemberBackend};
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     agent::{self, Agent},
     engine::{EVENT_CAPACITY, Fanout},
-    permission::{Action, Permissions, Rule, TASK},
-    protocol::{Event, FinishReason, MessageId, Part, PartBody, PartId, Role, ToolState, Usage},
+    permission::{Action, Decision, Permissions, Rule, TASK},
+    protocol::{
+        Event, FinishReason, MessageId, Part, PartBody, PartId, PermissionId, PermissionReply,
+        Role, ToolState, Usage,
+    },
     provider::Provider,
     session::{ChildParts, Persist, SessionState, Turn, TurnKind, run_turn},
     storage::{self, SessionId, SessionInfo},
     teammate::{
-        DEFAULT_BACKEND, SpawnRequest, Teammate, TeammateBackend, TeammateRegistry, backend_name,
-        parse_backend,
+        DEFAULT_BACKEND, SpawnRequest, SpawnSpec, Teammate, TeammateBackend, TeammateRegistry,
+        backend_name, parse_backend, posture,
     },
     tool::{
         Credentials, Registry,
@@ -299,14 +302,92 @@ impl Subagents for Spawn {
             });
         };
 
-        // The model and the directory are the **caller's** rather than the
-        // team's: a teammate started from a turn asks the model that turn is
-        // asking and works where that turn works, exactly as a delegated child
-        // does. Neither is a `task` argument, so neither is the model's to
-        // choose.
-        teammates
-            .start(request, self.host.model.clone(), self.host.cwd.clone())
-            .await
+        teammates.start(request, &self.caller(), self).await
+    }
+}
+
+impl Spawn {
+    /// What this turn brings to a spawn.
+    ///
+    /// Everything in it is the **caller's** rather than the team's: a teammate
+    /// started from a turn asks the model that turn is asking, works where that
+    /// turn works, and is judged by the rules that turn is under. None of the
+    /// four is a `task` argument, so none is the model's to choose.
+    fn caller(&self) -> Caller {
+        Caller {
+            model: self.host.model.clone(),
+            cwd: self.host.cwd.clone(),
+            permissions: Arc::clone(&self.host.permissions),
+            project_root: self.host.root.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl SpawnAsker for Spawn {
+    /// Raises the dialog on the **calling turn's** own fanout and waits.
+    ///
+    /// The same two moves `session.rs`'s per-call wait makes, and for the same
+    /// reason they work: the request is registered in the pending-reply
+    /// registry before it is published, so a frontend answering the instant it
+    /// renders finds somebody waiting; and the registry is the *parent's*,
+    /// which is free to take a reply precisely because the parent is blocked
+    /// inside this call.
+    ///
+    /// A dropped sender is a refusal. That covers a cancelled turn and a
+    /// frontend that went away, and refusing is the honest reading of both: a
+    /// spawn nobody could be asked about is one nobody approved.
+    async fn ask(&self, request: SpawnAsk) -> PermissionReply {
+        let (sender, receiver) = oneshot::channel();
+        let id = PermissionId::ascending();
+        self.pending
+            .lock()
+            .expect("the pending replies are never poisoned")
+            .open_permission(id.clone(), sender);
+
+        let published = self
+            .events
+            .send(Event::PermissionRequested {
+                session_id: self.session_id.clone(),
+                id: id.clone(),
+                // The `task` part this spawn is being asked about. A dialog is
+                // answered by its own `id`; what `call_id` buys is a frontend
+                // being able to say *which* call is waiting, and in the
+                // transcript that call is this part.
+                call_id: self.part_id.as_str().to_owned(),
+                tool: crate::tool::task::ID.to_owned(),
+                title: request.title,
+                args: request.args,
+                directories: request
+                    .directories
+                    .iter()
+                    .map(|directory| directory.to_string_lossy().into_owned())
+                    .collect(),
+            })
+            .await;
+        if published.is_err() {
+            self.pending
+                .lock()
+                .expect("the pending replies are never poisoned")
+                .close_permission(&id);
+
+            return PermissionReply::Reject;
+        }
+
+        let reply = receiver.await.unwrap_or(PermissionReply::Reject);
+        // Terminal either way, so a frontend may retire its dialog
+        // unconditionally — the contract every other permission wait here
+        // keeps.
+        let _ = self
+            .events
+            .send(Event::PermissionReplied {
+                session_id: self.session_id.clone(),
+                id,
+                reply,
+            })
+            .await;
+
+        reply
     }
 }
 
@@ -340,6 +421,64 @@ impl Backends {
     }
 }
 
+/// What the calling turn brings to a spawn.
+///
+/// Handed in rather than held on [`Teammates`], because none of the four is the
+/// *team's*: three of them change when the session switches agent or model, and
+/// a door that had copied them would answer with what was true when it was
+/// built. A team outlives all of that.
+#[derive(Clone, Debug)]
+pub struct Caller {
+    /// The model this turn is asking, which the teammate inherits.
+    pub model: String,
+    /// Where this turn works, which the teammate works in.
+    pub cwd: PathBuf,
+    /// The **lead's** own ruleset, which is what decides whether this spawn may
+    /// happen at all. Shared rather than cloned: it is the live one, and a
+    /// snapshot would answer with rules a stored "always" had since changed.
+    pub permissions: Arc<std::sync::Mutex<Permissions>>,
+    /// The lead's project root — what its rules were loaded for, and
+    /// emphatically not whatever project the teammate's directory sits in
+    /// (`posture::spawn_gate` owns why that distinction is the anti-laundering
+    /// rule rather than a detail).
+    pub project_root: PathBuf,
+}
+
+/// One spawn, as a person is asked about it.
+///
+/// Carries no prompt, and the omission is deliberate: a spawn prompt is
+/// documented as a place a credential lands in cleartext, and a dialog is read
+/// by a person and rendered by whatever frontend is attached. What a person
+/// needs to answer "may this run" is who, where and on what.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpawnAsk {
+    /// One line saying what would be started.
+    pub title: String,
+    /// The spawn's own facts, for a dialog to render.
+    pub args: serde_json::Value,
+    /// Directories outside the project this teammate would work in, disclosed
+    /// with the request because a person cannot answer "may this teammate run"
+    /// without "where" — the same disclosure a call's own dialog makes.
+    pub directories: Vec<PathBuf>,
+}
+
+/// Who a spawn's own permission dialog is put in front of.
+///
+/// A seam rather than a call into the turn, because [`Teammates`] is reached by
+/// two doors and only one of them is a tool call inside a turn: `/team spawn`
+/// asks the person who typed it, and a test asks nobody. What every one of them
+/// has in common is that a spawn the rules do not already settle is a question,
+/// and this is the shape of asking it.
+#[async_trait]
+pub trait SpawnAsker: Send + Sync {
+    /// Asks about one spawn and reports the answer.
+    ///
+    /// [`PermissionReply::Reject`] is the answer for anything that is not a
+    /// yes, a dismissal and a vanished dialog included: a spawn nobody could be
+    /// asked about is one nobody approved.
+    async fn ask(&self, request: SpawnAsk) -> PermissionReply;
+}
+
 /// The `task` tool's second door: this session's team, and the surfaces a
 /// teammate may run on (**D501**).
 ///
@@ -370,24 +509,30 @@ impl Teammates {
 
     /// Starts a teammate and answers without waiting for its work (§4.1).
     ///
-    /// `model` and `cwd` are the calling turn's own, handed in rather than
-    /// held: a door is not the place a session's current model lives, and a
-    /// value copied here would be one that goes stale the next time the
-    /// session switches agent.
+    /// # The gate comes first, and a deny raises nothing
+    ///
+    /// [`crate::teammate::posture::spawn_gate`] reads the **lead's** rules for
+    /// the two things a spawn decides — whether it may skip its dialogs, and
+    /// whether it may work outside the project — before anything is written.
+    /// A [`Decision::Deny`] refuses here and asks nobody: a deny is not a
+    /// question, and putting one in front of a person would be inventing an
+    /// answer they already gave. A [`Decision::Ask`] goes to `asker`, and only
+    /// a [`Decision::Allow`] — or a yes — reaches the registry.
     ///
     /// # Errors
     ///
     /// [`NotSpawned`], carrying one sentence: a `backend` value nothing
     /// answers to, a surface this build has not got, a name the team refused,
-    /// or a team file or mailbox that would not be written. Every one of them
-    /// is text the model reads and may retry on, which is why they collapse to
-    /// a sentence rather than staying a kind — the tool has no branch that
-    /// would act on the difference.
+    /// a rule or a person that refused the spawn, or a team file or mailbox
+    /// that would not be written. Every one of them is text the model reads and
+    /// may retry on, which is why they collapse to a sentence rather than
+    /// staying a kind — the tool has no branch that would act on the
+    /// difference.
     pub async fn start(
         &self,
         request: TeammateSpawn,
-        model: String,
-        cwd: PathBuf,
+        caller: &Caller,
+        asker: &dyn SpawnAsker,
     ) -> Result<Teammated, NotSpawned> {
         let backend = match request.backend.as_deref() {
             Some(named) => parse_backend(named).map_err(refused)?,
@@ -396,6 +541,59 @@ impl Teammates {
             // whether a *named* surface can run, never which one is chosen.
             None => DEFAULT_BACKEND,
         };
+        let asked = self.requested(&request, backend, caller)?;
+        let gate = posture::spawn_gate(
+            &caller
+                .permissions
+                .lock()
+                .expect("the lead's rules are never poisoned"),
+            &caller.project_root,
+            &asked,
+        );
+        match gate.action() {
+            Decision::Deny => {
+                return Err(NotSpawned {
+                    // Present whenever something was denied, which is what this
+                    // arm *is*; the fallback is the arm's own name rather than
+                    // an empty sentence, because a refusal a model cannot read
+                    // is a refusal it cannot act on.
+                    reason: gate.refusal().unwrap_or_else(|| REFUSED_BY_RULE.to_owned()),
+                });
+            }
+            Decision::Ask => {
+                let reply = asker
+                    .ask(SpawnAsk {
+                        title: format!(
+                            "start teammate {} on the {} backend",
+                            asked.name,
+                            backend_name(backend)
+                        ),
+                        args: serde_json::json!({
+                            "name": asked.name.as_str(),
+                            "backend": backend_name(backend),
+                            "agent_type": asked.agent_type,
+                            "cwd": asked.cwd.to_string_lossy(),
+                            "bypass": asked.bypass,
+                        }),
+                        directories: gate.directories(),
+                    })
+                    .await;
+                if reply == PermissionReply::Reject {
+                    return Err(NotSpawned {
+                        reason: REFUSED_BY_HAND.to_owned(),
+                    });
+                }
+                // `Always` is taken as the yes it is and remembered nowhere.
+                // `Permissions::remember` takes a `CallDecision`, and this gate
+                // is not one — its two questions are not a call's patterns — so
+                // the only way to store an answer here would be to invent a
+                // decision about a call that never happened. A person who wants
+                // to stop being asked writes the rule, or answers "always" on a
+                // call that really does work in that directory, which leaves
+                // behind the very `external_directory` rule this gate reads.
+            }
+            Decision::Allow => {}
+        }
 
         let spawned = self
             .registry
@@ -405,12 +603,12 @@ impl Teammates {
                     name: request.name,
                     backend,
                     agent_type: request.agent_type,
-                    model,
+                    model: caller.model.clone(),
                     // §4.3's palette assigns one; a `task` call has no colour
                     // in mind and no argument to say so with.
                     color: None,
                     prompt: request.prompt,
-                    cwd,
+                    cwd: caller.cwd.clone(),
                     // Neither is this door's to ask for: **D501** gives both
                     // doors exactly `name` and `backend`, so a teammate that
                     // must start in plan mode or that wants dialogs bypassed
@@ -430,6 +628,45 @@ impl Teammates {
             // a defaulted surface is visible in the transcript.
             backend: backend_name(spawned.backend).to_owned(),
             note: spawned.note.to_owned(),
+        })
+    }
+
+    /// The spawn **as it is being asked for**, which is what the gate judges.
+    ///
+    /// [`crate::teammate::TeammateRegistry::spawn`] builds the real
+    /// [`SpawnSpec`] itself, and it decides two things this one cannot know:
+    /// the resolved name and the assigned colour. Neither is a field
+    /// [`crate::teammate::posture::spawn_gate`] reads — it reads the bypass
+    /// flag, the agent kind and the directory, and all three arrive from the
+    /// request unchanged — so gating this value and spawning the other cannot
+    /// disagree about the answer. What is left empty here is left empty
+    /// because it is genuinely not decided yet, rather than filled with a
+    /// guess a later reader might trust.
+    ///
+    /// The name is parsed here, so a name the grammar refuses is refused before
+    /// a person is asked about it. The words are `resolve_unique`'s own — this
+    /// is the same [`MemberName::parse`] it runs first — so refusing early
+    /// costs no second sentence.
+    fn requested(
+        &self,
+        request: &TeammateSpawn,
+        backend: MemberBackend,
+        caller: &Caller,
+    ) -> Result<SpawnSpec, NotSpawned> {
+        Ok(SpawnSpec {
+            name: MemberName::parse(&request.name).map_err(refused)?,
+            team: self.registry.team().clone(),
+            lead: self.registry.lead().clone(),
+            root: self.registry.root().clone(),
+            backend,
+            agent_type: request.agent_type.clone(),
+            model: caller.model.clone(),
+            color: String::new(),
+            prompt: request.prompt.clone(),
+            cwd: caller.cwd.clone(),
+            plan_mode_required: false,
+            bypass: false,
+            parent_session_id: String::new(),
         })
     }
 }
@@ -603,6 +840,16 @@ fn refused(error: impl fmt::Display) -> NotSpawned {
         reason: error.to_string(),
     }
 }
+
+/// Why a spawn a rule denied was refused, when the gate names no clause of its
+/// own. Unreachable through [`crate::teammate::posture::SpawnGate`], which
+/// always has a sentence for a deny — a fallback rather than a message anybody
+/// is expected to read.
+const REFUSED_BY_RULE: &str = "a rule refuses this spawn";
+
+/// Why a spawn somebody was asked about was refused.
+const REFUSED_BY_HAND: &str =
+    "the spawn was refused at the permission dialog; nothing was started and no team was joined";
 
 /// Why a `uds:` address is validated and then not delivered.
 const NO_SOCKET: &str = "A message to another session travels over that session's socket, and this build has no such transport yet. A member of this team is reached by its bare name.";
@@ -1185,8 +1432,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Address, Body, DEFAULT_BACKEND, MemberName, NO_SOCKET, Postbox, Reserved, SpawnRequest,
-        Teammate, TeammateRegistry, Undelivered, Watched, denies_task, mailbox, roster,
+        Address, Backends, Body, Caller, DEFAULT_BACKEND, MemberName, NO_SOCKET, PermissionReply,
+        Postbox, Reserved, SpawnAsk, SpawnAsker, SpawnRequest, Teammate, TeammateRegistry,
+        TeammateSpawn, Teammates, Undelivered, Watched, async_trait, denies_task, mailbox, roster,
         subagent_rules, team, watch,
     };
     use crate::{
@@ -1554,6 +1802,185 @@ mod tests {
                 .expect("an inbox reads")
                 .valid
         }
+    }
+
+    /// Records every spawn it was asked about and answers each with `answer`.
+    #[derive(Debug)]
+    struct Asked {
+        seen: std::sync::Mutex<Vec<SpawnAsk>>,
+        answer: PermissionReply,
+    }
+
+    impl Asked {
+        fn answering(answer: PermissionReply) -> Self {
+            Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+                answer,
+            }
+        }
+
+        fn seen(&self) -> Vec<SpawnAsk> {
+            self.seen.lock().expect("no panic").clone()
+        }
+    }
+
+    #[async_trait]
+    impl SpawnAsker for Asked {
+        async fn ask(&self, request: SpawnAsk) -> PermissionReply {
+            self.seen.lock().expect("no panic").push(request);
+
+            self.answer
+        }
+    }
+
+    /// A `task` call's request, at its dullest.
+    fn wanted() -> TeammateSpawn {
+        TeammateSpawn {
+            name: "worker".to_owned(),
+            backend: None,
+            agent_type: "general".to_owned(),
+            prompt: "have a look at the parser".to_owned(),
+        }
+    }
+
+    /// A caller whose rules are `rules` and who works in `cwd`, judged against
+    /// `project_root`.
+    fn caller(rules: Vec<Rule>, cwd: &std::path::Path, project_root: &std::path::Path) -> Caller {
+        let mut permissions = Permissions::default();
+        permissions.set_baseline(rules);
+
+        Caller {
+            model: "recorder-model".to_owned(),
+            cwd: cwd.to_path_buf(),
+            permissions: Arc::new(std::sync::Mutex::new(permissions)),
+            project_root: project_root.to_path_buf(),
+        }
+    }
+
+    /// A door onto one team, over a backend that spawns nothing at all.
+    ///
+    /// The refusal that backend answers with is not what these tests read — a
+    /// gate that let the spawn through is visible as *reaching* the backend at
+    /// all, and a gate that stopped it is visible as its own sentence — so this
+    /// buys the gate's own claims without a running teammate under them.
+    fn door(home: &std::path::Path) -> Teammates {
+        let registry = Arc::new(TeammateRegistry::new(
+            TeamsRoot::new(home.join("teams")),
+            TeamName::parse("session-abcd1234").expect("a team name"),
+            "01998ad0-0000-7000-8000-000000000000",
+            home,
+        ));
+
+        Teammates::new(
+            registry,
+            Backends {
+                in_process: Arc::new(crate::teammate::pane::GanjaPane),
+                pane: Arc::new(crate::teammate::pane::GanjaPane),
+                claude: Arc::new(crate::teammate::claude::ClaudePane),
+            },
+        )
+    }
+
+    /// A teammate that would work outside the lead's project is not routine,
+    /// and the person asked is shown **where** — which is the only thing that
+    /// makes the question answerable.
+    #[tokio::test]
+    async fn a_spawn_outside_the_project_is_asked_about_and_discloses_the_directory() {
+        let home = ganja_testkit::temp_dir();
+        let elsewhere = ganja_testkit::temp_dir();
+        let asked = Asked::answering(PermissionReply::Once);
+
+        let refused = door(home.path())
+            .start(
+                wanted(),
+                &caller(Vec::new(), elsewhere.path(), home.path()),
+                &asked,
+            )
+            .await
+            .expect_err("the backend under this door spawns nothing");
+
+        assert!(
+            refused.reason.contains(crate::teammate::REFUSED_UNTIL_P25B),
+            "an approved spawn reaches the backend: {refused:?}"
+        );
+        let seen = asked.seen();
+        let ask = seen.first().expect("somebody was asked: {seen:?}");
+        assert_eq!(
+            ask.directories,
+            vec![crate::permission::resolve(elsewhere.path())],
+            "and shown where it would work: {ask:?}"
+        );
+        assert!(
+            ask.title.contains("worker"),
+            "the dialog names the teammate: {ask:?}"
+        );
+        assert_eq!(
+            ask.args.get("cwd").and_then(|cwd| cwd.as_str()),
+            Some(elsewhere.path().to_string_lossy().as_ref())
+        );
+        assert!(
+            !ask.args.to_string().contains("have a look at the parser"),
+            "and a spawn prompt is not put on a dialog: {ask:?}"
+        );
+    }
+
+    /// A rule that refuses is not a question. The spawn is refused in the
+    /// gate's own words and nobody is asked, because asking would be inviting
+    /// somebody to overturn an answer they already gave.
+    #[tokio::test]
+    async fn a_spawn_a_rule_denies_is_refused_without_anybody_being_asked() {
+        let home = ganja_testkit::temp_dir();
+        let elsewhere = ganja_testkit::temp_dir();
+        let asked = Asked::answering(PermissionReply::Once);
+        let denied = vec![Rule {
+            permission: crate::permission::EXTERNAL_DIRECTORY.to_owned(),
+            pattern: super::ANY.to_owned(),
+            action: Action::Deny,
+        }];
+
+        let refused = door(home.path())
+            .start(
+                wanted(),
+                &caller(denied, elsewhere.path(), home.path()),
+                &asked,
+            )
+            .await
+            .expect_err("a denied spawn does not happen");
+
+        assert!(
+            refused.reason.contains("a rule refuses work in"),
+            "the gate's own sentence reaches the model: {refused:?}"
+        );
+        assert!(
+            !refused.reason.contains(crate::teammate::REFUSED_UNTIL_P25B),
+            "and the backend was never reached: {refused:?}"
+        );
+        assert!(
+            asked.seen().is_empty(),
+            "a deny raises no dialog: {:?}",
+            asked.seen()
+        );
+    }
+
+    /// A person who says no is answered by not starting anything, in a sentence
+    /// that says which of the two refusals it was.
+    #[tokio::test]
+    async fn a_spawn_refused_at_the_dialog_starts_nothing() {
+        let home = ganja_testkit::temp_dir();
+        let elsewhere = ganja_testkit::temp_dir();
+        let asked = Asked::answering(PermissionReply::Reject);
+
+        let refused = door(home.path())
+            .start(
+                wanted(),
+                &caller(Vec::new(), elsewhere.path(), home.path()),
+                &asked,
+            )
+            .await
+            .expect_err("a refused spawn does not happen");
+
+        assert_eq!(refused.reason, super::REFUSED_BY_HAND);
+        assert_eq!(asked.seen().len(), 1, "and it was asked exactly once");
     }
 
     /// The frame vocabulary is read here and nowhere else, by one parse: the
