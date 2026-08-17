@@ -342,10 +342,14 @@ impl TeammateBackend for GanjaPane {
         // and the send-keys — ends the pane but cannot unregister the member,
         // because nothing here can reach the registry back. What bounds it is
         // this wave's own reaper: a record over a pane that is not there is
-        // exactly what it drops at the next lead's startup (D506). Moving the
-        // send-keys into a `TeammateBackend::launch` the registry calls after
-        // its record write, with the registry's own unwind, is the follow-up
-        // that closes the gap; the body here is that method's body already.
+        // exactly what it drops at the next lead's startup (D506). And the
+        // task is detached from the registry's shutdown: a lead that dies
+        // inside the wait leaves a pane holding an idle shell that no record
+        // ever named — invisible to a reaper that walks the team file — until
+        // a person closes it. Moving the send-keys into a
+        // `TeammateBackend::launch` the registry calls after its record write,
+        // with the registry's own unwind, is the follow-up that closes both
+        // (bead ganja-code-ipg); the body here is that method's body already.
         let handle = Handle::Pane {
             pane_id: pane.id.clone(),
             birth: pane.birth.clone(),
