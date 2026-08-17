@@ -1,0 +1,12 @@
+[
+  {
+    "from": "team-lead",
+    "text": "UNBLOCK from team-lead: network recovered and the 8481C was never down (uptime 2d — pure local WAN outage). GO on AVX2 UTF-8 validation on the real hardware NOW: (1) re-sync the repo to remote ~/gows (tar-over-ssh, exclude .git/.omc); (2) run the exhaustive suites there: `~/sdk/go1.26.5/bin/go test ./internal/utf8x/...` with the AVX2 kernel exercised directly (TestKernelDifferential against utf8ValidAVX2) + full package tests + FuzzValidator 60s; ALSO run with -race (gcc is installed there); (3) if all green: flip `avx2Validated = true`, re-run local+remote gates, update .omc/research/utf8-simd-calibration.md with real-HW validation record + AVX2 GB/s numbers. NOTE: the remote currently shows load avg ~24 (1-min, settling: 5-min 5.76) — CORRECTNESS validation is fine under load, but if you also capture calibration/benchmark numbers, first check the machine is quiet (uptime + pgrep) and skip/defer the perf numbers if it isn't — do NOT record load-contaminated GB/s. Report: validated/flipped or what failed. Then AVX-512 VBMI decision: with real AVX2 numbers in hand, state go/no-go per the memory-bandwidth rationale.",
+    "summary": "Network back: validate AVX2 utf8 on 8481C now",
+    "timestamp": "2026-07-08T10:04:03.181Z",
+    "msgV": 1,
+    "msg_id": "2861201d-16ab-4335-86a4-89070ddb9f7e",
+    "type": "message",
+    "read": false
+  }
+]
