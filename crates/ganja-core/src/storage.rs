@@ -130,6 +130,14 @@ const MIGRATED: &str = "migrated";
 /// superseded, not unreadable.
 const PREUUID: &str = "preuuid";
 
+/// What the lock that quarantine is decided under is named:
+/// `sessions.db.quarantine.lock`.
+///
+/// Beside the database rather than inside the data home, because the thing
+/// being coordinated is this one file and the processes that race for it are
+/// the ones that opened this project. See [`QuarantineLock`].
+const QUARANTINE_LOCK: &str = "quarantine.lock";
+
 /// Every connection sets these, immediately after open.
 ///
 /// `journal_mode` is a property of the file and persists; the other four are
@@ -1097,14 +1105,6 @@ impl Inner {
             }
         };
 
-        // A descriptor of this build's own on the file that connection just
-        // opened, taken here rather than down in the probe: SQLite publishes
-        // no descriptor of its own, and the narrower the gap between its open
-        // and this one, the less room there is for another process to have
-        // replaced the file between the two. It is what
-        // [`set_aside_preuuid`]'s guard asks whether the path still names.
-        let held = fs::File::open(&self.database).ok();
-
         migrate(&mut connection, &self.database)?;
         if first {
             convert(&mut connection, &self.root, &self.database)?;
@@ -1114,7 +1114,7 @@ impl Inner {
         // has not yet written the older store's ids — a probe placed there
         // would pass on an empty file and then rename the store `convert` had
         // just filled.
-        let connection = set_aside_preuuid(connection, held, &self.database)?;
+        let connection = set_aside_preuuid(connection, &self.database)?;
 
         let (writer, thread) = spawn_writer(self.database.clone())?;
         *self
@@ -1313,52 +1313,99 @@ fn set_aside(database: &Path, reason: &str, kind: &str) -> bool {
 /// exists to prevent. The store is renamed, never read further and never
 /// deleted, and a fresh one takes its name.
 ///
-/// The probe runs inside an `IMMEDIATE` transaction for the reason [`migrate`]
-/// gives: the loser of a two-process race is made to wait and then sees the
-/// winner's finished state rather than acting on its own stale reading.
+/// **A SQLite transaction cannot make this decision safely**, and the first
+/// version of it tried to. `IMMEDIATE` serializes the *reading*; the damage is
+/// done by the *renaming*, which is not a database operation and which no
+/// SQLite lock spans. Two processes can both read old ids, both be right, and
+/// then the second one renames the fresh store the first one had already put
+/// in the old one's place — leaving two `preuuid-` files, the second of them a
+/// clean store, and the first process's writer thread writing into a file no
+/// path names any more. Comparing inodes just before the rename narrows that
+/// window without closing it: the check and the rename are still two steps.
 ///
-/// **That alone does not close the race**, because no SQLite lock survives a
-/// `rename(2)`: the loser's descriptor stays on the old inode, re-reads the
-/// old ids there, and would rename whatever now holds the path — the fresh
-/// store the winner just created. So after the transaction commits and before
-/// anything is renamed, the file this connection was opened on is compared
-/// against whatever the path names now, and a mismatch means the store was
-/// replaced underneath: the handle is dropped and the new file opened, with
-/// nothing set aside. Failing to make that comparison at all counts as a
-/// mismatch — a file that cannot be identified is one that cannot be proved
-/// still ours.
+/// So the whole sequence — decide, rename, create fresh — happens under
+/// [`QuarantineLock`], and **the decision is taken again inside it**, against
+/// the file the path names at that moment rather than the one this connection
+/// was opened on. A process that waited for the lock finds a store with
+/// nothing old in it and does nothing, which is the right answer and the one
+/// it could not reach before. The cheap read that gets us here is done first
+/// and unlocked, so a store with nothing old in it — every store, after the
+/// first open that converts one — costs no lock and creates no lock file.
 ///
-/// A move that is *refused* — the name it would take is already in use, or the
-/// rename itself fails — leaves the store where it is and the session goes on
-/// reading it, old ids and all. That is worse than a quarantine and better
-/// than a project that will not open, and [`set_aside`]'s warn line names both
-/// files so the next open is a decision somebody can make.
+/// [`still_named_by`] is kept as the last word before the rename. It is no
+/// longer what makes this correct, but it is not dead either: [`Inner::start`]
+/// also renames this database when it is *unreadable*, and that path holds no
+/// lock, so a rename here is still checked against the file it means to move.
+///
+/// A move that is *refused* — the name it would take is already in use, the
+/// rename fails, or the lock cannot be had at all — leaves the store where it
+/// is and the session goes on reading it, old ids and all. That is worse than
+/// a quarantine and better than a project that will not open, and every one of
+/// those paths says so at `warn`.
 ///
 /// The reopened store is migrated but deliberately **not** converted: the
 /// older `storage/` tree a first open would have read was either carried into
 /// the store that has just been set aside, or set aside itself by [`convert`]
 /// for holding the same old ids. Converting again would be importing the very
 /// sessions that were just moved out of the way.
-fn set_aside_preuuid(
-    mut connection: Connection,
-    held: Option<fs::File>,
-    database: &Path,
-) -> Result<Connection, StorageError> {
-    let named = |source: rusqlite::Error| StorageError::Sql {
-        path: database.to_path_buf(),
-        source,
+fn set_aside_preuuid(connection: Connection, database: &Path) -> Result<Connection, StorageError> {
+    // The cheap question first, on the connection that is already open and
+    // taking nothing: this is asked on every open a project ever has, and all
+    // but one of them answer no.
+    if preuuid_id(&connection, database)?.is_none() {
+        return Ok(connection);
+    }
+
+    // Let go of the store *before* waiting, and open it again afterwards.
+    //
+    // Two reasons, and the first is not obvious. Waiting with this connection
+    // open would pin the very file the winner is about to rename, and SQLite
+    // deletes a write-ahead log **by the path it remembers**: when this
+    // process finally closed the last handle on the set-aside inode it would
+    // checkpoint that file correctly and then unlink
+    // `<database>-wal`/`-shm` — which by then name the *winner's fresh
+    // store*, leaving two processes writing one database through two
+    // different logs. Holding nothing while waiting makes the winner's own
+    // close the last one, so what it sets aside is settled and self-contained.
+    // The second reason is the ordinary one: a descriptor does not follow a
+    // rename, so the question has to be asked of the path again anyway.
+    drop(connection);
+
+    let lock = QuarantineLock::take(database);
+    // Whether or not the lock was had, this process needs a store to go on
+    // with, and the path is where one is.
+    let mut connection = connect(database)?;
+    let held = fs::File::open(database).ok();
+    migrate(&mut connection, database)?;
+
+    // Held until this function returns, which is after the fresh store exists:
+    // whoever was waiting must find a finished store rather than a gap.
+    let Some(_lock) = lock else {
+        return Ok(connection);
     };
 
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(named)?;
-    let old = names(&transaction, "SELECT id FROM session")
-        .map_err(named)?
-        .into_iter()
-        .find(|id| !is_uuidv7(id));
-    transaction.commit().map_err(named)?;
+    let old = {
+        // `IMMEDIATE` still, though the lock is what serializes us now: it
+        // keeps the row set from moving under the read while another process
+        // writes a session, which is a different race and a real one.
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| StorageError::Sql {
+                path: database.to_path_buf(),
+                source,
+            })?;
+        let old = preuuid_id(&transaction, database)?;
+        transaction.commit().map_err(|source| StorageError::Sql {
+            path: database.to_path_buf(),
+            source,
+        })?;
+
+        old
+    };
 
     let Some(old) = old else {
+        // Somebody else did it while we waited. What we are holding is their
+        // replacement store, which is exactly what we would have made.
         return Ok(connection);
     };
 
@@ -1386,6 +1433,106 @@ fn set_aside_preuuid(
     migrate(&mut connection, database)?;
 
     Ok(connection)
+}
+
+/// The first session id the store carries that [`is_uuidv7`] refuses, if any.
+///
+/// Takes a `&Connection` rather than a transaction so both callers can share
+/// it: the unlocked pre-check, which must be as cheap as a read gets, and the
+/// decision inside [`QuarantineLock`], where a `Transaction` derefs to one.
+fn preuuid_id(connection: &Connection, database: &Path) -> Result<Option<String>, StorageError> {
+    names(connection, "SELECT id FROM session")
+        .map(|ids| ids.into_iter().find(|id| !is_uuidv7(id)))
+        .map_err(|source| StorageError::Sql {
+            path: database.to_path_buf(),
+            source,
+        })
+}
+
+/// The exclusive advisory lock a pre-UUIDv7 quarantine is decided and
+/// performed under (**D493**).
+///
+/// A sibling of the database, `<database>.quarantine.lock`, locked with
+/// [`fs::File::lock`] — `flock(2)` on every platform this builds for, so the
+/// lock belongs to the open file description and two `ganja` processes really
+/// do exclude each other. No crate is involved and no lock protocol is
+/// invented: this is one call each way.
+///
+/// **It is never removed.** Unlinking a lock file is how a lock file stops
+/// working — the process that removed it and the one still holding a
+/// descriptor on it are no longer locking the same inode, so the next pair
+/// races exactly as if there were no lock. It is created only when a store
+/// that really does predate UUIDv7 is found, which happens at most once in a
+/// project's life, so what it leaves behind is one empty file and only where
+/// one was needed.
+///
+/// A lock that cannot be taken is reported, not worked around: see
+/// [`QuarantineLock::take`].
+struct QuarantineLock(fs::File);
+
+impl QuarantineLock {
+    /// Blocks until the lock is this process's, or says it cannot be had.
+    ///
+    /// [`None`] means the quarantine cannot be *coordinated* — a filesystem
+    /// with no advisory locking, a directory that will not take the file — and
+    /// an uncoordinated quarantine is the failure this exists to prevent
+    /// rather than a lesser version of it: it is what renames a store another
+    /// process is writing into, costing that process the session it is in the
+    /// middle of. So the caller reads the store as it is, old ids and all, and
+    /// the next open on a machine that can lock does the job properly. Waiting
+    /// costs nothing that is not already lost; renaming blind costs a session.
+    fn take(database: &Path) -> Option<Self> {
+        let name = database.file_name().unwrap_or_default().to_string_lossy();
+        let path = database.with_file_name(format!("{name}.{QUARANTINE_LOCK}"));
+
+        let refused = |failure: &io::Error| {
+            tracing::warn!(
+                path = %path.display(),
+                %failure,
+                "a store that predates UUIDv7 ids could not be set aside safely and was \
+                 left as it is: the quarantine lock could not be taken"
+            );
+        };
+
+        // `write` because a lock wants a writable handle and nothing else;
+        // `truncate(false)` said out loud because the file's *contents* are
+        // not the lock and never were — truncating one another process is
+        // holding would be a write for no reason.
+        let file = match fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(failure) => {
+                refused(&failure);
+
+                return None;
+            }
+        };
+        if let Err(failure) = file.lock() {
+            refused(&failure);
+
+            return None;
+        }
+
+        Some(Self(file))
+    }
+}
+
+impl Drop for QuarantineLock {
+    /// Lets the next process in.
+    ///
+    /// Closing the descriptor releases the lock on its own — that is what
+    /// makes a killed process let go of one, and it is why this needs no
+    /// staleness rule — so the call is not what makes the lock correct. It is
+    /// here because a guard's whole job is to be held and never read, and a
+    /// `Drop` is where that says so out loud rather than as a silenced
+    /// warning.
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 /// Whether `path` still names the file `file` was opened on.
@@ -3071,6 +3218,84 @@ mod tests {
                 "the {suffix:?} file must travel with its database, got {left:?}"
             );
         }
+    }
+
+    /// The quarantine waits for the lock, and then asks again.
+    ///
+    /// This is the regression drill for the bug the first version of
+    /// [`set_aside_preuuid`] shipped: it decided on its own connection and
+    /// renamed afterwards, so two processes could both decide "old ids", and
+    /// the second one would rename the *fresh* store the first had already put
+    /// in place. `ganja-cli`'s `two_processes_racing_the_quarantine…` catches
+    /// it with two real processes, roughly one run in six; this catches it
+    /// every time, by holding the lock and playing the winner underneath a
+    /// store that is already past the point of no return.
+    ///
+    /// Both halves are asserted, because either alone would pass on a build
+    /// with no lock at all: that the waiting store does **not** rename while
+    /// the lock is held, and that once it gets in it re-reads the path and
+    /// finds nothing to do.
+    #[test]
+    fn a_quarantine_waits_for_the_lock_and_then_finds_nothing_left_to_do() {
+        let directory = temporary();
+        let root = directory.path().join("storage");
+        let old = "ses_0193b2f0a1c2000000";
+        {
+            let planted = storage(&directory);
+            planted.save_info(&info(old, 5)).expect("the record writes");
+        }
+        let database = Storage::open(root.clone()).database().to_path_buf();
+
+        // Taken before anybody else can want it, and held across the whole
+        // interleaving below.
+        let held = super::QuarantineLock::take(&database).expect("the lock is available");
+
+        let waiting = Storage::open(root.clone());
+        std::thread::scope(|scope| {
+            let parked = scope.spawn(|| waiting.list_sessions());
+            // Long enough for that store to have read the old id, asked for
+            // the lock, and be waiting on it.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(
+                !names(directory.path())
+                    .iter()
+                    .any(|name| name.contains(".preuuid-")),
+                "nothing may be set aside while another process holds the lock"
+            );
+
+            // The winner's move, played by this test: the store renamed aside
+            // and a fresh one created at the name it left.
+            assert!(super::set_aside(&database, "for the test", super::PREUUID));
+            let fresh = minted(1);
+            Storage::open(root.clone())
+                .save_info(&info(&fresh, 1))
+                .expect("the fresh store writes");
+            drop(held);
+
+            let listed = parked
+                .join()
+                .expect("the waiting store does not panic")
+                .expect("the waiting store opens rather than failing");
+            assert_eq!(
+                listed
+                    .iter()
+                    .map(|info| info.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![fresh.as_str()],
+                "the store that waited must go on with what the winner left"
+            );
+        });
+
+        let left = names(directory.path());
+        assert_eq!(
+            left.iter()
+                .filter(|name| name.contains(".preuuid-")
+                    && !name.ends_with("-wal")
+                    && !name.ends_with("-shm"))
+                .count(),
+            1,
+            "the store that waited must not set the winner's fresh store aside too, got {left:?}"
+        );
     }
 
     #[test]
