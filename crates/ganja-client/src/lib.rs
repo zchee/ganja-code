@@ -28,11 +28,10 @@
 //! exactly one socket for its whole life and never switches: one client per
 //! socket path, which is also why the form takes no credential — a same-uid
 //! socket is authorized by the filesystem, and the server's guard asks it for
-//! none. Two routes are the socket's reason to exist: [`Client::team`]
-//! answers on both forms, and [`Client::send_team_message`] is registered on
-//! the socket alone, so calling it on a TCP client is refused by the server
-//! with `404` rather than by anything here — this crate declares routes, it
-//! does not second-guess which listener answers them.
+//! none. Of the three, this crate declares [`Client::health`] alone: it is
+//! what `ganja sessions --live` maps a live socket back to its session with.
+//! The two team routes have one caller, the engine's own deliver arm, whose
+//! crate may not link this one and so speaks them itself.
 //!
 //! # Version skew is unsupported, and refused readably
 //!
@@ -64,9 +63,7 @@ pub mod sse;
 use std::path::Path;
 
 use futures::{Stream, StreamExt as _, stream::BoxStream};
-pub use ganja_protocol::{
-    Event, Mention, PermissionId, PermissionReply, SessionId, team::TeamView,
-};
+pub use ganja_protocol::{Event, Mention, PermissionId, PermissionReply, SessionId};
 use serde::{Deserialize, Serialize};
 
 /// The credential a password-protected server requires on every route.
@@ -117,7 +114,7 @@ pub enum ClientError {
         reason: String,
     },
     /// The server answered more than this client reads. Every route here
-    /// answers a bounded document — a roster, a listing, a receipt — and a
+    /// answers a bounded document — a health line, a listing, a receipt — and a
     /// body past [`BODY_CAP`] is not one of them, whatever it says it is; it
     /// is refused rather than buffered, because a socket's far end is
     /// another process's word.
@@ -293,57 +290,6 @@ impl Prompt {
     }
 }
 
-/// What `POST /team/{name}/message` carries: a plain message from another
-/// session, as `ganja-serve`'s socket route takes it (**D505**).
-///
-/// Declared here as a client declares every body it sends; the server's side
-/// is `ganja-core`'s `SocketMessage`, three fields of the same names, and a
-/// drift between the two is refused by the server rather than guessed at.
-/// Plain text only, by shape: there is no field a protocol frame could ride
-/// in, which is §5.2-6's rule made a type.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct TeamMessage {
-    /// The sender's derived identity, `<name>@<team>` — what the receiving
-    /// session stamps the message with. A bare member name is refused there,
-    /// since it could name a member of *that* team.
-    pub from: String,
-    /// What the recipient reads.
-    pub text: String,
-    /// One line about it, when there is one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-}
-
-impl TeamMessage {
-    /// A message from `from` saying `text`, with nothing summarized.
-    #[must_use]
-    pub fn new(from: impl Into<String>, text: impl Into<String>) -> Self {
-        Self {
-            from: from.into(),
-            text: text.into(),
-            summary: None,
-        }
-    }
-
-    /// Adds the one-line summary.
-    #[must_use]
-    pub fn summarized(mut self, summary: impl Into<String>) -> Self {
-        self.summary = Some(summary.into());
-        self
-    }
-}
-
-/// What `POST /team/{name}/message` answers when the message landed:
-/// `ganja-core`'s `SocketDelivered`, declared whole and closed.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Delivered {
-    /// The bare member name the server wrote to.
-    pub to: String,
-    /// What became of it, in the server's words.
-    pub note: String,
-}
-
 /// The scheme and host every socket request is spelled under. `reqwest`
 /// resolves nothing once a client is bound to a socket, so the host is a
 /// label the URL needs and the server's router never reads.
@@ -512,45 +458,6 @@ impl Client {
     /// The transport, credential and skew refusals above.
     pub async fn health(&self) -> Result<Health, ClientError> {
         self.get("/global/health").await
-    }
-
-    /// `GET /team` (D-13): the team the served session leads, on either
-    /// address form.
-    ///
-    /// # Errors
-    ///
-    /// As [`Client::health`], plus [`ClientError::Refused`] carrying `404`
-    /// when the session leads no team.
-    pub async fn team(&self) -> Result<TeamView, ClientError> {
-        self.get("/team").await
-    }
-
-    /// `POST /team/{name}/message` (D-13): a plain message to `name`, a
-    /// member of the served session's team — its lead's own name included,
-    /// which is how a message reaches that session's next turn.
-    ///
-    /// The route is served on the socket alone. Called on a TCP client it is
-    /// refused by the server with `404`, exactly as any route that is not
-    /// there — declared here all the same, because which listener answers a
-    /// route is the server's fact and not this crate's to pre-empt.
-    ///
-    /// # Errors
-    ///
-    /// As [`Client::health`], plus [`ClientError::Refused`] carrying `404`
-    /// (no team, no such member, or a TCP server), `400` (a blank text, a
-    /// protocol frame, or a `from` that is not `<name>@<team>`) or `500` (an
-    /// inbox that would not take it), each with the server's own sentence.
-    pub async fn send_team_message(
-        &self,
-        name: &str,
-        message: &TeamMessage,
-    ) -> Result<Delivered, ClientError> {
-        let body = serde_json::to_value(message).map_err(|error| ClientError::Skew {
-            detail: format!("a team message does not serialize: {error}"),
-        })?;
-
-        self.send("POST", &format!("/team/{name}/message"), Some(body))
-            .await
     }
 
     /// `POST /session`: points the server's engine at a fresh session and

@@ -6,13 +6,13 @@
 //!
 //! No upstream counterpart: opencode serves TCP only. **The scheme itself
 //! lives one crate lower** — `ganja_tool::socket`, reached here as
-//! [`ganja_core::tool::socket`] and re-exported below under the names this
-//! module always had — because four readers at four heights of the tree
-//! spell it: the `send_message` tool judging a `uds:` address at rung 3, the
-//! engine's deliver arm judging it again before it connects, this binder,
-//! and `ganja sessions --live`. The literal `/tmp/ganja-<uid>/`, the
+//! [`ganja_core::tool::socket`] — because four readers at four heights of
+//! the tree spell it: the `send_message` tool judging a `uds:` address at
+//! rung 3, the engine's deliver arm judging it again before it connects, this
+//! binder, and `ganja sessions --live`. The literal `/tmp/ganja-<uid>/`, the
 //! `<hex>.sock` name, the `0700`/`0600` modes and the directory predicate
-//! are that module's; what is here is what only a server can do with them.
+//! are that module's; what is here is what only a server can do with them,
+//! and what is re-exported below is what the binder's callers read of it.
 //!
 //! Extension is routine rather than rare: a UUIDv7's first eight hex digits
 //! are the top thirty-two bits of a millisecond clock, so every session minted
@@ -72,11 +72,10 @@
 use std::path::{Path, PathBuf};
 
 pub use ganja_core::tool::socket::{
-    DIRECTORY_MODE, DirectoryRefusal, EXTENSION, LOCK_EXTENSION, LONGEST_NAME, SHORTEST_NAME,
-    SOCKET_MODE, lock_path, vet,
+    DirectoryRefusal, EXTENSION, LOCK_EXTENSION, SHORTEST_NAME, lock_path,
 };
 #[cfg(unix)]
-pub use ganja_core::tool::socket::{directory, uid, vet_directory};
+pub use ganja_core::tool::socket::{directory, vet_directory};
 use ganja_protocol::SessionId;
 
 /// Every name `id`'s socket may take under `directory`, shortest first: the
@@ -133,13 +132,11 @@ mod unix {
     };
 
     use axum::serve::Listener;
+    use ganja_core::tool::socket::{DIRECTORY_MODE, SOCKET_MODE, uid};
     use ganja_protocol::SessionId;
     use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
 
-    use super::{
-        DIRECTORY_MODE, DirectoryRefusal, SOCKET_MODE, candidates, lock_path, peer_allowed, uid,
-        vet_directory,
-    };
+    use super::{DirectoryRefusal, candidates, lock_path, peer_allowed, vet_directory};
     use crate::{Address, ServeError};
 
     /// A listener that answers only its own user: every accepted connection

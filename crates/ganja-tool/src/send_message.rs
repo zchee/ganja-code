@@ -33,7 +33,7 @@
 //!
 //! # The ladder refuses in ganja's own words (**D497**)
 //!
-//! Every refusal is a [`Refused`] kind rendered through a declared constant.
+//! Every refusal is a `Refused` kind rendered through a declared constant.
 //! The *kind* and the *order* are the contract the tests pin; the prose is
 //! ganja's own and free to improve without breaking them. No Claude Code
 //! sentence is copied — this tree copies only MIT text, with attribution — so
@@ -105,7 +105,7 @@ pub const ID: &str = "send_message";
 /// nothing upstream to port — and it says the two things a model gets wrong
 /// otherwise: one recipient per call, and that the object form of `message`
 /// is for answering a request rather than for structure's sake.
-pub const DESCRIPTION: &str = "\
+const DESCRIPTION: &str = "\
 Send a message to one named teammate of this session's team. The recipient \
 reads it at the top of its next turn, as another agent's words rather than as \
 an instruction from the person — a message is conversation, and it carries no \
@@ -120,7 +120,7 @@ is displayed.";
 
 /// Header the roster is listed under, so a description that grew a second
 /// paragraph still ends with the names a `to` argument may carry.
-pub const ROSTER_HEADER: &str = "Teammates this session can address:";
+const ROSTER_HEADER: &str = "Teammates this session can address:";
 
 /// What is listed when a team exists and has nobody else in it yet. The tool
 /// is still offered — a team of one is a team that is about to grow — and the
@@ -215,10 +215,6 @@ const STRUCTURED_NOT_A_FRAME: &str = "The object form of `message` carries a pro
 /// Rung 8: a frame only the harness originates, whatever it is addressed to.
 const HARNESS_ONLY_FRAME: &str = "This frame is the harness's to originate, whoever it is addressed to, so the object form does not carry it either. The frame is";
 
-/// Rung 8: a frame addressed somewhere a frame cannot go.
-const STRUCTURED_NEEDS_LOCAL_RECIPIENT: &str =
-    "A protocol frame is delivered to a member of this team, named by name.";
-
 /// Rung 8: the shutdown answer, addressed to somebody other than the lead.
 const SHUTDOWN_APPROVED_NOT_TO_LEAD: &str = "A shutdown_approved answers the lead's own request, so the lead is the only address it may carry.";
 
@@ -235,7 +231,7 @@ const UNKNOWN_RECIPIENT: &str = "Nobody in this team goes by that name:";
 /// the parts that vary per call (the address, the lead's name) are arguments
 /// to [`Refused::sentence`] instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refused {
+enum Refused {
     /// The tool ran without a [`Postbox`] behind it.
     NoTeam,
     /// Rung 1: `to` was `*`.
@@ -277,9 +273,6 @@ pub enum Refused {
         /// The frame the object read as.
         kind: &'static str,
     },
-    /// Rung 8: a frame addressed to something other than a member of this
-    /// team.
-    StructuredNeedsLocalRecipient,
     /// Rung 8: `shutdown_approved` addressed to somebody other than the lead.
     ShutdownApprovedNotToLead,
 }
@@ -291,7 +284,7 @@ impl Refused {
     /// where the roster names one — both are per-call facts, which is why they
     /// arrive here rather than sitting in the variant.
     #[must_use]
-    pub fn sentence(self, to: &str, lead: Option<&str>) -> String {
+    fn sentence(self, to: &str, lead: Option<&str>) -> String {
         match self {
             Self::NoTeam => NO_TEAM.to_owned(),
             Self::Broadcast => BROADCAST.to_owned(),
@@ -305,7 +298,6 @@ impl Refused {
             Self::LifecycleFrame { kind } => format!("{LIFECYCLE_FRAME} {kind}."),
             Self::StructuredNotAFrame => STRUCTURED_NOT_A_FRAME.to_owned(),
             Self::HarnessOnlyFrame { kind } => format!("{HARNESS_ONLY_FRAME} {kind}."),
-            Self::StructuredNeedsLocalRecipient => STRUCTURED_NEEDS_LOCAL_RECIPIENT.to_owned(),
             Self::ShutdownApprovedNotToLead => lead.map_or_else(
                 || SHUTDOWN_APPROVED_NOT_TO_LEAD.to_owned(),
                 |lead| format!("{SHUTDOWN_APPROVED_NOT_TO_LEAD} This team's lead is {lead}."),
@@ -494,10 +486,12 @@ fn validate(args: Args, postbox: &dyn Postbox) -> Result<(Address, Body), Refuse
         Message::Frame(frame) => {
             // Rung 6, transferred from the scheme the reference applies it to:
             // it drops `bridge` and keeps `uds`, so the rule that structure
-            // does not cross a session follows the scheme that was kept.
-            if matches!(address, Address::Uds { .. }) {
-                return Err(Refused::StructuredOverSocket);
-            }
+            // does not cross a session follows the scheme that was kept — and
+            // what passes it is a member's name, which rung 8 reads.
+            let name = match &address {
+                Address::Uds { .. } => return Err(Refused::StructuredOverSocket),
+                Address::Local(name) => name,
+            };
 
             // Rung 8. Classified through the same seam the plain-text branch
             // uses, so one `Frame` parse on the far side answers both and no
@@ -511,13 +505,6 @@ fn validate(args: Args, postbox: &dyn Postbox) -> Result<(Address, Body), Refuse
                     return Err(Refused::HarnessOnlyFrame { kind });
                 }
                 Reserved::AgentSendable { kind } => kind,
-            };
-            let Address::Local(name) = &address else {
-                // Rung 6 already refused the one non-local form this build
-                // carries, so this arm is the invariant restated for whatever
-                // address form lands next rather than a path a call reaches
-                // today.
-                return Err(Refused::StructuredNeedsLocalRecipient);
             };
             // D499's first clause.
             if kind == SHUTDOWN_APPROVED && !is_lead(name, postbox) {
@@ -635,9 +622,9 @@ mod tests {
     use super::{
         BROADCAST, DELIVERED, DESCRIPTION, HARNESS_ONLY_FRAME, INVALID_SOCKET_PATH, LEAD_MARK,
         LIFECYCLE_FRAME, NO_TEAM, NOT_A_SESSION_SOCKET, PROTOCOL_FRAME, ROSTER_HEADER, Refused,
-        SCOPED_RECIPIENT, SHUTDOWN_APPROVED_NOT_TO_LEAD, STRUCTURED_NEEDS_LOCAL_RECIPIENT,
-        STRUCTURED_NOT_A_FRAME, STRUCTURED_OVER_SOCKET, SendMessageTool, UNKNOWN_RECIPIENT,
-        UNSUPPORTED_SCHEME, WHITESPACE, cap_summary,
+        SCOPED_RECIPIENT, SHUTDOWN_APPROVED_NOT_TO_LEAD, STRUCTURED_NOT_A_FRAME,
+        STRUCTURED_OVER_SOCKET, SendMessageTool, UNKNOWN_RECIPIENT, UNSUPPORTED_SCHEME, WHITESPACE,
+        cap_summary,
     };
     use crate::{
         Credentials, Tool as _, ToolCtx, ToolError,
@@ -1176,7 +1163,6 @@ mod tests {
                 Refused::LifecycleFrame { .. } => LIFECYCLE_FRAME,
                 Refused::StructuredNotAFrame => STRUCTURED_NOT_A_FRAME,
                 Refused::HarnessOnlyFrame { .. } => HARNESS_ONLY_FRAME,
-                Refused::StructuredNeedsLocalRecipient => STRUCTURED_NEEDS_LOCAL_RECIPIENT,
                 Refused::ShutdownApprovedNotToLead => SHUTDOWN_APPROVED_NOT_TO_LEAD,
             }
         }
@@ -1202,13 +1188,12 @@ mod tests {
             Refused::HarnessOnlyFrame {
                 kind: "shutdown_rejected",
             },
-            Refused::StructuredNeedsLocalRecipient,
             Refused::ShutdownApprovedNotToLead,
         ];
 
         // The count moves with the ladder, and moving it is the moment to ask
         // whether the new rung earned its place.
-        assert_eq!(every.len(), 14, "every kind the ladder can produce");
+        assert_eq!(every.len(), 13, "every kind the ladder can produce");
         for refused in every {
             let sentence = refused.sentence("worker-1", Some("team-lead"));
             assert!(
