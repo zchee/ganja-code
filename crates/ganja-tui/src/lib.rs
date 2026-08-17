@@ -14,6 +14,7 @@ pub mod graphics;
 pub mod history;
 pub mod keybind;
 pub(crate) mod markdown;
+pub mod member;
 pub mod mention;
 pub mod notify;
 pub mod theme;
@@ -75,6 +76,9 @@ pub enum Resume {
 /// config file and above the environment between them. `yolo` is the bypass
 /// trio's one bool (**D479**): the session answers its own permission dialogs
 /// with "allow once" instead of raising them, and remembers none of it.
+/// `member` is §4.1's launch line, when a lead started this process as a pane
+/// teammate of its team: the session then reads its own inbox instead of
+/// leading a team, and tells the lead when its turns end (§10.3).
 ///
 /// Everything that can refuse does so *before* the terminal is taken over: a
 /// config file that will not parse, a key binding this build cannot read, a
@@ -93,9 +97,30 @@ pub enum Resume {
 ///
 /// Returns an error for any of the refusals above, and if the terminal cannot
 /// be initialized, drawn to, read from, or restored.
-pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Result<()> {
+pub async fn run(
+    resume: Option<Resume>,
+    overrides: Overrides,
+    yolo: bool,
+    member: Option<member::Flags>,
+) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = Config::load_with(&cwd, &overrides).context("failed to read the configuration")?;
+    // Resolved first, and refused readably before anything else is built: a
+    // pane teammate is launched by a program rather than a person, and a bad
+    // launch line has to reach the lead's log as a sentence rather than as a
+    // pane that flashed and died. The teams root is the lead's own — asked of
+    // the same registry a lead builds, so both sides read one directory — and
+    // a launch line with no config home has nowhere to read from at all.
+    let membership = match member {
+        Some(flags) => {
+            let home = ganja_core::config::config_home()
+                .context("a pane teammate needs a config home to find its team in")?;
+            let pane = std::env::var(member::TMUX_PANE).ok();
+
+            Some(member::Membership::resolve(flags, &home, &cwd, pane)?)
+        }
+        None => None,
+    };
     let keys =
         Keybinds::from_config(&config.keybinds).context("failed to read the key bindings")?;
     let selection = provider::select(&config).context("failed to select a provider")?;
@@ -257,24 +282,57 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
     // A build with no config home has nowhere to keep a team, so it leads
     // none: `Engine::teammates()` answers `None`, the `send_message` tool is
     // never registered, and the frontend's whole lead side is inert.
-    let (engine, teammates) = match ganja_core::config::config_home() {
-        Some(home) => {
-            let registry = Arc::new(TeammateRegistry::for_session(
-                &home,
-                engine.session_id().as_str(),
-                &cwd,
-            ));
+    //
+    // **A pane teammate leads no team either** (§10.3): it is a member of the
+    // one that launched it, and a teammate is not a place to nest a second
+    // team — the same line the engine draws for an in-process one. So the
+    // registry is skipped outright, which is also what keeps the lead's
+    // `send_message` from being offered under the lead's name to a process
+    // that is not the lead.
+    let (engine, teammates) =
+        match ganja_core::config::config_home().filter(|_| membership.is_none()) {
+            Some(home) => {
+                let registry = Arc::new(TeammateRegistry::for_session(
+                    &home,
+                    engine.session_id().as_str(),
+                    &cwd,
+                ));
 
-            (engine.with_teammates(Arc::clone(&registry)), Some(registry))
-        }
-        None => {
-            tracing::warn!(
-                "no config home, so this session leads no team and cannot spawn teammates"
-            );
+                (engine.with_teammates(Arc::clone(&registry)), Some(registry))
+            }
+            None if membership.is_some() => (engine, None),
+            None => {
+                tracing::warn!(
+                    "no config home, so this session leads no team and cannot spawn teammates"
+                );
 
-            (engine, None)
+                (engine, None)
+            }
+        };
+    // What the status bar says about who this process is, beside the provider
+    // and theme notices: a person looking at a pane should be able to tell it
+    // from the lead's window at a glance.
+    let member_notice = membership.as_ref().map(|membership| {
+        tracing::info!(
+            team = membership.team().as_str(),
+            name = membership.name().as_str(),
+            parent = membership.parent_session_id(),
+            "running as a pane teammate"
+        );
+
+        match membership.color() {
+            Some(color) => format!(
+                "teammate {} ({color}) of {}",
+                membership.name().as_str(),
+                membership.team().as_str()
+            ),
+            None => format!(
+                "teammate {} of {}",
+                membership.name().as_str(),
+                membership.team().as_str()
+            ),
         }
-    };
+    });
     // The builtins, the user's own themes, and the theme they last picked —
     // then whatever the config asks for on top, because a `theme` written in a
     // file outranks a runtime pick permanently rather than until the next one.
@@ -313,7 +371,12 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
             // session restores the one it was left on.
             let mut app = App::new(
                 engine,
-                notice(&[selection.notice, theme_notice, snapshot_notice]),
+                notice(&[
+                    selection.notice,
+                    theme_notice,
+                    snapshot_notice,
+                    member_notice,
+                ]),
                 themes,
             )
             .with_provider(provider_id)
@@ -343,6 +406,12 @@ pub async fn run(resume: Option<Resume>, overrides: Overrides, yolo: bool) -> Re
             // they typed is relative to where they are standing.
             .with_cwd(cwd)
             .watching_mcp(config.mcp.len());
+            // The member's inbox, on the tick that already polls everything
+            // else here; a session nobody launched as a teammate installs
+            // nothing and reads nothing (§10.3).
+            if let Some(membership) = membership {
+                app = app.with_member(member::Inbox::new(membership));
+            }
             app.seed(seed);
             // `SessionEnd` fires at the tail of this call rather than beside
             // `jobs.shutdown()` below: `run` consumes the app, and the engine

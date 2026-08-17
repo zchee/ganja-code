@@ -1,0 +1,1042 @@
+//! Running the terminal UI **as** a pane teammate (§4.1, §6.1, §10.3).
+//!
+//! Upstream opencode has **no counterpart**: nothing there is a member of
+//! anything. What is ported is the reference's pane teammate — a separate OS
+//! process running the full CLI, with its own session and transcript, launched
+//! by a lead with `--agent-id/--agent-name/--team-name/--agent-color/
+//! --parent-session-id` and told what to do through its mailbox rather than
+//! its command line (§4.1). §10.3 names the shape a `ganja` pane takes: the
+//! ordinary TUI plus four integrations, every one of them landing on a seam
+//! the frontend already has, and **the engine untouched** (§10.3-3).
+//!
+//! # The four integrations, and where each one lands
+//!
+//! 1. **Inbound** — [`Inbox::poll`] is the §6.1 pass over this member's own
+//!    inbox, run from the app's tick exactly as the lead's `LeadInbox` pass
+//!    is: `shutdown_request` first, then the frames, then the plain messages
+//!    handed back for the lane that already exists — a peer batch that steers
+//!    a running turn at its next step boundary or prompts an idle one (D-3).
+//! 2. **The seeded task** — the prompt the lead wrote into this inbox before
+//!    launching the pane is simply the first message the first pass finds, and
+//!    it becomes the first turn through the same lane; no dedicated mechanism.
+//! 3. **`idle_notification`** — [`Inbox::report_idle`] writes the frame to the
+//!    lead when a turn ends, mapping the finish reason the engine already
+//!    reports (completed / cancelled / failed) onto `available` /
+//!    `interrupted` / `failed`.
+//! 4. **Control frames** — a `shutdown_request` is answered with
+//!    [`Inbox::approve_shutdown`] once the turn has ended, and the app then
+//!    quits through the exit path it always had, so the MCP servers, the jobs
+//!    and the terminal are torn down in the order they always were.
+//!    `mode_set_request` maps onto `Command::SetPermissionMode` (D-15,
+//!    AC-19); `plan_approval_response` is stale by definition here, since
+//!    nothing in this build raises the request it would answer.
+//!
+//! # What is deliberately not here
+//!
+//! - **The reading and the ruling stay apart.** This module reads the file
+//!   and decides what each entry is; the app decides what to send the engine.
+//!   [`Pass`] is the whole of what crosses, so a test drives one pass and
+//!   asserts the §6.1 ordering without a terminal.
+//! - **The lead-only check is the type's.** `plan_approval_response` and
+//!   `mode_set_request` are reachable only through
+//!   [`ganja_protocol::team::LeadFrame`], which cannot be built from a peer's
+//!   frame (§7-2). A `task_assignment` is held to the same bar: it becomes this
+//!   member's next turn only when the lead wrote it.
+//! - **A pane teammate does not lead a team of its own.** No registry is
+//!   installed for it and no `send_message` is offered to its model: every
+//!   public door to a postbox either stamps the lead's name or wants the
+//!   in-process `Teammate` a frontend holding its own `Engine` cannot have,
+//!   and a teammate posting as its lead is the forgery `ganja-core`'s postbox
+//!   exists to make impossible. Its results reach the lead as its own
+//!   session's transcript and its `idle_notification`; the member-stamped
+//!   postbox is a core seam this landing names rather than fakes.
+//! - **Permission asks stay in the pane.** Forwarding them to the lead as §5
+//!   frames (AC-8) needs the lead's own pass to stop dropping
+//!   `permission_request` by name (§7-1 as W6 built it), so a pane teammate is
+//!   human-attended unless its launch line carried the bypass trio (D479).
+//!
+//! # One write, not two
+//!
+//! The runner's rule, for its reason: everything a pass finished leaves the
+//! inbox in one [`mailbox::prune_delivered`], because each write is a full
+//! read-modify-write under `ganja-team`'s lock. What the app **delivers** is
+//! pruned by the app once the engine provably took it ([`Inbox::delivered`]),
+//! which is what keeps the mailbox the durable queue: a batch the engine
+//! refused, or a pane that died between the read and the turn, leaves the
+//! message where the next pass finds it again.
+
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::Duration,
+};
+
+use anyhow::{Context as _, Result, bail};
+use ganja_core::{
+    team::{MailboxMessage, MemberName, Surface, TeamName, TeamsRoot, mailbox, record},
+    teammate::{Delivery, TeammateRegistry, lead_inbox::Delivered, runner},
+};
+use ganja_protocol::{
+    FinishReason, PermissionMode,
+    team::{
+        Frame, IdleNotification, IdleReason, LeadFrame, ModeSetRequest, ShutdownApproved,
+        TaskAssignment, cap_for_display,
+    },
+};
+
+/// The teammate's own cadence (§6), and the same constant the in-process
+/// runner keeps: the member is the side that has to notice a shutdown
+/// promptly.
+pub const POLL: Duration = runner::POLL;
+
+/// What is logged when a frame arrives that this member has no handler for —
+/// or that did not come from the lead, which for the lead-only frames is the
+/// same thing.
+pub const DROPPED_FRAME: &str = runner::DROPPED_FRAME;
+
+/// What is logged when an approval answers nothing.
+pub const IGNORED_STALE: &str = runner::IGNORED_STALE;
+
+/// The environment variable tmux sets in every pane it runs, naming the pane.
+///
+/// Read rather than passed: §4.1's launch line carries no pane id, and the
+/// pane is the one process that can ask its own environment which `%N` it is.
+pub const TMUX_PANE: &str = "TMUX_PANE";
+
+/// What §4.1's launch line said, as the command line hands it in.
+///
+/// Strings rather than the team crate's own names, for [`crate::Resume`]'s
+/// reason: the CLI carries the words in, and every refusal — a name that
+/// does not parse, an id that names a different member — happens once, in
+/// [`Membership::resolve`], before the terminal is taken over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Flags {
+    /// `--agent-id`: §2.2's `<name>@<team>`, as the lead recorded it.
+    pub agent_id: String,
+    /// `--agent-name`: the member name this process answers to.
+    pub name: String,
+    /// `--team-name`: the team whose documents this process reads.
+    pub team: String,
+    /// `--agent-color`: §4.3's assigned colour, where the lead gave one.
+    pub color: Option<String>,
+    /// `--parent-session-id`: the lead's session, which is what named the
+    /// team's directory.
+    pub parent_session_id: String,
+}
+
+/// Who this process is, once the flags have been checked against the grammar
+/// the lead resolved them under.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Membership {
+    name: MemberName,
+    team: TeamName,
+    lead: MemberName,
+    root: TeamsRoot,
+    color: Option<String>,
+    parent_session_id: String,
+    surface: Surface,
+}
+
+impl Membership {
+    /// Checks the launch line and resolves where the team's documents live.
+    ///
+    /// The teams root is asked of the registry a lead would build for the same
+    /// session, rather than composed here from a directory name of this
+    /// crate's own: the directory's name is `ganja-core`'s constant, and a
+    /// pane that spelled it itself would one day read a different directory
+    /// from the one its lead wrote into. Building the registry touches
+    /// nothing on disk.
+    ///
+    /// The `--agent-id` is checked against the name and the team it should be
+    /// derived from, and a mismatch is refused: the id is what the lead
+    /// recorded, and a pane running under a name its record does not carry
+    /// would answer to one member and be shut down as another.
+    ///
+    /// The surface is `pane` exactly when `TMUX_PANE` names one, so the
+    /// `shutdown_approved` this process eventually writes tells the lead which
+    /// pane to kill; a process launched with these flags outside tmux reports
+    /// no pane, which is the truth about it.
+    ///
+    /// # Errors
+    ///
+    /// A name or team the grammar refuses, or an id that does not name this
+    /// member.
+    pub fn resolve(
+        flags: Flags,
+        config_home: &Path,
+        cwd: &Path,
+        pane: Option<String>,
+    ) -> Result<Self> {
+        let name = MemberName::parse(&flags.name)
+            .with_context(|| format!("--agent-name {:?} is refused", flags.name))?;
+        let team = TeamName::parse(&flags.team)
+            .with_context(|| format!("--team-name {:?} is refused", flags.team))?;
+        let expected = name.agent_id(&team);
+        if flags.agent_id != expected {
+            bail!(
+                "--agent-id {:?} does not name --agent-name {:?} of --team-name {:?} (expected {expected:?})",
+                flags.agent_id,
+                flags.name,
+                flags.team,
+            );
+        }
+        let root = TeammateRegistry::for_session(config_home, &flags.parent_session_id, cwd)
+            .root()
+            .clone();
+        let surface = match pane.filter(|id| !id.is_empty()) {
+            Some(id) => Surface::Pane { id },
+            None => Surface::InProcess,
+        };
+
+        Ok(Self {
+            name,
+            team,
+            lead: MemberName::lead(),
+            root,
+            color: flags.color,
+            parent_session_id: flags.parent_session_id,
+            surface,
+        })
+    }
+
+    /// The name this process answers to.
+    #[must_use]
+    pub fn name(&self) -> &MemberName {
+        &self.name
+    }
+
+    /// The team it is a member of.
+    #[must_use]
+    pub fn team(&self) -> &TeamName {
+        &self.team
+    }
+
+    /// §4.3's colour, where the lead assigned one.
+    #[must_use]
+    pub fn color(&self) -> Option<&str> {
+        self.color.as_deref()
+    }
+
+    /// The lead's session, which named the team.
+    #[must_use]
+    pub fn parent_session_id(&self) -> &str {
+        &self.parent_session_id
+    }
+
+    /// The pane this process runs in, where it runs in one.
+    #[must_use]
+    pub fn surface(&self) -> &Surface {
+        &self.surface
+    }
+
+    /// This member's own inbox.
+    #[must_use]
+    pub fn inbox(&self) -> PathBuf {
+        self.root.inbox_path(&self.team, &self.name)
+    }
+
+    /// The lead's inbox — where this member's own frames go.
+    #[must_use]
+    pub fn lead_inbox(&self) -> PathBuf {
+        self.root.inbox_path(&self.team, &self.lead)
+    }
+}
+
+/// What one pass of §6.1 found and did.
+///
+/// Returned rather than only logged, for the runner's `Tick`'s reason: the
+/// ordering — the shutdown ahead of everything, the frames acted on and never
+/// queued, the plain messages batched — is the part of §6.1 that is the
+/// contract, and a test drives one pass to assert it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pass {
+    /// The request id of a `shutdown_request` this pass found, if it found
+    /// one. A pass that carries this carries nothing else: the shutdown went
+    /// ahead of everything and the rest of the inbox is left where it was.
+    pub shutdown: Option<String>,
+    /// How many unread entries the shutdown went ahead of.
+    pub jumped: usize,
+    /// The plain messages, oldest first, still owed a delivery — plus every
+    /// `task_assignment` the lead wrote, rendered as a message from the lead.
+    pub messages: Vec<Delivered>,
+    /// The permission modes the lead set, in the order it set them (D-15).
+    pub modes: Vec<PermissionMode>,
+    /// How many approvals were ignored as stale.
+    pub ignored: usize,
+    /// The frames this pass named and dropped, by kind.
+    pub dropped: Vec<&'static str>,
+}
+
+impl Pass {
+    /// Whether this pass found nothing at all, which is what almost every pass
+    /// finds.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.shutdown.is_none()
+            && self.messages.is_empty()
+            && self.modes.is_empty()
+            && self.ignored == 0
+            && self.dropped.is_empty()
+    }
+}
+
+/// This member's own mailbox, and the §6.1 pass over it.
+#[derive(Debug)]
+pub struct Inbox {
+    membership: Membership,
+    inbox: PathBuf,
+    lead_inbox: PathBuf,
+    /// The mailbox identity behind a message this pass **rendered** rather
+    /// than carried verbatim — a `task_assignment` — keyed by the identity of
+    /// what the app holds. [`Delivered::identity`] derives from the three
+    /// fields the value carries, and a rendered body is not the frame's text,
+    /// so the app's identity would prune nothing; this is what maps it back.
+    rendered: Mutex<HashMap<mailbox::Identity, mailbox::Identity>>,
+}
+
+impl Inbox {
+    /// The inbox of the member `membership` names.
+    #[must_use]
+    pub fn new(membership: Membership) -> Self {
+        let inbox = membership.inbox();
+        let lead_inbox = membership.lead_inbox();
+
+        Self {
+            membership,
+            inbox,
+            lead_inbox,
+            rendered: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Who this inbox belongs to.
+    #[must_use]
+    pub fn membership(&self) -> &Membership {
+        &self.membership
+    }
+
+    /// One pass of §6.1, in its order.
+    ///
+    /// Control frames are pruned **here**, because acting on one is the whole
+    /// of what it needed. Plain messages are not: whether one reached the
+    /// conversation is the caller's fact, so they stay until
+    /// [`Inbox::delivered`] says so.
+    pub async fn poll(&self) -> Pass {
+        let mut pass = Pass::default();
+        let path = self.inbox.clone();
+        let contents = match tokio::task::spawn_blocking(move || mailbox::read(&path)).await {
+            Ok(Ok(contents)) => contents,
+            Ok(Err(error)) => {
+                tracing::warn!(member = self.name(), %error, "a teammate's inbox could not be read");
+
+                return pass;
+            }
+            Err(error) => {
+                tracing::warn!(member = self.name(), %error, "an inbox read was lost");
+
+                return pass;
+            }
+        };
+        for report in &contents.reports {
+            tracing::warn!(member = self.name(), "{report}");
+        }
+        if contents.valid.is_empty() {
+            return pass;
+        }
+
+        // Step 1, and a step of its own because it goes first: a teammate
+        // wedged behind a queue of messages stays reclaimable.
+        let shutdown = contents
+            .valid
+            .iter()
+            .enumerate()
+            .find_map(|(position, message)| match message.frame() {
+                Some(Frame::ShutdownRequest(request)) => Some((position, message, request)),
+                _ => None,
+            });
+        if let Some((position, message, request)) = shutdown {
+            pass.jumped = position;
+            tracing::info!(
+                member = self.name(),
+                request = request.request_id,
+                jumped = position,
+                "a shutdown request goes ahead of everything else in the inbox"
+            );
+            self.prune(vec![mailbox::identity(message)]).await;
+            pass.shutdown = Some(request.request_id);
+
+            return pass;
+        }
+
+        // Steps 2 and 3.
+        let mut handled = Vec::new();
+        for message in &contents.valid {
+            let Some(kind) = Frame::reserved_kind(&message.text) else {
+                pass.messages.push(plain(message));
+                continue;
+            };
+            match self.apply(kind, message) {
+                Verdict::Mode(mode) => {
+                    pass.modes.push(mode);
+                    handled.push(mailbox::identity(message));
+                }
+                Verdict::Ignored => {
+                    pass.ignored += 1;
+                    handled.push(mailbox::identity(message));
+                }
+                Verdict::Dropped(name) => {
+                    pass.dropped.push(name);
+                    handled.push(mailbox::identity(message));
+                }
+                Verdict::Tell(delivered) => {
+                    self.rendered
+                        .lock()
+                        .expect("the rendering map is never poisoned")
+                        .insert(delivered.identity(), mailbox::identity(message));
+                    pass.messages.push(delivered);
+                }
+            }
+        }
+        if !handled.is_empty() {
+            self.prune(handled).await;
+        }
+
+        pass
+    }
+
+    /// Takes the messages the app really delivered out of the inbox.
+    ///
+    /// Separate from [`Inbox::poll`] because only the app knows: a batch the
+    /// engine refused is left where it was and offered again next pass, which
+    /// is a delivery delayed rather than a delivery lost.
+    pub async fn delivered(&self, messages: &[Delivered]) {
+        if messages.is_empty() {
+            return;
+        }
+        let identities = {
+            let mut rendered = self
+                .rendered
+                .lock()
+                .expect("the rendering map is never poisoned");
+
+            messages
+                .iter()
+                .map(|message| {
+                    let held = message.identity();
+                    rendered.remove(&held).unwrap_or(held)
+                })
+                .collect()
+        };
+        self.prune(identities).await;
+    }
+
+    /// Tells the lead this member's turn ended, and how (§10.3-3).
+    ///
+    /// The `from` is **this member's own name**, taken from the value it was
+    /// constructed with: a frame that carried a sender of its own would let
+    /// whoever wrote it choose whose name the lead reads. `failure_reason` is
+    /// capped at write: it is a notification, and the reader caps it again at
+    /// §5.3's second cap anyway, so nothing a person reads is lost — where a
+    /// provider's whole refusal body in a mailbox entry is a lot of bytes for
+    /// one sentence of news.
+    pub async fn report_idle(&self, reason: FinishReason, failure: Option<&str>) {
+        let idle = Frame::IdleNotification(IdleNotification {
+            from: self.name().to_owned(),
+            timestamp: record::now_iso8601(),
+            idle_reason: Some(idle_reason(reason)),
+            summary: None,
+            completed_task_id: None,
+            completed_status: None,
+            failure_reason: failure.map(|text| cap_for_display(text).to_owned()),
+        });
+        self.tell_lead(&idle, "an idle notification").await;
+    }
+
+    /// Answers a `shutdown_request`, naming the pane the lead has to kill.
+    ///
+    /// Written **before** the process exits and after its turn has ended,
+    /// which is the app's to sequence: the lead retires the member on this
+    /// frame, and a member that had gone quiet without writing it would sit
+    /// in the roster forever.
+    pub async fn approve_shutdown(&self, request_id: &str) {
+        let pane = match self.membership.surface() {
+            Surface::Pane { id } => Some(id.clone()),
+            Surface::Leader | Surface::InProcess => None,
+        };
+        let approved = Frame::ShutdownApproved(ShutdownApproved {
+            request_id: request_id.to_owned(),
+            from: self.name().to_owned(),
+            timestamp: record::now_iso8601(),
+            backend_type: pane
+                .is_some()
+                .then(|| self.membership.surface().backend_type().to_owned()),
+            pane_id: pane,
+        });
+        self.tell_lead(&approved, "a shutdown answer").await;
+    }
+
+    /// The name this inbox's frames are stamped with.
+    fn name(&self) -> &str {
+        self.membership.name.as_str()
+    }
+
+    /// What one frame is worth, once it is known to be one.
+    fn apply(&self, kind: &'static str, message: &MailboxMessage) -> Verdict {
+        // Undecodable, or from anybody but the lead: both are the same answer,
+        // and the second is the whole of §7-2. `LeadFrame` cannot be built
+        // from a peer's frame, so the three lead-only handlers below are
+        // unreachable for one by construction rather than by a check.
+        let Some(frame) = message.frame() else {
+            return self.drop_it(kind, message);
+        };
+        let Some(lead) = LeadFrame::parse(&message.from, self.membership.lead.as_str(), frame)
+        else {
+            return self.drop_it(kind, message);
+        };
+
+        match lead.into_inner() {
+            Frame::PlanApprovalResponse(response) => {
+                // Nothing in this build raises a `plan_approval_request`, so
+                // every answer is to a question this member never asked. It
+                // still leaves the inbox: leaving it would be reading it again
+                // on every pass forever.
+                tracing::info!(
+                    member = self.name(),
+                    request = response.request_id,
+                    "{IGNORED_STALE}"
+                );
+
+                Verdict::Ignored
+            }
+            Frame::ModeSetRequest(request) => self.mode_set(&request, message),
+            Frame::TaskAssignment(assignment) => Verdict::Tell(assigned(message, assignment)),
+            _ => self.drop_it(kind, message),
+        }
+    }
+
+    /// The lead setting this member's permission mode.
+    ///
+    /// Claude's mode vocabulary is not ganja's, and the mapping has a refusal
+    /// in it (**D496**): a mode this build has no posture for is dropped by
+    /// name rather than rounded to the nearest one.
+    fn mode_set(&self, request: &ModeSetRequest, message: &MailboxMessage) -> Verdict {
+        match PermissionMode::from_claude_name(&request.mode) {
+            Ok(mode) => Verdict::Mode(mode),
+            Err(refusal) => {
+                tracing::warn!(
+                    member = self.name(),
+                    from = message.from,
+                    %refusal,
+                    "{DROPPED_FRAME}: mode_set_request"
+                );
+
+                Verdict::Dropped("mode_set_request")
+            }
+        }
+    }
+
+    /// Names a frame nobody here handles, with the head of it.
+    ///
+    /// The *head*, and only of a frame: a plain message's body never reaches
+    /// a log line, but a frame that would not decode is undiagnosable without
+    /// seeing some of it — the trade §6.1 already makes.
+    fn drop_it(&self, kind: &'static str, message: &MailboxMessage) -> Verdict {
+        tracing::warn!(
+            member = self.name(),
+            from = message.from,
+            frame = head(&message.text),
+            "{DROPPED_FRAME}: {kind}"
+        );
+
+        Verdict::Dropped(kind)
+    }
+
+    /// Writes one frame into the lead's inbox, saying so in the log when it
+    /// could not.
+    async fn tell_lead(&self, frame: &Frame, what: &'static str) {
+        let message = match MailboxMessage::from_frame(self.name(), frame, record::now_iso8601()) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!(
+                    member = self.name(),
+                    %error,
+                    "{what} could not be encoded, so the lead is not being told"
+                );
+
+                return;
+            }
+        };
+        let path = self.lead_inbox.clone();
+        let written = tokio::task::spawn_blocking(move || mailbox::write(&path, message))
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|written| written.map_err(|error| error.to_string()));
+        if let Err(error) = written {
+            // Worth shouting about, for §6.2's reason in the other direction:
+            // the lead is the side that kills a pane and retires a member.
+            tracing::error!(
+                member = self.name(),
+                %error,
+                "{what} could not be written into the lead's inbox"
+            );
+        }
+    }
+
+    /// Takes entries out of the inbox, in one write.
+    async fn prune(&self, handled: Vec<mailbox::Identity>) {
+        let path = self.inbox.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || mailbox::prune_delivered(&path, &handled))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|pruned| pruned.map_err(|error| error.to_string()));
+
+        if let Err(error) = outcome {
+            // Not fatal and not retried: the next pass reads the same entries
+            // again, and a redelivery is a cost this side can pay where a lost
+            // message is not.
+            tracing::warn!(member = self.name(), %error, "a teammate could not prune its inbox");
+        }
+    }
+}
+
+/// What one frame turned out to be worth.
+enum Verdict {
+    /// A permission mode the lead set, for the app to send the engine.
+    Mode(PermissionMode),
+    /// Stale, or not this member's to act on. It still leaves the inbox.
+    Ignored,
+    /// Named and dropped.
+    Dropped(&'static str),
+    /// Rendered as something the member reads, so it leaves the inbox with
+    /// the batch it travels in.
+    Tell(Delivered),
+}
+
+/// A message nobody has to interpret, as the app takes it.
+///
+/// [`Delivery::Acknowledged`], and it is the member's own engine that
+/// acknowledges: the strip shows the entry pending until `SteerConsumed` says
+/// the turn took it, and the mailbox holds it until then.
+fn plain(message: &MailboxMessage) -> Delivered {
+    Delivered {
+        from: message.from.clone(),
+        timestamp: message.timestamp.clone(),
+        summary: message.summary.clone(),
+        color: message.color.clone(),
+        body: message.text.clone(),
+        delivery: Delivery::Acknowledged,
+    }
+}
+
+/// A `task_assignment` the lead wrote, as the message it becomes.
+///
+/// From the envelope's sender rather than the frame's `assignedBy`, for the
+/// runner's reason on the answering side: the envelope is the half the lead
+/// wrote the inbox path from, and a frame that could name somebody else there
+/// could put words in that somebody's mouth. The subject is the summary the
+/// strip shows and the first line the model reads.
+fn assigned(message: &MailboxMessage, assignment: TaskAssignment) -> Delivered {
+    Delivered {
+        from: message.from.clone(),
+        timestamp: message.timestamp.clone(),
+        summary: Some(assignment.subject.clone()),
+        color: message.color.clone(),
+        body: format!("{}\n\n{}", assignment.subject, assignment.description),
+        delivery: Delivery::Acknowledged,
+    }
+}
+
+/// §10.3-3's mapping, in one place.
+const fn idle_reason(reason: FinishReason) -> IdleReason {
+    match reason {
+        FinishReason::Completed => IdleReason::Available,
+        FinishReason::Cancelled => IdleReason::Interrupted,
+        FinishReason::Failed => IdleReason::Failed,
+    }
+}
+
+/// The first [`runner::FRAME_HEAD`] characters, cut on a character boundary.
+fn head(text: &str) -> &str {
+    match text.char_indices().nth(runner::FRAME_HEAD) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    }
+}
+
+/// A `shutdown_request` from the lead, as a test writes one into an inbox.
+#[cfg(test)]
+pub(crate) fn shutdown_request(request_id: &str) -> Frame {
+    Frame::ShutdownRequest(ganja_protocol::team::ShutdownRequest {
+        request_id: request_id.to_owned(),
+        from: MemberName::lead().into_inner(),
+        reason: None,
+        timestamp: record::now_iso8601(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use ganja_core::team::{MailboxMessage, MemberName, TeamName, mailbox, record};
+    use ganja_protocol::{
+        FinishReason, PermissionMode,
+        team::{Frame, IdleReason, ModeSetRequest, PlanApprovalResponse, TaskAssignment},
+    };
+    use tempfile::TempDir;
+
+    use super::{Flags, Inbox, Membership, shutdown_request};
+
+    /// §2.1's own example session, so the team on disk is `session-224cbeab`.
+    const PARENT: &str = "224cbeab-4e62-497c-aa8f-d05cc33ce7ba";
+
+    fn flags(name: &str) -> Flags {
+        Flags {
+            agent_id: format!("{name}@session-224cbeab"),
+            name: name.to_owned(),
+            team: "session-224cbeab".to_owned(),
+            color: Some("blue".to_owned()),
+            parent_session_id: PARENT.to_owned(),
+        }
+    }
+
+    fn member(home: &TempDir, pane: Option<&str>) -> Membership {
+        Membership::resolve(
+            flags("w1"),
+            home.path(),
+            home.path(),
+            pane.map(str::to_owned),
+        )
+        .expect("the flags resolve")
+    }
+
+    fn write(inbox: &std::path::Path, from: &str, text: &str) {
+        mailbox::write(
+            inbox,
+            MailboxMessage::new(from, text, record::now_iso8601()),
+        )
+        .expect("the inbox takes a message");
+    }
+
+    fn write_frame(inbox: &std::path::Path, from: &str, frame: &Frame) {
+        let message = MailboxMessage::from_frame(from, frame, record::now_iso8601())
+            .expect("the frame encodes");
+        mailbox::write(inbox, message).expect("the inbox takes a frame");
+    }
+
+    fn held(inbox: &std::path::Path) -> Vec<MailboxMessage> {
+        mailbox::read(inbox).expect("the inbox reads").valid
+    }
+
+    /// The root the flags resolve to is the one a lead of the same session
+    /// writes into — asked of the registry, never spelled here.
+    #[test]
+    fn a_member_reads_the_directory_its_lead_wrote_into() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let member = member(&home, Some("%7"));
+        let lead =
+            ganja_core::teammate::TeammateRegistry::for_session(home.path(), PARENT, home.path());
+
+        assert_eq!(member.lead_inbox(), lead.lead_inbox());
+        assert_eq!(
+            member.inbox(),
+            lead.root()
+                .inbox_path(lead.team(), &MemberName::parse("w1").expect("a name")),
+        );
+        assert_eq!(
+            member.team(),
+            &TeamName::parse("session-224cbeab").expect("a team")
+        );
+        assert_eq!(member.color(), Some("blue"));
+        assert_eq!(member.parent_session_id(), PARENT);
+        assert_eq!(
+            member.surface(),
+            &ganja_core::team::Surface::Pane {
+                id: "%7".to_owned()
+            }
+        );
+    }
+
+    /// The id the lead recorded has to be the one these flags describe.
+    #[test]
+    fn an_agent_id_naming_another_member_is_refused_before_anything_runs() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let mut wrong = flags("w1");
+        wrong.agent_id = "w2@session-224cbeab".to_owned();
+
+        let refused = Membership::resolve(wrong, home.path(), home.path(), None)
+            .expect_err("a mismatched id is refused");
+
+        assert!(
+            refused.to_string().contains("w1@session-224cbeab"),
+            "the refusal names what was expected: {refused}"
+        );
+        assert!(
+            Membership::resolve(
+                Flags {
+                    name: "main".to_owned(),
+                    ..flags("main")
+                },
+                home.path(),
+                home.path(),
+                None
+            )
+            .is_err(),
+            "and the reserved name is refused by the grammar"
+        );
+    }
+
+    /// The seeded prompt is the first message the first pass finds, and it is
+    /// still owed until the app says it landed (§10.3-2).
+    #[tokio::test]
+    async fn the_seeded_prompt_is_a_plain_message_that_stays_until_delivered() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, None));
+        write(&inbox.inbox, "team-lead", "start on the parser");
+
+        let pass = inbox.poll().await;
+
+        assert_eq!(pass.messages.len(), 1);
+        assert_eq!(pass.messages[0].from, "team-lead");
+        assert_eq!(pass.messages[0].body, "start on the parser");
+        assert_eq!(held(&inbox.inbox).len(), 1, "not pruned by the read");
+
+        inbox.delivered(&pass.messages).await;
+
+        assert!(held(&inbox.inbox).is_empty(), "delivered means gone");
+    }
+
+    /// §6.1's first step: a shutdown request goes ahead of everything, and the
+    /// pass says how many entries it jumped.
+    #[tokio::test]
+    async fn a_shutdown_request_goes_ahead_of_everything_else() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, Some("%3")));
+        write(&inbox.inbox, "team-lead", "one");
+        write(&inbox.inbox, "w2", "two");
+        write_frame(&inbox.inbox, "team-lead", &shutdown_request("req-9"));
+
+        let pass = inbox.poll().await;
+
+        assert_eq!(pass.shutdown.as_deref(), Some("req-9"));
+        assert_eq!(pass.jumped, 2);
+        assert!(
+            pass.messages.is_empty(),
+            "nothing else is delivered: {pass:?}"
+        );
+        assert_eq!(
+            held(&inbox.inbox).len(),
+            2,
+            "the request left the inbox, the messages it jumped did not"
+        );
+    }
+
+    /// The answer names the pane and the backend, stamped with this member's
+    /// own name, in the lead's inbox.
+    #[tokio::test]
+    async fn a_shutdown_answer_names_the_pane_and_reaches_the_lead() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, Some("%3")));
+
+        inbox.approve_shutdown("req-9").await;
+
+        let written = held(&inbox.lead_inbox);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].from, "w1");
+        match written[0].frame() {
+            Some(Frame::ShutdownApproved(approved)) => {
+                assert_eq!(approved.request_id, "req-9");
+                assert_eq!(approved.from, "w1");
+                assert_eq!(approved.pane_id.as_deref(), Some("%3"));
+                assert_eq!(approved.backend_type.as_deref(), Some("tmux"));
+            }
+            other => panic!("a shutdown_approved was expected, got {other:?}"),
+        }
+    }
+
+    /// Outside tmux there is no pane to name, and none is invented.
+    #[tokio::test]
+    async fn a_member_with_no_pane_names_none() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, Some("")));
+
+        inbox.approve_shutdown("req-1").await;
+
+        match held(&inbox.lead_inbox)[0].frame() {
+            Some(Frame::ShutdownApproved(approved)) => {
+                assert_eq!(approved.pane_id, None);
+                assert_eq!(approved.backend_type, None);
+            }
+            other => panic!("a shutdown_approved was expected, got {other:?}"),
+        }
+    }
+
+    /// §10.3-3's mapping, and the frame's own `from`.
+    #[tokio::test]
+    async fn the_turns_end_maps_onto_the_three_idle_reasons() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, None));
+
+        inbox.report_idle(FinishReason::Completed, None).await;
+        inbox.report_idle(FinishReason::Cancelled, None).await;
+        inbox
+            .report_idle(FinishReason::Failed, Some("the provider hung up"))
+            .await;
+
+        let reasons: Vec<_> = held(&inbox.lead_inbox)
+            .iter()
+            .map(|message| {
+                assert_eq!(message.from, "w1");
+                match message.frame() {
+                    Some(Frame::IdleNotification(idle)) => {
+                        assert_eq!(idle.from, "w1");
+                        (idle.idle_reason, idle.failure_reason)
+                    }
+                    other => panic!("an idle_notification was expected, got {other:?}"),
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            reasons,
+            [
+                (Some(IdleReason::Available), None),
+                (Some(IdleReason::Interrupted), None),
+                (
+                    Some(IdleReason::Failed),
+                    Some("the provider hung up".to_owned())
+                ),
+            ]
+        );
+    }
+
+    /// §7-2 as a type: the lead's mode is applied, a peer's identical frame is
+    /// dropped by name, and a mode this build cannot hold is refused rather
+    /// than rounded (**D496**). Every one of them leaves the inbox.
+    #[tokio::test]
+    async fn a_mode_is_taken_from_the_lead_only_and_refused_by_name_when_unknown() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, None));
+        let bypass = |from: &str| {
+            Frame::ModeSetRequest(ModeSetRequest {
+                mode: "bypassPermissions".to_owned(),
+                from: from.to_owned(),
+            })
+        };
+        write_frame(&inbox.inbox, "team-lead", &bypass("team-lead"));
+        write_frame(&inbox.inbox, "w2", &bypass("team-lead"));
+        write_frame(
+            &inbox.inbox,
+            "team-lead",
+            &Frame::ModeSetRequest(ModeSetRequest {
+                mode: "plan".to_owned(),
+                from: "team-lead".to_owned(),
+            }),
+        );
+
+        let pass = inbox.poll().await;
+
+        assert_eq!(pass.modes, [PermissionMode::Bypass]);
+        assert_eq!(pass.dropped, ["mode_set_request", "mode_set_request"]);
+        assert!(pass.messages.is_empty());
+        assert!(held(&inbox.inbox).is_empty(), "every frame left the inbox");
+    }
+
+    /// Nothing here asks for a plan, so every approval is stale — and a peer's
+    /// approval is not even that, it is dropped.
+    #[tokio::test]
+    async fn a_plan_approval_is_stale_by_definition_and_leaves_the_inbox() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, None));
+        // No `from` on this frame at all: the envelope is the only sender it
+        // has, which is exactly why the peer's copy below is dropped on the
+        // envelope alone.
+        let approval = Frame::PlanApprovalResponse(PlanApprovalResponse {
+            request_id: "plan-1".to_owned(),
+            approved: true,
+            feedback: None,
+            timestamp: record::now_iso8601(),
+            permission_mode: None,
+        });
+        write_frame(&inbox.inbox, "team-lead", &approval);
+        write_frame(&inbox.inbox, "w2", &approval);
+
+        let pass = inbox.poll().await;
+
+        assert_eq!(pass.ignored, 1);
+        assert_eq!(pass.dropped, ["plan_approval_response"]);
+        assert!(held(&inbox.inbox).is_empty());
+    }
+
+    /// A `task_assignment` from the lead becomes this member's next turn, and
+    /// is pruned by the identity the app holds even though the body it holds
+    /// is the rendering rather than the frame.
+    #[tokio::test]
+    async fn a_task_assignment_from_the_lead_becomes_a_message_and_prunes_by_the_rendered_identity()
+    {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, None));
+        let assignment = |assigned_by: &str| {
+            Frame::TaskAssignment(TaskAssignment {
+                task_id: "t-1".to_owned(),
+                subject: "look at the parser".to_owned(),
+                description: "the whole of it".to_owned(),
+                assigned_by: assigned_by.to_owned(),
+                timestamp: record::now_iso8601(),
+            })
+        };
+        write_frame(&inbox.inbox, "team-lead", &assignment("team-lead"));
+        write_frame(&inbox.inbox, "w2", &assignment("team-lead"));
+
+        let pass = inbox.poll().await;
+
+        assert_eq!(pass.messages.len(), 1);
+        assert_eq!(pass.messages[0].from, "team-lead");
+        assert_eq!(
+            pass.messages[0].summary.as_deref(),
+            Some("look at the parser")
+        );
+        assert_eq!(
+            pass.messages[0].body,
+            "look at the parser\n\nthe whole of it"
+        );
+        assert_eq!(
+            pass.dropped,
+            ["task_assignment"],
+            "a peer cannot assign work"
+        );
+        assert_eq!(
+            held(&inbox.inbox).len(),
+            1,
+            "the lead's stays until delivered"
+        );
+
+        inbox.delivered(&pass.messages).await;
+
+        assert!(
+            held(&inbox.inbox).is_empty(),
+            "and the rendered identity found it"
+        );
+    }
+
+    /// The other frames the harness may write are named and dropped, never
+    /// read as prose.
+    #[tokio::test]
+    async fn an_unhandled_frame_is_dropped_by_name_and_never_delivered() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, None));
+        write_frame(
+            &inbox.inbox,
+            "team-lead",
+            &Frame::TeammateTerminated(ganja_protocol::team::TeammateTerminated {
+                message: "w2 is gone".to_owned(),
+            }),
+        );
+
+        let pass = inbox.poll().await;
+
+        assert_eq!(pass.dropped, ["teammate_terminated"]);
+        assert!(pass.messages.is_empty());
+        assert!(held(&inbox.inbox).is_empty());
+    }
+}

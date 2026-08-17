@@ -77,7 +77,7 @@ use crate::{
     external, graphics,
     history::{self, History},
     keybind::{self, Keybinds},
-    mention, notify,
+    member, mention, notify,
     theme::{Theme, Themes},
     transcript,
 };
@@ -683,6 +683,32 @@ pub struct App {
     /// synchronous and cannot reach the disk, so what it decides is carried to
     /// the first point after the event where an `await` is allowed.
     settled: Vec<Delivered>,
+    /// This process's own mailbox, on a session that **is** a pane teammate
+    /// (§10.3) — the other posture, and the mirror of [`App::lead_inbox`].
+    ///
+    /// [`None`] is every session that was not launched with §4.1's flags,
+    /// which is every session a person starts and every test that does not
+    /// say otherwise. A session is one or the other and never both: a pane
+    /// teammate leads no team of its own, so the two fields cannot be
+    /// populated together by construction of `lib.rs`'s startup.
+    member: Option<member::Inbox>,
+    /// When the member's §6.1 pass last ran, for [`App::team_polled`]'s
+    /// reason at the member's own cadence.
+    member_polled: Option<Instant>,
+    /// A `shutdown_request` this member has taken and not yet answered,
+    /// because a turn was still running when it arrived.
+    ///
+    /// The answer waits for the turn's end rather than cutting it short,
+    /// which is `Teammate::shutdown`'s courtesy on the in-process side: the
+    /// turn is a transcript somebody may open tomorrow. It waits
+    /// [`ganja_core::teammate::SETTLE`] and no longer, and then cancels.
+    member_shutdown: Option<MemberShutdown>,
+    /// A turn's end this member has yet to tell the lead about (§10.3-3).
+    ///
+    /// [`App::settled`]'s shape and reason: `handle_core` is synchronous and
+    /// the write is a file, so what the event decided is carried to the first
+    /// point after it where an `await` is allowed.
+    member_finished: Option<(FinishReason, Option<String>)>,
     /// The `(tokens, window)` pair the context meter last showed, so a tick
     /// that finds the estimate unmoved touches nothing (**D469**).
     context: Option<(u64, u64)>,
@@ -859,6 +885,10 @@ impl App {
             forwarded_dialogs: HashMap::new(),
             peer_steers: HashMap::new(),
             settled: Vec::new(),
+            member: None,
+            member_polled: None,
+            member_shutdown: None,
+            member_finished: None,
             context: None,
             rates: Vec::new(),
             plans: Vec::new(),
@@ -947,6 +977,21 @@ impl App {
     #[must_use]
     pub fn with_notifier(mut self, notifier: notify::Notifier) -> Self {
         self.notifier = notifier;
+
+        self
+    }
+
+    /// Runs this session **as** the pane teammate `inbox` belongs to (§10.3).
+    ///
+    /// A builder because only the startup lane holds §4.1's flags: the default
+    /// is a session that is nobody's teammate, so a test that does not opt in
+    /// reads no inbox and writes no frame. What it changes is the tick — the
+    /// member's own §6.1 pass runs from it — and the turn's end, which now
+    /// tells the lead. Everything else about the session is what it always
+    /// was, which is the whole of §10.3's claim.
+    #[must_use]
+    pub fn with_member(mut self, inbox: member::Inbox) -> Self {
+        self.member = Some(inbox);
 
         self
     }
@@ -1160,6 +1205,11 @@ impl App {
                 // it: a message the turn has provably consumed is a message
                 // the mailbox may stop holding (**D503**).
                 self.settle_consumed_peers().await;
+                // And the member's two writes, for the same reason: a turn's
+                // end is a frame the lead reads, and a shutdown waiting on that
+                // end can now be answered (§10.3-3, §10.3-4).
+                self.report_member_idle().await;
+                self.finish_member_shutdown().await;
                 self.dirty = true;
                 // Run after every engine event, because the event that just
                 // landed may have been the one that ended the turn — and the
@@ -1174,6 +1224,7 @@ impl App {
                 self.poll_plans();
                 self.poll_mcp_dialog();
                 self.poll_team().await;
+                self.poll_member().await;
                 self.poll_wire_models().await;
                 self.poll_file_walk().await;
                 self.poll_plugin_task().await;
@@ -1372,6 +1423,149 @@ impl App {
             self.poll_teammate_count();
         }
         self.dirty = true;
+    }
+
+    /// The member's side of the mailbox, once a tick (§6.1, §10.3-1).
+    ///
+    /// [`App::poll_team`]'s mirror at the teammate's own cadence
+    /// ([`member::POLL`], half the lead's, because this is the side that has
+    /// to notice a shutdown promptly). The pass reads the file and rules on
+    /// every entry; what comes back is acted on here in §6.1's order — a
+    /// shutdown ahead of everything, the lead's modes sent to the engine, and
+    /// the plain messages handed to the very lane a peer's message takes on
+    /// the lead's side, which is what makes the seeded task the first turn
+    /// with no mechanism of its own (§10.3-2).
+    async fn poll_member(&mut self) {
+        // A shutdown that has waited out its courtesy is pressed before the
+        // pass, so a wedged turn is cancelled on the tick that finds it late
+        // rather than on some later message.
+        self.press_member_shutdown().await;
+        self.finish_member_shutdown().await;
+        if self.member.is_none() || self.member_shutdown.is_some() {
+            // Answering a shutdown is the last thing this member does with its
+            // inbox; nothing that arrives after the request is delivered.
+            return;
+        }
+        let due = self
+            .member_polled
+            .is_none_or(|last| last.elapsed() >= member::POLL);
+        if !due {
+            return;
+        }
+        self.member_polled = Some(Instant::now());
+
+        let Some(pass) = self.member_pass().await else {
+            return;
+        };
+        for mode in pass.modes {
+            // The lead's posture for this member (D-15). A refusal is a log
+            // line rather than a notice: nothing a person at this pane did
+            // asked for it, and the frame has already left the inbox.
+            if let Err(error) = self.engine.send(Command::SetPermissionMode { mode }).await {
+                tracing::warn!(%error, "a permission mode the lead set was refused");
+            }
+        }
+        if let Some(request_id) = pass.shutdown {
+            self.begin_member_shutdown(request_id).await;
+
+            return;
+        }
+        let fresh: Vec<Delivered> = pass
+            .messages
+            .into_iter()
+            .filter(|message| !self.in_flight(message))
+            .collect();
+        self.deliver_peers(fresh).await;
+        self.dirty = true;
+    }
+
+    /// One §6.1 pass, or [`None`] on a session that is nobody's teammate —
+    /// [`App::team_pass`]'s shape, for its borrow.
+    async fn member_pass(&self) -> Option<member::Pass> {
+        let pass = self.member.as_ref()?.poll().await;
+
+        (!pass.is_empty()).then_some(pass)
+    }
+
+    /// Takes a `shutdown_request` (§10.3-4).
+    ///
+    /// An idle member answers at once. One with a turn in flight waits for the
+    /// turn's end — [`App::finish_member_shutdown`] answers on the finish
+    /// event — and [`App::press_member_shutdown`] bounds the wait.
+    async fn begin_member_shutdown(&mut self, request_id: String) {
+        if self.member_idle().await {
+            self.approve_member_shutdown(&request_id).await;
+
+            return;
+        }
+        self.status.set_notice(Some(SHUTTING_DOWN.to_owned()));
+        self.member_shutdown = Some(MemberShutdown {
+            request_id,
+            since: Instant::now(),
+            cancelled: false,
+        });
+    }
+
+    /// Cancels the turn a shutdown has waited [`ganja_core::teammate::SETTLE`]
+    /// for, once.
+    ///
+    /// The in-process teammate's own bound: waiting is the courtesy a
+    /// transcript is owed, and waiting forever is not one anybody asked for.
+    /// A cancelled turn ends in a `MessageFinished` like any other, which is
+    /// what then answers the request.
+    async fn press_member_shutdown(&mut self) {
+        let Some(pending) = &mut self.member_shutdown else {
+            return;
+        };
+        if pending.cancelled || pending.since.elapsed() < ganja_core::teammate::SETTLE {
+            return;
+        }
+        pending.cancelled = true;
+        tracing::warn!("a teammate was still working when it was asked to shut down");
+        if let Err(error) = self.engine.send(Command::CancelTurn).await {
+            tracing::warn!(%error, "a teammate's turn could not be cancelled on the way out");
+        }
+    }
+
+    /// Answers the shutdown once the turn it waited on has ended.
+    async fn finish_member_shutdown(&mut self) {
+        if self.member_shutdown.is_none() || !self.member_idle().await {
+            return;
+        }
+        let Some(pending) = self.member_shutdown.take() else {
+            return;
+        };
+        self.approve_member_shutdown(&pending.request_id).await;
+    }
+
+    /// Whether nothing of a turn is left running: neither the streaming this
+    /// side has seen start, nor the tail the engine runs after the finish
+    /// event — the `Stop` hook, the slot release — which `Engine::settle`
+    /// observes and a frontend cannot see any other way. One look, no wait:
+    /// the wait is the tick's, bounded by [`App::press_member_shutdown`].
+    async fn member_idle(&self) -> bool {
+        !self.turn_running && self.engine.settle(Duration::ZERO).await
+    }
+
+    /// Writes `shutdown_approved` to the lead and leaves through the exit path
+    /// this app always had — the MCP servers, the jobs and the terminal are
+    /// torn down after the loop in the order they always were.
+    async fn approve_member_shutdown(&mut self, request_id: &str) {
+        if let Some(inbox) = &self.member {
+            inbox.approve_shutdown(request_id).await;
+        }
+        self.quit = true;
+    }
+
+    /// Tells the lead a turn ended, at the first point after the event where
+    /// the disk is reachable (§10.3-3).
+    async fn report_member_idle(&mut self) {
+        let Some((reason, failure)) = self.member_finished.take() else {
+            return;
+        };
+        if let Some(inbox) = &self.member {
+            inbox.report_idle(reason, failure.as_deref()).await;
+        }
     }
 
     /// One §6.2 pass, or [`None`] on a session leading no team.
@@ -2075,9 +2269,13 @@ impl App {
         }
     }
 
-    /// Takes messages the engine really took out of the lead's mailbox.
+    /// Takes messages the engine really took out of this session's mailbox —
+    /// the lead's on a lead, this member's own on a pane teammate.
     async fn settle_peer(&self, messages: &[Delivered]) {
         if let Some(inbox) = &self.lead_inbox {
+            inbox.delivered(messages).await;
+        }
+        if let Some(inbox) = &self.member {
             inbox.delivered(messages).await;
         }
     }
@@ -5754,6 +5952,12 @@ impl App {
                 error,
                 ..
             } => {
+                // A pane teammate's lead hears about every turn's end, and
+                // how it ended (§10.3-3). Carried rather than written: this
+                // arm cannot reach the disk.
+                if self.member.is_some() {
+                    self.member_finished = Some((reason, error.clone()));
+                }
                 self.status.set_activity(match reason {
                     FinishReason::Completed => Activity::Ready,
                     FinishReason::Cancelled => Activity::Stopped,
@@ -5885,6 +6089,10 @@ impl App {
             // teammate's message otherwise, and an idle session is exactly when
             // one is most likely to arrive (**D503**).
             || self.lead_inbox.is_some()
+            // And a member has to keep waking for the same file-shaped reason,
+            // pointed the other way: its lead writes into an inbox nothing
+            // else here would ever read (§10.3-1).
+            || self.member.is_some()
     }
 
     /// Whether something wants the **next frame**, as against the next mailbox
@@ -5931,6 +6139,9 @@ impl App {
             // the ordinary case — a session that leads a team and has spawned
             // into none — off this arm entirely (**D503**).
             || self.teammates > 0
+            // A shutdown waiting on a turn is bounded by a clock, and the
+            // tick is what reads it.
+            || self.member_shutdown.is_some()
     }
 
     /// How long the loop may sleep before it has to do something.
@@ -5953,13 +6164,20 @@ impl App {
         FRAME.saturating_sub(self.last_draw.elapsed())
     }
 
-    /// How long until the §6.2 pass is due again — zero when it has never run,
-    /// which is a first tick rather than a wait.
+    /// How long until the mailbox pass is due again — zero when it has never
+    /// run, which is a first tick rather than a wait.
+    ///
+    /// The lead's §6.2 cadence, or the member's §6.1 one on a pane teammate:
+    /// the two are never both installed, and the member's is the shorter
+    /// because it is the side that has to notice a shutdown promptly.
     fn until_team_poll(&self) -> Duration {
-        let poll = ganja_core::teammate::lead_inbox::POLL;
+        let (poll, last) = if self.member.is_some() {
+            (member::POLL, self.member_polled)
+        } else {
+            (ganja_core::teammate::lead_inbox::POLL, self.team_polled)
+        };
 
-        self.team_polled
-            .map_or(Duration::ZERO, |last| poll.saturating_sub(last.elapsed()))
+        last.map_or(Duration::ZERO, |last| poll.saturating_sub(last.elapsed()))
     }
 }
 
@@ -6035,6 +6253,22 @@ const NO_TEAM: &str = "this session leads no team \u{b7} there is no config home
 
 /// What `/team shutdown` answers when the team is only the lead.
 const NOBODY_TO_STOP: &str = "this team has no teammates to stop";
+
+/// What the status bar says while a pane teammate waits for its turn to end
+/// before answering the lead's shutdown request.
+const SHUTTING_DOWN: &str =
+    "the lead asked this teammate to shut down \u{b7} waiting for the turn to end";
+
+/// A `shutdown_request` waiting on a running turn (§10.3-4).
+#[derive(Debug)]
+struct MemberShutdown {
+    /// What the `shutdown_approved` quotes back.
+    request_id: String,
+    /// When it arrived, against [`ganja_core::teammate::SETTLE`].
+    since: Instant,
+    /// Whether the turn has already been told to stop, so it is told once.
+    cancelled: bool,
+}
 
 /// What one write into a teammate's inbox is reported as, whichever way it
 /// went.
@@ -16103,5 +16337,347 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
         let screen = screen(&terminal);
         assert!(screen.contains("nobody"), "{screen}");
+    }
+
+    /// The member side (§10.3): an app running **as** a pane teammate `w1` of
+    /// the team a lead of §2.1's example session would lead, over a teams root
+    /// under `directory`, plus the stream its own loop would read.
+    ///
+    /// No registry is installed and no team is led — a pane teammate is a
+    /// member of the one that launched it — so what this app has is exactly a
+    /// bare engine plus the member's inbox.
+    async fn membered(directory: &TempDir) -> (App, BoxStream<'static, CoreEvent>) {
+        let membership = crate::member::Membership::resolve(
+            crate::member::Flags {
+                agent_id: "w1@session-224cbeab".to_owned(),
+                name: "w1".to_owned(),
+                team: "session-224cbeab".to_owned(),
+                color: Some("blue".to_owned()),
+                parent_session_id: "224cbeab-4e62-497c-aa8f-d05cc33ce7ba".to_owned(),
+            },
+            directory.path(),
+            directory.path(),
+            Some("%5".to_owned()),
+        )
+        .expect("the launch line resolves");
+        let engine = Engine::persistent(
+            Arc::new(FakeProvider::default()),
+            fake::MODEL,
+            Arc::new(ganja_tool::Registry::new(Vec::new())),
+            ganja_permission::Permissions::default(),
+            Storage::open(directory.path().join("storage")),
+        );
+        let events = engine.subscribe().await.expect("the test subscribes first");
+        let app = App::new(engine, None, Themes::builtin())
+            .with_member(crate::member::Inbox::new(membership));
+
+        (app, events)
+    }
+
+    /// The member's own inbox and the lead's, as the app resolved them.
+    fn member_paths(app: &App) -> (std::path::PathBuf, std::path::PathBuf) {
+        let membership = app
+            .member
+            .as_ref()
+            .expect("the app is a member")
+            .membership();
+
+        (membership.inbox(), membership.lead_inbox())
+    }
+
+    /// Writes one plain message into the member's inbox, as the lead would —
+    /// which is also exactly what the spawn's inbox seed is.
+    fn lead_writes(inbox: &std::path::Path, text: &str) {
+        ganja_core::team::mailbox::write(
+            inbox,
+            ganja_core::team::MailboxMessage::new(
+                "team-lead",
+                text,
+                ganja_core::team::record::now_iso8601(),
+            ),
+        )
+        .expect("the member's inbox takes a message");
+    }
+
+    /// Every frame the lead's inbox holds, by kind, oldest first.
+    fn lead_heard(lead_inbox: &std::path::Path) -> Vec<ganja_protocol::team::Frame> {
+        ganja_core::team::mailbox::read(lead_inbox)
+            .expect("the lead's inbox reads")
+            .valid
+            .iter()
+            .filter_map(ganja_core::team::MailboxMessage::frame)
+            .collect()
+    }
+
+    /// The Peer part the turn's `MessageStarted` carried, if it carried one.
+    fn attributed_start(seen: &[CoreEvent]) -> Option<(String, String)> {
+        seen.iter().find_map(|event| match event {
+            CoreEvent::MessageStarted { message, .. } => {
+                message.parts.iter().find_map(|part| match &part.body {
+                    PartBody::Peer { from, body, .. } => Some((from.clone(), body.clone())),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+    }
+
+    /// **AC-10's pane leg, the drain and idle seams** (§10.3-1, -2, -3): the
+    /// prompt the lead seeded is the first turn, delivered as the lead's own
+    /// attributed words; the turn's end reaches the lead as
+    /// `idle_notification{available}` stamped with this member's name; and the
+    /// seed leaves the inbox only once the turn provably took it.
+    #[tokio::test]
+    async fn a_pane_teammates_seeded_prompt_is_its_first_turn_and_its_end_tells_the_lead() {
+        let directory = temporary();
+        let (mut app, mut events) = membered(&directory).await;
+        let (inbox, lead_inbox) = member_paths(&app);
+        lead_writes(&inbox, "start on the parser");
+
+        // The first tick is due at once — nothing has polled yet.
+        app.dirty = false;
+        assert_eq!(app.until_next_wakeup(), Duration::ZERO);
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        assert!(
+            ganja_core::team::mailbox::read(&inbox)
+                .expect("the inbox reads")
+                .valid
+                .is_empty(),
+            "an accepted prompt is the turn, so the seed is delivered and gone"
+        );
+        assert!(
+            lead_heard(&lead_inbox).is_empty(),
+            "nothing said until the turn ends"
+        );
+
+        let seen = pump_turn(&mut app, &mut events).await;
+
+        assert_eq!(
+            attributed_start(&seen),
+            Some(("team-lead".to_owned(), "start on the parser".to_owned())),
+            "the seed became a turn of the member's own, attributed to the lead"
+        );
+        assert!(!app.turn_running);
+        let heard = lead_heard(&lead_inbox);
+        assert_eq!(heard.len(), 1, "one turn, one idle notification: {heard:?}");
+        match &heard[0] {
+            ganja_protocol::team::Frame::IdleNotification(idle) => {
+                assert_eq!(idle.from, "w1");
+                assert_eq!(
+                    idle.idle_reason,
+                    Some(ganja_protocol::team::IdleReason::Available)
+                );
+            }
+            other => panic!("an idle_notification was expected, got {other:?}"),
+        }
+    }
+
+    /// The same lane mid-turn (D-3, §10.3-1): a message the lead writes while
+    /// the member is working steers the running turn, waits pending on the
+    /// strip until the engine says it took it, and only then leaves the inbox.
+    #[tokio::test]
+    async fn a_leads_message_steers_a_pane_teammates_running_turn() {
+        let directory = temporary();
+        let (mut app, mut events) = membered(&directory).await;
+        let (inbox, _lead_inbox) = member_paths(&app);
+        turn_in_flight(&mut app, &mut events).await;
+        lead_writes(&inbox, "and the lexer too");
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        assert_eq!(app.queue.depth(), 1, "pending until the turn consumes it");
+        assert!(app.queue.entries()[0].is_steered());
+        assert_eq!(
+            ganja_core::team::mailbox::read(&inbox)
+                .expect("the inbox reads")
+                .valid
+                .len(),
+            1,
+            "durable until consumed"
+        );
+        let id = app
+            .peer_steers
+            .keys()
+            .next()
+            .cloned()
+            .expect("one batch in flight");
+
+        app.handle(AppEvent::core(CoreEvent::SteerConsumed {
+            session_id: session(),
+            id,
+        }))
+        .await
+        .expect("the event is handled");
+
+        assert_eq!(app.queue.depth(), 0);
+        assert!(
+            ganja_core::team::mailbox::read(&inbox)
+                .expect("the inbox reads")
+                .valid
+                .is_empty(),
+            "consumed means gone"
+        );
+    }
+
+    /// **AC-10's pane leg, the shutdown seam** (§10.3-4, §6.2): an idle member
+    /// answers a `shutdown_request` on the tick that reads it — the approval
+    /// names its pane and its backend, stamped with its own name — and leaves
+    /// through the loop's own exit.
+    #[tokio::test]
+    async fn an_idle_pane_teammate_answers_a_shutdown_request_and_quits() {
+        let directory = temporary();
+        let (mut app, _events) = membered(&directory).await;
+        let (inbox, lead_inbox) = member_paths(&app);
+        ganja_core::team::mailbox::write(
+            &inbox,
+            ganja_core::team::MailboxMessage::from_frame(
+                "team-lead",
+                &crate::member::shutdown_request("req-1"),
+                ganja_core::team::record::now_iso8601(),
+            )
+            .expect("the frame encodes"),
+        )
+        .expect("the member's inbox takes a frame");
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        assert!(app.quit, "the request is the last thing this member reads");
+        let heard = lead_heard(&lead_inbox);
+        match heard.as_slice() {
+            [ganja_protocol::team::Frame::ShutdownApproved(approved)] => {
+                assert_eq!(approved.request_id, "req-1");
+                assert_eq!(approved.from, "w1");
+                assert_eq!(approved.pane_id.as_deref(), Some("%5"));
+                assert_eq!(approved.backend_type.as_deref(), Some("tmux"));
+            }
+            other => panic!("one shutdown_approved was expected, got {other:?}"),
+        }
+    }
+
+    /// A shutdown that arrives mid-turn waits for the turn's end rather than
+    /// cutting it short (`Teammate::shutdown`'s courtesy), and then answers in
+    /// the order the lead expects: the turn's idle notification, then the
+    /// approval.
+    #[tokio::test]
+    async fn a_shutdown_request_during_a_turn_waits_for_the_turn_to_end() {
+        let directory = temporary();
+        let (mut app, mut events) = membered(&directory).await;
+        let (inbox, lead_inbox) = member_paths(&app);
+        turn_in_flight(&mut app, &mut events).await;
+        ganja_core::team::mailbox::write(
+            &inbox,
+            ganja_core::team::MailboxMessage::from_frame(
+                "team-lead",
+                &crate::member::shutdown_request("req-2"),
+                ganja_core::team::record::now_iso8601(),
+            )
+            .expect("the frame encodes"),
+        )
+        .expect("the member's inbox takes a frame");
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        assert!(!app.quit, "the turn is still running");
+        assert!(app.member_shutdown.is_some(), "and the request is held");
+        assert!(lead_heard(&lead_inbox).is_empty(), "nothing answered yet");
+        assert!(
+            app.wants_frame(),
+            "a held shutdown keeps the loop ticking so its bound is read"
+        );
+
+        pump_turn(&mut app, &mut events).await;
+
+        assert!(
+            app.quit,
+            "the turn ended, so the request is answered and the app leaves"
+        );
+        let kinds: Vec<&str> = lead_heard(&lead_inbox)
+            .iter()
+            .map(ganja_protocol::team::Frame::kind)
+            .collect();
+        assert_eq!(kinds, ["idle_notification", "shutdown_approved"]);
+    }
+
+    /// The lead's `mode_set_request` reaches the engine as
+    /// `Command::SetPermissionMode` (D-15, AC-19's pane half): the engine
+    /// answers with `PermissionModeChanged`, and the frame is gone.
+    #[tokio::test]
+    async fn a_leads_mode_set_request_reaches_the_pane_teammates_engine() {
+        let directory = temporary();
+        let (mut app, mut events) = membered(&directory).await;
+        let (inbox, _lead_inbox) = member_paths(&app);
+        ganja_core::team::mailbox::write(
+            &inbox,
+            ganja_core::team::MailboxMessage::from_frame(
+                "team-lead",
+                &ganja_protocol::team::Frame::ModeSetRequest(
+                    ganja_protocol::team::ModeSetRequest {
+                        mode: "bypassPermissions".to_owned(),
+                        from: "team-lead".to_owned(),
+                    },
+                ),
+                ganja_core::team::record::now_iso8601(),
+            )
+            .expect("the frame encodes"),
+        )
+        .expect("the member's inbox takes a frame");
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        let changed =
+            std::iter::from_fn(|| events.next().now_or_never().flatten()).find_map(|event| {
+                match event {
+                    CoreEvent::PermissionModeChanged { mode, .. } => Some(mode),
+                    _ => None,
+                }
+            });
+        assert_eq!(changed, Some(ganja_protocol::PermissionMode::Bypass));
+        assert!(
+            ganja_core::team::mailbox::read(&inbox)
+                .expect("the inbox reads")
+                .valid
+                .is_empty(),
+            "a frame acted on leaves the inbox in the same pass"
+        );
+    }
+
+    /// A member wakes at its own cadence, which is the teammate's rather than
+    /// the lead's, and a session that is nobody's teammate wakes for neither.
+    #[test]
+    fn a_member_wakes_at_the_teammates_cadence() {
+        let membership = crate::member::Membership::resolve(
+            crate::member::Flags {
+                agent_id: "w1@session-224cbeab".to_owned(),
+                name: "w1".to_owned(),
+                team: "session-224cbeab".to_owned(),
+                color: None,
+                parent_session_id: "224cbeab-4e62-497c-aa8f-d05cc33ce7ba".to_owned(),
+            },
+            std::path::Path::new("/nowhere"),
+            std::path::Path::new("/nowhere"),
+            None,
+        )
+        .expect("the launch line resolves");
+        let mut member = app().with_member(crate::member::Inbox::new(membership));
+        // A fresh app wants its first frame; what is under test is the clock
+        // an idle member falls back to once nothing is left to draw.
+        member.dirty = false;
+
+        assert!(member.wants_wakeup());
+        assert_eq!(
+            member.until_next_wakeup(),
+            Duration::ZERO,
+            "the first pass is due at once"
+        );
+        member.member_polled = Some(Instant::now());
+        assert!(
+            member.until_next_wakeup() > FRAME && member.until_next_wakeup() <= crate::member::POLL,
+            "then the member's own clock, not the frame's: {:?}",
+            member.until_next_wakeup()
+        );
+        let mut plain = app();
+        plain.dirty = false;
+        assert!(!plain.wants_wakeup(), "a plain session sleeps");
     }
 }
