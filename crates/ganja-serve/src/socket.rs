@@ -199,6 +199,8 @@ pub enum DirectoryRefusal {
 }
 
 #[cfg(unix)]
+pub use unix::vet_directory;
+#[cfg(unix)]
 pub(crate) use unix::{PeerChecked, bind_path, bind_session};
 
 #[cfg(unix)]
@@ -394,15 +396,35 @@ mod unix {
             Err(error) => return Err(refuse(DirectoryRefusal::Io(error))),
         }
 
-        // `symlink_metadata`, not `metadata`: a link to a perfectly good
-        // directory is still a link somebody planted in `/tmp`.
-        let found =
-            fs::symlink_metadata(directory).map_err(|error| refuse(DirectoryRefusal::Io(error)))?;
+        vet_directory(directory).map_err(refuse)
+    }
+
+    /// The verdict on what sits at `directory`, as the binder forms it
+    /// before it binds: a real directory of ours at exactly `0700`, or the
+    /// first thing wrong with it — the same `vet` over what `stat` said,
+    /// with the not-a-directory arm in front. Public because a listing that
+    /// unlinks dead sockets (`ganja sessions --live`) has to ask the very
+    /// same question before it reads the directory, and a second spelling of
+    /// this predicate would be the day the two disagree. Inspects only —
+    /// creating the directory is the binder's own step, and a caller that
+    /// finds nothing at the path is told so through the
+    /// [`DirectoryRefusal::Io`] arm and decides for itself.
+    ///
+    /// # Errors
+    ///
+    /// [`DirectoryRefusal::NotADirectory`] for a file or a link — a link to a
+    /// perfectly good directory included, since a link is what somebody
+    /// plants in a world-writable `/tmp` — then `vet`'s owner and mode
+    /// refusals; [`DirectoryRefusal::Io`] when the path could not be
+    /// inspected at all, an absent one included.
+    pub fn vet_directory(directory: &Path) -> Result<(), DirectoryRefusal> {
+        // `symlink_metadata`, not `metadata`: a link is refused as a link.
+        let found = fs::symlink_metadata(directory).map_err(DirectoryRefusal::Io)?;
         if !found.file_type().is_dir() {
-            return Err(refuse(DirectoryRefusal::NotADirectory));
+            return Err(DirectoryRefusal::NotADirectory);
         }
 
-        vet(found.uid(), found.mode(), uid()).map_err(refuse)
+        vet(found.uid(), found.mode(), uid())
     }
 
     /// Unlinks the socket file a dead holder left at `path`, the name's lock

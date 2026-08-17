@@ -1265,20 +1265,25 @@ async fn sessions_command(args: SessionsArgs) -> Result<()> {
 /// its first eight hex digits.
 ///
 /// The directory is `ganja_serve::socket::directory()`'s, and it is **vetted
-/// before it is read** by the binder's own rule: a real directory of ours at
-/// exactly `0700`, or refused by name — because this listing unlinks files,
-/// and unlinking inside a directory somebody else made in a world-writable
-/// `/tmp` is not something to do on a hunch. Absent, there is nothing
-/// running, and the listing says so rather than creating one.
+/// before it is read** by the binder's own predicate: a real directory of
+/// ours at exactly `0700`, or refused by name — because this listing unlinks
+/// files, and unlinking inside a directory somebody else made in a
+/// world-writable `/tmp` is not something to do on a hunch. Absent, there is
+/// nothing running, and the listing says so rather than creating one.
 ///
 /// Health decides *live*; the lock decides *dead*. A socket that answers is
-/// listed. One that does not is unlinked only when nobody holds its name's
-/// lock — the liveness token `ganja_serve::socket` keeps beside every socket
-/// precisely because a connection is not one: a live server whose accept
-/// backlog is full refuses exactly the way an empty file does, and a listing
-/// that unlinked on that evidence would take a live socket with it. Such a
-/// socket is named as held and left alone. The `.lock` files themselves are
-/// never touched — created once per name and kept, by that module's design.
+/// listed under its session. One that does not is unlinked only when nobody
+/// holds its name's lock — the liveness token `ganja_serve::socket` keeps
+/// beside every socket precisely because a connection is not one: a live
+/// server whose accept backlog is full refuses exactly the way an empty file
+/// does, and a listing that unlinked on that evidence would take a live
+/// socket with it. Such a socket is listed as live under a `(held)` mark of
+/// its own — nothing answered, which is not the same as an answer this build
+/// cannot read, whose mark is `?` — named as held on stderr, and left alone.
+/// The `.lock` files
+/// themselves are never touched — created once per name and kept, by that
+/// module's design. And a socket that vanishes mid-walk is a server that
+/// stopped and unlinked its own; the walk goes on.
 ///
 /// The health check rides `ganja-client`'s socket form, one client per
 /// socket path (the plan's rule for `unix_socket`); this binary names the
@@ -1293,6 +1298,17 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
     /// silent. Local, and the answer is a few hundred bytes; a socket that
     /// takes longer than this is not one a listing should wait on.
     const HEALTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// The session column of a socket that answered, but not with health as
+    /// this build reads it: a server is there, and which session it serves
+    /// is the one thing it would not say.
+    const UNREADABLE: &str = "?";
+
+    /// The session column of a socket that answered nothing at all while a
+    /// live binder holds its name's lock — the lock is the only evidence of
+    /// life, and a different state from an answer this build cannot read, so
+    /// it wears a different mark.
+    const HELD: &str = "(held)";
 
     let directory = directory.unwrap_or_else(ganja_serve::socket::directory);
     if !private_socket_directory(&directory)? {
@@ -1317,15 +1333,30 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
     for path in entries {
         // `symlink_metadata`, and only what this binary's own binder makes is
         // ever probed or removed: a plain file or a link wearing the
-        // extension is named and left where it is.
-        let found = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        // extension is named and left where it is. One that vanished since
+        // the directory was read is a server that stopped and unlinked its
+        // own — the walk is seconds long — and is nobody's failure.
+        let found = match fs::symlink_metadata(&path) {
+            Ok(found) => found,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
+        };
         if !found.file_type().is_socket() {
             eprintln!("note: {} is not a socket; left in place", path.display());
             continue;
         }
 
-        let client = ganja_client::Client::on_socket(&path)?;
+        // A name the client cannot be bound to is named and walked past for
+        // the same reason: one entry never ends the listing of the rest.
+        let client = match ganja_client::Client::on_socket(&path) {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("note: {error}; left in place");
+                continue;
+            }
+        };
         let answered = tokio::time::timeout(HEALTH_DEADLINE, client.health()).await;
         match answered {
             Ok(Ok(health)) => live.push((health.session_id.as_str().to_owned(), path)),
@@ -1341,14 +1372,18 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
                     "note: {} answered, but not with a session: {refusal}",
                     path.display()
                 );
-                live.push(("?".to_owned(), path));
+                live.push((UNREADABLE.to_owned(), path));
             }
             Ok(Err(_)) | Err(_) => {
+                // Held is live, whatever the silence: it joins the table
+                // under its own mark, so what stdout lists and what stderr
+                // explains are one account.
                 if name_is_held(&path)? {
                     eprintln!(
                         "note: {} is held by a live server that did not answer; left in place",
                         path.display()
                     );
+                    live.push((HELD.to_owned(), path));
                     continue;
                 }
                 match fs::remove_file(&path) {
@@ -1382,49 +1417,26 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Whether `directory` is a real directory of ours at exactly `0700` —
-/// [`ganja_serve::socket`]'s own verdict, refused by name through that
-/// crate's own [`ganja_serve::ServeError::UnsafeSocketDirectory`] so the
-/// listing and the binder disagree about nothing, spelled here because
-/// the binder's check is its own private step. `Ok(false)` when there is
-/// nothing at the path: nothing has served a socket, and a listing is
-/// not the thing that should make the directory.
+/// Whether `directory` is a real directory of ours at exactly `0700` — the
+/// binder's own verdict, asked of [`ganja_serve::socket::vet_directory`]
+/// itself and refused by name through [`ganja_serve::ServeError`]'s own
+/// variant, so the listing and the binder cannot disagree about a directory.
+/// `Ok(false)` when there is nothing at the path: the binder would create it,
+/// but nothing has served a socket, and a listing is not the thing that
+/// should make the directory.
 #[cfg(unix)]
 fn private_socket_directory(directory: &std::path::Path) -> Result<bool> {
-    use std::{fs, os::unix::fs::MetadataExt as _};
+    use ganja_serve::{DirectoryRefusal, ServeError, socket::vet_directory};
 
-    use ganja_serve::{DirectoryRefusal, ServeError};
-
-    let refuse = |reason| {
-        anyhow::Error::from(ServeError::UnsafeSocketDirectory {
+    match vet_directory(directory) {
+        Ok(()) => Ok(true),
+        Err(DirectoryRefusal::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(reason) => Err(ServeError::UnsafeSocketDirectory {
             path: directory.to_path_buf(),
             reason,
-        })
-    };
-    // The link case is the reason for `symlink_metadata`: a link to a
-    // perfectly good directory is still a link somebody planted in `/tmp`.
-    let found = match fs::symlink_metadata(directory) {
-        Ok(found) => found,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(refuse(DirectoryRefusal::Io(error))),
-    };
-    if !found.file_type().is_dir() {
-        return Err(refuse(DirectoryRefusal::NotADirectory));
+        }
+        .into()),
     }
-    // SAFETY: `geteuid` takes nothing, touches nothing, and cannot fail.
-    let uid = unsafe { libc::geteuid() };
-    if found.uid() != uid {
-        return Err(refuse(DirectoryRefusal::ForeignOwner {
-            owner: found.uid(),
-            uid,
-        }));
-    }
-    let mode = found.mode() & 0o777;
-    if mode != 0o700 {
-        return Err(refuse(DirectoryRefusal::Permissions { mode }));
-    }
-
-    Ok(true)
 }
 
 /// Whether a live binder holds `socket`'s name: an advisory `flock` on
@@ -1441,9 +1453,9 @@ fn private_socket_directory(directory: &std::path::Path) -> Result<bool> {
 fn name_is_held(socket: &std::path::Path) -> Result<bool> {
     use std::{fs, os::fd::AsRawFd as _};
 
-    use ganja_serve::socket::LOCK_EXTENSION;
+    use ganja_serve::socket::lock_path;
 
-    let lock = socket.with_extension(LOCK_EXTENSION);
+    let lock = lock_path(socket);
     let file = match fs::OpenOptions::new().read(true).write(true).open(&lock) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
