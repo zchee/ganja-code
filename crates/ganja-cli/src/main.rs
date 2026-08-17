@@ -63,6 +63,8 @@ struct Cli {
     select: SelectArgs,
     #[command(flatten)]
     bypass: BypassArgs,
+    #[command(flatten)]
+    member: MemberArgs,
     /// Write the log file at debug level instead of info.
     ///
     /// What that buys is the provider wires' own account of a turn — the model
@@ -192,6 +194,80 @@ impl BypassArgs {
     /// Whether any of the three spellings was written.
     fn wanted(self) -> bool {
         self.auto || self.yolo || self.dangerously_skip_permissions
+    }
+}
+
+/// The launch line a lead composes for a pane teammate (§4.1 of the Claude
+/// teammates reference; upstream opencode has no counterpart).
+///
+/// Every flag is **hidden** exactly as the bypass aliases above are, and for
+/// a stronger reason: a person never types these. A lead's own process writes
+/// them when it splits a tmux pane for a teammate — the same five spellings
+/// Claude Code's `claude` binary takes, so a launch line composed against one
+/// harness reads on the other — and the prompt travels through the teammate's
+/// mailbox rather than beside them, so nothing here carries a body.
+///
+/// The five arrive together or not at all: `--agent-id` requires the three
+/// that give it meaning, and each of them requires it back, so a launch line
+/// missing one is refused by clap rather than half-honored. `--agent-color`
+/// is the one optional member of the set (§4.3 assigns it, but a lead may
+/// have none to give), and it too is meaningless alone.
+///
+/// The argv contract, spelled out because another lane composes the line
+/// against it:
+///
+/// ```text
+/// ganja [--model P/M] [--agent NAME] [--auto|--yolo|--dangerously-skip-permissions]
+///       --agent-id <name>@<team> --agent-name <name> --team-name <team>
+///       [--agent-color <color>] --parent-session-id <lead session id>
+/// ```
+///
+/// `--model`/`--agent` are `SelectArgs`' own and ride beside; the bypass trio
+/// is how a lead spawns a teammate that answers its own dialogs (D479). The
+/// pane id is not on the line: the pane reads `TMUX_PANE` from the environment
+/// tmux gives it.
+#[derive(Debug, Args)]
+struct MemberArgs {
+    #[arg(
+        long,
+        hide = true,
+        value_name = "NAME@TEAM",
+        requires_all = ["agent_name", "team_name", "parent_session_id"]
+    )]
+    agent_id: Option<String>,
+    #[arg(long, hide = true, value_name = "NAME", requires = "agent_id")]
+    agent_name: Option<String>,
+    #[arg(long, hide = true, value_name = "TEAM", requires = "agent_id")]
+    team_name: Option<String>,
+    #[arg(long, hide = true, value_name = "COLOR", requires = "agent_id")]
+    agent_color: Option<String>,
+    #[arg(long, hide = true, value_name = "ID", requires = "agent_id")]
+    parent_session_id: Option<String>,
+}
+
+impl MemberArgs {
+    /// The launch line as the UI takes it, or [`None`] for a session a person
+    /// started.
+    ///
+    /// Clap has already refused a partial set, so the three `expect`s below
+    /// name an invariant it holds rather than one this code checks: an
+    /// `--agent-id` without its companions never reaches here.
+    fn wanted(self) -> Option<ganja_tui::member::Flags> {
+        let agent_id = self.agent_id?;
+
+        Some(ganja_tui::member::Flags {
+            agent_id,
+            name: self
+                .agent_name
+                .expect("clap requires --agent-name beside --agent-id"),
+            team: self
+                .team_name
+                .expect("clap requires --team-name beside --agent-id"),
+            color: self.agent_color,
+            parent_session_id: self
+                .parent_session_id
+                .expect("clap requires --parent-session-id beside --agent-id"),
+        })
     }
 }
 
@@ -615,6 +691,7 @@ async fn main() -> Result<()> {
                 cli.resume.wanted(),
                 cli.select.overrides(),
                 cli.bypass.wanted(),
+                cli.member.wanted(),
             )
             .await
         }
@@ -1852,6 +1929,117 @@ mod tests {
             !Cli::parse_from(["ganja"]).bypass.wanted(),
             "a session that asked for nothing keeps every dialog it always had"
         );
+    }
+
+    /// §4.1's launch line, as another process composes it: the five spellings
+    /// parse together, ride beside `--model`/`--agent`, and are the value the
+    /// UI is handed. `--agent-color` is the one that may be left off.
+    #[test]
+    fn the_spawn_flags_parse_together_and_reach_the_ui() {
+        let cli = Cli::parse_from([
+            "ganja",
+            "--model",
+            "anthropic/claude-sonnet-5",
+            "--agent-id",
+            "w1@session-224cbeab",
+            "--agent-name",
+            "w1",
+            "--team-name",
+            "session-224cbeab",
+            "--agent-color",
+            "blue",
+            "--parent-session-id",
+            "224cbeab-4e62-497c-aa8f-d05cc33ce7ba",
+        ]);
+
+        assert_eq!(
+            cli.member.wanted(),
+            Some(ganja_tui::member::Flags {
+                agent_id: "w1@session-224cbeab".to_owned(),
+                name: "w1".to_owned(),
+                team: "session-224cbeab".to_owned(),
+                color: Some("blue".to_owned()),
+                parent_session_id: "224cbeab-4e62-497c-aa8f-d05cc33ce7ba".to_owned(),
+            })
+        );
+
+        let uncolored = Cli::parse_from([
+            "ganja",
+            "--agent-id",
+            "w1@session-224cbeab",
+            "--agent-name",
+            "w1",
+            "--team-name",
+            "session-224cbeab",
+            "--parent-session-id",
+            "224cbeab-4e62-497c-aa8f-d05cc33ce7ba",
+        ]);
+        assert_eq!(
+            uncolored.member.wanted().map(|flags| flags.color),
+            Some(None),
+            "the colour is the one optional member of the set"
+        );
+        assert_eq!(
+            Cli::parse_from(["ganja"]).member.wanted(),
+            None,
+            "a session a person started is nobody's teammate"
+        );
+    }
+
+    /// The five arrive together or not at all: a launch line missing one of
+    /// the required four is refused by clap rather than half-honored, and a
+    /// companion flag without `--agent-id` is refused too.
+    #[test]
+    fn a_partial_spawn_line_is_refused_not_half_honored() {
+        for partial in [
+            vec!["ganja", "--agent-id", "w1@session-224cbeab"],
+            vec![
+                "ganja",
+                "--agent-id",
+                "w1@session-224cbeab",
+                "--agent-name",
+                "w1",
+                "--team-name",
+                "session-224cbeab",
+            ],
+            vec!["ganja", "--agent-name", "w1"],
+            vec!["ganja", "--team-name", "session-224cbeab"],
+            vec!["ganja", "--agent-color", "blue"],
+            vec!["ganja", "--parent-session-id", "224cbeab"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&partial).is_err(),
+                "{partial:?} is a partial launch line and has to be refused"
+            );
+        }
+    }
+
+    /// Hidden exactly as the bypass aliases are: nothing a person does not
+    /// type appears in the help a person reads.
+    #[test]
+    fn the_spawn_flags_are_hidden_from_help() {
+        use clap::CommandFactory as _;
+
+        let mut help = Vec::new();
+        Cli::command()
+            .write_long_help(&mut help)
+            .expect("the help renders");
+        let help = String::from_utf8(help).expect("the help is UTF-8");
+
+        for flag in [
+            "--agent-id",
+            "--agent-name",
+            "--team-name",
+            "--agent-color",
+            "--parent-session-id",
+            "--yolo",
+        ] {
+            assert!(
+                !help.contains(flag),
+                "{flag} is hidden from --help:\n{help}"
+            );
+        }
+        assert!(help.contains("--model"), "and the visible flags still show");
     }
 
     #[test]
