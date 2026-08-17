@@ -30,7 +30,10 @@
 //! lead, and the lead reaches its members. A build with no config home leads
 //! no team and binds nothing either: the socket's team routes would answer
 //! nothing, and `ganja sessions --live` would list a session nothing can
-//! message. `ganja run` is not decided here.
+//! message. And a headless `ganja run` leads no team and binds nothing — the
+//! socket rides the team gate (P25 ruling): a one-shot turn installs no
+//! teammates, a `uds:` message to it would have no next turn to land on,
+//! and D-11/D-12 name `sessions --live` as the *peer* list, never a one-shot.
 //!
 //! # Which moments rebind
 //!
