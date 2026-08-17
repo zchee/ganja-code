@@ -15,11 +15,16 @@
 //! it arrived. `serde_json::Map` cannot do that job — without the
 //! `preserve_order` feature it is a `BTreeMap`, so an unknown key would come
 //! back alphabetized, and turning that feature on would reorder every `Map` in
-//! the workspace through feature unification. One limitation is recorded
-//! rather than hidden: a nested object *inside* an unknown key's value is a
-//! `serde_json::Value::Object` and would still reorder on rewrite. Whether
-//! that ever matters is a question a captured document answers, not this
-//! comment.
+//! the workspace through feature unification. Two limitations are recorded
+//! rather than hidden. A nested object *inside* an unknown key's value is a
+//! `serde_json::Value::Object` and would still reorder on rewrite; no captured
+//! document has one yet. And "in position" means *after the known fields*, not
+//! back where it was found — which the 2026-03-era team files on this machine
+//! **witness**: their `config.json` carries a top-level `description` between
+//! `name` and `createdAt`, and a rewrite here would move it to the tail. The
+//! documents a modern Claude Code writes carry no unknown key at all, so byte
+//! identity against those is unaffected; a reader who ever meets one of the
+//! old files should expect that one move and nothing else.
 //!
 //! *This is why the shapes are not in `ganja-protocol`.* That crate's posture
 //! is the exact opposite one — an exhaustive vocabulary with
@@ -32,16 +37,24 @@
 //! *Bytes are a compatibility surface.* Documents are written with
 //! [`document`] — `serde_json::to_string_pretty`, two-space indent, no
 //! trailing newline — which is what `JSON.stringify(value, null, 2)` produces,
-//! and the fields are declared in the order §2.2 and §2.3 print them. A
-//! rewrite that reordered or reindented would still parse; it would also make
-//! every `git diff` of a shared directory unreadable, and it would be the
-//! first thing to suspect when a byte-identity test failed for an unrelated
-//! reason.
+//! and the keys are emitted in the order a real `claude` emits them. A rewrite
+//! that reordered or reindented would still parse; it would also make every
+//! `git diff` of a shared directory unreadable, and it would be the first
+//! thing to suspect when a byte-identity test failed for an unrelated reason.
+//!
+//! *The key orders come from real documents, not from the reference.* §2.2's
+//! member records are marked `[OBS]` and are reflowed for the page, so their
+//! printed order is not evidence of anything; the survey behind AC-1b is — 29
+//! team directories under `~/.claude/teams`, 65 member records and 131
+//! messages, spanning a 2026-03 era and the modern one. Where the two disagree
+//! the bytes win, and they do disagree: the orders below are not the ones this
+//! module first shipped. Each shape says which documents settled it, and says
+//! plainly where the evidence is thin.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::Value;
 
 use crate::team::{LEAD, MemberName, TeamName};
@@ -163,70 +176,168 @@ pub struct Spawn {
 
 /// One member of a team, in Claude's own document shape (§2.2).
 ///
-/// **One struct, not two, and the five teammate-only fields skip when absent.**
-/// §2.2's lead record carries five fields fewer than a teammate's — no `model`,
-/// `color`, `prompt`, `planModeRequired` or `isActive` — so a single shape that
-/// emitted `"model": null` for a lead would fail a byte-identity comparison
-/// against the very first real file. Two shapes behind an untagged enum would
-/// also work; they were declined because untagged deserialization decides which
-/// arm to take by trying them, so a teammate record missing one field would
-/// silently decode as a lead rather than say what was wrong — and because the
-/// field *order* the format needs is exactly this struct's declaration order,
-/// which two arms would have to keep in step by hand.
+/// **Two key orders, one struct, and a hand-written [`Serialize`] to choose
+/// between them.** A lead record and a teammate record are not the same shape
+/// with fields missing — they are written in *irreconcilable orders*, which no
+/// single declaration can express:
+///
+/// ```text
+/// lead     agentId name agentType joinedAt tmuxPaneId cwd subscriptions backendType
+/// teammate agentId name color joinedAt tmuxPaneId subscriptions agentType model
+///          prompt planModeRequired cwd backendType isActive
+/// ```
+///
+/// `agentType` is third in one and seventh in the other; `cwd` precedes
+/// `subscriptions` in one and trails it by five keys in the other. All 24 lead
+/// records and all 26 teammate records in the modern half of the survey agree
+/// with their own line and no record straddles the two, so this is the format
+/// rather than a sample of it.
+///
+/// This module first shipped one declaration order with the five teammate-only
+/// fields skipping when absent, on the reading that §2.2's excerpt printed the
+/// order. **Real documents falsified that**, and the correction is confined to
+/// [`Serialize`]: [`Deserialize`] stays derived, because decoding is
+/// order-insensitive and the flatten passthrough needs no help.
+///
+/// *Not an untagged enum,* and that argument survives the falsification
+/// unchanged: untagged deserialization picks an arm by trying them, so a
+/// teammate record missing one field would quietly decode as a lead instead of
+/// saying what was wrong. Two arms would also have to keep the shared eight
+/// fields in step by hand — which is now a bigger job, not a smaller one.
+///
+/// *The discriminant is the record's shape, not its name.* A record is written
+/// in the teammate order when it carries any of the five teammate-only fields
+/// (`model`, `color`, `prompt`, `planModeRequired`, `isActive`), and in the
+/// lead order otherwise — so "a lead-ordered record never emits the five" is a
+/// tautology rather than a promise. [`MemberRecord::is_lead`] answers a
+/// different question — *is this the team's lead* — and would be the wrong
+/// discriminant for a reason the survey supplies: a 2026-03-era lead record is
+/// named `team-lead` and **carries `model` anyway**, so keying the order on the
+/// name would drop that value on rewrite. Keying it on the shape moves the key
+/// instead, which is the trade the flatten passthrough already makes.
 ///
 /// The name is a `String` rather than a [`MemberName`] on purpose: the type
 /// marks the door a *created* name goes through, and refusing to decode a
 /// document a real `claude` wrote is not this crate's call to make.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberRecord {
     /// `<name>@<team>` — derived, never minted (§2.2).
     pub agent_id: String,
     /// The bare name, which is also the mailbox address.
     pub name: String,
-    /// The `task` tool's `subagent_type`; `team-lead` for the lead.
-    pub agent_type: String,
-    /// Teammate-only: the model it runs as.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
     /// Teammate-only: its assigned color.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub color: Option<String>,
-    /// Teammate-only: the spawn prompt, in cleartext. See [`Spawn::prompt`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    /// Teammate-only: whether it must start in plan mode.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_mode_required: Option<bool>,
     /// Unix milliseconds at registration.
     pub joined_at: u64,
     /// §2.2's overloaded surface discriminator; read it through
     /// [`MemberRecord::surface`].
     pub tmux_pane_id: String,
-    /// The working directory the member runs in.
-    pub cwd: String,
     /// Vestigial (§9.1): written `[]` at every creation site and read nowhere,
     /// in Claude Code and here alike.
     ///
     /// **The reference's advice to omit it is declined**, and the reason is
     /// byte identity rather than doubt about the finding. Left out of the
     /// declaration, a real document's `subscriptions` would be captured by
-    /// `extra` and re-emitted *after* `backendType` instead of before it — so
-    /// the one thing omitting it would cost is the round-trip the whole format
-    /// contract rests on. Declared, it is written `[]` and never populated,
-    /// which is what "vestigial" buys in practice; a rewrite carries whatever
-    /// it read, so a file that somehow holds something keeps it.
+    /// `extra` and re-emitted at the tail instead of in the middle of the
+    /// record — so the one thing omitting it would cost is the round-trip the
+    /// whole format contract rests on. Declared, it is written `[]` and never
+    /// populated, which is what "vestigial" buys in practice; a rewrite carries
+    /// whatever it read, so a file that somehow holds something keeps it.
     #[serde(default)]
     pub subscriptions: Vec<Value>,
+    /// The `task` tool's `subagent_type`; `team-lead` for the lead.
+    pub agent_type: String,
+    /// Teammate-only: the model it runs as.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Teammate-only: the spawn prompt, in cleartext. See [`Spawn::prompt`].
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Teammate-only: whether it must start in plan mode.
+    #[serde(default)]
+    pub plan_mode_required: Option<bool>,
+    /// The working directory the member runs in.
+    pub cwd: String,
     /// `in-process` or `tmux`, as Claude spells them.
-    pub backend_type: String,
+    ///
+    /// Optional only for tolerance, never for a document this build writes:
+    /// every modern record carries it and both constructors set it, but the
+    /// 2026-03-era lead records in the survey **omit it entirely**, and
+    /// refusing to decode one of those would be refusing a file a real `claude`
+    /// wrote (§2.4's posture, and this crate's whole reason for existing).
+    #[serde(default)]
+    pub backend_type: Option<String>,
     /// Teammate-only: whether the member is still live.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub is_active: Option<bool>,
     /// Every key this build has never heard of, after the known fields and in
     /// the order they arrived.
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
+}
+
+/// The two orders of §2.2, chosen by the record's own shape.
+///
+/// A `serialize_map` rather than a `serialize_struct` because the key set is
+/// decided at runtime — which is also what the derive does under a
+/// `#[serde(flatten)]`, so this changes the machinery not at all, only which
+/// keys go through it and when.
+impl Serialize for MemberRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+
+        // The two orders share only their first two keys; from `agentType`
+        // onwards nothing lines up, which is why this is a branch and not a
+        // pair of conditional inserts.
+        map.serialize_entry("agentId", &self.agent_id)?;
+        map.serialize_entry("name", &self.name)?;
+
+        if self.carries_teammate_fields() {
+            if let Some(color) = &self.color {
+                map.serialize_entry("color", color)?;
+            }
+            map.serialize_entry("joinedAt", &self.joined_at)?;
+            map.serialize_entry("tmuxPaneId", &self.tmux_pane_id)?;
+            map.serialize_entry("subscriptions", &self.subscriptions)?;
+            map.serialize_entry("agentType", &self.agent_type)?;
+            if let Some(model) = &self.model {
+                map.serialize_entry("model", model)?;
+            }
+            if let Some(prompt) = &self.prompt {
+                map.serialize_entry("prompt", prompt)?;
+            }
+            if let Some(plan_mode_required) = &self.plan_mode_required {
+                map.serialize_entry("planModeRequired", plan_mode_required)?;
+            }
+            map.serialize_entry("cwd", &self.cwd)?;
+            if let Some(backend_type) = &self.backend_type {
+                map.serialize_entry("backendType", backend_type)?;
+            }
+            if let Some(is_active) = &self.is_active {
+                map.serialize_entry("isActive", is_active)?;
+            }
+        } else {
+            map.serialize_entry("agentType", &self.agent_type)?;
+            map.serialize_entry("joinedAt", &self.joined_at)?;
+            map.serialize_entry("tmuxPaneId", &self.tmux_pane_id)?;
+            map.serialize_entry("cwd", &self.cwd)?;
+            map.serialize_entry("subscriptions", &self.subscriptions)?;
+            if let Some(backend_type) = &self.backend_type {
+                map.serialize_entry("backendType", backend_type)?;
+            }
+        }
+
+        for (key, value) in &self.extra {
+            map.serialize_entry(key, value)?;
+        }
+
+        map.end()
+    }
 }
 
 impl MemberRecord {
@@ -239,16 +350,16 @@ impl MemberRecord {
         Self {
             agent_id: name.agent_id(team),
             name: LEAD.to_owned(),
-            agent_type: LEAD.to_owned(),
-            model: None,
             color: None,
-            prompt: None,
-            plan_mode_required: None,
             joined_at,
             tmux_pane_id: Surface::Leader.tmux_pane_id().to_owned(),
-            cwd: cwd.into(),
             subscriptions: Vec::new(),
-            backend_type: Surface::Leader.backend_type().to_owned(),
+            agent_type: LEAD.to_owned(),
+            model: None,
+            prompt: None,
+            plan_mode_required: None,
+            cwd: cwd.into(),
+            backend_type: Some(Surface::Leader.backend_type().to_owned()),
             is_active: None,
             extra: IndexMap::new(),
         }
@@ -261,16 +372,16 @@ impl MemberRecord {
         Self {
             agent_id: name.agent_id(team),
             name: name.as_str().to_owned(),
-            agent_type: spawn.agent_type,
-            model: Some(spawn.model),
             color: Some(spawn.color),
-            prompt: Some(spawn.prompt),
-            plan_mode_required: Some(spawn.plan_mode_required),
             joined_at,
             tmux_pane_id: spawn.surface.tmux_pane_id().to_owned(),
-            cwd: spawn.cwd,
             subscriptions: Vec::new(),
-            backend_type: spawn.surface.backend_type().to_owned(),
+            agent_type: spawn.agent_type,
+            model: Some(spawn.model),
+            prompt: Some(spawn.prompt),
+            plan_mode_required: Some(spawn.plan_mode_required),
+            cwd: spawn.cwd,
+            backend_type: Some(spawn.surface.backend_type().to_owned()),
             is_active: Some(true),
             extra: IndexMap::new(),
         }
@@ -283,9 +394,29 @@ impl MemberRecord {
     }
 
     /// Whether this record is the team's lead.
+    ///
+    /// The team's *role*, which is not the same question as which of §2.2's two
+    /// key orders this record is written in — see the type's own note, and the
+    /// private `carries_teammate_fields`, which is what decides that.
     #[must_use]
     pub fn is_lead(&self) -> bool {
         self.name == LEAD
+    }
+
+    /// Whether any of the five teammate-only fields is present, which is what
+    /// picks the key order [`Serialize`] writes.
+    ///
+    /// Every modern record answers this the way its name would — a lead has
+    /// none of the five, a teammate has all five — so on the documents byte
+    /// identity is asserted against, shape and role agree. They part on a
+    /// 2026-03-era lead, which carries `model`: this says `true` and writes the
+    /// value out in the teammate order rather than dropping it.
+    fn carries_teammate_fields(&self) -> bool {
+        self.model.is_some()
+            || self.color.is_some()
+            || self.prompt.is_some()
+            || self.plan_mode_required.is_some()
+            || self.is_active.is_some()
     }
 }
 
@@ -352,30 +483,45 @@ impl TeamFile {
 /// meanings, which is why [`MailboxMessage::frame`] exists rather than callers
 /// each trying `from_str` at their own seam.
 ///
-/// The field *order* below is §2.3's listing order followed by the two
-/// envelope stamps, which is the best evidence available until a captured
-/// document says otherwise; it is one declaration to reorder if it does.
+/// **The field order below is a real envelope's, not §2.3's listing order.**
+/// §2.3 prints the schema `type, from, text, timestamp, read?, color?,
+/// summary?` and then names `msgV`/`msg_id` as stamps a write adds — which
+/// this module first read as a key order and shipped as one. The modern
+/// document that settled it says otherwise:
+///
+/// ```text
+/// from text summary timestamp msgV msg_id type read
+/// ```
+///
+/// `type` is at the *tail*, next to `read`, not at the head. One declaration
+/// order reproduces that and every legacy shape in the survey byte for byte —
+/// `from text [summary] timestamp [color] [msgV msg_id] [type] [read]` — so
+/// unlike [`MemberRecord`] this needs no hand-written [`Serialize`]: a derive
+/// emits declaration order, and skipping an absent option closes the gap.
+///
+/// *`color`'s slot is this plan's assumption, and the thinnest thing here.* No
+/// modern document carries one — the only modern message in the survey has no
+/// `color` — so its position among the stamps is unwitnessed. It is declared
+/// immediately after `timestamp` because that is the only place it has **ever**
+/// been seen: all 76 of the survey's 2026-03-era messages that carry a `color`
+/// put it exactly there, directly before `read`. Should a modern message ever
+/// carry one and disagree, this is one line to move; **AC-13**'s live capture
+/// against a real `claude` is what would say so, and nothing in CI can.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MailboxMessage {
-    /// Normalized to [`MESSAGE_TYPE`] on read when absent, and forced to it on
-    /// write.
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
     /// Who sent it — a member name, or [`crate::team::LEAD`].
     pub from: String,
     /// The body: prose, or a JSON-encoded [`ganja_protocol::team::Frame`].
     pub text: String,
-    /// ISO-8601, and half of the identity a delivery is reconciled by.
-    pub timestamp: String,
-    /// The tombstone that is never written `true`. See the type's own note.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read: Option<bool>,
-    /// The sender's color, where the sender had one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
     /// A one-line summary, where the sender wrote one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// ISO-8601, and half of the identity a delivery is reconciled by.
+    pub timestamp: String,
+    /// The sender's color, where the sender had one. See the type's own note
+    /// on why this slot is an assumption rather than a finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     /// The schema version [`MESSAGE_VERSION`], stamped at write.
     #[serde(rename = "msgV", default, skip_serializing_if = "Option::is_none")]
     pub msg_v: Option<u32>,
@@ -383,6 +529,13 @@ pub struct MailboxMessage {
     /// reconciled by; that is [`crate::mailbox::identity`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub msg_id: Option<String>,
+    /// Normalized to [`MESSAGE_TYPE`] on read when absent, and forced to it on
+    /// write.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The tombstone that is never written `true`. See the type's own note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<bool>,
     /// Every key this build has never heard of, after the known fields and in
     /// the order they arrived.
     #[serde(flatten)]
@@ -403,15 +556,15 @@ impl MailboxMessage {
         timestamp: impl Into<String>,
     ) -> Self {
         Self {
-            kind: None,
             from: from.into(),
             text: text.into(),
-            timestamp: timestamp.into(),
-            read: None,
-            color: None,
             summary: None,
+            timestamp: timestamp.into(),
+            color: None,
             msg_v: None,
             msg_id: None,
+            kind: None,
+            read: None,
             extra: IndexMap::new(),
         }
     }
@@ -540,32 +693,27 @@ mod tests {
         TeamName::parse("session-224cbeab").expect("a valid team name")
     }
 
-    #[test]
-    fn a_lead_record_never_says_model_null() {
-        let record = MemberRecord::lead(&team(), "/w", 1_786_734_033_621);
-        let rendered = document(&record).expect("a record encodes");
+    /// Every one of the survey's 24 modern lead records, key for key.
+    const LEAD_ORDER: &str = "{\n  \"agentId\": \"team-lead@session-224cbeab\",\n  \
+         \"name\": \"team-lead\",\n  \"agentType\": \"team-lead\",\n  \
+         \"joinedAt\": 1786734033621,\n  \"tmuxPaneId\": \"leader\",\n  \"cwd\": \"/w\",\n  \
+         \"subscriptions\": [],\n  \"backendType\": \"in-process\"\n}";
 
-        assert!(
-            !rendered.contains("null"),
-            "the five teammate-only fields are absent from a lead record, not null: {rendered}"
-        );
-        // Declaration order is the format, so this is asserted as bytes rather
-        // than as a set of fields.
-        assert_eq!(
-            rendered,
-            "{\n  \"agentId\": \"team-lead@session-224cbeab\",\n  \"name\": \"team-lead\",\n  \
-             \"agentType\": \"team-lead\",\n  \"joinedAt\": 1786734033621,\n  \
-             \"tmuxPaneId\": \"leader\",\n  \"cwd\": \"/w\",\n  \"subscriptions\": [],\n  \
-             \"backendType\": \"in-process\"\n}"
-        );
-        assert!(record.is_lead());
-        assert_eq!(record.surface(), Surface::Leader);
-    }
+    /// Every one of the survey's 26 modern teammate records, key for key. Note
+    /// `color` fourth and `agentType` seventh — the two places the lead order
+    /// cannot be bent to agree.
+    const TEAMMATE_ORDER: &str = "{\n  \"agentId\": \"demo-worker-1@session-224cbeab\",\n  \
+         \"name\": \"demo-worker-1\",\n  \"color\": \"blue\",\n  \
+         \"joinedAt\": 1786734154864,\n  \"tmuxPaneId\": \"%142\",\n  \
+         \"subscriptions\": [],\n  \"agentType\": \"general-purpose\",\n  \
+         \"model\": \"claude-opus-5[1m]\",\n  \"prompt\": \"do the thing\",\n  \
+         \"planModeRequired\": false,\n  \"cwd\": \"/w\",\n  \"backendType\": \"tmux\",\n  \
+         \"isActive\": true\n}";
 
-    #[test]
-    fn a_teammate_record_carries_all_five_of_its_own_fields() {
+    fn worker() -> MemberRecord {
         let name = MemberName::parse("demo-worker-1").expect("a valid member name");
-        let record = MemberRecord::teammate(
+
+        MemberRecord::teammate(
             &name,
             &team(),
             Spawn {
@@ -580,17 +728,30 @@ mod tests {
                 cwd: "/w".to_owned(),
             },
             1_786_734_154_864,
-        );
+        )
+    }
 
-        assert_eq!(
-            document(&record).expect("a record encodes"),
-            "{\n  \"agentId\": \"demo-worker-1@session-224cbeab\",\n  \
-             \"name\": \"demo-worker-1\",\n  \"agentType\": \"general-purpose\",\n  \
-             \"model\": \"claude-opus-5[1m]\",\n  \"color\": \"blue\",\n  \
-             \"prompt\": \"do the thing\",\n  \"planModeRequired\": false,\n  \
-             \"joinedAt\": 1786734154864,\n  \"tmuxPaneId\": \"%142\",\n  \"cwd\": \"/w\",\n  \
-             \"subscriptions\": [],\n  \"backendType\": \"tmux\",\n  \"isActive\": true\n}"
+    #[test]
+    fn a_lead_record_is_written_in_the_lead_order_and_never_says_model_null() {
+        let record = MemberRecord::lead(&team(), "/w", 1_786_734_033_621);
+        let rendered = document(&record).expect("a record encodes");
+
+        assert!(
+            !rendered.contains("null"),
+            "the five teammate-only fields are absent from a lead record, not null: {rendered}"
         );
+        // The emitted order is the format, so this is asserted as bytes rather
+        // than as a set of fields.
+        assert_eq!(rendered, LEAD_ORDER);
+        assert!(record.is_lead());
+        assert_eq!(record.surface(), Surface::Leader);
+    }
+
+    #[test]
+    fn a_teammate_record_is_written_in_the_other_order_entirely() {
+        let record = worker();
+
+        assert_eq!(document(&record).expect("a record encodes"), TEAMMATE_ORDER);
         assert_eq!(
             record.surface(),
             Surface::Pane {
@@ -600,15 +761,66 @@ mod tests {
     }
 
     #[test]
+    fn each_record_shape_round_trips_the_bytes_it_was_read_from() {
+        // Decoding is order-insensitive, so this asserts the pair the format
+        // contract actually rests on: whatever a real `claude` wrote comes back
+        // out unchanged. A single declaration cannot do it — `agentType` is
+        // third here and seventh there.
+        for original in [LEAD_ORDER, TEAMMATE_ORDER] {
+            let record: MemberRecord = serde_json::from_str(original).expect("a record decodes");
+
+            assert_eq!(document(&record).expect("a record encodes"), original);
+        }
+    }
+
+    #[test]
+    fn a_legacy_lead_keeps_its_model_rather_than_losing_it_to_the_lead_order() {
+        // A 2026-03-era lead: named `team-lead`, carrying `model`, and with no
+        // `backendType` at all. Keying the order on the name would write the
+        // eight-key lead order and drop the model on the floor; keying it on
+        // the shape moves the key instead — the same trade the flatten
+        // passthrough makes for an unknown one.
+        let original = "{\n  \"agentId\": \"team-lead@web-pages\",\n  \
+             \"name\": \"team-lead\",\n  \"agentType\": \"team-lead\",\n  \
+             \"model\": \"claude-opus-4-1\",\n  \"joinedAt\": 1782579031759,\n  \
+             \"tmuxPaneId\": \"leader\",\n  \"cwd\": \"/w\",\n  \"subscriptions\": []\n}";
+        let record: MemberRecord = serde_json::from_str(original).expect("a record decodes");
+
+        assert!(record.is_lead(), "the role is still the lead's");
+        assert_eq!(
+            document(&record).expect("a record encodes"),
+            "{\n  \"agentId\": \"team-lead@web-pages\",\n  \"name\": \"team-lead\",\n  \
+             \"joinedAt\": 1782579031759,\n  \"tmuxPaneId\": \"leader\",\n  \
+             \"subscriptions\": [],\n  \"agentType\": \"team-lead\",\n  \
+             \"model\": \"claude-opus-4-1\",\n  \"cwd\": \"/w\"\n}"
+        );
+        // The absent `backendType` stays absent rather than becoming a guess,
+        // which is the whole reason that field is an `Option`.
+        assert_eq!(record.backend_type, None);
+    }
+
+    #[test]
     fn an_unknown_key_survives_a_rewrite_in_position() {
         // `zeta` before `alpha` on purpose: a `BTreeMap` passthrough would
         // hand them back the other way round, and that is the failure this
         // test exists to catch.
-        let original = "{\n  \"agentId\": \"w@t\",\n  \"name\": \"w\",\n  \
-             \"agentType\": \"general-purpose\",\n  \"joinedAt\": 1,\n  \
-             \"tmuxPaneId\": \"in-process\",\n  \"cwd\": \"/w\",\n  \"subscriptions\": [],\n  \
-             \"backendType\": \"in-process\",\n  \"zeta\": \"kept\",\n  \
+        let original = "{\n  \"agentId\": \"w@t\",\n  \"name\": \"w\",\n  \"color\": \"blue\",\n  \
+             \"joinedAt\": 1,\n  \"tmuxPaneId\": \"in-process\",\n  \"subscriptions\": [],\n  \
+             \"agentType\": \"general-purpose\",\n  \"model\": \"m\",\n  \"prompt\": \"p\",\n  \
+             \"planModeRequired\": false,\n  \"cwd\": \"/w\",\n  \
+             \"backendType\": \"in-process\",\n  \"isActive\": true,\n  \"zeta\": \"kept\",\n  \
              \"alpha\": {\n    \"nested\": true\n  }\n}";
+        let record: MemberRecord = serde_json::from_str(original).expect("a record decodes");
+
+        assert_eq!(record.extra.keys().collect::<Vec<_>>(), ["zeta", "alpha"]);
+        assert_eq!(document(&record).expect("a record encodes"), original);
+
+        // And on the other key order, where the unknown keys follow a shorter
+        // known set — the branch must reach the passthrough too.
+        let original = "{\n  \"agentId\": \"team-lead@t\",\n  \"name\": \"team-lead\",\n  \
+             \"agentType\": \"team-lead\",\n  \"joinedAt\": 1,\n  \"tmuxPaneId\": \"leader\",\n  \
+             \"cwd\": \"/w\",\n  \"subscriptions\": [],\n  \"backendType\": \"in-process\",\n  \
+             \"zeta\": \"kept\",\n  \"alpha\": {\n    \"nested\": true\n  }\n}";
         let record: MemberRecord = serde_json::from_str(original).expect("a record decodes");
 
         assert_eq!(record.extra.keys().collect::<Vec<_>>(), ["zeta", "alpha"]);
@@ -622,12 +834,47 @@ mod tests {
         let file: TeamFile = serde_json::from_str(original).expect("a team file decodes");
         assert_eq!(document(&file).expect("a team file encodes"), original);
 
-        // And for a message, where the unknown key follows the two stamps.
-        let original = "{\n  \"type\": \"message\",\n  \"from\": \"w\",\n  \"text\": \"hi\",\n  \
-             \"timestamp\": \"2026-08-17T00:00:00.000Z\",\n  \"read\": false,\n  \
-             \"msgV\": 1,\n  \"msg_id\": \"x\",\n  \"zeta\": \"kept\",\n  \"alpha\": \"kept\"\n}";
+        // And for a message, where the unknown key follows the whole envelope.
+        let original = "{\n  \"from\": \"w\",\n  \"text\": \"hi\",\n  \"summary\": \"s\",\n  \
+             \"timestamp\": \"2026-08-17T00:00:00.000Z\",\n  \"msgV\": 1,\n  \
+             \"msg_id\": \"x\",\n  \"type\": \"message\",\n  \"read\": false,\n  \
+             \"zeta\": \"kept\",\n  \"alpha\": \"kept\"\n}";
         let message: MailboxMessage = serde_json::from_str(original).expect("a message decodes");
         assert_eq!(document(&message).expect("a message encodes"), original);
+    }
+
+    #[test]
+    fn every_message_shape_the_survey_holds_round_trips_unchanged() {
+        // The modern envelope first — one real document, `session-44cd25e1`'s
+        // `inboxes/worker-mask.json`, with the body cut to a line. `type` next
+        // to `read` at the tail is the finding; §2.3's listing order is not it.
+        //
+        // The rest are the 2026-03 era, which is where `color` and every
+        // stamp-free shape come from. One declaration order serves all five,
+        // which is the reason this type needs no hand-written `Serialize` the
+        // way `MemberRecord` does.
+        for original in [
+            "{\n  \"from\": \"team-lead\",\n  \"text\": \"GO\",\n  \"summary\": \"unblock\",\n  \
+             \"timestamp\": \"2026-08-17T00:00:00.000Z\",\n  \"msgV\": 1,\n  \
+             \"msg_id\": \"0198c0de-dead-7000-8000-000000000000\",\n  \"type\": \"message\",\n  \
+             \"read\": false\n}",
+            "{\n  \"from\": \"w\",\n  \"text\": \"hi\",\n  \"summary\": \"s\",\n  \
+             \"timestamp\": \"2026-03-01T00:00:00.000Z\",\n  \"color\": \"blue\",\n  \
+             \"read\": false\n}",
+            "{\n  \"from\": \"w\",\n  \"text\": \"hi\",\n  \
+             \"timestamp\": \"2026-03-01T00:00:00.000Z\",\n  \"color\": \"blue\",\n  \
+             \"read\": false\n}",
+            "{\n  \"from\": \"w\",\n  \"text\": \"hi\",\n  \
+             \"timestamp\": \"2026-03-01T00:00:00.000Z\",\n  \"type\": \"message\",\n  \
+             \"read\": false\n}",
+            "{\n  \"from\": \"w\",\n  \"text\": \"hi\",\n  \
+             \"timestamp\": \"2026-03-01T00:00:00.000Z\",\n  \"read\": false\n}",
+        ] {
+            let message: MailboxMessage =
+                serde_json::from_str(original).expect("a message decodes");
+
+            assert_eq!(document(&message).expect("a message encodes"), original);
+        }
     }
 
     #[test]
