@@ -43,17 +43,39 @@
 //!   frame (§7-2). A `task_assignment` is held to the same bar: it becomes this
 //!   member's next turn only when the lead wrote it.
 //! - **A pane teammate does not lead a team of its own.** No registry is
-//!   installed for it and no `send_message` is offered to its model: every
-//!   public door to a postbox either stamps the lead's name or wants the
-//!   in-process `Teammate` a frontend holding its own `Engine` cannot have,
-//!   and a teammate posting as its lead is the forgery `ganja-core`'s postbox
-//!   exists to make impossible. Its results reach the lead as its own
-//!   session's transcript and its `idle_notification`; the member-stamped
-//!   postbox is a core seam this landing names rather than fakes.
-//! - **Permission asks stay in the pane.** Forwarding them to the lead as §5
-//!   frames (AC-8) needs the lead's own pass to stop dropping
-//!   `permission_request` by name (§7-1 as W6 built it), so a pane teammate is
-//!   human-attended unless its launch line carried the bypass trio (D479).
+//!   installed for it: a teammate is not a place to nest a second team, and
+//!   the lead's registry would offer its model a `send_message` stamped with
+//!   the lead's name. What it speaks through instead is `ganja-core`'s
+//!   [`ganja_core::teammate::member::MemberPostbox`], installed by the entry
+//!   with the name the launch line carried — the roster read off the team
+//!   file per call, the lead always addressable — so its results reach the
+//!   lead as messages, as its `idle_notification`, and as its own session's
+//!   transcript.
+//!
+//! # Posture, and the record a pane reads (D-5, AC-8)
+//!
+//! A pane's default posture is [`Posture::ForwardToLead`], and it rides
+//! `ganja-core`'s own [`Asks`] — the one dialect both ends of the inbox
+//! speak: an ask the pane's rules raise draws no dialog here but is written
+//! to the lead as §5's `permission_request` ([`Inbox::forward_ask`]), the
+//! lead's own pass puts it in front of the same dialog its in-process
+//! teammates use, and the answer comes back as a `permission_response`
+//! through this inbox, resolved by the type that refuses a peer's
+//! ([`Asks::resolve`] takes a [`LeadFrame`]) into the `ReplyPermission` the
+//! app sends — once, always or reject, exactly as the person at the lead's
+//! dialog answered *this member's own* open ask. [`Posture::BypassAtSpawn`]
+//! is the launch line's bypass trio (D479), which a lead composes exactly when
+//! the spawn it approved asked to skip dialogs, and the same answer the app
+//! already gives its own dialogs; nothing selects [`Posture::HumanAttended`]
+//! yet, and the plan selects it by nothing either.
+//!
+//! The member record — the model this teammate was spawned to run, and
+//! whether it must start in plan mode — is read off the team file **after a
+//! bounded wait** ([`Membership::await_record`]): the registry writes it only
+//! once the backend has answered, because the record names the pane the split
+//! returned, so a pane process is always older than its own record by a few
+//! milliseconds. `planModeRequired` becomes the `plan` agent, which is what
+//! plan mode is in this build.
 //!
 //! # One write, not two
 //!
@@ -74,11 +96,20 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use ganja_core::{
-    team::{MailboxMessage, MemberName, Surface, TeamName, TeamsRoot, mailbox, record},
-    teammate::{Delivery, TeammateRegistry, lead_inbox::Delivered, runner},
+    team::{
+        MailboxMessage, MemberName, MemberRecord, Surface, TeamFile, TeamName, TeamsRoot, mailbox,
+        record,
+    },
+    teammate::{
+        Delivery, TeammateRegistry,
+        lead_inbox::Delivered,
+        member::{Asks, Resolved, Unforwarded},
+        posture::Posture,
+        runner,
+    },
 };
 use ganja_protocol::{
-    FinishReason, PermissionMode,
+    Event, FinishReason, PermissionId, PermissionMode, PermissionReply,
     team::{
         Frame, IdleNotification, IdleReason, LeadFrame, ModeSetRequest, ShutdownApproved,
         TaskAssignment, cap_for_display,
@@ -103,6 +134,17 @@ pub const IGNORED_STALE: &str = runner::IGNORED_STALE;
 /// Read rather than passed: §4.1's launch line carries no pane id, and the
 /// pane is the one process that can ask its own environment which `%N` it is.
 pub const TMUX_PANE: &str = "TMUX_PANE";
+
+/// How long a pane waits for its own member record before refusing.
+///
+/// Generous against a lead that is slow to rewrite the team file under load,
+/// and short against a lead that died between the split and the write: a
+/// pane whose lead is gone should say so and leave, not sit in a window
+/// waiting for a record nobody will write.
+pub const RECORD_WAIT: Duration = Duration::from_secs(5);
+
+/// Between looks at the team file while waiting for the record.
+const RECORD_POLL: Duration = Duration::from_millis(50);
 
 /// What §4.1's launch line said, as the command line hands it in.
 ///
@@ -136,6 +178,7 @@ pub struct Membership {
     color: Option<String>,
     parent_session_id: String,
     surface: Surface,
+    posture: Posture,
 }
 
 impl Membership {
@@ -158,6 +201,12 @@ impl Membership {
     /// pane to kill; a process launched with these flags outside tmux reports
     /// no pane, which is the truth about it.
     ///
+    /// `bypass` is the launch line's bypass trio: [`Posture::BypassAtSpawn`]
+    /// when set, [`Posture::ForwardToLead`] otherwise — the record carries no
+    /// posture of its own (Claude's shape holds `planModeRequired` and nothing
+    /// else about it), and the spawn's own answer is the one fact the lead can
+    /// put on the line without putting a secret there.
+    ///
     /// # Errors
     ///
     /// A name or team the grammar refuses, or an id that does not name this
@@ -167,6 +216,7 @@ impl Membership {
         config_home: &Path,
         cwd: &Path,
         pane: Option<String>,
+        bypass: bool,
     ) -> Result<Self> {
         let name = MemberName::parse(&flags.name)
             .with_context(|| format!("--agent-name {:?} is refused", flags.name))?;
@@ -197,7 +247,70 @@ impl Membership {
             color: flags.color,
             parent_session_id: flags.parent_session_id,
             surface,
+            posture: if bypass {
+                Posture::BypassAtSpawn
+            } else {
+                Posture::ForwardToLead
+            },
         })
+    }
+
+    /// Where an ask this member's rules raise is answered (D-5).
+    #[must_use]
+    pub fn posture(&self) -> Posture {
+        self.posture
+    }
+
+    /// The team file's record of this member, or [`None`] while the lead has
+    /// not written it yet.
+    ///
+    /// # Errors
+    ///
+    /// A team file that is there and does not decode: that is somebody else's
+    /// document being wrong, not a record still on its way.
+    pub fn record(&self) -> Result<Option<MemberRecord>> {
+        let path = self.root.config_path(&self.team);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("the team file {} could not be read", path.display())
+                });
+            }
+        };
+        let team: TeamFile = serde_json::from_str(&text)
+            .with_context(|| format!("the team file {} does not decode", path.display()))?;
+
+        Ok(team.member(self.name.as_str()).cloned())
+    }
+
+    /// Waits for the lead to write this member's record, and hands it back.
+    ///
+    /// Bounded by `limit`, polled rather than watched: the write is one
+    /// rename by a process that has just launched this one, so it is a few
+    /// milliseconds away in every case but the one where the lead died, and
+    /// that case is what the bound is for.
+    ///
+    /// # Errors
+    ///
+    /// The record was not written within `limit`, naming the file a lead
+    /// would have written it into; or the file is there and will not decode.
+    pub async fn await_record(&self, limit: Duration) -> Result<MemberRecord> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if let Some(record) = self.record()? {
+                return Ok(record);
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!(
+                    "no lead wrote a record for teammate {:?} into {} within {limit:?}",
+                    self.name.as_str(),
+                    self.root.config_path(&self.team).display(),
+                );
+            }
+            tokio::time::sleep(RECORD_POLL).await;
+        }
     }
 
     /// The name this process answers to.
@@ -210,6 +323,12 @@ impl Membership {
     #[must_use]
     pub fn team(&self) -> &TeamName {
         &self.team
+    }
+
+    /// Where the team's documents live — the lead's own teams root.
+    #[must_use]
+    pub fn root(&self) -> &TeamsRoot {
+        &self.root
     }
 
     /// §4.3's colour, where the lead assigned one.
@@ -262,6 +381,11 @@ pub struct Pass {
     pub messages: Vec<Delivered>,
     /// The permission modes the lead set, in the order it set them (D-15).
     pub modes: Vec<PermissionMode>,
+    /// The lead's answers to asks this member forwarded (D-5, AC-8), in the
+    /// order they arrived — each the engine's own id and the reply the app
+    /// sends it. A stale answer never reaches here: [`Asks::resolve`] ignores
+    /// it, and this pass counts it among the ignored.
+    pub answers: Vec<(PermissionId, PermissionReply)>,
     /// How many approvals were ignored as stale.
     pub ignored: usize,
     /// The frames this pass named and dropped, by kind.
@@ -276,6 +400,7 @@ impl Pass {
         self.shutdown.is_none()
             && self.messages.is_empty()
             && self.modes.is_empty()
+            && self.answers.is_empty()
             && self.ignored == 0
             && self.dropped.is_empty()
     }
@@ -287,6 +412,9 @@ pub struct Inbox {
     membership: Membership,
     inbox: PathBuf,
     lead_inbox: PathBuf,
+    /// The asks this member's engine raised and forwarded to the lead, still
+    /// waiting on the answer (D-5) — `ganja-core`'s value, driven from here.
+    asks: Asks,
     /// The mailbox identity behind a message this pass **rendered** rather
     /// than carried verbatim — a `task_assignment` — keyed by the identity of
     /// what the app holds. [`Delivered::identity`] derives from the three
@@ -301,13 +429,40 @@ impl Inbox {
     pub fn new(membership: Membership) -> Self {
         let inbox = membership.inbox();
         let lead_inbox = membership.lead_inbox();
+        let asks = Asks::new(membership.name.clone(), &membership.team, &membership.root);
 
         Self {
             membership,
             inbox,
             lead_inbox,
+            asks,
             rendered: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The asks waiting on the lead.
+    #[must_use]
+    pub fn asks(&self) -> &Asks {
+        &self.asks
+    }
+
+    /// Carries one of this engine's dialogs to the lead instead of raising it
+    /// here (D-5, AC-8).
+    ///
+    /// # Errors
+    ///
+    /// [`Unforwarded`] when nothing was asked of anybody — the event was not
+    /// a permission request, or the lead's inbox would not take the frame —
+    /// which is the app's cue to refuse the call itself: a dialog nobody could
+    /// see has exactly one honest answer.
+    pub async fn forward_ask(&self, request: &Event) -> Result<(), Unforwarded> {
+        self.asks.forward(request).await
+    }
+
+    /// Forgets an ask its engine has published the answer to, from wherever
+    /// it was answered.
+    pub fn retire_ask(&self, id: &PermissionId) -> bool {
+        self.asks.retire(id)
     }
 
     /// Who this inbox belongs to.
@@ -379,6 +534,10 @@ impl Inbox {
             match self.apply(kind, message) {
                 Verdict::Mode(mode) => {
                     pass.modes.push(mode);
+                    handled.push(mailbox::identity(message));
+                }
+                Verdict::Answer(id, reply) => {
+                    pass.answers.push((id, reply));
                     handled.push(mailbox::identity(message));
                 }
                 Verdict::Ignored => {
@@ -494,6 +653,16 @@ impl Inbox {
         else {
             return self.drop_it(kind, message);
         };
+        // The lead answering an ask this member forwarded, resolved by the
+        // value that holds the wait — handed the proof itself, so a peer's
+        // answer cannot even be passed in (§7-2), and a stale one is ignored
+        // rather than applied (§7-3). Either way it leaves the inbox.
+        if matches!(lead.frame(), Frame::PermissionResponse(_)) {
+            return match self.asks.resolve(lead) {
+                Resolved::Answered { id, reply } => Verdict::Answer(id, reply),
+                Resolved::Stale { .. } | Resolved::NotAnAnswer { .. } => Verdict::Ignored,
+            };
+        }
 
         match lead.into_inner() {
             Frame::PlanApprovalResponse(response) => {
@@ -605,6 +774,8 @@ impl Inbox {
 enum Verdict {
     /// A permission mode the lead set, for the app to send the engine.
     Mode(PermissionMode),
+    /// The lead's answer to a forwarded ask, for the app to send the engine.
+    Answer(PermissionId, PermissionReply),
     /// Stale, or not this member's to act on. It still leaves the inbox.
     Ignored,
     /// Named and dropped.
@@ -678,14 +849,22 @@ pub(crate) fn shutdown_request(request_id: &str) -> Frame {
 
 #[cfg(test)]
 mod tests {
-    use ganja_core::team::{MailboxMessage, MemberName, TeamName, mailbox, record};
+    use std::time::Duration;
+
+    use ganja_core::{
+        team::{MailboxMessage, MemberName, TeamName, mailbox, record},
+        teammate::posture::Posture,
+    };
     use ganja_protocol::{
-        FinishReason, PermissionMode,
-        team::{Frame, IdleReason, ModeSetRequest, PlanApprovalResponse, TaskAssignment},
+        Event, FinishReason, PermissionId, PermissionMode, PermissionReply, SessionId,
+        team::{
+            Frame, IdleReason, ModeSetRequest, PermissionResponse, PermissionResponseBody,
+            PlanApprovalResponse, TaskAssignment,
+        },
     };
     use tempfile::TempDir;
 
-    use super::{Flags, Inbox, Membership, shutdown_request};
+    use super::{Flags, Inbox, Membership, RECORD_POLL, shutdown_request};
 
     /// §2.1's own example session, so the team on disk is `session-224cbeab`.
     const PARENT: &str = "224cbeab-4e62-497c-aa8f-d05cc33ce7ba";
@@ -706,6 +885,7 @@ mod tests {
             home.path(),
             home.path(),
             pane.map(str::to_owned),
+            false,
         )
         .expect("the flags resolve")
     }
@@ -764,7 +944,7 @@ mod tests {
         let mut wrong = flags("w1");
         wrong.agent_id = "w2@session-224cbeab".to_owned();
 
-        let refused = Membership::resolve(wrong, home.path(), home.path(), None)
+        let refused = Membership::resolve(wrong, home.path(), home.path(), None, false)
             .expect_err("a mismatched id is refused");
 
         assert!(
@@ -779,7 +959,8 @@ mod tests {
                 },
                 home.path(),
                 home.path(),
-                None
+                None,
+                false,
             )
             .is_err(),
             "and the reserved name is refused by the grammar"
@@ -1037,6 +1218,206 @@ mod tests {
 
         assert_eq!(pass.dropped, ["teammate_terminated"]);
         assert!(pass.messages.is_empty());
+        assert!(held(&inbox.inbox).is_empty());
+    }
+
+    /// The launch line's bypass trio is the one posture fact the lead can put
+    /// on the line, and the default is the lead's own dialog (D-5).
+    #[test]
+    fn a_pane_forwards_to_its_lead_unless_the_line_carried_the_bypass() {
+        let home = tempfile::tempdir().expect("a temporary home");
+
+        assert_eq!(member(&home, None).posture(), Posture::ForwardToLead);
+        assert_eq!(
+            Membership::resolve(flags("w1"), home.path(), home.path(), None, true)
+                .expect("the flags resolve")
+                .posture(),
+            Posture::BypassAtSpawn
+        );
+    }
+
+    /// The record is the lead's to write and arrives after the pane exists,
+    /// so it is waited for — and a lead that never writes it is refused
+    /// naming the file rather than waited on forever.
+    #[tokio::test]
+    async fn a_member_waits_for_its_record_and_refuses_when_no_lead_writes_one() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let member = member(&home, None);
+        assert_eq!(member.record().expect("no file is no record"), None);
+
+        let refused = member
+            .await_record(RECORD_POLL)
+            .await
+            .expect_err("nothing wrote a record");
+        assert!(
+            refused.to_string().contains("config.json"),
+            "the refusal names the file: {refused}"
+        );
+
+        // A lead of the same session writes it a moment later, exactly as the
+        // registry does — the record after the spawn — and the wait finds it.
+        let lead =
+            ganja_core::teammate::TeammateRegistry::for_session(home.path(), PARENT, home.path());
+        let path = lead.root().config_path(lead.team());
+        let mut team = ganja_core::team::TeamFile::new(
+            lead.team(),
+            PARENT,
+            home.path().display().to_string(),
+            record::now_millis(),
+        );
+        team.members.push(ganja_core::team::MemberRecord::teammate(
+            member.name(),
+            lead.team(),
+            ganja_core::team::Spawn {
+                agent_type: "general".to_owned(),
+                model: "recorder-model".to_owned(),
+                color: "blue".to_owned(),
+                prompt: "start on the parser".to_owned(),
+                plan_mode_required: false,
+                surface: ganja_core::team::Surface::Pane {
+                    id: "%7".to_owned(),
+                },
+                cwd: home.path().display().to_string(),
+            },
+            record::now_millis(),
+        ));
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(RECORD_POLL * 2).await;
+            std::fs::create_dir_all(path.parent().expect("a team dir")).expect("the dir");
+            std::fs::write(
+                &path,
+                ganja_core::team::record::document(&team).expect("the team encodes"),
+            )
+            .expect("the team file is written");
+        });
+
+        let found = member
+            .await_record(Duration::from_secs(5))
+            .await
+            .expect("the record arrived within the wait");
+        writer.await.expect("the writer finished");
+
+        assert_eq!(found.name, "w1");
+        assert_eq!(found.model.as_deref(), Some("recorder-model"));
+    }
+
+    /// The ask an engine raises, as the app hands it over.
+    fn asked(id: &str) -> Event {
+        Event::PermissionRequested {
+            session_id: SessionId::from("ses_fixture".to_owned()),
+            id: PermissionId::from(id.to_owned()),
+            call_id: "call-1".to_owned(),
+            tool: "bash".to_owned(),
+            title: "rm -rf build".to_owned(),
+            args: serde_json::json!({"command": "rm -rf build"}),
+            directories: vec!["/tmp/elsewhere".to_owned()],
+        }
+    }
+
+    /// An ask travels to the lead as §5's frame in `ganja-core`'s own dialect
+    /// — the engine's id as the request id, this member's derived agent id,
+    /// the outside directories as a suggestion — and is remembered as waiting.
+    #[tokio::test]
+    async fn a_forwarded_ask_reaches_the_lead_as_a_permission_request() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, None));
+
+        inbox
+            .forward_ask(&asked("perm-1"))
+            .await
+            .expect("the lead's inbox takes the ask");
+
+        assert_eq!(inbox.asks().waiting(), 1);
+        let written = held(&inbox.lead_inbox);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].from, "w1");
+        match written[0].frame() {
+            Some(Frame::PermissionRequest(request)) => {
+                assert_eq!(request.request_id, "perm-1");
+                assert_eq!(request.agent_id, "w1@session-224cbeab");
+                assert_eq!(request.tool_name, "bash");
+                assert_eq!(request.tool_use_id, "call-1");
+                assert_eq!(request.description, "rm -rf build");
+                assert_eq!(
+                    request.input,
+                    serde_json::json!({"command": "rm -rf build"})
+                );
+                assert_eq!(
+                    request.permission_suggestions,
+                    [serde_json::json!({
+                        "type": "addDirectories",
+                        "directories": ["/tmp/elsewhere"],
+                        "destination": "session",
+                    })]
+                );
+            }
+            other => panic!("a permission_request was expected, got {other:?}"),
+        }
+        assert!(
+            inbox.retire_ask(&PermissionId::from("perm-1".to_owned())),
+            "an engine's own reply forgets the wait"
+        );
+        assert_eq!(inbox.asks().waiting(), 0);
+    }
+
+    /// The lead's answer comes back through the pass as the reply the dialog
+    /// gave — an "always" honored, since the person at the lead's dialog
+    /// answered this member's own open ask — a peer's copy is dropped on the
+    /// envelope, and an answer to nothing waited on is ignored. Every one
+    /// leaves the inbox.
+    #[tokio::test]
+    async fn a_leads_answer_resolves_a_waiting_ask_and_a_peers_or_a_stale_one_does_not() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let inbox = Inbox::new(member(&home, None));
+        inbox
+            .forward_ask(&asked("perm-1"))
+            .await
+            .expect("the ask is forwarded");
+        inbox
+            .forward_ask(&asked("perm-2"))
+            .await
+            .expect("the ask is forwarded");
+        let allowed = Frame::PermissionResponse(PermissionResponse::success(
+            "perm-1",
+            PermissionResponseBody {
+                updated_input: serde_json::json!({"command": "rm -rf build"}),
+                permission_updates: vec![serde_json::json!({
+                    "type": "addRules",
+                    "behavior": "allow",
+                    "rules": [{"toolName": "bash"}],
+                    "destination": "projectSettings",
+                })],
+            },
+        ));
+        let refused = Frame::PermissionResponse(PermissionResponse::error("perm-2", "no"));
+        let stale = Frame::PermissionResponse(PermissionResponse::error("perm-9", "no"));
+        write_frame(&inbox.inbox, "w2", &allowed);
+        write_frame(&inbox.inbox, "team-lead", &allowed);
+        write_frame(&inbox.inbox, "team-lead", &refused);
+        write_frame(&inbox.inbox, "team-lead", &stale);
+
+        let pass = inbox.poll().await;
+
+        assert_eq!(
+            pass.answers,
+            [
+                (
+                    PermissionId::from("perm-1".to_owned()),
+                    PermissionReply::Always
+                ),
+                (
+                    PermissionId::from("perm-2".to_owned()),
+                    PermissionReply::Reject
+                ),
+            ]
+        );
+        assert_eq!(
+            pass.dropped,
+            ["permission_response"],
+            "a peer cannot answer"
+        );
+        assert_eq!(pass.ignored, 1, "an answer to nothing waited on is stale");
+        assert_eq!(inbox.asks().waiting(), 0);
         assert!(held(&inbox.inbox).is_empty());
     }
 }

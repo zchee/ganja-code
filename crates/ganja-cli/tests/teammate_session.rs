@@ -71,7 +71,8 @@ use ganja_core::{
 #[cfg(unix)]
 use ganja_core::{
     protocol::PartBody,
-    team::{MailboxMessage, MemberName, mailbox, record},
+    provider::fake,
+    team::{MailboxMessage, MemberName, MemberRecord, Spawn, Surface, TeamFile, mailbox, record},
     teammate::TeammateRegistry,
 };
 #[cfg(unix)]
@@ -363,6 +364,36 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
     )
     .expect("the inbox takes the seed");
     mailbox::seed(&lead_inbox).expect("the lead's inbox is created");
+    // And the member record, as the registry writes it once the split has
+    // answered: the pane waits for this before it builds its engine, because
+    // the model it runs is the record's.
+    let mut file = TeamFile::new(
+        team.team(),
+        LEAD_SESSION,
+        fixture.path().display().to_string(),
+        record::now_millis(),
+    );
+    file.members.push(MemberRecord::teammate(
+        &member,
+        team.team(),
+        Spawn {
+            agent_type: "general".to_owned(),
+            model: fake::MODEL.to_owned(),
+            color: "blue".to_owned(),
+            prompt: TEAMMATE_PROMPT.to_owned(),
+            plan_mode_required: false,
+            surface: Surface::Pane {
+                id: PANE.to_owned(),
+            },
+            cwd: fixture.path().display().to_string(),
+        },
+        record::now_millis(),
+    ));
+    fs::write(
+        team.root().config_path(team.team()),
+        record::document(&file).expect("the team file encodes"),
+    )
+    .expect("the team file is written");
 
     // The launch line, as `pane.rs` composes it — the flags `MemberArgs`
     // documents, and the pane id through the environment.

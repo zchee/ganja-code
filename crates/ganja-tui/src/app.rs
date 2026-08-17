@@ -26,7 +26,7 @@ use ganja_core::{
     teammate::{
         Delivery,
         lead_inbox::{Delivered, LeadInbox},
-        posture::Forwarded,
+        posture::{Forwarded, Posture},
     },
 };
 use ganja_protocol::{
@@ -709,6 +709,15 @@ pub struct App {
     /// the write is a file, so what the event decided is carried to the first
     /// point after it where an `await` is allowed.
     member_finished: Option<(FinishReason, Option<String>)>,
+    /// Asks this member's rules raised and its posture forwards to the lead
+    /// (D-5), waiting for the first `await` after the event to be written.
+    ///
+    /// [`App::auto_permissions`]'s shape, pointed at a file instead of at
+    /// this engine: `handle_core` decides, the write happens after. The event
+    /// itself is carried, because the value that writes it — the member's
+    /// [`ganja_core::teammate::member::Asks`] — reads the ask off the event
+    /// and holds the wait by its id.
+    member_asks: Vec<CoreEvent>,
     /// The `(tokens, window)` pair the context meter last showed, so a tick
     /// that finds the estimate unmoved touches nothing (**D469**).
     context: Option<(u64, u64)>,
@@ -889,6 +898,7 @@ impl App {
             member_polled: None,
             member_shutdown: None,
             member_finished: None,
+            member_asks: Vec::new(),
             context: None,
             rates: Vec::new(),
             plans: Vec::new(),
@@ -1209,6 +1219,7 @@ impl App {
                 // end is a frame the lead reads, and a shutdown waiting on that
                 // end can now be answered (§10.3-3, §10.3-4).
                 self.report_member_idle().await;
+                self.forward_member_asks().await;
                 self.finish_member_shutdown().await;
                 self.dirty = true;
                 // Run after every engine event, because the event that just
@@ -1465,6 +1476,9 @@ impl App {
                 tracing::warn!(%error, "a permission mode the lead set was refused");
             }
         }
+        for (id, reply) in pass.answers {
+            self.answer_forwarded_ask(id, reply).await;
+        }
         if let Some(request_id) = pass.shutdown {
             self.begin_member_shutdown(request_id).await;
 
@@ -1477,6 +1491,90 @@ impl App {
             .collect();
         self.deliver_peers(fresh).await;
         self.dirty = true;
+    }
+
+    /// Whether an ask this engine raises goes to the lead rather than onto
+    /// this screen (D-5): a pane teammate under [`Posture::ForwardToLead`].
+    ///
+    /// The bypass is checked first by the caller, as it is for every other
+    /// dialog: a spawn that was itself the answer forwards nothing.
+    fn forwards_asks_to_lead(&self) -> bool {
+        self.member
+            .as_ref()
+            .is_some_and(|inbox| inbox.membership().posture() == Posture::ForwardToLead)
+    }
+
+    /// Writes the asks `handle_core` decided to forward, at the first point
+    /// after the event where the disk is reachable (D-5, AC-8).
+    ///
+    /// An ask that could not be forwarded is refused **here**, by this app,
+    /// with the reply it would have sent for any dialog nobody could see:
+    /// nothing was asked of anybody, and a turn left waiting on an answer that
+    /// is not coming would be worse than a refused call the model reads.
+    async fn forward_member_asks(&mut self) {
+        if self.member_asks.is_empty() {
+            return;
+        }
+        let asks = std::mem::take(&mut self.member_asks);
+        for ask in asks {
+            let forwarded = match &self.member {
+                Some(inbox) => inbox.forward_ask(&ask).await,
+                None => continue,
+            };
+            let Err(error) = forwarded else {
+                continue;
+            };
+            let CoreEvent::PermissionRequested { id, .. } = ask else {
+                continue;
+            };
+            tracing::warn!(request = id.as_str(), %error, "an ask was refused instead of forwarded");
+            if let Err(error) = self
+                .engine
+                .send(Command::ReplyPermission {
+                    id,
+                    reply: PermissionReply::Reject,
+                })
+                .await
+            {
+                tracing::warn!(%error, "the refusal of an unforwarded ask was itself refused");
+            }
+        }
+    }
+
+    /// Carries the lead's answer to the engine, and puts the bar back to
+    /// streaming once nothing is waiting on anybody.
+    async fn answer_forwarded_ask(
+        &mut self,
+        id: ganja_protocol::PermissionId,
+        reply: PermissionReply,
+    ) {
+        if let Err(error) = self
+            .engine
+            .send(Command::ReplyPermission {
+                id: id.clone(),
+                reply,
+            })
+            .await
+        {
+            tracing::warn!(
+                request = id.as_str(),
+                %error,
+                "the lead's answer to a forwarded ask was refused by the engine"
+            );
+        }
+        self.settle_member_activity();
+    }
+
+    /// The bar's activity once a forwarded ask is answered: streaming again
+    /// only when no ask is waiting on the lead and no dialog is on screen.
+    fn settle_member_activity(&mut self) {
+        let waiting = self
+            .member
+            .as_ref()
+            .is_some_and(|inbox| inbox.asks().waiting() > 0);
+        if !waiting && self.permission.is_none() {
+            self.status.set_activity(Activity::Streaming);
+        }
     }
 
     /// One §6.1 pass, or [`None`] on a session that is nobody's teammate —
@@ -5773,12 +5871,13 @@ impl App {
                 self.sync_task_status();
             }
             CoreEvent::PermissionRequested {
+                session_id,
                 id,
+                call_id,
                 tool,
                 title,
                 args,
                 directories,
-                ..
             } => {
                 // A yolo session stands in for the person before any of the
                 // rest happens (**D479**): nobody is about to be asked, so
@@ -5792,6 +5891,26 @@ impl App {
                 // what keeps a config's standing "no" standing.
                 if self.yolo {
                     self.auto_permissions.push_back(id);
+
+                    return;
+                }
+                // A pane teammate forwarding to its lead (D-5, AC-8) shows no
+                // dialog either: the question travels to the lead's screen as
+                // §5's frame and the answer comes back through the inbox. The
+                // bar still says the turn is waiting on somebody, and on whom.
+                if self.forwards_asks_to_lead() {
+                    self.status
+                        .set_notice(Some(format!("asked the lead to allow: {title}")));
+                    self.status.set_activity(Activity::Permission);
+                    self.member_asks.push(CoreEvent::PermissionRequested {
+                        session_id,
+                        id,
+                        call_id,
+                        tool,
+                        title,
+                        args,
+                        directories,
+                    });
 
                     return;
                 }
@@ -5832,6 +5951,16 @@ impl App {
                 self.sync_queue_status();
             }
             CoreEvent::PermissionReplied { id, .. } => {
+                // A forwarded ask answered by any route — the lead's frame,
+                // or a cancel refusing every open dialog — is no longer
+                // waiting on the lead (D-5).
+                if self
+                    .member
+                    .as_ref()
+                    .is_some_and(|inbox| inbox.retire_ask(&id))
+                {
+                    self.settle_member_activity();
+                }
                 let names_open_request = self
                     .permission
                     .as_ref()
@@ -16358,6 +16487,7 @@ mod tests {
             directory.path(),
             directory.path(),
             Some("%5".to_owned()),
+            false,
         )
         .expect("the launch line resolves");
         let engine = Engine::persistent(
@@ -16657,6 +16787,7 @@ mod tests {
             std::path::Path::new("/nowhere"),
             std::path::Path::new("/nowhere"),
             None,
+            false,
         )
         .expect("the launch line resolves");
         let mut member = app().with_member(crate::member::Inbox::new(membership));
@@ -16679,5 +16810,161 @@ mod tests {
         let mut plain = app();
         plain.dirty = false;
         assert!(!plain.wants_wakeup(), "a plain session sleeps");
+    }
+
+    /// **AC-8's member half** (D-5): a pane teammate under `ForwardToLead`
+    /// raises no dialog of its own. The ask its rules raise travels to the
+    /// lead as §5's `permission_request`, the lead's `permission_response`
+    /// comes back through the member's inbox as `ReplyPermission::Once`, and
+    /// the call the ask was about actually runs.
+    ///
+    /// A real engine and a real tool, for `shelling`'s reason: what has to be
+    /// shown is a turn that ran to its end with nobody at this terminal
+    /// answering anything.
+    #[tokio::test]
+    async fn a_pane_teammates_ask_travels_to_the_lead_and_the_answer_lets_the_call_run() {
+        let directory = temporary();
+        let script = directory.path().join("shell.json");
+        fs::write(
+            &script,
+            format!(
+                r#"{{
+                    "cadence_ms": 0,
+                    "turns": [
+                        {{"tool_calls": [{{
+                            "name": "bash",
+                            "args": {{"command": "echo {ECHOED}"}}
+                        }}]}},
+                        {{"text": "{CLOSING}"}}
+                    ]
+                }}"#
+            ),
+        )
+        .expect("the fake-provider script writes");
+        let membership = crate::member::Membership::resolve(
+            crate::member::Flags {
+                agent_id: "w1@session-224cbeab".to_owned(),
+                name: "w1".to_owned(),
+                team: "session-224cbeab".to_owned(),
+                color: None,
+                parent_session_id: "224cbeab-4e62-497c-aa8f-d05cc33ce7ba".to_owned(),
+            },
+            directory.path(),
+            directory.path(),
+            None,
+            false,
+        )
+        .expect("the launch line resolves");
+        let engine = Engine::new(
+            Arc::new(FakeProvider::new("", Duration::ZERO).with_script(&script)),
+            fake::MODEL,
+            Arc::new(ganja_tool::Registry::new(vec![Arc::new(
+                ganja_tool::shell::ShellTool::new(),
+            )])),
+            ganja_permission::Permissions::default(),
+        );
+        let mut events = engine.subscribe().await.expect("the test subscribes first");
+        let mut app = App::new(engine, None, Themes::builtin())
+            .with_member(crate::member::Inbox::new(membership));
+        let (inbox, lead_inbox) = member_paths(&app);
+        app.engine
+            .send(ganja_protocol::Command::SendPrompt {
+                text: "run it".to_owned(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+                peers: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts the prompt");
+
+        let mut seen = Vec::new();
+        let mut answered = false;
+        for _ in 0..128 {
+            let event = next_event(&mut events).await;
+            let finished = matches!(event, CoreEvent::MessageFinished { .. });
+            seen.push(event.clone());
+            app.handle(AppEvent::core(event))
+                .await
+                .expect("an engine event is handled");
+            assert!(
+                app.permission.is_none() && app.queued_permissions.is_empty(),
+                "a forwarding pane draws no dialog of its own"
+            );
+            if !answered
+                && app
+                    .member
+                    .as_ref()
+                    .is_some_and(|inbox| inbox.asks().waiting() > 0)
+            {
+                // The ask reached the lead as a frame naming the engine's own
+                // request id, and this is the lead answering it.
+                let request = lead_heard(&lead_inbox)
+                    .into_iter()
+                    .find_map(|frame| match frame {
+                        ganja_protocol::team::Frame::PermissionRequest(request) => Some(request),
+                        _ => None,
+                    })
+                    .expect("the ask reached the lead");
+                assert_eq!(request.tool_name, "bash");
+                assert_eq!(request.agent_id, "w1@session-224cbeab");
+                assert_eq!(
+                    request.request_id,
+                    seen.iter()
+                        .find_map(|event| match event {
+                            CoreEvent::PermissionRequested { id, .. } =>
+                                Some(id.as_str().to_owned()),
+                            _ => None,
+                        })
+                        .expect("the engine asked"),
+                    "the frame names the engine's own id"
+                );
+                ganja_core::team::mailbox::write(
+                    &inbox,
+                    ganja_core::team::MailboxMessage::from_frame(
+                        "team-lead",
+                        &ganja_protocol::team::Frame::PermissionResponse(
+                            ganja_protocol::team::PermissionResponse::success(
+                                request.request_id.clone(),
+                                ganja_protocol::team::PermissionResponseBody {
+                                    updated_input: request.input.clone(),
+                                    permission_updates: Vec::new(),
+                                },
+                            ),
+                        ),
+                        ganja_core::team::record::now_iso8601(),
+                    )
+                    .expect("the frame encodes"),
+                )
+                .expect("the member's inbox takes the answer");
+                app.handle(AppEvent::Tick).await.expect("a tick is handled");
+                assert_eq!(
+                    app.member.as_ref().map(|inbox| inbox.asks().waiting()),
+                    Some(0),
+                    "the answer closed the ask"
+                );
+                answered = true;
+            }
+            if finished {
+                break;
+            }
+        }
+
+        assert!(answered, "the turn never asked: {seen:#?}");
+        let replies: Vec<_> = seen
+            .iter()
+            .filter_map(|event| match event {
+                CoreEvent::PermissionReplied { reply, .. } => Some(*reply),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            vec![PermissionReply::Once],
+            "the lead's success is Once, never Always"
+        );
+        assert!(
+            completed_shell(&seen).is_some_and(|output| output.contains(ECHOED)),
+            "the call the ask was about actually ran: {seen:#?}"
+        );
     }
 }
