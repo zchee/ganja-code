@@ -29,6 +29,8 @@ use secrecy::{SecretString, zeroize::Zeroize as _};
 use tracing_appender::non_blocking::WorkerGuard;
 
 mod assemble;
+#[cfg(unix)]
+mod binder;
 mod import;
 mod login;
 mod mcp;
@@ -65,6 +67,16 @@ struct Cli {
     bypass: BypassArgs,
     #[command(flatten)]
     member: MemberArgs,
+    /// The directory a lead session binds its socket in, instead of this
+    /// user's own (**D505**).
+    ///
+    /// Hidden exactly as `sessions --live`'s `--socket-dir` is, and for the
+    /// same reason: a test door, so the suite can bring a real lead up with
+    /// its socket in a directory of its own rather than in the developer's
+    /// `/tmp/ganja-<uid>/`, where `ganja sessions --live` would then list it.
+    /// Meaningless to a pane member, which binds nothing whatever this says.
+    #[arg(long, hide = true, value_name = "DIR")]
+    socket_dir: Option<PathBuf>,
     /// Write the log file at debug level instead of info.
     ///
     /// What that buys is the provider wires' own account of a turn — the model
@@ -715,11 +727,22 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None => {
+            // The one binder this binary has (**D505**): the UI may not link
+            // the server, so it is handed the door and decides — lead only —
+            // whether to open it. Windows is parked, and a build there hands
+            // the UI nothing rather than a door that would refuse.
+            #[cfg(unix)]
+            let binder: Option<Box<dyn ganja_tui::binder::Binder>> =
+                Some(Box::new(binder::SocketBinder::new(cli.socket_dir)));
+            #[cfg(not(unix))]
+            let binder: Option<Box<dyn ganja_tui::binder::Binder>> = None;
+
             ganja_tui::run(
                 cli.resume.wanted(),
                 cli.select.overrides(),
                 cli.bypass.wanted(),
                 cli.member.wanted(),
+                binder,
             )
             .await
         }

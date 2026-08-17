@@ -900,7 +900,7 @@ async fn a_recompute_survives_reload_and_never_defers_an_activated_name() {
             .map(|name| RecorderTool::new(name, name, "answered").0 as Arc<dyn Tool>)
             .collect()
     };
-    let mut engine = Engine::new(
+    let engine = Engine::new(
         provider,
         "scripted-model",
         Arc::new(Registry::new(big_only())),
@@ -945,7 +945,7 @@ async fn a_recompute_survives_reload_and_never_defers_an_activated_name() {
     let solo: Vec<Arc<dyn Tool>> = vec![
         RecorderTool::new("mcp__small__solo", "mcp__small__solo", "answered").0 as Arc<dyn Tool>,
     ];
-    let mut engine = engine.with_defer_threshold(0);
+    let engine = engine.with_defer_threshold(0);
     engine.replace_base_tools(Arc::new(Registry::new(solo)));
     engine.send(prompt()).await.expect("an idle engine accepts");
     drain(&mut events).await;
