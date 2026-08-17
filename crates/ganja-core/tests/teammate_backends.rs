@@ -1,15 +1,26 @@
-//! Which surfaces there are, how one is named, what a build that cannot have
-//! one says, and what two spawns racing for one name get (**D501**, **AC-27**,
-//! AC-14's P25a leg).
+//! Which surfaces there are, how one is named, what each can promise about a
+//! delivery, and what two spawns racing for one name get (**D501**,
+//! **AC-27**).
 //!
 //! Every root is handed in, and nothing here **writes** process-wide state, so
 //! this binary holds several tests. It does read some — `tempfile` resolves
 //! `TMPDIR` for the directories below — which is a read every test in the
 //! workspace makes and no test here can disturb.
 //!
-//! What it deliberately does *not* hold is the door-equivalence claim: that a
-//! `task` call and `/team spawn` build the same request is asserted where each
-//! door lives, because a core test binary cannot see the TUI one.
+//! What it deliberately does *not* hold, and why:
+//!
+//! - the door-equivalence claim — that a `task` call and `/team spawn` build
+//!   the same request is asserted where each door lives, because a core test
+//!   binary cannot see the TUI one;
+//! - **anything that starts a pane backend.** Since P25b the two pane values
+//!   really spawn when `$TMUX` is set, so a spawn of either from a binary that
+//!   cannot control that variable would split a pane of *this test harness*
+//!   into whatever tmux the developer is running the suite in. The per-value
+//!   refusal outside tmux is `teammate_no_tmux.rs` (AC-16), which owns
+//!   `TMUX`; the real spawn on a private server is
+//!   `teammate_pane_lifecycle.rs` (AC-11's engine-side leg). Both pane values
+//!   are still constructed here, for what they say
+//!   about themselves without being asked to spawn.
 //!
 //! Everything that starts a teammate here goes through
 //! [`ganja_core::Teammates::start`], which is the **only** door onto the
@@ -25,12 +36,12 @@ use ganja_core::{
     protocol::{PermissionReply, team::MemberBackend},
     provider::FakeProvider,
     teammate::{
-        BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, REFUSED_UNTIL_P25B, TeammateBackend,
-        TeammateRegistry, backend_name, claude::ClaudePane, pane::GanjaPane, parse_backend,
+        BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, TeammateBackend, TeammateRegistry,
+        backend_name, claude::ClaudePane, pane::GanjaPane, parse_backend,
     },
     tool::{Registry, task::TeammateSpawn},
 };
-use ganja_team::{MemberName, TeamFile, TeamName, TeamsRoot, mailbox};
+use ganja_team::{MemberName, TeamFile, TeamName, TeamsRoot};
 
 /// The task every teammate here is started with. Nothing reads it; what
 /// matters is that a spawn that failed left none of it behind.
@@ -57,8 +68,9 @@ impl SpawnAsker for Yes {
 ///
 /// The in-process backend is the real one — a fake provider over a real store,
 /// which is what a teammate needs to have a session at all — and both pane
-/// slots hold this build's own refusing skeletons, so a request naming one is
-/// refused by the same value production would refuse it with.
+/// slots hold production's own backends, which no test in this binary asks to
+/// spawn (the module doc says why); every request below names `in-process`
+/// or nothing.
 fn team(home: &std::path::Path) -> (TeamsRoot, TeamName, Arc<TeammateRegistry>, Arc<Teammates>) {
     let root = TeamsRoot::new(home.join("teams"));
     let team = TeamName::parse("session-abcd1234").expect("a team name");
@@ -206,63 +218,6 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
     assert_eq!(in_process.backend(), MemberBackend::InProcess);
     assert_eq!(GanjaPane.backend(), MemberBackend::Pane);
     assert_eq!(ClaudePane.backend(), MemberBackend::Claude);
-}
-
-/// **AC-14's P25a leg.** Both pane values refuse, they refuse with the same
-/// sentence, and the sentence names the phase that will change the answer.
-///
-/// Identical on purpose: one door spawning where the other refuses would be two
-/// behaviours wearing one argument, and a refusal that named neither the phase
-/// nor the alternative would leave a reader guessing whether their session or
-/// their build was the problem.
-#[tokio::test]
-async fn the_two_pane_backends_refuse_identically_until_p25b() {
-    let home = ganja_testkit::temp_dir();
-    let (root, team, registry, door) = team(home.path());
-    let caller = caller(home.path());
-
-    let ganja = door
-        .start(request("worker", Some("pane")), &caller, &Yes)
-        .await
-        .expect_err("this build has no panes yet");
-    let claude = door
-        .start(request("worker", Some("claude")), &caller, &Yes)
-        .await
-        .expect_err("nor real claude ones");
-
-    // The sentence a model reads is the surface it asked for, then why. So the
-    // heads differ by exactly the backend's own name and the tails are one
-    // string — which is what "refuse identically" is a claim about.
-    assert!(
-        ganja.reason.ends_with(REFUSED_UNTIL_P25B) && claude.reason.ends_with(REFUSED_UNTIL_P25B),
-        "a pane refusal names the phase that changes the answer: {ganja:?} / {claude:?}"
-    );
-    assert!(ganja.reason.contains("P25b"), "{}", ganja.reason);
-    assert!(
-        ganja.reason.contains("pane") && claude.reason.contains("claude"),
-        "a refusal still says which surface was asked for: {ganja:?} / {claude:?}"
-    );
-    assert_ne!(
-        ganja.reason, claude.reason,
-        "and the two are still told apart by it"
-    );
-
-    // A refused spawn leaves nothing behind: no member, no teammate, and — the
-    // half that would otherwise still be there tomorrow — no task sitting in a
-    // mailbox nothing will ever read.
-    assert!(
-        recorded(&root, &team).is_empty(),
-        "a team file was written for a teammate that never started"
-    );
-    assert_eq!(registry.running(), 0);
-    let inbox = root.inbox_path(&team, &MemberName::parse("worker").expect("a member name"));
-    assert!(
-        mailbox::read(&inbox)
-            .expect("the inbox reads")
-            .valid
-            .is_empty(),
-        "a refused spawn left its prompt in an inbox"
-    );
 }
 
 /// **Two spawns of one name at once are two teammates, not one and a ghost.**

@@ -12,9 +12,13 @@
 //! through it in exactly the sentence the other door refuses in — one door must
 //! not spawn where the other refuses.
 //!
-//! One test, because it redirects `XDG_DATA_HOME`, and a binary that mutates
-//! process-wide state holds exactly one — a plain `cargo test` runs a binary's
-//! tests on threads of one process.
+//! One test, because it redirects `XDG_DATA_HOME` and **withdraws `TMUX`**, and
+//! a binary that mutates process-wide state holds exactly one — a plain `cargo
+//! test` runs a binary's tests on threads of one process. `TMUX` goes because
+//! since P25b the pane backends are real: with it set, the `pane` request below
+//! would split a pane of this test harness into whatever tmux the developer is
+//! running the suite in, and the claim here is about the *door*, not about a
+//! window.
 //!
 //! # What sits behind the seam here, and why
 //!
@@ -38,7 +42,10 @@ use ganja_core::{
     permission::Permissions,
     protocol::PermissionReply,
     provider::FakeProvider,
-    teammate::{InProcess, REFUSED_UNTIL_P25B, TeammateRegistry},
+    teammate::{
+        InProcess, TeammateRegistry,
+        tmux::{self, REFUSED_NO_TMUX},
+    },
     tool::{
         Credentials, FileTimes, Registry, Tool as _, ToolCtx, ToolError,
         task::{
@@ -129,6 +136,12 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
     // SAFETY: this binary holds exactly one test, so nothing else in this
     // process is reading the environment while it is being written.
     let data = unsafe { ganja_testkit::redirect_xdg_data_home() };
+    // SAFETY: the same invariant. Outside tmux, both pane values refuse (D501)
+    // instead of splitting a pane of this binary into the developer's session.
+    unsafe {
+        std::env::remove_var(tmux::TMUX);
+        std::env::remove_var(tmux::TMUX_PANE);
+    }
     let home = ganja_testkit::temp_dir();
     let root = TeamsRoot::new(home.path().join("teams"));
     let team = TeamName::parse(TEAM).expect("a team name");
@@ -243,18 +256,24 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         asked.lock().expect("no panic")
     );
 
-    // The two pane values refuse identically, and through this door: a door
-    // that spawned where the other refused would be two behaviours wearing one
-    // argument.
+    // The two pane values refuse through this door — a door that spawned where
+    // the other refused would be two behaviours wearing one argument — and the
+    // `pane` sentence is the one `teammate_no_tmux.rs` pins: the session, not
+    // the build, is what is missing. `claude`'s sentence is W5b/L3's to pin in
+    // both binaries once `claude.rs`'s body lands; until then its skeleton
+    // refuses naming the phase, and what this door proves about it is that it
+    // refuses at all.
     for backend in ["pane", "claude"] {
         let refused = match tool.run(args(backend), &ctx).await {
             Err(ToolError::Failed(message)) => message,
             other => panic!("expected {backend} to be refused, got {other:?}"),
         };
-        assert!(
-            refused.contains(REFUSED_UNTIL_P25B),
-            "{backend} refuses in the sentence teammate_backends.rs pins: {refused}"
-        );
+        if backend == "pane" {
+            assert!(
+                refused.contains(REFUSED_NO_TMUX),
+                "{backend} refuses in the sentence teammate_no_tmux.rs pins: {refused}"
+            );
+        }
         assert!(
             refused.contains(backend),
             "and names the surface that was asked for: {refused}"

@@ -125,3 +125,16 @@ tokio = { workspace = true, features = ["net", "test-util"] }
 # Only to prove that a failed request logs nothing resembling an API key: the
 # secret-hygiene test needs a subscriber it can read back.
 tracing-subscriber.workspace = true
+
+# The two pane binaries are their own `main`. The program `pane.rs` starts in a
+# teammate's pane is `current_exe()` — inside a test binary, the test binary
+# itself, carrying the spawn flags — and libtest would refuse those flags on
+# sight. So each opens by asking whether it is the pane child (see
+# `tests/pane_support/mod.rs`) and only otherwise runs its one test.
+[[test]]
+name = "teammate_pane_lifecycle"
+harness = false
+
+[[test]]
+name = "teammate_pane_env"
+harness = false
