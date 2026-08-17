@@ -34,13 +34,18 @@
 //! module is asked to trust.
 //!
 //! **Liveness is a lock, not a probe.** Beside every socket sits a sibling
-//! `<stem>.lock`, and a binder holds an advisory `flock(LOCK_EX | LOCK_NB)` on
-//! it for as long as it serves; the lock is the one token that says "this
-//! name is live". A name whose lock is held is **never** touched — its file
-//! is not unlinked and its bind is not attempted, whatever a connection to it
-//! would or would not do — and one whose lock is free is stale by definition:
-//! the kernel released it when the holder exited, cleanly or not, so the file
-//! left behind is unlinked and the name reused. Connecting was the first
+//! `<stem>.lock` — in the same vetted `0700` directory, created at `0600`, so
+//! the world-writable-parent story above covers it without a word more — and
+//! a binder holds an advisory `flock(LOCK_EX | LOCK_NB)` on it for as long as
+//! it serves; the lock is the one token that says "this name is live". A name
+//! whose lock is held is **never** touched — its file is not unlinked and its
+//! bind is not attempted, whatever a connection to it would or would not do —
+//! and one whose lock is free is stale by definition. `flock` is the right
+//! primitive for exactly one reason: the kernel drops it with the last
+//! descriptor, so a holder that exits, crashes, or is `SIGKILL`ed releases
+//! the name without running a line of cleanup, and a stale lock can no more
+//! wedge a name than a stale socket file can — the file left behind is
+//! unlinked and the name reused. Connecting was the first
 //! draft's probe and is gone on purpose: a live listener refuses a connection
 //! whenever its accept backlog is full — the window between a bind and the
 //! first accept included — so "refused" never meant "nobody home", and two

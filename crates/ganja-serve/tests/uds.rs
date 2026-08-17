@@ -17,7 +17,13 @@
 //!   the verdict is pinned where it is decided: `socket.rs`'s pure `vet`
 //!   over `(owner, mode, own uid)`, its three arms each a unit test. What the
 //!   integration tests hold is the not-a-directory and mode arms on real
-//!   directories, and that the refusal reaches `serve()`'s caller by name.
+//!   directories, and that the refusal reaches `serve()`'s caller by name;
+//! * a **full accept backlog** behind a live name — Linux blocks a connect
+//!   into a full Unix backlog where macOS refuses it, so a flood would hang
+//!   the CI lane rather than prove anything. The design makes the backlog's
+//!   state irrelevant (liveness is the lock, and no connect is ever made),
+//!   and `a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it`
+//!   asserts that with a held lock and a listener nobody accepts on.
 //!
 //! Every directory is a fresh `tempfile` one rather than the real
 //! `/tmp/ganja-<uid>/`: the refusal cases have to chmod and plant files where
@@ -375,10 +381,19 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
     drop(lock);
 }
 
-/// Two — here eight — binders racing one bucket all come up, every one at a
-/// name of its own: the lock serializes the walk, so a loser reads the name
-/// as held and extends by a digit instead of dying on `EADDRINUSE`.
-#[tokio::test]
+/// Eight binders racing one bucket all come up, every one at a name of its
+/// own: the lock serializes the walk, so a loser reads the name as held and
+/// extends by a digit instead of dying on `EADDRINUSE`.
+///
+/// A genuine race, not eight binds in a row: the runtime is multi-threaded
+/// with a worker per racer, a barrier releases them together, and the whole
+/// claim→stat→unlink→bind section is synchronous, so on the current-thread
+/// flavor the racers could never interleave inside it and the test would
+/// prove nothing. Three rounds, because one overlap is luck and thirty are
+/// a pattern. Reverting `socket.rs` to the connect-probe design under this
+/// test fails it — the evidence that it is load-bearing lives in the lane
+/// report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn binders_racing_one_bucket_all_come_up_at_different_names() {
     let directory = private_dir();
     // Eight ids that agree on their first eleven hex digits and differ in the
@@ -386,46 +401,55 @@ async fn binders_racing_one_bucket_all_come_up_at_different_names() {
     let ids: Vec<SessionId> = (0..8).map(|n| session(&format!("3b4{n:x}"))).collect();
     let dir: Arc<Path> = Arc::from(directory.path());
 
-    let racing = ids.iter().cloned().map(|id| {
-        let dir = Arc::clone(&dir);
-        tokio::spawn(async move {
-            ganja_serve::serve(
-                engine(),
-                config(Listen::Session {
-                    id,
-                    directory: dir.to_path_buf(),
-                }),
-            )
-            .await
-        })
-    });
-    let mut handles = Vec::new();
-    for task in racing {
-        let handle = task
-            .await
-            .expect("the task ran")
-            .expect("every racer comes up: the lock hands out names, it does not fail binds");
-        handles.push(handle);
-    }
+    for round in 0..3 {
+        let go = Arc::new(tokio::sync::Barrier::new(ids.len()));
+        let racing: Vec<_> = ids
+            .iter()
+            .cloned()
+            .map(|id| {
+                let dir = Arc::clone(&dir);
+                let go = Arc::clone(&go);
+                tokio::spawn(async move {
+                    go.wait().await;
+                    ganja_serve::serve(
+                        engine(),
+                        config(Listen::Session {
+                            id,
+                            directory: dir.to_path_buf(),
+                        }),
+                    )
+                    .await
+                })
+            })
+            .collect();
+        let mut handles = Vec::new();
+        for task in racing {
+            let handle = task
+                .await
+                .expect("the task ran")
+                .expect("every racer comes up: the lock hands out names, it does not fail binds");
+            handles.push(handle);
+        }
 
-    let mut names: Vec<PathBuf> = handles.iter().map(bound).collect();
-    names.sort();
-    names.dedup();
-    assert_eq!(
-        names.len(),
-        handles.len(),
-        "no two racers share a name: {names:?}"
-    );
-    for handle in &handles {
-        assert_eq!(health(&bound(handle)).await["healthy"], true);
+        let mut names: Vec<PathBuf> = handles.iter().map(bound).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            handles.len(),
+            "round {round}: no two racers share a name: {names:?}"
+        );
+        for handle in &handles {
+            assert_eq!(health(&bound(handle)).await["healthy"], true);
+        }
+        for handle in handles {
+            handle.shutdown().await.expect("a clean stop");
+        }
+        assert!(
+            names.iter().all(|name| !name.exists()),
+            "round {round}: every socket file was given back"
+        );
     }
-    for handle in handles {
-        handle.shutdown().await.expect("a clean stop");
-    }
-    assert!(
-        names.iter().all(|name| !name.exists()),
-        "every socket file was given back"
-    );
 }
 
 #[tokio::test]
