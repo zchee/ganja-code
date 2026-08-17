@@ -28,11 +28,7 @@
 //! those types rather than `&str` so there is no door left that accepts an
 //! unchecked name.
 
-use std::{
-    collections::HashSet,
-    fmt,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, fmt, path::PathBuf};
 
 /// The lead's canonical member name (§1.1's `LEAD`).
 pub const LEAD: &str = "team-lead";
@@ -171,12 +167,6 @@ impl TeamName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// Gives up the check and returns the name.
-    #[must_use]
-    pub fn into_inner(self) -> String {
-        self.0
-    }
 }
 
 impl fmt::Display for TeamName {
@@ -308,12 +298,6 @@ impl TeamsRoot {
         Self(dir.into())
     }
 
-    /// The directory itself.
-    #[must_use]
-    pub fn dir(&self) -> &Path {
-        &self.0
-    }
-
     /// `<root>/<team>` (§2.1).
     #[must_use]
     pub fn team_dir(&self, team: &TeamName) -> PathBuf {
@@ -430,7 +414,7 @@ mod tests {
             inbox,
             Path::new("/tmp/teams/session-224cbeab/inboxes/demo-worker-1.json")
         );
-        assert!(inbox.starts_with(root.dir()));
+        assert!(inbox.starts_with("/tmp/teams"));
         assert!(
             !inbox
                 .components()

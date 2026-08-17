@@ -49,7 +49,8 @@ fn every_lock_is_released_even_when_the_write_fails() {
     );
 
     // The same claim for the refusal that never reaches the disk at all: a
-    // message refused by validation must not have cost a hold either.
+    // message refused on its way in — here for a passthrough key the schema
+    // already declares — must not have cost a hold either.
     let refused = root.inbox_path(
         &team,
         &MemberName::parse("refused").expect("a valid member name"),
@@ -59,8 +60,11 @@ fn every_lock_is_released_even_when_the_write_fails() {
         MailboxMessage::new("team-lead", "kept", record::now_iso8601()),
     )
     .expect("a message writes");
-    mailbox::write_value(&refused, json!({"from": "w", "text": 42, "timestamp": "t"}))
-        .expect_err("a number is not a message body");
+    let mut shadowing = MailboxMessage::new("team-lead", "impostor", record::now_iso8601());
+    shadowing
+        .extra
+        .insert("text".to_owned(), json!("a second body"));
+    mailbox::write(&refused, shadowing).expect_err("a shadowed schema key is refused");
     assert!(
         !lock_of(&refused).exists(),
         "a refused write left no hold behind",

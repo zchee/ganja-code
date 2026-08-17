@@ -263,10 +263,10 @@ pub fn read(path: &Path) -> io::Result<Contents> {
 /// the `msg_id` it stamped.
 ///
 /// **A write is also a destructive prune.** It is a read-modify-write, and the
-/// read keeps only what [`validate`] accepts (§2.4), so any *neighbouring* entry
+/// read keeps only what §2.4's validation accepts, so any *neighbouring* entry
 /// this build cannot read is gone from the file once this returns — a write is
-/// [`prune_invalid`] with a message appended, whether or not the caller wanted
-/// that. This is §2.4's own posture (`pruneInvalidMailboxEntries` rewrites the
+/// §2.4's `pruneInvalidMailboxEntries` with a message appended, whether or not
+/// the caller wanted that. That is the original's own posture (it rewrites the
 /// file without them) rather than an accident, and the drops are reported the
 /// way every other drop is, once per distinct damage. The consequence worth
 /// stating: an entry a *newer* peer wrote in a shape this build refuses is not
@@ -308,30 +308,10 @@ pub fn write(path: &Path, mut message: MailboxMessage) -> Result<String, Mailbox
         return Err(MailboxError::SchemaInvalid { issues: shadowed });
     }
 
-    update(path, move |messages, _| messages.push(message))?;
+    update(path, move |messages| messages.push(message))?;
     tracing::debug!(inbox = %path.display(), %msg_id, "a message joined an inbox");
 
     Ok(msg_id)
-}
-
-/// The same, for an entry that has not been decoded yet — the door §2.4's
-/// validation is defined on.
-///
-/// Unknown keys reach this door already alphabetized, because a
-/// [`serde_json::Value`]'s object is a `BTreeMap`; the typed [`write()`] above is
-/// the one a document's byte order rides on. That is fine for what this door is
-/// for: a caller holding a hand-built entry, and the tests that feed it ones no
-/// typed constructor could produce.
-///
-/// # Errors
-///
-/// [`MailboxError::TextNotAString`] or [`MailboxError::SchemaInvalid`] when the
-/// entry does not check out — **before the file is touched**, so a refused
-/// write leaves the inbox exactly as it was.
-pub fn write_value(path: &Path, entry: Value) -> Result<String, MailboxError> {
-    validate(&entry)?;
-
-    write(path, serde_json::from_value(entry)?)
 }
 
 /// §3.1's `markMessagesAsRead`: delivered messages are removed, not flagged.
@@ -346,7 +326,7 @@ pub fn write_value(path: &Path, entry: Value) -> Result<String, MailboxError> {
 /// Whatever the read-modify-write returned.
 pub fn prune_delivered(path: &Path, delivered: &[Identity]) -> Result<Pruned, MailboxError> {
     let delivered: HashSet<Identity> = delivered.iter().cloned().collect();
-    let pruned = update(path, |messages, _| {
+    let pruned = update(path, |messages| {
         let before = messages.len();
         messages.retain(|message| {
             !message.read.unwrap_or(false) && !delivered.contains(&identity(message))
@@ -367,30 +347,15 @@ pub fn prune_delivered(path: &Path, delivered: &[Identity]) -> Result<Pruned, Ma
     Ok(pruned)
 }
 
-/// §2.4's `pruneInvalidMailboxEntries`: rewrites the file without whatever
-/// would not read, and answers with how many that was.
-///
-/// It is the update that changes nothing, because the rewrite already only
-/// writes back what survived the read. Concurrent prunes of one path do not
-/// need the `pendingPrunes` bookkeeping the original keeps, for the same
-/// reason: they serialize on the hold the rewrite takes.
-///
-/// # Errors
-///
-/// Whatever the read-modify-write returned.
-pub fn prune_invalid(path: &Path) -> Result<usize, MailboxError> {
-    update(path, |_, dropped| dropped)
-}
-
 /// Read, change, write back — the shape every mutation here has (§2.5).
 ///
-/// The closure is handed the entries that read cleanly and how many did not,
-/// and whatever it leaves behind is what lands on disk. **The closure** cannot
-/// fail — it returns a `T`, not a `Result`, because every public mutator above
-/// refuses *before* getting here, so there is no path that takes a hold and then
-/// decides not to write. The I/O *after* it still can: the read, the encode and
-/// the atomic replace each return, and each leaves through the `?` below with
-/// the hold released by [`Guard`](crate::lock::Guard)'s `Drop` on the way out.
+/// The closure is handed the entries that read cleanly, and whatever it leaves
+/// behind is what lands on disk. **The closure** cannot fail — it returns a
+/// `T`, not a `Result`, because every public mutator above refuses *before*
+/// getting here, so there is no path that takes a hold and then decides not to
+/// write. The I/O *after* it still can: the read, the encode and the atomic
+/// replace each return, and each leaves through the `?` below with the hold
+/// released by [`Guard`](crate::lock::Guard)'s `Drop` on the way out.
 ///
 /// Because the write-back is whatever the read produced, **every mutation here
 /// prunes what would not read** — see [`write()`]'s own note, which is where that
@@ -408,14 +373,13 @@ pub fn prune_invalid(path: &Path) -> Result<usize, MailboxError> {
 /// stands and hold nothing at all.
 fn update<T>(
     path: &Path,
-    change: impl FnOnce(&mut Vec<MailboxMessage>, usize) -> T,
+    change: impl FnOnce(&mut Vec<MailboxMessage>) -> T,
 ) -> Result<T, MailboxError> {
     seed(path)?;
     let _hold = lock::acquire(path)?;
 
-    let contents = read(path)?;
-    let mut messages = contents.valid;
-    let outcome = change(&mut messages, contents.dropped);
+    let mut messages = read(path)?.valid;
+    let outcome = change(&mut messages);
     write_atomically(path, document(&messages)?.as_bytes())?;
 
     Ok(outcome)
@@ -492,7 +456,7 @@ const SCHEMA_KEYS: [&str; 9] = [
 /// [`MailboxError::TextNotAString`] for §2.4's distinctly reported case, and
 /// [`MailboxError::SchemaInvalid`] for everything else. The `text` check runs
 /// first, so an entry that is wrong in several ways is reported as that one.
-pub fn validate(entry: &Value) -> Result<(), MailboxError> {
+pub(crate) fn validate(entry: &Value) -> Result<(), MailboxError> {
     let Value::Object(fields) = entry else {
         return Err(MailboxError::SchemaInvalid {
             issues: vec![format!(
@@ -696,8 +660,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Contents, MailboxError, first_report, identity, prune_delivered, prune_invalid, read, seed,
-        write, write_value,
+        Contents, MailboxError, first_report, identity, prune_delivered, read, seed, validate,
+        write,
     };
     use crate::record::MailboxMessage;
 
@@ -763,9 +727,12 @@ mod tests {
             }
         );
 
-        // And the rewrite that removes it leaves a file that reads clean.
-        assert_eq!(prune_invalid(&path).expect("the prune writes"), 1);
-        assert_eq!(read(&path).expect("the inbox reads"), Contents::default());
+        // And any mutation's rewrite leaves a file that reads clean: the
+        // non-array is gone, and only what was written over it remains.
+        write(&path, MailboxMessage::new("w", "over it", WHEN)).expect("a message writes");
+        let held = read(&path).expect("the inbox reads");
+        assert_eq!(held.dropped, 0);
+        assert_eq!(held.valid.len(), 1);
 
         // A file that is not JSON at all fails differently, and says so.
         fs::write(&path, "not json").expect("the inbox is writable");
@@ -775,12 +742,10 @@ mod tests {
     }
 
     #[test]
-    fn a_non_string_text_is_refused_on_write() {
-        let (_home, path) = inbox();
-        write(&path, MailboxMessage::new("w", "kept", WHEN)).expect("a message writes");
-        let before = fs::read_to_string(&path).expect("the inbox is readable");
-
-        let refusal = write_value(&path, json!({"from": "w", "text": 42, "timestamp": WHEN}))
+    fn a_non_string_text_is_refused_as_its_own_case_and_every_other_field_by_name() {
+        // §2.4's one distinctly reported field: the type is named, the value
+        // is not.
+        let refusal = validate(&json!({"from": "w", "text": 42, "timestamp": WHEN}))
             .expect_err("a number is not a message body");
         assert!(
             matches!(refusal, MailboxError::TextNotAString { found: "a number" }),
@@ -788,15 +753,8 @@ mod tests {
         );
         assert!(refusal.to_string().contains("holds a number"));
 
-        // Refused before the file was touched, which is the half that matters:
-        // a rejected write must not cost the messages already queued.
-        assert_eq!(
-            fs::read_to_string(&path).expect("the inbox is readable"),
-            before
-        );
-
-        // Everything else is the other refusal, and names the field.
-        let refusal = write_value(&path, json!({"text": "hi", "timestamp": 7}))
+        // Everything else is the other refusal, one sentence per field.
+        let refusal = validate(&json!({"text": "hi", "timestamp": 7}))
             .expect_err("a message needs a sender and a timestamp");
         let MailboxError::SchemaInvalid { issues } = refusal else {
             panic!("expected a schema refusal, got {refusal:?}");
@@ -808,14 +766,6 @@ mod tests {
                 "timestamp: expected a string, found a number".to_owned(),
             ]
         );
-
-        // A well-formed entry through the same door does land.
-        write_value(
-            &path,
-            json!({"from": "w", "text": "also kept", "timestamp": WHEN}),
-        )
-        .expect("a valid entry writes");
-        assert_eq!(read(&path).expect("the inbox reads").valid.len(), 2);
     }
 
     #[test]

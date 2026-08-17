@@ -869,14 +869,8 @@ pub fn now_iso8601() -> String {
 /// looking right: the timestamp is one third of the identity key deliveries are
 /// reconciled by (§2.3), so two builds spelling one instant differently would
 /// deliver the same message twice.
-///
-/// Public because the milliseconds this module stores are not only its own to
-/// read back: `joinedAt` and `createdAt` are `u64`s in [`MemberRecord`] and
-/// [`TeamFile`], and whoever renders a team — a `/team` dialog, a `ganja team`
-/// listing — needs the one spelling this crate agrees with a peer about rather
-/// than a sixth date formatter.
 #[must_use]
-pub fn iso8601(millis: u64) -> String {
+pub(crate) fn iso8601(millis: u64) -> String {
     let seconds = i64::try_from(millis / 1_000).unwrap_or(i64::MAX);
     let subsecond = millis % 1_000;
     let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));

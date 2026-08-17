@@ -148,34 +148,20 @@ impl LockError {
 ///
 /// **The [`Drop`] impl is what is load-bearing here, not the field order.**
 /// Rust runs a type's own `Drop::drop` *first* and only then drops its fields in
-/// declaration order — so the `remove_dir` below happens before `local` is
+/// declaration order — so the `remove_dir` below happens before `_local` is
 /// dropped and the in-process hold released, which is the mirror of the order
 /// [`acquire`] takes them in and is what keeps a thread woken by the in-process
 /// release from finding the directory still there. Reordering the two fields
 /// would change nothing, because `dir` is a [`PathBuf`] whose own drop releases
 /// memory and no lock; deleting the `Drop` impl, or moving the `remove_dir` into
-/// something that dropped after `local`, would break it.
+/// something that dropped after `_local`, would break it.
 #[derive(Debug)]
 pub struct Guard {
     /// The lock directory this guard made and will remove.
     dir: PathBuf,
-    /// The in-process half, released when this field drops.
-    local: Local,
-}
-
-impl Guard {
-    /// The lock directory being held.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.dir
-    }
-
-    /// The inbox this hold is over, as its real path — the path the lock is
-    /// named after, and the key the in-process half is filed under.
-    #[must_use]
-    pub fn inbox(&self) -> &Path {
-        &self.local.key
-    }
+    /// The in-process half, held for nothing but its own `Drop`, which is
+    /// what releases it.
+    _local: Local,
 }
 
 impl Drop for Guard {
@@ -246,17 +232,7 @@ pub fn acquire(target: &Path) -> Result<Guard, LockError> {
         .call()?;
     tracing::debug!(lock = %dir.display(), "took an inbox lock");
 
-    Ok(Guard { dir, local })
-}
-
-/// The lock a target is held through: its real path with [`LOCK_SUFFIX`]
-/// appended.
-///
-/// # Errors
-///
-/// Whatever `realpath` returned — `ENOENT` for a target that is not there.
-pub fn path_of(target: &Path) -> io::Result<PathBuf> {
-    Ok(lock_path_of(&fs::canonicalize(target)?))
+    Ok(Guard { dir, _local: local })
 }
 
 /// proper-lockfile's ladder, reproduced: `{retries: 10, minTimeout: 5,

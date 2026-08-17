@@ -129,19 +129,11 @@ fn the_lock_is_a_directory_never_a_file() {
     let hold = lock::acquire(&inbox).expect("an unheld inbox is takeable");
     assert!(held.is_dir(), "an acquire makes a directory, not a file");
     // The naive spelling above and the protocol's own realpath one name one
-    // file — which is what makes a peer that canonicalizes nothing (and a
+    // directory — which is what makes a peer that canonicalizes nothing (and a
     // `TMPDIR` that is a symlink) contend with ganja rather than beside it.
     assert_eq!(
-        hold.path(),
-        lock::path_of(&inbox).expect("a seeded inbox has a real path"),
-    );
-    assert_eq!(
-        hold.inbox(),
-        inbox.canonicalize().expect("the inbox is real"),
-    );
-    assert_eq!(
         held.canonicalize().expect("the lock is real"),
-        hold.path(),
+        lock_of(&inbox.canonicalize().expect("the inbox is real")),
         "the two spellings are the same lock",
     );
     assert!(

@@ -70,15 +70,6 @@ pub mod mailbox;
 pub mod record;
 pub mod team;
 
-// A caller that writes a mailbox handles a lock failure, so the lock's own
-// vocabulary belongs beside the mailbox's rather than one module deeper:
-// `MailboxError::Lock` carries a `LockError` transparently, and a caller
-// matching on it should not have to learn a second path to name the type. The
-// constants come along because they are the numbers a diagnostic is read
-// against — how stale is stale, how many retries went into a refusal.
-pub use lock::{
-    Guard, LOCK_SUFFIX, LockError, REFUSED_LOCK_HELD, REFUSED_LOCK_NOT_A_DIRECTORY, RETRIES, STALE,
-};
 pub use mailbox::{Contents, Identity, MailboxError, Pruned};
 pub use record::{MailboxMessage, MemberRecord, Spawn, Surface, TeamFile};
 pub use team::{
