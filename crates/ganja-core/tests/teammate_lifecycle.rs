@@ -64,12 +64,12 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     let storage = Storage::open(home.path().join("storage"));
     let root = TeamsRoot::new(home.path().join("teams"));
     let team = TeamName::parse("session-abcd1234").expect("a team name");
-    let registry = TeammateRegistry::new(
+    let registry = Arc::new(TeammateRegistry::new(
         root.clone(),
         team.clone(),
         "01998ad0-0000-7000-8000-000000000000",
         home.path(),
-    );
+    ));
     let backend = Arc::new(InProcess::new(
         Arc::new(FakeProvider::new("on it", Duration::ZERO)),
         Arc::new(Registry::new(Vec::new())),

@@ -125,12 +125,12 @@ async fn the_two_pane_backends_refuse_identically_until_p25b() {
     let spec_holder = ganja_testkit::temp_dir();
     let root = TeamsRoot::new(spec_holder.path().join("teams"));
     let team = TeamName::parse("session-abcd1234").expect("a team name");
-    let registry = TeammateRegistry::new(
+    let registry = Arc::new(TeammateRegistry::new(
         root.clone(),
         team.clone(),
         "01998ad0-0000-7000-8000-000000000000",
         spec_holder.path(),
-    );
+    ));
 
     let ganja = registry
         .spawn(Arc::new(GanjaPane), request("worker", MemberBackend::Pane))

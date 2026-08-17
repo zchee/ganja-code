@@ -220,12 +220,12 @@ async fn a_teammate_cannot_send_as_the_lead() {
     let storage = Storage::open(home.path().join("storage"));
     let root = TeamsRoot::new(home.path().join("teams"));
     let team = TeamName::parse("session-abcd1234").expect("a team name");
-    let registry = TeammateRegistry::new(
+    let registry = Arc::new(TeammateRegistry::new(
         root.clone(),
         team.clone(),
         "01998ad0-0000-7000-8000-000000000000",
         home.path(),
-    );
+    ));
     let spawned = registry
         .spawn(
             Arc::new(InProcess::new(

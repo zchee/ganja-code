@@ -915,6 +915,16 @@ pub(crate) struct Turn {
     /// a gate with a hole in it. [`None`] is a session whose config asked for
     /// none, where every seam below does nothing at all.
     pub(crate) hooks: Option<Arc<crate::hook::Hooks>>,
+    /// Where this turn's `send_message` calls are posted — engine-owned, and
+    /// carrying the name *that engine* sends as, which is the whole of the
+    /// anti-forgery rule: no method on it takes a `from`, so a model's
+    /// arguments cannot stamp somebody else's name on a message.
+    ///
+    /// Cloned at the turn's start like everything else here, so a team
+    /// installed mid-turn reaches the next one. [`None`] on a session that
+    /// leads no team and belongs to none — and on every turn a subagent runs,
+    /// which is offered no `send_message` to call.
+    pub(crate) postbox: Option<Arc<dyn crate::tool::team::Postbox>>,
     /// Whether this turn is a subagent's.
     ///
     /// One question, one field, and it decides exactly one thing: which of the
@@ -1056,6 +1066,10 @@ impl Turn {
             // turn is the way around it. What the child does *not* do is fire
             // the session's `Stop` — see `delegated` just below.
             hooks: host.hooks.clone(),
+            // None, and the registry says the same thing twice: a child is
+            // offered no `send_message`, and a delegated turn writing to the
+            // team under the lead's name would be a message nobody sent.
+            postbox: None,
             delegated: true,
             persist: parts.persist,
         }
@@ -3803,7 +3817,10 @@ async fn start(
                 part_id: prepared.call.part_id.clone(),
             }) as Arc<dyn crate::tool::task::Subagents>
         }),
-        postbox: None,
+        // The turn's own, so a `send_message` call is stamped with the name
+        // the engine running it sends as. A subagent's turn carries none, and
+        // is offered no `send_message` to want one.
+        postbox: turn.postbox.clone(),
         // Built per call for the same reason, and out of the same three
         // pieces the permission wait uses: a dialog names the call it came
         // from, and a reply has to reach the turn that is blocked in it.
@@ -4884,6 +4901,7 @@ mod tests {
             pending_switch: None,
             jobs: None,
             hooks: None,
+            postbox: None,
             delegated: false,
             persist: None,
         };

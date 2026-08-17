@@ -70,6 +70,21 @@ use crate::{
 /// one is evicted.
 pub const EVENT_CAPACITY: usize = 1024;
 
+/// Teammate permission dialogs the lead may fall behind on before a teammate's
+/// forwarding waits for it (**D-5**).
+///
+/// Small on purpose, and much smaller than the event queue above: a dialog is
+/// a question somebody has to answer, so a lead holding dozens unanswered is a
+/// lead nobody is at. A full queue makes the *forwarding task* wait, never the
+/// teammate's turn — the forwarding reads a droppable subscription, so what a
+/// wedged lead eventually costs is that subscription rather than the teammate.
+const TEAMMATE_DIALOGS: usize = 16;
+
+/// Why a session with no store has no in-process teammates; see [`Storeless`].
+const STORELESS: &str = "this session has no store to keep a teammate's \
+    conversation in, and a teammate's transcript is a session somebody may \
+    resume";
+
 /// How full the current session's context is, as [`Engine::context_estimate`]
 /// answers it: the estimate the last request stamped, and the window the
 /// catalog sizes the active model at — absent for a model it does not know,
@@ -1083,16 +1098,25 @@ pub struct Engine {
     /// `run_in_background: true`. Always present, unlike `mcp`/`lsp`: there
     /// is no engine a background job cannot outlive.
     jobs: Arc<job::JobRegistry>,
-    /// The teammates this session started, once somebody gave it a team
-    /// (**D500**). [`None`] is every session that never spawned one, which is
-    /// every scripted, golden and PTY run — and every teammate's own engine,
-    /// since a teammate spawns nobody.
+    /// The team this session leads, once somebody gave it one (**D500**,
+    /// **D501**) — the registry that owns every teammate's lifetime, behind
+    /// the door a `task` call carrying a `name` goes through. [`None`] is
+    /// every session that leads no team, which is every scripted, golden and
+    /// PTY run — and every teammate's own engine, since a teammate leads
+    /// nobody.
     ///
     /// Beside [`Engine::jobs`] rather than inside a turn for the reason that
     /// registry is: a teammate's lifetime is not a turn's, so a turn's cancel
     /// must not end one. Unlike jobs it is optional, because a session with no
     /// team has no directory on disk and should leave none.
-    teammates: Option<Arc<teammate::TeammateRegistry>>,
+    teammates: Option<Arc<subagent::Teammates>>,
+    /// Where this session's own `send_message` calls are posted, stamped with
+    /// the lead's name (**D498**). Installed with the team above and by
+    /// nothing else, so the two cannot disagree about whether there is one.
+    postbox: std::sync::Mutex<Option<Arc<dyn crate::tool::team::Postbox>>>,
+    /// Every teammate's permission dialogs, waiting for the lead side to claim
+    /// the receiver (**D-5**). See [`Engine::teammate_dialogs`].
+    teammate_dialogs: std::sync::Mutex<Option<mpsc::Receiver<teammate::posture::Forwarded>>>,
     /// The roster the offered `send_message` was last described against, so a
     /// teammate spawned mid-session is addressable at the next turn rather
     /// than never. The same once-per-turn-start memo `mcp_installed` keeps,
@@ -1246,6 +1270,8 @@ impl Engine {
             persistence,
             jobs: Arc::new(job::JobRegistry::new()),
             teammates: None,
+            postbox: std::sync::Mutex::new(None),
+            teammate_dialogs: std::sync::Mutex::new(None),
             team_roster: std::sync::Mutex::new(Vec::new()),
             permission_mode: std::sync::Mutex::new(PermissionMode::Ask),
             hooks: None,
@@ -1693,34 +1719,117 @@ impl Engine {
         self.jobs.shutdown().await;
     }
 
-    /// Gives this session a team (**D500**).
+    /// Gives this session the team `registry` holds (**D500**, **D501**).
     ///
-    /// Consuming, like every other installer here: whether a session can spawn
-    /// teammates is decided once, before anything can be streaming. What the
-    /// registry then holds is not — teammates come and go — which is why the
-    /// two surfaces that draw it, the status segment and the `/team` dialog,
-    /// poll [`Engine::teammates`] rather than being told.
+    /// Consuming, like every other installer here: whether a session leads a
+    /// team is decided once, before anything can be streaming. What the team
+    /// then *holds* is not — teammates come and go — which is why the two
+    /// surfaces that draw it poll [`Engine::teammates`] rather than being
+    /// told.
     ///
-    /// The offered tool set is recomposed here, because a team is what puts
-    /// `send_message` in front of the model at all — presence is ability, the
-    /// same rule the `task` tool is registered under.
+    /// Four things are wired here because this is the one moment they all
+    /// exist: the three backends a `task` call may name, of which only the
+    /// in-process one holds anything of this engine's; the lead's own postbox,
+    /// stamped with the lead's name and no other; the dialog channel a
+    /// teammate's asks travel to the lead on ([`Engine::teammate_dialogs`]),
+    /// attached before anything can be spawned into it; and the tool set,
+    /// recomposed because a team is what puts `send_message` in front of the
+    /// model at all — presence is ability, the same rule `task` is registered
+    /// under.
+    ///
+    /// **What a teammate is offered** is the *lent* set — this build's tools
+    /// plus whatever the MCP servers were lending when the team was installed
+    /// — with `send_message` on it and nothing else: no `task`, for the reason
+    /// a subagent has none (a teammate is not a place to nest a second team),
+    /// and no plan doors, which want an agent roster a teammate engine has
+    /// not got. Its description names the lead, the one peer that exists
+    /// before any teammate does and cannot go away; who *else* it may address
+    /// is answered per call by its own postbox, which is live.
+    ///
+    /// **A session with no store gets the team and no in-process backend.** A
+    /// teammate's conversation is a root row somebody may resume (D-8), and
+    /// there is nowhere to write one; the surface refuses by name rather than
+    /// running a teammate whose transcript evaporates.
     #[must_use]
-    pub fn with_teammates(mut self, teammates: Arc<teammate::TeammateRegistry>) -> Self {
-        self.teammates = Some(teammates);
+    pub fn with_teammates(mut self, registry: Arc<teammate::TeammateRegistry>) -> Self {
+        let lead = Arc::new(subagent::Postbox::lead(Arc::clone(&registry)));
+        let in_process: Arc<dyn teammate::TeammateBackend> = match self.storage() {
+            Some(storage) => Arc::new(teammate::InProcess::new(
+                Arc::clone(&self.provider),
+                self.teammate_tools(&registry),
+                storage,
+                self.teammate_permissions(),
+            )),
+            None => Arc::new(Storeless),
+        };
+
+        let (dialogs, waiting) = mpsc::channel(TEAMMATE_DIALOGS);
+        registry.forward_dialogs_to(dialogs);
+        *self
+            .teammate_dialogs
+            .lock()
+            .expect("the dialog queue is never poisoned") = Some(waiting);
+
+        self.teammates = Some(Arc::new(subagent::Teammates::new(
+            registry,
+            subagent::Backends {
+                in_process,
+                pane: Arc::new(teammate::pane::GanjaPane),
+                claude: Arc::new(teammate::claude::ClaudePane),
+            },
+        )));
+        *self.postbox.lock().expect("the postbox is never poisoned") = Some(lead);
         self.recompose_tools();
 
         self
     }
 
-    /// The teammates this session started, for a status display or the
-    /// `/team` dialog to poll — exactly as [`Engine::jobs`] is polled.
+    /// The team this session leads, for a status display, the `/team` dialog
+    /// or a turn's `task` call — polled exactly as [`Engine::jobs`] is.
     ///
-    /// [`None`] is a session with no team, which is a different answer from a
-    /// team with nobody in it: the first has no directory on disk and the
-    /// second does.
+    /// [`None`] is a session that leads no team, which is a different answer
+    /// from a team with nobody in it: the first has no directory on disk and
+    /// the second does. What a frontend draws comes from
+    /// [`subagent::Teammates::registry`]'s
+    /// [`view`](teammate::TeammateRegistry::view).
     #[must_use]
-    pub fn teammates(&self) -> Option<&Arc<teammate::TeammateRegistry>> {
+    pub fn teammates(&self) -> Option<&Arc<subagent::Teammates>> {
         self.teammates.as_ref()
+    }
+
+    /// The queue this session's teammates raise their permission dialogs on
+    /// (**D-5**), claimed once by whoever is going to answer them.
+    ///
+    /// Take-once, exactly like the birth event queue: there is one receiver
+    /// and handing it to two readers would split the dialogs between them.
+    /// [`None`] on a session with no team, and on a second call. A lead that
+    /// never claims it leaves its teammates' asks refused rather than hanging
+    /// — the channel fills, and [`teammate::posture::Forwarding`] answers what
+    /// it cannot deliver.
+    ///
+    /// Each [`teammate::posture::Forwarded`] carries the teammate's name, the
+    /// `PermissionRequested` its turn published, and the sender the answer
+    /// goes back on; dropping that sender is the refusal a dialog nobody could
+    /// show means.
+    #[must_use]
+    pub fn teammate_dialogs(&self) -> Option<mpsc::Receiver<teammate::posture::Forwarded>> {
+        self.teammate_dialogs
+            .lock()
+            .expect("the dialog queue is never poisoned")
+            .take()
+    }
+
+    /// Installs the postbox one engine's `send_message` calls are posted
+    /// through.
+    ///
+    /// `&self` and public for exactly one caller: a teammate's own postbox is
+    /// built by [`teammate::TeammateRegistry`] once it holds both the team and
+    /// the teammate, and a teammate engine is reachable only by shared
+    /// reference (which is what keeps it from being given snapshots). The
+    /// lead's own is installed by [`Engine::with_teammates`] and never
+    /// through here.
+    pub fn install_postbox(&self, postbox: Arc<dyn crate::tool::team::Postbox>) {
+        *self.postbox.lock().expect("the postbox is never poisoned") = Some(postbox);
     }
 
     /// Ends every teammate this session started, waiting for each one's turn
@@ -1736,7 +1845,62 @@ impl Engine {
     /// else's.
     pub async fn shutdown_teammates(&self) {
         if let Some(teammates) = &self.teammates {
-            teammates.shutdown().await;
+            teammates.registry().shutdown().await;
+        }
+    }
+
+    /// The store this engine persists into, for a second engine that shares
+    /// it: a **clone** of the handle, never a second open of the same path,
+    /// because the connection, the writer thread and the migration all live
+    /// behind the `Arc` a clone shares.
+    fn storage(&self) -> Option<Storage> {
+        self.persistence.as_ref().map(|state| state.storage.clone())
+    }
+
+    /// The tool set a teammate of this session is offered; see
+    /// [`Engine::with_teammates`] for what is in it and why.
+    fn teammate_tools(&self, registry: &Arc<teammate::TeammateRegistry>) -> Arc<Registry> {
+        let lead = Peer {
+            name: registry.lead().as_str().to_owned(),
+            description: None,
+            lead: true,
+        };
+
+        Arc::new(
+            self.lent()
+                .with(Arc::new(send_message::SendMessageTool::new(&[lead]))),
+        )
+    }
+
+    /// The ruleset each teammate engine is built with (**D-5**).
+    ///
+    /// [`teammate::posture::permissions_for`] rather than that module's
+    /// `from_lead`, and the difference is the agent: `from_lead` binds one
+    /// ruleset for every teammate this session will ever start, where a
+    /// `task` call names a `subagent_type` per spawn — and a teammate started
+    /// as `plan` that ran under `build`'s rules would be a plan agent that can
+    /// write. So the agent is resolved per spawn and its rules are what the
+    /// lead's own refusals are appended *after*, which is the anti-laundering
+    /// order that module states.
+    ///
+    /// The lead's rules are read through the live handle at each spawn rather
+    /// than copied here, so a teammate started after somebody answered
+    /// "always" runs with that answer.
+    fn teammate_permissions(&self) -> impl Fn(&teammate::SpawnSpec) -> Permissions + use<> {
+        let lead = Arc::clone(&self.permissions);
+        let agents = self.agents.clone();
+
+        move |spec| {
+            let rules = agents
+                .as_ref()
+                .and_then(|registry| registry.get(&spec.agent_type))
+                .map(|agent| agent.rules.clone())
+                .unwrap_or_default();
+            let held = lead
+                .lock()
+                .expect("the permission rules are never poisoned");
+
+            teammate::posture::permissions_for(&held, rules)
         }
     }
 
@@ -3405,11 +3569,9 @@ impl Engine {
     /// like that one it is a memo rather than an unconditional rebuild — a
     /// team whose membership has not moved costs a lock and a comparison.
     fn refresh_team(&self) {
-        let Some(teammates) = &self.teammates else {
+        let Some(roster) = self.lead_roster() else {
             return;
         };
-
-        let roster = roster_of(teammates);
         let mut installed = self
             .team_roster
             .lock()
@@ -3464,31 +3626,33 @@ impl Engine {
     /// session that has one is offered it again on every rebuild, so a
     /// `/plugin` Reload cannot quietly drop it.
     ///
-    /// The roster the description lists is every member but the one doing the
-    /// addressing. The engine holding a registry is the lead's — a teammate's
-    /// engine is built by [`teammate::Teammate::new`], which installs none —
-    /// so the row dropped is the lead's own, and a model is never offered its
-    /// own name as a recipient.
-    ///
-    /// What the tool *delivers* through is [`crate::tool::team::Postbox`],
-    /// carried per call in its `ToolCtx`; until W5a/L3 installs one, a call
-    /// reads that tool's own "this session has no team" refusal rather than
-    /// sending anything.
+    /// Both halves come off the one postbox this engine posts through, which
+    /// is what keeps the roster the model *reads* and the roster its call is
+    /// *judged against* the same answer: the description lists everybody the
+    /// sender may address, and the last rung of the tool's ladder asks that
+    /// same value which of them leads.
     ///
     /// A subagent is offered the *lent* set rather than the composed one, so
     /// it does not get this — deliberately, and for the reason it does not get
     /// `task` either: a delegated turn runs inside the lead's own turn, and
     /// the identity it would send under is the lead's.
     fn team_messaging(&self, registry: Arc<Registry>) -> Arc<Registry> {
-        let Some(teammates) = &self.teammates else {
+        let Some(roster) = self.lead_roster() else {
             return registry;
         };
 
-        Arc::new(
-            registry.with(Arc::new(send_message::SendMessageTool::new(&roster_of(
-                teammates,
-            )))),
-        )
+        Arc::new(registry.with(Arc::new(send_message::SendMessageTool::new(&roster))))
+    }
+
+    /// Everybody this engine's own `send_message` may address, as its postbox
+    /// answers it. [`None`] when there is no team, which is not the same as a
+    /// team of nobody.
+    fn lead_roster(&self) -> Option<Vec<Peer>> {
+        self.postbox
+            .lock()
+            .expect("the postbox is never poisoned")
+            .as_ref()
+            .map(|postbox| postbox.roster())
     }
 
     /// The deferral half of every registry composition (**D492**), reached
@@ -3594,6 +3758,8 @@ impl Engine {
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks.clone(),
             concurrency: self.concurrency,
+            // No team for a child, which is the depth guard the missing `task`
+            // tool already states: a delegated turn does not start teammates.
             teammates: None,
         }))
     }
@@ -4268,6 +4434,11 @@ impl Engine {
             pending_switch: self.pending_for_turn(),
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks.clone(),
+            postbox: self
+                .postbox
+                .lock()
+                .expect("the postbox is never poisoned")
+                .clone(),
             delegated: false,
             persist,
         };
@@ -4497,27 +4668,47 @@ fn message_chars(message: &Message) -> (usize, usize) {
     (generated, results)
 }
 
-/// The team as the engine holding it may address it: every member but the
-/// lead, which on this engine is the caller.
+/// The in-process backend of a session that has nowhere to write a
+/// conversation.
 ///
-/// A [`Peer`] carries the little `send_message` needs — the name a `to`
-/// argument takes and the line it is listed under — and no more: the colour,
-/// the surface and the ring of recent calls are what a `/team` dialog draws,
-/// and a tool description that recited them would go stale between rebuilds.
-/// There is nothing to describe a teammate *with* on this side yet, so every
-/// row is listed under the tool's own "a teammate of this session".
-fn roster_of(teammates: &teammate::TeammateRegistry) -> Vec<Peer> {
-    teammates
-        .view()
-        .members
-        .into_iter()
-        .filter(|member| !member.is_lead)
-        .map(|member| Peer {
-            name: member.name,
-            description: None,
-            lead: false,
+/// A teammate's transcript is a **root session** somebody may resume tomorrow
+/// (D-8), so an engine built without a store — every scripted, golden and PTY
+/// run — has no honest way to run one. It refuses by name rather than starting
+/// a teammate whose whole transcript evaporates with the process, and the rest
+/// of the team still works: the roster, the mailboxes and the two pane
+/// surfaces are all somebody else's to provide.
+#[derive(Debug)]
+struct Storeless;
+
+#[async_trait::async_trait]
+impl teammate::TeammateBackend for Storeless {
+    fn backend(&self) -> crate::protocol::team::MemberBackend {
+        crate::protocol::team::MemberBackend::InProcess
+    }
+
+    async fn spawn(
+        &self,
+        _spec: &teammate::SpawnSpec,
+    ) -> Result<teammate::Handle, teammate::Unsupported> {
+        Err(teammate::Unsupported {
+            backend: crate::protocol::team::MemberBackend::InProcess,
+            reason: STORELESS.to_owned(),
         })
-        .collect()
+    }
+
+    async fn kill(&self, handle: &teammate::Handle) {
+        // Nothing this backend made can be here to end. Named rather than
+        // ignored, because a handle arriving here would mean a registry had
+        // crossed two backends.
+        tracing::warn!(
+            ?handle,
+            "a storeless backend was asked to end something it did not start"
+        );
+    }
+
+    fn delivery(&self) -> teammate::Delivery {
+        teammate::Delivery::Acknowledged
+    }
 }
 
 fn reminders(
