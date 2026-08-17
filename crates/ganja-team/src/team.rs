@@ -51,11 +51,29 @@ pub const NAME_MAX: usize = 64;
 ///
 /// §1.1 says only that registration "appends an incrementing counter starting
 /// at 2" and does not say whether anything separates the two, so `worker2` and
-/// `worker-2` are both readings of the same sentence. This build ships
-/// `worker-2`, **unverified**: the only witness that can settle it is a real
-/// `claude` binary registering a colliding name, which lives behind the
-/// live-gated test and by construction never runs in CI. It is one constant so
-/// that being wrong costs one line.
+/// `worker-2` were both readings of the same sentence, and this build shipped
+/// `worker-2` unverified. **It is verified now**, statically, out of the
+/// Claude Code 2.1.233 binary's own registration — the function that uniques a
+/// name against the team file before the member record is pushed:
+///
+/// ```text
+/// function tzf(e,t){ let r=$Ia(e);
+///   if(r===t9) throw Error('"main" is a reserved recipient name …');
+///   let n=new Set(t.members.map((i)=>i.name.toLowerCase()));
+///   if(!n.has(r.toLowerCase())) return r;
+///   let o=2;
+///   while(n.has(`${r}-${o}`.toLowerCase())) o++;
+///   return `${r}-${o}` }
+/// ```
+///
+/// A hyphen, a counter opening at 2, and a comparison lowercased on both sides
+/// — which is [`resolve_unique`], field for field. It stays one constant, but
+/// no longer because it might be wrong.
+///
+/// The static reading is what settles it because a live one cannot: the
+/// question needs a `claude` that *registers* a teammate, and a pane teammate
+/// is refused that by its own tool surface (see
+/// `ganja-core/tests/teammate_claude_live.rs`).
 pub const COLLISION_SEPARATOR: &str = "-";
 
 /// Why a name was refused. Ganja's own sentences — nothing here is copied from
