@@ -22,9 +22,21 @@
 //! Parts live in their own rows rather than inside their envelope for the same
 //! reason they used to live in their own files: a streaming turn rewrites one
 //! small row per fragment instead of the whole message. Ascending ids double
-//! as ordering — reassembly is `ORDER BY id`, never by a timestamp, because
-//! ids are `<millis hex><counter hex>` and are the tie-breaker-free creation
-//! order.
+//! as ordering — reassembly is `ORDER BY id`, never by a timestamp — and that
+//! is still true now that an id is a lowercase hyphenated UUIDv7 (**D493**):
+//! the four hyphens sit at fixed positions in every one of them so they never
+//! discriminate, and `'0'..='9'` precedes `'a'..='f'` in ASCII exactly as
+//! their values order, so a lexicographic sort of these strings is a sort by
+//! the millisecond timestamp they open with.
+//!
+//! What changed underneath is the guarantee, not the ordering. The
+//! `<millis hex><counter hex>` layout ids used to have counted from zero in
+//! each *process*, so two of them reaching one millisecond minted the same id
+//! — which is why a store holding such rows is **set aside** rather than
+//! minted into, both as a database — `sessions.db.preuuid-<millis>` — and as
+//! an older store's tree, `storage.preuuid-<millis>`. Nothing is deleted
+//! either way: the file or the directory is renamed and a fresh, empty store
+//! takes the name.
 //!
 //! Every record still carries a `version` field — [`SessionInfo`] inline,
 //! message and part rows through an envelope `{"version":1,"payload":…}` — and
@@ -64,7 +76,9 @@ use std::{
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::protocol::{Message, MessageId, Part, PartBody, PartId, REASONING_TAG, Usage, now};
+use crate::protocol::{
+    Message, MessageId, Part, PartBody, PartId, REASONING_TAG, Usage, is_uuidv7, now,
+};
 
 /// The record format this build writes.
 pub const VERSION: u32 = 1;
@@ -103,6 +117,18 @@ const QUARANTINE: &str = "corrupt";
 
 /// What a converted `storage/` tree is renamed to: `storage.migrated-<millis>`.
 const MIGRATED: &str = "migrated";
+
+/// What a store minted before UUIDv7 ids is renamed to:
+/// `sessions.db.preuuid-<millis>`, or `storage.preuuid-<millis>` for an older
+/// store's tree.
+///
+/// A second suffix beside [`QUARANTINE`] rather than that one reused, because
+/// the two say different things to whoever reads the directory afterwards: a
+/// `corrupt-` file is one nothing could read, while a `preuuid-` file reads
+/// perfectly and is set aside only because its ids came from the
+/// process-local counter [`crate::protocol::uuidv7`] replaced (**D493**) —
+/// superseded, not unreadable.
+const PREUUID: &str = "preuuid";
 
 /// Every connection sets these, immediately after open.
 ///
@@ -1039,14 +1065,21 @@ impl Inner {
                 Ok(()) => sound = Some(connection),
                 Err(reason) => {
                     drop(connection);
-                    set_aside(&self.database, &reason);
+                    set_aside(&self.database, &reason, QUARANTINE);
                 }
             },
             // A file so damaged that the pragmas cannot even be set: the same
             // damage `integrity` reports, arriving one statement earlier.
             // Anything else — a full disk, a directory that will not open — is
             // a passing condition and must not cost the file.
-            Err(error) if damaged(&error) => set_aside(&self.database, &error.to_string()),
+            //
+            // Whether the move succeeded is not consulted on this path: what
+            // follows is an open of whatever is at the name, which is the
+            // right next step either way — a fresh file when it moved, and the
+            // damaged one failing loudly when it did not.
+            Err(error) if damaged(&error) => {
+                set_aside(&self.database, &error.to_string(), QUARANTINE);
+            }
             Err(error) => return Err(error),
         }
 
@@ -1058,10 +1091,24 @@ impl Inner {
             }
         };
 
+        // A descriptor of this build's own on the file that connection just
+        // opened, taken here rather than down in the probe: SQLite publishes
+        // no descriptor of its own, and the narrower the gap between its open
+        // and this one, the less room there is for another process to have
+        // replaced the file between the two. It is what
+        // [`set_aside_preuuid`]'s guard asks whether the path still names.
+        let held = fs::File::open(&self.database).ok();
+
         migrate(&mut connection, &self.database)?;
         if first {
             convert(&mut connection, &self.root, &self.database)?;
         }
+        // After both, never beside the checks above: at that point the
+        // `session` table may not exist at all, and on a first open `convert`
+        // has not yet written the older store's ids — a probe placed there
+        // would pass on an empty file and then rename the store `convert` had
+        // just filled.
+        let connection = set_aside_preuuid(connection, held, &self.database)?;
 
         let (writer, thread) = spawn_writer(self.database.clone())?;
         *self
@@ -1190,39 +1237,178 @@ fn integrity(connection: &Connection) -> Result<(), String> {
     }
 }
 
-/// Renames a database that cannot be read out of the way, with the two files
-/// SQLite keeps beside it.
+/// Renames a database out of the way under `kind`, with the two files SQLite
+/// keeps beside it, and says whether it went.
 ///
 /// The write-ahead log has to travel with the database it belongs to. Left
 /// behind, it is recovered into the *fresh* file that takes the old name —
-/// which would pour the damaged store straight back in.
-fn set_aside(database: &Path, reason: &str) {
+/// which would pour the store that was just set aside straight back in.
+///
+/// `kind` is [`QUARANTINE`] or [`PREUUID`]: the same reversible move for two
+/// different reasons, told apart in the name so a log reader can see which
+/// happened without reading the log.
+fn set_aside(database: &Path, reason: &str, kind: &str) -> bool {
     let stamp = now();
     let name = database.file_name().unwrap_or_default().to_string_lossy();
+    // The name the database itself lands under, which is the one worth
+    // logging: the other two are derived from it the way SQLite derives them.
+    let kept = database.with_file_name(format!("{name}.{kind}-{stamp}"));
 
     for suffix in ["", "-wal", "-shm"] {
         let from = with_suffix(database, suffix);
         if !from.exists() {
             continue;
         }
-        let to = from.with_file_name(format!("{name}.{QUARANTINE}-{stamp}{suffix}"));
+        let to = from.with_file_name(format!("{name}.{kind}-{stamp}{suffix}"));
+        // Refused rather than overwritten. A name already taken means another
+        // process set a store aside in this same millisecond, and the only
+        // thing worse than not moving this file is moving it onto the one
+        // copy of somebody else's.
+        if to.exists() {
+            tracing::warn!(
+                path = %from.display(),
+                taken = %to.display(),
+                "a database could not be moved aside: the name it would take is in use"
+            );
+
+            return false;
+        }
         if let Err(failure) = fs::rename(&from, &to) {
             tracing::warn!(
                 path = %from.display(),
                 %failure,
-                "a database could not be read, and could not be moved aside either"
+                "a database could not be moved aside"
             );
 
-            return;
+            return false;
         }
     }
 
     tracing::warn!(
         path = %database.display(),
+        kept = %kept.display(),
         reason,
-        "the session database could not be read and was moved aside; \
-         this project starts with an empty store"
+        "the session database was moved aside; this project starts with an empty store"
     );
+
+    true
+}
+
+/// Sets a store whose sessions predate UUIDv7 ids aside, and hands back the
+/// connection to go on with (**D493**).
+///
+/// The question is data-shaped rather than schema-shaped — there is no version
+/// to bump for it, and a store from before the change is structurally
+/// identical to one from after — so it is asked of the rows: does any session
+/// carry an id [`crate::protocol::is_uuidv7`] refuses? Those ids came from a
+/// counter that started at zero in each *process*, so two processes reaching
+/// one millisecond minted the same one; mixing them with ids that cannot
+/// collide would fuse two sessions into one row, which is the outcome this
+/// exists to prevent. The store is renamed, never read further and never
+/// deleted, and a fresh one takes its name.
+///
+/// The probe runs inside an `IMMEDIATE` transaction for the reason [`migrate`]
+/// gives: the loser of a two-process race is made to wait and then sees the
+/// winner's finished state rather than acting on its own stale reading.
+///
+/// **That alone does not close the race**, because no SQLite lock survives a
+/// `rename(2)`: the loser's descriptor stays on the old inode, re-reads the
+/// old ids there, and would rename whatever now holds the path — the fresh
+/// store the winner just created. So after the transaction commits and before
+/// anything is renamed, the file this connection was opened on is compared
+/// against whatever the path names now, and a mismatch means the store was
+/// replaced underneath: the handle is dropped and the new file opened, with
+/// nothing set aside. Failing to make that comparison at all counts as a
+/// mismatch — a file that cannot be identified is one that cannot be proved
+/// still ours.
+///
+/// A move that is *refused* — the name it would take is already in use, or the
+/// rename itself fails — leaves the store where it is and the session goes on
+/// reading it, old ids and all. That is worse than a quarantine and better
+/// than a project that will not open, and [`set_aside`]'s warn line names both
+/// files so the next open is a decision somebody can make.
+///
+/// The reopened store is migrated but deliberately **not** converted: the
+/// older `storage/` tree a first open would have read was either carried into
+/// the store that has just been set aside, or set aside itself by [`convert`]
+/// for holding the same old ids. Converting again would be importing the very
+/// sessions that were just moved out of the way.
+fn set_aside_preuuid(
+    mut connection: Connection,
+    held: Option<fs::File>,
+    database: &Path,
+) -> Result<Connection, StorageError> {
+    let named = |source: rusqlite::Error| StorageError::Sql {
+        path: database.to_path_buf(),
+        source,
+    };
+
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(named)?;
+    let old = names(&transaction, "SELECT id FROM session")
+        .map_err(named)?
+        .into_iter()
+        .find(|id| !is_uuidv7(id));
+    transaction.commit().map_err(named)?;
+
+    let Some(old) = old else {
+        return Ok(connection);
+    };
+
+    let ours = held
+        .as_ref()
+        .is_some_and(|file| still_named_by(file, database));
+    drop(connection);
+    drop(held);
+
+    if ours {
+        set_aside(
+            database,
+            &format!("session {old} predates UUIDv7 ids"),
+            PREUUID,
+        );
+    } else {
+        tracing::warn!(
+            path = %database.display(),
+            "the session database was replaced while it was being read, so it was \
+             reopened rather than moved aside"
+        );
+    }
+
+    let mut connection = connect(database)?;
+    migrate(&mut connection, database)?;
+
+    Ok(connection)
+}
+
+/// Whether `path` still names the file `file` was opened on.
+///
+/// [`fs::File::metadata`] is an `fstat` on the descriptor and
+/// [`fs::metadata`] a `stat` on the path, so this is those two compared by
+/// identity — the device and inode pair, which is what a `rename(2)` under a
+/// held descriptor moves apart.
+#[cfg(unix)]
+fn still_named_by(file: &fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let (Ok(held), Ok(named)) = (file.metadata(), fs::metadata(path)) else {
+        return false;
+    };
+
+    held.dev() == named.dev() && held.ino() == named.ino()
+}
+
+/// Windows answers "cannot tell", which the caller reads as "do not rename".
+///
+/// The identity a plain `stat` carries there is not the `st_dev`/`st_ino` pair
+/// — it needs a handle opened for it — and this tree's windows support is
+/// parked with no compile signal to keep such a path honest. Refusing to
+/// quarantine is the harmless direction: the store keeps its old ids rather
+/// than losing them.
+#[cfg(not(unix))]
+fn still_named_by(_file: &fs::File, _path: &Path) -> bool {
+    false
 }
 
 /// Whether SQLite refused because the file is damaged rather than because the
@@ -1386,20 +1572,54 @@ fn names(connection: &Connection, sql: &str) -> Result<Vec<String>, rusqlite::Er
 /// set-aside a corrupt file gets — so a person who downgrades tomorrow loses
 /// only what they wrote today. When one did not, the tree stays exactly where
 /// it is, because the only copy of what did not make it is in there.
+///
+/// A tree whose sessions predate UUIDv7 ids is a third outcome, and it is
+/// decided before anything is carried (**D493**): the whole tree is set aside
+/// under [`PREUUID`] and nothing is imported. Deciding it afterwards would
+/// mean importing those sessions and then having [`set_aside_preuuid`]
+/// quarantine the store holding them — the same rows moved twice in one open,
+/// for one reason.
 fn convert(connection: &mut Connection, root: &Path, path: &Path) -> Result<(), StorageError> {
-    let infos = stored_files(&root.join(SESSION).join(INFO))?;
-    if infos.is_empty() {
+    let files = stored_files(&root.join(SESSION).join(INFO))?;
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    // Read the roster whole before carrying any of it, because the question
+    // below is about the tree rather than about one session.
+    let mut infos = Vec::with_capacity(files.len());
+    let mut lost = 0_usize;
+    for file in files {
+        match read_stored::<SessionInfo>(&file)? {
+            Some(info) => infos.push(info),
+            None => lost += 1,
+        }
+    }
+
+    if let Some(old) = infos.iter().find(|info| !is_uuidv7(info.id.as_str())) {
+        let aside = tree_aside(root, PREUUID);
+        match fs::rename(root, &aside) {
+            Ok(()) => tracing::warn!(
+                session = old.id.as_str(),
+                kept = %aside.display(),
+                "the stored sessions predate UUIDv7 ids and were set aside rather than \
+                 carried across; this project starts with an empty store"
+            ),
+            Err(failure) => tracing::warn!(
+                session = old.id.as_str(),
+                root = %root.display(),
+                %failure,
+                "the stored sessions predate UUIDv7 ids and could not be set aside; \
+                 nothing was carried across and the old store is left where it is"
+            ),
+        }
+
         return Ok(());
     }
 
     let mut carried = 0_usize;
-    let mut lost = 0_usize;
-    for file in infos {
-        let Some(info) = read_stored::<SessionInfo>(&file)? else {
-            lost += 1;
-            continue;
-        };
-        match carry(connection, root, &info) {
+    for info in &infos {
+        match carry(connection, root, info) {
             Ok(()) => carried += 1,
             Err(error) => {
                 lost += 1;
@@ -1424,11 +1644,7 @@ fn convert(connection: &mut Connection, root: &Path, path: &Path) -> Result<(), 
         return Ok(());
     }
 
-    let aside = root.with_file_name(format!(
-        "{}.{MIGRATED}-{}",
-        root.file_name().unwrap_or_default().to_string_lossy(),
-        now()
-    ));
+    let aside = tree_aside(root, MIGRATED);
     match fs::rename(root, &aside) {
         Ok(()) => tracing::info!(
             carried,
@@ -1444,6 +1660,19 @@ fn convert(connection: &mut Connection, root: &Path, path: &Path) -> Result<(), 
     }
 
     Ok(())
+}
+
+/// The name an older store's tree is set aside under: `storage.<kind>-<millis>`.
+///
+/// One place rather than two, because the two reasons a tree moves —
+/// [`MIGRATED`] once it has been carried across, [`PREUUID`] when it must not
+/// be — have to be told apart by suffix and by nothing else.
+fn tree_aside(root: &Path, kind: &str) -> PathBuf {
+    root.with_file_name(format!(
+        "{}.{kind}-{}",
+        root.file_name().unwrap_or_default().to_string_lossy(),
+        now()
+    ))
 }
 
 /// Carries one session and its whole transcript, in one transaction.
@@ -1804,6 +2033,23 @@ mod tests {
 
     fn session(id: &str) -> SessionId {
         SessionId::from(id.to_owned())
+    }
+
+    /// A session id spelled the way the mint spells one, from a small ordinal.
+    ///
+    /// Most fixtures below name their sessions `ses_1`, and may: `SessionId`'s
+    /// own doc says the prefix is a convention rather than an invariant, and
+    /// nothing reads such a store twice. The ones that **reopen** a store, or
+    /// that write an older store's tree for the conversion to read, cannot —
+    /// a store whose `session` rows carry that spelling is set aside rather
+    /// than read (**D493**), which is a different test and has four of its own
+    /// binaries. Those name their sessions through here instead, which keeps
+    /// the ordinal readable while spelling the id the way
+    /// [`crate::protocol::uuidv7`] spells one; the ordinal lands in the
+    /// trailing field, so `ORDER BY id` still orders them the way the test
+    /// wrote them.
+    fn minted(ordinal: u32) -> String {
+        format!("0198f2c4-a1b0-7000-8000-{ordinal:012x}")
     }
 
     /// Info with pinned times, so a test asserts on the order it asked for
@@ -2566,9 +2812,9 @@ mod tests {
         let mine = session("ses_mine");
         let yours = session("ses_yours");
 
-        // Two processes minting ids from their own counters can land on the
-        // same one in the same millisecond; under a bare `id` primary key the
-        // second write would take the first one's row.
+        // Two sessions can carry a message under the same id however it was
+        // minted; under a bare `id` primary key the second write would take
+        // the first one's row.
         store_message(
             &storage,
             &mine,
@@ -2605,10 +2851,10 @@ mod tests {
         // instead of failing — a claim nothing else in this suite exercises.
         //
         // Both sides deliberately use the *same* message and part ids, because
-        // that is the collision the composite keys exist for: ids are minted
-        // from a per-process counter, so two processes starting in the same
-        // millisecond mint the same `msg_…`. Under a bare `id` primary key the
-        // second writer would take the first one's row.
+        // that is the collision the composite keys exist for. UUIDv7 ids make
+        // it far less likely than the old per-process counter did (**D493**),
+        // but "unlikely" is not what a primary key is for: under a bare `id`
+        // the second writer would take the first one's row.
         let rounds = 25;
         let write = |storage: &Storage, owner: &str, what: &str| {
             let id = session(owner);
@@ -2624,9 +2870,15 @@ mod tests {
             }
         };
 
+        // The two sessions carry this build's own spelling, because the second
+        // handle to open finds the first one's rows already there — and a
+        // store whose rows are older than UUIDv7 is set aside at that moment
+        // rather than written into (**D493**).
+        let mine_id = minted(1);
+        let yours_id = minted(2);
         std::thread::scope(|scope| {
-            scope.spawn(|| write(&mine, "ses_mine", "mine"));
-            scope.spawn(|| write(&yours, "ses_yours", "yours"));
+            scope.spawn(|| write(&mine, &mine_id, "mine"));
+            scope.spawn(|| write(&yours, &yours_id, "yours"));
         });
 
         // Either handle answers for both sessions: one database, two views of
@@ -2648,8 +2900,8 @@ mod tests {
             );
         };
         for storage in [&mine, &yours] {
-            read(storage, "ses_mine", "mine");
-            read(storage, "ses_yours", "yours");
+            read(storage, &mine_id, "mine");
+            read(storage, &yours_id, "yours");
         }
         assert_eq!(
             mine.list_sessions().expect("the store lists").len(),
@@ -2694,11 +2946,12 @@ mod tests {
     #[test]
     fn a_second_open_finds_the_schema_already_there_and_the_sessions_with_it() {
         let directory = temporary();
-        let id = session("ses_1");
+        let name = minted(1);
+        let id = session(&name);
         {
             let storage = storage(&directory);
             storage
-                .save_info(&info("ses_1", 5))
+                .save_info(&info(&name, 5))
                 .expect("the record writes");
             store_message(&storage, &id, &message("msg_1", vec![text("prt_1", "a")]));
         }
@@ -2787,7 +3040,11 @@ mod tests {
             .expect("the file is writable");
         }
 
-        super::set_aside(&database, "for the test");
+        assert!(super::set_aside(
+            &database,
+            "for the test",
+            super::QUARANTINE
+        ));
 
         // A log left behind is recovered into the *fresh* file that takes the
         // old name, which would pour the damaged store straight back in — so
@@ -2869,23 +3126,33 @@ mod tests {
     fn an_older_file_store_is_carried_across_on_first_open_and_set_aside_intact() {
         let directory = temporary();
         let root = directory.path().join("storage");
-        let id = session("ses_1");
+        let name = minted(1);
+        let id = session(&name);
         let held = message("msg_1", vec![text("prt_1", "a"), tool("prt_2")]);
 
         // The file layout, written by hand: this is the store a build before
-        // this one left, and nothing in the tree writes it any more.
+        // this one left, and nothing in the tree writes it any more. Its ids
+        // are this build's, because a tree carrying older ones is set aside
+        // rather than carried across (**D493**) — `storage_preuuid_tree.rs`
+        // is where that is asserted.
         let info = SessionInfo {
             title: Some("carried".to_owned()),
-            ..info("ses_1", 5)
+            ..info(&name, 5)
         };
-        write_json(&root.join("session").join("info").join("ses_1.json"), &info);
+        write_json(
+            &root
+                .join("session")
+                .join("info")
+                .join(format!("{name}.json")),
+            &info,
+        );
         let mut envelope = held.clone();
         envelope.parts.clear();
         write_json(
             &root
                 .join("session")
                 .join("message")
-                .join("ses_1")
+                .join(&name)
                 .join("msg_1.json"),
             &serde_json::json!({"version": VERSION, "payload": envelope}),
         );
@@ -2894,7 +3161,7 @@ mod tests {
                 &root
                     .join("session")
                     .join("part")
-                    .join("ses_1")
+                    .join(&name)
                     .join("msg_1")
                     .join(format!("{}.json", part.id.as_str())),
                 &serde_json::json!({"version": VERSION, "payload": part}),
@@ -2923,7 +3190,7 @@ mod tests {
                 .join(aside)
                 .join("session")
                 .join("info")
-                .join("ses_1.json")
+                .join(format!("{name}.json"))
                 .is_file(),
             "the set-aside tree must still hold what it held"
         );
@@ -2943,12 +3210,16 @@ mod tests {
         let directory = temporary();
         let root = directory.path().join("storage");
 
-        for (file, title) in [("ses_1.json", "first"), ("also-ses_1.json", "second")] {
+        let name = minted(1);
+        for (file, title) in [
+            (format!("{name}.json"), "first"),
+            (format!("also-{name}.json"), "second"),
+        ] {
             write_json(
                 &root.join("session").join("info").join(file),
                 &SessionInfo {
                     title: Some(title.to_owned()),
-                    ..info("ses_1", 5)
+                    ..info(&name, 5)
                 },
             );
         }
@@ -2958,7 +3229,7 @@ mod tests {
         // the directory's order to decide and not this test's.
         assert!(
             storage
-                .load_info(&session("ses_1"))
+                .load_info(&session(&name))
                 .expect("the database opens")
                 .is_some(),
             "the session that did carry across is there"
@@ -2966,7 +3237,7 @@ mod tests {
         assert!(
             root.join("session")
                 .join("info")
-                .join("ses_1.json")
+                .join(format!("{name}.json"))
                 .is_file(),
             "and the tree that holds the one that did not is untouched"
         );
@@ -2982,19 +3253,24 @@ mod tests {
     fn a_second_open_does_not_convert_a_tree_that_appeared_after_the_first() {
         let directory = temporary();
         let root = directory.path().join("storage");
+        let native = minted(1);
         {
             let storage = Storage::open(root.clone());
             storage
-                .save_info(&info("ses_native", 5))
+                .save_info(&info(&native, 5))
                 .expect("the record writes");
         }
 
         // A tree that turns up after the database exists is not this build's
         // to import: convert-on-first-open happens exactly once, and once is
         // the open that created the file.
+        let late = minted(2);
         write_json(
-            &root.join("session").join("info").join("ses_late.json"),
-            &info("ses_late", 9),
+            &root
+                .join("session")
+                .join("info")
+                .join(format!("{late}.json")),
+            &info(&late, 9),
         );
 
         let storage = Storage::open(root.clone());
@@ -3004,7 +3280,7 @@ mod tests {
             .into_iter()
             .map(|info| info.id.as_str().to_owned())
             .collect();
-        assert_eq!(listed, vec!["ses_native".to_owned()]);
+        assert_eq!(listed, vec![native]);
         assert!(
             root.exists(),
             "a tree that was not converted is not set aside"
