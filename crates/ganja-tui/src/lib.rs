@@ -124,10 +124,12 @@ pub async fn run(
     // the spawn's own approved answer is the one fact a lead can put on the
     // line without putting a secret there. The record itself — the model this
     // teammate was spawned to run, and whether it must start in plan mode —
-    // is **waited for**, because the lead writes it after the split answers,
-    // and a pane is always a few milliseconds older than its own record.
-    // Before the config loads, because plan mode is an agent here, and the
-    // agent a session starts on is the config's to resolve.
+    // is read off the team file with a bounded wait
+    // (`member::Membership::await_record`): the lead writes it before it types
+    // this launch line, so the wait covers a lead that died in between, not
+    // the ordinary path. Before the config loads, because plan mode is an
+    // agent here, and the agent a session starts on is the config's to
+    // resolve.
     let membership = match member {
         Some(flags) => {
             let home = ganja_core::config::config_home()

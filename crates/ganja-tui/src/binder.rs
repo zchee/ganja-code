@@ -22,18 +22,9 @@
 //!
 //! # Which sessions bind
 //!
-//! A **lead** — a session with a config home that was not launched as a pane
-//! member — binds. A pane member binds nothing: it is addressed through its
-//! lead's team (its inbox), the same line `run` draws when it skips
-//! `with_teammates` and the D506 sweep for a member, and a member's own id is
-//! not something a peer session has any reason to reach — a peer reaches the
-//! lead, and the lead reaches its members. A build with no config home leads
-//! no team and binds nothing either: the socket's team routes would answer
-//! nothing, and `ganja sessions --live` would list a session nothing can
-//! message. And a headless `ganja run` leads no team and binds nothing — the
-//! socket rides the team gate (P25 ruling): a one-shot turn installs no
-//! teammates, a `uds:` message to it would have no next turn to land on,
-//! and D-11/D-12 name `sessions --live` as the *peer* list, never a one-shot.
+//! Decided in [`crate::run`], where the gate is: a lead binds, and a pane
+//! member, a build with no config home and a headless `ganja run` hand the
+//! binder back unused.
 //!
 //! # Which moments rebind
 //!
@@ -42,21 +33,19 @@
 //! lazy create, replaced by a resume, re-minted by `NewSession`. The socket is
 //! named by the id, so it follows the id and only the id: bound once at
 //! startup, **after** the startup resume; rebound whenever a resume or a
-//! `NewSession` moves the slot — the picker's, or `/new`'s. **Not a peer's
-//! over the socket**: the socket serves three routes and no session route
-//! (D505's ruling — `GET /global/health`, `GET /team`, `POST
-//! /team/{name}/message`; `POST /session` and every `/session/{id}/…` route
-//! are TCP's alone), so nothing that reaches a session through its socket
-//! can move its slot. [`SessionSocket`] still compares the engine's id
-//! against the bound one after every event the app handles rather than only
-//! at the app's own two doors, and the reason is now the cheaper one: it is
-//! one lock and one id compare per event (`Engine::session_id` locks the
-//! slot and clones the id), and it makes the socket follow the slot however
-//! it moves, so a door added later cannot leave a stale socket bound behind
-//! a session it no longer names. **Not** on first-prompt adoption, which
-//! gives the row the id the engine already had and moves nothing. Torn down
-//! at the tail of the app's run, on the same exit path as the MCP servers
-//! and the jobs.
+//! `NewSession` moves the slot — the picker's, or `/new`'s. Never a peer's
+//! doing: the socket serves three routes and no session route (D505's ruling
+//! — `GET /global/health`, `GET /team`, `POST /team/{name}/message`; `POST
+//! /session` and every `/session/{id}/…` route are TCP's alone), so nothing
+//! that reaches a session through its socket can move its slot.
+//! [`SessionSocket`] compares the engine's id against the bound one after
+//! every event the app handles — one lock and one id compare per event
+//! (`Engine::session_id` locks the slot and clones the id) — which makes the
+//! socket follow the slot however it moves, so a door added later cannot
+//! leave a stale socket bound behind a session it no longer names. **Not**
+//! on first-prompt adoption, which gives the row the id the engine already
+//! had and moves nothing. Torn down at the tail of the app's run, on the
+//! same exit path as the MCP servers and the jobs.
 //!
 //! The old socket is shut down **before** the new one is bound, and the two
 //! are sequential on purpose: two sessions minted inside one 65-second

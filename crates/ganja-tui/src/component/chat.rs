@@ -1291,10 +1291,10 @@ impl Entry {
                     body,
                     ..
                 } => {
-                    // Capped here as well as at `PeerMessage::new`: this
+                    // Capped here as well as at `PeerPayload::into_part`: this
                     // renderer draws whatever the stored part holds, and a
                     // part is deliberately storable with a summary that never
-                    // came through that constructor.
+                    // went through that cap.
                     let heading = match summary {
                         Some(line) if !line.trim().is_empty() => {
                             format!("{from}: {}", team::cap_for_display(line))

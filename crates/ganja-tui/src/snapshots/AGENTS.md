@@ -5,7 +5,7 @@
 
 ## Purpose
 
-`insta` snapshots of rendered screens, written by the tests in `../app.rs`. They are the frontend's regression net: a change in layout, wrapping or tool rendering shows up here as a diff instead of going unnoticed.
+`insta` snapshots of rendered screens, written by the tests in `../app.rs` and, since P25, one in `../component/chat.rs`. They are the frontend's regression net: a change in layout, wrapping or tool rendering shows up here as a diff instead of going unnoticed.
 
 ## Key Files
 

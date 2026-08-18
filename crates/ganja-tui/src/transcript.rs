@@ -202,9 +202,9 @@ fn formatted(part: &Part) -> String {
             body,
             ..
         } => {
-            // The summary is capped here as well as at `PeerMessage::new`,
-            // because a part is storable with one that never came through that
-            // constructor and this formatter draws what the part holds. It
+            // The summary is capped here as well as at `PeerPayload::into_part`,
+            // because a part is storable with one that never went through that
+            // cap and this formatter draws what the part holds. It
             // then rides this heading as text and only text
             // ([`inline_text`]) — the heading is ganja's own sentence about
             // who wrote what follows, and a field inside it that could still

@@ -72,7 +72,7 @@
 //!
 //! The member record — the model this teammate was spawned to run, and
 //! whether it must start in plan mode — is read off the team file **after a
-//! bounded wait** ([`Membership::await_record`]), and that wait is now
+//! bounded wait** ([`Membership::await_record`]), and that wait is
 //! **defensive rather than expected**. The lead orders the two the other way
 //! round: the registry writes the record once the backend's `spawn` has answered
 //! with the pane it made, and only *then* is the launch line typed — through
@@ -273,7 +273,7 @@ impl Membership {
     /// not name it — including when there is no document at all.
     ///
     /// An absent file is [`None`] rather than an error, and that tolerance is
-    /// **defensive** now rather than the ordinary path: the lead writes the record
+    /// **defensive** rather than the ordinary path: the lead writes the record
     /// before it launches this process (see [`Membership::await_record`]). What it
     /// answers for is a lead that died in between, or a `ganja` started with these
     /// flags by hand — cases where "no record" is the honest answer and a failure
@@ -1244,8 +1244,8 @@ mod tests {
         );
     }
 
-    /// The record is the lead's to write and arrives after the pane exists,
-    /// so it is waited for — and a lead that never writes it is refused
+    /// The record is the lead's to write before it types the launch line, so
+    /// the wait is defensive — and a lead that never writes one is refused
     /// naming the file rather than waited on forever.
     #[tokio::test]
     async fn a_member_waits_for_its_record_and_refuses_when_no_lead_writes_one() {

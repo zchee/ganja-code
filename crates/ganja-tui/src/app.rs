@@ -1,7 +1,8 @@
 //! The event loop and the state it owns.
 //!
-//! One [`tokio::select!`] owns every mutable piece of UI state, so nothing is
-//! shared with the engine but channels. No arm awaits work of unbounded
+//! One [`tokio::select!`] owns every mutable piece of UI state; the engine is
+//! reached through `&self` seams on a shared [`Arc<Engine>`] (**D505**) and
+//! answers through its event stream. No arm awaits work of unbounded
 //! duration: a prompt is handed to the engine, which answers through the event
 //! stream, and the loop goes straight back to drawing.
 //!
@@ -1173,10 +1174,10 @@ impl App {
 
     /// Keeps the session socket bound under the engine's current id, when
     /// this session serves one: after every event, because the slot can move
-    /// through this app's own doors (`/new`, the picker) **and** through a
-    /// peer's request over the socket itself, and one comparison of an id is
-    /// cheaper than knowing every door. A refusal reaches the status bar
-    /// once per id (**D505**, best-effort by design).
+    /// through this app's own doors (`/new`, the picker) — never through the
+    /// socket, which serves three routes and no session route — and one
+    /// comparison of an id is cheaper than knowing every door. A refusal
+    /// reaches the status bar once per id (**D505**, best-effort by design).
     async fn sync_socket(&mut self) {
         let Some(socket) = &mut self.socket else {
             return;
@@ -1270,11 +1271,12 @@ impl App {
                 // it: a message the turn has provably consumed is a message
                 // the mailbox may stop holding (**D503**).
                 self.settle_consumed_peers().await;
-                // And the member's two writes, for the same reason: a turn's
-                // end is a frame the lead reads, and a shutdown waiting on that
-                // end can now be answered (§10.3-3, §10.3-4).
+                // And the member's three writes, for the same reason: a turn's
+                // end is a frame the lead reads, a permission ask it forwards
+                // is one too (D-5), and a shutdown waiting on that end can now
+                // be answered (§10.3-3, §10.3-4).
                 self.report_member_idle().await;
-                self.forward_member_asks().await;
+                self.write_asks_to_lead().await;
                 self.finish_member_shutdown().await;
                 self.dirty = true;
                 // Run after every engine event, because the event that just
@@ -1432,10 +1434,12 @@ impl App {
 
     /// The lead's side of the mailbox, once a tick (**D503**).
     ///
-    /// Three things, and only the last is rate-limited *here*. Counting
-    /// teammates and carrying their dialogs are reads of memory this process
-    /// already holds, and cost a lock and nothing else; the §6.2 pass **is** a
-    /// file read — one `read_to_string` and, when it finds anything, a locked
+    /// Six things, and only the last is rate-limited *here*. Counting
+    /// teammates, carrying their dialogs and the spawn gate's asks, and
+    /// repainting the open `/team` dialog are reads of memory this process
+    /// already holds; reaping a finished spawn awaits a handle that already
+    /// reported finished. The §6.2 pass **is** a file read — one
+    /// `read_to_string` and, when it finds anything, a locked
     /// read-modify-write — so it keeps the reference's own 1000 ms rather than
     /// the loop's 16.
     ///
@@ -1533,7 +1537,7 @@ impl App {
             }
         }
         for (id, reply) in pass.answers {
-            self.answer_forwarded_ask(id, reply).await;
+            self.apply_leads_answer(id, reply).await;
         }
         if let Some(request_id) = pass.shutdown {
             self.begin_member_shutdown(request_id).await;
@@ -1569,7 +1573,7 @@ impl App {
     /// nobody could see: nothing was asked of anybody, and a turn left waiting
     /// on an answer that is not coming would be worse than a refused call the
     /// model reads.
-    async fn forward_member_asks(&mut self) {
+    async fn write_asks_to_lead(&mut self) {
         if self.member_asks.is_empty() {
             return;
         }
@@ -1601,7 +1605,7 @@ impl App {
 
     /// Carries the lead's answer to the engine, and puts the bar back to
     /// streaming once nothing is waiting on anybody.
-    async fn answer_forwarded_ask(
+    async fn apply_leads_answer(
         &mut self,
         id: ganja_protocol::PermissionId,
         reply: PermissionReply,
@@ -2145,13 +2149,13 @@ impl App {
             }
         }
         for forwarded in asked {
-            self.forward(forwarded);
+            self.raise_teammate_dialog(forwarded);
         }
     }
 
     /// Raises one teammate's dialog, or answers it where nobody is going to be
     /// asked.
-    fn forward(&mut self, forwarded: Forwarded) {
+    fn raise_teammate_dialog(&mut self, forwarded: Forwarded) {
         let CoreEvent::PermissionRequested {
             id,
             tool,
@@ -2210,7 +2214,7 @@ impl App {
     /// subscribe to. What it leaves behind is exactly what the engine's own
     /// path leaves — the next queued dialog on screen, and the activity back
     /// to what the lead is really doing.
-    fn answer_forwarded(&mut self, id: &PermissionId, reply: PermissionReply) -> bool {
+    fn answer_teammate_dialog(&mut self, id: &PermissionId, reply: PermissionReply) -> bool {
         // Two maps, one door: a spawn's dialog and a teammate's call dialog are
         // answered by the same keys and retired the same way, and which map a
         // reply belongs to is decided by which one is holding the id rather than
@@ -3132,7 +3136,7 @@ impl App {
                 // (**D-5**). One `if`, and the same keys either way: which
                 // conversation raised a question is not something a person
                 // answering it should have to know.
-                if !self.answer_forwarded(&id, reply) {
+                if !self.answer_teammate_dialog(&id, reply) {
                     self.engine
                         .send(Command::ReplyPermission { id, reply })
                         .await?;
@@ -5216,8 +5220,8 @@ impl App {
     /// the first one running can choose when to ask again.
     ///
     /// The reload is the one action that stays here: it touches no store
-    /// file, it needs `&mut self` for the engine seams it swaps, and it is a
-    /// config read rather than a network call.
+    /// file, it swaps the engine seams through `&self`, and it is a config
+    /// read rather than a network call.
     fn run_plugin_effect(&mut self, effect: plugin::Effect) {
         if effect == plugin::Effect::Reload {
             let notice = self.reload_plugins();
@@ -6048,11 +6052,10 @@ impl App {
                 self.effort = effort;
                 self.sync_effort_status();
             }
-            // Taken and drawn nowhere yet (**D496**): the posture this
-            // announces belongs beside the agent and the effort in the status
-            // bar, and that surface lands with the rest of the team's own
-            // (W6). Applying it here would paint a segment no other frontend
-            // shows and no test pins.
+            // Taken and drawn nowhere (**D496**): no frontend paints the
+            // posture this announces and no test pins one — its place would be
+            // beside the agent and the effort in the status bar. The arm
+            // exists so the match stays exhaustive.
             CoreEvent::PermissionModeChanged { .. } => {}
             CoreEvent::MessageFinished {
                 message_id,
@@ -16336,7 +16339,7 @@ mod tests {
         let mut app = app();
         let (reply, answered) = tokio::sync::oneshot::channel();
         let id = PermissionId::ascending();
-        app.forward(ganja_core::teammate::posture::Forwarded {
+        app.raise_teammate_dialog(ganja_core::teammate::posture::Forwarded {
             teammate: "w1".to_owned(),
             request: CoreEvent::PermissionRequested {
                 session_id: session(),
@@ -16382,7 +16385,7 @@ mod tests {
     async fn a_yolo_lead_answers_its_teammates_dialogs_without_drawing_one() {
         let mut app = app().with_yolo(true);
         let (reply, answered) = tokio::sync::oneshot::channel();
-        app.forward(ganja_core::teammate::posture::Forwarded {
+        app.raise_teammate_dialog(ganja_core::teammate::posture::Forwarded {
             teammate: "w1".to_owned(),
             request: CoreEvent::PermissionRequested {
                 session_id: session(),
