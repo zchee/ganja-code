@@ -59,6 +59,15 @@ jobs:
         with:
           tool: nextest
 
+      # The pane suites (ganja-core's teammate_pane_*, ganja-cli's
+      # teammate_* and pane_lead consumers) drive a real tmux server and
+      # hard-fail rather than skip when tmux is missing — the same posture
+      # as the golden differential's bun below, so CI has to provide it.
+      # The ubuntu images ship tmux; the xcode image does not.
+      - name: install tmux
+        if: runner.os == 'macOS'
+        run: brew install tmux
+
       # The golden differential test drives the real upstream opencode at its
       # pinned tag, headless under bun, and hard-fails when the checkout is
       # missing rather than silently comparing against nothing — so CI has to
