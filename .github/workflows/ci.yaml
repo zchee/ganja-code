@@ -11,6 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # NOTE(zchee): avoid 'trust aws/tap' warning
+  HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
   CARGO_TERM_COLOR: always
 
 jobs:
