@@ -37,6 +37,19 @@ ganja-tool.workspace = true
 # that make a loopback callback answerable only by the request that opened it.
 # Thirty-two bytes from the operating system, rendered as base64url.
 getrandom.workspace = true
+# `Retry-After` may be an IMF-fixdate, and RFC 9110 obliges a recipient to
+# read the two legacy spellings beside it — which the parser this replaces
+# never did. The one form it refuses where the hand parser did not, a
+# leap-second `:60`, keeps a fallback at the call site.
+httpdate.workspace = true
+# A quota snapshot arrives as a query string, and its escaped bytes are UTF-8
+# rather than one character each — which is what the hand decoder here read
+# them as. RFC 3986's coding, already in the tree under `url`.
+percent-encoding.workspace = true
+# One pattern in `effort`, cited from upstream's own source as a regex and
+# until now emulated by hand — backtracking and all — because this crate
+# named no engine. Already resolved in the lock through `grep-regex`.
+regex.workspace = true
 # Every wire speaks SSE, so only `stream` and `json` are load-bearing; the
 # workspace declaration pins rustls so no build here reaches for OpenSSL.
 reqwest.workspace = true
@@ -60,6 +73,11 @@ tracing.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 # `Host`, for deciding whether an endpoint is loopback without matching strings.
 url.workspace = true
+# A cursor login's pairing id is a v4 UUID, so the version and variant bits
+# RFC 9562 §5.4 fixes are the crate's business rather than this crate's hand
+# masking. `Builder::from_random_bytes` needs no feature past the workspace
+# declaration's, and the entropy is still ours.
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The credential store's owner-only protection: a DACL sealed onto the create

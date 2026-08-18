@@ -30,7 +30,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock, PoisonError, RwLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
@@ -1248,20 +1248,24 @@ async fn fetch(base: &str) -> Result<String, CatalogError> {
 /// How long to wait before attempt `attempt + 1`.
 ///
 /// Exponential from [`RETRY_BASE`], scattered across half to one and a half of
-/// it. The scatter is read off the clock rather than from a random-number
-/// generator: all it has to do is keep two processes that started together
-/// from staying in step, and that is not worth a dependency.
+/// it. All the scatter has to do is keep two processes that started together
+/// from staying in step — which is exactly why it may not be read off the
+/// clock, the one thing two such processes agree about.
+///
+/// `backon`'s ladder was weighed here and declined: its jitter is additive
+/// over `(0, delay)`, an effective one to two times the wait, where this one
+/// multiplies around one. Taking it would move pacing this module's own test
+/// pins, and that is a change to make deliberately or not at all.
 fn backoff(attempt: u32) -> Duration {
-    (RETRY_BASE * 2_u32.pow(attempt)).mul_f64(jitter())
+    scattered(attempt, crate::jitter::draw())
 }
 
-/// A factor in `0.5..1.5`.
-fn jitter() -> f64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.subsec_nanos());
+/// [`backoff`] over a draw the caller holds, so the window can be walked to
+/// its edges instead of sampled.
+fn scattered(attempt: u32, entropy: u64) -> Duration {
+    let factor = 0.5 + (entropy % 1_000_000) as f64 / 1_000_000.0;
 
-    0.5 + f64::from(nanos % 1_000_000) / 1_000_000.0
+    (RETRY_BASE * 2_u32.pow(attempt)).mul_f64(factor)
 }
 
 /// Writes `body` at `path`, verbatim, through a sibling that is renamed over
@@ -1308,7 +1312,7 @@ mod tests {
 
     use super::{
         Cost, DEFAULT_SOURCE, ModelStatus, Pricing, Source, backoff, cache_name, carries,
-        compact_tokens, cost, default_model, fresh, model, parse, read_cached, snapshot,
+        compact_tokens, cost, default_model, fresh, model, parse, read_cached, scattered, snapshot,
         write_cache,
     };
     use crate::protocol::Usage;
@@ -2137,6 +2141,25 @@ mod tests {
             .collect();
 
         assert!(strays.is_empty(), "a failed write left {strays:?} behind");
+    }
+
+    /// The window's own edges, which sixty-four live draws can only suggest.
+    #[test]
+    fn a_backoff_walks_half_to_half_again_of_the_attempts_base() {
+        for attempt in 0..3 {
+            let base = super::RETRY_BASE * 2_u32.pow(attempt);
+
+            assert_eq!(
+                scattered(attempt, 0),
+                base.mul_f64(0.5),
+                "the smallest draw is half the base"
+            );
+            let widest = scattered(attempt, 999_999);
+            assert!(
+                widest > base.mul_f64(1.499) && widest < base.mul_f64(1.5),
+                "the largest draw stops just short of half again, got {widest:?}"
+            );
+        }
     }
 
     #[test]

@@ -50,6 +50,10 @@ pub(crate) mod atomic;
 pub mod auth;
 pub mod catalog;
 pub(crate) mod effort;
+/// The entropy both backoff ladders here scatter their waits from — the one
+/// thing the retry policy and the catalog fetcher share, and the reason
+/// neither reads a clock for it any more.
+pub(crate) mod jitter;
 pub mod provider;
 
 pub use ganja_protocol as protocol;

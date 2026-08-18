@@ -56,8 +56,9 @@
 //! roster sorts by name, which is the catalog schema's standing order and not
 //! this module's to change.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::LazyLock};
 
+use regex::Regex;
 use serde_json::{Map, Value};
 
 use crate::catalog::{ModelInfo, ReasoningOption};
@@ -569,69 +570,26 @@ fn anthropic_opus_45(api_id: &str) -> bool {
         .any(|name| api_id.contains(name))
 }
 
-/// `claude-(?:[a-z]+-)?(\d+)(?:[.-](\d{1,2}))?(?:[.@-]|$)` on the lowered id,
-/// first match winning — hand-rolled because this crate carries no regex
-/// engine and the pattern is four fixed pieces. Minors are limited to two
-/// digits so a release date in an id such as `claude-opus-4-20250514` is not
-/// read as a version.
+/// The major and minor a Claude id carries, by upstream's own pattern.
+///
+/// Minors stop at two digits so a release date in an id such as
+/// `claude-opus-4-20250514` is not read as one; the trailing class is what
+/// makes that stop stick, since a longer run has to end on a separator the
+/// pattern names or the whole minor is given back.
 fn claude_version(id: &str) -> Option<(u64, u64)> {
-    for (at, _) in id.match_indices("claude-") {
-        let rest = &id[at + "claude-".len()..];
-        // The optional family word, greedily first, the way the regex
-        // engine would: a run of letters can never contain the `-` that ends
-        // it, so at most one of the two attempts can reach the digits.
-        let attempts = [family_stripped(rest), Some(rest)];
-        for tail in attempts.into_iter().flatten() {
-            if let Some(version) = version_tail(tail) {
-                return Some(version);
-            }
-        }
-    }
+    static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"claude-(?:[a-z]+-)?(\d+)(?:[.-](\d{1,2}))?(?:[.@-]|$)")
+            .expect("the version pattern is a literal")
+    });
 
-    None
-}
+    let found = PATTERN.captures(id)?;
+    let major = found.get(1)?.as_str().parse().ok()?;
+    let minor = found
+        .get(2)
+        .map_or(Ok(0), |minor| minor.as_str().parse())
+        .ok()?;
 
-/// `(?:[a-z]+-)` — one family word and its dash, or nothing to strip.
-fn family_stripped(rest: &str) -> Option<&str> {
-    let letters = rest
-        .find(|c: char| !c.is_ascii_lowercase())
-        .unwrap_or(rest.len());
-    (letters > 0 && rest[letters..].starts_with('-')).then(|| &rest[letters + 1..])
-}
-
-/// `(\d+)(?:[.-](\d{1,2}))?(?:[.@-]|$)` — the version itself. The minor is
-/// tried greedily (two digits, then one) and the no-minor reading still
-/// stands when neither fits, exactly the regex's backtracking.
-fn version_tail(tail: &str) -> Option<(u64, u64)> {
-    let digits = tail
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(tail.len());
-    if digits == 0 {
-        return None;
-    }
-    let major: u64 = tail[..digits].parse().ok()?;
-    let rest = &tail[digits..];
-
-    if rest.starts_with(['.', '-']) {
-        let after = &rest[1..];
-        for take in [2usize, 1] {
-            if after.len() >= take
-                && after.as_bytes()[..take].iter().all(u8::is_ascii_digit)
-                && after[take..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| matches!(c, '.' | '@' | '-'))
-            {
-                let minor = after[..take].parse().ok()?;
-                return Some((major, minor));
-            }
-        }
-    }
-
-    rest.chars()
-        .next()
-        .is_none_or(|c| matches!(c, '.' | '@' | '-'))
-        .then_some((major, 0))
+    Some((major, minor))
 }
 
 /// Upstream's `openaiReasoningEfforts`: the tiers a Responses-wire model

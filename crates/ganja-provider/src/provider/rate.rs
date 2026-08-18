@@ -109,6 +109,7 @@
 //! [`RateWindow::expired`] rather than by session identity.
 
 use std::{
+    borrow::Cow,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -667,31 +668,10 @@ fn quota_snapshot(kind: &str, value: &str) -> Option<PlanWindow> {
 /// Deliberately *not* a full `application/x-www-form-urlencoded` decode: a
 /// `+` stays a `+`, because the only field this build decodes is an RFC 3339
 /// instant, whose offset is spelled with one and whose grammar has nowhere to
-/// put a space. An escape that is not two hex digits is left as written rather
-/// than guessed at.
-fn percent_decode(value: &str) -> String {
-    let mut decoded = String::with_capacity(value.len());
-    let mut rest = value;
-
-    while let Some(index) = rest.find('%') {
-        decoded.push_str(&rest[..index]);
-        match rest
-            .get(index + 1..index + 3)
-            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
-        {
-            Some(byte) => {
-                decoded.push(char::from(byte));
-                rest = &rest[index + 3..];
-            }
-            None => {
-                decoded.push('%');
-                rest = &rest[index + 1..];
-            }
-        }
-    }
-    decoded.push_str(rest);
-
-    decoded
+/// put a space. That is the whole reason this is a named seam rather than the
+/// call itself — `serve`'s reader of the other dialect sits one crate away.
+fn percent_decode(value: &str) -> Cow<'_, str> {
+    percent_encoding::percent_decode_str(value).decode_utf8_lossy()
 }
 
 /// One header's value as trimmed text, or [`None`] when it is absent or is not
@@ -821,7 +801,10 @@ mod tests {
 
     use reqwest::header::{HeaderMap, HeaderValue};
 
-    use super::{PlanWindow, RateWindow, RateWindows, header_names, parse, parse_plans, rfc3339};
+    use super::{
+        PlanWindow, RateWindow, RateWindows, header_names, parse, parse_plans, percent_decode,
+        rfc3339,
+    };
 
     /// A fixed "now" so a duration-spelled reset lands somewhere a test can
     /// name, rather than wherever the clock happens to be.
@@ -1359,6 +1342,24 @@ mod tests {
         assert_eq!(
             plans[0].window_minutes, None,
             "this vendor sends no window length, so none is invented"
+        );
+    }
+
+    /// The escapes carry whatever the vendor put in the field, and a field is
+    /// bytes rather than code points: reading each escaped byte as its own
+    /// character turns any multi-byte sequence into mojibake.
+    #[test]
+    fn a_percent_encoded_utf8_sequence_decodes_to_its_character() {
+        assert_eq!(percent_decode("%E2%9C%93"), "\u{2713}");
+        assert_eq!(
+            percent_decode("1970-01-02T00%3A00%3A00Z"),
+            "1970-01-02T00:00:00Z",
+            "the ASCII escapes this build actually meets are unchanged"
+        );
+        assert_eq!(
+            percent_decode("+00%3A00%zz"),
+            "+00:00%zz",
+            "a `+` is not a space here, and half an escape is not a guess"
         );
     }
 

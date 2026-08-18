@@ -26,7 +26,7 @@
 //! cancelled login structurally unable to leave anything behind — the same
 //! property every other flow under [`super`] is built on.
 
-use std::{fmt, fmt::Write as _, sync::Arc, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio_util::sync::CancellationToken;
@@ -474,21 +474,12 @@ fn expiry(access: &SecretString) -> u64 {
 /// The RFC 9562 §5.4 version and variant bits are set because the id is a
 /// value cursor's server pairs a browser tab against, and an id the server
 /// might validate is minted in the shape the recorded client sends. What
-/// makes it unguessable is the 122 random bits, not the format.
+/// makes it unguessable is the 122 random bits, not the format — which is
+/// why the bytes are still drawn here while the format is [`uuid`]'s.
 fn pairing_id() -> Result<SecretString, EntropyError> {
-    let mut bytes = random_bytes::<16>()?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let id = uuid::Builder::from_random_bytes(random_bytes::<16>()?).into_uuid();
 
-    let mut rendered = String::with_capacity(36);
-    for (index, byte) in bytes.iter().enumerate() {
-        if matches!(index, 4 | 6 | 8 | 10) {
-            rendered.push('-');
-        }
-        write!(rendered, "{byte:02x}").expect("writing hex into a String cannot fail");
-    }
-
-    Ok(SecretString::from(rendered))
+    Ok(SecretString::from(id.hyphenated().to_string()))
 }
 
 /// Renews a cursor credential from the refresh token stored beside it.

@@ -20,7 +20,7 @@
 
 use std::{
     fmt::Write as _,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use reqwest::header::HeaderMap;
@@ -229,18 +229,20 @@ pub fn delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
     Duration::from_millis(u64::try_from(scheduled).unwrap_or(u64::MAX)).min(MAX_DELAY)
 }
 
-/// Extends `base` by up to [`JITTER_PERCENT`], deterministically enough for a
-/// retry and without pulling in a random number generator.
+/// Extends `base` by up to [`JITTER_PERCENT`], off the operating system's
+/// entropy rather than the clock the processes being spread apart share.
 fn jitter(base: Duration) -> Duration {
+    scattered(base, crate::jitter::draw())
+}
+
+/// [`jitter`] over a draw the caller holds, so the span can be walked end to
+/// end instead of sampled.
+fn scattered(base: Duration, entropy: u64) -> Duration {
     let span =
         u64::try_from(base.as_millis()).unwrap_or(u64::MAX) / u64::from(100 / JITTER_PERCENT);
     if span == 0 {
         return base;
     }
-
-    let entropy = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| u64::from(since.subsec_nanos()));
 
     (base + Duration::from_millis(entropy % (span + 1))).min(MAX_DELAY)
 }
@@ -272,51 +274,44 @@ pub fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
     http_date(value)?.duration_since(now).ok()
 }
 
-/// Parses an IMF-fixdate, the one format RFC 9110 requires senders to use:
-/// `Sun, 06 Nov 1994 08:49:37 GMT`.
+/// An HTTP date: the IMF-fixdate RFC 9110 requires senders to use, plus the
+/// two legacy spellings it requires recipients to read.
+///
+/// The grammar is held to rather than approximated: a one-digit day, an absent
+/// weekday and a weekday naming the wrong day of the week are each refused,
+/// where a parser that merely splits on spaces lets all three through.
+///
+/// The one form [`httpdate`] refuses and a reader here may not is the leap
+/// second, which keeps the branch below.
 fn http_date(value: &str) -> Option<SystemTime> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
+    httpdate::parse_http_date(value)
+        .ok()
+        .or_else(|| leap_second(value))
+}
 
-    let rest = value
-        .split_once(", ")
-        .map_or(value, |(_weekday, rest)| rest);
-    let mut fields = rest.split(' ');
+/// The `:60` of a leap second, read as the instant it names.
+///
+/// A sender that spells 60 is telling the truth about a second that happened,
+/// and the alternative — refusing the header — turns a `Retry-After` into no
+/// delay at all. The second before it is a date every reader agrees on, so
+/// that is what gets parsed and then stepped past.
+fn leap_second(value: &str) -> Option<SystemTime> {
+    let head = value.trim_end().strip_suffix(":60 GMT")?;
 
-    let day: u32 = fields.next()?.parse().ok()?;
-    let name = fields.next()?;
-    let month = 1 + u32::try_from(MONTHS.iter().position(|month| *month == name)?).ok()?;
-    let year: i64 = fields.next()?.parse().ok()?;
-
-    let mut clock = fields.next()?.split(':');
-    let hour: u64 = clock.next()?.parse().ok()?;
-    let minute: u64 = clock.next()?.parse().ok()?;
-    let second: u64 = clock.next()?.parse().ok()?;
-
-    // A leap second is a legal 60, and no field may spill into the next.
-    if !matches!(fields.next(), Some("GMT")) || hour > 23 || minute > 59 || second > 60 {
-        return None;
-    }
-
-    let clock = i64::try_from(hour * 3_600 + minute * 60 + second).ok()?;
-    let seconds = days_from_civil(year, month, day)
-        .checked_mul(86_400)?
-        .checked_add(clock)?;
-
-    UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(seconds).ok()?))
+    httpdate::parse_http_date(&format!("{head}:59 GMT"))
+        .ok()?
+        .checked_add(Duration::from_secs(1))
 }
 
 /// Days between 1970-01-01 and `year-month-day`, by Howard Hinnant's
 /// `days_from_civil`. Proleptic Gregorian, valid for any year the parser can
 /// produce.
 ///
-/// Visible to the module above because [`super::rate`] parses the same HTTP
-/// dates off the same responses and needs the same arithmetic. It kept a copy
-/// with a comment saying the copy was deliberate — the reason it gave was that
-/// this one is private to a module about refusals, which is a visibility fact
-/// rather than a boundary, and `pub(super)` is the seam that answers it. The
-/// two modules' own date tests hold it from both sides.
+/// Nothing here reads it any more — the dates this module parses are
+/// [`httpdate`]'s business now. It survives for [`super::rate`], whose own
+/// RFC 3339 parser is the last hand-rolled calendar in this crate, and stays
+/// spelled here rather than moving so that the move is one edit rather than
+/// two when that parser goes as well.
 pub(super) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let year = year - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
@@ -335,7 +330,9 @@ mod tests {
 
     use reqwest::header::{HeaderMap, HeaderValue};
 
-    use super::{MAX_ATTEMPTS, MAX_DELAY, delay, http_date, jitter, retry_after, summarize};
+    use super::{
+        MAX_ATTEMPTS, MAX_DELAY, delay, http_date, jitter, retry_after, scattered, summarize,
+    };
     use crate::provider::ProviderError;
 
     /// One `retry-after` case: what it is called, the headers a response
@@ -406,6 +403,29 @@ mod tests {
             jitter(Duration::from_millis(5)),
             Duration::from_millis(5),
             "a delay too short to jitter is left alone"
+        );
+    }
+
+    /// Both ends of the span, which sampling a live draw sixty-four times can
+    /// only ever suggest.
+    #[test]
+    fn the_span_a_draw_walks_is_the_scheduled_tenth_and_no_more() {
+        let base = Duration::from_secs(10);
+
+        assert_eq!(scattered(base, 0), base, "the smallest draw adds nothing");
+        assert_eq!(
+            scattered(base, 1_000),
+            Duration::from_millis(11_000),
+            "a draw at the top of the span adds the whole tenth"
+        );
+        assert_eq!(
+            scattered(base, 1_001),
+            base,
+            "and the span wraps rather than spilling past it"
+        );
+        assert!(
+            scattered(MAX_DELAY, u64::MAX) <= MAX_DELAY,
+            "the ceiling outranks the scatter"
         );
     }
 
@@ -481,6 +501,24 @@ mod tests {
 
             assert_eq!(parsed, expected, "parsing {value:?}");
         }
+    }
+
+    /// RFC 9110 lets a sender spell the leap second, and this build reads it
+    /// as the instant it names: a refusal here would turn a real `Retry-After`
+    /// into no delay at all, which is the one answer the header rules out.
+    #[test]
+    fn a_leap_second_names_the_instant_past_the_minute_rather_than_a_refusal() {
+        let parsed = http_date("Sat, 31 Dec 2016 23:59:60 GMT").map(|time| {
+            time.duration_since(UNIX_EPOCH)
+                .expect("the fixture is after the epoch")
+                .as_secs()
+        });
+
+        assert_eq!(parsed, Some(1_483_228_800));
+        assert!(
+            httpdate::parse_http_date("Sat, 31 Dec 2016 23:59:60 GMT").is_err(),
+            "the branch above is only here because the crate refuses this form"
+        );
     }
 
     #[test]
