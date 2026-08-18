@@ -628,43 +628,9 @@ mod tests {
     };
     use crate::{
         Tool as _, ToolCtx, ToolError,
-        socket::AddressRefusal,
+        socket::{AddressRefusal, SessionSocket},
         team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered},
     };
-
-    /// A session socket of ours a `uds:` address may name: a real socket at
-    /// a session's name inside a private directory of this user's — what
-    /// rung 3 admits and nothing else. The listener is held so the socket
-    /// stays a socket; nothing here connects to it.
-    struct SessionSocket {
-        _directory: tempfile::TempDir,
-        _listener: std::os::unix::net::UnixListener,
-        path: std::path::PathBuf,
-    }
-
-    impl SessionSocket {
-        fn new() -> Self {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            let directory = tempfile::Builder::new()
-                .permissions(std::fs::Permissions::from_mode(0o700))
-                .tempdir()
-                .expect("a private directory");
-            let path = directory.path().join("0198c1a2.sock");
-            let listener = std::os::unix::net::UnixListener::bind(&path).expect("a socket binds");
-
-            Self {
-                _directory: directory,
-                _listener: listener,
-                path,
-            }
-        }
-
-        /// The address as a model writes it.
-        fn address(&self) -> String {
-            format!("uds:{}", self.path.display())
-        }
-    }
 
     /// A handful of §5.1's ten, which is all any test here needs: the real
     /// answer is one `Frame::is_agent_sendable` call on the engine's side.
@@ -1011,11 +977,12 @@ mod tests {
     }
 
     /// **D505, the D498 premise across a socket**: a `uds:` address may name
-    /// only a session socket of ours. The listeners a prompt-injected call
-    /// would go for are each refused by name at rung 3 — before the body is
-    /// composed and before anything is connected — and the sentence names the
-    /// clause, so a model that meant a real session can see what a session
-    /// socket looks like.
+    /// only a session socket of ours, refused at rung 3 — before the body is
+    /// composed and before anything is connected. What is this tool's to pin
+    /// is the mapping — [`AddressRefusal`] becomes
+    /// [`Refused::NotASessionSocket`] and the rendered sentence names the
+    /// clause — over one string clause and one filesystem clause; the gate's
+    /// full clause table is `socket.rs`'s own test's.
     #[tokio::test]
     async fn a_uds_address_that_is_not_a_session_socket_of_ours_is_refused_by_name() {
         let postbox = Arc::new(Fake::answering(Ok(Sent {
@@ -1025,20 +992,6 @@ mod tests {
 
         for (to, clause) in [
             ("uds:/var/run/docker.sock", AddressRefusal::NotASessionName),
-            ("/var/run/docker.sock", AddressRefusal::NotASessionName),
-            ("uds:/tmp/tmux-501/default", AddressRefusal::NotASessionName),
-            (
-                "uds:/tmp/ssh-abc/agent.123",
-                AddressRefusal::NotASessionName,
-            ),
-            (
-                "uds:tmp/ganja-501/0198c1a2.sock",
-                AddressRefusal::NotPlainAbsolute,
-            ),
-            (
-                "uds:/tmp/../tmp/ganja-501/0198c1a2.sock",
-                AddressRefusal::NotPlainAbsolute,
-            ),
             (
                 "uds:/nonexistent-ganja-dir/0198c1a2.sock",
                 AddressRefusal::DirectoryUnreadable,
@@ -1059,27 +1012,6 @@ mod tests {
                 "{to}"
             );
         }
-        // A hex-named socket in a directory that is not private is refused for
-        // the directory, whatever is inside it.
-        let loose = tempfile::tempdir().expect("a directory");
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(loose.path(), std::fs::Permissions::from_mode(0o755))
-                .expect("the test may loosen its own directory");
-        }
-        let planted = loose.path().join("0198c1a2.sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&planted).expect("a socket binds");
-        assert_eq!(
-            validate(
-                &postbox,
-                &format!("uds:{}", planted.display()),
-                json!("hello"),
-                None
-            ),
-            Err(Refused::NotASessionSocket {
-                why: AddressRefusal::DirectoryNotOurs
-            })
-        );
 
         assert!(
             postbox.delivered.lock().expect("no panic").is_empty(),

@@ -319,6 +319,42 @@ pub fn vet_directory(directory: &Path) -> Result<(), DirectoryRefusal> {
     vet(found.uid(), found.mode(), uid())
 }
 
+/// A session socket of ours, as a test builds one: a real socket bound at a
+/// session's name inside a `0700` directory of this uid's — what
+/// [`vet_address`] admits and nothing else. The listener is held so the
+/// socket stays a socket; nothing connects to it.
+#[cfg(all(test, unix))]
+pub(crate) struct SessionSocket {
+    _directory: tempfile::TempDir,
+    _listener: std::os::unix::net::UnixListener,
+    pub(crate) path: PathBuf,
+}
+
+#[cfg(all(test, unix))]
+impl SessionSocket {
+    pub(crate) fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .expect("a private directory");
+        let path = directory.path().join("0198c1a2.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("a socket binds");
+
+        Self {
+            _directory: directory,
+            _listener: listener,
+            path,
+        }
+    }
+
+    /// The address as a model writes it.
+    pub(crate) fn address(&self) -> String {
+        format!("uds:{}", self.path.display())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -464,14 +500,18 @@ mod tests {
 
         use super::{AddressRefusal, vet_address};
 
-        let private = tempfile::Builder::new()
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .expect("a private directory");
-        let ours = private.path().join("0198c1a2.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&ours).expect("a socket binds");
+        let socket = super::SessionSocket::new();
+        let private = socket
+            .path
+            .parent()
+            .expect("the socket sits in its directory")
+            .to_path_buf();
 
-        assert_eq!(vet_address(&ours), Ok(()), "a session socket of ours");
+        assert_eq!(
+            vet_address(&socket.path),
+            Ok(()),
+            "a session socket of ours"
+        );
 
         // The string clauses.
         assert_eq!(
@@ -479,12 +519,12 @@ mod tests {
             Err(AddressRefusal::NotPlainAbsolute)
         );
         assert_eq!(
-            vet_address(&private.path().join("..").join("0198c1a2.sock")),
+            vet_address(&private.join("..").join("0198c1a2.sock")),
             Err(AddressRefusal::NotPlainAbsolute),
             "a step through .. is refused before anything is inspected"
         );
         assert_eq!(
-            vet_address(&private.path().join("agent.123")),
+            vet_address(&private.join("agent.123")),
             Err(AddressRefusal::NotASessionName)
         );
         assert_eq!(
@@ -513,20 +553,18 @@ mod tests {
 
         // The file clauses, inside a good directory.
         assert_eq!(
-            vet_address(&private.path().join("deadbeef.sock")),
+            vet_address(&private.join("deadbeef.sock")),
             Err(AddressRefusal::Absent)
         );
-        let plain = private.path().join("cafebabe.sock");
+        let plain = private.join("cafebabe.sock");
         std::fs::write(&plain, b"").expect("a plain file writes");
         assert_eq!(vet_address(&plain), Err(AddressRefusal::NotASocket));
-        let link = private.path().join("feedface.sock");
-        std::os::unix::fs::symlink(&ours, &link).expect("a link is made");
+        let link = private.join("feedface.sock");
+        std::os::unix::fs::symlink(&socket.path, &link).expect("a link is made");
         assert_eq!(
             vet_address(&link),
             Err(AddressRefusal::NotASocket),
             "a link to a good socket is refused as a link"
         );
-
-        drop(listener);
     }
 }

@@ -14,7 +14,7 @@
 mod support;
 
 use ganja_client::ClientError;
-use support::{Reply, Stub};
+use support::{HEALTHY, Reply, Stub};
 
 // ---------------------------------------------------------------------------
 // The socket form rides the same wire.
@@ -24,7 +24,7 @@ use support::{Reply, Stub};
 /// request crosses the socket, and the typed answer is what it always was.
 #[tokio::test]
 async fn health_rides_the_socket_form() {
-    let stub = Stub::on_socket(|_| Reply::ok(r#"{"healthy":true,"version":"0.1.0","session_id":"01998ad0-0000-7000-8000-00000000d505"}"#)).await;
+    let stub = Stub::on_socket(|_| Reply::ok(HEALTHY)).await;
 
     let health = stub
         .client()

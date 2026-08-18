@@ -497,29 +497,14 @@ async fn the_socket_serves_three_routes_and_tcp_serves_the_rest_behind_its_crede
         );
     }
 
-    // And the three the socket does serve, all without a credential.
+    // And the third route the socket does serve, without a credential — the
+    // two `/team` routes are AC-26's own test, above.
     let health = client
         .get(format!("{SOCKET_URL}/global/health"))
         .send()
         .await
         .expect("the socket answers");
     assert_eq!(health.status(), 200);
-    let team = client
-        .get(format!("{SOCKET_URL}/team"))
-        .send()
-        .await
-        .expect("the socket answers");
-    assert_eq!(team.status(), 200);
-    let posted = client
-        .post(format!("{SOCKET_URL}/team/team-lead/message"))
-        .json(&serde_json::json!({
-            "from": "team-lead@session-feedbeef",
-            "text": "the three routes",
-        }))
-        .send()
-        .await
-        .expect("the socket answers");
-    assert_eq!(posted.status(), 200);
 
     tcp.shutdown().await.expect("the TCP server stops");
     socket.shutdown().await.expect("the socket server stops");

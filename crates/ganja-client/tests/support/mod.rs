@@ -27,6 +27,11 @@ use tokio::{
 /// How long any single wait may take before the fixture is declared broken.
 pub const DEADLINE: Duration = Duration::from_secs(30);
 
+/// The health body a well-behaved server answers with, spelled once for
+/// every suite that opens with it.
+pub const HEALTHY: &str =
+    r#"{"healthy":true,"version":"0.1.0","session_id":"01998ad0-0000-7000-8000-00000000d505"}"#;
+
 /// One request the stub received, as the assertions read it.
 #[derive(Clone, Debug)]
 pub struct Recorded {
