@@ -447,9 +447,8 @@ fn spell(names: &[&str]) -> String {
 /// A backend this build cannot spawn on, and why.
 ///
 /// Carries the backend rather than only a sentence, so a caller may act on
-/// *which* surface was refused — the `/team` dialog says one thing about a
-/// session with no tmux and another about a build that has no panes yet — and
-/// still has one sentence to show when it does not care.
+/// *which* surface was refused — and still has one sentence to show when it
+/// does not care.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the {} backend is unavailable: {reason}", backend_name(*backend))]
 pub struct Unsupported {
@@ -518,8 +517,9 @@ pub struct SpawnSpec {
     /// Whether it must start in plan mode.
     pub plan_mode_required: bool,
     /// Whether the spawn asked for permission dialogs to be bypassed. Answered
-    /// through the permission engine rather than honoured on sight — W5a/L4's
-    /// posture owns what it costs; what it is is a fact about this spawn.
+    /// through the permission engine rather than honoured on sight —
+    /// [`crate::teammate::posture`] owns what it costs; what it is is a fact
+    /// about this spawn.
     pub bypass: bool,
     /// The lead's session, which §4.1 passes a pane as `--parent-session-id`.
     pub parent_session_id: String,
@@ -643,8 +643,7 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
     /// # Errors
     ///
     /// [`Unsupported`] when this build, or this session, cannot have the
-    /// surface asked for — a pane in a session with no tmux, or either pane
-    /// value in P25a.
+    /// surface asked for — a pane in a session with no tmux.
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported>;
 
     /// Starts what [`TeammateBackend::spawn`] produced, once the team file
@@ -694,7 +693,7 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
     /// nothing will persuade a real `claude` to look away from (§2.1) — and it
     /// writes a different message there, [`crate::teammate::claude::preamble`]'s
     /// rather than the bare prompt. Two writers over one spawn were a defect
-    /// both ways round (verify-l3 F-1): with the two roots pointed at one
+    /// both ways round: with the two roots pointed at one
     /// directory (AC-13's own configuration) the teammate's inbox held the bare
     /// task *ahead* of the preamble, so the first thing a real `claude` read was
     /// the one message that does not tell it how to address its lead — §5.5.1's
@@ -913,10 +912,10 @@ pub enum SpawnError {
     Mailbox(#[from] ganja_team::MailboxError),
     /// The teammate's own inbox could not be created.
     ///
-    /// Its own variant rather than [`SpawnError::TeamFile`], which is what it
-    /// used to be reported as: the team file and an inbox are two different
-    /// documents in two different places, and a sentence naming the wrong one
-    /// sends whoever reads it to look at a file that is fine. Its own variant
+    /// Its own variant rather than [`SpawnError::TeamFile`]: the team file
+    /// and an inbox are two different documents in two different places, and a
+    /// sentence naming the wrong one sends whoever reads it to look at a file
+    /// that is fine. Its own variant
     /// rather than [`SpawnError::Mailbox`] too, because [`ganja_team`]'s I/O
     /// error carries no path and the path is the useful half here.
     #[error("the inbox at {path} could not be created: {source}")]
@@ -1005,11 +1004,9 @@ pub struct TeammateRegistry {
     /// [`TeammateRegistry::record`] for what is lost without it.
     team_file: tokio::sync::Mutex<()>,
     /// How many colours §4.3's palette has handed out, which is the whole of
-    /// the assignment. A map from name to colour used to sit beside it, and it
-    /// was dead weight with a leak in it: the name it was keyed on is unique
-    /// for the life of the registry by construction, so it was never asked
-    /// twice about one name, and nothing ever removes a member — so the map
-    /// only grew.
+    /// the assignment: a member's name is unique for the life of the registry
+    /// by construction, so nothing ever asks twice about one name and no map
+    /// from name to colour needs to sit beside the counter.
     next_color: Mutex<usize>,
     /// The tasks a spawn started, kept so a shutdown can wait for them to
     /// actually finish rather than only ask them to.

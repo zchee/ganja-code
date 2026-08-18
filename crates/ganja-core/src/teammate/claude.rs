@@ -383,8 +383,9 @@ impl ClaudePane {
     ///
     /// The lead's inbox is seeded too, and that is not tidiness: the pane
     /// answers into it, and an inbox created by whoever writes first is an
-    /// inbox two processes can race to create — and since W5b's fix the lead
-    /// *reads* it, so it has to exist before the pane can write. Seeding it
+    /// inbox two processes can race to create — and the lead *reads* it
+    /// ([`crate::teammate::lead_inbox`]), so it has to exist before the pane
+    /// can write. Seeding it
     /// here, from the side that already knows the team, makes it exist before
     /// anybody needs it — `mailbox::seed` tolerates one that is already there
     /// (§2.5).
@@ -617,7 +618,7 @@ mod tests {
         );
         assert!(line.contains("'/usr/local/bin/claude'"), "quoted: {line}");
         // The canary again, on the *composed* line rather than on `arguments`
-        // alone (verify-l3 F-7): the line is what tmux is handed and what `ps`
+        // alone: the line is what tmux is handed and what `ps`
         // would print, so it is the value the §4.1-step-5 rule is really about.
         assert!(
             !line.contains("CANARY"),
@@ -718,7 +719,7 @@ mod tests {
 
     /// **One** message in the teammate's inbox, and it is the preamble.
     ///
-    /// The whole of verify-l3's F-1: with the registry seeding too, the bare
+    /// The defect this pins: with the registry seeding too, the bare
     /// prompt landed here first and a real `claude` read the one message that
     /// does not tell it how to address its lead. Drivable without a tmux server
     /// or a `claude` on the machine, because seeding is file work and nothing
@@ -761,7 +762,7 @@ mod tests {
     }
 
     /// A launch refused after the seed leaves nothing behind — the claude root's
-    /// inbox included, which the registry's own unwind cannot reach (F-4).
+    /// inbox included, which the registry's own unwind cannot reach.
     #[tokio::test]
     async fn a_refused_launch_takes_the_seeded_prompt_back_out() {
         let home = tempfile::tempdir().expect("a temporary claude config home");

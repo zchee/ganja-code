@@ -92,7 +92,7 @@ use std::{
 };
 
 use ganja_protocol::team::{
-    Frame, IdleNotification, MemberBackend, PermissionRequest, ShutdownApproved,
+    Frame, IdleNotification, MemberBackend, PermissionRequest, PermissionResponse, ShutdownApproved,
 };
 use ganja_team::{MailboxMessage, MemberName, TeamsRoot, mailbox, record};
 use tokio::sync::{mpsc, oneshot};
@@ -682,9 +682,10 @@ impl Answer {
             .await;
     }
 
-    /// Writes a refusal back, for an ask nobody could be shown.
+    /// Writes a refusal back, for an ask nobody could be shown — a dialog
+    /// that could not be raised, rather than one answered "no".
     async fn refuse(&self, reason: &str) {
-        let response = member::refused(&self.request_id, reason);
+        let response = PermissionResponse::error(&self.request_id, reason);
         self.deliver(Frame::PermissionResponse(response), "refused")
             .await;
     }
@@ -852,10 +853,9 @@ mod tests {
 
     /// §7-1, as this side keeps it after **D-5**'s pane half landed.
     ///
-    /// The earlier revision of this test (V-C1) asserted that a
-    /// `permission_request` is dropped beside a `task_assignment` — correct
-    /// while the only asker was in-process and crossed on the forwarding
-    /// channel. A pane's asks travel §5's frames, so `permission_request` is
+    /// Dropping a `permission_request` beside a `task_assignment` was
+    /// correct while the only asker was in-process and crossed on the
+    /// forwarding channel. A pane's asks travel §5's frames, so it is
     /// now **routed** (the two tests below), and what §7-1 forbids is pinned
     /// by the two frames that stay dropped: `team_permission_update`, the
     /// reference's own first control, and `permission_response`, an answer to

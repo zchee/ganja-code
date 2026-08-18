@@ -20,12 +20,12 @@
 //! roster comes from — the team file on disk, read fresh each time it is
 //! asked, since a member watches the roster move under it rather than holding
 //! the registry that moves it — and one standing entry: **the lead is always
-//! addressable**, whether or not the file names it yet. §4.1 launches the
-//! pane before its record is written, so the file may not exist for the first
-//! milliseconds of the pane's life; the lead's inbox path is derivable from
-//! the team name alone, and a teammate that could not reach its lead until
-//! the lead finished writing about it would be a teammate that cannot answer
-//! the shutdown it was just asked for.
+//! addressable**, whether or not the file names it yet. The launch line is
+//! typed only once the record is on disk ([`crate::teammate::pane`]), so an
+//! absent file is defence in depth rather than the ordinary path — the lead's
+//! inbox path is derivable from the team name alone, and a teammate that
+//! could not reach its lead until the file was readable would be a teammate
+//! that cannot answer the shutdown it was just asked for.
 //!
 //! # [`Asks`] — the pane's `ForwardToLead` (**D-5**)
 //!
@@ -411,10 +411,11 @@ impl Asks {
     /// [`Unforwarded::Unwritten`] when the lead's inbox would not take the
     /// frame.
     pub async fn forward(&self, request: &Event) -> Result<(), Unforwarded> {
-        let Event::PermissionRequested { id, tool, .. } = request else {
-            return Err(Unforwarded::NotAnAsk);
-        };
         let ask = ask_of(&self.agent_id, request).ok_or(Unforwarded::NotAnAsk)?;
+        // The ask carries the dialog's own id and tool, so nothing re-matches
+        // the event: `ask_of` is the one reader of its shape.
+        let id = PermissionId::from(ask.request_id.clone());
+        let tool = ask.tool_name.clone();
         let message = MailboxMessage::from_frame(
             self.name.as_str(),
             &Frame::PermissionRequest(ask),
@@ -433,7 +434,7 @@ impl Asks {
             self.pending
                 .lock()
                 .expect("the asks are never poisoned")
-                .remove(id);
+                .remove(&id);
             tracing::warn!(
                 member = self.name.as_str(),
                 request = id.as_str(),
@@ -622,13 +623,6 @@ pub fn response_of(
         ),
         PermissionReply::Reject => PermissionResponse::error(request_id, REFUSED_AT_DIALOG),
     }
-}
-
-/// A `permission_response` refusing an ask for a reason of the caller's — a
-/// dialog that could not be shown, rather than one that was answered "no".
-#[must_use]
-pub fn refused(request_id: &str, reason: &str) -> PermissionResponse {
-    PermissionResponse::error(request_id, reason)
 }
 
 /// What a lead's `permission_response` decides, in the engine's own words.

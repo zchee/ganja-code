@@ -328,8 +328,10 @@ impl GanjaPane {
     ///
     /// A launch that cannot be typed is a pane holding a shell nobody will
     /// use, so it is ended here, by identity — the one failure past the split
-    /// that this backend can still clean up after itself.
-    async fn launch(self, spec: &SpawnSpec, pane: &Pane, line: &OsStr, server: &Server) {
+    /// that this backend can still clean up after itself. Not the trait's
+    /// [`TeammateBackend::launch`], which this backend does not implement yet
+    /// (bead `ganja-code-ipg`).
+    async fn type_launch_line(self, spec: &SpawnSpec, pane: &Pane, line: &OsStr, server: &Server) {
         match server.type_line(&pane.id, line).await {
             Ok(()) => tracing::info!(
                 teammate = spec.name.as_str(),
@@ -404,7 +406,11 @@ impl TeammateBackend for GanjaPane {
         let line = tmux::launch_line(&binary, &arguments(spec));
         tokio::spawn(async move {
             match wait_for_record(&owned, &pane.id, RECORD_WAIT).await {
-                Ok(()) => watched.launch(&owned, &pane, &line, &server).await,
+                Ok(()) => {
+                    watched
+                        .type_launch_line(&owned, &pane, &line, &server)
+                        .await
+                }
                 Err(reason) => {
                     tracing::warn!(
                         teammate = owned.name.as_str(),

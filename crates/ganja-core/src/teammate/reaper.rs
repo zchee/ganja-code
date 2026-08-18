@@ -43,7 +43,7 @@
 //! the pair is not this teammate's, whatever id it wears, and is left alone.
 //!
 //! Each half of the witness answers a way the other one alone is wrong, and
-//! both were live defects before they were paired (verify-l4 F1 and F2):
+//! both were live defects before they were paired:
 //!
 //! - **the pair, rather than a substring.** `argv.contains(agent_id)` reads
 //!   `build@session-01998ad0` inside `rebuild@session-01998ad0`, so a member
@@ -93,8 +93,7 @@
 //! sweep walks that file and no other, and it refuses even that one when the
 //! document's `leadSessionId` is not this lead's session.
 //!
-//! **That guard is necessary and it is not sufficient**, which is the honest
-//! version of what an earlier revision of this paragraph claimed. It stops the
+//! **That guard is necessary and it is not sufficient.** It stops the
 //! obvious case — the shared fallback team (`default`, which every session with
 //! a pre-UUIDv7 id joins), whose document names one lead and is read by many.
 //! What it cannot stop is two leads that share a *derived* team name: the name
@@ -408,8 +407,8 @@ async fn witnessed(pane: &Pane, agent_id: &str, lead_session: &str) -> Option<bo
 /// Whether `argv` carries `flag` with exactly `value`.
 ///
 /// A **word** comparison, never a substring of the line: `--agent-id build` and
-/// `--agent-id rebuild` differ here and do not differ to `str::contains`, which
-/// is the whole of verify-l4's F1. `ps` prints an argv space-separated and
+/// `--agent-id rebuild` differ here and do not differ to `str::contains`.
+/// `ps` prints an argv space-separated and
 /// unquoted, and neither an agent id nor a session id can hold a space — both
 /// are grammar-checked ([`ganja_team::MemberName`], a bare UUID) — so splitting
 /// on whitespace recovers the words the process was started with.

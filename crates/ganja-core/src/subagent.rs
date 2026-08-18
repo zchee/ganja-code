@@ -1015,7 +1015,7 @@ impl Postbox {
     /// warm up, and a cache would need an eviction story for the sockets that
     /// die — which is every one of them, eventually — that nothing here is
     /// placed to know. Bound to exactly one path and never switched, which is
-    /// the plan's rule; every failure is a typed [`Undelivered`] naming the
+    /// never switched; every failure is a typed [`Undelivered`] naming the
     /// socket, under a deadline, never a hang.
     async fn deliver_over_socket(&self, path: &Path, body: Body) -> Result<Sent, Undelivered> {
         let Body::Text { text, summary } = body else {
@@ -1343,9 +1343,9 @@ pub enum NotReceived {
     #[error("This session leads no team; there is nobody here to deliver to.")]
     NoTeam,
     /// The route named a member other than the lead. The socket delivers to
-    /// the session — its lead — and to nobody else (**M4** of the W7 boundary
-    /// review): the outbound arm never addresses anyone else, no caller does,
-    /// and a door left wider than its one use is a door to state later.
+    /// the session — its lead — and to nobody else: the outbound arm never
+    /// addresses anyone else, no caller does, and a door left wider than its
+    /// one use is a door to state later.
     #[error(
         "A message over a session's socket is for that session's lead, {lead:?}, and this one \
          was addressed to {name:?}; a member of the team is reached through its lead."
@@ -1383,12 +1383,12 @@ pub enum NotReceived {
 /// The rungs are the tool's own, applied on the side that has no tool in
 /// front of it: blank text (rung 5), a frame in the text (rung 7, and rung 6
 /// with it — nothing structured crosses), the identity's shape
-/// ([`Postbox::peer`]), the recipient — **the lead, and the lead alone**
-/// (M4): a `uds:` address names a session and a session's next turn is its
+/// ([`Postbox::peer`]), the recipient — **the lead, and the lead alone**:
+/// a `uds:` address names a session and a session's next turn is its
 /// lead's, so that is the one member this door delivers to — and then the
 /// delivery every local message gets, so a peer's message to the lead is
 /// written by the same code a teammate's is. The summary is capped here as
-/// it is at every other seam it crosses (L3): the type says it arrives
+/// it is at every other seam it crosses: the type says it arrives
 /// capped, and a peer's word for that is not enough.
 ///
 /// # Errors
@@ -3028,7 +3028,7 @@ mod tests {
         );
     }
 
-    /// **H1(b)**: what a peer answers is read under a cap and refused past
+    /// What a peer answers is read under a cap and refused past
     /// it — declared oversize before a byte, undeclared oversize the moment
     /// the cap is passed — so a listener that is not a session cannot hand
     /// this side an unbounded body to hold. The refusal names the socket, and
@@ -3105,7 +3105,7 @@ mod tests {
         );
     }
 
-    /// **N1**: the lead's name a peer answers goes into a URL, so it is held
+    /// The lead's name a peer answers goes into a URL, so it is held
     /// to the member-name grammar first — a listener in a session socket's
     /// shape that names its lead `../../global/health` (traversal), one with
     /// a `?` (a query), one with a `#` (a fragment, which reaches a different
@@ -3211,7 +3211,7 @@ mod tests {
         assert_eq!(inbox[0].summary.as_deref(), Some("W7"));
 
         // The lead is matched as every name here is — without regard to
-        // case — and a member is *not* reachable this way (M4): the socket
+        // case — and a member is *not* reachable this way: the socket
         // delivers to the session, which is its lead, and the refusal names
         // the lead so the peer knows where to write.
         assert!(
@@ -3247,7 +3247,7 @@ mod tests {
         assert_eq!(team.inbox("worker"), seeded, "nothing reached the member");
     }
 
-    /// **M2, L3**: what a peer says about itself is bounded before it lands
+    /// What a peer says about itself is bounded before it lands
     /// in the lead's prompt — an identity with a control character or past
     /// the display cap is refused (never truncated: two peers must not read
     /// as one), and a summary past it is cut as it is at every other seam.
