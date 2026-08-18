@@ -160,6 +160,7 @@ impl SessionSocket {
     }
 
     /// The path bound right now, when one is.
+    #[cfg(test)]
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
         self.bound.as_ref().map(|(_, bound)| bound.path())

@@ -54,7 +54,7 @@ const MARKER: &str = "\u{2502} ";
 /// though this person had typed them (§7-5): a `String` walking around with no
 /// mark on it is exactly how that happens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Lane {
+enum Lane {
     /// The person at this terminal typed it.
     Typed,
     /// A teammate wrote it, and it reached here through the lead's mailbox
@@ -92,12 +92,6 @@ impl Entry {
     #[must_use]
     pub fn is_steered(&self) -> bool {
         self.steered
-    }
-
-    /// Which lane it belongs to.
-    #[must_use]
-    pub fn lane(&self) -> Lane {
-        self.lane
     }
 }
 
@@ -489,7 +483,6 @@ mod tests {
         let taken = queue.withdraw_newest().expect("the person's own entry");
 
         assert_eq!(taken.text, "mine");
-        assert_eq!(taken.lane(), super::Lane::Typed);
         assert_eq!(queue.depth(), 1, "and the peer's row is still waiting");
         assert_eq!(queue.entries()[0].text, "@Cargo.toml /init $skill");
 

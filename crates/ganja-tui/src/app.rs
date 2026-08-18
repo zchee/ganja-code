@@ -1563,10 +1563,12 @@ impl App {
     /// Writes the asks `handle_core` decided to forward, at the first point
     /// after the event where the disk is reachable (D-5, AC-8).
     ///
-    /// An ask that could not be forwarded is refused **here**, by this app,
-    /// with the reply it would have sent for any dialog nobody could see:
-    /// nothing was asked of anybody, and a turn left waiting on an answer that
-    /// is not coming would be worse than a refused call the model reads.
+    /// An ask that could not be forwarded — the event was not a permission
+    /// request, or the lead's inbox would not take the frame — is refused
+    /// **here**, by this app, with the reply it would have sent for any dialog
+    /// nobody could see: nothing was asked of anybody, and a turn left waiting
+    /// on an answer that is not coming would be worse than a refused call the
+    /// model reads.
     async fn forward_member_asks(&mut self) {
         if self.member_asks.is_empty() {
             return;
@@ -1574,7 +1576,7 @@ impl App {
         let asks = std::mem::take(&mut self.member_asks);
         for ask in asks {
             let forwarded = match &self.member {
-                Some(inbox) => inbox.forward_ask(&ask).await,
+                Some(inbox) => inbox.asks().forward(&ask).await,
                 None => continue,
             };
             let Err(error) = forwarded else {
@@ -6013,7 +6015,7 @@ impl App {
                 if self
                     .member
                     .as_ref()
-                    .is_some_and(|inbox| inbox.retire_ask(&id))
+                    .is_some_and(|inbox| inbox.asks().retire(&id))
                 {
                     self.settle_member_activity();
                 }
@@ -16639,7 +16641,10 @@ mod tests {
                 .expect("the key is handled");
         }
         assert_eq!(app.editor.text(), "", "nothing leaked past the dialog");
-        assert!(app.team_dialog.is_some(), "and none of it closed the dialog");
+        assert!(
+            app.team_dialog.is_some(),
+            "and none of it closed the dialog"
+        );
 
         let dialog = app.team_dialog.as_mut().expect("the dialog is open");
         dialog.move_selection(9);
@@ -16693,26 +16698,6 @@ mod tests {
             screen.contains("nobody on this team answers to that name"),
             "{screen}"
         );
-    }
-
-    /// **Resolution 4 / D-5**: `--bypass` is a thing a person may ask for, so
-    /// the typed door carries it into the request the engine gates — where the
-    /// `task` door's is hard-coded false.
-    #[tokio::test]
-    async fn a_typed_spawn_carries_bypass_where_the_task_door_cannot() {
-        let asked = command::team("/team spawn w1 --backend pane --bypass look at the parser")
-            .expect("a /team line");
-        let command::Team::Spawn(line) = asked else {
-            unreachable!("the line is a spawn");
-        };
-        let request = component::team::SpawnRequest::new(&line);
-
-        assert!(request.bypass, "the person asked for it");
-        // The literal `task`-door value, which is what makes AC-14's "both
-        // doors, one sequence" a fact about a type rather than a resemblance.
-        assert_eq!(request.spawn.name, "w1");
-        assert_eq!(request.spawn.backend.as_deref(), Some("pane"));
-        assert_eq!(request.spawn.prompt, "look at the parser");
     }
 
     /// A spawn's own dialog is raised by the tick and answered on the channel

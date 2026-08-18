@@ -138,7 +138,7 @@ pub struct Row {
 impl Row {
     /// One member, as this dialog shows it.
     #[must_use]
-    pub fn of(member: &MemberView) -> Self {
+    fn of(member: &MemberView) -> Self {
         Self {
             name: member.name.clone(),
             backend: member.backend,
@@ -385,8 +385,9 @@ impl Team {
     }
 
     /// Whether such a spawn is running.
+    #[cfg(test)]
     #[must_use]
-    pub fn is_busy(&self) -> bool {
+    pub(crate) fn is_busy(&self) -> bool {
         self.busy
     }
 
@@ -397,14 +398,16 @@ impl Team {
     }
 
     /// Whether the per-member action step is the one on screen.
+    #[cfg(test)]
     #[must_use]
-    pub fn is_choosing_action(&self) -> bool {
+    pub(crate) fn is_choosing_action(&self) -> bool {
         matches!(self.step, Step::Actions { .. })
     }
 
     /// What has been typed into the free-text step.
+    #[cfg(test)]
     #[must_use]
-    pub fn input(&self) -> Option<&str> {
+    pub(crate) fn input(&self) -> Option<&str> {
         match &self.step {
             Step::Input { buffer, .. } => Some(buffer.as_str()),
             Step::Members | Step::Actions { .. } => None,
@@ -413,8 +416,9 @@ impl Team {
 
     /// The member under the cursor, or [`None`] when the cursor is on the
     /// Spawn row.
+    #[cfg(test)]
     #[must_use]
-    pub fn selected_member(&self) -> Option<&Row> {
+    pub(crate) fn selected_member(&self) -> Option<&Row> {
         self.rows.get(self.selected)
     }
 

@@ -115,13 +115,13 @@ use ganja_core::{
     teammate::{
         Delivery, TeammateRegistry,
         lead_inbox::Delivered,
-        member::{Asks, Resolved, Unforwarded},
+        member::{Asks, Resolved},
         posture::Posture,
-        runner,
+        runner::{self, DROPPED_FRAME, IGNORED_STALE},
     },
 };
 use ganja_protocol::{
-    Event, FinishReason, PermissionId, PermissionMode, PermissionReply,
+    FinishReason, PermissionId, PermissionMode, PermissionReply,
     team::{
         Frame, IdleNotification, IdleReason, LeadFrame, ModeSetRequest, ShutdownApproved,
         TaskAssignment, cap_for_display,
@@ -132,14 +132,6 @@ use ganja_protocol::{
 /// runner keeps: the member is the side that has to notice a shutdown
 /// promptly.
 pub const POLL: Duration = runner::POLL;
-
-/// What is logged when a frame arrives that this member has no handler for —
-/// or that did not come from the lead, which for the lead-only frames is the
-/// same thing.
-pub const DROPPED_FRAME: &str = runner::DROPPED_FRAME;
-
-/// What is logged when an approval answers nothing.
-pub const IGNORED_STALE: &str = runner::IGNORED_STALE;
 
 /// The environment variable tmux sets in every pane it runs, naming the pane.
 ///
@@ -287,7 +279,7 @@ impl Membership {
     ///
     /// A team file that is there and does not decode: that is somebody else's
     /// document being wrong, not a record still on its way.
-    pub fn record(&self) -> Result<Option<MemberRecord>> {
+    fn record(&self) -> Result<Option<MemberRecord>> {
         let path = self.root.config_path(&self.team);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
@@ -368,7 +360,7 @@ impl Membership {
 
     /// The pane this process runs in, where it runs in one.
     #[must_use]
-    pub fn surface(&self) -> &Surface {
+    fn surface(&self) -> &Surface {
         &self.surface
     }
 
@@ -397,8 +389,6 @@ pub struct Pass {
     /// one. A pass that carries this carries nothing else: the shutdown went
     /// ahead of everything and the rest of the inbox is left where it was.
     pub shutdown: Option<String>,
-    /// How many unread entries the shutdown went ahead of.
-    pub jumped: usize,
     /// The plain messages, oldest first, still owed a delivery — plus every
     /// `task_assignment` the lead wrote, rendered as a message from the lead.
     pub messages: Vec<Delivered>,
@@ -469,25 +459,6 @@ impl Inbox {
         &self.asks
     }
 
-    /// Carries one of this engine's dialogs to the lead instead of raising it
-    /// here (D-5, AC-8).
-    ///
-    /// # Errors
-    ///
-    /// [`Unforwarded`] when nothing was asked of anybody — the event was not
-    /// a permission request, or the lead's inbox would not take the frame —
-    /// which is the app's cue to refuse the call itself: a dialog nobody could
-    /// see has exactly one honest answer.
-    pub async fn forward_ask(&self, request: &Event) -> Result<(), Unforwarded> {
-        self.asks.forward(request).await
-    }
-
-    /// Forgets an ask its engine has published the answer to, from wherever
-    /// it was answered.
-    pub fn retire_ask(&self, id: &PermissionId) -> bool {
-        self.asks.retire(id)
-    }
-
     /// Who this inbox belongs to.
     #[must_use]
     pub fn membership(&self) -> &Membership {
@@ -534,7 +505,6 @@ impl Inbox {
                 _ => None,
             });
         if let Some((position, message, request)) = shutdown {
-            pass.jumped = position;
             tracing::info!(
                 member = self.name(),
                 request = request.request_id,
@@ -1010,8 +980,7 @@ mod tests {
         assert!(held(&inbox.inbox).is_empty(), "delivered means gone");
     }
 
-    /// §6.1's first step: a shutdown request goes ahead of everything, and the
-    /// pass says how many entries it jumped.
+    /// §6.1's first step: a shutdown request goes ahead of everything.
     #[tokio::test]
     async fn a_shutdown_request_goes_ahead_of_everything_else() {
         let home = tempfile::tempdir().expect("a temporary home");
@@ -1023,7 +992,6 @@ mod tests {
         let pass = inbox.poll().await;
 
         assert_eq!(pass.shutdown.as_deref(), Some("req-9"));
-        assert_eq!(pass.jumped, 2);
         assert!(
             pass.messages.is_empty(),
             "nothing else is delivered: {pass:?}"
@@ -1337,16 +1305,18 @@ mod tests {
         }
     }
 
-    /// An ask travels to the lead as §5's frame in `ganja-core`'s own dialect
-    /// — the engine's id as the request id, this member's derived agent id,
-    /// the outside directories as a suggestion — and is remembered as waiting.
+    /// An ask travels to the lead's inbox as §5's `permission_request`, from
+    /// this member's own name, and is remembered as waiting until the engine's
+    /// own reply forgets it. The frame's fields are `Asks::forward`'s to fill,
+    /// and core's own tests pin them.
     #[tokio::test]
     async fn a_forwarded_ask_reaches_the_lead_as_a_permission_request() {
         let home = tempfile::tempdir().expect("a temporary home");
         let inbox = Inbox::new(member(&home, None));
 
         inbox
-            .forward_ask(&asked("perm-1"))
+            .asks()
+            .forward(&asked("perm-1"))
             .await
             .expect("the lead's inbox takes the ask");
 
@@ -1354,30 +1324,15 @@ mod tests {
         let written = held(&inbox.lead_inbox);
         assert_eq!(written.len(), 1);
         assert_eq!(written[0].from, "w1");
-        match written[0].frame() {
-            Some(Frame::PermissionRequest(request)) => {
-                assert_eq!(request.request_id, "perm-1");
-                assert_eq!(request.agent_id, "w1@session-224cbeab");
-                assert_eq!(request.tool_name, "bash");
-                assert_eq!(request.tool_use_id, "call-1");
-                assert_eq!(request.description, "rm -rf build");
-                assert_eq!(
-                    request.input,
-                    serde_json::json!({"command": "rm -rf build"})
-                );
-                assert_eq!(
-                    request.permission_suggestions,
-                    [serde_json::json!({
-                        "type": "addDirectories",
-                        "directories": ["/tmp/elsewhere"],
-                        "destination": "session",
-                    })]
-                );
-            }
-            other => panic!("a permission_request was expected, got {other:?}"),
-        }
         assert!(
-            inbox.retire_ask(&PermissionId::from("perm-1".to_owned())),
+            matches!(written[0].frame(), Some(Frame::PermissionRequest(_))),
+            "a permission_request was expected, got {:?}",
+            written[0].frame()
+        );
+        assert!(
+            inbox
+                .asks()
+                .retire(&PermissionId::from("perm-1".to_owned())),
             "an engine's own reply forgets the wait"
         );
         assert_eq!(inbox.asks().waiting(), 0);
@@ -1393,11 +1348,13 @@ mod tests {
         let home = tempfile::tempdir().expect("a temporary home");
         let inbox = Inbox::new(member(&home, None));
         inbox
-            .forward_ask(&asked("perm-1"))
+            .asks()
+            .forward(&asked("perm-1"))
             .await
             .expect("the ask is forwarded");
         inbox
-            .forward_ask(&asked("perm-2"))
+            .asks()
+            .forward(&asked("perm-2"))
             .await
             .expect("the ask is forwarded");
         let allowed = Frame::PermissionResponse(PermissionResponse::success(
