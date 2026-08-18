@@ -103,6 +103,9 @@ url.workspace = true
 # `CancellationToken` lives behind `rt`; the workspace declaration carries no
 # features so crates opt into exactly the modules they use.
 tokio-util = { workspace = true, features = ["rt"] }
+# A pane-backed Claude teammate must resolve a binary this process may execute,
+# so its PATH lookup asks the operating system rather than reading mode bits.
+which.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # The LSP and MCP servers this crate spawns are ended by signalling their

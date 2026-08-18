@@ -143,10 +143,7 @@
 //! such a queue entry at write time; without the split a claude peer's message
 //! sits pending in the lead's UI forever.
 
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-};
+use std::{ffi::OsString, path::PathBuf};
 
 use async_trait::async_trait;
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
@@ -303,49 +300,36 @@ pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
     argv
 }
 
-/// `binary` as `PATH` resolves it, or [`None`].
+/// `binary` as `PATH` resolves it for this process, or [`None`].
 ///
-/// Hand-written rather than reached for: the whole of it is "the first entry of
-/// `PATH` holding an executable file by that name", and a crate for that would
-/// be a dependency carrying a `which` implementation nobody here would read.
+/// `which` asks the operating system whether this process may execute each
+/// candidate, which is the question the later spawn needs answered. The old
+/// mode-bit walk instead asked whether somebody could execute the file, so a
+/// binary executable only by another owner was reported as runnable and failed
+/// later with `EACCES` instead of [`REFUSED_NO_BINARY`].
 fn on_path(binary: &str) -> Option<PathBuf> {
     resolve(&std::env::var_os("PATH")?, binary)
 }
 
-/// [`on_path`]'s decision over a value rather than over the environment.
+/// [`on_path`]'s decision over an explicit path list.
 ///
 /// The same split [`teams_root`] and [`root_under`] keep, for the same reason: a
 /// test can hold a `PATH` of its own without mutating the process it runs in,
 /// which is what would otherwise cost this one function its own test binary.
+/// Empty components are removed before `which` sees the list because its Unix
+/// behavior follows `which(1)` and treats them as the working directory, while
+/// this backend refuses to discover a teammate binary from a turn's incidental
+/// directory.
 fn resolve(path: &std::ffi::OsStr, binary: &str) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        // An empty `PATH` entry means the working directory to a shell, and a
-        // binary picked up out of whatever directory a turn happens to be in
-        // is not a binary anybody asked for.
+    let mut directories = std::env::split_paths(path)
         .filter(|directory| !directory.as_os_str().is_empty())
-        .map(|directory| directory.join(binary))
-        .find(|candidate| executable(candidate))
-}
+        .peekable();
+    directories.peek()?;
+    let search_path = std::env::join_paths(directories).ok()?;
 
-/// Whether `path` is a file somebody could run — following links, because a
-/// `PATH` entry is very often one.
-fn executable(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    which::which_in_global(binary, Some(search_path))
+        .ok()?
+        .next()
 }
 
 /// The real-`claude` pane backend.
@@ -528,7 +512,7 @@ mod tests {
 
     use super::{
         BINARY, BYPASS_PERMISSIONS, ClaudePane, PERMISSION_MODE, PLAN_MODE_REQUIRED,
-        TEAMS_DIRECTORY, arguments, carried_env, executable, preamble, resolve, root_under,
+        TEAMS_DIRECTORY, arguments, carried_env, preamble, resolve, root_under,
     };
     use crate::teammate::{
         SpawnSpec, TeammateBackend as _,
@@ -790,15 +774,12 @@ mod tests {
         assert!(inbox.exists(), "the inbox itself is left where it was");
     }
 
-    /// The `PATH` walk: the first entry holding something runnable wins, a file
-    /// nobody may run is not it, a directory by that name is not it either, and
-    /// an empty entry is never the working directory.
+    /// The `PATH` search returns the first runnable file, skips directories and
+    /// candidates this process cannot execute, and never interprets an empty
+    /// entry as the working directory.
     ///
-    /// Unix-only, because the mode bit it turns on is what
-    /// [`executable`](super::executable) reads there and the other branch of
-    /// that function answers [`true`] for any file at all — windows support is
-    /// parked in this tree and has no compile signal, so a test asserting the
-    /// ordering would be asserting the wrong thing rather than nothing.
+    /// Unix-only because the fixtures use Unix permission classes to establish
+    /// which candidate the test process may execute.
     #[cfg(unix)]
     #[test]
     fn the_binary_is_the_first_path_entry_holding_something_runnable() {
@@ -835,11 +816,58 @@ mod tests {
             resolve(std::ffi::OsStr::new(""), BINARY).is_none(),
             "an empty PATH resolves nothing rather than the working directory"
         );
+
+        let shadow_only = std::env::join_paths([shadow.as_path()]).expect("a PATH joins");
         assert!(
-            !executable(&shadow.join(BINARY)),
+            resolve(&shadow_only, BINARY).is_none(),
             "a directory is not a file"
         );
-        assert!(!executable(&decoy), "and a file nobody may run is not one");
-        assert!(!executable(&home.path().join("absent")));
+
+        let unrunnable_only = std::env::join_paths([unrunnable.as_path()]).expect("a PATH joins");
+        assert!(
+            resolve(&unrunnable_only, BINARY).is_none(),
+            "a file this process may not run is skipped"
+        );
+
+        let home_only = std::env::join_paths([home.path()]).expect("a PATH joins");
+        assert!(resolve(&home_only, "absent").is_none());
+    }
+
+    /// An execute bit for another permission class does not make a binary
+    /// runnable by the process that owns it.
+    #[cfg(unix)]
+    #[test]
+    fn an_execute_bit_for_another_permission_class_does_not_make_the_binary_runnable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // SAFETY: `geteuid` only reads the process credentials and has no
+        // memory-safety preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            // POSIX gives root special X_OK handling: any execute bit suffices,
+            // so this permission-class discriminator does not exist for root.
+            return;
+        }
+
+        let home = tempfile::tempdir().expect("a temporary PATH");
+        let candidate = home.path().join(BINARY);
+        std::fs::write(&candidate, "#!/bin/sh\n").expect("a candidate is written");
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o001))
+            .expect("only another permission class may execute it");
+
+        let mode = std::fs::metadata(&candidate)
+            .expect("the candidate has metadata")
+            .permissions()
+            .mode();
+        assert_ne!(
+            mode & 0o111,
+            0,
+            "the old any-execute-bit check would accept this candidate"
+        );
+
+        let path = std::env::join_paths([home.path()]).expect("a PATH joins");
+        assert!(
+            resolve(&path, BINARY).is_none(),
+            "access(2) rejects another class's execute permission for the owner"
+        );
     }
 }
