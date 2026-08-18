@@ -36,28 +36,12 @@
 
 mod pane_support;
 
-use std::{sync::Arc, time::Duration};
-
 use ganja_core::{
     config::CONFIG_HOME_ENV,
-    teammate::{
-        lead_inbox::LeadInbox,
-        pane::{AGENT_COLOR, AGENT_ID, AGENT_NAME, PARENT_SESSION_ID, TEAM_NAME},
-        tmux::{self, Server},
-    },
-    tool::{
-        Tool as _,
-        task::{Offered, TaskTool},
-    },
+    teammate::tmux::{self, Server},
 };
-use ganja_team::TeamFile;
-use pane_support::{
-    PrivateServer, Report, SESSION_ID, ctx, lead, pane_child_if_asked, run_one, task_args, team_of,
-    wait_for,
-};
-
-/// How long the pane's process gets to start and report.
-const CHILD_STARTS: Duration = Duration::from_secs(30);
+use ganja_testkit::tmux::PrivateServer;
+use pane_support::{expected_argv, pane_child_if_asked, run_one, spawn_pane_worker};
 
 /// A credential a lead might well hold, planted after the server started.
 const API_KEY: &str = "ANTHROPIC_API_KEY";
@@ -77,7 +61,11 @@ fn main() {
 async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_export() {
     // The server first, born without the variable and without the credentials
     // — whatever this process inherited of them is kept out of it.
-    let server = PrivateServer::start(&[CONFIG_HOME_ENV, API_KEY, SERVER_PASSWORD]);
+    let server = PrivateServer::start(
+        &["sleep", "3600"],
+        &[CONFIG_HOME_ENV, API_KEY, SERVER_PASSWORD],
+        &[],
+    );
     let config_home = ganja_testkit::temp_dir();
     let project = ganja_testkit::temp_dir();
     // SAFETY: this binary holds exactly one test, so nothing else in this
@@ -98,90 +86,41 @@ async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_exp
     );
     assert!(!server.global_has(API_KEY) && !server.global_has(SERVER_PASSWORD));
 
-    let (registry, door) = lead(config_home.path(), project.path());
-    let (root, team) = team_of(&registry);
-    let door = Arc::new(door);
-    let tool = TaskTool::new(&[Offered {
-        name: "general".to_owned(),
-        description: None,
-    }]);
-    let ctx = ctx(project.path(), Arc::clone(&door));
-
     let prompt = format!("watch the build; the key is {CANARY}");
-    let output = tool
-        .run(task_args("worker", "pane", &prompt), &ctx)
-        .await
-        .expect("the door spawns a pane teammate inside tmux");
-    assert_eq!(
-        output.metadata.get("backend").and_then(|on| on.as_str()),
-        Some("pane")
-    );
-    let file: TeamFile = serde_json::from_str(
-        &std::fs::read_to_string(root.config_path(&team)).expect("the team file is written"),
-    )
-    .expect("the team file decodes");
-    let member = file
-        .member("worker")
-        .unwrap_or_else(|| panic!("the pane teammate joined the team: {file:?}"))
-        .clone();
-    let pane_id = member.tmux_pane_id.clone();
-    assert!(pane_id.starts_with('%'), "{member:?}");
+    let spawned = spawn_pane_worker(config_home.path(), project.path(), &prompt).await;
+    let pane_id = spawned.pane_id.clone();
 
     // The pane reports from *inside the lead's team*: it resolved the lead's
     // home, not the server's absence of one.
-    let inbox = LeadInbox::new(Arc::clone(&registry));
-    let report = wait_for(
-        CHILD_STARTS,
-        "the pane's report to reach the lead",
-        async || {
-            let pass = inbox.poll().await;
-            pass.messages
-                .into_iter()
-                .find(|message| message.from == "worker")
-                .map(|message| {
-                    serde_json::from_str::<Report>(&message.body).unwrap_or_else(|error| {
-                        panic!("the pane wrote a report: {error} in {message:?}")
-                    })
-                })
-        },
-    )
-    .await;
     assert_eq!(
-        report.config_home.as_deref(),
+        spawned.report.config_home.as_deref(),
         Some(config_home.path().to_str().expect("utf-8")),
         "the pane reads the lead's config home, exported after the server started"
     );
 
     // What travelled, by name: the carried variable, and neither credential.
     assert!(
-        report.env_names.iter().any(|name| name == CONFIG_HOME_ENV),
+        spawned
+            .report
+            .env_names
+            .iter()
+            .any(|name| name == CONFIG_HOME_ENV),
         "the config home is in the pane's environment: {:?}",
-        report.env_names
+        spawned.report.env_names
     );
     for secret in [API_KEY, SERVER_PASSWORD] {
         assert!(
-            !report.env_names.iter().any(|name| name == secret),
+            !spawned.report.env_names.iter().any(|name| name == secret),
             "{secret} was in the lead's environment and must not be in the pane's: {:?}",
-            report.env_names
+            spawned.report.env_names
         );
     }
 
     // What is on the line: the five flags, and no canary anywhere tmux or the
     // pane can see it.
     assert_eq!(
-        report.argv,
-        [
-            AGENT_ID,
-            &format!("worker@{}", team.as_str()),
-            AGENT_NAME,
-            "worker",
-            TEAM_NAME,
-            team.as_str(),
-            AGENT_COLOR,
-            member.color.as_deref().expect("a spawn assigns a colour"),
-            PARENT_SESSION_ID,
-            SESSION_ID,
-        ]
+        spawned.report.argv,
+        expected_argv(&spawned.team, &spawned.member)
     );
     let line = server.start_command(&pane_id);
     assert!(
@@ -193,10 +132,10 @@ async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_exp
         "the environment rode tmux's own door, not the command line: {line}"
     );
     // Where the prompt did go, verbatim: the record (D-7) and the inbox.
-    assert_eq!(member.prompt.as_deref(), Some(prompt.as_str()));
+    assert_eq!(spawned.member.prompt.as_deref(), Some(prompt.as_str()));
 
     // The way out through the registry: shutdown kills the pane it made.
-    registry.shutdown().await;
+    spawned.registry.shutdown().await;
     let after = Server::at(server.socket(), None)
         .panes()
         .await

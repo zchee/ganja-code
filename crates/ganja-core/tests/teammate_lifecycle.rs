@@ -10,62 +10,25 @@
 //!
 //! Mutates `XDG_DATA_HOME`, so it holds exactly one test.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use ganja_core::{
-    Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
+    Storage,
     permission::Permissions,
     protocol::{
-        PermissionReply, Role,
+        Role,
         team::{Frame, ShutdownRequest},
     },
     provider::FakeProvider,
-    teammate::{InProcess, TeammateRegistry, claude::ClaudePane, pane::GanjaPane},
-    tool::{Registry, task::TeammateSpawn},
+    tool::Registry,
 };
-use ganja_team::{
-    LEAD, MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record, record::TeamFile,
-};
+use ganja_team::{LEAD, MailboxMessage, MemberName, mailbox, record};
+use ganja_testkit::{AllowSpawn, TASK, caller, eventually, spawn, team_file, team_with};
 
 /// How long a claim about the runner is waited for before it is a failure. The
 /// runner polls every 500 ms, so two passes plus a turn fit inside this
 /// comfortably and a real regression still fails in seconds rather than hanging.
 const EVENTUALLY: Duration = Duration::from_secs(20);
-
-/// How often the assertion below re-reads what it is waiting for.
-const CHECK: Duration = Duration::from_millis(25);
-
-/// Waits for `claim` to hold, or fails saying what it was waiting for.
-async fn eventually(what: &str, mut claim: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + EVENTUALLY;
-    while tokio::time::Instant::now() < deadline {
-        if claim() {
-            return;
-        }
-        tokio::time::sleep(CHECK).await;
-    }
-
-    panic!("waited {EVENTUALLY:?} for {what}, and it never happened");
-}
-
-/// The team file as it is on disk right now.
-fn team_file(path: &Path) -> TeamFile {
-    let text = std::fs::read_to_string(path).expect("the team file is there");
-
-    serde_json::from_str(&text).expect("the team file reads back")
-}
-
-/// Says yes, and is asked nothing: the spawn below works inside its own
-/// project and asks for no bypass, so the gate answers `Allow` on its own.
-#[derive(Debug)]
-struct Yes;
-
-#[async_trait::async_trait]
-impl SpawnAsker for Yes {
-    async fn ask(&self, _request: SpawnAsk) -> PermissionReply {
-        PermissionReply::Once
-    }
-}
 
 #[tokio::test]
 async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
@@ -74,62 +37,34 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     let _data = unsafe { ganja_testkit::redirect_xdg_data_home() };
     let home = ganja_testkit::temp_dir();
     let storage = Storage::open(home.path().join("storage"));
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse("session-abcd1234").expect("a team name");
-    let registry = Arc::new(TeammateRegistry::new(
-        root.clone(),
-        team.clone(),
-        "01998ad0-0000-7000-8000-000000000000",
-        home.path(),
-    ));
     // Through the gated door, which is the only one there is: the registry's
     // own spawn is crate-internal so that nothing can start a teammate the
-    // permission gate never saw.
-    let door = Teammates::new(
-        Arc::clone(&registry),
-        Backends {
-            in_process: Arc::new(InProcess::new(
-                Arc::new(FakeProvider::new("on it", Duration::ZERO)),
-                Arc::new(Registry::new(Vec::new())),
-                storage.clone(),
-                |_| Permissions::default(),
-            )),
-            pane: Arc::new(GanjaPane),
-            claude: Arc::new(ClaudePane),
-        },
+    // permission gate never saw. The store is this test's own handle, so every
+    // claim below reads the very sessions the teammate writes.
+    let (root, team, registry, door) = team_with(
+        home.path(),
+        Arc::new(FakeProvider::new("on it", Duration::ZERO)),
+        Arc::new(Registry::new(Vec::new())),
+        storage.clone(),
+        |_| Permissions::default(),
     );
-    // `cwd` and `project_root` are one directory, which is the case that
-    // discloses nothing and asks nobody.
-    let caller = Caller {
-        model: "recorder-model".to_owned(),
-        cwd: home.path().to_path_buf(),
-        permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
-        project_root: home.path().to_path_buf(),
-    };
+    let caller = caller(home.path());
 
     // §4.1: the spawn registers the member, seeds the inbox with the task and
     // returns at once — the call does not wait for any of the work.
     let spawned = door
-        .start(
-            TeammateSpawn {
-                name: "worker".to_owned(),
-                backend: None,
-                agent_type: "general".to_owned(),
-                prompt: "have a look at the parser".to_owned(),
-            },
-            &caller,
-            &Yes,
-        )
+        .start(spawn("worker", None), &caller, &AllowSpawn)
         .await
         .expect("an in-process teammate spawns");
     assert_eq!(spawned.name, "worker");
     assert_eq!(spawned.agent_id, "worker@session-abcd1234");
 
-    let member = team_file(&root.config_path(&team))
+    let member = team_file(&root, &team)
+        .expect("the team file is there")
         .member("worker")
         .cloned()
         .expect("the spawn wrote a member record");
-    assert_eq!(member.prompt.as_deref(), Some("have a look at the parser"));
+    assert_eq!(member.prompt.as_deref(), Some(TASK));
     assert_eq!(member.tmux_pane_id, "in-process");
     assert_eq!(
         registry
@@ -145,35 +80,49 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     // §6.1's first pass: the seeded task leaves the inbox and becomes a turn.
     let worker = MemberName::parse("worker").expect("a member name");
     let inbox = root.inbox_path(&team, &worker);
-    eventually("the seeded task to be drained from the inbox", || {
-        mailbox::read(&inbox)
-            .expect("the inbox reads")
-            .valid
-            .is_empty()
-    })
+    eventually(
+        EVENTUALLY,
+        "the seeded task to be drained from the inbox",
+        async || {
+            mailbox::read(&inbox)
+                .expect("the inbox reads")
+                .valid
+                .is_empty()
+                .then_some(())
+        },
+    )
     .await;
-    eventually("the teammate's own session to exist", || {
-        !storage.list_sessions().expect("the store lists").is_empty()
-    })
+    let session = eventually(
+        EVENTUALLY,
+        "the teammate's own session to exist",
+        async || {
+            storage
+                .list_sessions()
+                .expect("the store lists")
+                .first()
+                .map(|info| info.id.clone())
+        },
+    )
     .await;
-
-    let session = storage.list_sessions().expect("the store lists")[0]
-        .id
-        .clone();
-    eventually("the seeded task to reach the teammate's transcript", || {
-        storage
-            .load_transcript(&session)
-            .expect("the transcript reads")
-            .iter()
-            .any(|message| {
-                message.role == Role::User
-                    && message
-                        .parts
-                        .iter()
-                        .filter_map(ganja_core::protocol::Part::as_text)
-                        .any(|text| text.contains("have a look at the parser"))
-            })
-    })
+    eventually(
+        EVENTUALLY,
+        "the seeded task to reach the teammate's transcript",
+        async || {
+            storage
+                .load_transcript(&session)
+                .expect("the transcript reads")
+                .iter()
+                .any(|message| {
+                    message.role == Role::User
+                        && message
+                            .parts
+                            .iter()
+                            .filter_map(ganja_core::protocol::Part::as_text)
+                            .any(|text| text.contains(TASK))
+                })
+                .then_some(())
+        },
+    )
     .await;
 
     // A message written after the first turn reaches the next one.
@@ -183,8 +132,9 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     )
     .expect("the lead writes to the teammate's inbox");
     eventually(
+        EVENTUALLY,
         "the second message to reach the teammate's transcript",
-        || {
+        async || {
             storage
                 .load_transcript(&session)
                 .expect("the transcript reads")
@@ -196,6 +146,7 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
                         .filter_map(ganja_core::protocol::Part::as_text)
                         .any(|text| text.contains("and then the lexer"))
                 })
+                .then_some(())
         },
     )
     .await;
@@ -216,12 +167,17 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     .expect("the lead writes the shutdown request");
 
     let lead_inbox = registry.lead_inbox();
-    eventually("the teammate to answer the shutdown", || {
-        !mailbox::read(&lead_inbox)
-            .expect("the lead's inbox reads")
-            .valid
-            .is_empty()
-    })
+    eventually(
+        EVENTUALLY,
+        "the teammate to answer the shutdown",
+        async || {
+            (!mailbox::read(&lead_inbox)
+                .expect("the lead's inbox reads")
+                .valid
+                .is_empty())
+            .then_some(())
+        },
+    )
     .await;
 
     let answered = mailbox::read(&lead_inbox).expect("the lead's inbox reads");
@@ -239,9 +195,11 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     assert_eq!(approved.pane_id.as_deref(), Some("in-process"));
     assert_eq!(approved.backend_type.as_deref(), Some("in-process"));
 
-    eventually("the teammate to stop being listed", || {
-        registry.running() == 0
-    })
+    eventually(
+        EVENTUALLY,
+        "the teammate to stop being listed",
+        async || (registry.running() == 0).then_some(()),
+    )
     .await;
     assert!(
         mailbox::read(&inbox)

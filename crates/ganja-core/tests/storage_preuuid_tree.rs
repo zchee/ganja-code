@@ -10,13 +10,10 @@
 //!
 //! One test, one binary, beside its three `storage_preuuid*` siblings.
 
-use std::{fs, path::Path};
+use std::fs;
 
 use ganja_core::{SessionId, Storage};
-use ganja_testkit::{seeded_session_info, temp_dir};
-
-/// The spelling ids had before **D493**.
-const OLD: &str = "ses_0193b2f0a1c2000000";
+use ganja_testkit::{PRE_UUID_ID, entries, seeded_session_info, temp_dir};
 
 #[test]
 fn a_legacy_file_tree_with_old_ids_is_set_aside_once_not_twice() {
@@ -26,11 +23,11 @@ fn a_legacy_file_tree_with_old_ids_is_set_aside_once_not_twice() {
     // The file layout a build before the database left behind, written by
     // hand: nothing in the tree writes it any more, and the ids in it are the
     // ones that build minted.
-    let info = seeded_session_info(SessionId::from(OLD.to_owned()), 7);
+    let info = seeded_session_info(SessionId::from(PRE_UUID_ID.to_owned()), 7);
     let file = root
         .join("session")
         .join("info")
-        .join(format!("{OLD}.json"));
+        .join(format!("{PRE_UUID_ID}.json"));
     fs::create_dir_all(file.parent().expect("a file has a directory"))
         .expect("the directory is creatable");
     fs::write(
@@ -61,7 +58,7 @@ fn a_legacy_file_tree_with_old_ids_is_set_aside_once_not_twice() {
             .join(aside[0])
             .join("session")
             .join("info")
-            .join(format!("{OLD}.json"))
+            .join(format!("{PRE_UUID_ID}.json"))
             .is_file(),
         "the set-aside tree must still hold what it held"
     );
@@ -92,18 +89,4 @@ fn a_legacy_file_tree_with_old_ids_is_set_aside_once_not_twice() {
             .any(|entry| entry.starts_with(&format!("{name}.preuuid-"))),
         "the database was never filled, so it must not be set aside too, got {listing:?}"
     );
-}
-
-/// Everything directly inside `directory`, by name.
-fn entries(directory: &Path) -> Vec<String> {
-    fs::read_dir(directory)
-        .expect("the directory lists")
-        .map(|entry| {
-            entry
-                .expect("the entry reads")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect()
 }

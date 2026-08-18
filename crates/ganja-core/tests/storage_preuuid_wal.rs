@@ -8,17 +8,11 @@
 //!
 //! One test, one binary, beside its three `storage_preuuid*` siblings.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use ganja_core::{SessionId, Storage};
-use ganja_testkit::{seeded_session_info, temp_dir};
+use ganja_testkit::{entries, plant_preuuid_store, seeded_session_info, temp_dir};
 use rusqlite::Connection;
-
-/// The spelling ids had before **D493**.
-const OLD: &str = "ses_0193b2f0a1c2000000";
 
 /// One this build would mint.
 const NEW: &str = "0198f2c4-a1b0-7000-8000-000000000001";
@@ -28,11 +22,7 @@ fn the_wal_and_shm_companions_travel_with_the_set_aside_store() {
     let directory = temp_dir();
     let root = directory.path().join("storage");
 
-    let planted = Storage::open(root.clone());
-    planted
-        .save_info(&seeded_session_info(SessionId::from(OLD.to_owned()), 7))
-        .expect("the old-format record writes");
-    let database = planted.database().to_path_buf();
+    let (planted, database) = plant_preuuid_store(root.clone());
 
     // A second connection, opened while the store is still open: SQLite folds
     // the log back in and deletes it when the *last* connection closes, so
@@ -113,18 +103,4 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
         .into_owned();
 
     path.with_file_name(format!("{name}{suffix}"))
-}
-
-/// Everything directly inside `directory`, by name.
-fn entries(directory: &Path) -> Vec<String> {
-    fs::read_dir(directory)
-        .expect("the directory lists")
-        .map(|entry| {
-            entry
-                .expect("the entry reads")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect()
 }

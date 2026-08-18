@@ -37,7 +37,7 @@ const NOTHING_ARRIVES: Duration = Duration::from_millis(200);
 /// A store rooted in a directory that vanishes with the test. The directory
 /// handle travels back because dropping it deletes the tree.
 fn store() -> (tempfile::TempDir, Storage) {
-    let dir = tempfile::tempdir().expect("a temporary directory");
+    let dir = ganja_testkit::temp_dir();
     let storage = Storage::open(dir.path().join("storage"));
 
     (dir, storage)

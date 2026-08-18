@@ -21,20 +21,17 @@ use std::{sync::Arc, time::Duration};
 
 use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
-    Engine, Storage,
+    Engine,
     permission::{Action, Permissions, Rule},
     protocol::{
         Command, Event, PermissionId, PermissionMode, PermissionReply,
         team::{Frame, ModeSetRequest},
     },
-    provider::FakeProvider,
-    teammate::{Teammate, runner::Runner},
     tool::Registry,
 };
-use ganja_team::{LEAD, MailboxMessage, MemberName, Surface, TeamName, TeamsRoot, mailbox, record};
-use ganja_testkit::{RecorderTool, ScriptedProvider, drain, says, tool_call};
+use ganja_team::LEAD;
+use ganja_testkit::{RecorderTool, RunnerHarness, ScriptedProvider, drain, says, tool_call};
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 /// The tool the rules ask about. Any name outside the permission crate's
 /// ask-by-default list would be *allowed* by default, so the rule below is what
@@ -314,61 +311,29 @@ async fn a_bypassed_turn_does_not_launder_a_denied_call() {
 /// contract made testable.
 #[tokio::test]
 async fn a_lead_frame_maps_to_the_command_and_a_peer_frame_does_not() {
-    let home = tempfile::tempdir().expect("a temporary directory");
-    let storage = Storage::open(home.path().join("storage"));
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse("session-abcd1234").expect("a team name");
-    let worker = MemberName::parse("worker").expect("a member name");
-    let lead = MemberName::lead();
-
-    let teammate = Arc::new(Teammate::new(
-        worker.as_str(),
-        Arc::new(FakeProvider::new("on it", Duration::ZERO)),
-        "recorder-model",
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        storage,
-    ));
     // The birth queue is a lossless lane, so somebody has to read it; this test
     // reads it itself, because the announcement it asserts on arrives there.
-    let mut events = teammate
-        .engine()
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
-
-    let inbox = root.inbox_path(&team, &worker);
-    mailbox::seed(&inbox).expect("the inbox seeds");
-    let runner = Runner::new(
-        Arc::clone(&teammate),
-        lead,
-        inbox.clone(),
-        root.inbox_path(&team, &MemberName::lead()),
-        Surface::InProcess,
-        CancellationToken::new(),
-    );
+    let mut harness = RunnerHarness::new(false).await;
+    let mut events = harness
+        .events
+        .take()
+        .expect("an undrained harness hands the birth queue to the test");
     let arrives = |from: &str, mode: &str| {
-        mailbox::write(
-            &inbox,
-            MailboxMessage::from_frame(
-                from,
-                &Frame::ModeSetRequest(ModeSetRequest {
-                    mode: mode.to_owned(),
-                    from: from.to_owned(),
-                }),
-                record::now_iso8601(),
-            )
-            .expect("a frame encodes"),
-        )
-        .expect("the inbox is writable");
+        harness.arrives(
+            from,
+            &Frame::ModeSetRequest(ModeSetRequest {
+                mode: mode.to_owned(),
+                from: from.to_owned(),
+            }),
+        );
     };
 
     arrives(LEAD, "bypassPermissions");
-    let tick = runner.tick().await;
+    let tick = harness.runner.tick().await;
 
     assert_eq!(tick.applied, ["mode_set_request"], "{tick:?}");
     assert_eq!(
-        teammate.engine().permission_mode(),
+        harness.teammate.engine().permission_mode(),
         PermissionMode::Bypass,
         "the lead's frame reached the engine as the command it maps to"
     );
@@ -383,12 +348,12 @@ async fn a_lead_frame_maps_to_the_command_and_a_peer_frame_does_not() {
     // The same frame, from somebody who is not the lead: dropped by name, and
     // the posture it asked for is not the posture this teammate is left in.
     arrives("w2", "default");
-    let tick = runner.tick().await;
+    let tick = harness.runner.tick().await;
 
     assert_eq!(tick.dropped, ["mode_set_request"], "{tick:?}");
     assert!(tick.applied.is_empty(), "{tick:?}");
     assert_eq!(
-        teammate.engine().permission_mode(),
+        harness.teammate.engine().permission_mode(),
         PermissionMode::Bypass,
         "a peer's frame changed nothing, so the lead's posture still stands"
     );

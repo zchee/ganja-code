@@ -22,15 +22,18 @@ use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt as _;
 use ganja_core::{
-    Caller, Engine, SpawnAsk, SpawnAsker, Storage,
+    Engine, Storage,
     permission::Permissions,
     protocol::Command,
-    provider::ChatRequest,
+    provider::{ChatRequest, Provider},
     teammate::TeammateRegistry,
-    tool::{Registry, send_message, task::TeammateSpawn},
+    tool::{Registry, send_message, task::Teammated},
 };
-use ganja_team::{TeamFile, TeamName, TeamsRoot, mailbox};
-use ganja_testkit::{ScriptedProvider, says, tool_call};
+use ganja_team::{TeamName, TeamsRoot, mailbox};
+use ganja_testkit::{
+    LEAD_SESSION_ID, RecordedSpawns, ScriptedProvider, TEAM, caller, eventually, says,
+    spawn_with_prompt, team_file, tool_call,
+};
 
 /// How long the two engines are given to have asked the provider. Generous
 /// against a loaded machine: the teammate's runner polls, so this is waiting
@@ -71,71 +74,83 @@ const SPAWN_REQUESTS: usize = 2;
 /// so by the time the second request is logged both scripts are spent and the
 /// next push can only be the lead's.
 async fn spawn_turn_taken(requests: &Arc<std::sync::Mutex<Vec<ChatRequest>>>) -> usize {
-    let deadline = tokio::time::Instant::now() + EVENTUALLY;
-    loop {
-        let seen = requests
-            .lock()
-            .expect("the request log is never poisoned")
-            .len();
-        if seen >= SPAWN_REQUESTS {
-            return seen;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the teammate should have taken its spawn turn by now, got {seen} requests"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    eventually(
+        EVENTUALLY,
+        "the teammate to have taken its spawn turn",
+        async || {
+            let seen = requests
+                .lock()
+                .expect("the request log is never poisoned")
+                .len();
+
+            (seen >= SPAWN_REQUESTS).then_some(seen)
+        },
+    )
+    .await
+}
+
+/// The lead's side of every test here: a persistent engine over its own
+/// store, wired to a team, its birth queue drained.
+struct Lead {
+    home: tempfile::TempDir,
+    root: TeamsRoot,
+    team: TeamName,
+    registry: Arc<TeammateRegistry>,
+    engine: Engine,
+    asker: RecordedSpawns,
+}
+
+async fn lead(provider: Arc<dyn Provider>) -> Lead {
+    let home = ganja_testkit::temp_dir();
+    let storage = Storage::open(home.path().join("storage"));
+    let root = TeamsRoot::new(home.path().join("teams"));
+    let team = TeamName::parse(TEAM).expect("a team name");
+    let registry = Arc::new(TeammateRegistry::new(
+        root.clone(),
+        team.clone(),
+        LEAD_SESSION_ID,
+        home.path(),
+    ));
+
+    let engine = Engine::persistent(
+        provider,
+        "recorder-model",
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        storage,
+    )
+    .with_teammates(Arc::clone(&registry));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    tokio::spawn(async move { while events.next().await.is_some() {} });
+
+    Lead {
+        home,
+        root,
+        team,
+        registry,
+        engine,
+        asker: RecordedSpawns::default(),
     }
 }
 
-/// The calling turn, as the spawn gate reads it: a teammate inherits the
-/// model and the directory of the turn that started it, and the rules a spawn
-/// is judged by are the **lead's** own.
-///
-/// `cwd` and `project_root` are the same directory here, which is the ordinary
-/// case and the one that asks nobody anything: a teammate working inside the
-/// project discloses no directory and raises no dialog.
-fn caller(home: &std::path::Path) -> Caller {
-    Caller {
-        model: "recorder-model".to_owned(),
-        cwd: home.to_path_buf(),
-        permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
-        project_root: home.to_path_buf(),
-    }
-}
+/// The door the `task` tool goes through, driven directly: what a call adds
+/// is a name and a prompt, and everything else — the store, the provider,
+/// the tools, the rules — is what the engine wired in.
+async fn spawn_worker(lead: &Lead) -> Teammated {
+    let started = lead
+        .engine
+        .teammates()
+        .expect("this session leads a team")
+        .start(
+            spawn_with_prompt("worker", None, TEAMMATE_PROMPT),
+            &caller(lead.home.path()),
+            &lead.asker,
+        )
+        .await
+        .expect("an in-process teammate starts on a session that has a store");
+    lead.asker.asked_nobody();
 
-/// A person who says yes, and a record of every time they were asked.
-///
-/// Recorded rather than only answered, `teammate_doors.rs`'s shape: what these
-/// tests want from the gate is its **silence** — a teammate working inside the
-/// project with no bypass has nothing anybody needs to approve — and an asker
-/// that only said yes would let that silence break without a test noticing.
-#[derive(Debug, Default)]
-struct Allowing {
-    asked: std::sync::Mutex<Vec<SpawnAsk>>,
-}
-
-impl Allowing {
-    /// Fails naming what was asked, which is the whole diagnostic.
-    fn asked_nobody(&self) {
-        let asked = self.asked.lock().expect("the ask log is never poisoned");
-        assert!(
-            asked.is_empty(),
-            "a teammate working inside the project asks nobody: {asked:?}"
-        );
-    }
-}
-
-#[async_trait::async_trait]
-impl SpawnAsker for Allowing {
-    async fn ask(&self, request: SpawnAsk) -> ganja_core::protocol::PermissionReply {
-        self.asked
-            .lock()
-            .expect("the ask log is never poisoned")
-            .push(request);
-
-        ganja_core::protocol::PermissionReply::Once
-    }
+    started
 }
 
 /// What one engine was offered, as the request it sent carries it.
@@ -167,10 +182,6 @@ fn asked_about(requests: &[ChatRequest], needle: &str) -> Option<ChatRequest> {
 /// session's own store, and both sides are told who they may write to.
 #[tokio::test]
 async fn a_team_gives_both_engines_a_postbox_and_the_teammate_a_store() {
-    let home = tempfile::tempdir().expect("a temporary directory");
-    let storage = Storage::open(home.path().join("storage"));
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse("session-abcd1234").expect("a team name");
     // Enough scripts for both engines' turns and the titles a persistent
     // engine asks for; the double completes rather than improvises once they
     // run out, so a script that goes to the "wrong" turn costs nothing here —
@@ -181,69 +192,31 @@ async fn a_team_gives_both_engines_a_postbox_and_the_teammate_a_store() {
         says("a title"),
         says("another title"),
     ]);
-    let asker = Allowing::default();
-    let registry = Arc::new(TeammateRegistry::new(
-        root.clone(),
-        team.clone(),
-        "01998ad0-0000-7000-8000-000000000000",
-        home.path(),
-    ));
-
-    let engine = Engine::persistent(
-        provider,
-        "recorder-model",
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        storage,
-    )
-    .with_teammates(Arc::clone(&registry));
-    let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    tokio::spawn(async move { while events.next().await.is_some() {} });
+    let lead = lead(provider).await;
 
     // Claimed once, and once only: two readers would split the dialogs
     // between them.
     assert!(
-        engine.teammate_dialogs().is_some(),
+        lead.engine.teammate_dialogs().is_some(),
         "a session with a team has a dialog queue to claim"
     );
     assert!(
-        engine.teammate_dialogs().is_none(),
+        lead.engine.teammate_dialogs().is_none(),
         "and there is exactly one of it"
     );
 
-    // The door the `task` tool goes through, driven directly: what a call adds
-    // is a name and a prompt, and everything else — the store, the provider,
-    // the tools, the rules — is what the engine wired in.
-    let started = engine
-        .teammates()
-        .expect("this session leads a team")
-        .start(
-            TeammateSpawn {
-                name: "worker".to_owned(),
-                backend: None,
-                agent_type: "general".to_owned(),
-                prompt: TEAMMATE_PROMPT.to_owned(),
-            },
-            &caller(home.path()),
-            &asker,
-        )
-        .await
-        .expect("an in-process teammate starts on a session that has a store");
-    asker.asked_nobody();
+    let started = spawn_worker(&lead).await;
     assert_eq!(started.name, "worker");
     assert_eq!(started.backend, "in-process");
 
-    let file: TeamFile = serde_json::from_str(
-        &std::fs::read_to_string(root.config_path(&team)).expect("the team file was written"),
-    )
-    .expect("the team file this build wrote decodes");
+    let file = team_file(&lead.root, &lead.team).expect("the team file was written");
     assert!(
         file.members.iter().any(|member| member.name == "worker"),
         "the spawn wrote the member record: {:?}",
         file.members
     );
 
-    engine
+    lead.engine
         .send(Command::SendPrompt {
             text: LEAD_PROMPT.to_owned(),
             mentions: Vec::new(),
@@ -256,27 +229,24 @@ async fn a_team_gives_both_engines_a_postbox_and_the_teammate_a_store() {
     // Both engines have to have asked before either roster can be read. The
     // teammate's own turn is started by its runner off the mailbox, which is a
     // poll rather than a call, so this waits rather than assumes.
-    let deadline = tokio::time::Instant::now() + EVENTUALLY;
-    let (lead, worker) = loop {
-        let seen = requests
-            .lock()
-            .expect("the request log is never poisoned")
-            .clone();
-        if let Some(lead) = asked_about(&seen, LEAD_PROMPT)
-            && let Some(worker) = asked_about(&seen, TEAMMATE_PROMPT)
-        {
-            break (lead, worker);
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "both engines should have asked by now, got {} requests",
-            seen.len()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    let (lead_request, worker_request) =
+        eventually(EVENTUALLY, "both engines to have asked", async || {
+            let seen = requests
+                .lock()
+                .expect("the request log is never poisoned")
+                .clone();
+            match (
+                asked_about(&seen, LEAD_PROMPT),
+                asked_about(&seen, TEAMMATE_PROMPT),
+            ) {
+                (Some(lead), Some(worker)) => Some((lead, worker)),
+                _ => None,
+            }
+        })
+        .await;
 
     // The lead is offered the tool, described against the team it leads.
-    let leads = offered(&lead, send_message::ID).expect("the lead is offered send_message");
+    let leads = offered(&lead_request, send_message::ID).expect("the lead is offered send_message");
     assert!(
         leads.contains("worker"),
         "the lead's roster names the teammate it started: {leads}"
@@ -286,17 +256,18 @@ async fn a_team_gives_both_engines_a_postbox_and_the_teammate_a_store() {
     // before it did. Its *delivery* goes through a postbox of its own, which
     // is what stamps its name on what it writes; this is the half a request
     // can show.
-    let works = offered(&worker, send_message::ID).expect("a teammate is offered send_message");
+    let works =
+        offered(&worker_request, send_message::ID).expect("a teammate is offered send_message");
     assert!(
         works.contains(ganja_team::LEAD),
         "a teammate's roster names the lead: {works}"
     );
     assert!(
-        offered(&worker, "task").is_none(),
+        offered(&worker_request, "task").is_none(),
         "a teammate is not a place to nest a second team"
     );
 
-    engine.shutdown_teammates().await;
+    lead.engine.shutdown_teammates().await;
 }
 
 /// A teammate's own `send_message` really posts, and posts as itself.
@@ -308,10 +279,6 @@ async fn a_team_gives_both_engines_a_postbox_and_the_teammate_a_store() {
 /// it stamps, which is the teammate's own and not one the model could type.
 #[tokio::test]
 async fn a_teammates_message_reaches_the_lead_stamped_with_the_teammates_own_name() {
-    let home = tempfile::tempdir().expect("a temporary directory");
-    let storage = Storage::open(home.path().join("storage"));
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse("session-abcd1234").expect("a team name");
     let (provider, _requests) = ScriptedProvider::new(vec![
         tool_call(
             send_message::ID,
@@ -320,68 +287,31 @@ async fn a_teammates_message_reaches_the_lead_stamped_with_the_teammates_own_nam
         says("reported"),
         says("a title"),
     ]);
-    let asker = Allowing::default();
-    let registry = Arc::new(TeammateRegistry::new(
-        root.clone(),
-        team.clone(),
-        "01998ad0-0000-7000-8000-000000000000",
-        home.path(),
-    ));
+    let lead = lead(provider).await;
 
-    let engine = Engine::persistent(
-        provider,
-        "recorder-model",
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        storage,
+    spawn_worker(&lead).await;
+
+    let inbox = lead.registry.lead_inbox();
+    let posted = eventually(
+        EVENTUALLY,
+        "the teammate's message to reach the lead's inbox",
+        async || {
+            mailbox::read(&inbox)
+                .map(|read| read.valid)
+                .unwrap_or_default()
+                .iter()
+                .find(|message| message.text.contains(REPORT))
+                .cloned()
+        },
     )
-    .with_teammates(Arc::clone(&registry));
-    let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    tokio::spawn(async move { while events.next().await.is_some() {} });
-
-    engine
-        .teammates()
-        .expect("this session leads a team")
-        .start(
-            TeammateSpawn {
-                name: "worker".to_owned(),
-                backend: None,
-                agent_type: "general".to_owned(),
-                prompt: TEAMMATE_PROMPT.to_owned(),
-            },
-            &caller(home.path()),
-            &asker,
-        )
-        .await
-        .expect("an in-process teammate starts");
-    asker.asked_nobody();
-
-    let inbox = registry.lead_inbox();
-    let deadline = tokio::time::Instant::now() + EVENTUALLY;
-    let posted = loop {
-        let waiting = mailbox::read(&inbox)
-            .map(|read| read.valid)
-            .unwrap_or_default();
-        if let Some(message) = waiting
-            .iter()
-            .find(|message| message.text.contains(REPORT))
-            .cloned()
-        {
-            break message;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the teammate's message should have reached the lead's inbox by now"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    .await;
 
     assert_eq!(
         posted.from, "worker",
         "a message carries the name its sender was given, not one anything typed"
     );
 
-    engine.shutdown_teammates().await;
+    lead.engine.shutdown_teammates().await;
 }
 
 /// The other direction: what the lead's own `send_message` writes is what its
@@ -397,47 +327,11 @@ async fn a_teammates_message_reaches_the_lead_stamped_with_the_teammates_own_nam
 /// pushed only once nothing else is asking.
 #[tokio::test]
 async fn what_the_lead_sends_is_what_its_teammate_reads_next() {
-    let home = tempfile::tempdir().expect("a temporary directory");
-    let storage = Storage::open(home.path().join("storage"));
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse("session-abcd1234").expect("a team name");
     let (provider, requests) =
         ScriptedProvider::new(vec![says("on it"), says("the teammate's title")]);
-    let asker = Allowing::default();
-    let registry = Arc::new(TeammateRegistry::new(
-        root.clone(),
-        team.clone(),
-        "01998ad0-0000-7000-8000-000000000000",
-        home.path(),
-    ));
+    let lead = lead(Arc::clone(&provider) as Arc<dyn Provider>).await;
 
-    let engine = Engine::persistent(
-        Arc::clone(&provider) as Arc<dyn ganja_core::provider::Provider>,
-        "recorder-model",
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        storage,
-    )
-    .with_teammates(Arc::clone(&registry));
-    let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    tokio::spawn(async move { while events.next().await.is_some() {} });
-
-    engine
-        .teammates()
-        .expect("this session leads a team")
-        .start(
-            TeammateSpawn {
-                name: "worker".to_owned(),
-                backend: None,
-                agent_type: "general".to_owned(),
-                prompt: TEAMMATE_PROMPT.to_owned(),
-            },
-            &caller(home.path()),
-            &asker,
-        )
-        .await
-        .expect("an in-process teammate starts");
-    asker.asked_nobody();
+    spawn_worker(&lead).await;
 
     // The teammate has read its spawn prompt and spent both of its scripts.
     // Only then is the lead's pushed, so the call below is the lead's and
@@ -450,7 +344,7 @@ async fn what_the_lead_sends_is_what_its_teammate_reads_next() {
     provider.push(says("sent"));
     provider.push(says("the lead's title"));
 
-    engine
+    lead.engine
         .send(Command::SendPrompt {
             text: LEAD_PROMPT.to_owned(),
             mentions: Vec::new(),
@@ -460,21 +354,19 @@ async fn what_the_lead_sends_is_what_its_teammate_reads_next() {
         .await
         .expect("an idle engine accepts a prompt");
 
-    let deadline = tokio::time::Instant::now() + EVENTUALLY;
-    let delivered = loop {
-        let seen = requests
-            .lock()
-            .expect("the request log is never poisoned")
-            .clone();
-        if let Some(request) = asked_about(&seen[asked..], MEMO) {
-            break request;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the lead's message should have reached the teammate's turn by now"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    let delivered = eventually(
+        EVENTUALLY,
+        "the lead's message to reach the teammate's turn",
+        async || {
+            let seen = requests
+                .lock()
+                .expect("the request log is never poisoned")
+                .clone();
+
+            asked_about(&seen[asked..], MEMO)
+        },
+    )
+    .await;
 
     let read: String = delivered
         .messages
@@ -487,5 +379,5 @@ async fn what_the_lead_sends_is_what_its_teammate_reads_next() {
         "the teammate is told who wrote to it: {read}"
     );
 
-    engine.shutdown_teammates().await;
+    lead.engine.shutdown_teammates().await;
 }

@@ -22,72 +22,23 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use ganja_core::{
-    Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
+    Storage,
     permission::{self, Permissions},
     project::Project,
-    protocol::{Part, PartBody, PermissionReply, Role, ToolState},
-    teammate::{InProcess, TeammateRegistry, claude::ClaudePane, pane::GanjaPane, posture},
-    tool::{Registry, task::TeammateSpawn},
+    protocol::{Part, PartBody, Role, ToolState},
+    teammate::posture,
+    tool::Registry,
 };
-use ganja_team::{TeamName, TeamsRoot};
+use ganja_testkit::{RecordedSpawns, caller_with, eventually, spawn_with_prompt, team_with};
 
 /// How long a claim about the runner is waited for before it is a failure. The
 /// runner polls every 500 ms, so a spawn, a pass and a turn fit comfortably and
 /// a real regression still fails in seconds rather than hanging.
 const EVENTUALLY: Duration = Duration::from_secs(20);
 
-/// How often the assertion below re-reads what it is waiting for.
-const CHECK: Duration = Duration::from_millis(25);
-
 /// How long the lead's dialog surface is watched for a question it must never
 /// be asked. The turn it would have come from has already finished by then.
 const NOTHING_ARRIVES: Duration = Duration::from_millis(200);
-
-/// A person the spawn gate could reach, and a record of every time it did.
-///
-/// Recorded rather than only answered: what this test wants from the gate is
-/// its **silence**, and an asker that only said yes would let that silence
-/// break without anything noticing.
-#[derive(Debug, Default)]
-struct Recording {
-    asked: std::sync::Mutex<Vec<SpawnAsk>>,
-}
-
-impl Recording {
-    /// Fails naming what was asked, which is the whole diagnostic.
-    fn asked_nobody(&self) {
-        let asked = self.asked.lock().expect("the ask log is never poisoned");
-        assert!(
-            asked.is_empty(),
-            "a teammate working inside the project asks nobody: {asked:?}"
-        );
-    }
-}
-
-#[async_trait::async_trait]
-impl SpawnAsker for Recording {
-    async fn ask(&self, request: SpawnAsk) -> PermissionReply {
-        self.asked
-            .lock()
-            .expect("the ask log is never poisoned")
-            .push(request);
-
-        PermissionReply::Once
-    }
-}
-
-/// Waits for `claim` to hold, or fails saying what it was waiting for.
-async fn eventually(what: &str, mut claim: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + EVENTUALLY;
-    while tokio::time::Instant::now() < deadline {
-        if claim() {
-            return;
-        }
-        tokio::time::sleep(CHECK).await;
-    }
-
-    panic!("waited {EVENTUALLY:?} for {what}, and it never happened");
-}
 
 /// Writes the project's stored ruleset — the tier a person's own answers land
 /// in, and the one a spawn must not be able to step around.
@@ -140,18 +91,6 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
     let lead = Arc::new(std::sync::Mutex::new(Permissions::load(project.path())));
 
     let storage = Storage::open(project.path().join("storage"));
-    let registry = Arc::new(TeammateRegistry::new(
-        TeamsRoot::new(project.path().join("teams")),
-        TeamName::parse("session-abcd1234").expect("a team name"),
-        "01998ad0-0000-7000-8000-000000000000",
-        project.path(),
-    ));
-    // The lead's dialog surface really exists, so "nobody was asked" is read
-    // off a channel that could have carried the question rather than off the
-    // absence of a channel.
-    let (dialogs, mut asked) = tokio::sync::mpsc::channel(4);
-    registry.forward_dialogs_to(dialogs);
-
     // Two steps: the call the rules refuse, and the step that reads the refusal
     // and says so. The second is what proves the turn carried on — a refusal is
     // information, never a turn abort.
@@ -170,80 +109,79 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
     );
     // Through the gated door, which is the only one there is: the registry's
     // own spawn is crate-internal so that nothing can start a teammate the
-    // permission gate never saw.
-    let door = Teammates::new(
-        Arc::clone(&registry),
-        Backends {
-            in_process: Arc::new(InProcess::new(
-                provider,
-                Arc::new(Registry::with_builtins()),
-                storage.clone(),
-                // The seam this whole lane lands in: the teammate's engine
-                // takes the lead's ruleset, derived rather than invented.
-                {
-                    let lead = Arc::clone(&lead);
-                    move |_| {
-                        posture::permissions_for(
-                            &lead
-                                .lock()
-                                .expect("the permission rules are never poisoned"),
-                            Vec::new(),
-                        )
-                    }
-                },
-            )),
-            pane: Arc::new(GanjaPane),
-            claude: Arc::new(ClaudePane),
+    // permission gate never saw. The posture closure is the seam this whole
+    // lane lands in: the teammate's engine takes the lead's ruleset, derived
+    // rather than invented.
+    let (_root, _team, registry, door) = team_with(
+        project.path(),
+        provider,
+        Arc::new(Registry::with_builtins()),
+        storage.clone(),
+        {
+            let lead = Arc::clone(&lead);
+            move |_| {
+                posture::permissions_for(
+                    &lead
+                        .lock()
+                        .expect("the permission rules are never poisoned"),
+                    Vec::new(),
+                )
+            }
         },
     );
+    // The lead's dialog surface really exists, so "nobody was asked" is read
+    // off a channel that could have carried the question rather than off the
+    // absence of a channel.
+    let (dialogs, mut asked) = tokio::sync::mpsc::channel(4);
+    registry.forward_dialogs_to(dialogs);
     // A third place a question could have gone, so "nobody was asked" is read
     // off every surface that could have carried one rather than off one of
     // them. The teammate works inside the project and asks for no bypass, so
     // the spawn gate has nothing to raise either.
-    let spawn_asks = Recording::default();
+    let spawn_asks = RecordedSpawns::default();
 
     door.start(
-        TeammateSpawn {
-            name: "worker".to_owned(),
-            backend: None,
-            agent_type: "general".to_owned(),
-            prompt: "leave a note in notes.md".to_owned(),
-        },
-        &Caller {
-            model: "recorder-model".to_owned(),
-            cwd: project.path().to_path_buf(),
-            // The lead's own live handle — the rules the deny was stored in,
-            // which is what the gate has to be judging by.
-            permissions: Arc::clone(&lead),
-            project_root: project.path().to_path_buf(),
-        },
+        spawn_with_prompt("worker", None, "leave a note in notes.md"),
+        // The lead's own live handle — the rules the deny was stored in,
+        // which is what the gate has to be judging by.
+        &caller_with(project.path(), Arc::clone(&lead)),
         &spawn_asks,
     )
     .await
     .expect("an in-process teammate spawns");
     spawn_asks.asked_nobody();
 
-    eventually("the teammate's own session to exist", || {
-        !storage.list_sessions().expect("the store lists").is_empty()
-    })
+    let session = eventually(
+        EVENTUALLY,
+        "the teammate's own session to exist",
+        async || {
+            storage
+                .list_sessions()
+                .expect("the store lists")
+                .first()
+                .map(|info| info.id.clone())
+        },
+    )
     .await;
-    let session = storage.list_sessions().expect("the store lists")[0]
-        .id
-        .clone();
-    eventually("the teammate to read the refusal and answer it", || {
-        storage
-            .load_transcript(&session)
-            .expect("the transcript reads")
-            .iter()
-            .any(|message| {
-                message.role == Role::Assistant
-                    && message
-                        .parts
-                        .iter()
-                        .filter_map(Part::as_text)
-                        .any(|text| text.contains("the rules refuse that"))
-            })
-    })
+    eventually(
+        EVENTUALLY,
+        "the teammate to read the refusal and answer it",
+        async || {
+            storage
+                .load_transcript(&session)
+                .expect("the transcript reads")
+                .iter()
+                .any(|message| {
+                    message.role == Role::Assistant
+                        && message
+                            .parts
+                            .iter()
+                            .filter_map(Part::as_text)
+                            .any(|text| text.contains("the rules refuse that"))
+                })
+                .then_some(())
+        },
+    )
     .await;
 
     let recorded = calls(&storage, &session);

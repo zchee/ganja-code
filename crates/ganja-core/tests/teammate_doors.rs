@@ -38,14 +38,11 @@ use std::{
 
 use async_trait::async_trait;
 use ganja_core::{
-    Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
+    Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
     permission::Permissions,
     protocol::PermissionReply,
     provider::FakeProvider,
-    teammate::{
-        InProcess, TeammateRegistry,
-        tmux::{self, REFUSED_NO_TMUX},
-    },
+    teammate::tmux::{self, REFUSED_NO_TMUX},
     tool::{
         Credentials, FileTimes, Registry, Tool as _, ToolCtx, ToolError,
         task::{
@@ -54,7 +51,7 @@ use ganja_core::{
         },
     },
 };
-use ganja_team::{TeamFile, TeamName, TeamsRoot};
+use ganja_testkit::{TEAM, caller, team_file, team_with};
 use tokio_util::sync::CancellationToken;
 
 /// How long the teammate's own provider takes to answer.
@@ -72,14 +69,11 @@ const TEAMMATE_TURN: Duration = Duration::from_secs(2);
 /// is.
 const AT_ONCE: Duration = Duration::from_secs(1);
 
-/// The team every member here joins.
-const TEAM: &str = "session-abcd1234";
-
 /// The engine-side seam a `task` call reaches, with only the teammate half
 /// wired: what a delegation does is `task_tool.rs`'s claim, not this one.
 #[derive(Debug)]
 struct Door {
-    teammates: Teammates,
+    teammates: Arc<Teammates>,
     caller: Caller,
     /// Every spawn a person was asked about, which for a teammate working
     /// inside the project should be none at all.
@@ -121,13 +115,6 @@ fn args(backend: &str) -> serde_json::Value {
     })
 }
 
-/// The team file as it stands on disk.
-fn team_file(root: &TeamsRoot, team: &TeamName) -> Option<TeamFile> {
-    let text = std::fs::read_to_string(root.config_path(team)).ok()?;
-
-    Some(serde_json::from_str(&text).expect("the team file this build wrote decodes"))
-}
-
 /// Both halves of AC-14's `task` leg: the door starts a teammate and answers
 /// before the teammate has done anything, and the two pane surfaces refuse
 /// through it in the sentence they refuse in everywhere else.
@@ -143,38 +130,20 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         std::env::remove_var(tmux::TMUX_PANE);
     }
     let home = ganja_testkit::temp_dir();
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse(TEAM).expect("a team name");
-    let registry = Arc::new(TeammateRegistry::new(
-        root.clone(),
-        team.clone(),
-        "01998ad0-0000-7000-8000-000000000000",
+    let (root, team, registry, teammates) = team_with(
         home.path(),
-    ));
+        Arc::new(FakeProvider::new("on it", TEAMMATE_TURN)),
+        Arc::new(Registry::new(Vec::new())),
+        Storage::open(home.path().join("storage")),
+        |_| Permissions::default(),
+    );
     let asked: Arc<Mutex<Vec<SpawnAsk>>> = Arc::default();
     let door = Door {
         asked: Arc::clone(&asked),
-        teammates: Teammates::new(
-            Arc::clone(&registry),
-            Backends {
-                in_process: Arc::new(InProcess::new(
-                    Arc::new(FakeProvider::new("on it", TEAMMATE_TURN)),
-                    Arc::new(Registry::new(Vec::new())),
-                    Storage::open(home.path().join("storage")),
-                    |_| Permissions::default(),
-                )),
-                pane: Arc::new(ganja_core::teammate::pane::GanjaPane),
-                claude: Arc::new(ganja_core::teammate::claude::ClaudePane),
-            },
-        ),
-        caller: Caller {
-            model: "recorder-model".to_owned(),
-            cwd: home.path().to_path_buf(),
-            permissions: Arc::new(Mutex::new(Permissions::default())),
-            // The teammate works where the calling turn works, so the spawn
-            // gate has nothing to disclose and nobody to ask.
-            project_root: home.path().to_path_buf(),
-        },
+        teammates,
+        // The teammate works where the calling turn works, so the spawn gate
+        // has nothing to disclose and nobody to ask.
+        caller: caller(home.path()),
     };
     let tool = TaskTool::new(&[Offered {
         name: "general".to_owned(),

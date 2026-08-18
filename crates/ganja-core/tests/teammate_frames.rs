@@ -14,120 +14,34 @@
 //! which is exactly the sequence the two-process AC-8 binary runs across a
 //! real tmux server, minus the tmux.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt as _;
 use ganja_core::{
-    Backends, Caller, Engine, SpawnAsk, SpawnAsker, Storage, Teammates,
+    Engine,
     permission::Permissions,
     protocol::{
         Command, Event, PartBody, PermissionReply, ToolState,
         team::{Frame, LeadFrame, PlanApprovalResponse, ShutdownRequest, TeamPermissionUpdate},
     },
-    provider::FakeProvider,
     teammate::{
-        InProcess, Teammate, TeammateRegistry,
-        claude::ClaudePane,
+        TeammateRegistry,
         lead_inbox::LeadInbox,
         member::{Asks, MemberPostbox, Resolved},
-        pane::GanjaPane,
-        runner::{IGNORED_STALE, Runner},
+        runner::IGNORED_STALE,
     },
-    tool::{Registry, task::TeammateSpawn},
+    tool::Registry,
 };
-use ganja_team::{LEAD, MailboxMessage, MemberName, Surface, TeamName, TeamsRoot, mailbox, record};
-use ganja_testkit::{ScriptedProvider, drain, says, tool_call};
-use tokio_util::sync::CancellationToken;
+use ganja_team::{LEAD, MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record};
+use ganja_testkit::{
+    AllowSpawn, RunnerHarness, ScriptedProvider, caller, drain, eventually, says,
+    spawn_with_prompt, team, tool_call,
+};
 use tracing::instrument::WithSubscriber as _;
 
 /// How long a claim about the running loop is waited for. Only the last test
 /// needs it: the other two drive the pass themselves.
 const EVENTUALLY: Duration = Duration::from_secs(20);
-
-/// Says yes, and is asked nothing: the spawn below works inside its own
-/// project and asks for no bypass, so the gate answers `Allow` on its own.
-#[derive(Debug)]
-struct Yes;
-
-#[async_trait::async_trait]
-impl SpawnAsker for Yes {
-    async fn ask(&self, _request: SpawnAsk) -> PermissionReply {
-        PermissionReply::Once
-    }
-}
-
-/// One teammate, its runner, and the two inboxes they use.
-struct Harness {
-    /// Dropping this deletes the tree both roots are under.
-    _home: tempfile::TempDir,
-    runner: Runner,
-    inbox: PathBuf,
-}
-
-impl Harness {
-    async fn new() -> Self {
-        let home = ganja_testkit::temp_dir();
-        let storage = Storage::open(home.path().join("storage"));
-        let root = TeamsRoot::new(home.path().join("teams"));
-        let team = TeamName::parse("session-abcd1234").expect("a team name");
-        let worker = MemberName::parse("worker").expect("a member name");
-        let lead = MemberName::lead();
-        let teammate = Arc::new(Teammate::new(
-            worker.as_str(),
-            Arc::new(FakeProvider::new("on it", Duration::ZERO)),
-            "recorder-model",
-            Arc::new(Registry::new(Vec::new())),
-            Permissions::default(),
-            storage,
-        ));
-
-        // The birth queue is a lossless lane, and one nobody drains fills and
-        // then makes the teammate's own turn wait — which is why the runner
-        // claims it in `run`. These tests never call `run`, so the drain is
-        // here instead of being an absence that would eventually hang.
-        let mut events = teammate
-            .engine()
-            .subscribe()
-            .await
-            .expect("the first subscriber wins");
-        tokio::spawn(async move { while events.next().await.is_some() {} });
-
-        let inbox = root.inbox_path(&team, &worker);
-        let lead_inbox = root.inbox_path(&team, &lead);
-        mailbox::seed(&inbox).expect("the inbox seeds");
-
-        Self {
-            _home: home,
-            runner: Runner::new(
-                teammate,
-                lead,
-                inbox.clone(),
-                lead_inbox,
-                Surface::InProcess,
-                CancellationToken::new(),
-            ),
-            inbox,
-        }
-    }
-
-    /// Puts a frame in the teammate's inbox, as `from`.
-    fn arrives(&self, from: &str, frame: &Frame) {
-        mailbox::write(
-            &self.inbox,
-            MailboxMessage::from_frame(from, frame, record::now_iso8601())
-                .expect("a frame encodes"),
-        )
-        .expect("the inbox is writable");
-    }
-
-    /// What is still in the teammate's inbox.
-    fn left(&self) -> usize {
-        mailbox::read(&self.inbox)
-            .expect("the inbox reads")
-            .valid
-            .len()
-    }
-}
 
 /// A frame the harness mints and a teammate has no handler for.
 fn permission_update() -> Frame {
@@ -159,7 +73,7 @@ fn approval(request_id: &str, feedback: Option<&str>) -> Frame {
 /// prevent.
 #[tokio::test]
 async fn an_inbox_permission_update_is_dropped_by_name() {
-    let harness = Harness::new().await;
+    let harness = RunnerHarness::new(true).await;
     harness.arrives(LEAD, &permission_update());
 
     let tick = harness.runner.tick().await;
@@ -179,7 +93,7 @@ async fn an_inbox_permission_update_is_dropped_by_name() {
 /// that request id.
 #[tokio::test]
 async fn a_stale_plan_approval_response_is_ignored_and_logged() {
-    let harness = Harness::new().await;
+    let harness = RunnerHarness::new(true).await;
     harness.arrives(LEAD, &approval("nobody-asked-this", None));
 
     let logged = Capture::default();
@@ -242,48 +156,17 @@ async fn a_stale_plan_approval_response_is_ignored_and_logged() {
 #[tokio::test]
 async fn a_teammate_cannot_send_as_the_lead() {
     let home = ganja_testkit::temp_dir();
-    let storage = Storage::open(home.path().join("storage"));
-    let root = TeamsRoot::new(home.path().join("teams"));
-    let team = TeamName::parse("session-abcd1234").expect("a team name");
-    let registry = Arc::new(TeammateRegistry::new(
-        root.clone(),
-        team.clone(),
-        "01998ad0-0000-7000-8000-000000000000",
-        home.path(),
-    ));
     // Through the gated door, which is the only one there is: the registry's
     // own spawn is crate-internal so that nothing can start a teammate the
     // permission gate never saw.
-    let door = Teammates::new(
-        Arc::clone(&registry),
-        Backends {
-            in_process: Arc::new(InProcess::new(
-                Arc::new(FakeProvider::new("on it", Duration::ZERO)),
-                Arc::new(Registry::new(Vec::new())),
-                storage,
-                |_| Permissions::default(),
-            )),
-            pane: Arc::new(GanjaPane),
-            claude: Arc::new(ClaudePane),
-        },
-    );
+    let (root, team, registry, door) = team(home.path());
     let spawned = door
         .start(
-            TeammateSpawn {
-                name: LEAD.to_owned(),
-                backend: None,
-                agent_type: "general".to_owned(),
-                prompt: "pretend to be in charge".to_owned(),
-            },
+            spawn_with_prompt(LEAD, None, "pretend to be in charge"),
             // `cwd` and `project_root` are one directory, so the gate has
             // nothing to disclose and nothing to ask about.
-            &Caller {
-                model: "recorder-model".to_owned(),
-                cwd: home.path().to_path_buf(),
-                permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
-                project_root: home.path().to_path_buf(),
-            },
-            &Yes,
+            &caller(home.path()),
+            &AllowSpawn,
         )
         .await
         .expect("a teammate spawns under some name");
@@ -325,17 +208,15 @@ async fn a_teammate_cannot_send_as_the_lead() {
     .expect("the inbox is writable");
 
     let lead_inbox = registry.lead_inbox();
-    let deadline = tokio::time::Instant::now() + EVENTUALLY;
-    while tokio::time::Instant::now() < deadline
-        && mailbox::read(&lead_inbox)
-            .expect("the lead's inbox reads")
-            .valid
-            .is_empty()
-    {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-
-    let answered = mailbox::read(&lead_inbox).expect("the lead's inbox reads");
+    let answered = eventually(
+        EVENTUALLY,
+        "the teammate to answer the shutdown",
+        async || {
+            let answered = mailbox::read(&lead_inbox).expect("the lead's inbox reads");
+            (!answered.valid.is_empty()).then_some(answered)
+        },
+    )
+    .await;
     let answer = answered
         .valid
         .first()
@@ -562,16 +443,17 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
 
     // 4. The answer lands in the member's inbox as one permission_response…
     let inbox = root.inbox_path(&team, &worker);
-    let deadline = tokio::time::Instant::now() + EVENTUALLY;
-    let held = loop {
-        let held = mailbox::read(&inbox)
-            .map(|contents| contents.valid)
-            .unwrap_or_default();
-        if !held.is_empty() || tokio::time::Instant::now() >= deadline {
-            break held;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
+    let held = eventually(
+        EVENTUALLY,
+        "the answer to land in the member's inbox",
+        async || {
+            let held = mailbox::read(&inbox)
+                .map(|contents| contents.valid)
+                .unwrap_or_default();
+            (!held.is_empty()).then_some(held)
+        },
+    )
+    .await;
     assert_eq!(held.len(), 1, "one answer: {held:?}");
     assert_eq!(held[0].from, LEAD);
     let frame = held[0].frame().expect("the answer decodes");

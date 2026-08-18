@@ -20,14 +20,13 @@
 //!
 //! One test, one binary, beside its three `storage_preuuid*` siblings.
 
-use std::{fs, path::Path, thread, time::Duration};
+use std::{fs, thread, time::Duration};
 
 use ganja_core::{SessionId, Storage};
-use ganja_testkit::{seeded_session_info, temp_dir};
+use ganja_testkit::{
+    PRE_UUID_ID, plant_preuuid_store, seeded_session_info, set_aside_of, temp_dir,
+};
 use rusqlite::Connection;
-
-/// The spelling ids had before **D493**.
-const OLD: &str = "ses_0193b2f0a1c2000000";
 
 /// One this build would mint.
 const NEW: &str = "0198f2c4-a1b0-7000-8000-000000000001";
@@ -42,13 +41,8 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
     let directory = temp_dir();
     let root = directory.path().join("storage");
 
-    {
-        let planted = Storage::open(root.clone());
-        planted
-            .save_info(&seeded_session_info(SessionId::from(OLD.to_owned()), 7))
-            .expect("the old-format record writes");
-    }
-    let database = Storage::open(root.clone()).database().to_path_buf();
+    let (planted, database) = plant_preuuid_store(root.clone());
+    drop(planted);
 
     // The write lock, held on the file the loser is about to open.
     let blocker = Connection::open(&database).expect("the database opens a second time");
@@ -117,46 +111,26 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
         "the loser must go on with the store that replaced the one it had open"
     );
 
-    let listing = entries(directory.path());
-    let set_aside: Vec<&String> = listing
-        .iter()
-        .filter(|entry| {
-            entry.starts_with(&format!("{name}.preuuid-"))
-                && !entry.ends_with("-wal")
-                && !entry.ends_with("-shm")
-        })
-        .collect();
+    let set_aside = set_aside_of(directory.path(), &database);
     assert_eq!(
         set_aside.len(),
         1,
         "only the winner's aside file may exist; a second one is the loser \
-         setting the fresh store aside, got {listing:?}"
+         setting the fresh store aside, got {set_aside:?}"
     );
 
     // And the one that is there is the *old* store rather than the fresh one:
     // a guard that fired for the wrong reason would leave an empty file here.
     let kept = Connection::open(&aside).expect("the set-aside store opens like any other database");
     let held: i64 = kept
-        .query_row("SELECT COUNT(*) FROM session WHERE id = ?1", [OLD], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM session WHERE id = ?1",
+            [PRE_UUID_ID],
+            |row| row.get(0),
+        )
         .expect("the set-aside store still answers");
     assert_eq!(
         held, 1,
         "the set-aside store is the one that held the old ids"
     );
-}
-
-/// Everything directly inside `directory`, by name.
-fn entries(directory: &Path) -> Vec<String> {
-    fs::read_dir(directory)
-        .expect("the directory lists")
-        .map(|entry| {
-            entry
-                .expect("the entry reads")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect()
 }

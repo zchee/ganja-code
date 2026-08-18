@@ -1,9 +1,10 @@
-//! What the two pane binaries share: the pane child, the private tmux server,
-//! and the `task` door.
+//! What the two pane binaries share: the pane child, the spawn-and-report
+//! spine, and the `task` door.
 //!
 //! Not a test binary of its own — cargo does not discover `tests/*/mod.rs` as
 //! one — but a module both `teammate_pane_lifecycle.rs` and
 //! `teammate_pane_env.rs` declare, so the child a pane runs is written once.
+//! The private tmux server itself is [`ganja_testkit::tmux::PrivateServer`].
 //!
 //! # The pane child is this very binary
 //!
@@ -30,39 +31,36 @@
 // unused half differs per binary and a targeted allow cannot name it.
 #![allow(dead_code)]
 
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::{ffi::OsString, path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ganja_core::{
-    Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
-    permission::Permissions,
-    protocol::PermissionReply,
-    provider::FakeProvider,
+    Caller, Storage, Teammates,
     teammate::{
-        InProcess, TeammateRegistry,
-        claude::ClaudePane,
-        pane::{AGENT_ID, AGENT_NAME, GanjaPane, TEAM_NAME},
+        TeammateRegistry,
+        lead_inbox::LeadInbox,
+        pane::{AGENT_COLOR, AGENT_ID, AGENT_NAME, PARENT_SESSION_ID, TEAM_NAME},
     },
     tool::{
-        Credentials, FileTimes, Registry, ToolCtx,
+        Credentials, FileTimes, Tool as _, ToolCtx,
         task::{
-            Delegated, Delegation, NotSpawned, Subagents, TeammateSpawn, Teammated, Unanswered,
+            Delegated, Delegation, NotSpawned, Offered, Subagents, TaskTool, TeammateSpawn,
+            Teammated, Unanswered,
         },
     },
 };
-use ganja_team::{MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record};
+use ganja_team::{MailboxMessage, MemberName, MemberRecord, TeamName, TeamsRoot, mailbox, record};
+use ganja_testkit::AllowSpawn;
 use serde::{Deserialize, Serialize};
-use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
 /// The lead's session, and therefore the team's name: `session-01998ad0`.
 pub const SESSION_ID: &str = "01998ad0-0000-7000-8000-000000000000";
+
+/// How long the pane's process gets to start and report. Generous: it is a
+/// debug test binary being exec'd cold on a machine running the rest of the
+/// suite.
+pub const CHILD_STARTS: Duration = Duration::from_secs(30);
 
 /// What the pane child tells the lead about itself.
 #[derive(Debug, Serialize, Deserialize)]
@@ -152,7 +150,7 @@ pub fn run_one(name: &str, test: impl std::future::Future<Output = ()>) {
         println!("running 0 tests");
         return;
     }
-    require_tmux();
+    ganja_testkit::tmux::require_tmux();
     println!("running 1 test");
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -161,170 +159,6 @@ pub fn run_one(name: &str, test: impl std::future::Future<Output = ()>) {
         .block_on(test);
     println!("test {name} ... ok");
     println!("test result: ok. 1 passed; 0 failed; 0 ignored");
-}
-
-/// Refuses to run without tmux, by name: a green pane test that spawned no
-/// pane would be worth nothing.
-pub fn require_tmux() {
-    let version = Command::new("tmux").arg("-V").output();
-    assert!(
-        version.as_ref().is_ok_and(|output| output.status.success()),
-        "the pane tests need tmux on PATH and there is none: {version:?}"
-    );
-}
-
-/// A tmux server of this test's own, on a socket nobody else knows.
-///
-/// Killed when dropped, panics included, so a failing test leaves no server
-/// behind holding a pane of this binary open.
-pub struct PrivateServer {
-    socket: PathBuf,
-    /// The pane the server was born with — what the lead "runs in".
-    first_pane: String,
-    _dir: TempDir,
-}
-
-impl PrivateServer {
-    /// Starts a detached server whose first pane sleeps, with `withheld` taken
-    /// **out** of the environment the server is born with — which is how a
-    /// test stages "the server predates the export".
-    pub fn start(withheld: &[&str]) -> Self {
-        let dir = ganja_testkit::temp_dir();
-        let socket = dir.path().join("tmux.sock");
-        let mut command = Command::new("tmux");
-        command
-            .arg("-S")
-            .arg(&socket)
-            .arg("-f")
-            .arg("/dev/null")
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                "ganja-test",
-                "-x",
-                "200",
-                "-y",
-                "50",
-            ])
-            .args(["sleep", "3600"]);
-        for name in withheld {
-            command.env_remove(name);
-        }
-        let started = command.output().expect("tmux starts a private server");
-        assert!(
-            started.status.success(),
-            "the private tmux server did not start: {}",
-            String::from_utf8_lossy(&started.stderr)
-        );
-        let listing = tmux(&socket, &["list-panes", "-a", "-F", "#{pane_id}"]);
-        let first_pane = listing.trim().to_owned();
-        assert!(
-            first_pane.starts_with('%'),
-            "the private server has a first pane: {listing:?}"
-        );
-
-        Self {
-            socket,
-            first_pane,
-            _dir: dir,
-        }
-    }
-
-    /// The socket, for `Server::at` and for `$TMUX`.
-    pub fn socket(&self) -> &Path {
-        &self.socket
-    }
-
-    /// Points this process at the private server the way tmux would have:
-    /// `$TMUX` and `$TMUX_PANE`.
-    ///
-    /// # Safety
-    ///
-    /// Mutates process-wide environment; the calling binary holds one test.
-    pub unsafe fn enter(&self) {
-        // SAFETY: the caller's binary holds exactly one test.
-        unsafe {
-            std::env::set_var("TMUX", format!("{},0,0", self.socket.display()));
-            std::env::set_var("TMUX_PANE", &self.first_pane);
-        }
-    }
-
-    /// Whether the server's **global** environment — what every pane it makes
-    /// inherits — holds `name`.
-    pub fn global_has(&self, name: &str) -> bool {
-        Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .args(["show-environment", "-g", name])
-            .output()
-            .expect("tmux runs")
-            .status
-            .success()
-    }
-
-    /// The pane's title, as `select-pane -T` set it.
-    pub fn title(&self, pane_id: &str) -> String {
-        tmux(
-            &self.socket,
-            &["display-message", "-p", "-t", pane_id, "#{pane_title}"],
-        )
-        .trim()
-        .to_owned()
-    }
-
-    /// The command a pane was started with, as tmux itself records it.
-    pub fn start_command(&self, pane_id: &str) -> String {
-        tmux(
-            &self.socket,
-            &[
-                "display-message",
-                "-p",
-                "-t",
-                pane_id,
-                "#{pane_start_command}",
-            ],
-        )
-    }
-}
-
-impl Drop for PrivateServer {
-    fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .output();
-    }
-}
-
-/// One tmux client call against `socket`, or a panic in tmux's own words.
-fn tmux(socket: &Path, args: &[&str]) -> String {
-    let output = Command::new("tmux")
-        .arg("-S")
-        .arg(socket)
-        .args(args)
-        .output()
-        .expect("tmux runs");
-    assert!(
-        output.status.success(),
-        "tmux {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-/// Says yes to everything, and is asked nothing: every spawn here works
-/// inside its own project and asks for no bypass.
-#[derive(Debug)]
-pub struct Yes;
-
-#[async_trait]
-impl SpawnAsker for Yes {
-    async fn ask(&self, _request: SpawnAsk) -> PermissionReply {
-        PermissionReply::Once
-    }
 }
 
 /// The engine-side seam a `task` call reaches, with only the teammate half
@@ -346,7 +180,9 @@ impl Subagents for Door {
     }
 
     async fn spawn_teammate(&self, request: TeammateSpawn) -> Result<Teammated, NotSpawned> {
-        self.teammates.start(request, &self.caller, &Yes).await
+        self.teammates
+            .start(request, &self.caller, &AllowSpawn)
+            .await
     }
 }
 
@@ -361,23 +197,9 @@ pub fn lead(config_home: &Path, project: &Path) -> (Arc<TeammateRegistry>, Door)
     let door = Door {
         teammates: Teammates::new(
             Arc::clone(&registry),
-            Backends {
-                in_process: Arc::new(InProcess::new(
-                    Arc::new(FakeProvider::new("on it", Duration::ZERO)),
-                    Arc::new(Registry::new(Vec::new())),
-                    Storage::open(project.join("storage")),
-                    |_| Permissions::default(),
-                )),
-                pane: Arc::new(GanjaPane),
-                claude: Arc::new(ClaudePane),
-            },
+            ganja_testkit::backends(Storage::open(project.join("storage"))),
         ),
-        caller: Caller {
-            model: "recorder-model".to_owned(),
-            cwd: project.to_path_buf(),
-            permissions: Arc::new(Mutex::new(Permissions::default())),
-            project_root: project.to_path_buf(),
-        },
+        caller: ganja_testkit::caller(project),
     };
 
     (registry, door)
@@ -410,28 +232,109 @@ pub fn task_args(name: &str, backend: &str, prompt: &str) -> serde_json::Value {
     })
 }
 
-/// Polls `read` every 100ms until it answers, or panics with `what` after
-/// `limit`.
-pub async fn wait_for<T>(
-    limit: Duration,
-    what: &str,
-    mut read: impl AsyncFnMut() -> Option<T>,
-) -> T {
-    let started = Instant::now();
-    loop {
-        if let Some(found) = read().await {
-            return found;
-        }
-        assert!(
-            started.elapsed() < limit,
-            "waited {limit:?} for {what} and it did not happen"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 /// The lead's team, its name and where its documents are, off the same
 /// config home the child resolves.
 pub fn team_of(registry: &TeammateRegistry) -> (TeamsRoot, TeamName) {
     (registry.root().clone(), registry.team().clone())
+}
+
+/// What [`spawn_pane_worker`] hands back: the lead's side of the team, the
+/// member record the spawn wrote, and the report the pane child sent.
+pub struct Spawned {
+    pub registry: Arc<TeammateRegistry>,
+    pub root: TeamsRoot,
+    pub team: TeamName,
+    pub member: MemberRecord,
+    pub pane_id: String,
+    pub report: Report,
+    pub inbox: LeadInbox,
+}
+
+/// The spine both pane binaries walk: a lead over `config_home`, a `worker`
+/// spawned on the `pane` surface through the `task` door with `prompt`, the
+/// member record it wrote, and the child's report read back through the
+/// lead's own §6.2 pass. Each binary keeps only what it asserts beyond that.
+pub async fn spawn_pane_worker(config_home: &Path, project: &Path, prompt: &str) -> Spawned {
+    let (registry, door) = lead(config_home, project);
+    let (root, team) = team_of(&registry);
+    let door = Arc::new(door);
+    let tool = TaskTool::new(&[Offered {
+        name: "general".to_owned(),
+        description: None,
+    }]);
+    let ctx = ctx(project, Arc::clone(&door));
+
+    let output = tool
+        .run(task_args("worker", "pane", prompt), &ctx)
+        .await
+        .expect("the door spawns a pane teammate inside tmux");
+    assert_eq!(
+        output.metadata.get("backend").and_then(|on| on.as_str()),
+        Some("pane"),
+        "the surface it really runs on: {output:?}"
+    );
+
+    let file = ganja_testkit::team_file(&root, &team).expect("the team file is written");
+    let member = file
+        .member("worker")
+        .unwrap_or_else(|| panic!("the pane teammate joined the team: {file:?}"))
+        .clone();
+    assert!(
+        member.tmux_pane_id.starts_with('%'),
+        "§2.2's tmuxPaneId is the pane's own id: {member:?}"
+    );
+    let pane_id = member.tmux_pane_id.clone();
+
+    // The pane's process is the child branch of this binary, running as the
+    // teammate: it finds the team through the carried config home and reports
+    // to the lead — read through the lead's own inbox pass, the way a real
+    // lead reads it.
+    let inbox = LeadInbox::new(Arc::clone(&registry));
+    let report = ganja_testkit::eventually(
+        CHILD_STARTS,
+        "the pane's report to reach the lead",
+        async || {
+            let pass = inbox.poll().await;
+            pass.messages
+                .into_iter()
+                .find(|message| message.from == "worker")
+                .map(|message| {
+                    serde_json::from_str::<Report>(&message.body).unwrap_or_else(|error| {
+                        panic!("the pane wrote a report: {error} in {message:?}")
+                    })
+                })
+        },
+    )
+    .await;
+
+    Spawned {
+        registry,
+        root,
+        team,
+        member,
+        pane_id,
+        report,
+        inbox,
+    }
+}
+
+/// The five spawn flags and their values, in `pane.rs`'s order — what the
+/// child's argv must be, whole.
+pub fn expected_argv(team: &TeamName, member: &MemberRecord) -> [String; 10] {
+    [
+        AGENT_ID.to_owned(),
+        format!("{}@{}", member.name, team.as_str()),
+        AGENT_NAME.to_owned(),
+        member.name.clone(),
+        TEAM_NAME.to_owned(),
+        team.as_str().to_owned(),
+        AGENT_COLOR.to_owned(),
+        member
+            .color
+            .as_deref()
+            .expect("a spawn assigns a colour")
+            .to_owned(),
+        PARENT_SESSION_ID.to_owned(),
+        SESSION_ID.to_owned(),
+    ]
 }

@@ -31,116 +31,18 @@
 use std::{sync::Arc, time::Duration};
 
 use ganja_core::{
-    Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
+    Storage,
     permission::Permissions,
-    protocol::{PermissionReply, team::MemberBackend},
+    protocol::team::MemberBackend,
     provider::FakeProvider,
     teammate::{
-        BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, TeammateBackend, TeammateRegistry,
-        backend_name, claude::ClaudePane, pane::GanjaPane, parse_backend,
+        BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, TeammateBackend, backend_name,
+        claude::ClaudePane, pane::GanjaPane, parse_backend,
     },
-    tool::{Registry, task::TeammateSpawn},
+    tool::Registry,
 };
-use ganja_team::{MemberName, TeamFile, TeamName, TeamsRoot};
-
-/// The task every teammate here is started with. Nothing reads it; what
-/// matters is that a spawn that failed left none of it behind.
-const TASK: &str = "have a look at the parser";
-
-/// Says yes to everything, and is asked nothing by any test here.
-///
-/// Every spawn below works inside its own project and asks for no bypass, so
-/// [`ganja_core::teammate::posture::spawn_gate`] answers `Allow` and this is
-/// never reached. It exists because the door requires one, and saying yes is
-/// the answer that cannot mask a failure: a test that passed only because
-/// somebody refused would be testing the refusal.
-#[derive(Debug)]
-struct Yes;
-
-#[async_trait::async_trait]
-impl SpawnAsker for Yes {
-    async fn ask(&self, _request: SpawnAsk) -> PermissionReply {
-        PermissionReply::Once
-    }
-}
-
-/// A team over `home`, and the door onto it.
-///
-/// The in-process backend is the real one — a fake provider over a real store,
-/// which is what a teammate needs to have a session at all — and both pane
-/// slots hold production's own backends, which no test in this binary asks to
-/// spawn (the module doc says why); every request below names `in-process`
-/// or nothing.
-fn team(home: &std::path::Path) -> (TeamsRoot, TeamName, Arc<TeammateRegistry>, Arc<Teammates>) {
-    let root = TeamsRoot::new(home.join("teams"));
-    let team = TeamName::parse("session-abcd1234").expect("a team name");
-    let registry = Arc::new(TeammateRegistry::new(
-        root.clone(),
-        team.clone(),
-        "01998ad0-0000-7000-8000-000000000000",
-        home,
-    ));
-    let door = Arc::new(Teammates::new(
-        Arc::clone(&registry),
-        Backends {
-            in_process: Arc::new(InProcess::new(
-                Arc::new(FakeProvider::new("on it", Duration::ZERO)),
-                Arc::new(Registry::new(Vec::new())),
-                Storage::open(home.join("storage")),
-                |_| Permissions::default(),
-            )),
-            pane: Arc::new(GanjaPane),
-            claude: Arc::new(ClaudePane),
-        },
-    ));
-
-    (root, team, registry, door)
-}
-
-/// The calling turn, as the gate reads it. `cwd` and `project_root` are one
-/// directory, which is the case that discloses nothing and asks nobody.
-fn caller(home: &std::path::Path) -> Caller {
-    Caller {
-        model: "recorder-model".to_owned(),
-        cwd: home.to_path_buf(),
-        permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
-        project_root: home.to_path_buf(),
-    }
-}
-
-/// A spawn of `name` on `backend`, with everything else the same, so two
-/// spawns differ only where a test is looking.
-fn request(name: &str, backend: Option<&str>) -> TeammateSpawn {
-    TeammateSpawn {
-        name: name.to_owned(),
-        backend: backend.map(str::to_owned),
-        agent_type: "general".to_owned(),
-        prompt: TASK.to_owned(),
-    }
-}
-
-/// The **teammates** the team file records, sorted, or the empty account of a
-/// file that was never written.
-///
-/// The lead is a member of that file too — it is the team's own roster, not a
-/// list of the people it started — and it is dropped here because every claim
-/// below is about what a spawn wrote.
-fn recorded(root: &TeamsRoot, team: &TeamName) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(root.config_path(team)) else {
-        return Vec::new();
-    };
-    let file: TeamFile =
-        serde_json::from_str(&text).expect("the team file this build wrote decodes");
-    let mut names: Vec<String> = file
-        .members
-        .into_iter()
-        .map(|member| member.name)
-        .filter(|name| name != ganja_team::LEAD)
-        .collect();
-    names.sort();
-
-    names
-}
+use ganja_team::MemberName;
+use ganja_testkit::{AllowSpawn, caller, spawn, team, teammates_recorded};
 
 /// **AC-27.** A value outside the three is refused *by name*, and the refusal
 /// carries the list — because the useful half of "no such backend" is which
@@ -251,7 +153,10 @@ async fn two_spawns_of_one_name_at_once_get_two_teammates() {
     for _ in 0..2 {
         let door = Arc::clone(&door);
         let caller = caller.clone();
-        spawning.spawn(async move { door.start(request("worker", None), &caller, &Yes).await });
+        spawning.spawn(async move {
+            door.start(spawn("worker", None), &caller, &AllowSpawn)
+                .await
+        });
     }
 
     let mut names = Vec::new();
@@ -276,7 +181,7 @@ async fn two_spawns_of_one_name_at_once_get_two_teammates() {
     // Both are real: two records on disk, two inboxes, and — the assertion the
     // orphan fails — two teammates the registry still holds.
     assert_eq!(
-        recorded(&root, &team),
+        teammates_recorded(&root, &team),
         names,
         "each teammate wrote its own member record"
     );
@@ -315,7 +220,7 @@ async fn a_running_teammate_can_be_told_which_plan_approval_it_is_waiting_on() {
     let (_root, _team, registry, door) = team(home.path());
 
     let started = door
-        .start(request("worker", None), &caller(home.path()), &Yes)
+        .start(spawn("worker", None), &caller(home.path()), &AllowSpawn)
         .await
         .expect("an in-process teammate starts");
 
