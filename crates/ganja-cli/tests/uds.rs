@@ -652,10 +652,11 @@ async fn a_held_name_that_does_not_answer_is_listed_and_left_in_place() {
 /// directory before and inspects the entry after must walk past the gap:
 /// exit 0, the vanished entry skipped without a word, and the table about
 /// the sessions that *are* running still printed. Reproduced here as it was
-/// found: a stalled socket first in sort order (bound, never accepted, its
-/// lock held, so the health check waits its deadline out and the lock says
-/// live), a real session after it, and a dead file last that a task unlinks
-/// while the stall is still being waited on.
+/// found: a stalled socket first in sort order (accepted and never answered,
+/// its lock held, so the health check waits its deadline out and the lock
+/// says live), a real session after it, and a dead file last that vanishes
+/// while the stall is being waited on — unlinked on the walk's own connect
+/// rather than a clock, so the gap cannot close before the walk is in it.
 #[tokio::test]
 async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
     let directory = private_dir();
@@ -667,6 +668,11 @@ async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
     // Sorts before every UUIDv7-named socket: the walk meets it first.
     let stalled = directory.path().join(format!("00000000.{EXTENSION}"));
     let silent = std::os::unix::net::UnixListener::bind(&stalled).expect("the silent socket binds");
+    silent
+        .set_nonblocking(true)
+        .expect("the listener goes nonblocking");
+    let silent =
+        tokio::net::UnixListener::from_std(silent).expect("the listener joins the runtime");
     // The binder's own token, held for as long as the flock must stand.
     let lock = socket::NameLock::claim(&stalled)
         .expect("the lock file opens")
@@ -677,16 +683,24 @@ async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
     dead_socket(&dead);
     let vanishing = dead.clone();
     let unlinker = tokio::spawn(async move {
-        // Well inside the two-second stall, well after the directory read.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The health connect landing here *is* the walk past the directory
+        // read and inside the stall, so the entry vanishes exactly then. The
+        // accepted stream is answered nothing and handed back alive, so the
+        // client waits its deadline out instead of reading a close.
+        let (stream, _) = silent
+            .accept()
+            .await
+            .expect("the listing connects to the stalled socket");
         fs::remove_file(&vanishing).expect("the peer unlinks its own socket");
+
+        stream
     });
 
     let output = tokio::time::timeout(DEADLINE, sessions_live(directory.path(), &homes).output())
         .await
         .expect("the listing finishes within the deadline")
         .expect("the listing runs");
-    unlinker.await.expect("the unlinker ran");
+    let _stalling = unlinker.await.expect("the unlinker ran");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -710,7 +724,6 @@ async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
     );
     assert!(stalled.exists(), "the stalled socket was not unlinked");
 
-    drop(silent);
     drop(lock);
     handle.shutdown().await.expect("a clean stop");
 }
