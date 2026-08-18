@@ -43,6 +43,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -90,6 +91,20 @@ const YEAR_TOKEN: &str = "{{year}}";
 
 /// Seconds in a day, for [`current_year`].
 const DAY: u64 = 86_400;
+
+/// What [`encode`] escapes: everything outside RFC 3986's unreserved set,
+/// `A-Za-z0-9-._~`.
+///
+/// No stock set spells that. [`NON_ALPHANUMERIC`] is the same complement plus
+/// those four marks, which is stricter than what this has ever put on the
+/// wire, so the marks are taken back out — and the test
+/// `the_bytes_a_query_string_value_is_escaped_into_are_exactly_these` is what
+/// holds the two byte-identical.
+const ESCAPED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 /// Which service a search is asked of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -532,21 +547,11 @@ fn payload(text: &str) -> Option<String> {
 
 /// `value`, percent-encoded for a query string.
 ///
-/// Hand-rolled over the unreserved set of RFC 3986 rather than reached for:
-/// this is the only place in the crate that builds a query, and the alternative
-/// is a dependency for one line. Anything outside `A-Za-z0-9-._~` is escaped,
-/// which is stricter than a URL needs and cannot be wrong.
+/// [`ESCAPED`] is stricter than a URL needs — every reserved character goes,
+/// not only the ones that would end the value — which cannot be wrong for a
+/// value nothing ever parses structure out of.
 fn encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(byte));
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-
-    out
+    utf8_percent_encode(value, ESCAPED).to_string()
 }
 
 /// The year this process is running in, UTC.
@@ -1118,5 +1123,22 @@ mod tests {
     fn a_key_is_escaped_where_a_query_string_needs_it() {
         assert_eq!(super::encode("plain-key_1.0~"), "plain-key_1.0~");
         assert_eq!(super::encode("a b&c=d?e/f"), "a%20b%26c%3Dd%3Fe%2Ff");
+    }
+
+    /// The exact bytes a query-string value becomes, over the whole repertoire
+    /// one can carry: the four unreserved marks that stay literal, the
+    /// reserved characters that do not, and a multi-byte character escaped one
+    /// UTF-8 byte at a time in upper-case hex.
+    ///
+    /// Written against the hand encoder before it was retired, so its
+    /// replacement is held to the escape set the wire already sees rather than
+    /// to a stock set that merely comes close: `NON_ALPHANUMERIC` alone would
+    /// escape all four of those marks.
+    #[test]
+    fn the_bytes_a_query_string_value_is_escaped_into_are_exactly_these() {
+        assert_eq!(
+            super::encode("rust-lang async_trait v1.0~rc + tokio&io=x café ✓"),
+            "rust-lang%20async_trait%20v1.0~rc%20%2B%20tokio%26io%3Dx%20caf%C3%A9%20%E2%9C%93"
+        );
     }
 }

@@ -176,6 +176,13 @@ libc = "0.2.189"
 # The LSP wire types the diagnostics client speaks to rust-analyzer and
 # gopls, so requests and notifications are typed instead of hand-built JSON.
 lsp-types = "0.97.0"
+# The DOM beneath htmd, surfaced for webfetch's text mode: htmd itself
+# markdown-escapes every text node with no way to turn it off, which would
+# write backslashes into filenames the model then reads as real — so the
+# text path walks html5ever's own tree instead, through the rcdom types htmd
+# re-exports only partially. Already in the lock beneath htmd; declaring it
+# adds no vendor, only the right to name `NodeData`.
+markup5ever_rcdom = "0.38.0"
 # The command palette and @-file mention rank candidates in-process with the
 # same matcher helix uses, instead of hand-rolling a scorer.
 nucleo-matcher = "0.3.1"
@@ -339,12 +346,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # Already in the tree via `reqwest`, which re-exports only `Url`; the provider
 # endpoint check needs `Host` to compare a host as a host rather than as text.
 url = "2.5.8"
-# Already in the tree via `ratatui-core`; declared here because the chat
-# viewport measures its own wrap widths instead of leaning on `Paragraph`.
 # Grapheme clusters for the TUI's width-aware splitter: a hard wrap must not
 # land inside a ZWJ emoji or a combining sequence, which char-granular
 # splitting did. Already in the lock beneath ratatui's own widgets.
 unicode-segmentation = "1.13.3"
+# Already in the tree via `ratatui-core`; declared here because the chat
+# viewport measures its own wrap widths instead of leaning on `Paragraph`.
 unicode-width = "0.2.2"
 # Every id the protocol mints, and the one dependency `ganja-protocol` grew
 # past the two serde crates: RFC 9562 UUIDv7, whose `ContextV7` counter is what

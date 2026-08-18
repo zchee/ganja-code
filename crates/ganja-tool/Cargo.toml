@@ -35,6 +35,12 @@ ignore.workspace = true
 # way upstream's turndown call is, rather than the tag-stripped text that stood
 # in for one until the crate landed.
 htmd.workspace = true
+# `webfetch`'s text format walks the parse tree htmd hands back rather than
+# htmd's rendering of it: that rendering markdown-escapes every text node and
+# offers no way not to, which in a plain-text answer is a backslash the page
+# never had. Reaching the tree needs `NodeData`, which htmd re-exports no more
+# of than `Node`. Not a new vendor — htmd already resolves this exact version.
+markup5ever_rcdom.workspace = true
 # The stale-read watcher subscribes to the platform's own filesystem
 # notifications — FSEvents, inotify, ReadDirectoryChangesW — instead of polling
 # the files a session has read, which on a large checkout would be a stat storm
@@ -44,6 +50,11 @@ notify.workspace = true
 # descriptions with the same matcher the palette and the `@` menu already
 # use, instead of hand-rolling a third scorer.
 nucleo-matcher.workspace = true
+# `websearch` puts a key in Exa's query string, and the escape set is RFC
+# 3986's unreserved complement rather than anything this crate should be
+# spelling itself: the hand encoder it replaces was one drift away from the
+# mojibake its decoding twin already had.
+percent-encoding.workspace = true
 # `webfetch` is the one tool that reaches the network; the workspace
 # declaration pins rustls so no build here reaches for OpenSSL.
 reqwest.workspace = true

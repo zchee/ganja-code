@@ -12,11 +12,13 @@
 
 use std::{
     net::{IpAddr, SocketAddr, ToSocketAddrs as _},
+    rc::Rc,
     time::Duration,
 };
 
 use async_trait::async_trait;
 use futures::StreamExt as _;
+use markup5ever_rcdom::{Node, NodeData};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -41,6 +43,49 @@ const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 
 /// Elements whose text belongs to the machine rather than the reader.
 const SKIPPED: [&str; 6] = ["script", "style", "noscript", "iframe", "object", "embed"];
+
+/// Elements a plain-text reading puts a blank line around.
+///
+/// Not the CSS block set, which is a question about rendering boxes: these are
+/// the elements that separate *prose*, so a heading does not run into the
+/// paragraph under it and one list item does not run into the next. Anything
+/// unlisted is treated as inline, which is the right default — a tag a text
+/// rendering has never heard of is far more likely to be a `<span>` than a
+/// `<section>`.
+const BLOCK: [&str; 32] = [
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "caption",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "td",
+    "th",
+    "tr",
+];
 
 /// Most redirects one fetch will follow, which is reqwest's own default. Spelled
 /// out because guarding each hop means policing the chain here rather than
@@ -492,144 +537,86 @@ fn to_markdown(html: &str) -> String {
 
 /// The text a reader would see in `html`.
 ///
-/// Markup is dropped and the elements in [`SKIPPED`] take their contents with
-/// them, so a page's scripts and stylesheets do not reach the model as if they
-/// were prose. Text is joined exactly as upstream's parser joins it, without
-/// separators of its own, so the page's own whitespace is what separates
-/// words.
+/// html5ever's parse tree, reached through the same converter [`to_markdown`]
+/// already runs on — but walked here rather than rendered. htmd's own
+/// rendering cannot be used for a plain-text answer: it markdown-escapes every
+/// text node on the way out, so a page saying `src/main_test.rs` would reach
+/// the model as `src/main\_test.rs`, and no option it exposes turns that off.
+/// Walking the tree the parser already built costs one traversal and keeps a
+/// plain-text answer plain, while still getting the full entity table and the
+/// tag grammar a hand scanner cannot have — an attribute holding a `>` no
+/// longer ends its own tag and spills into the text.
+///
+/// The elements in [`SKIPPED`] take their contents with them, so a page's
+/// scripts and stylesheets do not reach the model as if they were prose, and
+/// those in [`BLOCK`] are separated so prose stays readable. Text itself is
+/// verbatim: whatever escaping a plain-text reading did would be escaping for
+/// a syntax it does not have.
 fn strip_tags(html: &str) -> String {
     let mut text = String::with_capacity(html.len() / 2);
-    let mut rest = html;
 
-    while let Some(open) = rest.find('<') {
-        text.push_str(&rest[..open]);
-        rest = &rest[open + 1..];
-
-        let Some(close) = rest.find('>') else {
-            // An unterminated tag is the end of the document as far as any
-            // parser is concerned; there is no text left to recover.
-            return decode_entities(text.trim());
-        };
-        let tag = &rest[..close];
-        rest = &rest[close + 1..];
-
-        if tag.starts_with('/') || tag.ends_with('/') {
-            continue;
-        }
-        if SKIPPED.contains(&element_name(tag).as_str()) {
-            rest = skip_element(rest, &element_name(tag));
-        }
-    }
-    text.push_str(rest);
-
-    decode_entities(text.trim())
-}
-
-/// The lowercased element name an open or close tag carries.
-fn element_name(tag: &str) -> String {
-    tag.trim_start_matches('/')
-        .split(|character: char| character.is_whitespace() || character == '/')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-}
-
-/// What follows the end tag for `name`.
-///
-/// Inside a script or a stylesheet the markup rules do not apply — `if (1 < 2)`
-/// is arithmetic, not a tag — so nothing but the element's own end tag can end
-/// it. Parsing that content as markup is how a stray `<` swallows the rest of
-/// the document.
-fn skip_element<'a>(html: &'a str, name: &str) -> &'a str {
-    let mut rest = html;
-
-    while let Some(open) = rest.find('<') {
-        rest = &rest[open + 1..];
-
-        let Some(tail) = rest.strip_prefix('/') else {
-            continue;
-        };
-        let ends_it = tail
-            .get(..name.len())
-            .is_some_and(|found| found.eq_ignore_ascii_case(name))
-            && tail[name.len()..]
-                .starts_with(|character: char| character.is_whitespace() || character == '>');
-        if !ends_it {
-            continue;
-        }
-
-        // Past the end tag, or nowhere: an unterminated one takes the rest of
-        // the document with it, exactly as a browser's parser would.
-        return tail.find('>').map_or("", |close| &tail[close + 1..]);
+    match htmd::HtmlToMarkdown::new().html_to_tree(html) {
+        Ok(tree) => push_text(&tree, &mut text),
+        // The parser is handed the whole string at once and has nothing to
+        // fail at; the `Result` is the sink API's shape rather than a case
+        // that arises. Saying nothing still beats panicking inside a tool
+        // call, or handing the model the page's markup as if it were prose.
+        Err(error) => tracing::warn!(%error, "the page would not parse"),
     }
 
-    ""
+    text.trim().to_owned()
 }
 
-/// The characters `text`'s entity references stand for.
-///
-/// The named references are the handful that appear in ordinary prose; the
-/// full HTML table is thousands of entries and belongs to a parser rather than
-/// to this. A reference this does not know is left as it was written, which is
-/// what a reader would see in a plain-text rendering anyway.
-fn decode_entities(text: &str) -> String {
-    if !text.contains('&') {
-        return text.to_owned();
-    }
-
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-
-    while let Some(start) = rest.find('&') {
-        out.push_str(&rest[..start]);
-        rest = &rest[start..];
-
-        // A reference is short; anything longer is an ampersand in prose.
-        let end = rest[1..]
-            .char_indices()
-            .take(10)
-            .find(|(_, character)| *character == ';')
-            .map(|(offset, _)| offset + 1);
-
-        // Anything that does not decode is an ampersand somebody wrote as an
-        // ampersand. Only that character is consumed, so the scan resumes
-        // inside what looked like a reference rather than past it — `a & b
-        // &amp; c` still gets its real reference decoded.
-        match end.and_then(|end| decode_entity(&rest[1..end]).map(|decoded| (decoded, end))) {
-            Some((decoded, end)) => {
-                out.push(decoded);
-                rest = &rest[end + 1..];
+/// Appends the text under `node`, minus what [`SKIPPED`] drops.
+fn push_text(node: &Rc<Node>, out: &mut String) {
+    match &node.data {
+        NodeData::Text { contents } => out.push_str(&contents.borrow()),
+        NodeData::Element { name, .. } => {
+            let tag = &*name.local;
+            if SKIPPED.contains(&tag) {
+                return;
             }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
+            // A line break is one line break, not the blank line a block
+            // earns; markup that lays out an address or a verse with `<br>`
+            // would otherwise come back double-spaced.
+            if tag == "br" {
+                out.push('\n');
+                return;
+            }
+
+            let block = BLOCK.contains(&tag);
+            if block {
+                end_block(out);
+            }
+            for child in node.children.borrow().iter() {
+                push_text(child, out);
+            }
+            if block {
+                end_block(out);
+            }
+        }
+        // A document, a doctype, a comment, a processing instruction: nothing
+        // a reader sees, though a document's children are the page.
+        _ => {
+            for child in node.children.borrow().iter() {
+                push_text(child, out);
             }
         }
     }
-    out.push_str(rest);
-
-    out
 }
 
-/// The character `reference` names, without its `&` and `;`.
-fn decode_entity(reference: &str) -> Option<char> {
-    match reference {
-        "amp" => return Some('&'),
-        "lt" => return Some('<'),
-        "gt" => return Some('>'),
-        "quot" => return Some('"'),
-        "apos" | "#39" => return Some('\''),
-        "nbsp" => return Some('\u{a0}'),
-        _ => {}
+/// Closes the line the text is on, so what follows starts a block of its own.
+///
+/// Whatever whitespace is already at the end goes with it: the newline and
+/// indentation between two tags belong to the markup's layout, not to the
+/// reader's.
+fn end_block(out: &mut String) {
+    while out.ends_with([' ', '\t', '\n', '\r']) {
+        out.pop();
     }
-
-    let digits = reference.strip_prefix('#')?;
-    let code = match digits.strip_prefix(['x', 'X']) {
-        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-        None => digits.parse().ok()?,
-    };
-
-    char::from_u32(code)
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
 }
 
 #[cfg(test)]
@@ -898,7 +885,10 @@ mod tests {
             .await
             .expect("the endpoint answers");
 
-        assert_eq!(out.output, "tGanja ports & tests");
+        // The title, the heading and the paragraph are three blocks, so they
+        // are three blocks here; the stripper this replaced ran them into one
+        // line because it had no idea which tags were which.
+        assert_eq!(out.output, "t\n\nGanja\n\nports & tests");
         assert!(
             !out.output.contains("color:red") && !out.output.contains("var x"),
             "a stylesheet and a script are not prose: {:?}",
@@ -1189,13 +1179,52 @@ mod tests {
             super::strip_tags(
                 "<p>before</p><script>for (i = 0; i < n; i++) { a = '</div>' }</script><p>after</p>"
             ),
-            "beforeafter",
+            "before\n\nafter",
             "`i < n` inside a script is arithmetic, not the start of a tag"
         );
         assert_eq!(
             super::strip_tags("<p>kept</p><script>never closed"),
             "kept",
             "an unterminated script takes the rest of the document, as a browser's parser does"
+        );
+    }
+
+    /// The reason the hand-rolled entity table went: it held six names, and
+    /// the two here are ordinary typography that any prose page carries.
+    #[test]
+    fn a_named_entity_outside_the_handful_still_decodes() {
+        assert_eq!(
+            super::strip_tags("<p>He said &mdash; &rsquo;yes&rsquo;</p>"),
+            "He said — ’yes’"
+        );
+    }
+
+    /// A hand scanner that ends a tag at the first `>` ends this one inside
+    /// the attribute and hands the rest of it over as prose — `b">text`.
+    /// Knowing where a tag ends is the parser's job, and now it does it.
+    #[test]
+    fn a_greater_than_inside_an_attribute_does_not_end_its_own_tag() {
+        assert_eq!(super::strip_tags("<p title=\"a > b\">text</p>"), "text");
+    }
+
+    /// Text is text. htmd's own rendering would reach the model as
+    /// `src/main\_test.rs` and `\[1\]` and `\*why\*`, because it escapes
+    /// every text node for a markdown syntax a plain-text answer does not
+    /// have; that is why this path walks the tree instead of rendering it.
+    #[test]
+    fn markdown_punctuation_in_prose_is_handed_over_unescaped() {
+        let text = super::strip_tags(
+            "<p>Run cargo build --release, edit src/main_test.rs, \
+             and see the note [1] about *why*.</p>",
+        );
+
+        assert_eq!(
+            text,
+            "Run cargo build --release, edit src/main_test.rs, and see the note [1] about *why*."
+        );
+        assert!(
+            !text.contains('\\'),
+            "a plain-text reading has no syntax to escape for: {text:?}"
         );
     }
 }
