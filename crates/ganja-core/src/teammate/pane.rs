@@ -369,10 +369,14 @@ impl TeammateBackend for GanjaPane {
             backend: MemberBackend::Pane,
             reason: format!("this build cannot name its own binary to run in the pane: {error}"),
         })?;
+        // The launch line under the same rule: its one refusal — a word no
+        // shell quoting can carry — makes no pane either.
+        let line =
+            tmux::launch_line(&binary, &arguments(spec)).map_err(|error| Self::refused(&error))?;
 
         // §4.1 step 1: the surface, holding an idle shell. The environment
-        // travels here (D502), through tmux's own door; the launch line comes
-        // later, once the record this pane will read exists.
+        // travels here (D502), through tmux's own door; the launch line is
+        // typed later, once the record this pane will read exists.
         let environment = tmux::environment(CARRIED_ENV);
         let pane =
             split_idle_shell(&server, spec, &environment, MemberBackend::Pane, "teammate").await?;
@@ -403,7 +407,6 @@ impl TeammateBackend for GanjaPane {
         let handle = Handle::Pane(pane.clone());
         let watched = Self;
         let owned = spec.clone();
-        let line = tmux::launch_line(&binary, &arguments(spec));
         tokio::spawn(async move {
             match wait_for_record(&owned, &pane.id, RECORD_WAIT).await {
                 Ok(()) => {

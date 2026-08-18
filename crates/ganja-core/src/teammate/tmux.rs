@@ -190,6 +190,19 @@ pub enum TmuxError {
         /// What it printed.
         output: String,
     },
+    /// A word shlex refuses to quote — a NUL byte today, whatever it
+    /// refuses tomorrow — caught when the line is composed, before any pane
+    /// exists to unmake.
+    #[error("a launch-line word cannot be shell-quoted ({source}): {word:?}")]
+    Unquotable {
+        /// The offending word, debug-rendered so the refused byte shows.
+        word: OsString,
+        /// shlex's own reason — the foreign type on purpose, for its
+        /// `Display` and its place in the `Error` source chain; this crate
+        /// is unpublished, so the coupling is a workspace fact rather than
+        /// a semver one.
+        source: shlex::QuoteError,
+    },
 }
 
 /// The tmux server this session runs in, and the pane it runs in.
@@ -467,7 +480,7 @@ impl Server {
 }
 
 /// The line typed into a pane's idle shell: `exec` the binary with `argv`,
-/// every word quoted for `sh`.
+/// every word quoted for the shell reading it.
 ///
 /// `exec`, so the shell is replaced rather than parented — the pane's process
 /// keeps the pid tmux forked, which is the `birth` half of its recorded
@@ -475,48 +488,65 @@ impl Server {
 /// word ([`shell_quote`]) so a path with a space or a quote in it is one word
 /// to the shell. Here beside the quoting rule because both pane backends
 /// compose their line this way; only which `arguments` fills `argv` differs.
-#[must_use]
-pub fn launch_line(binary: &Path, argv: &[OsString]) -> OsString {
+///
+/// # Errors
+///
+/// [`TmuxError::Unquotable`] for a word no quoting can carry; both backends
+/// take that refusal before a pane exists.
+pub fn launch_line(binary: &Path, argv: &[OsString]) -> Result<OsString, TmuxError> {
     let mut line = OsString::from("exec ");
-    line.push(shell_quote(binary.as_os_str()));
+    line.push(shell_quote(binary.as_os_str())?);
     for argument in argv {
         line.push(" ");
-        line.push(shell_quote(argument));
+        line.push(shell_quote(argument)?);
     }
 
-    line
+    Ok(line)
 }
 
-/// `arg` as one POSIX shell word: single-quoted, with every embedded single
-/// quote closed, escaped and reopened (`'\''`) — the one quoting a `sh` line
-/// needs and the only one that leaves every other byte alone.
+/// `arg` as one shell word, through shlex's POSIX quoter: bare when every
+/// byte is safe, single- or double-quoted chunks when one is not.
 ///
-/// Byte-level on unix, so a path that is not UTF-8 quotes as itself rather
-/// than being replaced. `shell_quote("it's")` is `'it'\''s'`.
-#[must_use]
-pub fn shell_quote(arg: &OsStr) -> OsString {
+/// The shell reading the line is the person's own, and the classic `'\''`
+/// idiom is wrong in one of them: fish reads a backslash inside single quotes
+/// as an escape where sh reads it literally, and shlex keeps backslashes out
+/// of single-quoted chunks for exactly that reason. Byte-level on unix, so a
+/// path that is not UTF-8 quotes as itself rather than being replaced.
+///
+/// What quoting cannot do, stated because the delivery channel is an
+/// interactive shell's pty ([`Server::type_line`]): shlex's own warning is
+/// that control bytes keep their line-editing meaning there — a quoted `\r`
+/// still executes the partial line — so the safety of a launch line rests on
+/// its words, not this function: flag constants, an absolute path, and names
+/// held to the member-name grammar.
+///
+/// # Errors
+///
+/// [`TmuxError::Unquotable`] — today only for the NUL byte no shell word can
+/// represent.
+pub fn shell_quote(arg: &OsStr) -> Result<OsString, TmuxError> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
-        let mut quoted = Vec::with_capacity(arg.len() + 2);
-        quoted.push(b'\'');
-        for byte in arg.as_bytes() {
-            if *byte == b'\'' {
-                quoted.extend_from_slice(b"'\\''");
-            } else {
-                quoted.push(*byte);
-            }
+        match shlex::bytes::try_quote(arg.as_bytes()) {
+            Ok(quoted) => Ok(OsString::from_vec(quoted.into_owned())),
+            Err(source) => Err(TmuxError::Unquotable {
+                word: arg.to_owned(),
+                source,
+            }),
         }
-        quoted.push(b'\'');
-
-        OsString::from_vec(quoted)
     }
     #[cfg(not(unix))]
     {
-        let text = arg.to_string_lossy().replace('\'', "'\\''");
-
-        OsString::from(format!("'{text}'"))
+        let text = arg.to_string_lossy();
+        match shlex::try_quote(&text) {
+            Ok(quoted) => Ok(OsString::from(quoted.into_owned())),
+            Err(source) => Err(TmuxError::Unquotable {
+                word: arg.to_owned(),
+                source,
+            }),
+        }
     }
 }
 
@@ -622,20 +652,60 @@ mod tests {
         assert!(parse_pane("").is_none());
     }
 
-    /// A word is quoted so a POSIX shell reads it back byte for byte: spaces
-    /// and `;` inert, an embedded quote closed-escaped-reopened.
+    /// A word is quoted so the shell on the other end reads it back byte for
+    /// byte — and only when it must be: a safe word rides bare, a backslash
+    /// never rides inside single quotes (fish reads it as an escape there),
+    /// and the NUL byte no shell word can carry is refused rather than sent.
     #[test]
     fn a_shell_word_survives_quoting() {
         let quote = |text: &str| {
             super::shell_quote(OsStr::new(text))
+                .expect("no NUL rides these words")
                 .into_string()
                 .expect("ascii")
         };
 
-        assert_eq!(quote("plain"), "'plain'");
+        assert_eq!(quote("plain"), "plain");
         assert_eq!(quote("/with space/a;b"), "'/with space/a;b'");
-        assert_eq!(quote("it's"), "'it'\\''s'");
+        assert_eq!(quote("it's"), "\"it's\"");
+        assert_eq!(quote("a\\b"), "\"a\\\\b\"");
         assert_eq!(quote(""), "''");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+            let quoted = super::shell_quote(OsStr::from_bytes(b"a\x80b"))
+                .expect("bytes outside UTF-8 still quote");
+            assert_eq!(quoted.into_vec(), b"'a\x80b'".to_vec());
+
+            let refused = super::shell_quote(OsStr::from_bytes(b"a\0b"));
+            assert!(matches!(refused, Err(super::TmuxError::Unquotable { .. })));
+        }
+    }
+
+    /// The composed line quotes only the words that need it, and a word no
+    /// quoting can carry refuses the whole line before tmux is handed
+    /// anything.
+    #[test]
+    fn a_launch_line_quotes_what_needs_it_and_refuses_a_nul() {
+        let line = super::launch_line(
+            std::path::Path::new("/opt/ganja builds/ganja"),
+            &[OsString::from("--agent-name"), OsString::from("it's")],
+        )
+        .expect("no NUL rides these words")
+        .into_string()
+        .expect("ascii");
+        assert_eq!(line, "exec '/opt/ganja builds/ganja' --agent-name \"it's\"");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let word = OsString::from_vec(b"a\0b".to_vec());
+            let refused = super::launch_line(std::path::Path::new("/bin/ganja"), &[word]);
+            assert!(matches!(refused, Err(super::TmuxError::Unquotable { .. })));
+        }
     }
 
     /// The environment helper renders exactly the names it is given that are

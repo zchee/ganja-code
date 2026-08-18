@@ -476,13 +476,16 @@ impl TeammateBackend for ClaudePane {
         let server = Server::current().map_err(|error| Self::refused(&error))?;
         let binary = on_path(BINARY).ok_or_else(|| Self::cannot(REFUSED_NO_BINARY))?;
         let root = teams_root().ok_or_else(|| Self::cannot(REFUSED_NO_CONFIG_DIR))?;
+        // Composed before the seed, so its one refusal — a word no shell
+        // quoting can carry — leaves no inbox to unseed.
+        let line =
+            tmux::launch_line(&binary, &arguments(spec)).map_err(|error| Self::refused(&error))?;
 
         // §4.1 steps 4 and 5 before step 6, which is the order that matters:
         // the pane reads its inbox on its way up, so a process launched before
         // the task was in it would either idle or ask what it is for.
         let seeded = Self::seed(spec, &root).await?;
 
-        let line = tmux::launch_line(&binary, &arguments(spec));
         if let Err(error) = server.type_line(&pane.id, &line).await {
             // The one failing path past the seed, and this backend's to unwind:
             // the registry seeded nothing here and cannot prune what it does not
@@ -599,20 +602,21 @@ mod tests {
         assert!(!line.contains("general"), "no agent-type guess: {line}");
     }
 
-    /// The composed line, as tmux is handed it: `exec`, the binary quoted,
-    /// and never the prompt. (The one-word login-shell hazard is a property
-    /// of the *idle* argv, pinned at `pane::SHELL`; this line is typed with
-    /// `send-keys -l`, which no shell re-reads.)
+    /// The composed line, as tmux is handed it: `exec`, the binary — bare,
+    /// because no byte of that path needs quoting — and never the prompt.
+    /// (The one-word login-shell hazard is a property of the *idle* argv,
+    /// pinned at `pane::SHELL`; this line is typed with `send-keys -l`,
+    /// which no shell re-reads.)
     #[test]
-    fn the_composed_line_is_quoted_and_the_prompt_stays_off_it() {
+    fn the_composed_line_execs_the_binary_and_the_prompt_stays_off_it() {
         let line = crate::teammate::tmux::launch_line(
             &PathBuf::from("/usr/local/bin/claude"),
             &arguments(&spec()),
         )
+        .expect("no NUL rides the spawn flags")
         .into_string()
         .expect("ascii");
-        assert!(line.starts_with("exec "), "{line}");
-        assert!(line.contains("'/usr/local/bin/claude'"), "quoted: {line}");
+        assert!(line.starts_with("exec /usr/local/bin/claude "), "{line}");
         // The canary again, on the *composed* line rather than on `arguments`
         // alone: the line is what tmux is handed and what `ps`
         // would print, so it is the value the §4.1-step-5 rule is really about.

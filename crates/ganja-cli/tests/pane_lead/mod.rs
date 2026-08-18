@@ -233,7 +233,10 @@ pub fn wait_for<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-/// `text`, single-quoted for `sh`.
+/// `text` as one `sh` word, by the same crate the production launch line
+/// rides.
 fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
+    shlex::try_quote(text)
+        .expect("no NUL rides a test's window command")
+        .into_owned()
 }

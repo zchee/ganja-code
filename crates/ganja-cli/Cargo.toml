@@ -98,6 +98,9 @@ assert_cmd.workspace = true
 # seeder the pane and drill suites share with `ganja-core`'s.
 ganja-testkit.workspace = true
 predicates.workspace = true
+# The one quoter production launch lines ride, for the window command the
+# pane suite composes.
+shlex.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]

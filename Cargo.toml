@@ -263,6 +263,20 @@ serde_json = "1.0.151"
 # `default-features = false` drops `alloc` and `oid`: a fixed-size digest over
 # a 43-byte string needs neither.
 sha2 = { version = "0.11.0", default-features = false }
+# One shell word at a time, for the launch line a pane teammate is typed in
+# with: bare when every byte is safe, quoted when one is not. Chosen over the
+# hand-rolled `'\''` idiom because the idle shell reading that line is the
+# person's own and may be fish, which reads a backslash inside single quotes
+# as an escape where sh reads it literally — shlex keeps backslashes out of
+# single-quoted chunks for exactly that reason — and because a NUL byte is
+# refused at compose time instead of riding on to a confusing spawn failure.
+# The `bytes` module quotes an `OsStr`'s own bytes, so a non-UTF-8 path
+# quotes as itself. Already in the lock as `cc`'s build dependency. Caret on
+# purpose: `QuoteError` is `#[non_exhaustive]` and shlex reserves the right
+# to refuse new fundamentally-unquotable inputs by default, so an update may
+# widen the refusal set — an observable refusal, which is the failure mode
+# this tree prefers to a line a shell misreads.
+shlex = "2.0.1"
 similar = "3.1.2"
 # Fenced-code highlighting for the markdown renderer. The regex backend is
 # the pure-Rust `fancy-regex` — `default-onig` would put a C library in
