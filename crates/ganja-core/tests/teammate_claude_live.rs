@@ -23,11 +23,9 @@
 //! GANJA_LIVE_TEST=1 cargo test -p ganja-core --test teammate_claude_live -- --ignored
 //! ```
 //!
-//! It lives in `ganja-core`'s tests beside the two `ganja` pane binaries rather
-//! than in `ganja-cli`'s, where the plan's ownership table first placed it: the
-//! whole claim is about a `ganja-core` backend, the CLI adds nothing to it, and
-//! `async-trait` — which any [`SpawnAsker`] needs — is a dependency of this
-//! crate and not of that one.
+//! It lives in `ganja-core`'s tests beside the two `ganja` pane binaries
+//! rather than in `ganja-cli`'s: the whole claim is about a `ganja-core`
+//! backend, and the CLI adds nothing to it.
 //!
 //! # The shared inbox
 //!
@@ -114,7 +112,7 @@ const SECURE_STORAGE_ENV: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 /// lead's implicit session team is.
 const TEAM: &str = "session-01998ad0";
 
-/// The teammate the lead spawns, and the name the collision probe re-asks for.
+/// The teammate the lead spawns.
 const WORKER: &str = "worker";
 
 /// The word the pane is asked to send back, chosen so it cannot occur in any
@@ -201,7 +199,10 @@ async fn a_real_claude_pane_round_trips_over_the_shared_inbox() {
         .await
         .unwrap_or_else(|refused| panic!("a claude pane could not be started: {}", refused.reason));
     assert_eq!(started.backend, "claude");
-    assert_eq!(started.name, WORKER, "the first `worker` is `worker`");
+    assert_eq!(
+        started.name, WORKER,
+        "the spawn keeps the name it asked for"
+    );
 
     // §4.1 step 5, from the pane's side of the directory: the task is in the
     // inbox the pane reads, and it was never on the command line.

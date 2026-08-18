@@ -40,6 +40,7 @@ use ganja_core::{
     config::CONFIG_HOME_ENV,
     teammate::tmux::{self, Server},
 };
+use ganja_team::{MemberName, mailbox};
 use ganja_testkit::tmux::PrivateServer;
 use pane_support::{expected_argv, pane_child_if_asked, run_one, spawn_pane_worker};
 
@@ -131,8 +132,18 @@ async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_exp
         !line.contains(config_home.path().to_str().expect("utf-8")),
         "the environment rode tmux's own door, not the command line: {line}"
     );
-    // Where the prompt did go, verbatim: the record (D-7) and the inbox.
+    // Where the prompt did go, verbatim: the record (D-7) and the inbox —
+    // which the registry seeded, since a `ganja` pane does not own its own.
     assert_eq!(spawned.member.prompt.as_deref(), Some(prompt.as_str()));
+    let worker = MemberName::parse("worker").expect("a member name");
+    assert!(
+        mailbox::read(&spawned.root.inbox_path(&spawned.team, &worker))
+            .expect("the worker's inbox reads")
+            .valid
+            .iter()
+            .any(|message| message.text == prompt),
+        "the prompt reached the pane's inbox verbatim"
+    );
 
     // The way out through the registry: shutdown kills the pane it made.
     spawned.registry.shutdown().await;

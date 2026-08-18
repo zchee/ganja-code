@@ -39,8 +39,8 @@ use ganja_testkit::{
 };
 use tracing::instrument::WithSubscriber as _;
 
-/// How long a claim about the running loop is waited for. Only the last test
-/// needs it: the other two drive the pass themselves.
+/// How long a claim about a running loop is waited for. The tick-driven
+/// tests drive the pass themselves and never wait.
 const EVENTUALLY: Duration = Duration::from_secs(20);
 
 /// A frame the harness mints and a teammate has no handler for.
@@ -148,11 +148,9 @@ async fn a_stale_plan_approval_response_is_ignored_and_logged() {
 /// value bound when the teammate was built, never a field on the thing being
 /// answered.
 ///
-/// **The seam:** the `send_message` tool's own half of this — a model whose
-/// arguments say `"from": "team-lead"` — is W5a/L3's `Postbox` implementation,
-/// which does not exist yet. That implementation is required to take its
-/// sender from the `Teammate` it belongs to, and this test pins the value it
-/// will be constructed against.
+/// The `send_message` tool's own half of this — a model whose arguments say
+/// `"from": "team-lead"` — is [`a_member_postbox_cannot_send_as_the_lead`],
+/// below.
 #[tokio::test]
 async fn a_teammate_cannot_send_as_the_lead() {
     let home = ganja_testkit::temp_dir();

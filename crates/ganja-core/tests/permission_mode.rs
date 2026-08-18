@@ -12,10 +12,7 @@
 //! `Permissions::default` has nowhere to write an answer, and the one test that
 //! needs a store and a mailbox roots both under a temporary directory it owns.
 //! So nothing here reads the environment for a path and nothing mutates it,
-//! which is why this binary may hold more than one test. (The plan's
-//! test-binary table budgeted an env-mutating binary of one test here; the rule
-//! that table states is about the environment rather than the count, and this
-//! binary needs none.)
+//! which is why this binary may hold more than one test.
 
 use std::{sync::Arc, time::Duration};
 
