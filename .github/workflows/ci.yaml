@@ -24,7 +24,6 @@ jobs:
       matrix:
         os:
           - ubuntu-26.04
-          - ubuntu-26.04-arm
           - xcode-27
           # A windows-2025 entry stood here (and a windows-lint job above)
           # until 2026-08-12: windows support is parked for now, and the
