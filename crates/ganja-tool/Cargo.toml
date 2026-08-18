@@ -78,9 +78,13 @@ tokio-util = { workspace = true, features = ["rt"] }
 
 [target.'cfg(unix)'.dependencies]
 # The shell tool runs commands in their own process group and `killpg` is the
-# call that ends one; the anchored file I/O is built on `openat` and friends
-# from the same crate. Windows support arrives with its own mechanism later.
+# call that ends one; the socket identity and test-only timestamp probes use
+# the same platform vocabulary.
 libc.workspace = true
+# Anchored file I/O needs descriptor-relative opens whose flags reach the
+# syscall unchanged, while the safe API owns every returned descriptor before
+# this crate translates an error.
+rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Spilled tool output sealed on its create handle and the spill directory

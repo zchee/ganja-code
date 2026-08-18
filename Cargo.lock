@@ -1513,6 +1513,7 @@ dependencies = [
  "nucleo-matcher",
  "percent-encoding",
  "reqwest",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",

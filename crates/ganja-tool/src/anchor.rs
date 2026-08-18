@@ -16,12 +16,12 @@
 //! walked one component at a time from the root with `O_NOFOLLOW`, so every
 //! step is the directory it was checked to be or the walk refuses. The
 //! descriptor that comes out of that walk is the only thing the rest of the
-//! call speaks to: containment is verified against it, `openat` opens the
-//! final name relative to it — again `O_NOFOLLOW`, so the name itself may not
-//! be a link — and the freshness stamp is an `fstat` on that same descriptor
-//! rather than a fresh look at the path. Nothing between the check and the
-//! write is reachable by renaming anything, because after the anchor is taken
-//! no name is resolved again.
+//! call speaks to: containment is verified against it, `rustix::fs::openat`
+//! opens the final name relative to it — again `O_NOFOLLOW`, so the name itself
+//! may not be a link — and the freshness stamp is an `fstat` on that same
+//! descriptor rather than a fresh look at the path. Nothing between the check
+//! and the write is reachable by renaming anything, because after the anchor
+//! is taken no name is resolved again.
 //!
 //! Two consequences worth stating plainly:
 //!
@@ -30,9 +30,9 @@
 //!   could only refuse a link that *escaped the project*. Editing a checkout's
 //!   own symlinked file (a `CLAUDE.md` pointing at `AGENTS.md`, say) now means
 //!   naming the file it points at, and the refusal says so.
-//! - **Missing parents are created with `mkdirat`** under the same anchor, so
-//!   `create_dir_all`'s own walk — which resolves names, and therefore links —
-//!   is not a second way in.
+//! - **Missing parents are created with `rustix::fs::mkdirat`** under the same
+//!   anchor, so `create_dir_all`'s own walk — which resolves names, and
+//!   therefore links — is not a second way in.
 //!
 //! Windows keeps the first of those two and not the second. It has no `openat`
 //! to anchor to, but it does have `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a
@@ -377,14 +377,16 @@ fn split_path(path: &Path) -> Result<(PathBuf, OsString), AnchorError> {
 #[cfg(unix)]
 mod unix {
     use std::{
-        ffi::{CStr, CString, OsStr},
+        ffi::OsStr,
         fs::File,
         io,
-        os::{
-            fd::{AsRawFd as _, FromRawFd as _, OwnedFd},
-            unix::ffi::OsStrExt as _,
-        },
+        os::{fd::OwnedFd, unix::ffi::OsStrExt as _},
         path::{Component, Path, PathBuf},
+    };
+
+    use rustix::{
+        fs::{self, Mode, OFlags},
+        io::Errno,
     };
 
     use super::{Anchor, AnchorError, split_existing, split_path};
@@ -392,11 +394,11 @@ mod unix {
     /// Mode a created file is asked for, which the process umask then narrows.
     /// `std::fs::write`'s own default, kept so anchoring a write does not
     /// quietly change the bits a file lands with.
-    const CREATE_MODE: libc::mode_t = 0o666;
+    const CREATE_MODE: Mode = Mode::from_raw_mode(0o666);
 
     /// Mode a created directory is asked for. `std::fs::create_dir_all`'s
     /// default, for the same reason.
-    const CREATE_DIR_MODE: libc::mode_t = 0o777;
+    const CREATE_DIR_MODE: Mode = Mode::from_raw_mode(0o777);
 
     impl Anchor {
         /// Opens the directory holding `path` and keeps it open, so everything
@@ -438,8 +440,9 @@ mod unix {
         /// so the refusal is made on the descriptor already in hand — no name
         /// is resolved a second time to ask the question.
         pub(crate) fn read(&self) -> Result<File, AnchorError> {
-            let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-            let file = openat(&self.dir, &self.name, flags, 0, &self.path()).map(File::from)?;
+            let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let file = openat(&self.dir, &self.name, flags, Mode::empty(), &self.path())
+                .map(File::from)?;
             super::refuse_directory(&file, &self.path())?;
 
             Ok(file)
@@ -454,11 +457,11 @@ mod unix {
         /// follows a link at the name — the same reason `truncate.rs` creates
         /// its spill files that way.
         pub(crate) fn write(&self) -> Result<(File, bool), AnchorError> {
-            let existing = libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-            let fresh = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC;
+            let existing = OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let fresh = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC;
             let path = self.path();
 
-            match openat(&self.dir, &self.name, existing, 0, &path) {
+            match openat(&self.dir, &self.name, existing, Mode::empty(), &path) {
                 Ok(file) => Ok((File::from(file), true)),
                 Err(error) if error.is_missing() => {
                     match openat(&self.dir, &self.name, fresh, CREATE_MODE, &path) {
@@ -469,7 +472,7 @@ mod unix {
                         Err(AnchorError::Io(_, raced))
                             if raced.kind() == io::ErrorKind::AlreadyExists =>
                         {
-                            openat(&self.dir, &self.name, existing, 0, &path)
+                            openat(&self.dir, &self.name, existing, Mode::empty(), &path)
                                 .map(|file| (File::from(file), true))
                         }
                         Err(error) => Err(error),
@@ -489,7 +492,7 @@ mod unix {
     /// last.
     fn open_root(canonical: &Path) -> Result<OwnedFd, AnchorError> {
         let mut walked = PathBuf::from("/");
-        let mut dir = open_dir(c"/", &walked)?;
+        let mut dir = open_dir(Path::new("/"), &walked)?;
 
         for component in canonical.components() {
             match component {
@@ -509,20 +512,18 @@ mod unix {
 
     /// Opens a directory by absolute path, refusing a link at its last
     /// component. Only ever called for the root itself.
-    fn open_dir(path: &CStr, at: &Path) -> Result<OwnedFd, AnchorError> {
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-        // SAFETY: the path is a valid C string and the variadic mode argument
-        // is unread without `O_CREAT`. The descriptor is owned immediately.
-        let raw = retry(|| unsafe { libc::open(path.as_ptr(), flags) });
+    fn open_dir(path: &Path, at: &Path) -> Result<OwnedFd, AnchorError> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let result = retry(|| fs::open(path, flags, Mode::empty()));
 
-        own(raw, at)
+        decode(result, at)
     }
 
     /// Opens `name` inside `dir` as a directory, refusing to follow a link.
     fn openat_dir(dir: &OwnedFd, name: &OsStr, at: &Path) -> Result<OwnedFd, AnchorError> {
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
 
-        openat(dir, name, flags, 0, at)
+        openat(dir, name, flags, Mode::empty(), at)
     }
 
     /// Opens `name` inside `dir` with `flags`, owning the descriptor before an
@@ -530,88 +531,71 @@ mod unix {
     fn openat(
         dir: &OwnedFd,
         name: &OsStr,
-        flags: libc::c_int,
-        mode: libc::mode_t,
+        flags: OFlags,
+        mode: Mode,
         at: &Path,
     ) -> Result<OwnedFd, AnchorError> {
-        let name = cstring(name, at)?;
-        // SAFETY: the descriptor is open for the duration of the call, the name
-        // is a valid C string, and `mode` is read only when `flags` carries
-        // `O_CREAT`. The descriptor is owned immediately.
-        let raw = retry(|| unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                flags,
-                libc::c_uint::from(mode),
-            )
-        });
+        let name = checked_name(name, at)?;
+        let result = retry(|| fs::openat(dir, name, flags, mode));
 
-        own(raw, at)
+        decode(result, at)
     }
 
     /// Creates `name` inside `dir`, treating "it is already there" as success —
     /// which is what `create_dir_all` does, and what two calls racing to make
     /// the same directory need.
     fn mkdirat(dir: &OwnedFd, name: &OsStr, at: &Path) -> Result<(), AnchorError> {
-        let name = cstring(name, at)?;
-        // SAFETY: the descriptor is open for the duration of the call and the
-        // name is a valid C string.
-        let result =
-            retry(|| unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), CREATE_DIR_MODE) });
-        if result >= 0 {
-            return Ok(());
-        }
+        let name = checked_name(name, at)?;
 
-        match io::Error::last_os_error() {
-            error if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-            error => Err(AnchorError::Io(at.to_owned(), error)),
+        match retry(|| fs::mkdirat(dir, name, CREATE_DIR_MODE)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(AnchorError::Io(at.to_owned(), error.into())),
         }
     }
 
     /// Runs a syscall again when a signal interrupted it, which is a thing that
     /// happens to a process whose tools spawn children.
-    fn retry(mut call: impl FnMut() -> libc::c_int) -> libc::c_int {
+    fn retry<T>(mut call: impl FnMut() -> rustix::io::Result<T>) -> rustix::io::Result<T> {
         loop {
-            let result = call();
-            if result >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-                return result;
+            match call() {
+                Err(Errno::INTR) => {}
+                result => return result,
             }
         }
     }
 
-    /// Takes ownership of a raw descriptor, or reads why there is not one.
+    /// Decodes an anchored operation's failure without losing its owned value.
     ///
     /// A refused link is the error this module exists to produce, and which
     /// errno says so is not agreed on: Linux and macOS answer `ELOOP`, the BSDs
     /// answer `EMLINK`. Both are read as the same refusal.
-    fn own(raw: libc::c_int, at: &Path) -> Result<OwnedFd, AnchorError> {
-        if raw >= 0 {
-            // SAFETY: `raw` is a fresh descriptor this call owns, handed
-            // straight to the type that will close it.
-            return Ok(unsafe { OwnedFd::from_raw_fd(raw) });
-        }
-
-        let error = io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(libc::ELOOP | libc::EMLINK) => Err(AnchorError::Link(at.to_owned())),
-            _ => Err(AnchorError::Io(at.to_owned(), error)),
+    fn decode<T>(result: rustix::io::Result<T>, at: &Path) -> Result<T, AnchorError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(Errno::LOOP | Errno::MLINK) => Err(AnchorError::Link(at.to_owned())),
+            Err(error) => Err(AnchorError::Io(at.to_owned(), error.into())),
         }
     }
 
-    /// A path component as the C interface needs it. A name holding a NUL byte
-    /// cannot come from a real path, but it can come from an argument the model
-    /// invented, and it is refused rather than truncated.
-    fn cstring(name: &OsStr, at: &Path) -> Result<CString, AnchorError> {
-        CString::new(name.as_bytes()).map_err(|_| {
-            AnchorError::Io(
+    /// Refuses a NUL-bearing component before rustix converts it to a C string.
+    ///
+    /// Such a component cannot come from a real path, but it can come from an
+    /// argument the model invented. Rustix would return `EINVAL`; keeping the
+    /// explicit check preserves the actionable refusal this module already
+    /// exposed instead of replacing it with the platform's generic wording.
+    fn checked_name<'a>(name: &'a OsStr, at: &Path) -> Result<&'a OsStr, AnchorError> {
+        if name.as_bytes().contains(&b'\0') {
+            return Err(AnchorError::Io(
                 at.to_owned(),
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "a path component holds a NUL byte",
                 ),
-            )
-        })
+            ));
+        }
+
+        Ok(name)
     }
 }
 
@@ -763,6 +747,11 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    #[cfg(unix)]
+    use std::{
+        ffi::OsString,
+        os::unix::ffi::{OsStrExt as _, OsStringExt as _},
+    };
 
     use super::{Anchor, AnchorError};
 
@@ -786,6 +775,50 @@ mod tests {
             anchor.path(),
             std::fs::canonicalize(&path).expect("the file exists")
         );
+    }
+
+    /// Unix paths are byte strings, so anchoring must not make UTF-8 a hidden
+    /// precondition for the file name.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_survives_the_anchor_byte_for_byte() {
+        let dir = project();
+        let name = OsString::from_vec(b"notes-\xfe.txt".to_vec());
+        let path = dir.path().join(&name);
+
+        let anchor = Anchor::open(&path, false).expect("the parent is an ordinary directory");
+        assert_eq!(
+            anchor
+                .path()
+                .file_name()
+                .expect("the file has a name")
+                .as_bytes(),
+            name.as_os_str().as_bytes(),
+        );
+    }
+
+    /// A model-supplied NUL must be refused rather than turning the bytes after
+    /// it into an invisible suffix and opening a different file.
+    #[cfg(unix)]
+    #[test]
+    fn a_nul_byte_in_a_name_is_refused_instead_of_truncated() {
+        let dir = project();
+        std::fs::write(dir.path().join("notes"), "different file")
+            .expect("the truncated name exists");
+        let name = OsString::from_vec(b"notes\0-hidden".to_vec());
+        let path = dir.path().join(name);
+        let anchor = Anchor::open(&path, false).expect("the parent is an ordinary directory");
+
+        let refused = anchor
+            .read()
+            .expect_err("a NUL-bearing name is never opened");
+
+        let AnchorError::Io(refused_path, error) = refused else {
+            panic!("the refusal must remain an I/O argument error: {refused:?}");
+        };
+        assert_eq!(refused_path, anchor.path());
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "a path component holds a NUL byte");
     }
 
     #[test]
