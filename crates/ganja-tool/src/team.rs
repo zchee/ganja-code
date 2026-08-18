@@ -115,11 +115,11 @@ pub enum Undelivered {
     /// retries on is written in exactly one place — `send_message`'s own
     /// constants.
     Unknown,
-    /// There is a recipient, and this build has no way to reach it. Carries
-    /// its own sentence because *which* transport is missing is a fact about
-    /// the implementation — in this phase, that the cross-session socket has
-    /// not landed yet — and a tool that guessed at it would go stale the day
-    /// it does.
+    /// There is a recipient, and this build has no way to reach it. Since
+    /// D505 landed the cross-session socket this is the pane member's answer
+    /// to a `uds:` address — its postbox holds no socket transport — and it
+    /// carries its own sentence because *which* transport is missing stays a
+    /// fact about the deliverer, not one for a tool to guess at.
     NoTransport {
         /// What is missing, in the terms the model reads next.
         reason: String,

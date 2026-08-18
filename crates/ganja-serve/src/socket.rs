@@ -399,7 +399,7 @@ mod unix {
 
         use super::{NameLock, PeerChecked, uid};
 
-        /// **L2 of the W7 boundary review**: the peer-uid refusal, on a real
+        /// The peer-uid refusal, on a real
         /// accept. A `PeerChecked` measuring peers against a uid that is not
         /// this process's — the one override no other test can arrange
         /// without a second user — closes a same-uid connection unread: the

@@ -39,7 +39,7 @@
 //!   password posture is untouched — a socket takes no password because the
 //!   filesystem already said who may connect — and the guard that reads the
 //!   transport is `routes.rs`'s. **What the socket serves is exactly what
-//!   its consumers use** (ruling, W7 boundary review): `GET /global/health`,
+//!   its consumers use** (a standing ruling): `GET /global/health`,
 //!   `GET /team` and `POST /team/{name}/message`, and nothing else — every
 //!   session-mutating route (a prompt, an abort, a shell line, a command, a
 //!   revert, an agent or model switch, a permission reply) and every other

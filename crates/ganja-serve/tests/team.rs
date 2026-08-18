@@ -350,7 +350,7 @@ async fn a_structured_frame_is_refused_on_the_socket_post() {
     socket.shutdown().await.expect("the socket server stops");
 }
 
-/// **The socket serves exactly three routes** (D505, the W7 ruling): health,
+/// **The socket serves exactly three routes** (D505, a standing ruling): health,
 /// the roster, and a peer's message. Every other route — every one that
 /// mutates the session, and every other read of it — is TCP's alone: over
 /// the socket it does not exist (`404`), while over TCP it is served behind

@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-05 -->
+<!-- Generated: 2026-08-05 | Updated: 2026-08-18 -->
 
 # ganja-serve
 
@@ -24,7 +24,7 @@ The engine over a socket: REST routes and an SSE event stream over `ganja-core`,
 
 | Directory | Purpose |
 |-----------|---------|
-| `tests/` | Socket-driving suites, each a self-contained binary on an OS-assigned loopback port: `replay_identity.rs` (one turn, two readers — a direct subscriber and an SSE client hold the same transcript frame for frame), `surface.rs` (the REST pins and the 404/409/400 table over real routes), `permissions.rs` (a dialog listed, answered over HTTP, gone), `posture.rs` (the startup refusal, the directory `400`, the auth trio), `ports.rs` (4096-first-then-fallback on real sockets), `no_secrets_in_logs.rs` (the canary: a configured password reaches no log line, `Debug`, or error body — one test, one binary, global subscriber), `support/` (shared fixtures; a directory module, not a binary). **P25** added two: `team.rs` (AC-15, AC-26 — `GET /team` answering identically on TCP and socket, `POST /team/{name}/message` **not registered** on TCP, and the transport-aware guard asserted both ways with `GANJA_SERVER_PASSWORD` set, since a uds request needs no password while a TCP one still does) and `uds.rs` (the bind itself: the directory refusal, a stale socket reused, a live one never stolen, the peer-uid check). |
+| `tests/` | Socket-driving suites, each a self-contained binary on an OS-assigned loopback port: `replay_identity.rs` (one turn, two readers — a direct subscriber and an SSE client hold the same transcript frame for frame), `surface.rs` (the REST pins and the 404/409/400 table over real routes), `permissions.rs` (a dialog listed, answered over HTTP, gone), `posture.rs` (the startup refusal, the directory `400`, the auth trio), `ports.rs` (4096-first-then-fallback on real sockets), `no_secrets_in_logs.rs` (the canary: a configured password reaches no log line, `Debug`, or error body — one test, one binary, global subscriber), `support/` (shared fixtures; a directory module, not a binary). **P25** added two: `team.rs` (AC-15, AC-26 — `GET /team` answering identically on TCP and socket, `POST /team/{name}/message` **not registered** on TCP, and the transport-aware guard asserted both ways with a credential configured on both servers — built directly, so no test mutates the process environment — since a uds request needs no password while a TCP one still does) and `uds.rs` (the bind itself: the directory refusal, a stale socket reused, a live one never stolen; the peer-uid refusal leg is pinned as `src/socket.rs`'s own unit test, since everything here carries the test's own uid). |
 
 ## For AI Agents
 
@@ -63,6 +63,6 @@ Handlers take the body as `Bytes` and parse with `serde_json` directly rather th
 
 ### External
 
-`axum` (routes, middleware, SSE body), `secrecy`, `base64`, `tokio`/`tokio-stream`/`futures`, `serde`/`serde_json`, `thiserror`, `tracing`. Dev: `reqwest` (the suites' client; `stream` reads SSE frames as they arrive), `tempfile`, `tracing-subscriber` (the canary's capture).
+`axum` (routes, middleware, SSE body), `secrecy`, `base64`, `libc` (`geteuid` for the socket directory's name and the peer-uid check), `tokio` (with this crate's own `net` opt-in for the listeners it binds)/`tokio-stream`/`futures`, `serde`/`serde_json`, `thiserror`, `tracing`. Dev: `reqwest` (the suites' client; `stream` reads SSE frames as they arrive), `tempfile`, `tracing-subscriber` (the canary's capture).
 
 <!-- MANUAL: -->

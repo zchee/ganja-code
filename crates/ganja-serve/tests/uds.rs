@@ -373,7 +373,7 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
     drop(lock);
 }
 
-/// **M1 of the W7 boundary review**: the lister's reclaim of a stale socket
+/// The lister's reclaim of a stale socket
 /// is claim-then-unlink under one held lock, the binder's own `NameLock`.
 /// While the lister holds a name, a binder walking into it reads it as held
 /// and extends by a digit — it never binds a live socket at a file the
@@ -442,7 +442,7 @@ async fn a_name_the_lister_holds_is_walked_past_and_its_stale_file_goes_under_th
     next.shutdown().await.expect("a clean stop");
 }
 
-/// The other side of M1: a name a live server holds is never claimed by
+/// The reclaim's other side: a name a live server holds is never claimed by
 /// the lister — [`NameLock::claim`] answers [`None`] and touches nothing —
 /// so a live socket cannot be reclaimed however silent it is.
 #[tokio::test]
@@ -472,7 +472,7 @@ async fn a_live_name_is_never_claimed_by_the_lister() {
     handle.shutdown().await.expect("a clean stop");
 }
 
-/// **L1 of the W7 boundary review**: the one assumption the check→bind
+/// The one assumption the check→bind
 /// window rests on — a world-writable parent carries the sticky bit, so a
 /// foreign uid cannot swap the vetted directory out from under the bind —
 /// is asserted before anything is made, and refused by name when it does
