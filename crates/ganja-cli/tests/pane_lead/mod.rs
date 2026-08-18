@@ -99,12 +99,6 @@ impl Homes {
         self.data.path()
     }
 
-    /// The config home a lead started here resolves — `$XDG_CONFIG_HOME/ganja`
-    /// under this fixture's data home — and where the team is kept.
-    pub fn config_home(&self) -> PathBuf {
-        self.data.path().join("config").join("ganja")
-    }
-
     /// Writes a fake-provider script under the project and answers its path.
     pub fn script(&self, name: &str, turns: serde_json::Value) -> PathBuf {
         let path = self.project.path().join(name);

@@ -46,7 +46,7 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use ganja_client::{Client, ClientError};
+use ganja_client::Client;
 use ganja_core::{
     Engine, Postbox,
     provider::fake::FakeProvider,
@@ -59,7 +59,7 @@ use ganja_core::{
 use ganja_permission::Permissions;
 use ganja_protocol::{Command, Event, PartBody, Role, SessionId, team::PeerPayload};
 use ganja_serve::{
-    DirectoryRefusal, Handle, Listen, ServeConfig, ServeError,
+    Handle, Listen, ServeConfig,
     socket::{self, EXTENSION, LOCK_EXTENSION},
 };
 use tempfile::TempDir;
@@ -434,21 +434,22 @@ async fn a_structured_message_does_not_cross_a_socket() {
     handle.shutdown().await.expect("a clean stop");
 }
 
-/// A socket directory that is not a private one of ours is refused by name,
-/// end to end: the binder will not put a socket in it — so a client pointed
-/// at where the socket would have been finds nothing — and the shipped
-/// listing will not read it, and above all will not unlink anything inside
-/// it. Held on the **mode** arm and the **link** arm, which one uid can
-/// make. AC-9's other-uid leg is *not* what this test holds, and its name
-/// says so: the *owner* arm — the `/tmp` squat — cannot be raised without a
-/// second uid and is pinned as the pure `vet`'s unit test in
-/// `ganja-tool/src/socket.rs`; the peer whose uid is not ours is pinned on a
-/// real accept, against a test-only uid, in `ganja-serve/src/socket.rs`
-/// (`a_connection_from_another_uid_is_closed_unread`).
+/// A socket directory that is not a private one of ours is refused by the
+/// shipped listing — by name, mode and requirement — and nothing inside it
+/// is unlinked. Held on the **mode** arm and the **link** arm, which one uid
+/// can make. The binder's own refusal of the same directory is
+/// `ganja-serve/tests/uds.rs`'s
+/// (`a_socket_directory_that_is_not_private_is_refused_naming_its_mode`),
+/// and a client at a name nothing serves is
+/// `ganja-client/tests/socket.rs`'s. AC-9's other-uid leg is *not* what this
+/// test holds, and its name says so: the *owner* arm — the `/tmp` squat —
+/// cannot be raised without a second uid and is pinned as the pure `vet`'s
+/// unit test in `ganja-tool/src/socket.rs`; the peer whose uid is not ours
+/// is pinned on a real accept, against a test-only uid, in
+/// `ganja-serve/src/socket.rs` (`a_connection_from_another_uid_is_closed_unread`).
 #[tokio::test]
 async fn a_socket_directory_that_is_not_private_is_refused_end_to_end() {
     let homes = TempDir::new().expect("homes for the listing");
-    let (engine, _registry) = led_engine(homes.path());
 
     // A directory anybody may read: what a socket directory must never be.
     let loose = tempfile::tempdir().expect("a directory");
@@ -458,52 +459,8 @@ async fn a_socket_directory_that_is_not_private_is_refused_end_to_end() {
     let planted = loose.path().join(format!("0198c1a2.{EXTENSION}"));
     dead_socket(&planted);
 
-    // The binder refuses it, naming the mode.
-    let mut config =
-        ServeConfig::in_directory(env::current_dir().expect("the working directory resolves"));
-    config.listen = Listen::Session {
-        id: engine.session_id(),
-        directory: loose.path().to_path_buf(),
-    };
-    let refused = ganja_serve::serve(Arc::clone(&engine), config).await;
-    let error = match refused {
-        Err(error) => error,
-        Ok(handle) => panic!(
-            "a world-readable socket directory must not be bound into; it was, at {}",
-            handle.address()
-        ),
-    };
-    assert!(
-        matches!(
-            error,
-            ServeError::UnsafeSocketDirectory {
-                ref path,
-                reason: DirectoryRefusal::Permissions { mode: 0o755 },
-            } if path == loose.path()
-        ),
-        "the refusal names the directory and its mode: {error:?}"
-    );
-
-    // So a client at the name the session would have taken finds nobody: the
-    // refusal is a socket that never came up, not one that answers.
-    let would_be = socket::candidates(loose.path(), &engine.session_id())
-        .next()
-        .expect("a session has a name");
-    let nobody = tokio::time::timeout(
-        DEADLINE,
-        Client::on_socket(&would_be)
-            .expect("a socket client builds")
-            .health(),
-    )
-    .await
-    .expect("a dead path answers within the deadline");
-    assert!(
-        matches!(nobody, Err(ClientError::Transport { .. })),
-        "nothing listens where the refused socket would have been: {nobody:?}"
-    );
-
-    // And the shipped listing refuses the same directory the same way — by
-    // name, mode and requirement — and unlinks nothing inside it.
+    // The shipped listing refuses the directory by name, mode and
+    // requirement — and unlinks nothing inside it.
     let output = tokio::time::timeout(DEADLINE, sessions_live(loose.path(), &homes).output())
         .await
         .expect("the listing finishes within the deadline")
