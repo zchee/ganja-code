@@ -264,6 +264,40 @@ jobs:
           ! cargo tree -p ganja-serve -e normal | grep -q ratatui
           ! cargo tree -p ganja-client -e normal | grep -q axum
 
+      # `tmux` is deliberately outside this workspace's ganja-* dependency
+      # graph, not merely unused by today's callers. The consuming-direction
+      # half of the sealed-leaf P26 user directive (2026-08-18) forbids any
+      # `ganja-*` crate beneath it; `tail` keeps this the same header-stripped
+      # inverted-grep shape as the bottom-crate leaf checks above.
+      - name: tmux consumes no ganja crate
+        run: |
+          ! cargo tree -p tmux -e normal | tail -n +2 | grep -q ganja-
+
+      # A fixed consumer list would prove only today's graph and quietly
+      # ignore the next workspace member. The producing-direction half of
+      # P26's sealed-leaf user directive (2026-08-18) therefore derives every
+      # member from `cargo metadata` at gate time and refuses `tmux` in each
+      # normal tree, so the prohibition stays closed as the workspace grows.
+      - name: no workspace member consumes tmux
+        run: |
+          for m in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | grep -v '^tmux$'); do
+            if cargo tree -p "$m" -e normal --prefix none | awk '{print $1}' | grep -qx tmux; then
+              echo "$m consumes tmux" >&2
+              exit 1
+            fi
+          done
+
+      # The inverted grep proves only that `tmux` names no `ganja-*` crate; it
+      # cannot notice the control client quietly widening its external list.
+      # This is the protocol gate's analogous external guard: depth one keeps
+      # transitive details and the dev-only `tempfile` below the horizon, while
+      # an added normal dependency fails until this exact set is edited
+      # deliberately.
+      - name: tmux's direct dependencies are exactly futures, thiserror and tokio
+        run: |
+          external="$(cargo tree -p tmux -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' ')"
+          test "$external" = "futures thiserror tokio "
+
       # The workspace rule "every dependency version lives in the root
       # manifest" was convention only; this makes it a gate. A member manifest
       # naming a version inside any dependencies section fails, printed with

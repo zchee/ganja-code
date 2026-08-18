@@ -66,6 +66,10 @@ ganja-tool = { path = "crates/ganja-tool" }
 # Every pixel and no engine logic; the binary links it to draw what the engine
 # streams.
 ganja-tui = { path = "crates/ganja-tui" }
+# There is deliberately no `tmux` workspace dependency: that entry would be
+# the opt-in handle another crate uses to consume it, which the sealed-leaf
+# P26 user directive (2026-08-18) forbids; `.github/workflows/ci.yaml`'s
+# `lint` job asserts both directions.
 
 anyhow = "1.0.104"
 # Clipboard read and write through each platform's native surface.

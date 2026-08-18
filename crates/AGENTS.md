@@ -22,6 +22,7 @@ Container for the workspace members. The split is architectural, not cosmetic. T
 | `ganja-client/` | The other end of that wire, and nothing else: the typed routes and the SSE reader `run --attach` and `sessions --live` drive. Names only `ganja-protocol` (see `ganja-client/AGENTS.md`) |
 | `ganja-cli/` | The `ganja` binary (see `ganja-cli/AGENTS.md`) |
 | `ganja-testkit/` | Dev-only scaffolding shared by `ganja-core`'s integration suites: scripted providers, recorder/blocking tools, drain and storage-seeding builders (see `ganja-testkit/AGENTS.md`) |
+| `tmux/` | A sealed-leaf tmux control-mode client over one persistent `tmux -C`; deliberately outside the ganja dependency graph. |
 
 ## For AI Agents
 
@@ -32,6 +33,8 @@ The dependency direction is one-way, and every load-bearing edge of it is assert
 - **`ganja-core` may never depend on a terminal crate.** CI asserts `cargo tree -p ganja-core -e normal` never mentions `ratatui`. If core needs to describe something the UI will draw, it does so in serde-serializable protocol types, not in ratatui types. `ganja-provider` is held to the same rule, plus `arboard`: a login that wants to ask a person something hands the question back to whoever called it rather than drawing a prompt.
 - **Nothing below the engine may name the engine.** The assertion is a closed allowlist per crate rather than a `! grep ganja-core`, which names one crate and goes quiet the day a new one appears: `ganja-tool`'s internal set is exactly `ganja-permission`, `ganja-provider`'s is exactly `ganja-permission ganja-protocol ganja-tool`, `ganja-team`'s and `ganja-client`'s are each exactly `ganja-protocol`, and `ganja-permission` and `ganja-protocol` name nothing of ours at all. What a tool needs from its caller arrives as a value in `ToolCtx`, which is why that type is a bag of values rather than a session handle; what a wire needs arrives on its `ChatRequest`; and where a teams directory *is* arrives as a `TeamsRoot`, for the same reason. `ganja-core`'s own list is the closed five — `ganja-permission ganja-protocol ganja-provider ganja-team ganja-tool` — which is the one that has to be edited deliberately when a crate is split off, and the reason none of these is a blocklist.
 - **`ganja-tui` holds no engine logic.** It turns terminal events into `Command`s and engine `Event`s into frames. A transcript is built from engine events alone — the frontend never invents an entry — because that is what makes resumed sessions and remote clients replay identically. It links `ganja-protocol` for the types it renders, `ganja-permission` for the project's stored rules it loads and hands to the engine, and `ganja-tool` for the one thing it genuinely runs in-process: the `@` file menu's glob walk.
+
+`tmux` at `crates/tmux` is the twelfth workspace member but not part of this graph at all: the P26 user directive (2026-08-18) seals it in both directions, so it consumes nothing here and nothing here consumes it. CI checks its normal tree for no `ganja-*` crates and derives every other member from `cargo metadata` before checking that none names `tmux`.
 
 `ganja-cli` depends on `ratatui` for exactly one reason: the raw-mode read that keeps a typed API key off the screen, through the same crossterm instance the UI drives so the two cannot disagree about terminal state.
 
@@ -47,7 +50,7 @@ Member manifests declare dependencies as `foo.workspace = true` and never carry 
 
 ### Internal
 
-Every member is declared as a workspace dependency (a path dep) in the root manifest with the reason it exists, so members reference each other the same way they reference crates.io — `foo.workspace = true`, never a path or a version in a member manifest.
+Every `ganja-*` member is declared as a workspace dependency (a path dep) in the root manifest with the reason it exists, so members reference each other the same way they reference crates.io — `foo.workspace = true`, never a path or a version in a member manifest. Sealed-leaf `tmux` is the P26 exception described above: its missing handle is deliberate because no member may opt in to consuming it.
 
 `ganja-core` re-exports the crates beneath it under the module names they had before each split (`ganja_core::protocol`, `::permission`, `::project`, `::tool`, `::watch`, `::auth`, `::catalog`, and `::team` for the one crate that was born rather than split off), which is what let each split land without rewriting every caller. The facade is those module names and nothing more: the crate root names only the engine's own types, so a caller that wants one of the five crates alone depends on it directly rather than reach through the facade — `ganja-cli` does exactly that for `auth login`, which drives `ganja-provider`'s OAuth flows and has no engine at all.
 
