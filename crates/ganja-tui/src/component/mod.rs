@@ -12,6 +12,55 @@
 
 use ratatui::layout::{Constraint, Rect};
 
+/// What marks the row the cursor is on, and what pads every other row.
+pub(crate) const MARKER: &str = "> ";
+
+/// Rows a two-step dialog spends on chrome: a blank line and the key hints.
+pub(crate) const CHROME: usize = 2;
+
+/// Widest the two-step modals grow.
+pub(crate) const MAX_WIDTH: u16 = 76;
+
+/// Tallest the two-step modals grow.
+pub(crate) const MAX_HEIGHT: u16 = 20;
+
+/// The keys a two-step dialog's list step answers to.
+pub(crate) const LIST_HINTS: &str = "[j/k] [up/down] move   [Enter] choose   [Esc] close";
+
+/// The keys its per-row action step answers to.
+pub(crate) const ACTION_HINTS: &str = "[j/k] [up/down] move   [Enter] run   [Esc] close";
+
+/// The keys its free-text step answers to.
+pub(crate) const INPUT_HINTS: &str = "[type/backspace] edit   [Enter] submit   [Esc] cancel";
+
+/// The key surface the `/plugin` and `/team` dialogs share: a list, a per-row
+/// action step, and a free-text step that takes the printable keys. One
+/// driver in `app.rs` reads it, so the two dialogs cannot answer the same
+/// keypress two ways. What stays each dialog's own — the step enums, and what
+/// `submit` decides — is the tested divergence between them.
+pub(crate) trait TwoStep {
+    /// What Enter hands the app to run.
+    type Effect;
+
+    /// Whether the free-text step owns the keyboard.
+    fn is_typing(&self) -> bool;
+
+    /// Esc; `false` means the dialog itself should close.
+    fn cancel(&mut self) -> bool;
+
+    /// Backspace, while the free-text step owns the keyboard.
+    fn backspace(&mut self);
+
+    /// A printable key, while the free-text step owns the keyboard.
+    fn push(&mut self, character: char);
+
+    /// Up/Down (and j/k) on whichever list is showing.
+    fn move_selection(&mut self, delta: isize);
+
+    /// Enter, wherever the dialog is.
+    fn submit(&mut self) -> Option<Self::Effect>;
+}
+
 pub mod chat;
 pub mod context;
 pub mod dropdown;

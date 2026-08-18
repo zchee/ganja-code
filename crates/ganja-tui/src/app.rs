@@ -1768,7 +1768,7 @@ impl App {
 
     /// The team as the dialog and the arg door both read it.
     fn team_roster(&self) -> Option<ganja_protocol::team::TeamView> {
-        self.engine.teammates().map(|team| team.registry().view())
+        self.engine.team_view()
     }
 
     /// Repaints the open `/team` dialog off a fresh roster.
@@ -1797,50 +1797,16 @@ impl App {
         self.dirty |= moved;
     }
 
-    /// One keypress while the `/team` dialog is open, which owns every key.
-    ///
-    /// [`App::handle_plugin_key`]'s shape, key for key, because the two dialogs
-    /// are the same dialog: a list, a per-row action step, and a free-text step
-    /// that takes the printable keys.
+    /// One keypress while the `/team` dialog is open, which owns every key —
+    /// [`drive_two_step`], the same driver the `/plugin` dialog reads.
     async fn handle_team_key(&mut self, key: KeyEvent) {
         let Some(dialog) = &mut self.team_dialog else {
             return;
         };
-
-        if dialog.is_typing() {
-            match key.code {
-                KeyCode::Esc => {
-                    dialog.cancel();
-                }
-                KeyCode::Backspace => dialog.backspace(),
-                KeyCode::Enter => {
-                    if let Some(effect) = dialog.submit() {
-                        self.run_team_effect(effect).await;
-                    }
-                }
-                KeyCode::Char(character) if !key.modifiers.intersects(SHORTCUT_MODIFIERS) => {
-                    dialog.push(character);
-                }
-                _ => {}
-            }
-
-            return;
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                if !dialog.cancel() {
-                    self.team_dialog = None;
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => dialog.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => dialog.move_selection(1),
-            KeyCode::Enter => {
-                if let Some(effect) = dialog.submit() {
-                    self.run_team_effect(effect).await;
-                }
-            }
-            _ => {}
+        match drive_two_step(dialog, key) {
+            Driven::Close => self.team_dialog = None,
+            Driven::Run(effect) => self.run_team_effect(effect).await,
+            Driven::Stay => {}
         }
     }
 
@@ -2100,6 +2066,27 @@ impl App {
         self.dirty = true;
     }
 
+    /// Shows `asked` now, or queues it behind the dialog already up, and says
+    /// so (**D468**): a dialog raised is a person needed, and the turn is
+    /// blocked on the answer either way.
+    ///
+    /// One dialog at a time is still what a person is shown — the frontend's
+    /// half of **D462**: the engine holds every request open and routes each
+    /// reply by id, so the one on screen stays answerable and a queued one is
+    /// asked as soon as it is. Written once for the three raisers — the
+    /// engine's own `PermissionRequested`, a teammate's forwarded dialog, and
+    /// a spawn's own gate — so they cannot drift apart.
+    fn raise_permission(&mut self, summary: &str, asked: Permission) {
+        self.announce(NotificationEvent::ApprovalRequested, summary);
+        match &self.permission {
+            Some(_) => self.queued_permissions.push_back(asked),
+            None => self.permission = Some(asked),
+        }
+        self.status.set_activity(Activity::Permission);
+        self.sync_dialog_status();
+        self.dirty = true;
+    }
+
     /// Raises the permission dialogs `/team spawn` put in front of a person.
     ///
     /// [`App::drain_teammate_dialogs`]'s twin on the other question — may this
@@ -2121,10 +2108,7 @@ impl App {
                 let _ = reply.send(PermissionReply::Once);
                 continue;
             }
-            self.announce(
-                NotificationEvent::ApprovalRequested,
-                &format!("approval requested: {}", ask.title),
-            );
+            let summary = format!("approval requested: {}", ask.title);
             let id = PermissionId::ascending();
             let asked = Permission::new(
                 id.clone(),
@@ -2137,13 +2121,7 @@ impl App {
                     .collect(),
             );
             self.spawn_dialogs.insert(id, reply);
-            match &self.permission {
-                Some(_) => self.queued_permissions.push_back(asked),
-                None => self.permission = Some(asked),
-            }
-            self.status.set_activity(Activity::Permission);
-            self.sync_dialog_status();
-            self.dirty = true;
+            self.raise_permission(&summary, asked);
         }
     }
 
@@ -2208,10 +2186,7 @@ impl App {
 
             return;
         }
-        self.announce(
-            NotificationEvent::ApprovalRequested,
-            &format!("{} asks: {title}", forwarded.teammate),
-        );
+        let summary = format!("{} asks: {title}", forwarded.teammate);
         // The teammate's name is put in front of the title, because the one
         // thing this dialog has that the engine's own does not is a subject:
         // the call is not this conversation's, and answering it as though it
@@ -2224,13 +2199,7 @@ impl App {
             directories,
         );
         self.forwarded_dialogs.insert(id, forwarded.reply);
-        match &self.permission {
-            Some(_) => self.queued_permissions.push_back(asked),
-            None => self.permission = Some(asked),
-        }
-        self.status.set_activity(Activity::Permission);
-        self.sync_dialog_status();
-        self.dirty = true;
+        self.raise_permission(&summary, asked);
     }
 
     /// Answers a dialog a teammate raised, and says whether one was waiting.
@@ -5219,50 +5188,16 @@ impl App {
         }
     }
 
-    /// One keypress while the `/plugin` dialog is open, which owns every
-    /// key. The free-text step takes the printable ones, the way the
-    /// question dialog's editor does; everywhere else the keys are the
-    /// `/mcp` dialog's, Esc closing the dialog except where the input step
-    /// consumes it as "cancel the edit".
+    /// One keypress while the `/plugin` dialog is open, which owns every key —
+    /// [`drive_two_step`], the same driver the `/team` dialog reads.
     fn handle_plugin_key(&mut self, key: KeyEvent) {
         let Some(dialog) = &mut self.plugin_dialog else {
             return;
         };
-
-        if dialog.is_typing() {
-            match key.code {
-                KeyCode::Esc => {
-                    dialog.cancel();
-                }
-                KeyCode::Backspace => dialog.backspace(),
-                KeyCode::Enter => {
-                    if let Some(effect) = dialog.submit() {
-                        self.run_plugin_effect(effect);
-                    }
-                }
-                KeyCode::Char(character) if !key.modifiers.intersects(SHORTCUT_MODIFIERS) => {
-                    dialog.push(character);
-                }
-                _ => {}
-            }
-
-            return;
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                if !dialog.cancel() {
-                    self.plugin_dialog = None;
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => dialog.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => dialog.move_selection(1),
-            KeyCode::Enter => {
-                if let Some(effect) = dialog.submit() {
-                    self.run_plugin_effect(effect);
-                }
-            }
-            _ => {}
+        match drive_two_step(dialog, key) {
+            Driven::Close => self.plugin_dialog = None,
+            Driven::Run(effect) => self.run_plugin_effect(effect),
+            Driven::Stay => {}
         }
     }
 
@@ -5973,24 +5908,11 @@ impl App {
                     return;
                 }
                 // A dialog raised is a person needed, shown now or queued
-                // behind the one already up — either way the turn is blocked
-                // on an answer, which is the moment **D468** announces.
-                self.announce(
-                    NotificationEvent::ApprovalRequested,
-                    &format!("approval requested: {title}"),
-                );
+                // behind the one already up (**D462**, **D468**) — see
+                // [`App::raise_permission`].
+                let summary = format!("approval requested: {title}");
                 let asked = Permission::new(id, tool, title, args, directories);
-                match &self.permission {
-                    // A dialog is already up. Queueing rather than replacing is
-                    // the whole of the frontend's half of D462: the engine now
-                    // holds both requests open and routes each reply by id, so
-                    // the one on screen is still answerable and this one is
-                    // asked as soon as it is.
-                    Some(_) => self.queued_permissions.push_back(asked),
-                    None => self.permission = Some(asked),
-                }
-                self.status.set_activity(Activity::Permission);
-                self.sync_dialog_status();
+                self.raise_permission(&summary, asked);
             }
             // The engine took a queued message into the running turn, so the
             // strip entry has done its job: what it stood for is about to
@@ -6420,6 +6342,67 @@ fn image_token_at(text: &str, offset: usize) -> Option<(usize, usize, u32)> {
     }
 
     None
+}
+
+/// What one keypress did to a two-step dialog, as [`drive_two_step`] answers
+/// it: consumed inside the dialog, an effect for the caller to run, or the
+/// dialog's own close.
+enum Driven<E> {
+    /// The key was consumed inside the dialog.
+    Stay,
+    /// Enter resolved to an effect the caller has to run.
+    Run(E),
+    /// Esc on a step where Esc means leave.
+    Close,
+}
+
+/// One keypress while a two-step dialog owns every key. The free-text step
+/// takes the printable characters, the way the question dialog's editor does;
+/// everywhere else the keys are the `/mcp` dialog's, Esc closing the dialog
+/// except where the input step consumes it as "cancel the edit". Written once
+/// over [`crate::component::TwoStep`] so the `/plugin` and `/team` dialogs
+/// cannot drift apart key by key.
+fn drive_two_step<D: crate::component::TwoStep>(
+    dialog: &mut D,
+    key: KeyEvent,
+) -> Driven<D::Effect> {
+    if dialog.is_typing() {
+        match key.code {
+            KeyCode::Esc => {
+                dialog.cancel();
+            }
+            KeyCode::Backspace => dialog.backspace(),
+            KeyCode::Enter => {
+                if let Some(effect) = dialog.submit() {
+                    return Driven::Run(effect);
+                }
+            }
+            KeyCode::Char(character) if !key.modifiers.intersects(SHORTCUT_MODIFIERS) => {
+                dialog.push(character);
+            }
+            _ => {}
+        }
+
+        return Driven::Stay;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            if !dialog.cancel() {
+                return Driven::Close;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => dialog.move_selection(-1),
+        KeyCode::Down | KeyCode::Char('j') => dialog.move_selection(1),
+        KeyCode::Enter => {
+            if let Some(effect) = dialog.submit() {
+                return Driven::Run(effect);
+            }
+        }
+        _ => {}
+    }
+
+    Driven::Stay
 }
 
 /// One spawn waiting on a person, and where the answer goes back.
@@ -16008,15 +15991,12 @@ mod tests {
 
     /// Writes one plain message into the lead's own inbox, as a peer would.
     fn peer_writes(registry: &ganja_core::teammate::TeammateRegistry, from: &str, text: &str) {
-        ganja_core::team::mailbox::write(
-            &registry.lead_inbox(),
-            ganja_core::team::MailboxMessage::new(
-                from,
-                text,
-                ganja_core::team::record::now_iso8601(),
-            ),
-        )
-        .expect("the lead's inbox takes a message");
+        crate::member::write(&registry.lead_inbox(), from, text);
+    }
+
+    /// Everything the stream will answer right now, without waiting.
+    fn drained(events: &mut BoxStream<'static, CoreEvent>) -> Vec<CoreEvent> {
+        std::iter::from_fn(|| events.next().now_or_never().flatten()).collect()
     }
 
     /// Leaves `app` with a turn really streaming, so a delivery takes the
@@ -16058,7 +16038,7 @@ mod tests {
         // checkpoint title — so a test looking for text here would find nothing
         // even when delivery worked.
         let mut attributed = None;
-        while let Some(Some(event)) = events.next().now_or_never() {
+        for event in drained(&mut events) {
             if let CoreEvent::MessageStarted { message, .. } = event {
                 for part in &message.parts {
                     if let PartBody::Peer { from, body, .. } = &part.body {
@@ -16099,22 +16079,14 @@ mod tests {
                 pane_id: None,
                 backend_type: None,
             });
-        ganja_core::team::mailbox::write(
-            &registry.lead_inbox(),
-            ganja_core::team::MailboxMessage::from_frame(
-                "w1",
-                &approved,
-                ganja_core::team::record::now_iso8601(),
-            )
-            .expect("the frame encodes"),
-        )
-        .expect("the lead's inbox takes a frame");
+        crate::member::write_frame(&registry.lead_inbox(), "w1", &approved);
 
         app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
         assert_eq!(app.queue.depth(), 0, "a control frame is not a message");
         assert!(
-            !std::iter::from_fn(|| events.next().now_or_never().flatten())
+            !drained(&mut events)
+                .iter()
                 .any(|event| matches!(event, CoreEvent::MessageStarted { .. })),
             "and nothing about it is put to the model"
         );
@@ -16783,20 +16755,7 @@ mod tests {
     /// member of the one that launched it — so what this app has is exactly a
     /// bare engine plus the member's inbox.
     async fn membered(directory: &TempDir) -> (App, BoxStream<'static, CoreEvent>) {
-        let membership = crate::member::Membership::resolve(
-            crate::member::Flags {
-                agent_id: "w1@session-224cbeab".to_owned(),
-                name: "w1".to_owned(),
-                team: "session-224cbeab".to_owned(),
-                color: Some("blue".to_owned()),
-                parent_session_id: "224cbeab-4e62-497c-aa8f-d05cc33ce7ba".to_owned(),
-            },
-            directory.path(),
-            directory.path(),
-            Some("%5".to_owned()),
-            false,
-        )
-        .expect("the launch line resolves");
+        let membership = crate::member::membership(directory.path(), Some("%5"), false);
         let engine = Engine::persistent(
             Arc::new(FakeProvider::default()),
             fake::MODEL,
@@ -16825,15 +16784,12 @@ mod tests {
     /// Writes one plain message into the member's inbox, as the lead would —
     /// which is also exactly what the spawn's inbox seed is.
     fn lead_writes(inbox: &std::path::Path, text: &str) {
-        ganja_core::team::mailbox::write(
-            inbox,
-            ganja_core::team::MailboxMessage::new(
-                "team-lead",
-                text,
-                ganja_core::team::record::now_iso8601(),
-            ),
-        )
-        .expect("the member's inbox takes a message");
+        crate::member::write(inbox, "team-lead", text);
+    }
+
+    /// What is left in a member-side inbox.
+    fn owed(inbox: &std::path::Path) -> usize {
+        crate::member::held(inbox).len()
     }
 
     /// Every frame the lead's inbox holds, by kind, oldest first.
@@ -16876,11 +16832,9 @@ mod tests {
         assert_eq!(app.until_next_wakeup(), Duration::ZERO);
         app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
-        assert!(
-            ganja_core::team::mailbox::read(&inbox)
-                .expect("the inbox reads")
-                .valid
-                .is_empty(),
+        assert_eq!(
+            owed(&inbox),
+            0,
             "an accepted prompt is the turn, so the seed is delivered and gone"
         );
         assert!(
@@ -16925,14 +16879,7 @@ mod tests {
 
         assert_eq!(app.queue.depth(), 1, "pending until the turn consumes it");
         assert!(app.queue.entries()[0].is_steered());
-        assert_eq!(
-            ganja_core::team::mailbox::read(&inbox)
-                .expect("the inbox reads")
-                .valid
-                .len(),
-            1,
-            "durable until consumed"
-        );
+        assert_eq!(owed(&inbox), 1, "durable until consumed");
         let id = app
             .peer_steers
             .keys()
@@ -16948,13 +16895,7 @@ mod tests {
         .expect("the event is handled");
 
         assert_eq!(app.queue.depth(), 0);
-        assert!(
-            ganja_core::team::mailbox::read(&inbox)
-                .expect("the inbox reads")
-                .valid
-                .is_empty(),
-            "consumed means gone"
-        );
+        assert_eq!(owed(&inbox), 0, "consumed means gone");
     }
 
     /// **AC-10's pane leg, the shutdown seam** (§10.3-4, §6.2): an idle member
@@ -16966,16 +16907,11 @@ mod tests {
         let directory = temporary();
         let (mut app, _events) = membered(&directory).await;
         let (inbox, lead_inbox) = member_paths(&app);
-        ganja_core::team::mailbox::write(
+        crate::member::write_frame(
             &inbox,
-            ganja_core::team::MailboxMessage::from_frame(
-                "team-lead",
-                &crate::member::shutdown_request("req-1"),
-                ganja_core::team::record::now_iso8601(),
-            )
-            .expect("the frame encodes"),
-        )
-        .expect("the member's inbox takes a frame");
+            "team-lead",
+            &crate::member::shutdown_request("req-1"),
+        );
 
         app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
@@ -17002,16 +16938,11 @@ mod tests {
         let (mut app, mut events) = membered(&directory).await;
         let (inbox, lead_inbox) = member_paths(&app);
         turn_in_flight(&mut app, &mut events).await;
-        ganja_core::team::mailbox::write(
+        crate::member::write_frame(
             &inbox,
-            ganja_core::team::MailboxMessage::from_frame(
-                "team-lead",
-                &crate::member::shutdown_request("req-2"),
-                ganja_core::team::record::now_iso8601(),
-            )
-            .expect("the frame encodes"),
-        )
-        .expect("the member's inbox takes a frame");
+            "team-lead",
+            &crate::member::shutdown_request("req-2"),
+        );
 
         app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
@@ -17044,37 +16975,27 @@ mod tests {
         let directory = temporary();
         let (mut app, mut events) = membered(&directory).await;
         let (inbox, _lead_inbox) = member_paths(&app);
-        ganja_core::team::mailbox::write(
+        crate::member::write_frame(
             &inbox,
-            ganja_core::team::MailboxMessage::from_frame(
-                "team-lead",
-                &ganja_protocol::team::Frame::ModeSetRequest(
-                    ganja_protocol::team::ModeSetRequest {
-                        mode: "bypassPermissions".to_owned(),
-                        from: "team-lead".to_owned(),
-                    },
-                ),
-                ganja_core::team::record::now_iso8601(),
-            )
-            .expect("the frame encodes"),
-        )
-        .expect("the member's inbox takes a frame");
+            "team-lead",
+            &ganja_protocol::team::Frame::ModeSetRequest(ganja_protocol::team::ModeSetRequest {
+                mode: "bypassPermissions".to_owned(),
+                from: "team-lead".to_owned(),
+            }),
+        );
 
         app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
-        let changed =
-            std::iter::from_fn(|| events.next().now_or_never().flatten()).find_map(|event| {
-                match event {
-                    CoreEvent::PermissionModeChanged { mode, .. } => Some(mode),
-                    _ => None,
-                }
+        let changed = drained(&mut events)
+            .into_iter()
+            .find_map(|event| match event {
+                CoreEvent::PermissionModeChanged { mode, .. } => Some(mode),
+                _ => None,
             });
         assert_eq!(changed, Some(ganja_protocol::PermissionMode::Bypass));
-        assert!(
-            ganja_core::team::mailbox::read(&inbox)
-                .expect("the inbox reads")
-                .valid
-                .is_empty(),
+        assert_eq!(
+            owed(&inbox),
+            0,
             "a frame acted on leaves the inbox in the same pass"
         );
     }
@@ -17083,20 +17004,7 @@ mod tests {
     /// the lead's, and a session that is nobody's teammate wakes for neither.
     #[test]
     fn a_member_wakes_at_the_teammates_cadence() {
-        let membership = crate::member::Membership::resolve(
-            crate::member::Flags {
-                agent_id: "w1@session-224cbeab".to_owned(),
-                name: "w1".to_owned(),
-                team: "session-224cbeab".to_owned(),
-                color: None,
-                parent_session_id: "224cbeab-4e62-497c-aa8f-d05cc33ce7ba".to_owned(),
-            },
-            std::path::Path::new("/nowhere"),
-            std::path::Path::new("/nowhere"),
-            None,
-            false,
-        )
-        .expect("the launch line resolves");
+        let membership = crate::member::membership(std::path::Path::new("/nowhere"), None, false);
         let mut member = app().with_member(crate::member::Inbox::new(membership));
         // A fresh app wants its first frame; what is under test is the clock
         // an idle member falls back to once nothing is left to draw.
@@ -17148,20 +17056,7 @@ mod tests {
             ),
         )
         .expect("the fake-provider script writes");
-        let membership = crate::member::Membership::resolve(
-            crate::member::Flags {
-                agent_id: "w1@session-224cbeab".to_owned(),
-                name: "w1".to_owned(),
-                team: "session-224cbeab".to_owned(),
-                color: None,
-                parent_session_id: "224cbeab-4e62-497c-aa8f-d05cc33ce7ba".to_owned(),
-            },
-            directory.path(),
-            directory.path(),
-            None,
-            false,
-        )
-        .expect("the launch line resolves");
+        let membership = crate::member::membership(directory.path(), None, false);
         let engine = Engine::new(
             Arc::new(FakeProvider::new("", Duration::ZERO).with_script(&script)),
             fake::MODEL,
@@ -17230,23 +17125,18 @@ mod tests {
                 // spelling only, where `response_of` is the function a real
                 // lead calls for all three replies and whose round trip with
                 // `reply_of` core already pins.
-                ganja_core::team::mailbox::write(
+                crate::member::write_frame(
                     &inbox,
-                    ganja_core::team::MailboxMessage::from_frame(
-                        "team-lead",
-                        &ganja_protocol::team::Frame::PermissionResponse(
-                            ganja_core::teammate::member::response_of(
-                                &request.request_id,
-                                &request.tool_name,
-                                &request.input,
-                                ganja_protocol::PermissionReply::Once,
-                            ),
+                    "team-lead",
+                    &ganja_protocol::team::Frame::PermissionResponse(
+                        ganja_core::teammate::member::response_of(
+                            &request.request_id,
+                            &request.tool_name,
+                            &request.input,
+                            ganja_protocol::PermissionReply::Once,
                         ),
-                        ganja_core::team::record::now_iso8601(),
-                    )
-                    .expect("the frame encodes"),
-                )
-                .expect("the member's inbox takes the answer");
+                    ),
+                );
                 app.handle(AppEvent::Tick).await.expect("a tick is handled");
                 assert_eq!(
                     app.member.as_ref().map(|inbox| inbox.asks().waiting()),

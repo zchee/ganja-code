@@ -57,7 +57,8 @@
 //! A pane's default posture is [`Posture::ForwardToLead`], and it rides
 //! `ganja-core`'s own [`Asks`] — the one dialect both ends of the inbox
 //! speak: an ask the pane's rules raise draws no dialog here but is written
-//! to the lead as §5's `permission_request` ([`Inbox::forward_ask`]), the
+//! to the lead as §5's `permission_request` ([`Asks::forward`], driven off
+//! [`Inbox::asks`] by the app), the
 //! lead's own pass puts it in front of the same dialog its in-process
 //! teammates use, and the answer comes back as a `permission_response`
 //! through this inbox, resolved by the type that refuses a peer's
@@ -133,18 +134,21 @@ use ganja_protocol::{
 /// promptly.
 pub const POLL: Duration = runner::POLL;
 
-/// The environment variable tmux sets in every pane it runs, naming the pane.
+/// The environment variable tmux sets in every pane it runs, naming the pane
+/// — core's own spelling of it, re-exported.
 ///
 /// Read rather than passed: §4.1's launch line carries no pane id, and the
 /// pane is the one process that can ask its own environment which `%N` it is.
-pub const TMUX_PANE: &str = "TMUX_PANE";
+pub use ganja_core::teammate::tmux::TMUX_PANE;
 
 /// How long a pane waits for its own member record before refusing.
 ///
-/// Generous against a lead that is slow to rewrite the team file under load,
-/// and short against a lead that died between the split and the write: a
-/// pane whose lead is gone should say so and leave, not sit in a window
-/// waiting for a record nobody will write.
+/// Defensive rather than the ordinary path: the lead writes the record before
+/// it types this launch line, so the first look should already answer. The
+/// bound turns the cases where it does not — a lead that died between the
+/// record and the launch, a `ganja` started with these flags by hand — into a
+/// sentence naming the file, instead of a pane sitting in a window waiting
+/// for a record nobody will write.
 pub const RECORD_WAIT: Duration = Duration::from_secs(5);
 
 /// Between looks at the team file while waiting for the record.
@@ -840,12 +844,61 @@ pub(crate) fn shutdown_request(request_id: &str) -> Frame {
     })
 }
 
+/// §2.1's own example session, so the team a test's fixtures name on disk is
+/// `session-224cbeab` and a reader can find it by hand.
+#[cfg(test)]
+pub(crate) const PARENT: &str = "224cbeab-4e62-497c-aa8f-d05cc33ce7ba";
+
+/// §4.1's launch line for member `name` of §2.1's example team.
+#[cfg(test)]
+fn flags(name: &str) -> Flags {
+    Flags {
+        agent_id: format!("{name}@session-224cbeab"),
+        name: name.to_owned(),
+        team: "session-224cbeab".to_owned(),
+        color: Some("blue".to_owned()),
+        parent_session_id: PARENT.to_owned(),
+    }
+}
+
+/// Teammate `w1` of §2.1's example team, resolved under `root` — the one
+/// membership fixture this crate's tests share.
+#[cfg(test)]
+pub(crate) fn membership(root: &Path, pane: Option<&str>, bypass: bool) -> Membership {
+    Membership::resolve(flags("w1"), root, root, pane.map(str::to_owned), bypass)
+        .expect("the flags resolve")
+}
+
+/// Writes one plain message into `inbox`, as a test's lead or peer would.
+#[cfg(test)]
+pub(crate) fn write(inbox: &Path, from: &str, text: &str) {
+    mailbox::write(
+        inbox,
+        MailboxMessage::new(from, text, record::now_iso8601()),
+    )
+    .expect("the inbox takes a message");
+}
+
+/// Writes one frame into `inbox`, from `from`.
+#[cfg(test)]
+pub(crate) fn write_frame(inbox: &Path, from: &str, frame: &Frame) {
+    let message =
+        MailboxMessage::from_frame(from, frame, record::now_iso8601()).expect("the frame encodes");
+    mailbox::write(inbox, message).expect("the inbox takes a frame");
+}
+
+/// Every valid message `inbox` holds.
+#[cfg(test)]
+pub(crate) fn held(inbox: &Path) -> Vec<MailboxMessage> {
+    mailbox::read(inbox).expect("the inbox reads").valid
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use ganja_core::{
-        team::{MailboxMessage, MemberName, TeamName, mailbox, record},
+        team::{MemberName, TeamName, record},
         teammate::posture::Posture,
     };
     use ganja_protocol::{
@@ -857,48 +910,14 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use super::{Flags, Inbox, Membership, RECORD_POLL, shutdown_request};
+    use super::{
+        Flags, Inbox, Membership, PARENT, RECORD_POLL, flags, held, membership, shutdown_request,
+        write, write_frame,
+    };
 
-    /// §2.1's own example session, so the team on disk is `session-224cbeab`.
-    const PARENT: &str = "224cbeab-4e62-497c-aa8f-d05cc33ce7ba";
-
-    fn flags(name: &str) -> Flags {
-        Flags {
-            agent_id: format!("{name}@session-224cbeab"),
-            name: name.to_owned(),
-            team: "session-224cbeab".to_owned(),
-            color: Some("blue".to_owned()),
-            parent_session_id: PARENT.to_owned(),
-        }
-    }
-
+    /// The `w1` fixture, under a temporary home.
     fn member(home: &TempDir, pane: Option<&str>) -> Membership {
-        Membership::resolve(
-            flags("w1"),
-            home.path(),
-            home.path(),
-            pane.map(str::to_owned),
-            false,
-        )
-        .expect("the flags resolve")
-    }
-
-    fn write(inbox: &std::path::Path, from: &str, text: &str) {
-        mailbox::write(
-            inbox,
-            MailboxMessage::new(from, text, record::now_iso8601()),
-        )
-        .expect("the inbox takes a message");
-    }
-
-    fn write_frame(inbox: &std::path::Path, from: &str, frame: &Frame) {
-        let message = MailboxMessage::from_frame(from, frame, record::now_iso8601())
-            .expect("the frame encodes");
-        mailbox::write(inbox, message).expect("the inbox takes a frame");
-    }
-
-    fn held(inbox: &std::path::Path) -> Vec<MailboxMessage> {
-        mailbox::read(inbox).expect("the inbox reads").valid
+        membership(home.path(), pane, false)
     }
 
     /// The root the flags resolve to is the one a lead of the same session
@@ -1220,9 +1239,7 @@ mod tests {
 
         assert_eq!(member(&home, None).posture(), Posture::ForwardToLead);
         assert_eq!(
-            Membership::resolve(flags("w1"), home.path(), home.path(), None, true)
-                .expect("the flags resolve")
-                .posture(),
+            membership(home.path(), None, true).posture(),
             Posture::BypassAtSpawn
         );
     }

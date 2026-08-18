@@ -446,8 +446,9 @@ pub fn lookup(name: &str) -> Option<&'static Entry> {
 /// follows has to read the text itself, which is how Claude Code and Codex
 /// both dispatch a slash command. Only a leading `/name` (or alias) with
 /// nothing but whitespace after it qualifies: these commands take no
-/// arguments, so `/models gpt` stays text, under the same ruling that keeps
-/// an unknown slash command out of the UI's hands.
+/// arguments — `/team` is the one exception, whose argument-carrying lines
+/// [`team`] reads off the same buffer — so `/models gpt` stays text, under
+/// the same ruling that keeps an unknown slash command out of the UI's hands.
 #[must_use]
 pub fn submitted(text: &str) -> Option<&'static Entry> {
     let name = text.strip_prefix('/')?.trim_end();
@@ -516,11 +517,11 @@ pub struct TeamSpawn {
     pub prompt: String,
 }
 
-/// The name `/team` is typed as.
-const TEAM: &str = "team";
-
-/// What `/team spawn` reads when the line names nothing to call the teammate.
-const SPAWN_NEEDS_A_NAME: &str = "`/team spawn` starts a teammate under a name: /team spawn <name> [--backend <surface>] [--agent <kind>] [--bypass] [what it should do]";
+/// `/team spawn`'s grammar, spelled once: the refusal a nameless spawn reads
+/// names it, and the `/team` dialog's own input step shows it, because
+/// [`team_spawn`] is the one parser both doors feed.
+pub const SPAWN_GRAMMAR: &str =
+    "<name> [--backend <surface>] [--agent <kind>] [--bypass] [what it should do]";
 
 /// What `--backend` reads when the line ends before its value. Which surfaces
 /// there are is not repeated here on purpose: the far side refuses an unknown
@@ -542,7 +543,9 @@ const AGENT_NEEDS_A_VALUE: &str =
 #[must_use]
 pub fn team(text: &str) -> Option<Team> {
     let (name, rest) = split_word(text.strip_prefix('/')?);
-    if name != TEAM {
+    // Through [`lookup`] rather than against a second spelling of the name,
+    // so an alias the roster grows one day reaches this door for free.
+    if lookup(name).is_none_or(|entry| entry.action != Action::Team) {
         return None;
     }
 
@@ -603,7 +606,9 @@ pub fn team(text: &str) -> Option<Team> {
 pub fn team_spawn(text: &str) -> Result<TeamSpawn, String> {
     let (name, mut rest) = split_word(text);
     if name.is_empty() || name.starts_with('-') {
-        return Err(SPAWN_NEEDS_A_NAME.to_owned());
+        return Err(format!(
+            "`/team spawn` starts a teammate under a name: /team spawn {SPAWN_GRAMMAR}"
+        ));
     }
 
     let mut spawn = TeamSpawn {

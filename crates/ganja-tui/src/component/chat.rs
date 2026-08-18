@@ -99,8 +99,10 @@ fn title(entry: &Entry) -> String {
 /// made (**D487**).
 const BULLET: &str = "\u{25cf} ";
 
-/// What leads what a call answered, one step under the header it answers.
-const RESULT: &str = "  \u{23bf} ";
+/// What leads what a call answered, one step under the header it answers —
+/// and, in the `/team` dialog, a member's ring of recent calls: a call log is
+/// the same thing there and here and should read the same way.
+pub(crate) const RESULT: &str = "  \u{23bf} ";
 
 /// What leads a prompt, in place of the author's name the pane used to head
 /// every message with.

@@ -37,30 +37,12 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    component::{body_rows, chat::clip, clamped, first_visible},
+    component::{
+        ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
+        body_rows, chat::clip, clamped, first_visible,
+    },
     theme::Theme,
 };
-
-/// What marks the row the cursor is on, and what pads every other row.
-const MARKER: &str = "> ";
-
-/// Rows the dialog spends on chrome: a blank line and the key hints.
-const CHROME: usize = 2;
-
-/// Widest the modal grows.
-const MAX_WIDTH: u16 = 76;
-
-/// Tallest the modal grows.
-const MAX_HEIGHT: u16 = 20;
-
-/// The keys the list step answers to.
-const LIST_HINTS: &str = "[j/k] [up/down] move   [Enter] choose   [Esc] close";
-
-/// The keys the per-plugin action step answers to.
-const ACTION_HINTS: &str = "[j/k] [up/down] move   [Enter] run   [Esc] close";
-
-/// The keys the free-text step answers to.
-const INPUT_HINTS: &str = "[type/backspace] edit   [Enter] submit   [Esc] cancel";
 
 /// Columns between a row's fixed columns.
 const GAP: usize = 2;
@@ -559,6 +541,37 @@ impl Plugin {
                 theme.selection,
             ),
         ]
+    }
+}
+
+/// The shared key surface, every method the inherent one: what the trait
+/// exists for is the one driver in `app.rs`, and what stays this dialog's own
+/// is everything `submit` decides.
+impl TwoStep for Plugin {
+    type Effect = Effect;
+
+    fn is_typing(&self) -> bool {
+        Self::is_typing(self)
+    }
+
+    fn cancel(&mut self) -> bool {
+        Self::cancel(self)
+    }
+
+    fn backspace(&mut self) {
+        Self::backspace(self);
+    }
+
+    fn push(&mut self, character: char) {
+        Self::push(self, character);
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        Self::move_selection(self, delta);
+    }
+
+    fn submit(&mut self) -> Option<Effect> {
+        Self::submit(self)
     }
 }
 

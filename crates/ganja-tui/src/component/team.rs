@@ -44,17 +44,14 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
     command::TeamSpawn,
-    component::{body_rows, chat::clip, clamped, first_visible},
+    component::{
+        ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
+        body_rows,
+        chat::{RESULT, clip},
+        clamped, first_visible,
+    },
     theme::Theme,
 };
-
-/// What marks the row the cursor is on, and what pads every other row.
-const MARKER: &str = "> ";
-
-/// What a member's recent calls hang under — the transcript's own result
-/// marker (`chat.rs`'s `RESULT`), because a call log under a row is the same
-/// thing there and here and should read the same way.
-const RING: &str = "  \u{23bf} ";
 
 /// How many of a member's recent calls a row shows. The registry's own ring
 /// holds `ganja_core::teammate::RECENT_CALLS` of them, which is more than a
@@ -62,35 +59,11 @@ const RING: &str = "  \u{23bf} ";
 /// answer "what is it doing right now".
 const RING_LINES: usize = 4;
 
-/// Rows the dialog spends on chrome: a blank line and the key hints.
-const CHROME: usize = 2;
-
-/// Widest the modal grows.
-const MAX_WIDTH: u16 = 76;
-
-/// Tallest the modal grows.
-const MAX_HEIGHT: u16 = 20;
-
-/// The keys the member step answers to.
-const MEMBER_HINTS: &str = "[j/k] [up/down] move   [Enter] choose   [Esc] close";
-
-/// The keys the per-member action step answers to.
-const ACTION_HINTS: &str = "[j/k] [up/down] move   [Enter] run   [Esc] close";
-
-/// The keys the free-text step answers to.
-const INPUT_HINTS: &str = "[type/backspace] edit   [Enter] submit   [Esc] cancel";
-
 /// What is shown when the team holds nobody at all.
 const EMPTY: &str = "no team members";
 
 /// The label of the action that belongs to the team rather than to a row.
 const SPAWN_LABEL: &str = "Spawn teammate\u{2026}";
-
-/// What the free-text step asks for when a spawn is being typed. The same
-/// grammar `/team spawn` takes, because [`crate::command::team_spawn`] is the
-/// one that reads both.
-const SPAWN_PROMPT: &str =
-    "Spawn: <name> [--backend <surface>] [--agent <kind>] [--bypass] [what it should do]";
 
 /// What a spawn is refused with while another one is still starting.
 ///
@@ -618,7 +591,7 @@ impl Team {
             lines.push(Line::styled(clip(first, inner_width), theme.dim));
         }
         let hints = match &self.step {
-            Step::Members => MEMBER_HINTS,
+            Step::Members => LIST_HINTS,
             Step::Actions { .. } => ACTION_HINTS,
             Step::Input { .. } => INPUT_HINTS,
         };
@@ -769,7 +742,10 @@ impl Team {
         theme: &Theme,
     ) -> Vec<Line<'static>> {
         let prompt = match asking {
-            Asking::Spawn => SPAWN_PROMPT.to_owned(),
+            // The same grammar `/team spawn` takes, spelled by the constant
+            // its refusal names, because [`crate::command::team_spawn`] is the
+            // one parser both doors feed.
+            Asking::Spawn => format!("Spawn: {}", crate::command::SPAWN_GRAMMAR),
             Asking::Message(member) => format!("Message {member}:"),
         };
 
@@ -786,7 +762,9 @@ impl Team {
     }
 }
 
-/// A member's recent calls, newest last, hung under its row (**D503**).
+/// A member's recent calls, newest last, hung under its row (**D503**) behind
+/// the transcript's own result marker — a call log under a row is the same
+/// thing there and here and should read the same way.
 ///
 /// What was cut is admitted above what is shown rather than below it — the
 /// transcript's own posture for a clamped call log, and the one that keeps the
@@ -798,7 +776,7 @@ fn ring_rows(calls: &[String], width: usize, theme: &Theme) -> Vec<Line<'static>
         lines.push(Line::styled(
             clip(
                 &format!(
-                    "{RING}\u{2026} +{hidden} earlier call{plural}",
+                    "{RESULT}\u{2026} +{hidden} earlier call{plural}",
                     plural = if hidden == 1 { "" } else { "s" },
                 ),
                 width,
@@ -810,10 +788,41 @@ fn ring_rows(calls: &[String], width: usize, theme: &Theme) -> Vec<Line<'static>
         calls
             .iter()
             .skip(hidden)
-            .map(|call| Line::styled(clip(&format!("{RING}{call}"), width), theme.dim)),
+            .map(|call| Line::styled(clip(&format!("{RESULT}{call}"), width), theme.dim)),
     );
 
     lines
+}
+
+/// The shared key surface, every method the inherent one: what the trait
+/// exists for is the one driver in `app.rs`, and what stays this dialog's own
+/// is everything `submit` decides.
+impl TwoStep for Team {
+    type Effect = Effect;
+
+    fn is_typing(&self) -> bool {
+        Self::is_typing(self)
+    }
+
+    fn cancel(&mut self) -> bool {
+        Self::cancel(self)
+    }
+
+    fn backspace(&mut self) {
+        Self::backspace(self);
+    }
+
+    fn push(&mut self, character: char) {
+        Self::push(self, character);
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        Self::move_selection(self, delta);
+    }
+
+    fn submit(&mut self) -> Option<Effect> {
+        Self::submit(self)
+    }
 }
 
 /// How a member's surface is spelled on its row.
@@ -1382,6 +1391,29 @@ mod tests {
         assert_eq!(dialog.submit(), None);
         dialog.move_selection(1);
         assert_eq!(dialog.submit(), Some(Effect::Shutdown("w2".to_owned())));
+    }
+
+    /// The input step's prompt and the grammar a refusal names are one
+    /// constant, so the dialog cannot teach a spelling `team_spawn` refuses.
+    #[test]
+    fn the_spawn_prompt_shows_the_grammar_the_refusal_names() {
+        let mut dialog = dialog();
+        dialog.move_selection(9);
+        dialog.submit();
+
+        let screen = rendered(&dialog, AREA);
+        // The dialog is narrower than the whole grammar, so what the screen
+        // shows is its head; the tie to the refusal is the shared constant.
+        assert!(
+            screen.contains(&command::SPAWN_GRAMMAR[..40]),
+            "got:\n{screen}"
+        );
+        assert!(
+            command::team_spawn("")
+                .expect_err("a nameless spawn is refused")
+                .contains(command::SPAWN_GRAMMAR),
+            "and the refusal names the same grammar"
+        );
     }
 
     /// The command grammar is the dialog's grammar, so a `/team` line and the
