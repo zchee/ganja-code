@@ -115,7 +115,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
-    path::PathBuf,
+    io::Write as _,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -130,6 +131,7 @@ use ganja_team::{
     MailboxMessage, MemberName, MemberRecord, NameError, Spawn, Surface, TeamFile, TeamName,
     TeamsRoot, mailbox, record, team::resolve_unique,
 };
+use tempfile::NamedTempFile;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -1702,18 +1704,36 @@ impl TeammateRegistry {
         self.write_team(file, &writing).await
     }
 
-    /// Writes the team file whole, through a staged file and a rename: a reader
-    /// sharing this directory — a real `claude` among them — sees the old
-    /// document or the new one and never half of either.
+    /// Writes the team file whole, through a temporary file and a rename: a
+    /// reader sharing this directory — a real `claude` among them — sees the
+    /// old document or the new one and never half of either.
     ///
-    /// The staged name is unique per **process**, which is all it needs to be
-    /// and less than it looks: two writes from *this* process would share it,
-    /// and the second would rename a file the first had already renamed away.
-    /// What keeps that from happening is the `team_file` lock — and it is
-    /// taken as an **argument** rather than described in a sentence, so a
-    /// second caller cannot forget to hold it: the guard is unused inside, and
-    /// borrowing it is the point. `_writing` names what it is because the
-    /// compiler is the reader that matters here.
+    /// This is [`ganja_team::mailbox`]'s `write_atomically` against the other
+    /// document of the same interop pair, and it is deliberately the same
+    /// three steps in the same order — temporary beside the target, `sync_all`,
+    /// `persist` — because the reader they are defending against is literally
+    /// the same process. Two properties are worth naming out loud:
+    ///
+    /// * **The bytes are fsynced before the rename.** Without it a crash can
+    ///   leave the *renamed* file present and empty, which is the one outcome
+    ///   a foreign reader cannot tell from "the team has no members" — the
+    ///   torn-write failure the rename exists to prevent, arriving through the
+    ///   back door. The parent directory is **not** fsynced, for the reason
+    ///   spelled out at the mailbox's own copy: a lost rename is
+    ///   indistinguishable from the spawn never having happened, and a reader
+    ///   still sees one whole document or the other.
+    /// * **The temporary cannot outlive the failure.** The staged name used to
+    ///   be `<path>.json.new-<pid>`, and a rename that failed left it in the
+    ///   team directory for good — beside a document a real `claude` walks.
+    ///   Its life is now the value's: dropped on every path out, including
+    ///   the one where `persist` hands it back.
+    ///
+    /// Uniqueness per *process* used to be the staged name's job and is now
+    /// the crate's, but what makes concurrent writes safe was never the name:
+    /// it is the `team_file` lock — taken as an **argument** rather than
+    /// described in a sentence, so a second caller cannot forget to hold it.
+    /// The guard is unused inside and borrowing it is the point; `_writing`
+    /// names what it is because the compiler is the reader that matters here.
     async fn write_team(
         &self,
         file: TeamFile,
@@ -1731,14 +1751,44 @@ impl TeammateRegistry {
             };
             let document =
                 record::document(&file).map_err(|error| failed("encoded", Box::new(error)))?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
+            // The temporary has to land in the directory the target is in, or
+            // `persist` is a cross-device copy rather than a rename and the
+            // atomicity this exists for is gone.
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            std::fs::create_dir_all(parent).map_err(|error| failed("written", Box::new(error)))?;
+
+            let mut staged = NamedTempFile::new_in(parent)
+                .map_err(|error| failed("written", Box::new(error)))?;
+            staged
+                .write_all(document.as_bytes())
+                .map_err(|error| failed("written", Box::new(error)))?;
+            staged
+                .as_file()
+                .sync_all()
+                .map_err(|error| failed("written", Box::new(error)))?;
+            // A temporary is created `0600` and a rename carries that mode
+            // onto the target. The team file is *shared* — that is the whole
+            // premise of the crate it belongs to — so an existing document's
+            // bits are copied across rather than narrowed under a peer that
+            // was reading it.
+            //
+            // A file this *creates* keeps the `0600`, where the `fs::write`
+            // this replaces took the umask's answer. Named rather than
+            // inherited from the crate's default: the document records every
+            // teammate's prompt, model and working directory, and the only
+            // reader that has ever mattered — a real `claude` sharing the
+            // directory — runs as this same user.
+            if let Ok(existing) = std::fs::metadata(&path) {
+                staged
+                    .as_file()
+                    .set_permissions(existing.permissions())
                     .map_err(|error| failed("written", Box::new(error)))?;
             }
-            let staged = path.with_extension(format!("json.new-{}", std::process::id()));
-            std::fs::write(&staged, document)
-                .map_err(|error| failed("written", Box::new(error)))?;
-            std::fs::rename(&staged, &path).map_err(|error| failed("written", Box::new(error)))
+            staged
+                .persist(&path)
+                .map_err(|error| failed("written", Box::new(error.error)))?;
+
+            Ok(())
         })
         .await
     }
@@ -2314,6 +2364,152 @@ pub(crate) mod tests {
                 .await
                 .expect("a second retire is fine"),
             "a shutdown read twice is ordinary rather than an error"
+        );
+    }
+
+    /// The team file is somebody else's document too, so the write that
+    /// replaces it may not leave its own scaffolding in the directory a real
+    /// `claude` walks.
+    ///
+    /// The failure is forced rather than injected: a **directory** at the
+    /// target path is a rename `persist` cannot complete, and it reaches that
+    /// step with everything before it having succeeded. `write_team` is called
+    /// straight rather than through `record`, because [`read_team`] would
+    /// refuse the same directory first and the write would never run.
+    ///
+    /// This is the half the old code got wrong. It staged at
+    /// `config.json.new-<pid>` with [`std::fs::write`] and renamed, and a
+    /// rename that failed returned the error and left the staged file where it
+    /// fell — permanently, since the name is per-process and the next run of
+    /// this build would write the same one.
+    ///
+    /// [`read_team`]: TeammateRegistry::read_team
+    #[tokio::test]
+    async fn a_team_file_write_that_cannot_rename_leaves_nothing_behind() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        let path = registry.root().config_path(registry.team());
+        std::fs::create_dir_all(&path).expect("the target is a directory nothing can rename onto");
+
+        let refused = {
+            let writing = registry.team_file.lock().await;
+            let file = ganja_team::TeamFile::new(registry.team(), "01998ad0", "/tmp", 1);
+
+            registry
+                .write_team(file, &writing)
+                .await
+                .expect_err("a rename onto a directory cannot succeed")
+        };
+
+        assert!(
+            matches!(
+                refused,
+                super::SpawnError::TeamFile {
+                    doing: "written",
+                    ..
+                }
+            ),
+            "the failure is the write it was: {refused}"
+        );
+        let left: Vec<_> = std::fs::read_dir(path.parent().expect("the team has a directory"))
+            .expect("the team directory is readable")
+            .map(|entry| entry.expect("the entry is readable").file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from("config.json")],
+            "nothing of the write survives it"
+        );
+    }
+
+    /// The document is shared, so its mode is the owner's to set and not this
+    /// writer's to narrow.
+    ///
+    /// A temporary is created `0600` and a rename carries that mode onto the
+    /// target, so a rewrite that copied nothing across would silently take a
+    /// group-readable team file private under a peer already reading it.
+    /// `ganja-team`'s mailbox defends the same property for the same reason
+    /// — `a_rewrite_keeps_the_inboxes_existing_mode` is this test's twin.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_team_file_rewrite_keeps_the_documents_existing_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        let path = registry.root().config_path(registry.team());
+
+        let write = async || {
+            let writing = registry.team_file.lock().await;
+            let file = ganja_team::TeamFile::new(registry.team(), "01998ad0", "/tmp", 1);
+
+            registry
+                .write_team(file, &writing)
+                .await
+                .expect("the team file writes");
+        };
+
+        write().await;
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("the team file is there")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "a document this created is private, whatever the umask would have said"
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("the mode is settable");
+        write().await;
+
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("the team file is there")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640,
+            "a rewrite neither tightens nor loosens what the owner set"
+        );
+    }
+
+    /// The bytes reach the disk before the rename does.
+    ///
+    /// Asserted against the source because there is nowhere else to assert it:
+    /// an `fsync` leaves no trace a reader in this process — or any other —
+    /// can observe, and the outcome it buys is only ever visible after a power
+    /// loss. What it prevents is specific and worth the unusual test: without
+    /// it a crash can leave the *renamed* file present and **empty**, which is
+    /// the one damaged state a foreign reader cannot tell from a team that has
+    /// no members. So this pins the call rather than its effect, and the
+    /// ordering that makes it mean anything — a `sync_all` after the rename
+    /// would be a `sync_all` of nothing.
+    #[test]
+    fn the_team_file_is_synced_before_it_is_renamed_into_place() {
+        // Bounded to the one function, and it has to be: this test's own
+        // source carries both needles, so a search over the rest of the file
+        // would find them here and pass against a writer that syncs nothing.
+        // A method's closing brace is the only `}` this file indents by four
+        // spaces, which is what makes the end of a body findable at all.
+        let body = include_str!("teammate.rs")
+            .split_once("    async fn write_team(")
+            .expect("the writer is still called that")
+            .1;
+        let body = body
+            .split_once("\n    }\n")
+            .expect("the writer still ends")
+            .0;
+
+        let synced = body
+            .find(".sync_all()")
+            .expect("the bytes are still synced");
+        let renamed = body.find(".persist(").expect("the file is still renamed");
+
+        assert!(
+            synced < renamed,
+            "the sync is what the rename publishes, so it comes first"
         );
     }
 

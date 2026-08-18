@@ -26,10 +26,6 @@ base64.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# `geteuid`, for the socket directory's name and the peer-uid check every
-# accepted socket connection is held against — the same crate the shell tool
-# and the anchored file I/O already build their unix calls on.
-libc.workspace = true
 # The configured password is held wiped-on-drop and out of `Debug`, the same
 # way every credential in the tree is.
 secrecy.workspace = true

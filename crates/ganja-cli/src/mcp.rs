@@ -55,7 +55,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
+    fs,
     io::{self, Write as _},
     path::{Path, PathBuf},
 };
@@ -66,6 +66,7 @@ use ganja_core::config::{Config, McpServer};
 use ganja_permission::Project;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 use serde_json::{Map, Value};
+use tempfile::NamedTempFile;
 
 /// What this *creates*. The `.jsonc` spelling is deliberately never created:
 /// a file this wrote has no comment in it to justify the name.
@@ -396,48 +397,56 @@ fn write(path: &Path, document: &CstRootNode) -> Result<()> {
     }
 
     let staged = stage(path, text.as_bytes())?;
-    fs::rename(&staged, path).map_err(|error| {
-        // The staged file is this function's litter, and leaving it behind
-        // after the rename failed would leave a dotted half-config in a
+    staged.persist(path).map_err(|error| {
+        // `PersistError` hands the staged file back rather than dropping it,
+        // so the temporary outlives the failed rename by exactly as long as
+        // this closure holds it: letting the error go is what removes the
+        // file, and leaving one behind would leave a dotted half-config in a
         // project directory forever.
-        let _ = fs::remove_file(&staged);
-        anyhow!("{} could not be written: {error}", path.display())
-    })
+        anyhow!("{} could not be written: {}", path.display(), error.error)
+    })?;
+
+    Ok(())
 }
 
-/// Writes `bytes` to a fresh file beside `path`, and hands back its name.
+/// Writes `bytes` to a fresh file beside `path`, and hands back the file
+/// itself — unnamed by anything the caller has to remember to clean up.
 ///
-/// `create_new` in a loop rather than a fixed name: two `ganja mcp add`
+/// Staged beside rather than at a fixed name because two `ganja mcp add`
 /// processes in one directory would otherwise write the same staging file and
-/// one would rename the other's half-written bytes into place.
-fn stage(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
+/// one would rename the other's half-written bytes into place. The uniqueness
+/// used to be a `create_new` loop over a pid-stamped name, which was correct
+/// about collisions and silent about failure: a write that failed returned
+/// early and left the staged file where it fell, since only the *rename*
+/// arm above ever cleaned up. Tying the temporary's life to a value fixes
+/// both halves at once — the file is removed when this is dropped, on every
+/// path out of every caller, including the one nobody wrote.
+fn stage(path: &Path, bytes: &[u8]) -> Result<NamedTempFile> {
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path.file_name().map_or_else(
-        || CONFIG_FILE.to_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    );
 
-    for attempt in 0..u32::from(u8::MAX) {
-        let staged = directory.join(format!(".{stem}.{}.{attempt}.tmp", std::process::id()));
-        let mut file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("{} could not be written", staged.display()));
-            }
-        };
-        file.write_all(bytes)
-            .with_context(|| format!("{} could not be written", staged.display()))?;
+    // Both sentences name `path` and not the staged file: the temporary's
+    // name is this function's business and never something somebody typed,
+    // so a person reading the failure is told about the config file they
+    // asked to edit.
+    let mut staged = NamedTempFile::new_in(directory)
+        .with_context(|| format!("{} could not be written", path.display()))?;
+    staged
+        .write_all(bytes)
+        .with_context(|| format!("{} could not be written", path.display()))?;
 
-        return Ok(staged);
+    // A temporary is created `0600`, and a rename carries that mode onto the
+    // target — so an existing config would quietly lose whatever mode its
+    // owner gave it. Copying the mode across keeps the edit an edit. A file
+    // this *creates* keeps the `0600`, which is the safer default for a
+    // document whose remote entries carry `Authorization` headers.
+    if let Ok(existing) = fs::metadata(path) {
+        staged
+            .as_file()
+            .set_permissions(existing.permissions())
+            .with_context(|| format!("{} could not be written", path.display()))?;
     }
 
-    bail!("no staging file could be created beside {}", path.display())
+    Ok(staged)
 }
 
 /// Refuses a name that could not be an entry key.
@@ -999,6 +1008,104 @@ mod tests {
                 "whatever {hostile} is, it is not this command's to throw away"
             );
         }
+    }
+
+    /// `RLIMIT_FSIZE` at zero, so that writing any byte to any file in this
+    /// process fails — with `SIGXFSZ` ignored, because its default
+    /// disposition kills the process rather than letting the write return
+    /// `EFBIG`. It is the cheapest real write failure there is: no fixture
+    /// filesystem, no injected error type, no seam in production code that
+    /// exists only for a test.
+    ///
+    /// Both settings are process-wide, and nextest gives every test its own
+    /// process. The restore on drop is what keeps that from being the only
+    /// thing holding the line — under a plain `cargo test`, where a binary's
+    /// tests share one process across threads, the window is at least closed
+    /// rather than left open for the rest of the run.
+    #[cfg(unix)]
+    struct NoFileMayGrow {
+        limit: libc::rlimit,
+        signal: libc::sighandler_t,
+    }
+
+    #[cfg(unix)]
+    impl NoFileMayGrow {
+        fn take() -> Self {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: each call is handed a pointer to a live local of the
+            // type it documents, and nothing outlives this frame.
+            unsafe {
+                assert_eq!(
+                    libc::getrlimit(libc::RLIMIT_FSIZE, &raw mut limit),
+                    0,
+                    "the current file-size limit is readable"
+                );
+                let signal = libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                let forbidden = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: limit.rlim_max,
+                };
+                assert_eq!(
+                    libc::setrlimit(libc::RLIMIT_FSIZE, &raw const forbidden),
+                    0,
+                    "lowering the file-size limit is always permitted"
+                );
+
+                Self { limit, signal }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for NoFileMayGrow {
+        fn drop(&mut self) {
+            // SAFETY: the values restored are the ones the constructor read
+            // out of this same process.
+            unsafe {
+                libc::setrlimit(libc::RLIMIT_FSIZE, &raw const self.limit);
+                libc::signal(libc::SIGXFSZ, self.signal);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_that_fails_leaves_no_staged_file_beside_the_config() {
+        let directory = tempfile::tempdir().expect("a temporary directory is creatable");
+        let path = directory.path().join(super::CONFIG_FILE);
+        let original = "{\n  // a note\n  \"theme\": \"ganja\",\n}\n";
+        std::fs::write(&path, original).expect("the fixture is writable");
+        let parsed = document(&path).expect("the fixture parses");
+
+        let refused = {
+            let _forbidden = NoFileMayGrow::take();
+
+            super::write(&path, &parsed).expect_err("no byte may be written")
+        };
+
+        // Asserted before the message, because it is what the name promises
+        // and what the old staging loop got wrong.
+        let left: Vec<_> = std::fs::read_dir(directory.path())
+            .expect("the directory is readable")
+            .map(|entry| entry.expect("the entry is readable").file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from(super::CONFIG_FILE)],
+            "a failed write is litter-free: only the config it could not edit is left"
+        );
+        assert!(
+            format!("{refused:#}").contains(&path.display().to_string()),
+            "the failure names the file somebody asked to edit: {refused:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the config is readable"),
+            original,
+            "and the config it could not edit is the bytes it was"
+        );
     }
 
     #[test]

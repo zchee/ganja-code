@@ -75,6 +75,12 @@ secrecy.workspace = true
 # The pty and importer tests read documents with it too, which is why it sits
 # here rather than under the dev tier it used to.
 serde_json.workspace = true
+# `mcp add/remove` stages the edited config beside the file and renames it into
+# place, and the staged file has to vanish however the write ends — the crate
+# that ties a temporary file's life to a value's is what makes the failure path
+# leave no litter, which a hand-named `.tmp` could only approximate. The test
+# tier already carried this; production reaches for it now.
+tempfile.workspace = true
 tokio.workspace = true
 # A login flow's wait is ended by a `CancellationToken`, and the binary is the
 # only crate that can catch the keystroke which fires one. The token lives
@@ -101,7 +107,6 @@ predicates.workspace = true
 # The one quoter production launch lines ride, for the window command the
 # pane suite composes.
 shlex.workspace = true
-tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 expectrl.workspace = true

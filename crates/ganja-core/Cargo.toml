@@ -84,6 +84,13 @@ secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shlex.workspace = true
+# The team file is a document a real `claude` shares the directory with, so it
+# is replaced through a temporary and a rename rather than written in place.
+# The crate is what ties that temporary's life to a value: it is removed
+# however the write ends, including the rename failure a hand-named staging
+# file has no owner to clean up after. `ganja-team`'s mailbox writes the same
+# way, for the same reason and against the same reader.
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -112,9 +119,6 @@ jsonschema.workspace = true
 # "a real PNG of the right dimensions reached the wire" rather than "some
 # bytes did."
 png.workspace = true
-# The credential tests write real files, with real permission bits, in a
-# directory that goes away afterwards.
-tempfile.workspace = true
 # `net` is for the provider tests only: they serve canned HTTP over a loopback
 # socket rather than mocking the client, so the request really is built, sent,
 # retried and streamed. The library itself needs no listener. `test-util` is

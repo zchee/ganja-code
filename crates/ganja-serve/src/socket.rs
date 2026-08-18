@@ -121,12 +121,9 @@ pub(crate) use unix::{PeerChecked, bind_path, bind_session};
 mod unix {
     use std::{
         fs, io,
-        os::{
-            fd::AsRawFd as _,
-            unix::fs::{
-                DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
-                PermissionsExt as _,
-            },
+        os::unix::fs::{
+            DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
+            PermissionsExt as _,
         },
         path::{Path, PathBuf},
     };
@@ -190,20 +187,22 @@ mod unix {
                 .truncate(false)
                 .mode(SOCKET_MODE)
                 .open(lock_path(socket))?;
-            // SAFETY: `flock` takes an open descriptor and two flags, and the
-            // descriptor is owned by `file` for the whole call.
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if rc == 0 {
-                return Ok(Some(Self {
+            // std's own file lock, which on unix *is* `flock(2)` — so every
+            // sentence the module doc spends on kernel semantics holds word
+            // for word, and the descriptor is still the lock. What the swap
+            // buys is the one thing a hand call could only approximate:
+            // "somebody else holds it" arrives as a variant rather than as an
+            // errno this has to recognize and map by hand.
+            // `storage::QuarantineLock` takes the blocking half of the same
+            // family for the same reason.
+            match file.try_lock() {
+                Ok(()) => Ok(Some(Self {
                     _file: file,
                     socket: socket.to_path_buf(),
-                }));
+                })),
+                Err(fs::TryLockError::WouldBlock) => Ok(None),
+                Err(fs::TryLockError::Error(error)) => Err(error),
             }
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
-            Err(error)
         }
 
         /// The socket whose name this holds.
