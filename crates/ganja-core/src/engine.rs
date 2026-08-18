@@ -1831,7 +1831,7 @@ impl Engine {
                 claude: Arc::new(teammate::claude::ClaudePane),
             },
         )));
-        *self.postbox.lock().expect("the postbox is never poisoned") = Some(lead);
+        self.install_postbox(lead);
         self.recompose_tools();
 
         self
@@ -1942,12 +1942,12 @@ impl Engine {
     /// Installs the postbox one engine's `send_message` calls are posted
     /// through.
     ///
-    /// `&self` for exactly one caller: a teammate's own postbox is built by
-    /// [`teammate::TeammateRegistry`] once it holds both the team and the
-    /// teammate, and a teammate engine is reachable only by shared reference
-    /// (which is what keeps it from being given snapshots). The lead's own is
-    /// installed by [`Engine::with_teammates`], a member process's by
-    /// [`Engine::with_postbox`], and neither through here.
+    /// `&self` for the one caller a consuming builder could not serve: a
+    /// teammate's own postbox is built by [`teammate::TeammateRegistry`] once
+    /// it holds both the team and the teammate, and a teammate engine is
+    /// reachable only by shared reference (which is what keeps it from being
+    /// given snapshots). [`Engine::with_teammates`] and
+    /// [`Engine::with_postbox`] land here too, before the engine is shared.
     ///
     /// `pub(crate)` because a postbox is an engine's **outbound identity** —
     /// the name every message it writes is stamped with, bound at construction

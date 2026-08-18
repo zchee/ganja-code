@@ -1384,21 +1384,19 @@ fn set_aside_preuuid(connection: Connection, database: &Path) -> Result<Connecti
         return Ok(connection);
     };
 
+    let named = |source: rusqlite::Error| StorageError::Sql {
+        path: database.to_path_buf(),
+        source,
+    };
     let old = {
         // `IMMEDIATE` still, though the lock is what serializes us now: it
         // keeps the row set from moving under the read while another process
         // writes a session, which is a different race and a real one.
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|source| StorageError::Sql {
-                path: database.to_path_buf(),
-                source,
-            })?;
+            .map_err(named)?;
         let old = preuuid_id(&transaction, database)?;
-        transaction.commit().map_err(|source| StorageError::Sql {
-            path: database.to_path_buf(),
-            source,
-        })?;
+        transaction.commit().map_err(named)?;
 
         old
     };

@@ -1242,8 +1242,8 @@ fn peer_parts(peers: &[crate::protocol::team::PeerPayload]) -> impl Iterator<Ite
     peers.iter().cloned().map(|peer| peer.into_part())
 }
 
-/// Whether a message built from `text` and `peers` should carry a text part at
-/// all.
+/// Builds the user message a prompt or a steer becomes: the text where it
+/// belongs, then the teammate, mention and skill parts in that order.
 ///
 /// A delivery turn — the lead's inbox poll handing on what a teammate said —
 /// has no text of its own, and an empty text part is worth avoiding twice
@@ -1251,8 +1251,23 @@ fn peer_parts(peers: &[crate::protocol::team::PeerPayload]) -> impl Iterator<Ite
 /// would draw a `>` over nothing, which claims the person typed something they
 /// did not. A message with no peers keeps its empty text part exactly as it
 /// always did, so nothing outside a team changes.
-fn carries_text(text: &str, peers: &[crate::protocol::team::PeerPayload]) -> bool {
-    peers.is_empty() || !text.trim().is_empty()
+fn user_message(
+    text: String,
+    peers: &[crate::protocol::team::PeerPayload],
+    mentions: &[crate::protocol::Mention],
+    skills: &[String],
+    roots: &skill::Roots,
+) -> Message {
+    let carries = peers.is_empty() || !text.trim().is_empty();
+    let mut user = Message::user(text);
+    if !carries {
+        user.parts.clear();
+    }
+    user.parts.extend(peer_parts(peers));
+    user.parts.extend(mention_parts(mentions));
+    user.parts.extend(skill_parts(roots, skills));
+
+    user
 }
 
 /// Takes whatever a [`Command::Steer`] left for this turn and turns each one
@@ -1300,17 +1315,13 @@ async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, bool> {
             return ControlFlow::Break(stop);
         }
 
-        // Asked before the text moves into the message, so this reads as the
-        // question it is rather than as an inspection of what was just built.
-        let carries = carries_text(&input.text, &input.peers);
-        let mut user = Message::user(input.text);
-        if !carries {
-            user.parts.clear();
-        }
-        user.parts.extend(peer_parts(&input.peers));
-        user.parts.extend(mention_parts(&input.mentions));
-        user.parts
-            .extend(skill_parts(&turn.skill_roots, &input.skills));
+        let user = user_message(
+            input.text,
+            &input.peers,
+            &input.mentions,
+            &input.skills,
+            &turn.skill_roots,
+        );
 
         // Disk before the provider hears it, exactly as the opening prompt
         // reaches it: a `kill -9` mid-stream must still preserve what was
@@ -1927,26 +1938,28 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
         return (Message::assistant(turn.model.clone()), stop);
     }
 
-    let mut user = Message::user(turn.prompt.clone());
     // A mention is a reference and nothing more; what the file says is read
     // when a request is built. See [`PartBody::File`]. A `$` invocation is
     // the opposite — its body is loaded here, whole — see [`skill_parts`].
     // A teammate's message is the second kind and then some: it arrived
     // whole, and it leads the extras because it is content rather than an
     // attachment to some.
-    if let TurnKind::Prompt {
+    let user = if let TurnKind::Prompt {
         mentions,
         skills,
         peers,
     } = &turn.kind
     {
-        if !carries_text(&turn.prompt, peers) {
-            user.parts.clear();
-        }
-        user.parts.extend(peer_parts(peers));
-        user.parts.extend(mention_parts(mentions));
-        user.parts.extend(skill_parts(&turn.skill_roots, skills));
-    }
+        user_message(
+            turn.prompt.clone(),
+            peers,
+            mentions,
+            skills,
+            &turn.skill_roots,
+        )
+    } else {
+        Message::user(turn.prompt.clone())
+    };
     // The prompt reaches the disk before the provider hears it: a `kill -9`
     // mid-stream must still preserve what was asked.
     if let Some(persist) = &turn.persist {
