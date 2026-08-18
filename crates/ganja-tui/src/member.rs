@@ -477,23 +477,9 @@ impl Inbox {
     /// [`Inbox::delivered`] says so.
     pub async fn poll(&self) -> Pass {
         let mut pass = Pass::default();
-        let path = self.inbox.clone();
-        let contents = match tokio::task::spawn_blocking(move || mailbox::read(&path)).await {
-            Ok(Ok(contents)) => contents,
-            Ok(Err(error)) => {
-                tracing::warn!(member = self.name(), %error, "a teammate's inbox could not be read");
-
-                return pass;
-            }
-            Err(error) => {
-                tracing::warn!(member = self.name(), %error, "an inbox read was lost");
-
-                return pass;
-            }
+        let Some(contents) = runner::read_inbox(self.inbox.clone(), self.name()).await else {
+            return pass;
         };
-        for report in &contents.reports {
-            tracing::warn!(member = self.name(), "{report}");
-        }
         if contents.valid.is_empty() {
             return pass;
         }
@@ -702,68 +688,23 @@ impl Inbox {
         }
     }
 
-    /// Names a frame nobody here handles, with the head of it.
-    ///
-    /// The *head*, and only of a frame: a plain message's body never reaches
-    /// a log line, but a frame that would not decode is undiagnosable without
-    /// seeing some of it — the trade §6.1 already makes.
+    /// Names a frame nobody here handles — the runner's own account of it,
+    /// under this member's name.
     fn drop_it(&self, kind: &'static str, message: &MailboxMessage) -> Verdict {
-        tracing::warn!(
-            member = self.name(),
-            from = message.from,
-            frame = head(&message.text),
-            "{DROPPED_FRAME}: {kind}"
-        );
+        runner::drop_frame(self.name(), kind, message);
 
         Verdict::Dropped(kind)
     }
 
-    /// Writes one frame into the lead's inbox, saying so in the log when it
-    /// could not.
+    /// Writes one frame into the lead's inbox, stamped with this member's own
+    /// name — the runner's writer, which shouts when it could not.
     async fn tell_lead(&self, frame: &Frame, what: &'static str) {
-        let message = match MailboxMessage::from_frame(self.name(), frame, record::now_iso8601()) {
-            Ok(message) => message,
-            Err(error) => {
-                tracing::error!(
-                    member = self.name(),
-                    %error,
-                    "{what} could not be encoded, so the lead is not being told"
-                );
-
-                return;
-            }
-        };
-        let path = self.lead_inbox.clone();
-        let written = tokio::task::spawn_blocking(move || mailbox::write(&path, message))
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|written| written.map_err(|error| error.to_string()));
-        if let Err(error) = written {
-            // Worth shouting about, for §6.2's reason in the other direction:
-            // the lead is the side that kills a pane and retires a member.
-            tracing::error!(
-                member = self.name(),
-                %error,
-                "{what} could not be written into the lead's inbox"
-            );
-        }
+        runner::write_frame(self.lead_inbox.clone(), self.name(), frame, what).await;
     }
 
     /// Takes entries out of the inbox, in one write.
     async fn prune(&self, handled: Vec<mailbox::Identity>) {
-        let path = self.inbox.clone();
-        let outcome =
-            tokio::task::spawn_blocking(move || mailbox::prune_delivered(&path, &handled))
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|pruned| pruned.map_err(|error| error.to_string()));
-
-        if let Err(error) = outcome {
-            // Not fatal and not retried: the next pass reads the same entries
-            // again, and a redelivery is a cost this side can pay where a lost
-            // message is not.
-            tracing::warn!(member = self.name(), %error, "a teammate could not prune its inbox");
-        }
+        runner::prune_inbox(self.inbox.clone(), handled, self.name()).await;
     }
 }
 
@@ -822,14 +763,6 @@ const fn idle_reason(reason: FinishReason) -> IdleReason {
         FinishReason::Completed => IdleReason::Available,
         FinishReason::Cancelled => IdleReason::Interrupted,
         FinishReason::Failed => IdleReason::Failed,
-    }
-}
-
-/// The first [`runner::FRAME_HEAD`] characters, cut on a character boundary.
-fn head(text: &str) -> &str {
-    match text.char_indices().nth(runner::FRAME_HEAD) {
-        Some((end, _)) => &text[..end],
-        None => text,
     }
 }
 
