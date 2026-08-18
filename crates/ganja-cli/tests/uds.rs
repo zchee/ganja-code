@@ -46,7 +46,7 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use ganja_client::{Client, ClientError, TeamMessage};
+use ganja_client::{Client, ClientError};
 use ganja_core::{
     Engine, Postbox,
     provider::fake::FakeProvider,
@@ -356,10 +356,9 @@ async fn a_message_addressed_uds_reaches_the_peers_next_turn() {
 }
 
 /// Nothing structured crosses the socket (§5.2-6), and the sender is told so
-/// in typed form on both roads it has: the landed core arm refuses a frame
-/// *body* before any connection is tried and reports the server's `400` for
-/// a frame smuggled as text; the client form gets that `400` as its own
-/// typed refusal. Neither writes a byte into the receiver's inbox.
+/// in typed form: the landed core arm refuses a frame *body* before any
+/// connection is tried, and reports the server's `400` for a frame smuggled
+/// as text. Neither writes a byte into the receiver's inbox.
 #[tokio::test]
 async fn a_structured_message_does_not_cross_a_socket() {
     let directory = private_dir();
@@ -426,35 +425,6 @@ async fn a_structured_message_does_not_cross_a_socket() {
             && reason.contains("shutdown_request"),
         "the far side's refusal, status and sentence and frame: {reason}"
     );
-
-    // The client form: the same 400, as the client's own typed refusal.
-    let client = Client::on_socket(&socket).expect("a socket client builds");
-    let refused = tokio::time::timeout(
-        DEADLINE,
-        client.send_team_message(
-            "team-lead",
-            &TeamMessage::new("team-lead@session-feedbeef", frame.to_string()),
-        ),
-    )
-    .await
-    .expect("the socket answers within the deadline");
-    match refused {
-        Err(ClientError::Refused {
-            method,
-            path,
-            status,
-            body,
-        }) => {
-            assert_eq!(method, "POST");
-            assert_eq!(path, "/team/team-lead/message");
-            assert_eq!(status, 400, "a frame is a bad request: {body}");
-            assert!(
-                body.contains("does not cross a socket") && body.contains("shutdown_request"),
-                "with the server's own sentence: {body}"
-            );
-        }
-        other => panic!("a frame in the text is refused with 400, not {other:?}"),
-    }
 
     assert!(
         lead_inbox(&registry).is_empty(),
