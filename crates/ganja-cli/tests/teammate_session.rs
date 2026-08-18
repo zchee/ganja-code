@@ -10,12 +10,9 @@
 //!
 //! # Why the teammate is built here rather than spawned through a door
 //!
-//! On this branch there is no door. The `task` tool's `name`/`backend`
-//! arguments are W5a/L3's and the `/team spawn` dialog is W6/L3's, so the
-//! honest test of *the claim this lane owns* — that the row a teammate's second
-//! engine writes is a root row the binary can find and resume — builds the
-//! teammate with the same constructor those doors will call, over the same
-//! store the binary opens. What is exercised end to end is everything from the
+//! It is built with the constructor both doors — the `task` tool's `name`
+//! argument and the `/team spawn` dialog — call, so the row is what is under
+//! test, not the door. What is exercised end to end is everything from the
 //! row outward: the listing, the resume, and the transcript the resumed run
 //! appended to.
 //!
@@ -27,21 +24,21 @@
 //! `id_collision.rs`'s rule, for its reason. So this binary may hold more than
 //! one test.
 //!
-//! # The pane half (W5b/L2)
+//! # The pane half
 //!
 //! [`a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable`]
 //! is AC-25's other leg, and it drives the row from where a pane really writes
 //! it: **a second `ganja` process launched with §4.1's flags**, in a pty of
 //! its own, reading the inbox its lead seeded. What it is *not* is a tmux
-//! pane. The window is `p25/w5b-l1`'s to split and kill; what a pane's process
+//! pane. The window is tmux's to split and kill; what a pane's process
 //! does inside it — resolve the launch line, join the team, take the seeded
 //! task as its first turn, tell the lead it went idle, answer the shutdown
 //! request and leave — is this crate's and the TUI's, and is what the row a
 //! resume opens depends on. So the test launches the binary itself as the
 //! member, hands it a `TMUX_PANE` the way tmux would, and reads back the
-//! frames and the store. When L1's spawn lands, `/team spawn w1 --backend
-//! pane` runs this very launch line, and AC-11's own binary drives it through
-//! that door on a private server.
+//! frames and the store. `/team spawn w1 --backend pane` runs this very
+//! launch line, and AC-11's own binary (`teammate_pane.rs`) drives it
+//! through that door on a private server.
 //!
 //! The team is reached through `ganja_core::team` — the crate re-exports
 //! `ganja-team` under that name — so no second dependency is needed to seed

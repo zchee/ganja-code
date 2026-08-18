@@ -164,7 +164,7 @@ fn agent_id(team: &str, member: &str) -> String {
 /// lead `parent_session` names: the two flags the witness reads, and nothing
 /// else of a real one.
 ///
-/// **Both** flags, because the witness wants both (verify-l4 F1 and F2) and
+/// **Both** flags, because the witness wants both and
 /// every real launch line carries both — `teammate::pane::arguments` and
 /// `teammate::claude::arguments` put `--agent-id` and `--parent-session-id` on
 /// §4.1's own five. A stand-in wearing one of them would be testing a pane this
@@ -281,7 +281,8 @@ async fn a_team_led_by_another_session_is_left_whole() {
     );
 }
 
-/// **verify-l4 F1.** A member whose name is a *suffix* of a sibling's: the
+/// The suffix-collision case: a member whose name is a *suffix* of a
+/// sibling's — the
 /// sibling's live pane must survive a sweep looking for the dead one.
 ///
 /// `build@session-01998ad0` is a substring of `rebuild@session-01998ad0`, so the
@@ -311,7 +312,7 @@ async fn a_siblings_pane_is_not_killed_because_its_name_ends_with_the_dead_ones(
     );
 }
 
-/// **verify-l4 F2.** Two leads inside one 65.536-second team-name bucket share a
+/// The co-tenant case: two leads inside one 65.536-second team-name bucket share a
 /// team *file*, and the document keeps naming whichever of them wrote it first.
 /// A sweep by that lead must leave the co-tenant's **live** panes alone.
 ///

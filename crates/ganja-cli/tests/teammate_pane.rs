@@ -45,8 +45,9 @@
 //! given those explicitly (`-e`, the way a person's `GANJA_CONFIG_HOME=…
 //! ganja` would), and they reach the member's pane only because `pane.rs`
 //! carries them (D502). So the member joining the lead's team at all is the
-//! D502 mechanism working through the real binary; `teammate_env.rs` pins the
-//! same fact with the launch line composed by hand.
+//! D502 mechanism working through the real binary; `teammate_session.rs`'s
+//! pane leg pins the same fact with the launch line composed by hand, and
+//! `teammate_env.rs` from `ps`.
 //!
 //! Nothing here calls `std::env::set_var`: every variable is set on a child,
 //! so the binary holds a second, tmux-free test beside the pane one: the
@@ -94,9 +95,9 @@ const SCRIPT: &str = "script.json";
 /// The teammate's name, as the spec's own line spells it.
 const MEMBER: &str = "w1";
 
-/// The one thing the lead's dialog says right after a spawn (Resolution 4,
-/// D-7): the prompt is on disk in cleartext at a named path. Its presence on
-/// screen is the spawn having gone through the dialog.
+/// The one thing the lead's dialog says right after a spawn (D-7): the
+/// prompt is on disk in cleartext at a named path. Its presence on screen is
+/// the spawn having gone through the dialog.
 const CLEARTEXT_NOTICE: &str = "cleartext at";
 
 /// What the composer draws when nothing else owns the screen — the sign that

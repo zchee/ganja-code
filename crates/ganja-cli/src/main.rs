@@ -225,8 +225,8 @@ impl BypassArgs {
 /// is the one optional member of the set (§4.3 assigns it, but a lead may
 /// have none to give), and it too is meaningless alone.
 ///
-/// The argv contract, spelled out because another lane composes the line
-/// against it:
+/// The argv contract, spelled out because `ganja_core::teammate::pane`'s
+/// `arguments` composes the line against it:
 ///
 /// ```text
 /// ganja [--model P/M] [--agent NAME] [--auto|--yolo|--dangerously-skip-permissions]
@@ -239,7 +239,7 @@ impl BypassArgs {
 /// these flags, and **not** because a lead ever composes them: a spawn's model
 /// travels in the member record (see below) and its agent is that record's
 /// `planModeRequired`. The bracketed pair is what a person could type, not part
-/// of the contract another lane composes against. The bypass trio
+/// of the contract the launch line is composed against. The bypass trio
 /// is the pane's posture (D-5): carried, the teammate answers its own dialogs
 /// (D479); absent, it forwards every ask to the lead as a §5 frame. The pane
 /// id is not on the line — the pane reads `TMUX_PANE` from the environment
@@ -1303,10 +1303,9 @@ async fn sessions_command(args: SessionsArgs) -> Result<()> {
 /// socket with it. Such a socket is listed as live under a `(held)` mark of
 /// its own — nothing answered, which is not the same as an answer this build
 /// cannot read, whose mark is `?` — named as held on stderr, and left alone.
-/// The `.lock` files
-/// themselves are never touched — created once per name and kept, by that
-/// module's design. And a socket that vanishes mid-walk is a server that
-/// stopped and unlinked its own; the walk goes on.
+/// The `.lock` files themselves are claimed, never removed — created once
+/// per name and kept, by that module's design. And a socket that vanishes
+/// mid-walk is a server that stopped and unlinked its own; the walk goes on.
 ///
 /// The health check rides `ganja-client`'s socket form, one client per
 /// socket path (the plan's rule for `unix_socket`); this binary names the
@@ -1485,7 +1484,7 @@ fn private_socket_directory(directory: &std::path::Path) -> Result<bool> {
 
 /// The name's lock, claimed for the unlink, or [`None`] when a live binder
 /// holds it — the binder's own [`ganja_serve::socket::NameLock`], the same
-/// token, taken the same way (**M1** of the W7 boundary review).
+/// token, taken the same way.
 ///
 /// Claimed rather than probed-and-released, because the release *was* the
 /// bug: a binder that claimed the name between a released probe and the
@@ -2163,7 +2162,7 @@ mod tests {
         providers, resolve_filter, title,
     };
 
-    /// **L4 of the W7 boundary review**: the session column of `sessions
+    /// The session column of `sessions
     /// --live` is a peer's word, and a peer that is not a session could put
     /// an escape sequence in it; the column shows an id untouched and
     /// anything else as `?` per character, cut to an id's width.

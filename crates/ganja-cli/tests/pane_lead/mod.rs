@@ -24,8 +24,8 @@
 //!
 //! Nothing here mutates this process's environment: the server, the lead and
 //! the pane are children, and every variable travels to them. So a binary
-//! over this fixture may hold more than one test — and `teammate_permission.rs`
-//! holds one because the plan says so, not because it must.
+//! over this fixture may hold more than one test; `teammate_permission.rs`
+//! happens to hold one.
 
 #![allow(dead_code)]
 

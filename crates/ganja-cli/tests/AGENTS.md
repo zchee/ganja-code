@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
+<!-- Generated: 2026-08-04 | Updated: 2026-08-18 -->
 
 # ganja-cli/tests
 
@@ -22,14 +22,13 @@ Assertions on the shipped binary rather than on library functions: the command-l
 | `pty_smoke.rs` | Unix-only (`#![cfg(unix)]`). Runs the binary under a pty: a fake turn streams into the transcript, a scripted turn runs a read, an edit and a shell command past the permission dialog, and the terminal is left restored however the process exits. |
 | `rewind_drill.rs` | Unix-only. The Esc Esc gesture (**F7**, **D452**) across the two states its guard is about: at an idle composer it opens the rewind picker, while a turn streams it is the cancel and opens nothing, and once that turn is over it opens again — which is also what proves the Esc cancelled. Two Esc bytes in one read are **one** Esc event to crossterm's parser, so each press is its own write with the pty drained between; draining is also what keeps the app running, since a process whose frames nobody reads blocks on its own stdout. |
 | `resume_drill.rs` | Unix-only. The crash drill: a scripted turn is SIGKILLed mid tool call, the store must hold an unfinished envelope with the streamed text, and `--continue` must show that text marked interrupted. The store is read through `ganja_core::Storage` — the same reader the binary uses — rather than by opening files, so the drill pins stored state rather than a layout. Kills wait for pty EOF before reaping — a session leader cannot finish dying while its terminal has unread output. |
-| `id_collision.rs` | **P25 (D493, AC-17)**: the concurrent-writers drill kept as a regression test — N processes started together mint N sessions, and two racing the quarantine leave exactly one aside file. It sets only a *child's* environment through `assert_cmd`, so it may hold several tests. |
+| `id_collision.rs` | **P25 (D493, AC-17)**: the concurrent-writers drill kept as a regression test — N processes started together mint N sessions, and two racing the quarantine leave exactly one aside file. It sets only a *child's* environment through `std::process::Command`, so it may hold several tests. |
 | `teammate_session.rs` | **P25 (AC-25)**, D-8's second half in the surface it is claimed about: a teammate's session shows up in `ganja sessions` (so its `parent` is `None`) and `ganja run --session <id>` opens it — for an in-process teammate, and separately for a ganja pane writing its own row. The lead's own run is there to give the store a second root row, because a listing that showed the teammate by showing everything would prove nothing about the filter. |
-| `teammate_pane.rs` | Unix-only. **P25 (AC-11)**: a pane teammate driven through `/team spawn w1 --backend pane` — the spec's own spelling — on a private tmux server (`tmux -L ganja-test-$$`), created and killed on `shutdown_approved`. **Hard-fails without tmux.** The lead is hosted *in a tmux pane itself*, because a full-screen app is unreadable off a byte stream while a pane is a readable pty. Where a message must be observed appearing and then vanishing, the lead is held still with `SIGSTOP` and let go with `SIGCONT` under an RAII guard, which is what makes that assertion race-free rather than usually-right. |
+| `teammate_pane.rs` | Unix-only. **P25 (AC-11)**: a pane teammate driven through `/team spawn w1 --backend pane` — the spec's own spelling — on a private tmux server (`tmux -S <socket>` on a temp dir), created and killed on `shutdown_approved`. **Hard-fails without tmux.** The lead is hosted *in a tmux pane itself*, because a full-screen app is unreadable off a byte stream while a pane is a readable pty. Where a message must be observed appearing and then vanishing, the lead is held still with `SIGSTOP` and let go with `SIGCONT` under an RAII guard, which is what makes that assertion race-free rather than usually-right. |
 | `teammate_env.rs` | **P25 (D502)**: what a pane's launch line and environment must carry and what they must not — the argv-secrets pin, and a pane joining the team when the tmux server predates the config-home export. |
 | `teammate_permission.rs` | **P25 (AC-8)**: two real processes on a private tmux server — the pane asks, a `permission_request` crosses, the lead's dialog answers, a `permission_response` comes back, the call proceeds. |
-| `teammate_reaper.rs` | **P25 (AC-12, D506)**: an orphaned pane is reaped at lead startup, and a **recycled** pane id is not killed. The second is the one that matters — the witness re-derives identity from what the pane is running, which is what closed both the suffix-collision kill and the co-tenant-lead kill demonstrated before the fix. |
-| `uds.rs` / `session_socket.rs` | **P25 (D505, AC-9, AC-22)**: the cross-session socket end to end — a `uds:`-addressed message reaching a peer's next turn, a structured message refused rather than crossing, a socket owned by another user refused, an over-long path refused naming the limit, and `sessions --live` listing the living while unlinking only the dead. `session_socket.rs` is the same scheme through the real binary, from the binder's side. |
-| `pane_lead/` | The tmux-hosted-lead helper the pane suites share; a module, not a binary. |
+| `uds.rs` / `session_socket.rs` | **P25 (D505, AC-9, AC-22)**: the cross-session socket end to end — a `uds:`-addressed message reaching a peer's next turn, a structured message refused rather than crossing, a loosened or linked socket directory refused by the shipped listing, and `sessions --live` listing the living while unlinking only the dead. AC-9's other-uid legs live where they are decided: `ganja-tool/src/socket.rs`'s `vet` unit tests and `ganja-serve/src/socket.rs`'s accept check. `session_socket.rs` is the same scheme through the real binary, from the binder's side. |
+| `pane_lead/` | The tmux-hosted-lead helper shared by `teammate_permission.rs` and `teammate_env.rs` (`teammate_pane.rs` hosts its lead in a *split* pane and carries its own glue); a module, not a binary, over `ganja_testkit::tmux`'s server. |
 
 ## For AI Agents
 
@@ -64,7 +63,7 @@ Timeouts are generous on purpose (`EXIT_DEADLINE` is 10s): a timeout here should
 
 ### Internal
 
-The built `ganja` binary, located by `assert_cmd`.
+The built `ganja` binary, located by `assert_cmd`; `ganja-testkit` for the private tmux server, the project/data-home `Homes` fixture and the team-file seeder the pane and drill suites share with `ganja-core`'s.
 
 ### External
 

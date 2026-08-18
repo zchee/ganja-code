@@ -56,8 +56,7 @@ use ganja_protocol::is_uuidv7;
 use ganja_testkit::Homes;
 use serde_json::json;
 
-/// How many processes are released together. The N the live drill ran at, and
-/// the one W1's exit gate names.
+/// How many processes are released together — the N the live drill ran at.
 const PROCESSES: usize = 6;
 
 /// How many times the drill is repeated, each round in its own project and its
@@ -310,7 +309,7 @@ fn n_processes_started_together_mint_n_sessions() {
     }
 }
 
-/// The other half of pre-mortem 1: two processes opening the same pre-UUIDv7
+/// The other half of D493's drill: two processes opening the same pre-UUIDv7
 /// store must leave **one** aside file, not two, and must delete nothing.
 ///
 /// The store is planted rather than found: a run creates it (so the project
