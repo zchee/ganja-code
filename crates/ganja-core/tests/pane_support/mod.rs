@@ -25,6 +25,9 @@
 //! home is the lead's, and a credential planted in the lead's environment is a
 //! name that must not appear.
 
+// Each pane binary compiles this module separately and uses only part of it
+// (`title` is lifecycle's alone, `global_has`/`start_command` env's), so the
+// unused half differs per binary and a targeted allow cannot name it.
 #![allow(dead_code)]
 
 use std::{
@@ -45,7 +48,6 @@ use ganja_core::{
         InProcess, TeammateRegistry,
         claude::ClaudePane,
         pane::{AGENT_ID, AGENT_NAME, GanjaPane, TEAM_NAME},
-        reaper::Pane,
     },
     tool::{
         Credentials, FileTimes, Registry, ToolCtx,
@@ -234,11 +236,6 @@ impl PrivateServer {
         &self.socket
     }
 
-    /// The pane the lead pretends to run in, for `$TMUX_PANE`.
-    pub fn first_pane(&self) -> &str {
-        &self.first_pane
-    }
-
     /// Points this process at the private server the way tmux would have:
     /// `$TMUX` and `$TMUX_PANE`.
     ///
@@ -251,25 +248,6 @@ impl PrivateServer {
             std::env::set_var("TMUX", format!("{},0,0", self.socket.display()));
             std::env::set_var("TMUX_PANE", &self.first_pane);
         }
-    }
-
-    /// The live panes as `(id, pid)` pairs, read with the same format
-    /// production reads.
-    pub fn panes(&self) -> Vec<Pane> {
-        tmux(
-            &self.socket,
-            &["list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"],
-        )
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let (id, birth) = line.trim().split_once(' ').expect("id and pid");
-            Pane {
-                id: id.to_owned(),
-                birth: birth.to_owned(),
-            }
-        })
-        .collect()
     }
 
     /// Whether the server's **global** environment — what every pane it makes
