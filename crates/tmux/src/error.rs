@@ -29,6 +29,20 @@
 //! improvement on Go's shape: Go uses `Line == ""` as its own "no line"
 //! sentinel (the only site that leaves it unset is exactly this EOF case),
 //! which Rust makes an explicit `None` instead of an ambiguous empty string.
+//!
+//! # `Error` is `Clone` (W2 divergence)
+//!
+//! Go's `error` interface needs no such bound; this port's [`Error`] does,
+//! because W2's `Client` stores one abort cause and must hand an owned copy
+//! of it to every subsequent caller that observes the client as closed
+//! (`closed_error`, read many times, never consumed). [`Error::Io`] and
+//! [`Error::Spawn`] therefore wrap their `std::io::Error` in `Arc` rather
+//! than owning it directly — `Arc` is `Clone` regardless of whether its
+//! payload is, which is what makes `#[derive(Clone)]` on the whole enum
+//! possible without hand-rolling a clone that reconstructs an `io::Error`
+//! from its `.kind()` and loses the original message.
+
+use std::sync::Arc;
 
 use crate::protocol::Response;
 
@@ -87,8 +101,9 @@ fn exit_message(reason: &str) -> String {
 /// Ports Go's `errors.go` as a whole: the package-level sentinels
 /// (`ErrClosed`, `errDetachSkippedWriteLocked`) become unit variants, and
 /// `CommandError`/`ProtocolError`/`ExitError` become wrapping variants.
-/// `#[non_exhaustive]` — see the module doc.
-#[derive(Debug, thiserror::Error)]
+/// `#[non_exhaustive]` — see the module doc. `Clone` — see the module doc's
+/// `Error is Clone` section.
+#[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// An operation was attempted after client shutdown began.
@@ -120,9 +135,9 @@ pub enum Error {
     Io {
         /// What was being attempted when it failed.
         context: String,
-        /// The underlying I/O failure.
+        /// The underlying I/O failure. `Arc`-wrapped — see the module doc.
         #[source]
-        source: std::io::Error,
+        source: Arc<std::io::Error>,
     },
 
     /// `close` skipped the best-effort `detach-client` write because
@@ -131,6 +146,84 @@ pub enum Error {
     /// Ports Go's `errDetachSkippedWriteLocked` sentinel.
     #[error("tmux: detach-client skipped: write lock held")]
     DetachSkippedWriteLocked,
+
+    /// An [`crate::options::Options`] combination failed validation.
+    ///
+    /// Ports the `fmt.Errorf` sites in Go's `Options.validate`; added in W2
+    /// since that type does not exist until this wave.
+    #[error("tmux: {message}")]
+    InvalidOptions {
+        /// The violated rule, in the same wording as the Go original.
+        message: String,
+    },
+
+    /// Starting the tmux executable failed: it could not be found on
+    /// `PATH`, or the subprocess would not spawn.
+    ///
+    /// Ports the two `fmt.Errorf("tmux: find executable: %w", err)` /
+    /// `fmt.Errorf("tmux: start %q: %w", path, err)` sites in Go's `New`;
+    /// added in W2 since spawning does not exist until this wave.
+    #[error("tmux: start {path:?}: {source}")]
+    Spawn {
+        /// The resolved (or attempted) executable path.
+        path: String,
+        /// The underlying I/O failure. `Arc`-wrapped — see the module doc.
+        #[source]
+        source: Arc<std::io::Error>,
+    },
+
+    /// A command was sent while another command's response was still
+    /// pending.
+    ///
+    /// Ports Go's `registerPending`'s `"tmux: another command is already
+    /// pending"`; added in W2 since command serialization does not exist
+    /// until this wave.
+    #[error("tmux: another command is already pending")]
+    AlreadyPending,
+
+    /// Rendering a [`crate::CommandLine`] or validating a raw command line
+    /// failed.
+    ///
+    /// Ports the `fmt.Errorf` sites `CommandLine.String` and
+    /// `ExecRaw`/`validateRawLine` share in Go, folded here into one
+    /// `#[from]` conversion of [`crate::commandline::RenderError`]; added in
+    /// W2 since `Client::exec`/`exec_line`/`exec_raw` are this wave's.
+    #[error(transparent)]
+    InvalidCommand(#[from] crate::commandline::RenderError),
+
+    /// [`crate::Client::new`]'s initial command did not complete
+    /// successfully.
+    ///
+    /// Ports Go's `fmt.Errorf("tmux: initial command: %w", result.err)` in
+    /// `New`; added in W2 since startup does not exist until this wave.
+    #[error("tmux: initial command: {source}")]
+    Startup {
+        /// Why the initial command failed.
+        #[source]
+        source: Box<Error>,
+    },
+
+    /// One or more failures occurred while closing the client.
+    ///
+    /// Ports Go's `Close`'s `errors.Join(errs...)`; added in W2 since
+    /// `Client::close` does not exist until this wave. Unlike
+    /// `errors.Join`, a single failure still renders through this variant
+    /// rather than surfacing bare, which keeps `close`'s return type a
+    /// plain `Result<(), Error>` instead of `Result<(), Option<Error>>`.
+    #[error("tmux: close: {}", join_close_errors(.errors))]
+    Close {
+        /// Every failure observed during shutdown, in the order Go's
+        /// `Close` would have joined them.
+        errors: Vec<Error>,
+    },
+}
+
+fn join_close_errors(errors: &[Error]) -> String {
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(test)]

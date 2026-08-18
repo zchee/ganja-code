@@ -204,15 +204,7 @@ fn is_bare_arg(value: &str) -> bool {
 /// newlines.
 ///
 /// Spec: pandaemonium pkg/tmux/commandline.go (`validateRawLine`); used by
-/// the client's `exec_raw` (a later wave).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the non-test caller is W2's Client::exec_raw; remove this \
-                  expectation in the same change that adds it"
-    )
-)]
+/// [`crate::Client::exec_raw`].
 pub(crate) fn validate_raw_line(line: &str) -> Result<(), RenderError> {
     if line.trim().is_empty() {
         return Err(RenderError::new("tmux: command line must not be empty"));
