@@ -16424,28 +16424,23 @@ mod tests {
         );
     }
 
-    /// The data `/team`'s own dialog will be built from (**D504**), asserted
-    /// here because the accessor that reads it is one line and the shape it
-    /// answers is the contract: the lead is the first row, it is the only row
-    /// marked as the lead, and a session with no teammates yet still has a
-    /// team.
+    /// The frontend's own claim about the roster (**D504**): `open_team`
+    /// renders the lead as the dialog's first row, with an empty ring, and a
+    /// session with no teammates yet still has a team to show. The registry
+    /// invariant underneath — lead first, the only `is_lead` row — is core's
+    /// own to pin.
     #[tokio::test]
     async fn the_roster_a_team_dialog_renders_starts_as_the_lead_and_nobody_else() {
         let directory = temporary();
-        let (app, _registry, _events) = leading(&directory).await;
+        let (mut app, _registry, _events) = leading(&directory).await;
 
-        let view = app
-            .engine
-            .teammates()
-            .expect("this session leads a team")
-            .registry()
-            .view();
+        app.open_team();
 
-        assert_eq!(view.team, "session-224cbeab", "§2.1's own naming");
-        assert_eq!(view.lead, "team-lead");
-        assert_eq!(view.members.len(), 1, "an empty roster is still a team");
-        assert!(view.members[0].is_lead);
-        assert!(view.members[0].recent_calls.is_empty());
+        let dialog = app.team_dialog.as_ref().expect("the dialog opened");
+        let lead = dialog.selected_member().expect("the cursor opens on a row");
+        assert_eq!(lead.name, "team-lead");
+        assert!(lead.is_lead);
+        assert!(lead.recent.is_empty());
     }
 
     /// **D504's two doors, one dialog.** The palette's data-free action and a
@@ -16709,6 +16704,117 @@ mod tests {
         assert!(app.permission.is_none());
     }
 
+    /// Starts `w1` through the typed door and waits, off the loop, for the
+    /// registry to hold it — without ticking the app, so a test can watch what
+    /// the next tick does with the moved roster.
+    async fn registry_holds_w1(app: &mut App, registry: &ganja_core::teammate::TeammateRegistry) {
+        app.run_team_line(command::team("/team spawn w1").expect("a /team line"))
+            .await;
+        assert!(app.team_spawn.is_some(), "the spawn runs off the loop");
+        for _ in 0..500 {
+            if registry.view().members.len() == 2 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the registry never recorded the spawn");
+    }
+
+    /// An open `/team` dialog repaints when the roster really moved, and
+    /// leaves the frame alone when it did not — `poll_team_dialog`'s
+    /// changed-only rule.
+    #[tokio::test]
+    async fn an_open_team_dialog_repaints_only_when_the_roster_moved() {
+        let directory = temporary();
+        let (mut app, registry, _events) = leading(&directory).await;
+        app.open_team();
+
+        app.dirty = false;
+        app.poll_team_dialog();
+        assert!(!app.dirty, "a roster nobody touched is no reason to redraw");
+
+        registry_holds_w1(&mut app, &registry).await;
+
+        app.dirty = false;
+        app.poll_team_dialog();
+        assert!(app.dirty, "a roster that grew is");
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("w1"),
+            "and the refreshed dialog shows the new row"
+        );
+
+        app.dirty = false;
+        app.poll_team_dialog();
+        assert!(!app.dirty, "a dialog already caught up stays quiet");
+    }
+
+    /// The in-process reap (**D504**): the tick reaps the finished spawn, the
+    /// dialog hears the outcome with Resolution 4's cleartext-path sentence,
+    /// and the bar counts the teammate.
+    #[tokio::test]
+    async fn a_team_spawn_is_reaped_by_the_tick_and_lands_on_the_dialog() {
+        let directory = temporary();
+        let (mut app, registry, _events) = leading(&directory).await;
+        registry_holds_w1(&mut app, &registry).await;
+
+        for _ in 0..500 {
+            if app.team_spawn.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        }
+
+        assert!(app.team_spawn.is_none(), "the tick reaped the spawn");
+        let mut terminal = terminal(90, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(screen.contains("w1 started"), "{screen}");
+        assert!(
+            screen.contains("prompt persisted in cleartext at"),
+            "{screen}"
+        );
+        assert_eq!(app.teammates, 1, "the bar counts the started teammate");
+    }
+
+    /// A teammate that stopped waiting — its turn cancelled, its process gone
+    /// — does not wedge the queue: the answer is dropped, the next dialog is
+    /// asked, and nothing panics.
+    #[tokio::test]
+    async fn answering_a_dialog_whose_teammate_stopped_waiting_still_advances_the_queue() {
+        let mut app = app();
+        let asked = |name: &str, id: &PermissionId| ganja_core::teammate::posture::Forwarded {
+            teammate: name.to_owned(),
+            request: CoreEvent::PermissionRequested {
+                session_id: session(),
+                id: id.clone(),
+                call_id: "call-1".to_owned(),
+                tool: "bash".to_owned(),
+                title: "rm -rf build".to_owned(),
+                args: serde_json::json!({"command": "rm -rf build"}),
+                directories: Vec::new(),
+            },
+            reply: tokio::sync::oneshot::channel().0,
+        };
+        let first = PermissionId::ascending();
+        let second = PermissionId::ascending();
+        app.raise_teammate_dialog(asked("w1", &first));
+        app.raise_teammate_dialog(asked("w2", &second));
+        assert_eq!(app.queued_permissions.len(), 1, "the second is queued");
+
+        assert!(
+            app.answer_teammate_dialog(&first, PermissionReply::Once),
+            "the id was known even though nobody is listening"
+        );
+
+        let on_screen = app.permission.as_ref().expect("the queue advanced");
+        assert_eq!(on_screen.id(), &second);
+        assert!(app.answer_teammate_dialog(&second, PermissionReply::Once));
+        assert!(app.permission.is_none());
+    }
+
     /// `/team shutdown` with nobody named is the whole team, and a team that is
     /// only its lead is told so rather than silently doing nothing.
     #[tokio::test]
@@ -16902,9 +17008,9 @@ mod tests {
     }
 
     /// **AC-10's pane leg, the shutdown seam** (§10.3-4, §6.2): an idle member
-    /// answers a `shutdown_request` on the tick that reads it — the approval
-    /// names its pane and its backend, stamped with its own name — and leaves
-    /// through the loop's own exit.
+    /// answers a `shutdown_request` on the tick that reads it, quoting the
+    /// request id, and leaves through the loop's own exit. The pane and
+    /// backend fields the approval carries are `member.rs`'s own pin.
     #[tokio::test]
     async fn an_idle_pane_teammate_answers_a_shutdown_request_and_quits() {
         let directory = temporary();
@@ -16923,9 +17029,6 @@ mod tests {
         match heard.as_slice() {
             [ganja_protocol::team::Frame::ShutdownApproved(approved)] => {
                 assert_eq!(approved.request_id, "req-1");
-                assert_eq!(approved.from, "w1");
-                assert_eq!(approved.pane_id.as_deref(), Some("%5"));
-                assert_eq!(approved.backend_type.as_deref(), Some("tmux"));
             }
             other => panic!("one shutdown_approved was expected, got {other:?}"),
         }

@@ -1393,6 +1393,23 @@ mod tests {
         assert_eq!(dialog.submit(), Some(Effect::Shutdown("w2".to_owned())));
     }
 
+    /// The word on a row is serde's own wire spelling of the backend — which
+    /// is also the word a person would type after `--backend` to ask for
+    /// another one like it.
+    #[test]
+    fn the_backend_label_is_the_wires_own_spelling() {
+        for backend in [
+            MemberBackend::InProcess,
+            MemberBackend::Pane,
+            MemberBackend::Claude,
+        ] {
+            assert_eq!(
+                serde_json::to_value(backend).expect("a backend serializes"),
+                serde_json::Value::String(super::backend_label(backend).to_owned()),
+            );
+        }
+    }
+
     /// The input step's prompt and the grammar a refusal names are one
     /// constant, so the dialog cannot teach a spelling `team_spawn` refuses.
     #[test]
