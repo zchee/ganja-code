@@ -14,9 +14,105 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    name: test/${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-26.04
+          - ubuntu-26.04-arm
+          - xcode-27
+          # A windows-2025 entry stood here (and a windows-lint job above)
+          # until 2026-08-12: windows support is parked for now, and the
+          # lanes left with it. The cfg(windows) code still in the tree has
+          # no compile signal while this holds; a revival is a deliberate
+          # decision that starts observational again, not a paused lane
+          # flipping back.
+
+    # Naming bash adds pipefail to every run step, which the runners'
+    # implicit `bash -e` default does not.
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # The same date rust-toolchain.toml pins — this action does not read
+          # that file. The LSP diagnostics drill spawns rust-analyzer from
+          # PATH; the component ships it with the pinned toolchain on every
+          # runner.
+          toolchain: nightly-2026-08-07
+          components: rust-analyzer
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The suite runs under nextest, which gives each test its own process —
+      # the tests that mutate process-wide environment are isolated by that
+      # rather than by staying off one thread. Installed from a prebuilt
+      # binary rather than compiled.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # The golden differential test drives the real upstream opencode at its
+      # pinned tag, headless under bun, and hard-fails when the checkout is
+      # missing rather than silently comparing against nothing — so CI has to
+      # provide both. The checkout lands in upstream/, which exists only on
+      # the runner: .omc/ is local tooling state and never committed, so the
+      # workflow cannot assume it and should not create it.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: check out the upstream behavioral spec
+        uses: actions/checkout@v7
+        with:
+          repository: anomalyco/opencode
+          ref: v1.18.13
+          path: upstream/opencode-v1.18.13
+          persist-credentials: false
+
+      - name: cache the upstream dependency install
+        uses: actions/cache@v6
+        with:
+          path: upstream/opencode-v1.18.13/node_modules
+          key: opencode-v1.18.13-${{ runner.os }}-${{ hashFiles('upstream/opencode-v1.18.13/bun.lock') }}
+
+      - name: install the upstream dependencies
+        working-directory: upstream/opencode-v1.18.13
+        run: bun install --frozen-lockfile
+
+      - name: test
+        run: cargo nextest run --workspace --profile ci
+        env:
+          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.13
+          # A shared runner under load adds whole seconds of queueing to the
+          # lsp drill's timed edit, so CI holds the drill just past the
+          # client's own 5s ceiling; the tighter 3s default stays what a
+          # development machine is held to. At 5s the client itself stops
+          # waiting and the drill fails on the missing diagnostics block, so
+          # this cannot mask a wedge — the margin above the ceiling covers
+          # only the drill's own bookkeeping around the call, which its clock
+          # includes and the client's does not (a budget equal to the ceiling
+          # lost to exactly that, 5002ms with the complaint attached).
+          GANJA_LSP_EDIT_BUDGET_MS: "6000"
+
+      # nextest does not run doctests, so they get their own step; the
+      # testkit's builder examples are what it runs today.
+      - name: doc-tests
+        run: cargo test --workspace --doc
+        env:
+          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.13
+
   lint:
     name: lint
     runs-on: ubuntu-26.04
+
     steps:
       - uses: actions/checkout@v7
 
@@ -51,10 +147,10 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
       - name: ganja-core stays free of terminal dependencies
-        run: '! cargo tree -p ganja-core -e normal | grep -q ratatui'
+        run: "! cargo tree -p ganja-core -e normal | grep -q ratatui"
 
       - name: ganja-core stays free of the http server
-        run: '! cargo tree -p ganja-core -e normal | grep -q axum'
+        run: "! cargo tree -p ganja-core -e normal | grep -q axum"
 
       # Allowlist form, not a blocklist grep: a `! grep -q ganja-core` names
       # one crate and silently weakens the day a new internal crate appears —
@@ -167,12 +263,12 @@ jobs:
         run: |
           awk 'FNR==1{sec=""} /^\[/{sec=$0} sec ~ /dependencies/ && /version[[:space:]]*=/ {print FILENAME ":" FNR ": " $0; bad=1} END{exit bad}' crates/*/Cargo.toml
 
+  # Advisories, licenses, bans and source-registry checks are static
+  # analysis over Cargo.lock metadata, not compiled code, so the result
+  # cannot differ between the test job's ubuntu and xcode runners; running
+  # it once here instead of across that matrix isn't a coverage gap.
   deny:
     name: deny
-    # Advisories, licenses, bans and source-registry checks are static
-    # analysis over Cargo.lock metadata, not compiled code, so the result
-    # cannot differ between the test job's ubuntu and xcode runners; running
-    # it once here instead of across that matrix isn't a coverage gap.
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
@@ -192,95 +288,3 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-26.04
-          - xcode-27
-          # A windows-2025 entry stood here (and a windows-lint job above)
-          # until 2026-08-12: windows support is parked for now, and the
-          # lanes left with it. The cfg(windows) code still in the tree has
-          # no compile signal while this holds; a revival is a deliberate
-          # decision that starts observational again, not a paused lane
-          # flipping back.
-    runs-on: ${{ matrix.os }}
-    # Naming bash adds pipefail to every run step, which the runners'
-    # implicit `bash -e` default does not.
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          # The same date rust-toolchain.toml pins — this action does not read
-          # that file. The LSP diagnostics drill spawns rust-analyzer from
-          # PATH; the component ships it with the pinned toolchain on every
-          # runner.
-          toolchain: nightly-2026-08-07
-          components: rust-analyzer
-
-      - uses: Swatinem/rust-cache@v2
-
-      # The suite runs under nextest, which gives each test its own process —
-      # the tests that mutate process-wide environment are isolated by that
-      # rather than by staying off one thread. Installed from a prebuilt
-      # binary rather than compiled.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-
-      # The golden differential test drives the real upstream opencode at its
-      # pinned tag, headless under bun, and hard-fails when the checkout is
-      # missing rather than silently comparing against nothing — so CI has to
-      # provide both. The checkout lands in upstream/, which exists only on
-      # the runner: .omc/ is local tooling state and never committed, so the
-      # workflow cannot assume it and should not create it.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-
-      - name: check out the upstream behavioral spec
-        uses: actions/checkout@v7
-        with:
-          repository: anomalyco/opencode
-          ref: v1.18.13
-          path: upstream/opencode-v1.18.13
-          persist-credentials: false
-
-      - name: cache the upstream dependency install
-        uses: actions/cache@v6
-        with:
-          path: upstream/opencode-v1.18.13/node_modules
-          key: opencode-v1.18.13-${{ runner.os }}-${{ hashFiles('upstream/opencode-v1.18.13/bun.lock') }}
-
-      - name: install the upstream dependencies
-        working-directory: upstream/opencode-v1.18.13
-        run: bun install --frozen-lockfile
-
-      - name: test
-        run: cargo nextest run --workspace --profile ci
-        env:
-          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.13
-          # A shared runner under load adds whole seconds of queueing to the
-          # lsp drill's timed edit, so CI holds the drill just past the
-          # client's own 5s ceiling; the tighter 3s default stays what a
-          # development machine is held to. At 5s the client itself stops
-          # waiting and the drill fails on the missing diagnostics block, so
-          # this cannot mask a wedge — the margin above the ceiling covers
-          # only the drill's own bookkeeping around the call, which its clock
-          # includes and the client's does not (a budget equal to the ceiling
-          # lost to exactly that, 5002ms with the complaint attached).
-          GANJA_LSP_EDIT_BUDGET_MS: "6000"
-
-      # nextest does not run doctests, so they get their own step; the
-      # testkit's builder examples are what it runs today.
-      - name: doc-tests
-        run: cargo test --workspace --doc
-        env:
-          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.13
