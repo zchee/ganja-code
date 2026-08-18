@@ -32,7 +32,7 @@ mod tool;
 
 pub use agent::agent_registry;
 pub use drain::{drain, drain_allowing, drain_answering};
-pub use fs::{redirect_xdg_data_home, temp_dir};
+pub use fs::{Homes, redirect_xdg_data_home, temp_dir};
 pub use provider::{ScriptedProvider, says, tool_call};
 pub use session::{
     PRE_UUID_ID, entries, plant_preuuid_store, seed_message, seed_session, seeded_session_info,

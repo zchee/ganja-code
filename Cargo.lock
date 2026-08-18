@@ -1284,6 +1284,7 @@ dependencies = [
  "ganja-protocol",
  "ganja-provider",
  "ganja-serve",
+ "ganja-testkit",
  "ganja-tui",
  "jsonc-parser",
  "libc",

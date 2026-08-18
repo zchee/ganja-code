@@ -29,19 +29,17 @@
 //! through [`Server::at`] rather than `$TMUX`. Storage never enters it — a
 //! [`TeammateRegistry`] over an explicit [`TeamsRoot`] is all a sweep reads.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::PathBuf;
 
 use ganja_core::{
-    team::{MemberName, MemberRecord, Spawn, Surface, TeamFile, TeamName, TeamsRoot, record},
+    team::{MemberName, Spawn, Surface, TeamFile, TeamName, TeamsRoot},
     teammate::{
         TeammateRegistry,
         reaper::{self, Fate},
         tmux::Server,
     },
 };
+use ganja_testkit::tmux::{PrivateServer, require_tmux};
 use tempfile::TempDir;
 
 /// The lead's session, and therefore §2.1's team name: `session-01998ad0`.
@@ -64,102 +62,23 @@ const OTHER_SESSION: &str = "01998ad0-1111-7000-8000-000000000000";
 /// it was given.
 const IDLE: &str = "sleep 300; :";
 
-/// A tmux server of this test's own, on a socket nothing else knows.
-struct PrivateServer {
-    socket: PathBuf,
-    _dir: TempDir,
+/// A tmux server of this test's own ([`ganja_testkit::tmux`]'s, killed on
+/// drop with its stand-in shells and their `sleep`s), holding a single pane
+/// that outlives every test in it.
+fn server() -> PrivateServer {
+    require_tmux();
+
+    PrivateServer::start(&["sleep", "3600"], &[], &[])
 }
 
-impl PrivateServer {
-    /// Starts one, holding a single pane that outlives every test in it.
-    fn start() -> Self {
-        let dir = tempfile::tempdir().expect("a temporary directory for the socket");
-        let socket = dir.path().join("tmux.sock");
-        let started = Command::new("tmux")
-            .arg("-S")
-            .arg(&socket)
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                "ganja-reaper",
-                "-x",
-                "200",
-                "-y",
-                "50",
-            ])
-            .args(["sleep", "3600"])
-            .output()
-            .expect("tmux starts a private server");
-        assert!(
-            started.status.success(),
-            "the private tmux server did not start: {}",
-            String::from_utf8_lossy(&started.stderr)
-        );
-
-        Self { socket, _dir: dir }
-    }
-
-    /// The socket, for [`Server::at`].
-    fn socket(&self) -> &Path {
-        &self.socket
-    }
-
-    /// Splits a pane running `argv` and answers its id.
-    fn split(&self, argv: &[&str]) -> String {
-        let id = self
-            .tmux(
-                &["split-window", "-d", "-P", "-F", "#{pane_id}", "--"],
-                argv,
-            )
-            .trim()
-            .to_owned();
-        assert!(id.starts_with('%'), "a split answers a pane id: {id:?}");
-
-        id
-    }
-
-    /// Whether a pane by that id is on the server right now.
-    fn holds(&self, pane_id: &str) -> bool {
-        self.tmux(&["list-panes", "-a", "-F", "#{pane_id}"], &[])
-            .lines()
-            .any(|line| line.trim() == pane_id)
-    }
-
-    /// Ends a pane, for the test that wants a record with nothing behind it.
-    fn kill(&self, pane_id: &str) {
-        self.tmux(&["kill-pane", "-t", pane_id], &[]);
-    }
-
-    /// One client call against this server, and its stdout.
-    fn tmux(&self, args: &[&str], rest: &[&str]) -> String {
-        let output = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .args(args)
-            .args(rest)
-            .output()
-            .expect("the tmux client runs");
-        assert!(
-            output.status.success(),
-            "tmux {args:?} {rest:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
+/// Whether a pane by that id is on the server right now.
+fn holds(server: &PrivateServer, pane_id: &str) -> bool {
+    server.panes().iter().any(|id| id == pane_id)
 }
 
-impl Drop for PrivateServer {
-    fn drop(&mut self) {
-        // Takes the stand-in shells and their `sleep`s with it, however a test
-        // ended.
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .output();
-    }
+/// Ends a pane, for the test that wants a record with nothing behind it.
+fn kill(server: &PrivateServer, pane_id: &str) {
+    server.run(&["kill-pane", "-t", pane_id]);
 }
 
 /// A team on disk: the root, the name, and the file a sweep reads.
@@ -174,37 +93,29 @@ impl Team {
     /// Writes a team file led by `lead_session`, holding one member per
     /// `(name, surface)` pair.
     fn written(team: &str, lead_session: &str, members: &[(&str, Surface)]) -> Self {
-        let home = tempfile::tempdir().expect("a temporary config home");
+        let home = ganja_testkit::temp_dir();
         let root = TeamsRoot::new(home.path().join("teams"));
         let name = TeamName::parse(team).expect("a team name");
         let cwd = home.path().to_string_lossy().into_owned();
 
-        let mut file = TeamFile::new(&name, lead_session, cwd.clone(), record::now_millis());
-        for (member, surface) in members {
-            file.members.push(MemberRecord::teammate(
-                &MemberName::parse(member).expect("a member name"),
-                &name,
-                Spawn {
-                    agent_type: "general".to_owned(),
-                    model: "fake/fake".to_owned(),
-                    color: "blue".to_owned(),
-                    prompt: "watch the build".to_owned(),
-                    plan_mode_required: false,
-                    surface: surface.clone(),
-                    cwd: cwd.clone(),
-                },
-                record::now_millis(),
-            ));
-        }
-
-        let path = root.config_path(&name);
-        std::fs::create_dir_all(path.parent().expect("a team directory"))
-            .expect("the team directory is made");
-        std::fs::write(
-            &path,
-            record::document(&file).expect("the team file encodes"),
-        )
-        .expect("the team file is written");
+        let members: Vec<(MemberName, Spawn)> = members
+            .iter()
+            .map(|(member, surface)| {
+                (
+                    MemberName::parse(member).expect("a member name"),
+                    Spawn {
+                        agent_type: "general".to_owned(),
+                        model: "fake/fake".to_owned(),
+                        color: "blue".to_owned(),
+                        prompt: "watch the build".to_owned(),
+                        plan_mode_required: false,
+                        surface: surface.clone(),
+                        cwd: cwd.clone(),
+                    },
+                )
+            })
+            .collect();
+        let path = ganja_testkit::seed_team_file(&root, &name, lead_session, home.path(), &members);
 
         Self {
             _home: home,
@@ -259,31 +170,35 @@ fn agent_id(team: &str, member: &str) -> String {
 /// §4.1's own five. A stand-in wearing one of them would be testing a pane this
 /// build never spawns.
 fn teammate_pane(server: &PrivateServer, agent_id: &str, parent_session: &str) -> String {
-    server.split(&[
-        "/bin/sh",
-        "-c",
-        IDLE,
-        "--agent-id",
-        agent_id,
-        "--parent-session-id",
-        parent_session,
-    ])
+    server.split(
+        None,
+        &[],
+        &[
+            "/bin/sh",
+            "-c",
+            IDLE,
+            "--agent-id",
+            agent_id,
+            "--parent-session-id",
+            parent_session,
+        ],
+    )
 }
 
 /// Splits a pane belonging to nobody in this team — what a recycled `%N` is
 /// wearing by the time a sweep meets it.
 fn stranger_pane(server: &PrivateServer) -> String {
-    server.split(&["/bin/sh", "-c", IDLE])
+    server.split(None, &[], &["/bin/sh", "-c", IDLE])
 }
 
 /// A pane still running its teammate is an orphan of the lead that died: the
 /// sweep ends it, and the record goes with it.
 #[tokio::test]
 async fn an_orphaned_pane_is_reaped_at_lead_startup() {
-    let server = PrivateServer::start();
+    let server = server();
     let pane = teammate_pane(&server, &agent_id("session-01998ad0", "worker"), SESSION);
     let team = Team::written("session-01998ad0", SESSION, &[("worker", on(&pane))]);
-    assert!(server.holds(&pane), "the stand-in pane is running");
+    assert!(holds(&server, &pane), "the stand-in pane is running");
 
     let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
 
@@ -292,7 +207,7 @@ async fn an_orphaned_pane_is_reaped_at_lead_startup() {
         Some(Fate::Reaped),
         "the orphan was ended: {swept:?}"
     );
-    assert!(!server.holds(&pane), "and its pane is gone: {pane}");
+    assert!(!holds(&server, &pane), "and its pane is gone: {pane}");
     assert_eq!(
         team.members(),
         vec!["team-lead".to_owned()],
@@ -304,7 +219,7 @@ async fn an_orphaned_pane_is_reaped_at_lead_startup() {
 /// work. It must survive — the record is what is stale, not the window.
 #[tokio::test]
 async fn a_recycled_pane_id_is_not_killed() {
-    let server = PrivateServer::start();
+    let server = server();
     // No `--agent-id` on it at all: tmux reissued `%N` to a stranger's shell.
     let pane = stranger_pane(&server);
     let team = Team::written("session-01998ad0", SESSION, &[("worker", on(&pane))]);
@@ -317,7 +232,7 @@ async fn a_recycled_pane_id_is_not_killed() {
         "a pane that cannot show the agent id is not the teammate's: {swept:?}"
     );
     assert!(
-        server.holds(&pane),
+        holds(&server, &pane),
         "and it is still running: {pane} on {:?}",
         server.socket()
     );
@@ -332,9 +247,9 @@ async fn a_recycled_pane_id_is_not_killed() {
 /// next lead should not have to look at again.
 #[tokio::test]
 async fn a_record_whose_pane_is_gone_is_dropped_without_a_kill() {
-    let server = PrivateServer::start();
+    let server = server();
     let pane = teammate_pane(&server, &agent_id("session-01998ad0", "worker"), SESSION);
-    server.kill(&pane);
+    kill(&server, &pane);
     let team = Team::written("session-01998ad0", SESSION, &[("worker", on(&pane))]);
 
     let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
@@ -348,7 +263,7 @@ async fn a_record_whose_pane_is_gone_is_dropped_without_a_kill() {
 /// its own lead's to end.
 #[tokio::test]
 async fn a_team_led_by_another_session_is_left_whole() {
-    let server = PrivateServer::start();
+    let server = server();
     let pane = teammate_pane(&server, &agent_id("default", "worker"), OTHER_SESSION);
     let team = Team::written("default", OTHER_SESSION, &[("worker", on(&pane))]);
 
@@ -356,7 +271,7 @@ async fn a_team_led_by_another_session_is_left_whole() {
 
     assert!(swept.is_empty(), "nothing was even looked at: {swept:?}");
     assert!(
-        server.holds(&pane),
+        holds(&server, &pane),
         "the other lead's teammate is still running"
     );
     assert_eq!(
@@ -376,7 +291,7 @@ async fn a_team_led_by_another_session_is_left_whole() {
 /// with `build` and `rebuild` in it is a team somebody would write.
 #[tokio::test]
 async fn a_siblings_pane_is_not_killed_because_its_name_ends_with_the_dead_ones() {
-    let server = PrivateServer::start();
+    let server = server();
     // The live sibling, wearing its own agent id — and now wearing the pane id
     // the record names, which is what a recycled `%N` looks like from here.
     let pane = teammate_pane(&server, &agent_id("session-01998ad0", "rebuild"), SESSION);
@@ -390,7 +305,7 @@ async fn a_siblings_pane_is_not_killed_because_its_name_ends_with_the_dead_ones(
         "`rebuild`'s pane is not `build`'s, however the two names read: {swept:?}"
     );
     assert!(
-        server.holds(&pane),
+        holds(&server, &pane),
         "and the sibling is still working: {pane} on {:?}",
         server.socket()
     );
@@ -413,7 +328,7 @@ async fn a_siblings_pane_is_not_killed_because_its_name_ends_with_the_dead_ones(
 /// that had to stop.
 #[tokio::test]
 async fn a_co_tenant_leads_live_panes_survive_a_sweep_of_the_team_file_they_share() {
-    let server = PrivateServer::start();
+    let server = server();
     let pane = teammate_pane(
         &server,
         &agent_id("session-01998ad0", "worker"),
@@ -429,7 +344,7 @@ async fn a_co_tenant_leads_live_panes_survive_a_sweep_of_the_team_file_they_shar
         "a pane another lead launched is not this lead's to end: {swept:?}"
     );
     assert!(
-        server.holds(&pane),
+        holds(&server, &pane),
         "and the other lead's teammate is still working: {pane} on {:?}",
         server.socket()
     );
@@ -439,7 +354,7 @@ async fn a_co_tenant_leads_live_panes_survive_a_sweep_of_the_team_file_they_shar
 /// file, decides there is nothing to do, and writes nothing.
 #[tokio::test]
 async fn a_team_with_no_panes_is_swept_silently() {
-    let server = PrivateServer::start();
+    let server = server();
     let team = Team::written(
         "session-01998ad0",
         SESSION,

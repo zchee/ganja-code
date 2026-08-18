@@ -49,13 +49,7 @@
 
 #[cfg(unix)]
 use std::time::Instant;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::Path, process::Command, sync::Arc, time::Duration};
 
 #[cfg(unix)]
 use expectrl::{Eof, Expect as _, Session, process::unix::WaitStatus, session::OsSession};
@@ -72,18 +66,13 @@ use ganja_core::{
 use ganja_core::{
     protocol::PartBody,
     provider::fake,
-    team::{MailboxMessage, MemberName, MemberRecord, Spawn, Surface, TeamFile, mailbox, record},
+    team::{MailboxMessage, MemberName, Spawn, Surface, mailbox, record},
     teammate::TeammateRegistry,
 };
 #[cfg(unix)]
 use ganja_protocol::team::{Frame, IdleReason, ShutdownRequest};
+use ganja_testkit::Homes;
 use serde_json::json;
-use tempfile::TempDir;
-
-/// The store's directory under a project's data directory, as `main.rs` names
-/// it. `ganja-core` names the database file itself, which is why the path
-/// stops here.
-const STORAGE: &str = "storage";
 
 /// The script the child runs play. One turn, one word.
 const SCRIPT: &str = "script.json";
@@ -97,56 +86,30 @@ const REPLY: &str = "child-turn-zarquon";
 const TEAMMATE_PROMPT: &str = "the teammate's own first turn";
 const RESUMED_PROMPT: &str = "the same conversation, opened again";
 
-/// A project and a data home that both vanish with the test.
+/// The shared project/data pair, with this suite's one-turn script written
+/// at birth.
 struct Fixture {
-    project: TempDir,
-    data: TempDir,
+    homes: Homes,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let project = TempDir::new().expect("a temporary directory is creatable");
-        // The checkout marker pins the project — and so the one store every
-        // process opens — to this directory rather than to whatever the
-        // temporary directory happens to sit inside.
-        fs::create_dir(project.path().join(".git")).expect("the checkout marker is creatable");
-        fs::write(
-            project.path().join(SCRIPT),
-            json!({"cadence_ms": 1, "turns": [{"text": REPLY}]}).to_string(),
-        )
-        .expect("the script is writable");
+        let homes = Homes::new();
+        homes.script(SCRIPT, json!([{"text": REPLY}]));
 
-        Self {
-            project,
-            data: TempDir::new().expect("a temporary directory is creatable"),
-        }
+        Self { homes }
     }
 
     fn path(&self) -> &Path {
-        self.project.path()
+        self.homes.project()
     }
 
-    /// Pins everything that could decide what a run does onto this fixture's
-    /// own directories, exactly as `run.rs` pins it: a developer's global
-    /// config can choose a provider, and their cached catalog can decide what
-    /// a model is sized at, so all of it moves or none of it has moved.
+    /// The binary, pinned to this fixture's own directories
+    /// ([`Homes::pin`]): a developer's global config can choose a provider,
+    /// and their cached catalog can decide what a model is sized at.
     fn ganja(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
-        command
-            .current_dir(self.path())
-            .env("GANJA_PROVIDER", "fake")
-            .env("GANJA_FAKE_SCRIPT", self.path().join(SCRIPT))
-            .env("XDG_DATA_HOME", self.data.path())
-            .env("HOME", self.data.path())
-            .env("XDG_CONFIG_HOME", self.data.path().join("config"))
-            .env("XDG_CACHE_HOME", self.data.path().join("cache"))
-            .env("GANJA_DISABLE_MODELS_FETCH", "1")
-            .env_remove("GANJA_CONFIG_HOME")
-            .env_remove("GANJA_CONFIG")
-            .env_remove("GANJA_MODEL")
-            .env_remove("ANTHROPIC_API_KEY")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("OPENROUTER_API_KEY");
+        self.homes.pin(&mut command, &self.path().join(SCRIPT));
 
         command
     }
@@ -171,27 +134,10 @@ impl Fixture {
         String::from_utf8(output.stdout).expect("the binary writes UTF-8")
     }
 
-    /// The store the runs wrote into.
-    ///
-    /// Found rather than computed: the project directory's name is
-    /// `ganja-permission`'s to decide, and that there is exactly one of them
-    /// is itself worth asserting — a teammate that stored under a second
-    /// project stored somewhere the binary will never look.
+    /// The store the runs wrote into — found rather than computed
+    /// ([`Homes::store`]).
     fn store(&self) -> Storage {
-        let mut roots: Vec<PathBuf> = fs::read_dir(self.data.path().join("ganja").join("project"))
-            .expect("the run created a project directory")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect();
-        roots.sort();
-
-        assert_eq!(
-            roots.len(),
-            1,
-            "one working directory is one project, got {roots:?}"
-        );
-
-        Storage::open(roots.remove(0).join(STORAGE))
+        self.homes.store()
     }
 }
 
@@ -352,7 +298,7 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
     // The team as a lead of `LEAD_SESSION` would keep it under this config
     // home, and the member's inbox seeded exactly as a spawn seeds it (§4.1
     // step 5): the prompt travels through the mailbox, never the launch line.
-    let config_home = fixture.data.path().join("config").join("ganja");
+    let config_home = fixture.homes.config_home();
     let team = TeammateRegistry::for_session(&config_home, LEAD_SESSION, fixture.path());
     let member = MemberName::parse("w1").expect("a member name");
     let inbox = team.root().inbox_path(team.team(), &member);
@@ -367,33 +313,26 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
     // And the member record, as the registry writes it once the split has
     // answered: the pane waits for this before it builds its engine, because
     // the model it runs is the record's.
-    let mut file = TeamFile::new(
+    ganja_testkit::seed_team_file(
+        team.root(),
         team.team(),
         LEAD_SESSION,
-        fixture.path().display().to_string(),
-        record::now_millis(),
-    );
-    file.members.push(MemberRecord::teammate(
-        &member,
-        team.team(),
-        Spawn {
-            agent_type: "general".to_owned(),
-            model: fake::MODEL.to_owned(),
-            color: "blue".to_owned(),
-            prompt: TEAMMATE_PROMPT.to_owned(),
-            plan_mode_required: false,
-            surface: Surface::Pane {
-                id: PANE.to_owned(),
+        fixture.path(),
+        &[(
+            member.clone(),
+            Spawn {
+                agent_type: "general".to_owned(),
+                model: fake::MODEL.to_owned(),
+                color: "blue".to_owned(),
+                prompt: TEAMMATE_PROMPT.to_owned(),
+                plan_mode_required: false,
+                surface: Surface::Pane {
+                    id: PANE.to_owned(),
+                },
+                cwd: fixture.path().display().to_string(),
             },
-            cwd: fixture.path().display().to_string(),
-        },
-        record::now_millis(),
-    ));
-    fs::write(
-        team.root().config_path(team.team()),
-        record::document(&file).expect("the team file encodes"),
-    )
-    .expect("the team file is written");
+        )],
+    );
 
     // The launch line, as `pane.rs` composes it — the flags `MemberArgs`
     // documents, and the pane id through the environment.

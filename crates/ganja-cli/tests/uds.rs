@@ -599,24 +599,15 @@ async fn sessions_live_lists_the_living_and_unlinks_the_dead() {
 /// for the same reason).
 #[tokio::test]
 async fn a_held_name_that_does_not_answer_is_listed_and_left_in_place() {
-    use std::os::fd::AsRawFd as _;
-
     let directory = private_dir();
     let homes = TempDir::new().expect("homes for the listing");
     let held = directory.path().join(format!("0198c1a2.{EXTENSION}"));
     dead_socket(&held);
     let lock_file = socket::lock_path(&held);
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_file)
-        .expect("the lock file opens");
-    // SAFETY: an open descriptor and two flags; the test holds `lock` open
-    // for as long as the flock must stand.
-    let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    assert_eq!(rc, 0, "the test takes the name's lock first");
+    // The binder's own token, held for as long as the flock must stand.
+    let lock = socket::NameLock::claim(&held)
+        .expect("the lock file opens")
+        .expect("the test takes the name's lock first");
 
     let output = tokio::time::timeout(DEADLINE, sessions_live(directory.path(), &homes).output())
         .await
@@ -667,8 +658,6 @@ async fn a_held_name_that_does_not_answer_is_listed_and_left_in_place() {
 /// while the stall is still being waited on.
 #[tokio::test]
 async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
-    use std::os::fd::AsRawFd as _;
-
     let directory = private_dir();
     let homes = TempDir::new().expect("homes for the listing");
     let (engine, _registry) = led_engine(homes.path());
@@ -678,17 +667,10 @@ async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
     // Sorts before every UUIDv7-named socket: the walk meets it first.
     let stalled = directory.path().join(format!("00000000.{EXTENSION}"));
     let silent = std::os::unix::net::UnixListener::bind(&stalled).expect("the silent socket binds");
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(socket::lock_path(&stalled))
-        .expect("the lock file opens");
-    // SAFETY: an open descriptor and two flags; the test holds `lock` open
-    // for as long as the flock must stand.
-    let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    assert_eq!(rc, 0, "the test takes the stalled name's lock first");
+    // The binder's own token, held for as long as the flock must stand.
+    let lock = socket::NameLock::claim(&stalled)
+        .expect("the lock file opens")
+        .expect("the test takes the stalled name's lock first");
 
     // Sorts after: still unvisited while the stall is waited on.
     let dead = directory.path().join(format!("ffffffff.{EXTENSION}"));

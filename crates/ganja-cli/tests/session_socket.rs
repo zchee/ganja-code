@@ -54,9 +54,7 @@ use std::{
 use expectrl::{
     ControlCode, Eof, Expect as _, Session, process::unix::WaitStatus, session::OsSession,
 };
-use ganja_core::team::{
-    MemberName, MemberRecord, Spawn, Surface, TeamFile, TeamName, TeamsRoot, record,
-};
+use ganja_core::team::{MemberName, Spawn, Surface, TeamName, TeamsRoot};
 use ganja_serve::socket::EXTENSION;
 use tempfile::TempDir;
 
@@ -528,27 +526,24 @@ fn seed_member_record(fixture: &Fixture) {
     let root = TeamsRoot::new(fixture.config_home().join("teams"));
     let team = TeamName::parse(TEAM).expect("a team name");
     let name = MemberName::parse(MEMBER).expect("a member name");
-    let cwd = fixture.project.path().display().to_string();
-    let mut file = TeamFile::new(&team, LEAD_SESSION, cwd.clone(), record::now_millis());
-    file.members.push(MemberRecord::teammate(
-        &name,
+    ganja_testkit::seed_team_file(
+        &root,
         &team,
-        Spawn {
-            agent_type: "general".to_owned(),
-            model: "fake-model".to_owned(),
-            color: "blue".to_owned(),
-            prompt: String::new(),
-            plan_mode_required: false,
-            surface: Surface::Pane {
-                id: "%7".to_owned(),
+        LEAD_SESSION,
+        fixture.project.path(),
+        &[(
+            name,
+            Spawn {
+                agent_type: "general".to_owned(),
+                model: "fake-model".to_owned(),
+                color: "blue".to_owned(),
+                prompt: String::new(),
+                plan_mode_required: false,
+                surface: Surface::Pane {
+                    id: "%7".to_owned(),
+                },
+                cwd: fixture.project.path().display().to_string(),
             },
-            cwd,
-        },
-        record::now_millis(),
-    ));
-    let path = root.config_path(&team);
-    fs::create_dir_all(path.parent().expect("a team file has a directory"))
-        .expect("the team directory is creatable");
-    fs::write(&path, record::document(&file).expect("a team file encodes"))
-        .expect("the team file is writable");
+        )],
+    );
 }

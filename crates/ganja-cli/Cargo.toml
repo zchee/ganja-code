@@ -94,6 +94,9 @@ url.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
+# The private tmux server, the project/data-home fixture and the team-file
+# seeder the pane and drill suites share with `ganja-core`'s.
+ganja-testkit.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
 

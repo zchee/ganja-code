@@ -53,8 +53,8 @@ use std::{
 
 use ganja_core::{SessionId, Storage};
 use ganja_protocol::is_uuidv7;
+use ganja_testkit::Homes;
 use serde_json::json;
-use tempfile::TempDir;
 
 /// How many processes are released together. The N the live drill ran at, and
 /// the one W1's exit gate names.
@@ -72,10 +72,6 @@ const SCRIPT: &str = "script.json";
 
 /// The directory the barrier files of one release live in, under the project.
 const BARRIER: &str = ".barrier";
-
-/// The store's directory under a project's data directory. `ganja-core` names
-/// the database file itself, which is why the path stops here.
-const STORAGE: &str = "storage";
 
 /// What `storage.rs` renames a pre-UUIDv7 store to, ahead of the millisecond
 /// stamp: `sessions.db.preuuid-<millis>`.
@@ -113,63 +109,32 @@ const WAIT_THEN_RUN: &str = concat!(
 /// One round: a project, the data home its runs store under, and a counter so
 /// that two releases in one round cannot inherit each other's barrier files.
 struct Drill {
-    project: TempDir,
-    data: TempDir,
+    homes: Homes,
     releases: Cell<usize>,
 }
 
 impl Drill {
     fn new() -> Self {
-        let project = temporary();
-
-        // The checkout marker pins the project — and so the one store every
-        // process opens — to this directory, rather than to whatever the
-        // temporary directory happens to sit inside.
-        fs::create_dir(project.path().join(".git")).expect("the checkout marker is creatable");
-        fs::write(
-            project.path().join(SCRIPT),
-            json!({"cadence_ms": 1, "turns": [{"text": CLOSING}]}).to_string(),
-        )
-        .expect("the script is writable");
-        fs::create_dir(project.path().join(BARRIER)).expect("the barrier directory is creatable");
+        let homes = Homes::new();
+        homes.script(SCRIPT, json!([{"text": CLOSING}]));
+        fs::create_dir(homes.project().join(BARRIER)).expect("the barrier directory is creatable");
 
         Self {
-            project,
-            data: temporary(),
+            homes,
             releases: Cell::new(0),
         }
     }
 
     fn path(&self) -> &Path {
-        self.project.path()
+        self.homes.project()
     }
 
-    /// Pins everything that could decide what a run does onto this drill's own
-    /// directories, exactly as `run.rs` pins it: a developer's global config
-    /// can choose a provider, and their cached catalog can decide what a model
-    /// is sized at, so all of it moves or none of it has moved.
+    /// Pins everything that could decide what a run does onto this drill's
+    /// own directories ([`Homes::pin`]): a developer's global config can
+    /// choose a provider, and their cached catalog can decide what a model is
+    /// sized at, so all of it moves or none of it has moved.
     fn pinned(&self, command: &mut Command) {
-        command
-            .current_dir(self.path())
-            .env("GANJA_PROVIDER", "fake")
-            .env("GANJA_FAKE_SCRIPT", self.path().join(SCRIPT))
-            .env("XDG_DATA_HOME", self.data.path())
-            // The three variables that decide where ganja's *global* home
-            // lands, moved together — an empty pinned `XDG_CONFIG_HOME` falls
-            // through to `~/.ganja` via `HOME`.
-            .env("HOME", self.data.path())
-            .env("XDG_CONFIG_HOME", self.data.path().join("config"))
-            .env("XDG_CACHE_HOME", self.data.path().join("cache"))
-            // Six processes must not become six catalog fetches: the
-            // compiled-in snapshot answers, and a drill that measured the
-            // network would be measuring the wrong thing.
-            .env("GANJA_DISABLE_MODELS_FETCH", "1")
-            .env_remove("GANJA_CONFIG_HOME")
-            .env_remove("GANJA_CONFIG")
-            .env_remove("GANJA_MODEL")
-            .env_remove("ANTHROPIC_API_KEY")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("OPENROUTER_API_KEY");
+        self.homes.pin(command, &self.path().join(SCRIPT));
     }
 
     /// Spawns `count` runs, releases them together, and returns once every one
@@ -231,33 +196,13 @@ impl Drill {
         }
     }
 
-    /// The store this drill's runs wrote into.
-    ///
-    /// Found rather than computed: the project directory's name is
-    /// `ganja-permission`'s to decide, and that there is exactly one of them is
-    /// itself worth asserting — runs that stored under two projects stored
-    /// under the wrong one, and a count taken from either would be a count of
-    /// half a drill.
+    /// The store this drill's runs wrote into — found rather than computed
+    /// ([`Homes::store`]): runs that stored under two projects stored under
+    /// the wrong one, and a count taken from either would be a count of half
+    /// a drill.
     fn store(&self) -> Storage {
-        let mut roots: Vec<PathBuf> = fs::read_dir(self.data.path().join("ganja").join("project"))
-            .expect("the runs created a project directory")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect();
-        roots.sort();
-
-        assert_eq!(
-            roots.len(),
-            1,
-            "one working directory is one project, got {roots:?}"
-        );
-
-        Storage::open(roots.remove(0).join(STORAGE))
+        self.homes.store()
     }
-}
-
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
 }
 
 /// One child's captured stream, as a file the child may inherit.

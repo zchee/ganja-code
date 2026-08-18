@@ -72,12 +72,11 @@ use std::{
 };
 
 use ganja_core::{
-    team::{
-        MemberName, MemberRecord, Spawn, Surface, TeamFile, TeamName, TeamsRoot, mailbox, record,
-    },
+    team::{MemberName, Spawn, Surface, TeamFile, TeamName, TeamsRoot, mailbox},
     teammate::{SpawnSpec, pane},
 };
 use ganja_protocol::team::{Frame, MemberBackend};
+use ganja_testkit::{Homes, tmux::PrivateServer};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -104,7 +103,7 @@ const CLEARTEXT_NOTICE: &str = "cleartext at";
 /// the dialog is closed and the next line typed reaches the composer.
 const COMPOSER: &str = "Ask ganja something";
 
-/// Refuses to run without tmux, by name.
+/// Refuses to run without tmux, in AC-11's own words.
 fn require_tmux() {
     let version = Command::new("tmux").arg("-V").output();
     assert!(
@@ -113,35 +112,24 @@ fn require_tmux() {
     );
 }
 
-/// A project and a data home that both vanish with the test.
+/// The shared project/data pair, plus this suite's own reads of the team the
+/// lead keeps under its config home.
 struct Fixture {
-    project: TempDir,
-    data: TempDir,
+    homes: Homes,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let project = TempDir::new().expect("a temporary directory is creatable");
-        // The checkout marker pins the project — and so the one store every
-        // process opens — to this directory rather than to whatever the
-        // temporary directory happens to sit inside.
-        fs::create_dir(project.path().join(".git")).expect("the checkout marker is creatable");
-        fs::write(
-            project.path().join(SCRIPT),
-            json!({"cadence_ms": 1, "turns": [{"text": REPLY}]}).to_string(),
-        )
-        .expect("the script is writable");
+        let homes = Homes::new();
+        homes.script(SCRIPT, json!([{"text": REPLY}]));
 
-        Self {
-            project,
-            data: TempDir::new().expect("a temporary directory is creatable"),
-        }
+        Self { homes }
     }
 
     /// The config home the lead runs under, and therefore where the team
     /// lives — the variable D502 exists to carry.
     fn config_home(&self) -> PathBuf {
-        self.data.path().join("config").join("ganja")
+        self.homes.config_home()
     }
 
     /// The environment the **server** is born from, and so what every pane
@@ -151,11 +139,11 @@ impl Fixture {
     /// launch's to carry.
     fn server_env(&self) -> Vec<(&'static str, String)> {
         vec![
-            ("HOME", self.data.path().display().to_string()),
+            ("HOME", self.homes.data().display().to_string()),
             ("GANJA_PROVIDER", "fake".to_owned()),
             (
                 "GANJA_FAKE_SCRIPT",
-                self.project.path().join(SCRIPT).display().to_string(),
+                self.homes.project().join(SCRIPT).display().to_string(),
             ),
             ("GANJA_DISABLE_MODELS_FETCH", "1".to_owned()),
         ]
@@ -163,17 +151,20 @@ impl Fixture {
 
     /// What the lead's own pane is additionally given (`-e`): where its
     /// things are.
-    fn lead_env(&self) -> Vec<String> {
+    fn lead_env(&self) -> Vec<(&'static str, String)> {
         vec![
-            format!("GANJA_CONFIG_HOME={}", self.config_home().display()),
-            format!("XDG_DATA_HOME={}", self.data.path().display()),
-            format!(
-                "XDG_CONFIG_HOME={}",
-                self.data.path().join("config").display()
+            (
+                "GANJA_CONFIG_HOME",
+                self.config_home().display().to_string(),
             ),
-            format!(
-                "XDG_CACHE_HOME={}",
-                self.data.path().join("cache").display()
+            ("XDG_DATA_HOME", self.homes.data().display().to_string()),
+            (
+                "XDG_CONFIG_HOME",
+                self.homes.data().join("config").display().to_string(),
+            ),
+            (
+                "XDG_CACHE_HOME",
+                self.homes.data().join("cache").display().to_string(),
             ),
         ]
     }
@@ -204,12 +195,10 @@ impl Fixture {
     }
 }
 
-/// A tmux server of this test's own, on a socket nobody else knows, killed
-/// when dropped — panics included — so a failing test leaves no server
-/// holding a `ganja` open.
+/// The private server ([`ganja_testkit::tmux`]'s, killed on drop) plus the
+/// send-keys/capture glue this suite drives both panes through.
 struct Tmux {
-    socket: PathBuf,
-    _dir: TempDir,
+    server: PrivateServer,
 }
 
 impl Tmux {
@@ -217,126 +206,69 @@ impl Tmux {
     /// pane inherits), whose first pane sleeps so the server outlives every
     /// pane the test watches.
     fn start(env: &[(&str, String)], remove: &[&str]) -> Self {
-        let dir = TempDir::new().expect("a temporary directory is creatable");
-        let socket = dir.path().join("tmux.sock");
-        let mut command = Command::new("tmux");
-        command
-            .arg("-S")
-            .arg(&socket)
-            .arg("-f")
-            .arg("/dev/null")
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                "ganja-test",
-                "-x",
-                "200",
-                "-y",
-                "50",
-            ])
-            .args(["sleep", "3600"]);
-        for (name, value) in env {
-            command.env(name, value);
+        let pairs: Vec<(&str, &str)> = env
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+
+        Self {
+            server: PrivateServer::start(&["sleep", "3600"], remove, &pairs),
         }
-        for name in remove {
-            command.env_remove(name);
-        }
-        let started = command.output().expect("tmux starts a private server");
-        assert!(
-            started.status.success(),
-            "the private tmux server did not start: {}",
-            String::from_utf8_lossy(&started.stderr)
-        );
-
-        Self { socket, _dir: dir }
-    }
-
-    /// One client call, or a panic in tmux's own words.
-    fn run(&self, args: &[&str]) -> String {
-        let output = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .args(args)
-            .output()
-            .expect("tmux runs");
-        assert!(
-            output.status.success(),
-            "tmux {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
     /// Splits a pane in `cwd` running `argv` with `env` added, and returns
     /// its id. `argv` is at least two words, for the reason `pane.rs` gives.
-    fn split(&self, cwd: &str, env: &[String], argv: &[&str]) -> String {
-        let mut args: Vec<&str> = vec!["split-window", "-d", "-P", "-F", "#{pane_id}", "-c", cwd];
-        for pair in env {
-            args.push("-e");
-            args.push(pair);
-        }
-        args.push("--");
-        args.extend_from_slice(argv);
+    fn split(&self, cwd: &Path, env: &[(&str, String)], argv: &[&str]) -> String {
+        let pairs: Vec<(&str, &str)> = env
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
 
-        self.run(&args).trim().to_owned()
+        self.server.split(Some(cwd), &pairs, argv)
     }
 
     /// The live pane ids.
     fn panes(&self) -> Vec<String> {
-        self.run(&["list-panes", "-a", "-F", "#{pane_id}"])
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect()
+        self.server.panes()
     }
 
     /// The pid of the pane's process — for the lead's pane, the lead.
     fn pane_pid(&self, pane: &str) -> String {
-        self.run(&["display-message", "-p", "-t", pane, "#{pane_pid}"])
+        self.server
+            .run(&["display-message", "-p", "-t", pane, "#{pane_pid}"])
             .trim()
             .to_owned()
     }
 
     /// The name of the process in the pane's foreground, as tmux sees it.
     fn current_command(&self, pane: &str) -> String {
-        self.run(&[
-            "display-message",
-            "-p",
-            "-t",
-            pane,
-            "#{pane_current_command}",
-        ])
-        .trim()
-        .to_owned()
+        self.server
+            .run(&[
+                "display-message",
+                "-p",
+                "-t",
+                pane,
+                "#{pane_current_command}",
+            ])
+            .trim()
+            .to_owned()
     }
 
     /// The pane's screen, as text.
     fn screen(&self, pane: &str) -> String {
-        self.run(&["capture-pane", "-p", "-t", pane])
+        self.server.run(&["capture-pane", "-p", "-t", pane])
     }
 
     /// Types `text` into `pane` literally, then Enter.
     fn type_line(&self, pane: &str, text: &str) {
-        self.run(&["send-keys", "-t", pane, "-l", "--", text]);
-        self.run(&["send-keys", "-t", pane, "Enter"]);
+        self.server
+            .run(&["send-keys", "-t", pane, "-l", "--", text]);
+        self.server.run(&["send-keys", "-t", pane, "Enter"]);
     }
 
     /// Presses one named key in `pane`.
     fn key(&self, pane: &str, name: &str) {
-        self.run(&["send-keys", "-t", pane, name]);
-    }
-}
-
-impl Drop for Tmux {
-    fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .output();
+        self.server.run(&["send-keys", "-t", pane, name]);
     }
 }
 
@@ -443,9 +375,8 @@ fn a_pane_teammate_spawned_with_backend_pane_is_created_and_killed_on_shutdown_a
     // The lead, in a pane of its own in the project directory — so tmux
     // gives it `TMUX` and `TMUX_PANE` itself. Two words on purpose (`env` and
     // the binary): a one-word command would go through the login shell.
-    let project = fixture.project.path().display().to_string();
     let lead = tmux.split(
-        &project,
+        fixture.homes.project(),
         &fixture.lead_env(),
         &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
     );
@@ -610,33 +541,26 @@ fn guard_spec(root: &TeamsRoot, cwd: &Path, bypass: bool) -> SpawnSpec {
 /// gets past that wait and on to the terminal instead of sitting out the
 /// wait's whole bound twice.
 fn seed_record(spec: &SpawnSpec) {
-    let mut file = TeamFile::new(
+    ganja_testkit::seed_team_file(
+        &spec.root,
         &spec.team,
         GUARD_SESSION,
-        spec.cwd.display().to_string(),
-        record::now_millis(),
-    );
-    file.members.push(MemberRecord::teammate(
-        &spec.name,
-        &spec.team,
-        Spawn {
-            agent_type: spec.agent_type.clone(),
-            model: spec.model.clone(),
-            color: spec.color.clone(),
-            prompt: spec.prompt.clone(),
-            plan_mode_required: spec.plan_mode_required,
-            surface: Surface::Pane {
-                id: "%7".to_owned(),
+        &spec.cwd,
+        &[(
+            spec.name.clone(),
+            Spawn {
+                agent_type: spec.agent_type.clone(),
+                model: spec.model.clone(),
+                color: spec.color.clone(),
+                prompt: spec.prompt.clone(),
+                plan_mode_required: spec.plan_mode_required,
+                surface: Surface::Pane {
+                    id: "%7".to_owned(),
+                },
+                cwd: spec.cwd.display().to_string(),
             },
-            cwd: spec.cwd.display().to_string(),
-        },
-        record::now_millis(),
-    ));
-    let path = spec.root.config_path(&spec.team);
-    fs::create_dir_all(path.parent().expect("a team file has a directory"))
-        .expect("the team directory is creatable");
-    fs::write(&path, record::document(&file).expect("a team file encodes"))
-        .expect("the team file is writable");
+        )],
+    );
 }
 
 /// **The spelling guard.** The line `pane.rs` composes is the line `Cli`

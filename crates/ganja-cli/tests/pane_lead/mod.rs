@@ -30,14 +30,13 @@
 #![allow(dead_code)]
 
 use std::{
-    fs,
-    path::{Path, PathBuf},
+    path::Path,
     process::Command,
     time::{Duration, Instant},
 };
 
-use serde_json::json;
-use tempfile::TempDir;
+pub use ganja_testkit::Homes;
+use ganja_testkit::tmux::{PrivateServer, require_tmux};
 
 /// The composer's placeholder, which the first frame of an idle lead draws —
 /// pinned to `ganja_tui::component::editor`. Once it is on screen raw mode is
@@ -59,83 +58,13 @@ const POLL: Duration = Duration::from_millis(100);
 /// The pane teammate every test here spawns.
 pub const TEAMMATE: &str = "w1";
 
-/// Refuses to run without tmux, by name: a green pane test that spawned no
-/// pane would be worth nothing.
-pub fn require_tmux() {
-    let version = Command::new("tmux").arg("-V").output();
-    assert!(
-        version.as_ref().is_ok_and(|output| output.status.success()),
-        "the pane tests need tmux on PATH and there is none: {version:?}"
-    );
-}
-
-/// The project a lead runs in and the data home it stores under, plus the
-/// scripts the fake provider plays.
-pub struct Homes {
-    project: TempDir,
-    data: TempDir,
-}
-
-impl Homes {
-    /// A project (with its checkout marker) and a data home, both gone with
-    /// the test.
-    pub fn new() -> Self {
-        let project = TempDir::new().expect("a temporary directory is creatable");
-        // The checkout marker pins the project — and so the store every
-        // process opens — to this directory.
-        fs::create_dir(project.path().join(".git")).expect("the checkout marker is creatable");
-
-        Self {
-            project,
-            data: TempDir::new().expect("a temporary directory is creatable"),
-        }
-    }
-
-    pub fn project(&self) -> &Path {
-        self.project.path()
-    }
-
-    pub fn data(&self) -> &Path {
-        self.data.path()
-    }
-
-    /// Writes a fake-provider script under the project and answers its path.
-    pub fn script(&self, name: &str, turns: serde_json::Value) -> PathBuf {
-        let path = self.project.path().join(name);
-        fs::write(&path, json!({"cadence_ms": 1, "turns": turns}).to_string())
-            .expect("the script is writable");
-
-        path
-    }
-
-    /// The store the lead and its panes share, found under the data home the
-    /// way `teammate_session.rs` finds it — one project, one store.
-    pub fn store(&self) -> ganja_core::Storage {
-        let mut roots: Vec<PathBuf> = fs::read_dir(self.data.path().join("ganja").join("project"))
-            .expect("a run created a project directory")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect();
-        roots.sort();
-        assert_eq!(
-            roots.len(),
-            1,
-            "one working directory is one project, got {roots:?}"
-        );
-
-        ganja_core::Storage::open(roots.remove(0).join("storage"))
-    }
-}
-
-/// A private tmux server whose first window is a real `ganja` lead.
-///
-/// Killed when dropped, panics included, so a failing test leaves neither a
-/// server nor a pane of the binary behind.
+/// A private tmux server whose first window is a real `ganja` lead — the
+/// server itself is [`ganja_testkit::tmux`]'s, killed when dropped so a
+/// failing test leaves neither a server nor a pane of the binary behind.
 pub struct Lead {
-    socket: PathBuf,
+    server: PrivateServer,
     /// The pane the lead runs in.
     pane: String,
-    _dir: TempDir,
 }
 
 impl Lead {
@@ -155,8 +84,6 @@ impl Lead {
         lead_only: &[(&str, &str)],
     ) -> Self {
         require_tmux();
-        let dir = TempDir::new().expect("a temporary directory is creatable");
-        let socket = dir.path().join("tmux.sock");
         // The window command: the lead's own environment first, then the
         // binary. Always at least two words, which is what keeps tmux from
         // handing a one-word command to the login shell (`pane.rs`'s own
@@ -170,64 +97,38 @@ impl Lead {
         window.push(' ');
         window.push_str(&shell_quote(env!("CARGO_BIN_EXE_ganja")));
 
-        let mut command = Command::new("tmux");
-        command
-            .arg("-S")
-            .arg(&socket)
-            .arg("-f")
-            .arg("/dev/null")
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                "ganja-test",
-                "-x",
-                "160",
-                "-y",
-                "48",
-            ])
-            .arg("-c")
-            .arg(homes.project())
-            .arg(window)
-            .env("GANJA_PROVIDER", "fake")
-            .env("GANJA_FAKE_SCRIPT", pane_script)
-            .env("XDG_DATA_HOME", homes.data())
-            .env("HOME", homes.data())
-            .env("XDG_CONFIG_HOME", homes.data().join("config"))
-            .env("XDG_CACHE_HOME", homes.data().join("cache"))
-            .env("GANJA_DISABLE_MODELS_FETCH", "1")
-            .env_remove("GANJA_CONFIG_HOME")
-            .env_remove("GANJA_CONFIG")
-            .env_remove("GANJA_MODEL")
-            .env_remove("ANTHROPIC_API_KEY")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("OPENROUTER_API_KEY")
-            .env_remove("GANJA_SERVER_PASSWORD")
-            // A server that inherited this process's own tmux would think it
-            // was nested inside it.
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE");
-        for name in withheld {
-            command.env_remove(name);
-        }
-        let started = command.output().expect("tmux starts a private server");
-        assert!(
-            started.status.success(),
-            "the private tmux server did not start: {}",
-            String::from_utf8_lossy(&started.stderr)
-        );
-        let listing = tmux(&socket, &["list-panes", "-a", "-F", "#{pane_id}"]);
-        let pane = listing.trim().to_owned();
-        assert!(
-            pane.starts_with('%'),
-            "the private server has a first pane: {listing:?}"
+        let script = pane_script.display().to_string();
+        let data = homes.data().display().to_string();
+        let config = homes.data().join("config").display().to_string();
+        let cache = homes.data().join("cache").display().to_string();
+        let mut removed = vec![
+            "GANJA_CONFIG_HOME",
+            "GANJA_CONFIG",
+            "GANJA_MODEL",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GANJA_SERVER_PASSWORD",
+        ];
+        removed.extend_from_slice(withheld);
+        let server = PrivateServer::start_in(
+            homes.project(),
+            (160, 48),
+            &[&window],
+            &removed,
+            &[
+                ("GANJA_PROVIDER", "fake"),
+                ("GANJA_FAKE_SCRIPT", &script),
+                ("XDG_DATA_HOME", &data),
+                ("HOME", &data),
+                ("XDG_CONFIG_HOME", &config),
+                ("XDG_CACHE_HOME", &cache),
+                ("GANJA_DISABLE_MODELS_FETCH", "1"),
+            ],
         );
 
-        let lead = Self {
-            socket,
-            pane,
-            _dir: dir,
-        };
+        let pane = server.first_pane().to_owned();
+        let lead = Self { server, pane };
         // The lead's first frame, for [`READY`]'s reason.
         lead.wait_for_screen(&lead.pane, |screen| screen.contains(READY));
 
@@ -241,18 +142,19 @@ impl Lead {
 
     /// Types `line` into the lead and presses Enter.
     pub fn type_line(&self, line: &str) {
-        tmux(&self.socket, &["send-keys", "-t", &self.pane, "-l", line]);
-        tmux(&self.socket, &["send-keys", "-t", &self.pane, "Enter"]);
+        self.server
+            .run(&["send-keys", "-t", &self.pane, "-l", line]);
+        self.server.run(&["send-keys", "-t", &self.pane, "Enter"]);
     }
 
     /// Presses one key in the lead.
     pub fn press(&self, key: &str) {
-        tmux(&self.socket, &["send-keys", "-t", &self.pane, key]);
+        self.server.run(&["send-keys", "-t", &self.pane, key]);
     }
 
     /// What `pane` shows right now.
     pub fn screen(&self, pane: &str) -> String {
-        tmux(&self.socket, &["capture-pane", "-p", "-t", pane])
+        self.server.run(&["capture-pane", "-p", "-t", pane])
     }
 
     /// Waits until `pane`'s screen satisfies `wanted`, and answers the screen
@@ -274,18 +176,16 @@ impl Lead {
 
     /// The live panes as `(id, pid)` pairs.
     pub fn panes(&self) -> Vec<(String, u32)> {
-        tmux(
-            &self.socket,
-            &["list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"],
-        )
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let (id, pid) = line.trim().split_once(' ').expect("id and pid");
+        self.server
+            .run(&["list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"])
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let (id, pid) = line.trim().split_once(' ').expect("id and pid");
 
-            (id.to_owned(), pid.parse().expect("a pid"))
-        })
-        .collect()
+                (id.to_owned(), pid.parse().expect("a pid"))
+            })
+            .collect()
     }
 
     /// Waits for a second pane — the teammate's — and answers its `(id, pid)`.
@@ -307,24 +207,7 @@ impl Lead {
     /// Whether the server's **global** environment — what every pane it makes
     /// inherits — holds `name`.
     pub fn global_has(&self, name: &str) -> bool {
-        Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .args(["show-environment", "-g", name])
-            .output()
-            .expect("tmux runs")
-            .status
-            .success()
-    }
-}
-
-impl Drop for Lead {
-    fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .output();
+        self.server.global_has(name)
     }
 }
 
@@ -348,23 +231,6 @@ pub fn wait_for<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
         assert!(started.elapsed() < DEADLINE, "{what} never happened");
         std::thread::sleep(POLL);
     }
-}
-
-/// One tmux client call against `socket`, or a panic in tmux's own words.
-fn tmux(socket: &Path, args: &[&str]) -> String {
-    let output = Command::new("tmux")
-        .arg("-S")
-        .arg(socket)
-        .args(args)
-        .output()
-        .expect("tmux runs");
-    assert!(
-        output.status.success(),
-        "tmux {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// `text`, single-quoted for `sh`.
