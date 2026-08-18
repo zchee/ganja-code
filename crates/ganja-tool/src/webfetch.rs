@@ -51,7 +51,9 @@ const SKIPPED: [&str; 6] = ["script", "style", "noscript", "iframe", "object", "
 /// paragraph under it and one list item does not run into the next. Anything
 /// unlisted is treated as inline, which is the right default — a tag a text
 /// rendering has never heard of is far more likely to be a `<span>` than a
-/// `<section>`.
+/// `<section>`. `td`/`th` are absent on purpose: rows separate through `tr`,
+/// and cells gluing within a row beats a table exploding into one paragraph
+/// per cell.
 const BLOCK: [&str; 38] = [
     "address",
     "article",
@@ -562,7 +564,10 @@ fn strip_tags(html: &str) -> String {
     let mut text = String::with_capacity(html.len() / 2);
 
     match htmd::HtmlToMarkdown::new().html_to_tree(html) {
-        Ok(tree) => push_text(&tree, &mut text),
+        Ok(tree) => {
+            push_text(&tree, &mut text);
+            drop_tree_iteratively(tree);
+        }
         // The parser is handed the whole string at once and has nothing to
         // fail at; the `Result` is the sink API's shape rather than a case
         // that arises. Saying nothing still beats panicking inside a tool
@@ -623,6 +628,25 @@ fn push_text(node: &Rc<Node>, out: &mut String) {
                     .rev()
                     .map(|child| Work::Enter(Rc::clone(child))),
             ),
+        }
+    }
+}
+
+/// Detaches every owning tree edge before each node is dropped, so teardown
+/// consumes heap worklist space rather than one call stack frame per level.
+///
+/// This cannot cover [`to_markdown`], whose converter builds and drops its tree
+/// entirely inside `convert`, beyond this module's reach.
+fn drop_tree_iteratively(root: Rc<Node>) {
+    let mut work = vec![root];
+    while let Some(node) = work.pop() {
+        work.extend(std::mem::take(&mut *node.children.borrow_mut()));
+        if let NodeData::Element {
+            template_contents, ..
+        } = &node.data
+            && let Some(contents) = template_contents.borrow_mut().take()
+        {
+            work.push(contents);
         }
     }
 }
@@ -1262,12 +1286,42 @@ mod tests {
         assert_eq!(text, "Page title\n\nAB\n\nCD");
     }
 
-    /// A page's nesting depth consumes heap worklist space rather than call
-    /// stack frames.
+    /// A passing result proves both the text walk and the tree's teardown
+    /// return without consuming one call stack frame per nesting level.
     #[test]
     fn deeply_nested_inline_elements_do_not_overflow_the_stack() {
         let html = format!("{}text{}", "<i>".repeat(100_000), "</i>".repeat(100_000));
 
         assert_eq!(super::strip_tags(&html), "text");
+    }
+
+    /// The 100,000-level fixture completes in a real thread with a 2 MiB stack.
+    #[test]
+    fn deeply_nested_inline_elements_fit_a_two_mebibyte_thread_stack() {
+        let rendered = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let html = format!("{}text{}", "<i>".repeat(100_000), "</i>".repeat(100_000));
+
+                super::strip_tags(&html)
+            })
+            .expect("the bounded-stack webfetch test thread starts")
+            .join()
+            .expect("the bounded-stack webfetch test thread returns");
+
+        assert_eq!(rendered, "text");
+    }
+
+    /// A deep template-contents chain is detached without rendering its text.
+    #[test]
+    fn deeply_nested_template_contents_do_not_overflow_the_stack() {
+        const DEPTH: usize = 10_000;
+        let html = format!(
+            "{}text{}",
+            "<template>".repeat(DEPTH),
+            "</template>".repeat(DEPTH)
+        );
+
+        assert_eq!(super::strip_tags(&html), "");
     }
 }

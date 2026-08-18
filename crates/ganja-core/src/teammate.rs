@@ -1710,9 +1710,9 @@ impl TeammateRegistry {
     ///
     /// This is [`ganja_team::mailbox`]'s `write_atomically` against the other
     /// document of the same interop pair, and it is deliberately the same
-    /// three steps in the same order — temporary beside the target, `sync_all`,
-    /// `persist` — because the reader they are defending against is literally
-    /// the same process. Two properties are worth naming out loud:
+    /// steps in the same order — temporary beside the target, `sync_all`, the
+    /// mode copy, `persist` — because the reader they are defending against is
+    /// literally the same process. Two properties are worth naming out loud:
     ///
     /// * **The bytes are fsynced before the rename.** Without it a crash can
     ///   leave the *renamed* file present and empty, which is the one outcome

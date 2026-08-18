@@ -2159,9 +2159,7 @@ mod tests {
             "/team/some-lead/message"
         );
         assert!(server.contains("/team/{name}/message"));
-        assert!(server.contains("/team"));
         assert!(client.contains("/team/{name}/message"));
-        assert!(client.contains("/team"));
     }
 
     /// A child's thinking is not a child's answer (bead `pwe`), and the

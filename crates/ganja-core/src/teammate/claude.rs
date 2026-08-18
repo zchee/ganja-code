@@ -319,7 +319,9 @@ fn on_path(binary: &str) -> Option<PathBuf> {
 /// Empty and relative components are removed before `which` sees the list
 /// because its Unix behavior follows `which(1)` and can resolve them against
 /// the working directory, while this backend refuses to discover a teammate
-/// binary from a turn's incidental directory.
+/// binary from a turn's incidental directory. A literal `~/bin` entry is
+/// dropped by the same test — the crate would tilde-expand it, but an entry
+/// only a shell would have expanded is not a directory this backend trusts.
 fn resolve(path: &std::ffi::OsStr, binary: &str) -> Option<PathBuf> {
     let mut directories = std::env::split_paths(path)
         .filter(|directory| !directory.as_os_str().is_empty() && directory.is_absolute())

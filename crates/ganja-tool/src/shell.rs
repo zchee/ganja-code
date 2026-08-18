@@ -799,7 +799,9 @@ pub fn signal_group(pid: u32, signal: libc::c_int) {
     //
     // `Child::id` returns `None` once the child has been reaped, so an id that
     // reaches this function still names an unreaped child; an unreaped pid
-    // cannot have been recycled onto an unrelated process.
+    // cannot have been recycled onto an unrelated process. Every owner but
+    // `Servers::shutdown` holds that invariant; the one that cannot — rmcp
+    // reaps its own children — records its residual at its own resend site.
     //
     // A failure is not worth reporting: `ESRCH` means the group is already
     // gone, which is the outcome being asked for, and `EPERM` cannot arise for
