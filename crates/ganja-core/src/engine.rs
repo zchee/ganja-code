@@ -2027,14 +2027,12 @@ impl Engine {
 
     /// The ruleset each teammate engine is built with (**D-5**).
     ///
-    /// [`teammate::posture::permissions_for`] rather than that module's
-    /// `from_lead`, and the difference is the agent: `from_lead` binds one
-    /// ruleset for every teammate this session will ever start, where a
-    /// `task` call names a `subagent_type` per spawn — and a teammate started
-    /// as `plan` that ran under `build`'s rules would be a plan agent that can
-    /// write. So the agent is resolved per spawn and its rules are what the
-    /// lead's own refusals are appended *after*, which is the anti-laundering
-    /// order that module states.
+    /// A factory rather than one ruleset bound up front, because the agent
+    /// is per spawn: a `task` call names a `subagent_type`, and a teammate
+    /// started as `plan` that ran under `build`'s rules would be a plan
+    /// agent that can write. So each spawn resolves its own agent, and that
+    /// agent's rules are what the lead's own refusals are appended *after* —
+    /// [`teammate::posture::permissions_for`]'s anti-laundering order.
     ///
     /// The lead's rules are read through the live handle at each spawn rather
     /// than copied here, so a teammate started after somebody answered

@@ -77,7 +77,10 @@ use ganja_core::{
     teammate::{SpawnSpec, pane},
 };
 use ganja_protocol::team::{Frame, MemberBackend};
-use ganja_testkit::{Homes, tmux::PrivateServer};
+use ganja_testkit::{
+    Homes,
+    tmux::{PrivateServer, require_tmux},
+};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -103,15 +106,6 @@ const CLEARTEXT_NOTICE: &str = "cleartext at";
 /// What the composer draws when nothing else owns the screen — the sign that
 /// the dialog is closed and the next line typed reaches the composer.
 const COMPOSER: &str = "Ask ganja something";
-
-/// Refuses to run without tmux, in AC-11's own words.
-fn require_tmux() {
-    let version = Command::new("tmux").arg("-V").output();
-    assert!(
-        version.as_ref().is_ok_and(|output| output.status.success()),
-        "AC-11 needs tmux on PATH and there is none: {version:?}"
-    );
-}
 
 /// The shared project/data pair, plus this suite's own reads of the team the
 /// lead keeps under its config home.
