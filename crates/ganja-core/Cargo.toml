@@ -51,6 +51,9 @@ ganja-tool.workspace = true
 # ignore rules the tools search it with, so a file `glob` would skip is a file
 # the instruction layer skips too.
 ignore.workspace = true
+# The prompt's UTC date is rendered through the workspace's one calendar
+# vocabulary while remaining stable across the machine that runs a session.
+jiff.workspace = true
 # Config files are JSONC, the way upstream's are. Only the `serde` feature is
 # on: it makes the parser itself a `serde::Deserializer` over the token stream,
 # so a config decodes straight into its typed struct and sees keys in document

@@ -50,9 +50,11 @@ ganja-provider.workspace = true
 # routes and the SSE stream that crate owns.
 ganja-serve.workspace = true
 ganja-tui.workspace = true
-# The daily log rolls on the machine's own civil date, and `localtime_r` is
-# how that date is asked for without growing a timezone crate — the workspace
-# already links libc for the shell tool's unix calls.
+# The daily log rolls on the machine's own civil date. Jiff supplies the
+# system-timezone lookup without the unsafe unix-only `localtime_r` path.
+jiff.workspace = true
+# The unix-only staging-write failure test uses `setrlimit` to force a real
+# short write; production no longer reaches libc for the local date.
 libc.workspace = true
 # The importer reads someone else's config, which is JSONC whatever its
 # extension says, and it has to see the keys in document order — permission

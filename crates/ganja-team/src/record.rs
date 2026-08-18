@@ -57,6 +57,7 @@ use std::{
 };
 
 use indexmap::IndexMap;
+use jiff::Timestamp;
 use serde::{
     Deserialize, Serialize, Serializer,
     ser::{self, SerializeMap as _},
@@ -899,59 +900,18 @@ pub fn now_iso8601() -> String {
 /// looking right: the timestamp is one third of the identity key deliveries are
 /// reconciled by (§2.3), so two builds spelling one instant differently would
 /// deliver the same message twice.
+///
+/// A shared formatter would have to live in a crate, not a module.
+/// `ganja-protocol` cannot be that crate: CI pins its external dependencies to
+/// serde, serde_json and uuid, while this crate's internal allowlist is exactly
+/// `ganja-protocol`. A thin jiff call site in each consumer is therefore the
+/// only shape this dependency graph admits.
 #[must_use]
 pub(crate) fn iso8601(millis: u64) -> String {
-    let seconds = i64::try_from(millis / 1_000).unwrap_or(i64::MAX);
-    let subsecond = millis % 1_000;
-    let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
-    let time = seconds.rem_euclid(86_400);
+    let millis = i64::try_from(millis).unwrap_or(i64::MAX);
+    let timestamp = Timestamp::from_millisecond(millis).unwrap_or(Timestamp::MAX);
 
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{subsecond:03}Z",
-        hour = time / 3_600,
-        minute = (time % 3_600) / 60,
-        second = time % 60,
-    )
-}
-
-/// Days since the epoch to a proleptic Gregorian date.
-///
-/// Hinnant's `civil_from_days`, and the fifth days↔date helper in this
-/// workspace — `ganja-cli`'s `main.rs` keeps the same algorithm, `ganja-tui`'s
-/// `transcript.rs` and `ganja-core`'s `instruction.rs` a loop-based one, and
-/// `ganja-provider`'s `provider/retry.rs` the inverse.
-///
-/// **The layering does not forbid a shared one, and saying that it did was
-/// wrong.** Every crate holding a copy already depends on `ganja-protocol`, so
-/// a helper there would be reachable from all five. What is missing is a *place*:
-/// `ganja-protocol` is a vocabulary crate — the types the wire and the
-/// transcript speak — and putting date arithmetic in it would make it the
-/// workspace's utility crate, which is a decision about the whole dependency
-/// graph and not one this module gets to take on the way past. So the
-/// duplication is a **standing cost, accepted and unpaid**, not a constraint:
-/// twenty lines of arithmetic that has not changed since 2013, pinned in each
-/// copy by its own edge-case test. Whoever decides where shared leaf utilities
-/// live in this workspace is who collapses these five.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    // Shift the epoch to 0000-03-01, so a leap day lands at the end of a year
-    // and the month arithmetic below needs no special case for February.
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = u32::try_from(day_of_year - (153 * shifted_month + 2) / 5 + 1).unwrap_or(1);
-    let month = u32::try_from(if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    })
-    .unwrap_or(1);
-
-    (year + i64::from(month <= 2), month, day)
+    format!("{timestamp:.3}")
 }
 
 #[cfg(test)]

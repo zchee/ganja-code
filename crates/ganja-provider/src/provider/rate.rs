@@ -114,6 +114,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use jiff::{Timestamp, fmt::friendly::SpanParser};
 use reqwest::header::HeaderMap;
 
 /// One vendor bucket: how much of one budget is left, and when it refills.
@@ -707,92 +708,54 @@ fn elapsed(value: &str) -> Option<Duration> {
             .then(|| Duration::from_millis((seconds * 1_000.0).ceil() as u64));
     }
 
-    // `1h2m3.5s`, `6m0s`, `500ms`: number-then-unit, repeated, no separators.
-    let mut millis = 0f64;
-    let mut rest = value;
-    while !rest.is_empty() {
-        let digits = rest
-            .find(|character: char| !character.is_ascii_digit() && character != '.')
-            .filter(|split| *split > 0)?;
-        let (count, tail) = rest.split_at(digits);
-        let count: f64 = count.parse().ok()?;
-        let unit = tail
-            .find(|character: char| character.is_ascii_digit())
-            .unwrap_or(tail.len());
-        let (unit, tail) = tail.split_at(unit);
+    let parsed = SpanParser::new().parse_unsigned_duration(value).ok()?;
+    let millis = u64::try_from(parsed.as_millis()).ok()?;
+    let millis = millis.checked_add(u64::from(parsed.subsec_nanos() % 1_000_000 != 0))?;
 
-        millis += count
-            * match unit {
-                "ms" => 1.0,
-                "s" => 1_000.0,
-                "m" => 60_000.0,
-                "h" => 3_600_000.0,
-                _ => return None,
-            };
-        rest = tail;
-    }
-
-    (millis.is_finite() && millis >= 0.0).then(|| Duration::from_millis(millis.ceil() as u64))
+    Some(Duration::from_millis(millis))
 }
 
 /// Parses the RFC 3339 spelling Anthropic sends: `2026-08-14T12:34:56Z`, with
 /// optional fractional seconds and an optional numeric offset.
 ///
-/// Hand-rolled for [`super::retry::retry_after`]'s reason — the workspace
-/// carries no date crate, and the grammar a vendor actually emits is this
-/// narrow.
+/// Jiff validates the calendar and offset. Fractions are removed before it
+/// parses because this meter has always resolved resets to whole seconds; its
+/// parser also clamps `:60` to `:59`, so that one spelling is advanced back to
+/// the instant the vendor named.
 fn rfc3339(value: &str) -> Option<SystemTime> {
     let (date, rest) = value.split_once(['T', 't'])?;
-    let mut date = date.split('-');
-    let year: i64 = date.next()?.parse().ok()?;
-    let month: u32 = date.next()?.parse().ok()?;
-    let day: u32 = date.next()?.parse().ok()?;
-    if date.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-
-    // The offset first, so what is left is only the clock.
-    let (clock, offset) = match rest.find(['Z', 'z']) {
-        Some(index) if index + 1 == rest.len() => (&rest[..index], 0i64),
+    let (clock, zone) = match rest.find(['Z', 'z']) {
+        Some(index) if index + 1 == rest.len() => (&rest[..index], &rest[index..]),
         _ => {
             let index = rest.rfind(['+', '-'])?;
             let (hours, minutes) = rest[index + 1..].split_once(':')?;
-            let seconds = i64::from(hours.parse::<u32>().ok()?) * 3_600
-                + i64::from(minutes.parse::<u32>().ok()?) * 60;
-            (
-                &rest[..index],
-                if rest.as_bytes()[index] == b'-' {
-                    -seconds
-                } else {
-                    seconds
-                },
-            )
+            hours.parse::<u32>().ok()?;
+            minutes.parse::<u32>().ok()?;
+            (&rest[..index], &rest[index..])
         }
     };
 
     let mut clock = clock.split(':');
-    let hour: u64 = clock.next()?.parse().ok()?;
-    let minute: u64 = clock.next()?.parse().ok()?;
-    // Fractional seconds are dropped rather than refused: a window that
-    // refills 300ms later than the header's whole second is a window this
-    // build has no reason to be precise about.
+    let hour = clock.next()?;
+    let minute = clock.next()?;
     let field = clock.next()?;
-    let second: u64 = field
-        .split_once('.')
-        .map_or(field, |(whole, _)| whole)
-        .parse()
-        .ok()?;
-    if clock.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+    if clock.next().is_some() {
         return None;
     }
+    // A window that refills 300ms after the named whole second is not useful
+    // at finer precision, and dropping it before parsing also preserves the
+    // old reader's acceptance of any opaque fractional tail.
+    let second = field.split_once('.').map_or(field, |(whole, _)| whole);
+    let leap_second = second == "60";
+    let normalized = format!("{date}T{hour}:{minute}:{second}{zone}");
+    let mut timestamp = normalized.parse::<Timestamp>().ok()?;
+    if leap_second {
+        timestamp = timestamp.checked_add(Duration::from_secs(1)).ok()?;
+    }
 
-    // `retry`'s, not a copy of it: the two modules read the same dates off
-    // the same responses, and one arithmetic is what keeps them agreeing.
-    let seconds = super::retry::days_from_civil(year, month, day).checked_mul(86_400)?
-        + i64::try_from(hour * 3_600 + minute * 60 + second).ok()?
-        - offset;
-
-    UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(seconds).ok()?))
+    UNIX_EPOCH.checked_add(Duration::from_secs(
+        u64::try_from(timestamp.as_second()).ok()?,
+    ))
 }
 
 #[cfg(test)]
@@ -802,8 +765,8 @@ mod tests {
     use reqwest::header::{HeaderMap, HeaderValue};
 
     use super::{
-        PlanWindow, RateWindow, RateWindows, header_names, parse, parse_plans, percent_decode,
-        rfc3339,
+        PlanWindow, RateWindow, RateWindows, elapsed, header_names, parse, parse_plans,
+        percent_decode, rfc3339,
     };
 
     /// A fixed "now" so a duration-spelled reset lands somewhere a test can
@@ -1065,6 +1028,26 @@ mod tests {
         );
     }
 
+    /// The OpenAI-shaped reset grammar, including its ceiling to the next
+    /// whole millisecond.
+    #[test]
+    fn the_elapsed_reader_keeps_the_vendor_grammar_and_rounding() {
+        for (value, expected) in [
+            ("1h2m3.5s", Some(Duration::from_millis(3_723_500))),
+            ("500ms", Some(Duration::from_millis(500))),
+            ("60", Some(Duration::from_secs(60))),
+            ("1.5", Some(Duration::from_millis(1_500))),
+            ("0.0001s", Some(Duration::from_millis(1))),
+            ("", None),
+            ("6x0s", None),
+            ("-1", None),
+            ("NaN", None),
+            ("inf", None),
+        ] {
+            assert_eq!(elapsed(value), expected, "parsing {value:?}");
+        }
+    }
+
     /// The RFC 3339 shapes a vendor actually emits, and the ones it does not.
     #[test]
     fn the_rfc3339_reader_takes_offsets_and_fractions_and_refuses_the_rest() {
@@ -1083,7 +1066,17 @@ mod tests {
             Some(UNIX_EPOCH + Duration::from_secs(1_786_710_896)),
             "a real instant lands where the civil arithmetic says"
         );
-        for refused in ["1970-13-01T00:00:00Z", "1970-01-01 00:00:00Z", "not a date"] {
+        assert_eq!(
+            rfc3339("1970-01-01T00:00:60Z"),
+            Some(UNIX_EPOCH + Duration::from_secs(60)),
+            "a leap-second-shaped field names the next minute"
+        );
+        for refused in [
+            "1970-13-01T00:00:00Z",
+            "1970-01-01T00:00:61Z",
+            "1970-01-01 00:00:00Z",
+            "not a date",
+        ] {
             assert_eq!(rfc3339(refused), None, "{refused:?} is refused");
         }
     }

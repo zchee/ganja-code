@@ -42,6 +42,9 @@ getrandom.workspace = true
 # never did. The one form it refuses where the hand parser did not, a
 # leap-second `:60`, keeps a fallback at the call site.
 httpdate.workspace = true
+# Vendor rate-limit resets arrive as RFC 3339 instants; the compatibility shim
+# at that parser is the only place any leap-second divergence is handled.
+jiff.workspace = true
 # A quota snapshot arrives as a query string, and its escaped bytes are UTF-8
 # rather than one character each — which is what the hand decoder here read
 # them as. RFC 3986's coding, already in the tree under `url`.

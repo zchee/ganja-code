@@ -31,6 +31,9 @@ grep-matcher.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
 ignore.workspace = true
+# The web-search prompt's current UTC year is a per-crate call site because
+# this tool layer cannot borrow the engine's prompt formatter above it.
+jiff.workspace = true
 # `webfetch`'s markdown format is a real conversion of the page's markup, the
 # way upstream's turndown call is, rather than the tag-stripped text that stood
 # in for one until the crate landed.

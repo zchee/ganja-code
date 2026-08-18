@@ -32,6 +32,10 @@ ganja-protocol.workspace = true
 # The whole reason the record shapes live here and not in `ganja-protocol`,
 # whose posture is to refuse an unknown field rather than carry it.
 indexmap.workspace = true
+# Claude-compatible mailbox timestamps are RFC 3339 with exactly milliseconds;
+# this crate keeps the thin formatter because the protocol leaf cannot grow a
+# date dependency and nothing else sits beneath this document layer.
+jiff.workspace = true
 serde.workspace = true
 # Claude's documents are checked as values and decoded from raw bytes, because
 # §2.4's validation is field-level — a dropped entry has to say which key

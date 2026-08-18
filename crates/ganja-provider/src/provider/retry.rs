@@ -286,7 +286,7 @@ pub fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
 fn http_date(value: &str) -> Option<SystemTime> {
     httpdate::parse_http_date(value)
         .ok()
-        .or_else(|| leap_second(value))
+        .or_else(|| http_leap_second(value))
 }
 
 /// The `:60` of a leap second, read as the instant it names.
@@ -295,33 +295,12 @@ fn http_date(value: &str) -> Option<SystemTime> {
 /// and the alternative — refusing the header — turns a `Retry-After` into no
 /// delay at all. The second before it is a date every reader agrees on, so
 /// that is what gets parsed and then stepped past.
-fn leap_second(value: &str) -> Option<SystemTime> {
+fn http_leap_second(value: &str) -> Option<SystemTime> {
     let head = value.trim_end().strip_suffix(":60 GMT")?;
 
     httpdate::parse_http_date(&format!("{head}:59 GMT"))
         .ok()?
         .checked_add(Duration::from_secs(1))
-}
-
-/// Days between 1970-01-01 and `year-month-day`, by Howard Hinnant's
-/// `days_from_civil`. Proleptic Gregorian, valid for any year the parser can
-/// produce.
-///
-/// Nothing here reads it any more — the dates this module parses are
-/// [`httpdate`]'s business now. It survives for [`super::rate`], whose own
-/// RFC 3339 parser is the last hand-rolled calendar in this crate, and stays
-/// spelled here rather than moving so that the move is one edit rather than
-/// two when that parser goes as well.
-pub(super) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let year = year - i64::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * i64::from(if month > 2 { month - 3 } else { month + 9 }) + 2) / 5
-        + i64::from(day)
-        - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-
-    era * 146_097 + day_of_era - 719_468
 }
 
 #[cfg(test)]

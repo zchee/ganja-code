@@ -47,6 +47,9 @@ ganja-protocol.workspace = true
 # through an engine API is the work of the phase that grows a remote frontend,
 # which cannot link this crate at all.
 ganja-tool.workspace = true
+# Copied transcripts render their persisted millisecond clocks in UTC through
+# the same date vocabulary as the other crates, without reaching into core.
+jiff.workspace = true
 # The palette and the `/` dropdown rank commands by a typed fragment. The same
 # matcher helix and nucleo use, so a fragment scores here the way it scores in
 # every other terminal picker the user already knows.

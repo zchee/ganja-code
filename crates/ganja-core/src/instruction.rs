@@ -36,9 +36,9 @@
 //!   provider is asked for it. Upstream additionally spells the `provider/model`
 //!   pair, which is not available where this is composed.
 //! - **D24** — the date is UTC. Upstream renders the machine's local date;
-//!   there is no date library in this workspace, and reaching `localtime_r`
-//!   through `libc` for one line — unsafe, and unix-only — buys less than it
-//!   costs.
+//!   keeping UTC makes the prompt stable across machines regardless of where
+//!   ganja happens to run. That product property is independent of which date
+//!   library is available.
 //! - **D25** — instruction globs do not consult ignore files, but do keep the
 //!   hidden-file rule; see `glob`.
 //! - **D2** — `http(s)` entries in `instructions` are skipped with a warning
@@ -70,10 +70,11 @@ use std::{
     collections::BTreeSet,
     fmt::Write as _,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
+use jiff::Timestamp;
 
 use crate::{config::Config, project::Project, tool::skill};
 
@@ -119,18 +120,6 @@ const MEMORY_INDEX: &str = "MEMORY.md";
 /// disagree about where a block starts.
 const MEMORY_HEAD: &str =
     "Project memory: durable facts about this project, kept outside the repository.";
-
-/// Days in each month of a non-leap year, for [`civil_date`].
-const MONTH_LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-/// Month names as `Date.prototype.toDateString` spells them.
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
-/// Weekday names as `Date.prototype.toDateString` spells them, starting at
-/// Thursday because that is what 1970-01-01 was.
-const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
 
 /// The base prompt for `model_id`.
 ///
@@ -961,65 +950,17 @@ fn glob(directory: &Path, pattern: &str) -> Vec<PathBuf> {
 
 /// Today's date, spelled the way `Date.prototype.toDateString` spells it.
 fn today() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // Integer division floors, and the clock is never before the epoch here —
-    // `duration_since` already saturated a clock set earlier than that to zero.
-    let days = i64::try_from(seconds / 86_400).unwrap_or_default();
-    let (year, month, day) = civil_date(days);
+    let timestamp = Timestamp::try_from(SystemTime::now())
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .max(Timestamp::UNIX_EPOCH);
 
-    // 1970-01-01 was a Thursday, which is where `WEEKDAYS` starts.
-    let weekday = WEEKDAYS[usize::try_from(days.rem_euclid(7)).unwrap_or_default()];
-
-    format!("{weekday} {} {day:02} {year}", MONTHS[month as usize - 1])
+    date_at(timestamp)
 }
 
-/// The civil date `days` after 1970-01-01, as `(year, month, day)` with the
-/// month 1-based.
-///
-/// Spelled out rather than pulled from a crate because one line of a prompt is
-/// not worth a dependency, and the proleptic Gregorian rules it needs fit in a
-/// dozen lines.
-fn civil_date(days: i64) -> (i64, u32, u32) {
-    /// Days in the 400-year Gregorian cycle: 400 × 365 plus its leap days.
-    const CYCLE: i64 = 146_097;
-
-    let mut year = 1970;
-    let mut remaining = days;
-
-    // Whole cycles first, so a date centuries away is still a handful of
-    // iterations rather than a loop over every year.
-    let cycles = remaining.div_euclid(CYCLE);
-    year += cycles * 400;
-    remaining -= cycles * CYCLE;
-
-    loop {
-        let length = if leap(year) { 366 } else { 365 };
-        if remaining < length {
-            break;
-        }
-        remaining -= length;
-        year += 1;
-    }
-
-    let mut month = 1;
-    for (index, length) in MONTH_LENGTHS.iter().enumerate() {
-        let length = i64::from(*length) + i64::from(index == 1 && leap(year));
-        if remaining < length {
-            break;
-        }
-        remaining -= length;
-        month += 1;
-    }
-
-    (year, month, u32::try_from(remaining + 1).unwrap_or(1))
-}
-
-/// Whether `year` has a 29th of February.
-fn leap(year: i64) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+/// Kept separate so the byte format is pinned at fixed instants without
+/// controlling the process clock.
+fn date_at(timestamp: Timestamp) -> String {
+    timestamp.strftime("%a %b %d %Y").to_string()
 }
 
 #[cfg(test)]
@@ -1029,12 +970,13 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use jiff::Timestamp;
     use tempfile::TempDir;
 
     use super::{
-        ANTHROPIC, DEFAULT, GPT, HEADER, NESTED_MAX, base_prompt, civil_date, discover,
-        environment, find_up, glob, joined, nested_files, nested_suffix, resolve_entry, resolved,
-        skill, skills_block, suffix_from, suffix_measure, today,
+        ANTHROPIC, DEFAULT, GPT, HEADER, NESTED_MAX, base_prompt, date_at, discover, environment,
+        find_up, glob, joined, nested_files, nested_suffix, resolve_entry, resolved, skill,
+        skills_block, suffix_from, suffix_measure,
     };
     use crate::config::{Config, SkillsConfig};
 
@@ -1367,38 +1309,26 @@ mod tests {
     #[test]
     fn the_date_is_spelled_the_way_upstream_spells_it() {
         let cases = [
-            (0_i64, (1970, 1, 1), "Thu Jan 01 1970"),
-            (59, (1970, 3, 1), "Sun Mar 01 1970"),
+            (0_i64, "Thu Jan 01 1970"),
+            (59, "Sun Mar 01 1970"),
             // 2000 is a leap year; 2100 is not, which is what makes the
             // century rule worth a case of its own.
-            (11_016, (2000, 2, 29), "Tue Feb 29 2000"),
-            (20_577, (2026, 5, 4), "Mon May 04 2026"),
-            (47_541, (2100, 3, 1), "Mon Mar 01 2100"),
+            (11_016, "Tue Feb 29 2000"),
+            (20_577, "Mon May 04 2026"),
+            (47_541, "Mon Mar 01 2100"),
         ];
 
-        for (days, expected, spelled) in cases {
-            let (year, month, day) = civil_date(days);
-            assert_eq!((year, month, day), expected, "day {days}");
-
-            let rendered = format!(
-                "{} {} {day:02} {year}",
-                super::WEEKDAYS[usize::try_from(days.rem_euclid(7)).expect("a weekday index")],
-                super::MONTHS[month as usize - 1]
-            );
-            assert_eq!(rendered, spelled);
+        for (days, expected) in cases {
+            let timestamp = Timestamp::from_second(days * 86_400).expect("the day is in range");
+            assert_eq!(date_at(timestamp), expected, "day {days}");
         }
     }
 
     #[test]
-    fn todays_date_has_the_shape_the_prompt_promises() {
-        let rendered = today();
-        let fields: Vec<&str> = rendered.split(' ').collect();
+    fn a_prompt_date_has_the_exact_shape_it_promises() {
+        let timestamp = Timestamp::from_second(20_577 * 86_400).expect("the day is in range");
 
-        assert_eq!(fields.len(), 4, "{rendered}");
-        assert!(super::WEEKDAYS.contains(&fields[0]), "{rendered}");
-        assert!(super::MONTHS.contains(&fields[1]), "{rendered}");
-        assert_eq!(fields[2].len(), 2, "{rendered}");
-        assert_eq!(fields[3].len(), 4, "{rendered}");
+        assert_eq!(date_at(timestamp), "Mon May 04 2026");
     }
 
     /// Writes a skill at `<root>/<name>/SKILL.md`.

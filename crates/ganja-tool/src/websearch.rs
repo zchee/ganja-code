@@ -40,9 +40,10 @@
 //!   here for the reason above, and both are optional in upstream's own schema
 //!   (`mcp-websearch.ts:51-56`), so they are omitted rather than invented.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use jiff::{Timestamp, tz::TimeZone};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -88,9 +89,6 @@ const NOTHING_FOUND: &str = "No search results found. Please try a different que
 
 /// The token the description carries for the year the session is running in.
 const YEAR_TOKEN: &str = "{{year}}";
-
-/// Seconds in a day, for [`current_year`].
-const DAY: u64 = 86_400;
 
 /// What [`encode`] escapes: everything outside RFC 3986's unreserved set,
 /// `A-Za-z0-9-._~`.
@@ -294,7 +292,7 @@ impl WebsearchTool {
     fn against(exa: &str, parallel: &str) -> Self {
         Self {
             description: include_str!("websearch.txt")
-                .replace(YEAR_TOKEN, &current_year().to_string()),
+                .replace(YEAR_TOKEN, &current_utc_year().to_string()),
             exa_url: exa.to_owned(),
             parallel_url: parallel.to_owned(),
         }
@@ -556,40 +554,30 @@ fn encode(value: &str) -> String {
 
 /// The year this process is running in, UTC.
 ///
-/// The same **D24** trade the environment block makes: there is no date
-/// library in this workspace, and the year is wanted for one substitution in
-/// one prompt. The arithmetic is the civil-from-days walk — the engine's
-/// `instruction` module does it too, and cannot be borrowed from here because
-/// this crate sits beneath it and must stay there.
+/// This crate sits beneath `ganja-core`, so it cannot borrow the prompt
+/// formatter above it. As with the other consumers, the dependency graph
+/// admits a thin local jiff call site rather than a shared helper in the
+/// protocol leaf.
 ///
-/// A clock before the epoch yields 1970, which is the year of a machine whose
-/// clock is wrong rather than a panic in a tool description.
-fn current_year() -> u32 {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
-    let mut days = seconds / DAY;
-    let mut year = 1970;
+/// A clock before the epoch still yields 1970 rather than turning a broken
+/// machine clock into a misleading prompt year.
+fn current_utc_year() -> u32 {
+    let timestamp = Timestamp::try_from(SystemTime::now())
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .max(Timestamp::UNIX_EPOCH);
 
-    loop {
-        let length = if leap(year) { 366 } else { 365 };
-        if days < length {
-            return year;
-        }
-        days -= length;
-        year += 1;
-    }
+    year_in_utc(timestamp)
 }
 
-/// Whether `year` is a leap year in the proleptic Gregorian calendar.
-const fn leap(year: u32) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+fn year_in_utc(timestamp: Timestamp) -> u32 {
+    u32::try_from(timestamp.to_zoned(TimeZone::UTC).year()).unwrap_or(1970)
 }
 
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, sync::Arc, time::Duration};
 
+    use jiff::Timestamp;
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::TcpListener,
@@ -1047,27 +1035,32 @@ mod tests {
             tool.description()
         );
         assert!(
-            tool.description()
-                .contains(&format!("The current year is {}.", super::current_year())),
+            tool.description().contains(&format!(
+                "The current year is {}.",
+                super::current_utc_year()
+            )),
             "and substituted with this year: {}",
             tool.description()
         );
-        assert!(super::current_year() >= 2026, "the epoch walk is off");
+        assert!(super::current_utc_year() >= 2026, "the UTC clock is off");
     }
 
-    /// The civil-from-days walk, at the boundaries a leap-year rule gets wrong.
+    /// The UTC year at calendar boundaries the hand-written walk could get
+    /// wrong.
     #[test]
-    fn the_year_walk_holds_at_the_leap_boundaries() {
-        for (year, expected) in [
-            (1970_u32, false),
-            (1972, true),
-            (1900, false),
-            (2000, true),
-            (2024, true),
-            (2026, false),
-            (2100, false),
+    fn the_utc_year_is_pinned_at_calendar_boundaries() {
+        for (seconds, expected) in [
+            (0_u64, 1970_u32),
+            (63_072_000, 1972),
+            (946_684_800, 2000),
+            (1_709_164_800, 2024),
+            (1_786_924_800, 2026),
+            (4_107_542_400, 2100),
         ] {
-            assert_eq!(super::leap(year), expected, "{year}");
+            let timestamp =
+                Timestamp::from_second(i64::try_from(seconds).expect("the fixture fits i64"))
+                    .expect("the fixture is in range");
+            assert_eq!(super::year_in_utc(timestamp), expected, "second {seconds}");
         }
     }
 

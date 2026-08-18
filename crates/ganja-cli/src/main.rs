@@ -16,7 +16,7 @@
 use std::{
     io::{self, IsTerminal as _, Read as _, Write as _},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -25,6 +25,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use ganja_core::{McpStatus, SessionInfo, Storage, auth, catalog};
 use ganja_permission::Project;
 use ganja_protocol::Usage;
+use jiff::{Timestamp, tz::TimeZone};
 use secrecy::{SecretString, zeroize::Zeroize as _};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -836,7 +837,7 @@ fn install_logging(verbose: bool) -> Option<WorkerGuard> {
 /// (`Rotation::DAILY` reads a UTC clock), which east of Greenwich has the
 /// morning's log still landing under yesterday's name — the 2026-08-15
 /// report, from JST, where the roll would only have come at 09:00. This
-/// writer asks libc for the local civil date instead and otherwise keeps the
+/// writer asks jiff for the local civil date instead and otherwise keeps the
 /// appender's shape: `ganja.<date>.log` under one directory, [`LOG_FILES`]
 /// kept, the oldest pruned on each roll. It sits behind
 /// `tracing_appender::non_blocking` exactly as the stock appender did, so
@@ -849,6 +850,11 @@ struct LocalDaily {
 
 /// A civil date, `(year, month, day)`.
 type Date = (i32, u32, u32);
+
+// System-tz discovery may read the platform database, so one process resolves
+// it once instead of doing filesystem work for every trace record.
+static LOCAL_TIMEZONE: LazyLock<TimeZone> =
+    LazyLock::new(|| TimeZone::try_system().unwrap_or(TimeZone::UTC));
 
 impl LocalDaily {
     fn new(directory: PathBuf) -> Self {
@@ -916,61 +922,25 @@ fn log_name((year, month, day): Date) -> String {
 
 /// Today, in this machine's own timezone.
 ///
-/// libc's `localtime_r` on unix — reentrant by contract, reading the same
-/// timezone database every other local timestamp on this machine reads.
-/// Elsewhere, and on the call failing, the UTC civil date stands in, which is
-/// exactly what the stock appender always used.
+/// Jiff reads the platform's system timezone, including `TZ` and the unix
+/// zoneinfo database. When that lookup is unavailable or invalid, UTC stands
+/// in, preserving the stock appender's graceful fallback.
 fn local_date() -> Date {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or(0);
-
-    #[cfg(unix)]
-    {
-        let time = libc::time_t::try_from(seconds).unwrap_or(0);
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        // SAFETY: `localtime_r` writes only into the `tm` this call owns and
-        // reads only the timestamp beside it; it is the reentrant variant by
-        // contract.
-        if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
-            return civil_from_days(seconds / 86_400);
-        }
-
-        (
-            1900 + tm.tm_year,
-            u32::try_from(tm.tm_mon + 1).unwrap_or(1),
-            u32::try_from(tm.tm_mday).unwrap_or(1),
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        civil_from_days(seconds / 86_400)
-    }
+    local_date_at(SystemTime::now())
 }
 
-/// The civil date `days` days after 1970-01-01 — Howard Hinnant's
-/// `civil_from_days`, the epoch shifted.
-fn civil_from_days(days: u64) -> Date {
-    let days = i64::try_from(days).unwrap_or(0) + 719_468;
-    let era = days.div_euclid(146_097);
-    let of_era = days.rem_euclid(146_097);
-    let of_year = (of_era - of_era / 1_460 + of_era / 36_524 - of_era / 146_096) / 365;
-    let year = of_year + era * 400;
-    let year_days = of_era - (365 * of_year + of_year / 4 - of_year / 100);
-    let month_index = (5 * year_days + 2) / 153;
-    let day = year_days - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = if month <= 2 { year + 1 } else { year };
+fn local_date_at(instant: SystemTime) -> Date {
+    let timestamp = Timestamp::try_from(instant).unwrap_or(Timestamp::UNIX_EPOCH);
 
+    date_in(timestamp, LOCAL_TIMEZONE.clone())
+}
+
+fn date_in(timestamp: Timestamp, timezone: TimeZone) -> Date {
+    let date = timestamp.to_zoned(timezone).date();
     (
-        i32::try_from(year).unwrap_or(1970),
-        u32::try_from(month).unwrap_or(1),
-        u32::try_from(day).unwrap_or(1),
+        i32::from(date.year()),
+        u32::try_from(date.month()).expect("jiff months are positive"),
+        u32::try_from(date.day()).expect("jiff days are positive"),
     )
 }
 
@@ -1587,8 +1557,8 @@ fn millis_now() -> u64 {
 /// since the Unix epoch.
 ///
 /// An age rather than a timestamp, because the question a listing answers is
-/// "which of these was I just in" — and because there is no date library in
-/// the workspace manifest, and putting one there is not this crate's call.
+/// "which of these was I just in"; an absolute timestamp makes that ordering
+/// harder to scan without adding information the listing needs.
 ///
 /// A `then` in the future is a clock that moved rather than a session from the
 /// future, so it reads as the present instead of as a negative age.
@@ -2147,7 +2117,11 @@ fn per_mtok(price: f64) -> String {
 /// tests only, so that one assertion belongs in `tests/` instead.
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        process::Command as ProcessCommand,
+        sync::Arc,
+        time::{Duration, UNIX_EPOCH},
+    };
 
     use clap::Parser;
     use ganja_core::{
@@ -2156,6 +2130,7 @@ mod tests {
         storage::VERSION,
     };
     use ganja_protocol::Usage;
+    use jiff::{Timestamp, tz::TimeZone};
 
     use super::{
         Cli, Command, UNTITLED, age, billed_tokens, matching, per_mtok, printable_session,
@@ -2194,13 +2169,61 @@ mod tests {
         assert_eq!(super::log_name((2026, 1, 2)), "ganja.2026-01-02.log");
     }
 
-    /// The UTC fallback's date arithmetic, against dates a calendar can
-    /// check — the epoch itself, a leap-adjacent day, and the report's own.
+    /// A child process owns `TZ`, so this remains race-free under plain
+    /// `cargo test` while still exercising the system timezone lookup.
     #[test]
-    fn civil_from_days_matches_the_calendar() {
-        assert_eq!(super::civil_from_days(0), (1970, 1, 1));
-        assert_eq!(super::civil_from_days(11_017), (2000, 3, 1));
-        assert_eq!(super::civil_from_days(20_680), (2026, 8, 15));
+    fn a_local_date_uses_the_configured_timezone_at_a_fixed_instant() {
+        const CHILD: &str = "GANJA_TEST_LOCAL_DATE_CHILD";
+        if let Some(expected) = std::env::var_os(CHILD) {
+            let instant = UNIX_EPOCH
+                .checked_add(Duration::from_secs(1_786_926_600))
+                .expect("the fixed instant is representable");
+            let expected = match expected.to_str() {
+                Some("local") => (2026, 8, 16),
+                Some("fallback") => (2026, 8, 17),
+                value => panic!("unknown child case: {value:?}"),
+            };
+            assert_eq!(super::local_date_at(instant), expected);
+            return;
+        }
+
+        for (case, timezone) in [
+            ("local", "America/Los_Angeles"),
+            ("fallback", "/definitely/missing/ganja-zoneinfo"),
+        ] {
+            let output =
+                ProcessCommand::new(std::env::current_exe().expect("the test binary has a path"))
+                    .args([
+                        "--exact",
+                        "tests::a_local_date_uses_the_configured_timezone_at_a_fixed_instant",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, case)
+                    .env("TZ", timezone)
+                    .output()
+                    .expect("the isolated timezone test starts");
+
+            assert!(
+                output.status.success(),
+                "the isolated {case} timezone pin failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
+    /// The UTC fallback, against dates a calendar can check — the epoch
+    /// itself, a leap-adjacent day, and the report's own.
+    #[test]
+    fn the_utc_fallback_date_matches_the_calendar() {
+        for (days, expected) in [
+            (0_i64, (1970, 1, 1)),
+            (11_017, (2000, 3, 1)),
+            (20_680, (2026, 8, 15)),
+        ] {
+            let timestamp = Timestamp::from_second(days * 86_400).expect("the fixture is in range");
+            assert_eq!(super::date_in(timestamp, TimeZone::UTC), expected);
+        }
     }
 
     #[test]

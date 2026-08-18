@@ -30,6 +30,7 @@
 
 use ganja_core::SessionInfo;
 use ganja_protocol::{Part, PartBody, Role, ToolState, team};
+use jiff::Timestamp;
 
 /// What a session with no title of its own is headed with. Upstream's title
 /// is always a string; ganja's is absent until a title call has named the
@@ -337,67 +338,15 @@ fn pretty(input: &serde_json::Value) -> String {
 
 /// `millis` since the Unix epoch, as `YYYY-MM-DD HH:MM:SS UTC`.
 ///
-/// The calendar arithmetic is spelled out for the same reason
-/// `ganja_core::instruction` spells its own copy out — two timestamps are not
-/// worth a date crate — and duplicated rather than shared because that copy is
-/// private to another crate. Worth folding into one exported helper the day
-/// either side needs a third caller.
+/// A shared formatter's home would be a crate, not a module, and the only
+/// common leaf is `ganja-protocol`, whose external dependency allowlist is
+/// intentionally fixed. The thin jiff call stays per-crate so the protocol
+/// vocabulary does not become a utility layer.
 fn stamp(millis: u64) -> String {
-    let seconds = millis / 1_000;
-    let days = i64::try_from(seconds / 86_400).unwrap_or_default();
-    let (hour, minute, second) = (seconds / 3_600 % 24, seconds / 60 % 60, seconds % 60);
-    let (year, month, day) = civil_date(days);
+    let millis = i64::try_from(millis).unwrap_or(i64::MAX);
+    let timestamp = Timestamp::from_millisecond(millis).unwrap_or(Timestamp::MAX);
 
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
-}
-
-/// Days in each month of a non-leap year.
-const MONTH_LENGTHS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-/// The civil date `days` after 1970-01-01, as `(year, month, day)` with the
-/// month 1-based.
-fn civil_date(days: i64) -> (i64, u32, u32) {
-    /// Days in the 400-year Gregorian cycle: 400 × 365 plus its leap days.
-    const CYCLE: i64 = 146_097;
-
-    let mut year = 1970;
-    let mut remaining = days;
-
-    // Whole cycles first, so a date centuries away costs a handful of
-    // iterations rather than a loop over every year in between.
-    let cycles = remaining.div_euclid(CYCLE);
-    year += cycles * 400;
-    remaining -= cycles * CYCLE;
-
-    loop {
-        let length = if leap(year) { 366 } else { 365 };
-        if remaining < length {
-            break;
-        }
-        remaining -= length;
-        year += 1;
-    }
-
-    let mut month = 1;
-    for (index, length) in MONTH_LENGTHS.iter().enumerate() {
-        let length = i64::from(*length) + i64::from(index == 1 && leap(year));
-        if remaining < length {
-            break;
-        }
-        remaining -= length;
-        month += 1;
-    }
-
-    (
-        year,
-        month,
-        u32::try_from(remaining).unwrap_or_default() + 1,
-    )
-}
-
-/// Whether `year` is a leap year in the proleptic Gregorian calendar.
-fn leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    timestamp.strftime("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
 #[cfg(test)]
@@ -405,7 +354,7 @@ mod tests {
     use ganja_core::{SessionId, SessionInfo};
     use ganja_protocol::{Part, PartBody, Role, ToolState, Usage};
 
-    use super::{Missing, civil_date, format, last_reply, stamp};
+    use super::{Missing, format, last_reply, stamp};
 
     /// A session whose times are fixed, so what this renders is the same
     /// string on every machine that runs it.
@@ -739,22 +688,22 @@ mod tests {
         }
     }
 
-    /// The calendar, at the edges that catch an off-by-one: an epoch, a leap
-    /// day, the century that is not a leap year and the one that is.
+    /// The formatted calendar at the edges that catch an off-by-one: an epoch,
+    /// a leap day, and a century boundary.
     #[test]
-    fn the_civil_date_holds_at_the_gregorian_edges() {
+    fn a_stamp_holds_at_the_gregorian_edges() {
         let cases = [
-            (0_i64, (1970_i64, 1_u32, 1_u32)),
-            (59, (1970, 3, 1)),
-            (365, (1971, 1, 1)),
+            (0_u64, "1970-01-01 00:00:00 UTC"),
+            (59 * 86_400_000, "1970-03-01 00:00:00 UTC"),
+            (365 * 86_400_000, "1971-01-01 00:00:00 UTC"),
             // 2000 was a leap year (÷400) where 1900 was not (÷100).
-            (11_016, (2000, 2, 29)),
-            (11_017, (2000, 3, 1)),
-            (20_513, (2026, 3, 1)),
+            (11_016 * 86_400_000, "2000-02-29 00:00:00 UTC"),
+            (11_017 * 86_400_000, "2000-03-01 00:00:00 UTC"),
+            (20_513 * 86_400_000, "2026-03-01 00:00:00 UTC"),
         ];
 
-        for (days, expected) in cases {
-            assert_eq!(civil_date(days), expected, "{days} days after the epoch");
+        for (millis, expected) in cases {
+            assert_eq!(stamp(millis), expected, "millisecond {millis}");
         }
     }
 
