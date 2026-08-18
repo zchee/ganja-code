@@ -22,7 +22,7 @@ use ganja_core::{
     permission::Permissions,
     protocol::{
         Command, Event, PartBody, PermissionReply, ToolState,
-        team::{Frame, LeadFrame, PlanApprovalResponse, ShutdownRequest, TeamPermissionUpdate},
+        team::{Frame, LeadFrame, PlanApprovalResponse, TeamPermissionUpdate},
     },
     teammate::{
         TeammateRegistry,
@@ -32,7 +32,7 @@ use ganja_core::{
     },
     tool::Registry,
 };
-use ganja_team::{LEAD, MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record};
+use ganja_team::{LEAD, MemberName, TeamName, TeamsRoot, mailbox, record};
 use ganja_testkit::{
     AllowSpawn, RunnerHarness, ScriptedProvider, caller, drain, eventually, says,
     spawn_with_prompt, team, tool_call,
@@ -136,28 +136,23 @@ async fn a_stale_plan_approval_response_is_ignored_and_logged() {
     );
 }
 
-/// A teammate's outbound frames carry the name the team gave it, and there is
-/// no argument that changes that.
+/// A teammate cannot take the lead's name: the registry's construction rule
+/// rather than a check somewhere downstream. A spawn that *asks* to be called
+/// `team-lead` does not get it — the lead is already in the roster, so the
+/// name resolves to something else, and the roster still holds exactly one
+/// lead.
 ///
-/// Two moves, both of them the registry's construction rule rather than a check
-/// somewhere downstream. First: a spawn that *asks* to be called `team-lead`
-/// does not get it — the lead is already in the roster, so the name resolves to
-/// something else, and the roster still holds exactly one lead. Second: the one
-/// frame this teammate mints is stamped with that resolved name even though the
-/// message it answers claims to be from the lead — because the sender is a
-/// value bound when the teammate was built, never a field on the thing being
-/// answered.
-///
-/// The `send_message` tool's own half of this — a model whose arguments say
-/// `"from": "team-lead"` — is [`a_member_postbox_cannot_send_as_the_lead`],
-/// below.
+/// What that resolved name then stamps is pinned where each stamp lives: the
+/// runner's answers in `teammate_lifecycle.rs`, and the `send_message` tool's
+/// — a model whose arguments say `"from": "team-lead"` — in
+/// [`a_member_postbox_cannot_send_as_the_lead`], below.
 #[tokio::test]
 async fn a_teammate_cannot_send_as_the_lead() {
     let home = ganja_testkit::temp_dir();
     // Through the gated door, which is the only one there is: the registry's
     // own spawn is crate-internal so that nothing can start a teammate the
     // permission gate never saw.
-    let (root, team, registry, door) = team(home.path());
+    let (_root, _team, registry, door) = team(home.path());
     let spawned = door
         .start(
             spawn_with_prompt(LEAD, None, "pretend to be in charge"),
@@ -183,52 +178,6 @@ async fn a_teammate_cannot_send_as_the_lead() {
             .iter()
             .any(|member| member.name == "team-lead-2" && !member.is_lead),
         "and the teammate is not it: {view:?}"
-    );
-
-    // The frame it mints is stamped with its own name, not with what the
-    // message it answers says about itself.
-    let worker = MemberName::parse("team-lead-2").expect("a member name");
-    let inbox = root.inbox_path(&team, &worker);
-    mailbox::write(
-        &inbox,
-        MailboxMessage::from_frame(
-            LEAD,
-            &Frame::ShutdownRequest(ShutdownRequest {
-                request_id: "req-1".to_owned(),
-                from: LEAD.to_owned(),
-                reason: None,
-                timestamp: record::now_iso8601(),
-            }),
-            record::now_iso8601(),
-        )
-        .expect("a frame encodes"),
-    )
-    .expect("the inbox is writable");
-
-    let lead_inbox = registry.lead_inbox();
-    let answered = eventually(
-        EVENTUALLY,
-        "the teammate to answer the shutdown",
-        async || {
-            let answered = mailbox::read(&lead_inbox).expect("the lead's inbox reads");
-            (!answered.valid.is_empty()).then_some(answered)
-        },
-    )
-    .await;
-    let answer = answered
-        .valid
-        .first()
-        .expect("the teammate answered the shutdown");
-    assert_eq!(
-        answer.from, "team-lead-2",
-        "the envelope says who really wrote it"
-    );
-    let Some(Frame::ShutdownApproved(approved)) = answer.frame() else {
-        panic!("the lead was told something other than a shutdown answer");
-    };
-    assert_eq!(
-        approved.from, "team-lead-2",
-        "and so does the frame inside it, whatever the request claimed"
     );
 
     registry.shutdown().await;

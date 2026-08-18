@@ -20,7 +20,10 @@
 //!
 //! One test, one binary, beside its three `storage_preuuid*` siblings.
 
-use std::{fs, thread, time::Duration};
+use std::{
+    fs, thread,
+    time::{Duration, Instant},
+};
 
 use ganja_core::{SessionId, Storage};
 use ganja_testkit::{
@@ -58,8 +61,12 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
     let aside = database.with_file_name(format!("{name}.preuuid-1755300000000"));
 
     let loser = Storage::open(root.clone());
-    let listed = thread::scope(|scope| {
-        let parked = scope.spawn(|| loser.list_sessions());
+    let (freed_at, returned_at, listed) = thread::scope(|scope| {
+        let parked = scope.spawn(|| {
+            let listed = loser.list_sessions();
+
+            (Instant::now(), listed)
+        });
         thread::sleep(PARKED);
 
         // The winner's whole move, performed by this test while the loser is
@@ -83,16 +90,30 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
             .save_info(&seeded_session_info(SessionId::from(NEW.to_owned()), 1))
             .expect("the winner's fresh store writes");
 
+        // Taken just before the release, so "the loser answered after this"
+        // below is "the loser was still inside the lock when the winner
+        // finished". On a loaded runner the loser might not have opened its
+        // connection before [`PARKED`] elapsed; it then lists the winner's
+        // fresh store without the race ever having been staged, and without
+        // this guard that is a vacuous green rather than anything. No real
+        // synchroniser exists — SQLite exposes no waiting-on-lock signal — so
+        // the timestamp pair is the honest minimum.
+        let freed_at = Instant::now();
         blocker
             .execute_batch("COMMIT")
             .expect("the lock is released");
+        let (returned_at, listed) = parked.join().expect("the parked store does not panic");
 
-        parked.join().expect("the parked store does not panic")
+        (freed_at, returned_at, listed)
     });
     // Dropped before the set-aside store is read back, so nothing about that
     // read depends on a connection this drill happens to be holding.
     drop(blocker);
     drop(loser);
+    assert!(
+        returned_at > freed_at,
+        "the drill's premise: the loser answers only once the winner has finished"
+    );
 
     // The loser read the old ids off its own descriptor and still did not
     // rename. What decides that is the quarantine lock and the re-probe taken

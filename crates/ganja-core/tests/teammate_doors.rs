@@ -8,9 +8,9 @@
 //! door's engine-side half, `crates/ganja-tui/src/component/team.rs` holds the
 //! `/team spawn` dialog's half, and `teammate_backends.rs` holds the
 //! per-backend refusals on their own. What this file has to show is that the
-//! **door** reaches [`Teammates::start`] and that the two pane values refuse
-//! through it in exactly the sentence the other door refuses in — one door must
-//! not spawn where the other refuses.
+//! **door** reaches [`Teammates::start`] and that a refusal propagates
+//! through it in exactly the sentence the other door refuses in — one door
+//! must not spawn where the other refuses.
 //!
 //! One test, because it redirects `XDG_DATA_HOME` and **withdraws `TMUX`**, and
 //! a binary that mutates process-wide state holds exactly one — a plain `cargo
@@ -40,7 +40,7 @@ use async_trait::async_trait;
 use ganja_core::{
     Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
     permission::Permissions,
-    protocol::PermissionReply,
+    protocol::{PermissionReply, Role},
     provider::FakeProvider,
     teammate::tmux::{self, REFUSED_NO_TMUX},
     tool::{
@@ -56,18 +56,11 @@ use tokio_util::sync::CancellationToken;
 
 /// How long the teammate's own provider takes to answer.
 ///
-/// Long enough that a door which *waited* for the teammate could not possibly
-/// come back inside [`AT_ONCE`]: the runner's first pass alone is half a second
-/// behind the spawn, and the turn it starts is this much more.
+/// Long enough that a door which *waited* for the teammate would find that
+/// teammate's assistant reply already stored when it came back: the runner's
+/// first pass alone is half a second behind the spawn, and the turn it
+/// starts is this much more.
 const TEAMMATE_TURN: Duration = Duration::from_secs(2);
-
-/// The most a door that answers without waiting may take.
-///
-/// A generous multiple of what the work actually is — writing two small files
-/// — and a small fraction of [`TEAMMATE_TURN`], which is what makes the bound
-/// a claim about *whether* it waited rather than about how fast this machine
-/// is.
-const AT_ONCE: Duration = Duration::from_secs(1);
 
 /// The engine-side seam a `task` call reaches, with only the teammate half
 /// wired: what a delegation does is `task_tool.rs`'s claim, not this one.
@@ -130,11 +123,12 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         std::env::remove_var(tmux::TMUX_PANE);
     }
     let home = ganja_testkit::temp_dir();
+    let storage = Storage::open(home.path().join("storage"));
     let (root, team, registry, teammates) = team_with(
         home.path(),
         Arc::new(FakeProvider::new("on it", TEAMMATE_TURN)),
         Arc::new(Registry::new(Vec::new())),
-        Storage::open(home.path().join("storage")),
+        storage.clone(),
         |_| Permissions::default(),
     );
     let asked: Arc<Mutex<Vec<SpawnAsk>>> = Arc::default();
@@ -167,18 +161,26 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         "a session that has not spawned anything leaves no team on disk"
     );
 
-    let started = std::time::Instant::now();
     let output = tool
         .run(args("in-process"), &ctx)
         .await
         .expect("the door starts an in-process teammate");
-    let took = started.elapsed();
 
     // The door answered, and it answered without the teammate having done its
     // work — which is the whole difference between this door and the other.
+    // Read off the store rather than a clock: the teammate's provider sleeps
+    // for [`TEAMMATE_TURN`], so a door that waited for the turn comes back to
+    // an assistant reply already on disk, however loaded the machine is.
+    let sessions = storage.list_sessions().expect("the store lists");
     assert!(
-        took < AT_ONCE,
-        "the door waited for the teammate: {took:?} of a {TEAMMATE_TURN:?} turn"
+        sessions.iter().all(|info| {
+            storage
+                .load_transcript(&info.id)
+                .expect("the transcript reads")
+                .iter()
+                .all(|message| message.role != Role::Assistant)
+        }),
+        "the door waited for the teammate's {TEAMMATE_TURN:?} turn: {sessions:?}"
     );
     assert_eq!(
         output.metadata.get("teammate").and_then(|to| to.as_str()),
@@ -225,33 +227,18 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         asked.lock().expect("no panic")
     );
 
-    // The two pane values refuse through this door — a door that spawned where
-    // the other refused would be two behaviours wearing one argument — and both
-    // refuse in the sentence `teammate_no_tmux.rs` pins: the session, not the
-    // build, is what is missing. Since W5b both bodies are real, so this says
-    // the same thing about `claude` it always said about `pane`.
-    for backend in ["pane", "claude"] {
-        let refused = match tool.run(args(backend), &ctx).await {
-            Err(ToolError::Failed(message)) => message,
-            other => panic!("expected {backend} to be refused, got {other:?}"),
-        };
-        assert!(
-            refused.contains(REFUSED_NO_TMUX),
-            "{backend} refuses in the sentence teammate_no_tmux.rs pins: {refused}"
-        );
-        assert!(
-            refused.contains(backend),
-            "and names the surface that was asked for: {refused}"
-        );
-    }
-    let file = team_file(&root, &team).expect("the team file is still there");
-    assert_eq!(
-        file.members
-            .iter()
-            .map(|member| member.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["team-lead", "worker"],
-        "a refused spawn joined nobody to the team: {file:?}"
+    // A refusal propagates through this door in the sentence the other door
+    // refuses in — a door that spawned where the other refused would be two
+    // behaviours wearing one argument. One backend suffices for the
+    // propagation claim; the per-backend sentences, and that a refused spawn
+    // leaves nothing behind, are `teammate_no_tmux.rs`'s.
+    let refused = match tool.run(args("pane"), &ctx).await {
+        Err(ToolError::Failed(message)) => message,
+        other => panic!("expected pane to be refused, got {other:?}"),
+    };
+    assert!(
+        refused.contains(REFUSED_NO_TMUX),
+        "the door refuses in the sentence teammate_no_tmux.rs pins: {refused}"
     );
 
     registry.shutdown().await;
