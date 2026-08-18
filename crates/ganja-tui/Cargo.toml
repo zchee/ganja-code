@@ -17,6 +17,11 @@ anyhow.workspace = true
 # clipboard through it. Only ever constructed behind the seam in
 # `src/clipboard.rs`, so nothing in a test run talks to a real desktop.
 arboard.workspace = true
+# Two escape sequences carry a base64 payload — the OSC 52 clipboard write and
+# the kitty graphics transmission — and both fed a scalar encoder `clipboard.rs`
+# carried itself. One vectorised codec, already in the tree under the provider
+# crate's logins, serves both.
+base64.workspace = true
 # Not named in the source: it exists to enable crossterm's `event-stream`
 # feature on the crate instance `ratatui` re-exports.
 crossterm.workspace = true
@@ -75,6 +80,11 @@ tokio-util.workspace = true
 # A custom theme that will not load is skipped rather than fatal, which is only
 # defensible if the run says which file it dropped and why.
 tracing.workspace = true
+# The transcript measures its own wrap widths, so it also chooses its own split
+# points — and a split point is a grapheme-cluster boundary, never a `char`
+# one: walking by `char` put hard wraps inside ZWJ emoji and combining
+# sequences, which no terminal can redraw as the glyph the text meant.
+unicode-segmentation.workspace = true
 unicode-width.workspace = true
 # A dropped `file://` path decodes through `Url::to_file_path`, which already
 # carries the percent-decoding and the localhost-host rule upstream's own

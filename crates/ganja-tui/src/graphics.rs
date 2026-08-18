@@ -20,6 +20,8 @@
 //! everything else draws no previews at all. The tokens in the composer are
 //! the feature; the pixels are a terminal's bonus.
 
+use base64::Engine as _;
+
 /// Base64 characters per transmission chunk — `icat`'s own chunk size.
 const CHUNK: usize = 4096;
 
@@ -54,7 +56,9 @@ impl Emitter {
     /// `m=1`, and the payload is base64 throughout.
     #[must_use]
     pub fn transmit(&self, id: u32, png: &[u8]) -> String {
-        let encoded = crate::clipboard::base64(png);
+        // The graphics protocol names standard, padded base64 (`f=100` is a
+        // PNG carried that way), the same encoding the OSC 52 payload uses.
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
         let chunks: Vec<&str> = encoded
             .as_bytes()
             .chunks(CHUNK)

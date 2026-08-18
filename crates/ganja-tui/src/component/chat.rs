@@ -58,7 +58,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::{component::rewind, graphics, markdown, mention, theme::Theme};
 
@@ -2057,12 +2058,19 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Splits `text` at the last boundary that fits in `width` columns, always
-/// consuming at least one character so callers cannot loop forever.
+/// consuming at least one grapheme cluster so callers cannot loop forever.
+///
+/// The boundaries are **clusters, not `char`s**: a `char` walk cut a ZWJ emoji
+/// or a combining sequence apart mid-glyph, and neither half of that cut is
+/// something a terminal can draw back as what the text meant. Each cluster is
+/// measured whole for the same reason the rest of this module measures whole
+/// strings — [`unicode_width`] reads a fully-qualified ZWJ sequence as the one
+/// two-column glyph it renders as, which summing its characters would not.
 pub(crate) fn split_at_width(text: &str, width: usize) -> (&str, &str) {
     let mut used = 0;
 
-    for (index, character) in text.char_indices() {
-        let advance = character.width().unwrap_or(0);
+    for (index, cluster) in text.grapheme_indices(true) {
+        let advance = cluster.width();
         if index > 0 && used + advance > width {
             return text.split_at(index);
         }
@@ -2352,6 +2360,30 @@ mod tests {
         // A double-width character cannot fit in one column, but returning an
         // empty head would spin the caller forever.
         assert_eq!(split_at_width("ああ", 1), ("あ", "あ"));
+    }
+
+    /// A wrap lands between grapheme clusters and never inside one. Both
+    /// shapes here overflow a one-column budget on their first cluster, which
+    /// is exactly where a `char` walk used to cut: after the family's leading
+    /// emoji, and between the kana and the mark that voices it. Half a cluster
+    /// is not a glyph any terminal can draw back.
+    #[test]
+    fn a_wrap_never_splits_a_zwj_family_or_a_combining_sequence() {
+        // Four emoji joined by three ZERO WIDTH JOINERs — 25 bytes, one glyph.
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        // "か" plus the combining voiced sound mark that makes it "が".
+        let voiced = "\u{304b}\u{3099}";
+
+        assert_eq!(
+            split_at_width(&format!("{family}x"), 1),
+            (family, "x"),
+            "the family is consumed whole"
+        );
+        assert_eq!(
+            split_at_width(&format!("{voiced}x"), 1),
+            (voiced, "x"),
+            "the mark stays with the kana it voices"
+        );
     }
 
     #[test]

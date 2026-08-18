@@ -191,6 +191,8 @@ impl Clipboard for System {
 /// reaches the terminal a tmux pane or an SSH session is really attached to,
 /// which [`arboard`] on the far machine never can.
 pub mod osc52 {
+    use base64::Engine as _;
+
     /// The OSC 52 sequence that puts `text` on the terminal's clipboard.
     ///
     /// Upstream's exact bytes: `ESC ] 52 ; c ; <base64> BEL`. When `$TMUX` or
@@ -206,7 +208,11 @@ pub mod osc52 {
     /// (deviation-free: this is upstream's behavior).
     #[must_use]
     pub fn sequence(text: &str) -> String {
-        let inner = format!("\x1b]52;c;{}\x07", super::base64(text.as_bytes()));
+        // Standard alphabet, padded: RFC 4648 §4 is the encoding OSC 52 is
+        // defined in terms of, and the one upstream's `toString("base64")`
+        // produces.
+        let payload = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+        let inner = format!("\x1b]52;c;{payload}\x07");
 
         if wrapped_for_multiplexer() {
             // The multiplexer swallows an escape it does not recognize; the
@@ -223,37 +229,6 @@ pub mod osc52 {
     fn wrapped_for_multiplexer() -> bool {
         std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some()
     }
-}
-
-/// `bytes` as standard (RFC 4648) base64, padded.
-///
-/// Hand-rolled rather than pulled in as a dependency: the one caller is the
-/// OSC 52 sequence above, and a full crate for one table lookup per three
-/// bytes would be weight this frontend does not otherwise carry.
-pub(crate) fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        // The three input bytes packed big-endian into 24 bits, the missing
-        // ones left zero.
-        let packed = chunk.iter().enumerate().fold(0u32, |acc, (i, &byte)| {
-            acc | (u32::from(byte) << (16 - 8 * i))
-        });
-
-        // Four 6-bit groups, most significant first; a group with no input
-        // byte behind it becomes `=` rather than an `A`.
-        for group in 0..4 {
-            if group <= chunk.len() {
-                let index = (packed >> (18 - 6 * group)) & 0x3f;
-                encoded.push(ALPHABET[index as usize] as char);
-            } else {
-                encoded.push('=');
-            }
-        }
-    }
-
-    encoded
 }
 
 /// A clipboard that remembers what it was handed and answers reads from a
@@ -390,12 +365,22 @@ impl Clipboard for Recording {
 
 #[cfg(test)]
 mod tests {
-    use super::{Clipboard as _, Error, Image, Recording, base64, osc52};
+    use super::{Clipboard as _, Error, Image, Recording, osc52};
 
-    /// The RFC 4648 test vectors, plus the padding boundaries: a hand-rolled
-    /// encoder earns its keep only if it matches the standard byte for byte.
+    /// The payload of an OSC 52 sequence, between the `;c;` introducer and the
+    /// BEL terminator. Read out of the whole sequence rather than compared
+    /// against it, because the tmux wrap this process may or may not be under
+    /// decides the outer framing and nothing else.
+    fn payload(sequence: &str) -> &str {
+        let (_, rest) = sequence.split_once(";c;").expect("the OSC 52 introducer");
+        rest.split_once('\u{7}').expect("the BEL terminator").0
+    }
+
+    /// The RFC 4648 test vectors, plus the padding boundaries, asserted where
+    /// the encoding is actually load-bearing: what a terminal reads off the
+    /// wire has to be the standard alphabet, padded, or the paste is garbage.
     #[test]
-    fn base64_matches_the_standard_encoding_including_padding() {
+    fn an_osc52_payload_matches_the_standard_encoding_including_padding() {
         let cases = [
             ("", ""),
             ("f", "Zg=="),
@@ -407,16 +392,20 @@ mod tests {
         ];
 
         for (input, expected) in cases {
-            assert_eq!(base64(input.as_bytes()), expected, "encoding {input:?}");
+            assert_eq!(
+                payload(&osc52::sequence(input)),
+                expected,
+                "encoding {input:?}"
+            );
         }
     }
 
     /// Non-ASCII text is encoded as its UTF-8 bytes, the way upstream's
     /// `Buffer.from(text)` does.
     #[test]
-    fn base64_encodes_the_utf8_bytes_of_multibyte_text() {
+    fn an_osc52_payload_encodes_the_utf8_bytes_of_multibyte_text() {
         // "é" is two UTF-8 bytes (0xC3 0xA9).
-        assert_eq!(base64("é".as_bytes()), "w6k=");
+        assert_eq!(payload(&osc52::sequence("é")), "w6k=");
     }
 
     /// A copy produces the exact escape upstream writes, and its base64 decodes
@@ -434,7 +423,9 @@ mod tests {
             "the OSC 52 opener: {sequence:?}"
         );
         assert!(
-            sequence.contains(&base64(b"copy me")),
+            // The literal rather than a re-encode: a pin that computes its own
+            // expectation is a pin against nothing.
+            sequence.contains("Y29weSBtZQ=="),
             "the payload is the text's base64: {sequence:?}"
         );
         assert!(
