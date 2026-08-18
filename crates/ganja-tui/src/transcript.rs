@@ -202,19 +202,17 @@ fn formatted(part: &Part) -> String {
             body,
             ..
         } => {
-            // The summary is capped here as well as at `PeerPayload::into_part`,
-            // because a part is storable with one that never went through that
-            // cap and this formatter draws what the part holds. It
-            // then rides this heading as text and only text
-            // ([`inline_text`]) — the heading is ganja's own sentence about
-            // who wrote what follows, and a field inside it that could still
-            // set its own bold is a peer writing in this side's voice.
-            let mut rendered = match summary {
-                Some(line) if !line.trim().is_empty() => format!(
-                    "**Teammate: {from}** — {}\n\n",
-                    inline_text(team::cap_for_display(line))
-                ),
-                _ => format!("**Teammate: {from}**\n\n"),
+            // `display_summary` owns the blank-dropped, capped projection
+            // this formatter shares with the two renderers. The summary then
+            // rides this heading as text and only text ([`inline_text`]) —
+            // the heading is ganja's own sentence about who wrote what
+            // follows, and a field inside it that could still set its own
+            // bold is a peer writing in this side's voice.
+            let mut rendered = match team::display_summary(summary.as_deref()) {
+                Some(line) => {
+                    format!("**Teammate: {from}** — {}\n\n", inline_text(line))
+                }
+                None => format!("**Teammate: {from}**\n\n"),
             };
             // **The decision this arm exists for.** The heading above is a
             // claim about who wrote what follows, and what follows is the one

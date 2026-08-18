@@ -38,10 +38,10 @@ pub use session::{
     PRE_UUID_ID, entries, plant_preuuid_store, seed_message, seed_session, seeded_session_info,
     set_aside_of,
 };
-pub use subagent::ScriptedSubagents;
+pub use subagent::{RecordingSpawner, ScriptedSubagents};
 pub use teammate::{
     AllowSpawn, LEAD_SESSION_ID, RecordedSpawns, RunnerHarness, TASK, TEAM, backends, caller,
     caller_with, eventually, seed_team_file, spawn, spawn_with_prompt, team, team_file, team_with,
     teammates_recorded,
 };
-pub use tool::{BlockingTool, RecorderTool, placeholder_schema};
+pub use tool::{BlockingTool, RecorderTool, placeholder_schema, tool_ctx};

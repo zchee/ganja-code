@@ -839,22 +839,15 @@ fn backend_label(backend: MemberBackend) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        future::Future,
-        pin::Pin,
-        sync::{Arc, Mutex},
-    };
+    use std::sync::Arc;
 
     use ganja_protocol::{MemberBackend, MemberView, TeamView};
+    use ganja_testkit::RecordingSpawner;
     use ganja_tool::{
-        Credentials, FileTimes, Tool as _, ToolCtx,
-        task::{
-            Delegated, Delegation, NotSpawned, Offered, Subagents, TaskTool, TeammateSpawn,
-            Teammated, Unanswered,
-        },
+        Tool as _,
+        task::{Offered, Subagents, TaskTool, TeammateSpawn, Teammated},
     };
     use ratatui::{buffer::Buffer, layout::Rect};
-    use tokio_util::sync::CancellationToken;
 
     use super::{BUSY, Effect, Row, SpawnRequest, Spawned, Team, rows};
     use crate::{command, theme::Theme};
@@ -936,76 +929,18 @@ mod tests {
         }
     }
 
-    /// A `Subagents` seam that records the request the `task` tool's teammate
-    /// door hands it.
-    ///
-    /// Hand-desugared rather than `#[async_trait]`, exactly as
-    /// [`crate::app`]'s own `SpawnAsker` impl is: this crate takes no
-    /// dependency on that macro, and the attribute expands to precisely this
-    /// signature. Writing it out is what keeps a build dependency out of the
-    /// manifest for one test double.
-    #[derive(Debug)]
-    struct Recorder {
-        started: Mutex<Vec<TeammateSpawn>>,
-    }
-
-    impl Subagents for Recorder {
-        fn delegate<'life0, 'async_trait>(
-            &'life0 self,
-            _request: Delegation,
-            _cancel: CancellationToken,
-        ) -> Pin<Box<dyn Future<Output = Result<Delegated, Unanswered>> + Send + 'async_trait>>
-        where
-            'life0: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async { Err(Unanswered::Unknown) })
-        }
-
-        fn spawn_teammate<'life0, 'async_trait>(
-            &'life0 self,
-            request: TeammateSpawn,
-        ) -> Pin<Box<dyn Future<Output = Result<Teammated, NotSpawned>> + Send + 'async_trait>>
-        where
-            'life0: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async move {
-                self.started
-                    .lock()
-                    .expect("the spawn log is never poisoned")
-                    .push(request);
-
-                Ok(Teammated {
-                    name: "w3".to_owned(),
-                    agent_id: "w3@session-abcd1234".to_owned(),
-                    backend: "in-process".to_owned(),
-                    note: "it reads this through its mailbox".to_owned(),
-                })
-            })
-        }
-    }
-
     /// The request the **real** `task` door builds for the same arguments —
     /// run through `TaskTool` itself rather than reconstructed here, because a
     /// hand-written expectation would assert this test's reading of the door
     /// instead of the door.
     async fn spawn_through_the_task_door(args: serde_json::Value) -> TeammateSpawn {
-        let recorder = Arc::new(Recorder {
-            started: Mutex::new(Vec::new()),
+        let recorder = RecordingSpawner::new(Teammated {
+            name: "w3".to_owned(),
+            agent_id: "w3@session-abcd1234".to_owned(),
+            backend: "in-process".to_owned(),
+            note: "it reads this through its mailbox".to_owned(),
         });
-        let ctx = ToolCtx {
-            cwd: std::env::temp_dir(),
-            cancel: CancellationToken::new(),
-            call_id: "call_1".to_owned(),
-            files: Arc::new(FileTimes::default()),
-            credentials: Credentials::Unguarded,
-            spawn: Some(Arc::clone(&recorder) as Arc<dyn Subagents>),
-            postbox: None,
-            ask: None,
-            switch: None,
-            jobs: None,
-        };
+        let ctx = ganja_testkit::tool_ctx(Arc::clone(&recorder) as Arc<dyn Subagents>);
         TaskTool::new(&[Offered {
             name: "general".to_owned(),
             description: None,
@@ -1014,9 +949,11 @@ mod tests {
         .await
         .expect("a teammate starts");
 
-        let started = recorder.started.lock().expect("no panic").clone();
-
-        started.into_iter().next().expect("one spawn was recorded")
+        recorder
+            .started()
+            .into_iter()
+            .next()
+            .expect("one spawn was recorded")
     }
 
     /// **AC-14**, the `/team spawn` half: the two doors are one sequence

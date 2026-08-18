@@ -190,7 +190,11 @@ const INVALID_SOCKET_PATH: &str =
 
 /// Rung 3: a socket address that is not a session socket of ours — the
 /// clause it failed follows.
-const NOT_A_SESSION_SOCKET: &str = "A uds: address names another ganja session's socket — a session-named socket of this user's, in a private socket directory of this user's — and this one does not:";
+///
+/// `pub` because `ganja-core`'s socket arm judges the same predicate once
+/// more behind this tool (§5.2-6's posture) and refuses in the same sentence
+/// — spelled once, here, at the rung that owns it.
+pub const NOT_A_SESSION_SOCKET: &str = "A uds: address names another ganja session's socket — a session-named socket of this user's, in a private socket directory of this user's — and this one does not:";
 
 /// Rung 4: a scoped recipient.
 const SCOPED_RECIPIENT: &str = "There is one team per session, so a recipient is a bare name rather than a name scoped to somewhere:";

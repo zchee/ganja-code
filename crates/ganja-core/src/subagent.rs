@@ -116,7 +116,7 @@ use std::{
 
 use async_trait::async_trait;
 use ganja_protocol::team::{
-    DISPLAY_FIELD_CAP, Frame, MemberBackend, ShutdownRequest, TeamView, cap_for_display,
+    DISPLAY_FIELD_CAP, Frame, MemberBackend, ShutdownRequest, TeamView, cap_chars, cap_for_display,
 };
 use ganja_team::{MemberName, record};
 use serde::{Deserialize, Serialize};
@@ -140,6 +140,7 @@ use crate::{
     },
     tool::{
         Credentials, Registry,
+        send_message::NOT_A_SESSION_SOCKET,
         task::{
             Delegated, Delegation, NO_TEAM, NotSpawned, Offered, Subagents, TeammateSpawn,
             Teammated, Unanswered,
@@ -1035,7 +1036,8 @@ impl Postbox {
         // once more here because [`team::Postbox`] is a public trait and this
         // arm is what every caller of it gets — the last gate before a
         // connection is the one that has to hold by construction, whoever
-        // called. Same predicate, one spelling (`ganja_tool::socket`).
+        // called. Same predicate, one spelling (`ganja_tool::socket`), and
+        // the refusal in the rung's own sentence.
         crate::tool::socket::vet_address(path).map_err(|why| Undelivered::Failed {
             reason: format!("{NOT_A_SESSION_SOCKET} {}: {why}.", path.display()),
         })?;
@@ -1153,12 +1155,10 @@ const SOCKET_BODY_CAP: usize = 1 << 20;
 /// what is held, and this bounds what is repeated.
 const REFLECTED_CAP: usize = 512;
 
-/// `text`, cut to [`REFLECTED_CAP`] characters on a character boundary.
+/// `text`, cut to [`REFLECTED_CAP`] characters on a character boundary —
+/// [`cap_chars`], at this side's wider bound.
 fn reflected(text: &str) -> String {
-    match text.char_indices().nth(REFLECTED_CAP) {
-        Some((cut, _)) => text[..cut].to_owned(),
-        None => text.to_owned(),
-    }
+    cap_chars(text, REFLECTED_CAP).to_owned()
 }
 
 /// One session's socket, as this side speaks to it: a `reqwest::Client`
@@ -1510,11 +1510,6 @@ const REFUSED_BY_HAND: &str =
 /// rung 6 already, and refused here again for whoever reaches the trait
 /// without the tool in front of it (§5.2-6).
 const FRAME_OVER_SOCKET: &str = "A protocol frame does not cross a socket: a session reached at a uds: address takes plain text. Send prose, or address a member of this team by name.";
-
-/// A `uds:` address that is not a session socket of ours (**D505**, the
-/// D498 premise held across a socket): the tool refuses it at rung 3, and
-/// this arm refuses it again ahead of the clause it failed.
-pub(crate) const NOT_A_SESSION_SOCKET: &str = "A uds: address names another ganja session's socket — a session-named socket of this user's, in a private socket directory of this user's — and this one does not. Socket";
 
 /// A client that would not build for a socket path — ahead of what reqwest
 /// said, and unreachable for any path the tool's rung 3 let through.

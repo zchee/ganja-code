@@ -3565,15 +3565,12 @@ fn render_peer_envelopes(messages: &mut [Message]) {
 /// did — the check ran where the member was recorded, and re-deciding it here
 /// would be a second opinion about somebody else's roster.
 ///
-/// `summary` is capped at
-/// [`DISPLAY_FIELD_CAP`](crate::protocol::team::DISPLAY_FIELD_CAP) here as
-/// well as at
-/// [`PeerPayload::into_part`](crate::protocol::team::PeerPayload::into_part),
-/// because a part is deliberately storable with a summary that never came
-/// through that door — the same defence the two frontends' renderers apply. The cap
-/// runs **before** the escaping, so what it counts is the peer's own
-/// characters rather than the entities they expand into; a blank one is left
-/// out entirely, which is what those renderers already do with it.
+/// `summary` goes through
+/// [`display_summary`](crate::protocol::team::display_summary) — blank
+/// dropped, the rest capped — the one projection this envelope shares with
+/// both frontends' renderers. The cap runs **before** the escaping, so what
+/// it counts is the peer's own characters rather than the entities they
+/// expand into.
 fn peer_envelope(from: &str, summary: Option<&str>, color: Option<&str>, body: &str) -> String {
     let mut open = format!(
         "<teammate-message teammate_id=\"{}\"",
@@ -3582,8 +3579,7 @@ fn peer_envelope(from: &str, summary: Option<&str>, color: Option<&str>, body: &
     if let Some(color) = color {
         open.push_str(&format!(" color=\"{}\"", escape_attribute(color)));
     }
-    if let Some(summary) = summary.filter(|summary| !summary.trim().is_empty()) {
-        let capped = crate::protocol::team::cap_for_display(summary);
+    if let Some(capped) = crate::protocol::team::display_summary(summary) {
         open.push_str(&format!(" summary=\"{}\"", escape_attribute(capped)));
     }
 

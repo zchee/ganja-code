@@ -11,8 +11,37 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ganja_tool::{Tool, ToolCtx, ToolError, ToolOutput};
+use ganja_tool::{Credentials, FileTimes, Tool, ToolCtx, ToolError, ToolOutput, task::Subagents};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+
+/// A [`ToolCtx`] for a suite driving one tool call directly: a scratch
+/// working directory, nothing guarded, and `spawn` as its only seam.
+///
+/// The other seams stay [`None`] on purpose — a call that reaches for a
+/// postbox, a question, a switch or the job registry through this fixture is
+/// a call the suite meant to drive some other way.
+///
+/// ```
+/// let (subagents, _asked) = ganja_testkit::ScriptedSubagents::new(Vec::new());
+/// let ctx = ganja_testkit::tool_ctx(subagents);
+/// assert_eq!(ctx.call_id, "call_1");
+/// ```
+#[must_use]
+pub fn tool_ctx(spawn: Arc<dyn Subagents>) -> ToolCtx {
+    ToolCtx {
+        cwd: std::env::temp_dir(),
+        cancel: CancellationToken::new(),
+        call_id: "call_1".to_owned(),
+        files: Arc::new(FileTimes::default()),
+        credentials: Credentials::Unguarded,
+        spawn: Some(spawn),
+        postbox: None,
+        ask: None,
+        switch: None,
+        jobs: None,
+    }
+}
 
 /// A permissive placeholder schema, for a tool double whose script never
 /// exercises argument validation — the loop never validates a call's

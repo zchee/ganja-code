@@ -1024,14 +1024,6 @@ impl PeerPayload {
 
 /// Truncates a display-only field to [`DISPLAY_FIELD_CAP`] characters.
 ///
-/// Counts `char`s and cuts on a `char` boundary, so a field of CJK is
-/// shortened rather than panicked on. A `char` is not a grapheme: a flag or a
-/// ZWJ sequence sitting across the two-hundredth one is cut inside itself and
-/// draws as a different glyph. That is accepted rather than fixed — the cut is
-/// always valid UTF-8 and never panics, and a segmentation dependency to make
-/// the last glyph of a truncated summary prettier is not a trade this crate's
-/// three-entry dependency list should make.
-///
 /// Public because it is the one place the cap lives:
 /// [`PeerPayload::into_part`] applies it to a summary, and whoever renders an
 /// [`IdleNotification::failure_reason`] — or a summary that reached them by
@@ -1039,10 +1031,43 @@ impl PeerPayload {
 /// of its own.
 #[must_use]
 pub fn cap_for_display(text: &str) -> &str {
-    match text.char_indices().nth(DISPLAY_FIELD_CAP) {
+    cap_chars(text, DISPLAY_FIELD_CAP)
+}
+
+/// `text`, cut to at most `cap` characters on a `char` boundary.
+///
+/// Counts `char`s and cuts on a `char` boundary, so a field of CJK is
+/// shortened rather than panicked on. A `char` is not a grapheme: a flag or a
+/// ZWJ sequence sitting across the cut is split inside itself and draws as a
+/// different glyph. That is accepted rather than fixed — the cut is always
+/// valid UTF-8 and never panics, and a segmentation dependency to make the
+/// last glyph of a truncated field prettier is not a trade this crate's
+/// three-entry dependency list should make.
+///
+/// The `cap` parameter exists because two caps read one rule: the §5.3
+/// display cap above, and the wider bound `ganja-core` cuts a peer's
+/// reflected words to.
+#[must_use]
+pub fn cap_chars(text: &str, cap: usize) -> &str {
+    match text.char_indices().nth(cap) {
         Some((end, _)) => &text[..end],
         None => text,
     }
+}
+
+/// A peer's summary as a renderer shows it: a blank one is nothing at all,
+/// and anything else is capped through [`cap_for_display`].
+///
+/// One function rather than three matches because a stored part is
+/// deliberately storable with a summary that never went through
+/// [`PeerPayload::into_part`]'s cap — so the engine's §5.3 envelope and both
+/// frontends' renderers each re-apply the same projection, and it lives here
+/// so they cannot drift.
+#[must_use]
+pub fn display_summary(summary: Option<&str>) -> Option<&str> {
+    summary
+        .filter(|summary| !summary.trim().is_empty())
+        .map(cap_for_display)
 }
 
 /// Which surface a member runs on, spelled as the `--backend` argument spells
@@ -1495,6 +1520,22 @@ mod tests {
         // Exactly at the cap nothing is cut, and nothing is copied.
         let exact = "e".repeat(DISPLAY_FIELD_CAP);
         assert_eq!(cap_for_display(&exact), exact);
+    }
+
+    /// The one projection every renderer of a peer's summary applies: blank
+    /// is nothing, anything else is capped.
+    #[test]
+    fn a_blank_summary_projects_to_nothing_and_a_long_one_is_capped() {
+        assert_eq!(super::display_summary(None), None);
+        assert_eq!(super::display_summary(Some("   ")), None);
+        assert_eq!(
+            super::display_summary(Some("picked up W2")),
+            Some("picked up W2")
+        );
+
+        let wide = "あ".repeat(DISPLAY_FIELD_CAP + 10);
+        let capped = super::display_summary(Some(&wide)).expect("a non-blank summary survives");
+        assert_eq!(capped.chars().count(), DISPLAY_FIELD_CAP);
     }
 
     /// The strictness the reference attests for the ten §5 frames (`be`), the

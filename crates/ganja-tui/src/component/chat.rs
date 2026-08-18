@@ -1291,15 +1291,12 @@ impl Entry {
                     body,
                     ..
                 } => {
-                    // Capped here as well as at `PeerPayload::into_part`: this
-                    // renderer draws whatever the stored part holds, and a
-                    // part is deliberately storable with a summary that never
-                    // went through that cap.
-                    let heading = match summary {
-                        Some(line) if !line.trim().is_empty() => {
-                            format!("{from}: {}", team::cap_for_display(line))
-                        }
-                        _ => from.clone(),
+                    // `display_summary` owns the blank-dropped, capped
+                    // projection this renderer shares with the engine's
+                    // envelope and the copy formatter.
+                    let heading = match team::display_summary(summary.as_deref()) {
+                        Some(line) => format!("{from}: {line}"),
+                        None => from.clone(),
                     };
                     let prefix = match self.role {
                         Role::User => prompt_lead(lines.is_empty()),
