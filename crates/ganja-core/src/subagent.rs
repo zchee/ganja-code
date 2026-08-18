@@ -3176,10 +3176,6 @@ mod tests {
                 vec!["GET /team"],
                 "{hostile:?}: no POST was formed"
             );
-            assert!(
-                !requests.iter().any(|(method, _, _)| method == "POST"),
-                "{hostile:?}: not one POST"
-            );
         }
     }
 

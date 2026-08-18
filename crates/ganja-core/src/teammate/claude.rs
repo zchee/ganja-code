@@ -599,12 +599,12 @@ mod tests {
         assert!(!line.contains("general"), "no agent-type guess: {line}");
     }
 
-    /// The composed line is the binary and then at least one word, which is the
-    /// §10.10 hazard tmux itself creates: a *one*-word command goes through the
-    /// person's login shell, and a `.zshenv` that exports credentials would put
-    /// straight back what D502 carefully withheld.
+    /// The composed line, as tmux is handed it: `exec`, the binary quoted,
+    /// and never the prompt. (The one-word login-shell hazard is a property
+    /// of the *idle* argv, pinned at `pane::SHELL`; this line is typed with
+    /// `send-keys -l`, which no shell re-reads.)
     #[test]
-    fn the_launch_is_never_one_word() {
+    fn the_composed_line_is_quoted_and_the_prompt_stays_off_it() {
         let line = crate::teammate::tmux::launch_line(
             &PathBuf::from("/usr/local/bin/claude"),
             &arguments(&spec()),
@@ -612,10 +612,6 @@ mod tests {
         .into_string()
         .expect("ascii");
         assert!(line.starts_with("exec "), "{line}");
-        assert!(
-            line.split_whitespace().count() >= 2,
-            "a one-word command would be re-read by a login shell: {line}"
-        );
         assert!(line.contains("'/usr/local/bin/claude'"), "quoted: {line}");
         // The canary again, on the *composed* line rather than on `arguments`
         // alone: the line is what tmux is handed and what `ps`

@@ -2149,6 +2149,118 @@ pub(crate) mod tests {
         );
     }
 
+    /// The invariant [`TeammateRegistry::view`] promises and `ganja-tool`'s
+    /// roster reads: the lead is the first row and the only one with
+    /// `is_lead`, before a spawn and after one, and a fresh registry's ring
+    /// is empty.
+    #[tokio::test]
+    async fn the_view_starts_at_the_lead_and_no_other_row_ever_leads() {
+        let home = ganja_testkit::temp_dir();
+        let registry = registry(home.path());
+
+        let fresh = registry.view();
+        assert_eq!(fresh.team, "session-abcd1234");
+        assert_eq!(fresh.lead, "team-lead");
+        assert_eq!(fresh.members.len(), 1, "the lead and nobody else");
+        assert!(fresh.members[0].is_lead);
+        assert_eq!(fresh.members[0].name, "team-lead");
+        assert!(fresh.members[0].recent_calls.is_empty());
+
+        registry
+            .spawn(
+                in_process(home.path()),
+                request("w1", DEFAULT_BACKEND, home.path()),
+            )
+            .await
+            .expect("a teammate joins");
+        let led = registry.view();
+        assert!(led.members[0].is_lead, "the lead is still the first row");
+        assert_eq!(
+            led.members.iter().filter(|member| member.is_lead).count(),
+            1,
+            "and the only one that leads: {led:?}"
+        );
+
+        registry.shutdown().await;
+    }
+
+    /// **D503**'s ring, off the same events a teammate engine publishes: a
+    /// running call joins once however often its part republishes, a second
+    /// call reading identically stays one row, and the ring keeps the newest
+    /// [`RECENT_CALLS`] in order.
+    #[tokio::test]
+    async fn the_ring_keeps_distinct_running_calls_in_order_deduped_and_capped() {
+        use futures::StreamExt as _;
+
+        use crate::protocol::{MessageId, PartId, SessionId};
+
+        let part = |id: &str, tool: &str| crate::protocol::Event::PartUpdated {
+            session_id: SessionId::from("ses_w1".to_owned()),
+            message_id: MessageId::from("msg_1".to_owned()),
+            part: crate::protocol::Part {
+                id: PartId::from(id.to_owned()),
+                body: crate::protocol::PartBody::Tool {
+                    call_id: id.to_owned(),
+                    tool: tool.to_owned(),
+                    state: crate::protocol::ToolState::Running {
+                        input: serde_json::Value::Null,
+                        metadata: serde_json::Value::Null,
+                        started: 0,
+                    },
+                },
+            },
+        };
+        let fold = |events: Vec<crate::protocol::Event>, ring: &Arc<super::Mutex<_>>| {
+            super::fold_calls(
+                futures::stream::iter(events.into_iter().map(Ok)).boxed(),
+                Arc::new(Tools::new(Vec::new())),
+                Arc::clone(ring),
+                "w1".to_owned(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+        };
+        let ring = Arc::new(super::Mutex::new(std::collections::VecDeque::new()));
+
+        // One call republishing as it streams, then a second call whose line
+        // reads the same: one row carries both.
+        fold(
+            vec![
+                part("prt_a", "read"),
+                part("prt_a", "read"),
+                part("prt_b", "read"),
+            ],
+            &ring,
+        )
+        .await;
+        assert_eq!(
+            ring.lock()
+                .expect("the ring")
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["read"],
+            "a republished part and an identical line are one row"
+        );
+
+        // More distinct calls than the ring holds: the newest win, in order.
+        let over = super::RECENT_CALLS + 2;
+        fold(
+            (0..over)
+                .map(|index| part(&format!("prt_{index}"), &format!("tool-{index}")))
+                .collect(),
+            &ring,
+        )
+        .await;
+        let held: Vec<String> = ring.lock().expect("the ring").iter().cloned().collect();
+        assert_eq!(held.len(), super::RECENT_CALLS, "capped: {held:?}");
+        assert_eq!(held.first().map(String::as_str), Some("tool-2"), "{held:?}");
+        assert_eq!(
+            held.last().map(String::as_str),
+            Some(format!("tool-{}", over - 1).as_str()),
+            "the newest call ends the ring: {held:?}"
+        );
+    }
+
     /// §2.1's own example, and the property that makes it useful: one session
     /// id always names one team, so a resume rejoins rather than orphans.
     #[test]

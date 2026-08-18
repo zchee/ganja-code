@@ -447,7 +447,7 @@ mod tests {
     use ganja_protocol::team::MemberBackend;
     use ganja_team::{MemberName, TeamName, TeamsRoot};
 
-    use super::{CARRIED_ENV, arguments};
+    use super::{CARRIED_ENV, SHELL, arguments};
     use crate::teammate::SpawnSpec;
 
     /// A spawn with every field a launch could be tempted to put on the line.
@@ -511,6 +511,17 @@ mod tests {
         assert!(!line.contains("recorder-model"), "no model guess: {line}");
         assert!(!line.contains("general"), "no agent flag: {line}");
         assert!(!line.contains("plan"), "no plan-mode flag: {line}");
+    }
+
+    /// The D502 re-import hazard's own guard: tmux hands a **one**-word
+    /// command to the person's login shell, which sources its rc files and
+    /// re-imports exactly the credentials the enumerated environment
+    /// withheld — so the idle argv is two words by construction, and
+    /// [`crate::teammate::tmux::Server::split`]'s debug assertion reads the
+    /// same rule at the seam.
+    #[test]
+    fn the_idle_shell_is_two_words_so_no_login_shell_rereads_it() {
+        assert!(SHELL.len() >= 2, "{SHELL:?}");
     }
 
     /// The closed list holds directory names and never a credential's.
