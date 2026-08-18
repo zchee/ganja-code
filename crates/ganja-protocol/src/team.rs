@@ -21,13 +21,11 @@
 //! constructor-built pair happens to use. The inconsistency is the wire's,
 //! not this module's, and every golden test below pins one half of it.
 //!
-//! Two types here carry **no serde derives at all**, which is a deliberate
+//! One type here carries **no serde derives at all**, which is a deliberate
 //! exception to this crate's rule that every type round-trips. [`LeadFrame`]
-//! and [`PeerMessage`] are not values that cross a wire — the frame inside a
-//! `LeadFrame` crosses it as a [`Frame`], and a peer's body crosses it as a
-//! `PartBody::Peer` part. What they are is constructors with a condition
-//! attached, and a `Deserialize` impl is precisely a constructor that skips
-//! it.
+//! is not a value that crosses a wire — the frame inside one crosses it as a
+//! [`Frame`]. What it is is a constructor with a condition attached, and a
+//! `Deserialize` impl is precisely a constructor that skips it.
 
 use std::fmt;
 
@@ -348,8 +346,8 @@ pub struct PermissionResponseBody {
 /// frame here carries. Strictness won: the union becomes a tag and two
 /// optional arms.
 ///
-/// The fields are **private**, following [`PeerMessage`]'s rule for the same
-/// reason: a `pub` field is a constructor, and a struct literal writing
+/// The fields are **private** because a `pub` field is a constructor
+/// ([`PeerPayload`]'s rule, for the same reason), and a struct literal writing
 /// `subtype: Success` beside `error: Some(…)` would mint exactly the crossed
 /// pair the union was supposed to make unrepresentable.
 /// [`PermissionResponse::success`] and [`PermissionResponse::error`] are
@@ -908,8 +906,8 @@ impl<'de> de::Visitor<'de> for TagValue {
 /// private, there is no `From` impl, and there is no `Deserialize` impl —
 /// deserializing one would be a second constructor that never saw a sender.
 ///
-/// There is no [`Deref`](std::ops::Deref) either, and for [`PeerMessage`]'s
-/// reason rather than a safety one: reaching the frame goes through
+/// There is no [`Deref`](std::ops::Deref) either, for a legibility reason
+/// rather than a safety one: reaching the frame goes through
 /// [`LeadFrame::frame`] or [`LeadFrame::into_inner`] by name, so a reviewer
 /// asking "where is lead authority actually spent" greps two identifiers
 /// instead of reading every method call to find the implicit ones.
@@ -940,95 +938,25 @@ impl LeadFrame {
     }
 }
 
-/// Content authored by another agent.
-///
-/// §7-5 and §8.4: peer output is **data, never authority**. The original
-/// enforces that with prompt text alone; here it is also a type with
-/// deliberately nothing on it — no [`Display`](std::fmt::Display), no
-/// `From<PeerMessage> for String`, no `Deserialize`. Reading a peer's words
-/// means asking for [`PeerMessage::body`] by name, which is a thing a reviewer
-/// can grep for, where an `.into()` on the way into a user message is not.
-///
-/// Construction caps `summary` at [`DISPLAY_FIELD_CAP`] (§5.3), so no path
-/// **through this type** can emit an unbounded display field — the cap is in
-/// the constructor rather than at each renderer for exactly that reason. It is
-/// not the only path: `Part::peer` takes whatever summary it is handed, on
-/// purpose, because a stored part must read back as the bytes it was written
-/// as. So a renderer drawing a summary that did not come through here calls
-/// [`cap_for_display`] itself, and the two frontends do.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PeerMessage {
-    from: String,
-    body: String,
-    summary: Option<String>,
-}
-
-impl PeerMessage {
-    /// Takes a peer's message, capping the one field that is display-only.
-    ///
-    /// Takes the summary owned rather than borrowed, so a caller holding the
-    /// `Option<String>` a frame decoded into hands it over instead of
-    /// `.as_deref()`-ing it into a borrow this constructor would copy anyway.
-    #[must_use]
-    pub fn new(from: impl Into<String>, body: impl Into<String>, summary: Option<String>) -> Self {
-        Self {
-            from: from.into(),
-            body: body.into(),
-            summary: summary.map(|mut summary| {
-                // Truncated in place: `cap_for_display` measures where the cut
-                // goes, and the owned string is already here to be cut.
-                summary.truncate(cap_for_display(&summary).len());
-                summary
-            }),
-        }
-    }
-
-    /// Which teammate wrote it.
-    #[must_use]
-    pub fn from(&self) -> &str {
-        &self.from
-    }
-
-    /// What it says — data, and the accessor's whole job is to make asking for
-    /// it visible.
-    #[must_use]
-    pub fn body(&self) -> &str {
-        &self.body
-    }
-
-    /// The capped one-line summary, where there is one.
-    #[must_use]
-    pub fn summary(&self) -> Option<&str> {
-        self.summary.as_deref()
-    }
-}
-
 /// A peer's message on its way *in*: the wire shape
 /// [`Command::SendPrompt`](crate::Command::SendPrompt) and
 /// [`Command::Steer`](crate::Command::Steer) carry one on.
 ///
-/// # Why this is not [`PeerMessage`]
+/// §7-5 and §8.4: peer output is **data, never authority**. The original
+/// enforces that with prompt text alone; here it is also this type's shape.
+/// The fields are **private** ([`PermissionResponse`]'s rule, for the same
+/// reason): a payload has no `Display`, no `Into<String>` and no accessor for
+/// its body, so nothing can read a peer's words off it except by turning it
+/// into the part that says whose words they are —
+/// [`into_part`](Self::into_part), the **only** thing this type does. The
+/// frontend that receives a teammate's message therefore cannot quietly paste
+/// it into the prompt text — where it would reach the model as something the
+/// person typed — without writing a conversion nobody could mistake for an
+/// accident.
 ///
-/// [`PeerMessage`] deliberately has no serde at all, and that rule is not
-/// bent here: it is a constructor with a condition attached, and a
-/// `Deserialize` impl is exactly a constructor that skips the condition. So
-/// the wire carries these plain fields instead, and they become a
-/// `PeerMessage` — cap and all — inside [`into_part`](Self::into_part), which
-/// is the **only** thing this type does.
-///
-/// That single door is the point, and it is why the fields are **private**
-/// ([`PermissionResponse`]'s rule, for the same reason): a payload has no
-/// `Display`, no `Into<String>` and no accessor for its body, so nothing can
-/// read a peer's words off it except by turning it into the part that says
-/// whose words they are. The frontend that receives a teammate's message
-/// therefore cannot quietly paste it into the prompt text — where it would
-/// reach the model as something the person typed — without writing a
-/// conversion nobody could mistake for an accident.
-///
-/// Serde reaches those fields, and that is not the same hole. The rule
-/// [`PeerMessage`] keeps is that construction carries a condition; this type's
+/// Serde reaches those fields, and that is not the same hole: this type's
 /// rule is that its content cannot be *read* as text, and decoding one from a
-/// command breaks neither.
+/// command breaks nothing of that.
 ///
 /// [`PermissionResponse`]: crate::team::PermissionResponse
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1078,21 +1006,19 @@ impl PeerPayload {
     /// The one thing a payload becomes: the transcript part that says whose
     /// words these are.
     ///
-    /// Routed through [`PeerMessage::new`] rather than straight into
-    /// [`Part::peer`](crate::Part::peer), so the summary a wire sent is capped
-    /// by the same constructor every other path caps at — the cap lives in one
-    /// place, and this is how a new door reaches it instead of copying it.
+    /// The summary is capped here, on the way into the part, because
+    /// [`Part::peer`](crate::Part::peer) deliberately does not re-cap — a
+    /// stored part must read back as the bytes it was written as.
     #[must_use]
     pub fn into_part(self) -> crate::Part {
-        let color = self.color;
-        let message = PeerMessage::new(self.from, self.body, self.summary);
+        let summary = self.summary.map(|mut summary| {
+            // Truncated in place: `cap_for_display` measures where the cut
+            // goes, and the owned string is already here to be cut.
+            summary.truncate(cap_for_display(&summary).len());
+            summary
+        });
 
-        crate::Part::peer(
-            message.from(),
-            message.summary().map(str::to_owned),
-            color,
-            message.body(),
-        )
+        crate::Part::peer(self.from, summary, self.color, self.body)
     }
 }
 
@@ -1106,8 +1032,8 @@ impl PeerPayload {
 /// the last glyph of a truncated summary prettier is not a trade this crate's
 /// three-entry dependency list should make.
 ///
-/// Public because it is the one place the cap lives: [`PeerMessage::new`]
-/// applies it to a summary, and whoever renders an
+/// Public because it is the one place the cap lives:
+/// [`PeerPayload::into_part`] applies it to a summary, and whoever renders an
 /// [`IdleNotification::failure_reason`] — or a summary that reached them by
 /// some other path — applies the same function rather than a second constant
 /// of its own.
@@ -1187,11 +1113,11 @@ mod tests {
     use super::{
         AGENT_SENDABLE, CompletedStatus, DISPLAY_FIELD_CAP, Frame, HARNESS_ONLY, HostPattern,
         IdleNotification, IdleReason, LeadFrame, MemberBackend, MemberView, ModeSetRequest,
-        PeerMessage, PermissionRequest, PermissionResponse, PermissionResponseBody,
-        PermissionResponseSubtype, PlanApprovalRequest, PlanApprovalResponse,
-        SandboxPermissionRequest, SandboxPermissionResponse, ShutdownApproved, ShutdownRejected,
-        ShutdownRequest, TaskAssignment, TaskCompleted, TeamPermissionUpdate, TeamView,
-        TeammateTerminated, cap_for_display,
+        PermissionRequest, PermissionResponse, PermissionResponseBody, PermissionResponseSubtype,
+        PlanApprovalRequest, PlanApprovalResponse, SandboxPermissionRequest,
+        SandboxPermissionResponse, ShutdownApproved, ShutdownRejected, ShutdownRequest,
+        TaskAssignment, TaskCompleted, TeamPermissionUpdate, TeamView, TeammateTerminated,
+        cap_for_display,
     };
 
     /// The timestamp every pinned frame carries, so a golden differs from its
@@ -1556,25 +1482,9 @@ mod tests {
         assert_eq!(lead.into_inner(), frame);
     }
 
-    /// §5.3's cap, applied where no later path can skip it.
+    /// §5.3's cap, measured in characters rather than bytes.
     #[test]
-    fn a_peer_messages_summary_is_capped_at_the_display_length() {
-        let long = "e".repeat(DISPLAY_FIELD_CAP * 2);
-        let message = PeerMessage::new("w1", long.clone(), Some(long.clone()));
-
-        assert_eq!(message.from(), "w1");
-        assert_eq!(
-            message.summary().map(str::len),
-            Some(DISPLAY_FIELD_CAP),
-            "the summary is capped"
-        );
-        assert_eq!(
-            message.body().len(),
-            long.len(),
-            "the body is not a display field and is not truncated"
-        );
-        assert_eq!(PeerMessage::new("w1", "hi", None).summary(), None);
-
+    fn the_display_cap_cuts_on_a_character_boundary() {
         // Multibyte text is cut on a character boundary, not a byte one — a
         // byte cut here would panic rather than shorten.
         let wide = "あ".repeat(DISPLAY_FIELD_CAP + 10);

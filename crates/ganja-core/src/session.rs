@@ -3553,10 +3553,11 @@ fn render_peer_envelopes(messages: &mut [Message]) {
 /// would be a second opinion about somebody else's roster.
 ///
 /// `summary` is capped at
-/// [`DISPLAY_FIELD_CAP`](crate::protocol::team::DISPLAY_FIELD_CAP) here as well
-/// as at [`PeerMessage::new`](crate::protocol::team::PeerMessage::new), because
-/// a part is deliberately storable with a summary that never came through that
-/// constructor — the same defence the two frontends' renderers apply. The cap
+/// [`DISPLAY_FIELD_CAP`](crate::protocol::team::DISPLAY_FIELD_CAP) here as
+/// well as at
+/// [`PeerPayload::into_part`](crate::protocol::team::PeerPayload::into_part),
+/// because a part is deliberately storable with a summary that never came
+/// through that door — the same defence the two frontends' renderers apply. The cap
 /// runs **before** the escaping, so what it counts is the peer's own
 /// characters rather than the entities they expand into; a blank one is left
 /// out entirely, which is what those renderers already do with it.

@@ -23,14 +23,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 /// The [`team`] types that appear in signatures outside the frame vocabulary:
-/// a trust boundary ([`LeadFrame`], [`PeerMessage`]), the classifier every
+/// a trust boundary ([`LeadFrame`]), the classifier every
 /// messaging path asks ([`Frame`]), and the projection a frontend renders
 /// ([`TeamView`] and its two halves).
 ///
 /// Everything else — the fifteen frame payloads, the two reserved-set consts,
 /// the display cap — stays behind `team::`, because a caller naming one of
 /// those is already inside that vocabulary and the qualification says so.
-pub use team::{Frame, LeadFrame, MemberBackend, MemberView, PeerMessage, TeamView};
+pub use team::{Frame, LeadFrame, MemberBackend, MemberView, TeamView};
 use uuid::Uuid;
 
 /// Milliseconds since the Unix epoch, saturating rather than failing when the
@@ -511,7 +511,7 @@ pub enum PartBody {
     /// neither this session's model nor the person at the terminal, and §7-5
     /// is what follows from that: a peer's words are information the model
     /// reads, never an instruction it is bound by and never consent for
-    /// anything. [`team::PeerMessage`] states that rule as a type; this
+    /// anything. [`team::PeerPayload`] states that rule as a type; this
     /// variant states it on the wire, by staying **outside [`Part::as_text`]**
     /// — that accessor titles a rewind checkpoint and answers the copy
     /// surfaces, and a teammate's sentence standing in for what *this*
@@ -546,8 +546,8 @@ pub enum PartBody {
         /// the sender wrote one.
         ///
         /// Capped at [`team::DISPLAY_FIELD_CAP`] characters **by whoever
-        /// builds the part**: [`team::PeerMessage::new`] is where that happens
-        /// on the path a message actually travels, and
+        /// builds the part**: [`team::PeerPayload::into_part`] is where that
+        /// happens on the path a message actually travels, and
         /// [`team::cap_for_display`] is the function to call anywhere else.
         /// This type deliberately does not re-cap — a stored part must read
         /// back as the bytes it was written as, and a constructor that
@@ -807,10 +807,9 @@ impl Part {
     /// there is nothing here for a delta to grow.
     ///
     /// The arguments are in the field order, because two of them are
-    /// `Option<String>` and adjacent. `summary` is expected already capped — a
-    /// caller holding a [`team::PeerMessage`] passes
-    /// `message.summary().map(str::to_owned)`, which that type capped when it
-    /// took the message.
+    /// `Option<String>` and adjacent. `summary` is expected already capped —
+    /// [`team::PeerPayload::into_part`] caps on its way through here, and any
+    /// other caller applies [`team::cap_for_display`] itself.
     #[must_use]
     pub fn peer(
         from: impl Into<String>,
@@ -3412,22 +3411,6 @@ mod tests {
     #[test]
     fn a_peer_part_keeps_the_summary_it_was_built_with() {
         let long = "e".repeat(team::DISPLAY_FIELD_CAP * 2);
-        let message = team::PeerMessage::new("w1", long.clone(), Some(long.clone()));
-
-        let capped = Part::peer(
-            message.from(),
-            message.summary().map(str::to_owned),
-            None,
-            message.body(),
-        );
-        let PartBody::Peer { summary, body, .. } = &capped.body else {
-            unreachable!("the constructor built a peer part")
-        };
-        assert_eq!(
-            summary.as_deref().map(str::len),
-            Some(team::DISPLAY_FIELD_CAP)
-        );
-        assert_eq!(body.len(), long.len(), "the body is not a display field");
 
         // Handed a summary nobody capped, the part carries it as given — the
         // type states where the cap lives rather than applying it twice.
@@ -3438,10 +3421,9 @@ mod tests {
         assert_eq!(summary.as_deref().map(str::len), Some(long.len()));
     }
 
-    /// The wire's own door to that part caps on the way through, because it
-    /// goes through the constructor the cap lives in rather than around it —
-    /// which is what keeps a sender from spending the context window on a
-    /// display field by writing a long one.
+    /// The wire's own door to that part caps on the way through — which is
+    /// what keeps a sender from spending the context window on a display
+    /// field by writing a long one.
     #[test]
     fn a_peer_payload_becomes_a_part_through_the_capping_constructor() {
         let long = "e".repeat(team::DISPLAY_FIELD_CAP * 2);
@@ -3466,7 +3448,7 @@ mod tests {
         assert_eq!(
             summary.as_deref().map(str::len),
             Some(team::DISPLAY_FIELD_CAP),
-            "the display field is capped where every other path caps it"
+            "the display field is capped on the way into the part"
         );
         assert_eq!(color.as_deref(), Some("blue"), "the color travels as given");
         assert_eq!(body.len(), long.len(), "and the message itself is whole");
