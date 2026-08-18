@@ -4617,6 +4617,7 @@ name = "tmux"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
 ]

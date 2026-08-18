@@ -34,3 +34,6 @@ tokio.workspace = true
 # Stream adapters for the client's drop-oldest event queue, added in the
 # same later wave `tokio` is for.
 futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
