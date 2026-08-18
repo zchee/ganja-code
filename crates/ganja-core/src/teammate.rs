@@ -254,12 +254,6 @@ impl Teammate {
         &self.name
     }
 
-    /// The registry this teammate's calls are named against.
-    #[must_use]
-    pub fn tools(&self) -> &Arc<Registry> {
-        &self.tools
-    }
-
     /// The engine its turns run on.
     ///
     /// A caller subscribes here **before** it prompts: the engine's birth queue
@@ -283,7 +277,7 @@ impl Teammate {
     /// they die with it.
     ///
     /// A turn that outlasts `limit` is **cancelled** rather than left running,
-    /// and then given [`CANCELLED`] to unwind. Waiting is the courtesy a
+    /// and then given `CANCELLED` to unwind. Waiting is the courtesy a
     /// teammate's transcript is owed; waiting forever is not one anybody asked
     /// for, and a turn still streaming into a store the process is about to
     /// drop is the outcome both sides lose by. A cancelled turn is stored the
@@ -339,7 +333,7 @@ pub const SETTLE: Duration = Duration::from_secs(5);
 ///
 /// Short, and short on purpose: what is being waited for here is the tail of a
 /// step that has already been told to stop, not a model's answer.
-pub const CANCELLED: Duration = Duration::from_secs(1);
+const CANCELLED: Duration = Duration::from_secs(1);
 
 /// What the door reports back when a spawn succeeded.
 ///
@@ -558,12 +552,6 @@ impl SpawnSpec {
     #[must_use]
     pub fn inbox(&self) -> PathBuf {
         self.root.inbox_path(&self.team, &self.name)
-    }
-
-    /// The lead's inbox — where this teammate's own frames go.
-    #[must_use]
-    pub fn lead_inbox(&self) -> PathBuf {
-        self.root.inbox_path(&self.team, &self.lead)
     }
 
     /// §2.2's derived `<name>@<team>` identity.
@@ -1803,7 +1791,7 @@ impl TeammateRegistry {
             let events = teammate.engine().subscribe_droppable();
             tasks.push(tokio::spawn(fold_calls(
                 events,
-                Arc::clone(teammate.tools()),
+                Arc::clone(&teammate.tools),
                 Arc::clone(&recent),
                 spec.name.as_str().to_owned(),
                 self.cancel.child_token(),
@@ -1817,7 +1805,7 @@ impl TeammateRegistry {
                 Arc::clone(teammate),
                 self.lead.clone(),
                 spec.inbox(),
-                spec.lead_inbox(),
+                self.lead_inbox(),
                 handle.surface(),
                 self.cancel.child_token(),
             ));

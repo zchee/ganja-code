@@ -253,12 +253,6 @@ impl Server {
         &self.socket
     }
 
-    /// The pane a split splits, when one was named.
-    #[must_use]
-    pub fn pane(&self) -> Option<&str> {
-        self.pane.as_deref()
-    }
-
     /// Splits a new pane off this one and returns what identifies it.
     ///
     /// One call carries the whole §4.1 step 1: the working directory, the
@@ -360,8 +354,7 @@ impl Server {
     /// Every pane on this server, as the pair a recorded pane is matched on.
     ///
     /// The liveness listing: what a reaper compares the team file's panes
-    /// against, and what `/team` asks whether a pane teammate's window is
-    /// still there. All sessions, not only this one — a lead's teammates live
+    /// against. All sessions, not only this one — a lead's teammates live
     /// on this server, and which session's window they were split into is
     /// not what identifies them.
     ///
@@ -388,15 +381,6 @@ impl Server {
                 })
             })
             .collect()
-    }
-
-    /// Whether `pane` — id **and** birth — is on this server right now.
-    ///
-    /// # Errors
-    ///
-    /// Whatever [`Server::panes`] returns.
-    pub async fn is_live(&self, pane: &Pane) -> Result<bool, TmuxError> {
-        Ok(self.panes().await?.iter().any(|live| pane.is(live)))
     }
 
     /// Ends `pane` if, and only if, it is still the pane that was recorded.

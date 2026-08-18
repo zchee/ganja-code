@@ -111,17 +111,17 @@ pub const DROPPED_FRAME: &str = "an inbox frame was dropped";
 /// What is logged when a pane's ask is answered with a refusal because nobody
 /// could be shown it — [`crate::teammate::posture::Forwarding`]'s own line,
 /// for the same two reasons it gives.
-pub const REFUSED_ASK: &str = "a pane's permission dialog was refused rather than made to wait";
+const REFUSED_ASK: &str = "a pane's permission dialog was refused rather than made to wait";
 
 /// The error a refused ask carries back when this lead has no dialog surface
 /// at all — a headless lead, or a session nothing attached one to.
-pub const NO_DIALOG_SURFACE: &str = "the lead has no dialog to put this ask in front of anybody";
+const NO_DIALOG_SURFACE: &str = "the lead has no dialog to put this ask in front of anybody";
 
 /// The same, when the surface is there and its queue is full.
-pub const DIALOG_QUEUE_FULL: &str = "the lead's dialog queue is full";
+const DIALOG_QUEUE_FULL: &str = "the lead's dialog queue is full";
 
 /// The same, when the lead's side of the channel has gone.
-pub const LEAD_GONE: &str = "the lead's side is gone";
+const LEAD_GONE: &str = "the lead's side is gone";
 
 /// One plain message on its way into the lead's conversation.
 ///

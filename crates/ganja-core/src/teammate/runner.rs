@@ -91,8 +91,6 @@ pub struct Tick {
     /// The request id of a shutdown this pass answered, if it answered one.
     /// A pass that returns this has torn the teammate down and the loop ends.
     pub shutdown: Option<String>,
-    /// How many unread messages the shutdown went ahead of.
-    pub jumped: usize,
     /// How many plain messages reached the teammate's turn.
     pub delivered: usize,
     /// The frames this pass applied, by kind.
@@ -102,17 +100,6 @@ pub struct Tick {
     /// The frames this pass dropped, by kind — which is what "dropped by name"
     /// means: an unhandled frame is named rather than silently eaten.
     pub dropped: Vec<&'static str>,
-}
-
-/// Why the loop ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Stopped {
-    /// The registry's shutdown cancelled it.
-    Cancelled,
-    /// It answered a `shutdown_request` and tore the teammate down.
-    ShutDown,
-    /// The teammate's engine went away under it.
-    Gone,
 }
 
 /// One teammate's mailbox loop.
@@ -198,9 +185,9 @@ impl Runner {
     /// Borrows rather than consumes, so the value stays reachable while its
     /// loop runs — see [`Runner::awaiting_plan_approval`], which is worth
     /// nothing if the only thing holding a `Runner` is the task inside it.
-    pub async fn run(&self) -> Stopped {
+    pub async fn run(&self) {
         let Ok(mut events) = self.teammate.engine().subscribe().await else {
-            return Stopped::Gone;
+            return;
         };
         let mut poll = tokio::time::interval(self.poll);
         // A pass that ran late is taken late rather than immediately again: a
@@ -210,17 +197,17 @@ impl Runner {
 
         loop {
             tokio::select! {
-                () = self.cancel.cancelled() => return Stopped::Cancelled,
+                () = self.cancel.cancelled() => return,
                 // The first pass is taken at once: `Interval`'s first tick is
                 // now, which is the reference's "skipped on the first pass".
                 _ = poll.tick() => {
                     if self.tick().await.shutdown.is_some() {
-                        return Stopped::ShutDown;
+                        return;
                     }
                 }
                 event = events.next() => {
                     if event.is_none() {
-                        return Stopped::Gone;
+                        return;
                     }
                 }
             }
@@ -263,7 +250,6 @@ impl Runner {
                 _ => None,
             });
         if let Some((position, message, request)) = shutdown {
-            tick.jumped = position;
             tracing::info!(
                 teammate = self.teammate.name(),
                 request = request.request_id,

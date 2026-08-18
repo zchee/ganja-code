@@ -180,7 +180,17 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
                 storage.clone(),
                 // The seam this whole lane lands in: the teammate's engine
                 // takes the lead's ruleset, derived rather than invented.
-                posture::from_lead(Arc::clone(&lead), Vec::new()),
+                {
+                    let lead = Arc::clone(&lead);
+                    move |_| {
+                        posture::permissions_for(
+                            &lead
+                                .lock()
+                                .expect("the permission rules are never poisoned"),
+                            Vec::new(),
+                        )
+                    }
+                },
             )),
             pane: Arc::new(GanjaPane),
             claude: Arc::new(ClaudePane),

@@ -177,12 +177,6 @@ impl MemberPostbox {
         }
     }
 
-    /// The name this postbox stamps on everything it writes.
-    #[must_use]
-    pub fn sender(&self) -> &MemberName {
-        &self.sender
-    }
-
     /// The team file, or [`None`] where there is not one to read.
     ///
     /// Synchronous, because [`team::Postbox::roster`] is: the file is a few

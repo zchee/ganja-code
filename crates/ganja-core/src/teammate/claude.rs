@@ -633,7 +633,7 @@ mod tests {
         root_under,
     };
     use crate::teammate::{
-        Delivery, SpawnSpec, TeammateBackend as _,
+        SpawnSpec, TeammateBackend as _,
         pane::CARRIED_ENV,
         tmux::{REFUSED_NO_TMUX, TmuxError},
     };
@@ -808,12 +808,11 @@ mod tests {
         );
     }
 
-    /// Handing the message over is all there is to see: a real `claude` marks a
-    /// message read when it reads it, so there is no consumption to wait for.
+    /// The delivery and backend answers are pinned beside the other backends'
+    /// in `tests/teammate_backends.rs`; what is this file's alone is the inbox
+    /// ownership the registry's seed-skip reads.
     #[test]
-    fn a_claude_pane_can_only_report_that_it_handed_a_message_over() {
-        assert_eq!(ClaudePane.delivery(), Delivery::FireAndForget);
-        assert_eq!(ClaudePane.backend(), MemberBackend::Claude);
+    fn a_claude_pane_owns_its_inbox_so_the_registry_must_not_seed_it() {
         assert!(
             ClaudePane.owns_inbox(),
             "the registry must not write a second message into this inbox"

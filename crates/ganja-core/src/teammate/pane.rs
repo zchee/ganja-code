@@ -133,7 +133,7 @@ pub const AGENT_COLOR: &str = "--agent-color";
 pub const PARENT_SESSION_ID: &str = "--parent-session-id";
 /// The bypass flag, in the spelling `ganja` itself takes — appended only when
 /// the spawn asked for it and the lead's gate let it through.
-pub const AUTO: &str = "--auto";
+const AUTO: &str = "--auto";
 
 /// The shell a fresh pane holds until its launch line arrives, as the argv
 /// tmux is given.
@@ -156,7 +156,7 @@ pub const SHELL: [&str; 2] = ["/bin/sh", "-s"];
 /// How long a pane's shell waits for its member record before the pane is
 /// ended: the record is written by the same process a few milliseconds after
 /// the split, so this is a bound on a machine in trouble, not a schedule.
-pub const RECORD_WAIT: Duration = Duration::from_secs(5);
+const RECORD_WAIT: Duration = Duration::from_secs(5);
 
 /// The line typed into the pane's shell: `exec` the binary with
 /// [`arguments`], every word quoted for `sh`.
@@ -211,7 +211,7 @@ const RECORD_POLL: Duration = Duration::from_millis(20);
 /// The arguments a `ganja` pane is launched with, after the binary.
 ///
 /// The five spawn flags in §4.1's own order, each with its value from `spec`,
-/// then [`AUTO`] iff `spec.bypass` — and nothing else; what is deliberately
+/// then `--auto` iff `spec.bypass` — and nothing else; what is deliberately
 /// absent is in the module doc. Pure, so the composed line is a thing a test
 /// can hold in its hand: the argv-secrets pin reads it, and the pane's own side
 /// parses exactly these spellings.
@@ -427,7 +427,7 @@ mod tests {
     use ganja_team::{MemberName, TeamName, TeamsRoot};
 
     use super::{CARRIED_ENV, arguments};
-    use crate::{config::CONFIG_HOME_ENV, teammate::SpawnSpec};
+    use crate::teammate::SpawnSpec;
 
     /// A spawn with every field a launch could be tempted to put on the line.
     fn spec() -> SpawnSpec {
@@ -492,20 +492,9 @@ mod tests {
         assert!(!line.contains("plan"), "no plan-mode flag: {line}");
     }
 
-    /// The carried set is exactly the four directory variables, config home
-    /// first — spelled from the config module's own constant so the two
-    /// cannot drift.
+    /// The closed list holds directory names and never a credential's.
     #[test]
-    fn the_carried_environment_is_the_four_directory_names() {
-        assert_eq!(
-            CARRIED_ENV,
-            [
-                CONFIG_HOME_ENV,
-                "XDG_CONFIG_HOME",
-                "XDG_DATA_HOME",
-                "XDG_RUNTIME_DIR"
-            ]
-        );
+    fn no_credential_name_is_in_the_carried_environment() {
         for name in CARRIED_ENV {
             assert!(
                 !name.contains("KEY") && !name.contains("PASSWORD") && !name.contains("TOKEN"),

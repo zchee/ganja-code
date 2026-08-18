@@ -181,30 +181,6 @@ pub fn permissions_for(lead: &Permissions, agent_rules: Vec<Rule>) -> Permission
     lead.derive(baseline)
 }
 
-/// The factory [`crate::teammate::InProcess`] is built with.
-///
-/// The ruleset is read from the lead's live handle at each spawn rather than
-/// copied once, so a teammate started after a person answered "always" runs
-/// with that answer, exactly as a `/command` naming another agent does.
-///
-/// The [`SpawnSpec`] the seam offers is not consulted, and that is the design
-/// rather than an omission: nothing about *this* spawn may weaken the rules.
-/// What a spawn does decide — whether its dialogs are bypassed, and whether it
-/// works outside the project — is a posture and a gate ([`Posture::for_spawn`],
-/// [`spawn_gate`]), neither of which is a rule.
-pub fn from_lead(
-    lead: Arc<std::sync::Mutex<Permissions>>,
-    agent_rules: Vec<Rule>,
-) -> impl Fn(&SpawnSpec) -> Permissions + Send + Sync + 'static {
-    move |_spec| {
-        let held = lead
-            .lock()
-            .expect("the permission rules are never poisoned");
-
-        permissions_for(&held, agent_rules.clone())
-    }
-}
-
 /// What the lead's own rules say about a spawn, before the teammate exists.
 ///
 /// Two questions, both asked on the **lead's** side and both answered out of
@@ -569,14 +545,14 @@ async fn answer(teammate: &Teammate, id: PermissionId, reply: PermissionReply) {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Mutex, time::Duration};
+    use std::{path::PathBuf, time::Duration};
 
     use ganja_protocol::team::MemberBackend;
     use ganja_team::{MemberName, TeamName, TeamsRoot};
 
     use super::{
         ANY, Arc, BYPASS, CancellationToken, Event, Forwarded, Forwarding, Posture, SpawnGate,
-        SpawnSpec, Teammate, from_lead, mpsc, oneshot, permissions_for, spawn_gate,
+        SpawnSpec, Teammate, mpsc, oneshot, permissions_for, spawn_gate,
     };
     use crate::{
         Storage,
@@ -697,28 +673,6 @@ mod tests {
             teammate.gate("webfetch", &call).action,
             Decision::Allow,
             "the agent's own rule is the one nothing overrides"
-        );
-    }
-
-    /// The factory reads the lead's live handle, so an answer given after the
-    /// backend was built still reaches the teammate built after it.
-    #[test]
-    fn the_factory_reads_the_leads_rules_at_the_moment_of_the_spawn() {
-        let held = Arc::new(Mutex::new(lead(Vec::new())));
-        let factory = from_lead(Arc::clone(&held), Vec::new());
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let spec = spec(directory.path(), false);
-
-        held.lock()
-            .expect("the rules are never poisoned")
-            .set_baseline(vec![rule("bash", ANY, Action::Deny)]);
-
-        assert_eq!(
-            factory(&spec)
-                .gate("bash", &serde_json::json!({ "command": "cargo test" }))
-                .action,
-            Decision::Deny,
-            "a rule written before the spawn binds the teammate the spawn makes"
         );
     }
 
