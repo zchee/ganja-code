@@ -31,7 +31,10 @@
 //! none. Of the three, this crate declares [`Client::health`] alone: it is
 //! what `ganja sessions --live` maps a live socket back to its session with.
 //! The two team routes have one caller, the engine's own deliver arm, whose
-//! crate may not link this one and so speaks them itself.
+//! private `Socket` lives in `crates/ganja-core/src/subagent.rs`. CI's internal
+//! dependency allowlist forbids `ganja-core → ganja-client`: reversing that
+//! edge would make this pure consumer a dependency of the engine, so that
+//! `Socket` intentionally speaks the two routes itself.
 //!
 //! # Version skew is unsupported, and refused readably
 //!

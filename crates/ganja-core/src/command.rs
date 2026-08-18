@@ -30,6 +30,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ganja_tool::frontmatter::{fields, split};
+
 use crate::config::{CommandConfig, Config};
 
 /// Name of the builtin that writes a repository's `AGENTS.md`.
@@ -616,86 +618,49 @@ fn palette_line(description: Option<String>, hint: Option<String>) -> Option<Str
 /// Splits an optional leading frontmatter block off `text`, or reports that the
 /// block is never closed.
 ///
-/// Hand-rolled rather than reached through a YAML dependency: four string keys
-/// do not justify a parser for a language with nine ways to write a string, and
-/// the workspace has no YAML crate to borrow. The grammar is exactly what a
-/// Claude command file uses — a `---` line, `key: value` lines, a closing `---`
-/// line — and everything outside it is *tolerated*, not interpreted: unknown
-/// keys, comments and blank lines are skipped, because this is somebody else's
-/// file shape and a build that refused what it did not recognise would refuse
-/// files that work in the tool they were written for (the D472 posture).
+/// The shared reader deliberately returns [`None`] both when no block opens and
+/// when one opens but never closes. Command files distinguish those outcomes:
+/// the former is a body-only command, while the latter is refused rather than
+/// sent as a template whose first half is a header nobody meant to send.
 ///
-/// A missing block is not an error: the whole file is then the template.
+/// [`parse_command`] removes a leading BOM before this adapter runs. The opener
+/// check below therefore matches the shared reader's post-BOM grammar exactly;
+/// the reader still strips a BOM for its other consumers, but this branch does
+/// not depend on that second, independent normalization path by accident.
 fn split_frontmatter(text: &str) -> Option<(Frontmatter, &str)> {
-    let Some(rest) = fence(text) else {
+    if !opens_frontmatter(text) {
         return Some((Frontmatter::default(), text));
-    };
-
-    let mut front = Frontmatter::default();
-    let mut rest = rest;
-    loop {
-        if let Some(body) = fence(rest) {
-            return Some((front, body));
-        }
-        // No closing fence anywhere: the file is refused rather than read as a
-        // template whose first half is a header nobody meant to send.
-        let (line, tail) = rest.split_once('\n')?;
-        rest = tail;
-
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = unquote_scalar(value.trim());
-        if value.is_empty() {
-            // `description:` with nothing after it says nothing; treating it as
-            // an empty description would put a blank line in a palette.
-            continue;
-        }
-        let value = Some(value.to_owned());
-
-        match key.trim().to_ascii_lowercase().as_str() {
-            "description" => front.description = value,
-            "agent" => front.agent = value,
-            "model" => front.model = value,
-            "argument-hint" => front.argument_hint = value,
-            // Tolerated: a file may carry keys for the tool it was written for.
-            _ => {}
-        }
-    }
-}
-
-/// What follows the fence when `text` opens with one, allowing the trailing
-/// `\r` a file written on another platform carries.
-fn fence(text: &str) -> Option<&str> {
-    let (line, rest) = match text.split_once('\n') {
-        Some((line, rest)) => (line, rest),
-        // A file that is nothing but a fence has no body and no closing fence
-        // either; the caller's own rules decide, and both read it as unclosed.
-        None => (text, ""),
-    };
-
-    (line.trim_end() == FENCE).then_some(rest)
-}
-
-/// Strips one matched pair of surrounding quotes from a frontmatter value.
-///
-/// Only a *matched* pair, unlike [`unquote`], which strips one of either at
-/// each end: an argument token comes from a shell-ish grammar where that is the
-/// rule, and a `description: "he said 'hi'"` does not.
-fn unquote_scalar(value: &str) -> &str {
-    for quote in ['"', '\''] {
-        if let Some(inner) = value.strip_prefix(quote)
-            && let Some(inner) = inner.strip_suffix(quote)
-        {
-            return inner;
-        }
     }
 
-    value
+    // A leading fence was established independently, so `None` now has only
+    // one meaning: the block never closed.
+    let (frontmatter, body) = split(text)?;
+    let fields = fields(frontmatter);
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, value)| key.eq_ignore_ascii_case(name) && !value.is_empty())
+            .map(|(_, value)| value.clone())
+    };
+
+    Some((
+        Frontmatter {
+            description: field("description"),
+            agent: field("agent"),
+            model: field("model"),
+            argument_hint: field("argument-hint"),
+        },
+        body,
+    ))
+}
+
+/// Whether BOM-free `text` opens with the exact fence grammar [`split`] uses.
+fn opens_frontmatter(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix(FENCE) else {
+        return false;
+    };
+
+    rest.starts_with('\n') || rest.starts_with("\r\n")
 }
 
 /// The commands this build ships, with `${path}` already pointing at the

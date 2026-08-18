@@ -782,12 +782,12 @@ impl Client {
                 // Already reaped; there is no group left to signal.
                 return;
             };
-            signal_group(pid, libc::SIGTERM);
+            ganja_tool::shell::signal_group(pid, libc::SIGTERM);
 
             tokio::spawn(async move {
                 tokio::time::sleep(KILL_GRACE).await;
                 if matches!(child.try_wait(), Ok(None)) {
-                    signal_group(pid, libc::SIGKILL);
+                    ganja_tool::shell::signal_group(pid, libc::SIGKILL);
                 }
             });
         }
@@ -871,28 +871,6 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.shutdown();
-    }
-}
-
-/// Sends `signal` to the process group led by `pid`.
-///
-/// The same call `tool/shell.rs` and `mcp.rs` make, for the same reason:
-/// `pid` comes from `Child::id` for a child spawned with `process_group(0)`,
-/// which makes it the leader of a fresh group holding the server and
-/// everything it forked, and a signal to the leader alone would leave the
-/// rest running.
-#[cfg(unix)]
-fn signal_group(pid: u32, signal: libc::c_int) {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return;
-    };
-
-    // SAFETY: `killpg` reads no memory and owns no resource — it takes two
-    // integers and returns one. `pid` names a group this process created
-    // with `process_group(0)` and has not yet reaped, so it cannot have been
-    // recycled onto some unrelated process.
-    unsafe {
-        libc::killpg(pid, signal);
     }
 }
 

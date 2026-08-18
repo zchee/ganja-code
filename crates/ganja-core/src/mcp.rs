@@ -361,9 +361,9 @@ impl Servers {
             client.cancellation_token().cancel();
             #[cfg(unix)]
             if let Some(group) = group {
-                end_group(group, libc::SIGTERM);
+                ganja_tool::shell::signal_group(group, libc::SIGTERM);
                 tokio::time::sleep(KILL_GRACE).await;
-                end_group(group, libc::SIGKILL);
+                ganja_tool::shell::signal_group(group, libc::SIGKILL);
             }
 
             return;
@@ -927,12 +927,12 @@ impl Servers {
             // left a server's helpers running for as long as the server
             // itself chose to ignore the signal.
             for &group in &groups {
-                end_group(group, libc::SIGTERM);
+                ganja_tool::shell::signal_group(group, libc::SIGTERM);
             }
             if !groups.is_empty() {
                 tokio::time::sleep(KILL_GRACE).await;
                 for group in groups {
-                    end_group(group, libc::SIGKILL);
+                    ganja_tool::shell::signal_group(group, libc::SIGKILL);
                 }
             }
         }
@@ -1138,25 +1138,6 @@ fn bearer_value(
     value.set_sensitive(true);
 
     Ok(value)
-}
-
-/// Sends `signal` to the process group `group` leads.
-///
-/// The same `killpg` the shell tool uses, and for the same reason spelled
-/// there: a server started with `process_group(0)` leads a group of its own,
-/// and signalling the leader alone leaves whatever it spawned running.
-#[cfg(unix)]
-fn end_group(group: u32, signal: libc::c_int) {
-    let Ok(pid) = i32::try_from(group) else {
-        return;
-    };
-
-    // SAFETY: `killpg` reads no memory and owns no resource. The group is one
-    // this process created with `process_group(0)`, so the signal cannot reach
-    // a group that was never ours.
-    unsafe {
-        libc::killpg(pid, signal);
-    }
 }
 
 /// Reads a local server's stderr and writes it to the trace log.

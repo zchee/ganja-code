@@ -1164,6 +1164,12 @@ fn reflected(text: &str) -> String {
 /// One session's socket, as this side speaks to it: a `reqwest::Client`
 /// bound to that path and nothing else, and the path itself for every
 /// sentence a failure is read in.
+///
+/// This intentionally duplicates `ganja-client/src/lib.rs`'s
+/// `Client::on_socket` transport. The module doc there names this twin and the
+/// three routes the socket serves; CI's internal-dependency allowlist forbids
+/// `ganja-core → ganja-client`, because the latter must remain a pure consumer
+/// of the served engine rather than becoming another layer beneath it.
 struct Socket {
     http: reqwest::Client,
     path: PathBuf,
@@ -2120,11 +2126,11 @@ mod tests {
 
     use super::{
         Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Incoming,
-        NOT_A_SESSION_SOCKET, NotReceived, PermissionReply, Postbox, Reserved, SOCKET_LEAD_UNNAMED,
-        SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent, SocketMessage, SpawnAsk,
-        SpawnAsker, SpawnRequest, TEAM_GONE, Teammate, TeammateRegistry, TeammateSpawn, Teammates,
-        Undelivered, Watched, async_trait, denies_task, receive, roster, subagent_rules, team,
-        watch,
+        MESSAGE_ROUTE, NOT_A_SESSION_SOCKET, NotReceived, PermissionReply, Postbox, Reserved,
+        SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent,
+        SocketMessage, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate,
+        TeammateRegistry, TeammateSpawn, Teammates, Undelivered, Watched, async_trait, denies_task,
+        receive, roster, subagent_rules, team, watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -2140,6 +2146,17 @@ mod tests {
 
     fn registry() -> Registry {
         Registry::from_config(&Config::default()).expect("the default config resolves agents")
+    }
+
+    #[test]
+    fn the_team_routes_this_side_speaks_match_the_socket_twin_in_ganja_client() {
+        // `crates/ganja-client/src/lib.rs`'s module docs (roughly lines 17-36)
+        // are the independent twin whose declared socket routes this pins.
+        assert_eq!(TEAM_ROUTE, "/team");
+        assert_eq!(
+            format!("{TEAM_ROUTE}/{}{MESSAGE_ROUTE}", "some-lead"),
+            "/team/some-lead/message"
+        );
     }
 
     /// A child's thinking is not a child's answer (bead `pwe`), and the

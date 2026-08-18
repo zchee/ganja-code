@@ -774,8 +774,12 @@ pub async fn kill_tree(child: &mut Child) {
 }
 
 /// Sends `signal` to the process group led by `pid`.
+///
+/// Public because shell commands, MCP servers, and language servers own
+/// different shutdown ladders but all need this one unsafe system call. Keeping
+/// only the call here lets each owner retain its own grace and liveness policy.
 #[cfg(unix)]
-fn signal_group(pid: u32, signal: libc::c_int) {
+pub fn signal_group(pid: u32, signal: libc::c_int) {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         // No pid a kernel hands out is this large, so nothing sensible is
         // being asked for; signalling a truncated value would be worse than
@@ -787,13 +791,11 @@ fn signal_group(pid: u32, signal: libc::c_int) {
     // integers and returns one — so the invariant that matters is which group
     // gets signalled rather than anything about pointers.
     //
-    // `pid` is the group. It comes from `Child::id`, and the child was spawned
-    // with `process_group(0)`, which makes it the leader of a fresh group whose
-    // id equals its pid; that group holds the shell and its descendants and
-    // nothing else. `Child::id` returns `None` once the child has been reaped,
-    // so reaching here means it has not been — and an unreaped pid cannot have
-    // been recycled onto some unrelated process. The reap happens in `run`,
-    // strictly after this returns.
+    // Every owner supplies an id obtained from `Child::id` after spawning that
+    // child with `process_group(0)`, or retains that same id as its group
+    // handle. The child is therefore the leader of a fresh group whose id
+    // equals its pid; the group holds that child and its descendants and cannot
+    // name a group this process did not create.
     //
     // A failure is not worth reporting: `ESRCH` means the group is already
     // gone, which is the outcome being asked for, and `EPERM` cannot arise for
