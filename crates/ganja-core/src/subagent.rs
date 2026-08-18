@@ -118,7 +118,7 @@ use async_trait::async_trait;
 use ganja_protocol::team::{
     DISPLAY_FIELD_CAP, Frame, MemberBackend, ShutdownRequest, TeamView, cap_for_display,
 };
-use ganja_team::{MailboxMessage, MemberName, mailbox, record};
+use ganja_team::{MemberName, record};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -135,8 +135,8 @@ use crate::{
     session::{ChildParts, Persist, SessionState, Turn, TurnKind, run_turn},
     storage::{self, SessionId, SessionInfo},
     teammate::{
-        DEFAULT_BACKEND, SpawnRequest, SpawnSpec, Teammate, TeammateBackend, TeammateRegistry,
-        backend_name, parse_backend, posture,
+        DEFAULT_BACKEND, SpawnRequest, Teammate, TeammateBackend, TeammateRegistry, backend_name,
+        parse_backend, postbox::LEADS, posture,
     },
     tool::{
         Credentials, Registry,
@@ -645,14 +645,20 @@ impl Teammates {
             // whether a *named* surface can run, never which one is chosen.
             None => DEFAULT_BACKEND,
         };
-        let asked = self.requested(&request, backend, bypass, caller)?;
+        // Parsed here, so a name the grammar refuses is refused before a
+        // person is asked about it. The words are `resolve_unique`'s own —
+        // this is the same [`MemberName::parse`] it runs first — so refusing
+        // early costs no second sentence.
+        let name = MemberName::parse(&request.name).map_err(refused)?;
         let gate = posture::spawn_gate(
             &caller
                 .permissions
                 .lock()
                 .expect("the lead's rules are never poisoned"),
             &caller.project_root,
-            &asked,
+            bypass,
+            &request.agent_type,
+            &caller.cwd,
         );
         match gate.action() {
             Decision::Deny => {
@@ -676,16 +682,15 @@ impl Teammates {
                         // not, rather than naming a teammate that may never
                         // exist under that name.
                         title: format!(
-                            "start teammate {} on the {} backend (a name already taken gets a counter)",
-                            asked.name,
+                            "start teammate {name} on the {} backend (a name already taken gets a counter)",
                             backend_name(backend)
                         ),
                         args: serde_json::json!({
-                            "name": asked.name.as_str(),
+                            "name": name.as_str(),
                             "backend": backend_name(backend),
-                            "agent_type": asked.agent_type,
-                            "cwd": asked.cwd.to_string_lossy(),
-                            "bypass": asked.bypass,
+                            "agent_type": request.agent_type,
+                            "cwd": caller.cwd.to_string_lossy(),
+                            "bypass": bypass,
                         }),
                         directories: gate.directories(),
                     })
@@ -823,46 +828,6 @@ impl Teammates {
 
         outcomes
     }
-
-    /// The spawn **as it is being asked for**, which is what the gate judges.
-    ///
-    /// [`crate::teammate::TeammateRegistry::spawn`] builds the real
-    /// [`SpawnSpec`] itself, and it decides two things this one cannot know:
-    /// the resolved name and the assigned colour. Neither is a field
-    /// [`crate::teammate::posture::spawn_gate`] reads — it reads the bypass
-    /// flag, the agent kind and the directory, and all three arrive from the
-    /// request unchanged — so gating this value and spawning the other cannot
-    /// disagree about the answer. What is left empty here is left empty
-    /// because it is genuinely not decided yet, rather than filled with a
-    /// guess a later reader might trust.
-    ///
-    /// The name is parsed here, so a name the grammar refuses is refused before
-    /// a person is asked about it. The words are `resolve_unique`'s own — this
-    /// is the same [`MemberName::parse`] it runs first — so refusing early
-    /// costs no second sentence.
-    fn requested(
-        &self,
-        request: &TeammateSpawn,
-        backend: MemberBackend,
-        bypass: bool,
-        caller: &Caller,
-    ) -> Result<SpawnSpec, NotSpawned> {
-        Ok(SpawnSpec {
-            name: MemberName::parse(&request.name).map_err(refused)?,
-            team: self.registry.team().clone(),
-            lead: self.registry.lead().clone(),
-            root: self.registry.root().clone(),
-            backend,
-            agent_type: request.agent_type.clone(),
-            model: caller.model.clone(),
-            color: String::new(),
-            prompt: request.prompt.clone(),
-            cwd: caller.cwd.clone(),
-            plan_mode_required: false,
-            bypass,
-            parent_session_id: String::new(),
-        })
-    }
 }
 
 /// Where one engine's `send_message` calls are posted.
@@ -957,7 +922,7 @@ impl Postbox {
                 description: Some(if member.is_lead {
                     LEADS.to_owned()
                 } else {
-                    format!("{RUNS_ON} {} backend", backend_name(member.backend))
+                    crate::teammate::postbox::peer_description(backend_name(member.backend))
                 }),
                 lead: member.is_lead,
                 name: member.name,
@@ -1011,10 +976,7 @@ impl Postbox {
     ///
     /// [`NotReceived::NotAPeerIdentity`] when `identity` is not
     /// `<name>@<team>` with both halves present, plain, and within the cap.
-    pub(crate) fn peer(
-        registry: &Arc<TeammateRegistry>,
-        identity: &str,
-    ) -> Result<Self, NotReceived> {
+    fn peer(registry: &Arc<TeammateRegistry>, identity: &str) -> Result<Self, NotReceived> {
         let derived = identity
             .split_once('@')
             .is_some_and(|(name, team)| !name.is_empty() && !team.is_empty());
@@ -1478,15 +1440,7 @@ pub async fn receive(
 #[async_trait]
 impl team::Postbox for Postbox {
     fn classify(&self, text: &str) -> Reserved {
-        // One parse and one lookup, both `ganja-protocol`'s: the tool may not
-        // name that crate, so this is the only place the fifteen are known,
-        // and there is no list of frame names anywhere on the tool's side to
-        // fall out of step with it.
-        match Frame::reserved_kind(text) {
-            None => Reserved::No,
-            Some(kind) if Frame::is_agent_sendable_kind(kind) => Reserved::AgentSendable { kind },
-            Some(kind) => Reserved::HarnessOnly { kind },
-        }
+        crate::teammate::postbox::classify_reserved(text)
     }
 
     async fn deliver(&self, to: Address, body: Body) -> Result<Sent, Undelivered> {
@@ -1508,40 +1462,15 @@ impl team::Postbox for Postbox {
         let Some(recipient) = self.recipient(&registry, &name) else {
             return Err(Undelivered::Unknown);
         };
-        // A roster name was resolved through the name grammar before it was
-        // ever a member, so this cannot fail — and it is answered rather than
-        // unwrapped because the cost of being wrong is a panic in somebody's
-        // turn, where the cost of being right is one arm.
-        let member = MemberName::parse(&recipient.name).map_err(|error| Undelivered::Failed {
-            reason: format!("{UNADDRESSABLE} {:?}: {error}", recipient.name),
-        })?;
 
-        let (text, summary) = match body {
-            Body::Text { text, summary } => (text, summary),
-            // A frame crosses as the document its sender wrote. The far side
-            // reads it back with the same one parse `classify` uses, so
-            // re-encoding it through a typed value here would only be a second
-            // spelling of one document.
-            Body::Frame(document) => (document.to_string(), None),
-        };
-        let mut message = MailboxMessage::new(&self.sender, text, record::now_iso8601());
-        message.summary = summary;
-
-        let path = registry.root().inbox_path(registry.team(), &member);
-        let written = tokio::task::spawn_blocking(move || mailbox::write(&path, message))
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|written| written.map_err(|error| error.to_string()));
-
-        match written {
-            Ok(_) => Ok(Sent {
-                to: member.into_inner(),
-                note: WRITTEN.to_owned(),
-            }),
-            Err(reason) => Err(Undelivered::Failed {
-                reason: format!("{UNWRITTEN} {reason}"),
-            }),
-        }
+        crate::teammate::postbox::write_to_peer(
+            &self.sender,
+            registry.root(),
+            registry.team(),
+            &recipient,
+            body,
+        )
+        .await
     }
 
     fn roster(&self) -> Vec<Peer> {
@@ -1577,16 +1506,10 @@ const REFUSED_BY_RULE: &str = "a rule refuses this spawn";
 const REFUSED_BY_HAND: &str =
     "the spawn was refused at the permission dialog; nothing was started and no team was joined";
 
-/// Why a `uds:` address is validated and then not delivered — by the one
-/// postbox that still does not speak the socket, a pane member's
-/// ([`crate::teammate::member::MemberPostbox`]). The lead's and an in-process
-/// teammate's do (**D505**, [`Postbox::deliver_over_socket`]).
-pub(crate) const NO_SOCKET: &str = "A message to another session travels over that session's socket, and this teammate's postbox does not speak it yet. A member of this team is reached by its bare name; another session, through the lead.";
-
 /// A structured message offered to the socket arm — refused at the tool's
 /// rung 6 already, and refused here again for whoever reaches the trait
 /// without the tool in front of it (§5.2-6).
-pub(crate) const FRAME_OVER_SOCKET: &str = "A protocol frame does not cross a socket: a session reached at a uds: address takes plain text. Send prose, or address a member of this team by name.";
+const FRAME_OVER_SOCKET: &str = "A protocol frame does not cross a socket: a session reached at a uds: address takes plain text. Send prose, or address a member of this team by name.";
 
 /// A `uds:` address that is not a session socket of ours (**D505**, the
 /// D498 premise held across a socket): the tool refuses it at rung 3, and
@@ -1598,10 +1521,10 @@ pub(crate) const NOT_A_SESSION_SOCKET: &str = "A uds: address names another ganj
 const SOCKET_CLIENT_FAILED: &str = "The socket could not be opened at";
 
 /// Nothing answered at the socket, ahead of the OS's own reason.
-pub(crate) const SOCKET_UNREACHABLE: &str = "The session at that socket did not answer; it may have ended, and `ganja sessions --live` lists the ones still there. Socket";
+const SOCKET_UNREACHABLE: &str = "The session at that socket did not answer; it may have ended, and `ganja sessions --live` lists the ones still there. Socket";
 
 /// The peer answered with a refusal, ahead of its status and its sentence.
-pub(crate) const SOCKET_REFUSED: &str = "The session at that socket refused the message. Socket";
+const SOCKET_REFUSED: &str = "The session at that socket refused the message. Socket";
 
 /// The peer answered something this build has no type for.
 const SOCKET_UNREADABLE: &str =
@@ -1609,18 +1532,10 @@ const SOCKET_UNREADABLE: &str =
 
 /// The peer named a lead the member-name grammar refuses — nothing this
 /// build's binder would ever answer, and a name that cannot go into a URL.
-pub(crate) const SOCKET_LEAD_UNNAMED: &str = "The session at that socket named a lead that is not a member name, so no message was posted to it. Socket";
+const SOCKET_LEAD_UNNAMED: &str = "The session at that socket named a lead that is not a member name, so no message was posted to it. Socket";
 
 /// The peer answered more than this side reads — refused, not buffered.
-pub(crate) const SOCKET_OVERSIZED: &str = "The session at that socket answered more than a session ever does, and the answer was refused unread. Socket";
-
-/// A member of the team whose name the name grammar refuses — impossible
-/// through this build's own registration, and answered rather than trusted.
-pub(crate) const UNADDRESSABLE: &str =
-    "This team is holding a member under a name that cannot be addressed:";
-
-/// A write that did not land, ahead of what the mailbox said about it.
-pub(crate) const UNWRITTEN: &str = "The message could not be written to that teammate's inbox:";
+const SOCKET_OVERSIZED: &str = "The session at that socket answered more than a session ever does, and the answer was refused unread. Socket";
 
 /// Why a message written after the team itself has gone reaches nobody.
 ///
@@ -1630,9 +1545,6 @@ pub(crate) const UNWRITTEN: &str = "The message could not be written to that tea
 /// had a team at all — this one is a team that has ended.
 const TEAM_GONE: &str =
     "The team this session led has been shut down; there is nobody left to deliver to.";
-
-/// What became of a message that did land.
-pub(crate) const WRITTEN: &str = "It is in that inbox and will be read on the next pass.";
 
 /// The reason a lead gives a teammate it is asking to stop.
 ///
@@ -1647,12 +1559,6 @@ const SHUTDOWN_ASKED: &str = "the lead asked this teammate to stop";
 /// answered rather than unwrapped because the cost of being wrong is a panic
 /// in somebody's event loop.
 const UNENCODABLE: &str = "The shutdown request could not be written:";
-
-/// What the roster says about the one member that is not a teammate.
-pub(crate) const LEADS: &str = "the session that leads this team";
-
-/// What it says about the ones that are, ahead of the surface each runs on.
-pub(crate) const RUNS_ON: &str = "a teammate on the";
 
 /// The agents `caller` may delegate to, as the task tool lists them.
 ///
@@ -2094,7 +2000,7 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                 if let PartBody::Tool { tool, state, .. } = &part.body
                     && let ToolState::Running { input, .. } = state
                 {
-                    let name = name_of(&watched, tool, input);
+                    let name = describe_call(&watched.tools, tool, input);
                     // A call republishes its Running part as it streams, so
                     // only a *new* name joins the log; two genuinely identical
                     // calls back to back collapse into one row, which the true
@@ -2156,16 +2062,17 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
     outcome
 }
 
-/// How a running child call is named on the parent's row.
+/// How a running call is named on a row a person reads.
 ///
 /// Upstream shows the tool's own `state.title`, which its running parts carry
 /// and ganja's do not. What stands in is the line a permission dialog would
 /// have used for the same call — `read src/main.rs`, not `read` — which is the
 /// same sentence by a different route
-/// (deviation: task-progress-names-the-call).
-fn name_of(watched: &Watched, tool: &str, input: &serde_json::Value) -> String {
-    watched
-        .tools
+/// (deviation: task-progress-names-the-call). The watcher's row and the
+/// D503 ring ([`crate::teammate`]'s `fold_calls`) both name calls through
+/// this.
+pub(crate) fn describe_call(tools: &Registry, tool: &str, input: &serde_json::Value) -> String {
+    tools
         .get(tool)
         .map_or_else(|| tool.to_owned(), |found| found.describe(input))
 }
@@ -2213,16 +2120,16 @@ async fn report(watched: &Watched, current: Option<&str>, outcome: &Outcome) {
 mod tests {
     use std::sync::Arc;
 
-    use ganja_team::{MailboxMessage, TeamName, TeamsRoot};
+    use ganja_team::{MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox};
     use tokio::sync::mpsc;
 
     use super::{
-        Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Incoming, MemberName,
+        Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Incoming,
         NOT_A_SESSION_SOCKET, NotReceived, PermissionReply, Postbox, Reserved, SOCKET_LEAD_UNNAMED,
         SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent, SocketMessage, SpawnAsk,
         SpawnAsker, SpawnRequest, TEAM_GONE, Teammate, TeammateRegistry, TeammateSpawn, Teammates,
-        Undelivered, Watched, async_trait, denies_task, mailbox, receive, roster, subagent_rules,
-        team, watch,
+        Undelivered, Watched, async_trait, denies_task, receive, roster, subagent_rules, team,
+        watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -2519,14 +2426,9 @@ mod tests {
     impl Team {
         async fn new() -> Self {
             let home = ganja_testkit::temp_dir();
-            let root = TeamsRoot::new(home.path().join("teams"));
-            let team = TeamName::parse("session-abcd1234").expect("a team name");
-            let registry = Arc::new(TeammateRegistry::new(
-                root.clone(),
-                team.clone(),
-                "01998ad0-0000-7000-8000-000000000000",
-                home.path(),
-            ));
+            let registry = crate::teammate::tests::registry(home.path());
+            let root = registry.root().clone();
+            let team = registry.team().clone();
             registry
                 .spawn(
                     Arc::new(crate::teammate::InProcess::new(
@@ -2663,61 +2565,24 @@ mod tests {
         }
     }
 
-    /// Why [`Never`] refuses.
-    const NEVER: &str = "this door spawns nothing";
+    use crate::teammate::tests::{NEVER, Never, registry as team_registry};
 
-    /// A backend that spawns nothing at all, refusing in its own sentence.
-    ///
-    /// A fixture rather than a real pane backend, because a real one spawns:
-    /// a door test that leaned on `GanjaPane` refusing would split a pane into
-    /// whichever tmux session the developer happens to be sitting in the day
-    /// its body lands.
-    #[derive(Debug)]
-    struct Never;
-
-    #[async_trait]
-    impl crate::teammate::TeammateBackend for Never {
-        fn backend(&self) -> ganja_protocol::team::MemberBackend {
-            ganja_protocol::team::MemberBackend::InProcess
-        }
-
-        async fn spawn(
-            &self,
-            _spec: &crate::teammate::SpawnSpec,
-        ) -> Result<crate::teammate::Handle, crate::teammate::Unsupported> {
-            Err(crate::teammate::Unsupported {
-                backend: ganja_protocol::team::MemberBackend::InProcess,
-                reason: NEVER.to_owned(),
-            })
-        }
-
-        async fn kill(&self, _handle: &crate::teammate::Handle) {}
-
-        fn delivery(&self) -> crate::teammate::Delivery {
-            crate::teammate::Delivery::FireAndForget
-        }
-    }
-
-    /// A door onto one team, over a backend that spawns nothing at all.
+    /// A door onto one team, over [`Never`] — a backend that spawns nothing
+    /// at all.
     ///
     /// The refusal that backend answers with is not what these tests read — a
     /// gate that let the spawn through is visible as *reaching* the backend at
     /// all, and a gate that stopped it is visible as its own sentence — so this
     /// buys the gate's own claims without a running teammate under them.
     fn door(home: &std::path::Path) -> Teammates {
-        let registry = Arc::new(TeammateRegistry::new(
-            TeamsRoot::new(home.join("teams")),
-            TeamName::parse("session-abcd1234").expect("a team name"),
-            "01998ad0-0000-7000-8000-000000000000",
-            home,
-        ));
+        use ganja_protocol::team::MemberBackend;
 
         Teammates::new(
-            registry,
+            team_registry(home),
             Backends {
-                in_process: Arc::new(Never),
-                pane: Arc::new(Never),
-                claude: Arc::new(Never),
+                in_process: Arc::new(Never(MemberBackend::InProcess)),
+                pane: Arc::new(Never(MemberBackend::InProcess)),
+                claude: Arc::new(Never(MemberBackend::InProcess)),
             },
         )
     }

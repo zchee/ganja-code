@@ -151,13 +151,11 @@ use std::{
 use async_trait::async_trait;
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use ganja_protocol::team::MemberBackend;
-use ganja_team::{MailboxMessage, TeamsRoot, mailbox, record};
+use ganja_team::{TeamsRoot, mailbox};
 
 use crate::teammate::{
-    Delivery, Handle, SpawnSpec, TeammateBackend, Unsupported,
-    pane::{self, AGENT_COLOR, AGENT_ID, AGENT_NAME, PARENT_SESSION_ID, TEAM_NAME},
-    reaper::Pane,
-    tmux::{self, Killed, Launch, Server, TmuxError},
+    Delivery, Handle, SpawnSpec, TeammateBackend, Unsupported, pane,
+    tmux::{self, Server, TmuxError},
 };
 
 /// The variable naming the directory a real `claude` keeps its own things in,
@@ -293,16 +291,7 @@ pub fn preamble(spec: &SpawnSpec) -> String {
 /// thing a test can hold in its hand.
 #[must_use]
 pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
-    let mut argv: Vec<OsString> = [
-        (AGENT_ID, spec.agent_id()),
-        (AGENT_NAME, spec.name.as_str().to_owned()),
-        (TEAM_NAME, spec.team.as_str().to_owned()),
-        (AGENT_COLOR, spec.color.clone()),
-        (PARENT_SESSION_ID, spec.parent_session_id.clone()),
-    ]
-    .into_iter()
-    .flat_map(|(flag, value)| [OsString::from(flag), OsString::from(value)])
-    .collect();
+    let mut argv = pane::identity_flags(spec);
     if spec.plan_mode_required {
         argv.push(OsString::from(PLAN_MODE_REQUIRED));
     }
@@ -312,27 +301,6 @@ pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
     }
 
     argv
-}
-
-/// The line typed into the pane's shell: `exec` the binary with
-/// [`arguments`], every word quoted for `sh`.
-///
-/// `exec`, so the shell is replaced rather than parented — the pane's process
-/// keeps the pid tmux forked, which is the `birth` half of its recorded
-/// identity and what an identity-checked kill compares against. Composed here
-/// rather than shared with [`crate::teammate::pane`]'s: the two argv differ,
-/// and the only thing they have in common is [`tmux::shell_quote`], which is
-/// where the quoting rule already lives.
-#[must_use]
-pub fn launch_line(binary: &Path, spec: &SpawnSpec) -> OsString {
-    let mut line = OsString::from("exec ");
-    line.push(tmux::shell_quote(binary.as_os_str()));
-    for argument in arguments(spec) {
-        line.push(" ");
-        line.push(tmux::shell_quote(&argument));
-    }
-
-    line
 }
 
 /// `binary` as `PATH` resolves it, or [`None`].
@@ -422,62 +390,34 @@ impl ClaudePane {
     /// (§2.5).
     ///
     /// Answers with what identifies the entry, so a launch that fails after this
-    /// can take it back out ([`ClaudePane::unseed`]).
+    /// can take it back out ([`crate::teammate::unseed_inbox`], under this
+    /// backend's own root — the unwind the registry cannot do for it, since it
+    /// never wrote the entry and does not know the root it went to).
     async fn seed(spec: &SpawnSpec, root: &TeamsRoot) -> Result<mailbox::Identity, Unsupported> {
-        let inbox = root.inbox_path(&spec.team, &spec.name);
         let lead = root.inbox_path(&spec.team, &spec.lead);
-        let message =
-            MailboxMessage::new(spec.lead.as_str(), preamble(spec), record::now_iso8601());
-        let identity = mailbox::identity(&message);
-
-        let seeding = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            for path in [&lead, &inbox] {
-                mailbox::seed(path).map_err(|error| format!("{}: {error}", path.display()))?;
-            }
-            mailbox::write(&inbox, message)
-                .map(|_| ())
-                .map_err(|error| format!("{}: {error}", inbox.display()))
+        if let Err(reason) = crate::teammate::blocking_io(move || {
+            mailbox::seed(&lead).map_err(|error| format!("{}: {error}", lead.display()))
         })
-        .await;
-
-        match seeding {
-            Ok(Ok(())) => Ok(identity),
-            Ok(Err(reason)) => Err(Self::cannot(format!(
+        .await
+        {
+            return Err(Self::cannot(format!(
                 "the teammate's inbox under claude's own teams directory could not be written — \
                  {reason}"
-            ))),
-            Err(error) => Err(Self::cannot(format!(
-                "the write of the teammate's inbox was lost: {error}"
-            ))),
+            )));
         }
-    }
 
-    /// Takes [`ClaudePane::seed`]'s message back out, for a launch that was
-    /// refused after it landed.
-    ///
-    /// The unwind the registry cannot do for this backend: it never wrote the
-    /// entry and does not know the root it went to
-    /// ([`TeammateBackend::owns_inbox`]). Reported rather than returned, exactly
-    /// as `teammate.rs`'s own `unseed_inbox` is — the launch has already failed,
-    /// and a cleanup that failed too is a line in the log rather than a second
-    /// error for whoever asked to read.
-    async fn unseed(spec: &SpawnSpec, root: &TeamsRoot, seeded: mailbox::Identity) {
-        let inbox = root.inbox_path(&spec.team, &spec.name);
-        let path = inbox.clone();
-        let outcome =
-            tokio::task::spawn_blocking(move || mailbox::prune_delivered(&path, &[seeded]))
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|pruned| pruned.map_err(|error| error.to_string()));
-
-        if let Err(error) = outcome {
-            tracing::warn!(
-                teammate = spec.name.as_str(),
-                inbox = %inbox.display(),
-                %error,
-                "a refused launch left its prompt in a claude teammate's inbox"
-            );
-        }
+        crate::teammate::seed_inbox(
+            root.inbox_path(&spec.team, &spec.name),
+            spec.lead.as_str().to_owned(),
+            preamble(spec),
+        )
+        .await
+        .map_err(|error| {
+            Self::cannot(format!(
+                "the teammate's inbox under claude's own teams directory could not be written — \
+                 {error}"
+            ))
+        })
     }
 }
 
@@ -500,52 +440,30 @@ impl TeammateBackend for ClaudePane {
         let server = Server::current().map_err(|error| Self::refused(&error))?;
         // Both of these are resolved *before* the pane exists, so a machine
         // that cannot run a `claude` at all makes no window it would then have
-        // to unmake.
-        let binary = on_path(BINARY).ok_or_else(|| Self::cannot(REFUSED_NO_BINARY))?;
+        // to unmake; the binary itself is spent in `launch`, which resolves it
+        // again at the moment it is typed.
+        on_path(BINARY).ok_or_else(|| Self::cannot(REFUSED_NO_BINARY))?;
         teams_root().ok_or_else(|| Self::cannot(REFUSED_NO_CONFIG_DIR))?;
 
-        // §4.1 step 1: the surface, holding an idle shell. The environment
-        // travels here (D502), through tmux's own door; the launch line comes
-        // later, once the record this pane's process reads exists.
+        // §4.1 steps 1 and 3: the surface, holding an idle shell, then the
+        // cosmetic title. The environment travels here (D502), through tmux's
+        // own door; the launch line comes later, once the record this pane's
+        // process reads exists.
         let environment = tmux::environment(carried_env());
-        let shell: Vec<OsString> = pane::SHELL.iter().map(OsString::from).collect();
-        let pane = server
-            .split(Launch {
-                cwd: &spec.cwd,
-                environment: &environment,
-                argv: &shell,
-            })
-            .await
-            .map_err(|error| Self::refused(&error))?;
-        tracing::info!(
-            teammate = spec.name.as_str(),
-            pane = pane.id,
-            birth = pane.birth,
-            binary = %binary.display(),
-            "a pane was split for a claude teammate"
-        );
+        let pane = pane::split_idle_shell(
+            &server,
+            spec,
+            &environment,
+            MemberBackend::Claude,
+            "claude teammate",
+        )
+        .await?;
 
-        // §4.1 step 3, cosmetic and treated as such by every caller: a title
-        // that would not stick is a pane without a name on it, not a teammate
-        // that did not start. Named rather than swallowed, because a tmux that
-        // refuses a cosmetic call is worth a line in the log.
-        if let Err(error) = server.title(&pane.id, spec.name.as_str()).await {
-            tracing::warn!(
-                teammate = spec.name.as_str(),
-                pane = pane.id,
-                %error,
-                "the teammate's pane could not be titled"
-            );
-        }
-
-        Ok(Handle::Pane {
-            pane_id: pane.id,
-            birth: pane.birth,
-        })
+        Ok(Handle::Pane(pane))
     }
 
     async fn launch(&self, spec: &SpawnSpec, handle: &Handle) -> Result<(), Unsupported> {
-        let Some(pane) = Pane::of(handle) else {
+        let Handle::Pane(pane) = handle else {
             // Not reachable through the registry, which hands back the handle
             // this backend's own `spawn` returned — but a handle of the other
             // shape arriving here would mean a registry had crossed two
@@ -563,14 +481,19 @@ impl TeammateBackend for ClaudePane {
         // the task was in it would either idle or ask what it is for.
         let seeded = Self::seed(spec, &root).await?;
 
-        let line = launch_line(&binary, spec);
+        let line = tmux::launch_line(&binary, &arguments(spec));
         if let Err(error) = server.type_line(&pane.id, &line).await {
             // The one failing path past the seed, and this backend's to unwind:
             // the registry seeded nothing here and cannot prune what it does not
             // know the root of (`TeammateBackend::owns_inbox`). A prompt left in
             // an inbox nothing will read is the half of a failed spawn still
             // visible tomorrow.
-            Self::unseed(spec, &root, seeded).await;
+            crate::teammate::unseed_inbox(
+                root.inbox_path(&spec.team, &spec.name),
+                Some(seeded),
+                spec.name.as_str(),
+            )
+            .await;
 
             return Err(Self::refused(&error));
         }
@@ -584,35 +507,7 @@ impl TeammateBackend for ClaudePane {
     }
 
     async fn kill(&self, handle: &Handle) {
-        let Some(pane) = Pane::of(handle) else {
-            tracing::warn!(
-                ?handle,
-                "a claude backend was asked to end something it did not start"
-            );
-            return;
-        };
-        let server = match Server::current() {
-            Ok(server) => server,
-            Err(error) => {
-                // A lead that had a pane to spawn into and now has no `$TMUX`
-                // is not a case this build makes: the pane outlives this
-                // process either way, and the reaper is what finds it.
-                tracing::warn!(pane = pane.id, %error, "a pane could not be ended");
-                return;
-            }
-        };
-        match server.kill(&pane).await {
-            Ok(Killed::Yes) => tracing::info!(pane = pane.id, "a claude teammate's pane was ended"),
-            Ok(Killed::AlreadyGone) => {
-                tracing::debug!(pane = pane.id, "a claude teammate's pane was already gone");
-            }
-            Ok(Killed::Recycled) => tracing::warn!(
-                pane = pane.id,
-                birth = pane.birth,
-                "a claude teammate's pane id now names somebody else's pane; left alone"
-            ),
-            Err(error) => tracing::warn!(pane = pane.id, %error, "a pane could not be ended"),
-        }
+        pane::kill_pane(handle, "claude", "claude teammate").await;
     }
 
     fn delivery(&self) -> Delivery {
@@ -629,8 +524,7 @@ mod tests {
 
     use super::{
         BINARY, BYPASS_PERMISSIONS, ClaudePane, PERMISSION_MODE, PLAN_MODE_REQUIRED,
-        TEAMS_DIRECTORY, arguments, carried_env, executable, launch_line, preamble, resolve,
-        root_under,
+        TEAMS_DIRECTORY, arguments, carried_env, executable, preamble, resolve, root_under,
     };
     use crate::teammate::{
         SpawnSpec, TeammateBackend as _,
@@ -710,9 +604,12 @@ mod tests {
     /// straight back what D502 carefully withheld.
     #[test]
     fn the_launch_is_never_one_word() {
-        let line = launch_line(&PathBuf::from("/usr/local/bin/claude"), &spec())
-            .into_string()
-            .expect("ascii");
+        let line = crate::teammate::tmux::launch_line(
+            &PathBuf::from("/usr/local/bin/claude"),
+            &arguments(&spec()),
+        )
+        .into_string()
+        .expect("ascii");
         assert!(line.starts_with("exec "), "{line}");
         assert!(
             line.split_whitespace().count() >= 2,
@@ -874,7 +771,12 @@ mod tests {
             .await
             .expect("the seed lands");
 
-        ClaudePane::unseed(&spec, &root, seeded).await;
+        crate::teammate::unseed_inbox(
+            root.inbox_path(&spec.team, &spec.name),
+            Some(seeded),
+            spec.name.as_str(),
+        )
+        .await;
 
         let inbox = root.inbox_path(&spec.team, &spec.name);
         assert!(

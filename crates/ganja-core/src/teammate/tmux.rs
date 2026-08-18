@@ -466,6 +466,27 @@ impl Server {
     }
 }
 
+/// The line typed into a pane's idle shell: `exec` the binary with `argv`,
+/// every word quoted for `sh`.
+///
+/// `exec`, so the shell is replaced rather than parented — the pane's process
+/// keeps the pid tmux forked, which is the `birth` half of its recorded
+/// identity and what an identity-checked kill compares against. Quoted per
+/// word ([`shell_quote`]) so a path with a space or a quote in it is one word
+/// to the shell. Here beside the quoting rule because both pane backends
+/// compose their line this way; only which `arguments` fills `argv` differs.
+#[must_use]
+pub fn launch_line(binary: &Path, argv: &[OsString]) -> OsString {
+    let mut line = OsString::from("exec ");
+    line.push(shell_quote(binary.as_os_str()));
+    for argument in argv {
+        line.push(" ");
+        line.push(shell_quote(argument));
+    }
+
+    line
+}
+
 /// `arg` as one POSIX shell word: single-quoted, with every embedded single
 /// quote closed, escaped and reopened (`'\''`) — the one quoting a `sh` line
 /// needs and the only one that leaves every other byte alone.

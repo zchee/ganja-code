@@ -265,19 +265,30 @@ impl SpawnGate {
 /// directory is still asked about: the error is towards asking, which is the
 /// direction the permission layer errs in everywhere else.
 #[must_use]
-pub fn spawn_gate(lead: &Permissions, project_root: &Path, spec: &SpawnSpec) -> SpawnGate {
+pub fn spawn_gate(
+    lead: &Permissions,
+    project_root: &Path,
+    bypass: bool,
+    agent_type: &str,
+    cwd: &Path,
+) -> SpawnGate {
+    // The three arguments are the three facts a spawn decides that the rules
+    // have an opinion about — handed in bare rather than behind a
+    // [`SpawnSpec`], because the real spec is built by the registry after
+    // this gate answers and a placeholder-stuffed one here would be a value a
+    // later reader might trust.
+    //
     // Every deny the lead is under, and every `external_directory` rule
     // whatever it says — the same set a teammate's own engine is bound by, so
     // the gate and what it gates cannot disagree.
     let rules = lead.inherited_by_subagent();
-    let bypass = spec
-        .bypass
+    let bypass = bypass
         // Never below `Ask`, whatever a rule says. A stored "always" is how a
         // person stops being asked about routine work, and handing a teammate
         // the keys is the one thing that is never routine — so an allow here
         // is read as an ask, and only a deny is stronger than the default.
-        .then(|| decide(&rules, BYPASS, &spec.agent_type).max(Decision::Ask));
-    let directory = outside(project_root, &spec.cwd).map(|directory| {
+        .then(|| decide(&rules, BYPASS, agent_type).max(Decision::Ask));
+    let directory = outside(project_root, cwd).map(|directory| {
         let pattern = covering(&directory);
 
         (directory, decide(&rules, EXTERNAL_DIRECTORY, &pattern))
@@ -715,7 +726,9 @@ mod tests {
         let asked = spawn_gate(
             &lead(Vec::new()),
             directory.path(),
-            &spec(directory.path(), true),
+            true,
+            "general",
+            directory.path(),
         );
         assert_eq!(asked.bypass, Some(Decision::Ask));
         assert_eq!(asked.action(), Decision::Ask);
@@ -724,7 +737,9 @@ mod tests {
         let allowed = spawn_gate(
             &lead(vec![rule(BYPASS, ANY, Action::Allow)]),
             directory.path(),
-            &spec(directory.path(), true),
+            true,
+            "general",
+            directory.path(),
         );
         assert_eq!(
             allowed.bypass,
@@ -735,7 +750,9 @@ mod tests {
         let denied = spawn_gate(
             &lead(vec![rule(BYPASS, "general", Action::Deny)]),
             directory.path(),
-            &spec(directory.path(), true),
+            true,
+            "general",
+            directory.path(),
         );
         assert_eq!(denied.action(), Decision::Deny);
         assert!(
@@ -749,7 +766,9 @@ mod tests {
         let ordinary = spawn_gate(
             &lead(vec![rule(BYPASS, ANY, Action::Deny)]),
             directory.path(),
-            &spec(directory.path(), false),
+            false,
+            "general",
+            directory.path(),
         );
         assert_eq!(
             ordinary.bypass, None,
@@ -769,7 +788,9 @@ mod tests {
         let inside = spawn_gate(
             &lead(Vec::new()),
             project.path(),
-            &spec(&project.path().join("crates"), false),
+            false,
+            "general",
+            &project.path().join("crates"),
         );
         assert_eq!(
             inside.directory, None,
@@ -780,7 +801,9 @@ mod tests {
         let outside = spawn_gate(
             &lead(Vec::new()),
             project.path(),
-            &spec(elsewhere.path(), false),
+            false,
+            "general",
+            elsewhere.path(),
         );
         let (named, decision) = outside.directory.clone().expect("somewhere else was named");
         assert_eq!(decision, Decision::Ask);
@@ -798,7 +821,9 @@ mod tests {
                 Action::Allow,
             )]),
             project.path(),
-            &spec(elsewhere.path(), false),
+            false,
+            "general",
+            elsewhere.path(),
         );
         assert_eq!(
             answered.action(),
@@ -809,7 +834,9 @@ mod tests {
         let refused = spawn_gate(
             &lead(vec![rule(EXTERNAL_DIRECTORY, ANY, Action::Deny)]),
             project.path(),
-            &spec(elsewhere.path(), false),
+            false,
+            "general",
+            elsewhere.path(),
         );
         assert_eq!(refused.action(), Decision::Deny);
         assert!(

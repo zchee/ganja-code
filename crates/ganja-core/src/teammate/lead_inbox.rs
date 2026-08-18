@@ -97,16 +97,17 @@ use ganja_protocol::team::{
 use ganja_team::{MailboxMessage, MemberName, TeamsRoot, mailbox, record};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Delivery, TeammateRegistry, claude, member, posture::Forwarded, runner::FRAME_HEAD};
+use super::{
+    Delivery, TeammateRegistry, claude, member,
+    posture::Forwarded,
+    runner::{drop_frame, prune_inbox, read_inbox},
+};
 use crate::protocol::{PermissionReply, SessionId};
 
 /// §6's lead cadence, and deliberately half the teammate's own
 /// ([`crate::teammate::runner::POLL`]): the teammate is the side that has to notice a
 /// shutdown promptly, and the lead is the side a person is watching anyway.
 pub const POLL: Duration = Duration::from_millis(1000);
-
-/// What is logged when a frame arrives that the lead has no handler for.
-pub const DROPPED_FRAME: &str = "an inbox frame was dropped";
 
 /// What is logged when a pane's ask is answered with a refusal because nobody
 /// could be shown it — [`crate::teammate::posture::Forwarding`]'s own line,
@@ -378,27 +379,9 @@ impl LeadInbox {
     /// exists for.
     async fn poll_one(&self, root: &TeamsRoot, pass: &mut Pass) {
         let inbox = self.lead_inbox_in(root);
-        let path = inbox.clone();
-        let contents = match tokio::task::spawn_blocking(move || mailbox::read(&path)).await {
-            Ok(Ok(contents)) => contents,
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    inbox = %inbox.display(),
-                    %error,
-                    "the lead's inbox could not be read"
-                );
-
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "an inbox read was lost");
-
-                return;
-            }
+        let Some(contents) = read_inbox(inbox.clone(), self.registry.lead().as_str()).await else {
+            return;
         };
-        for report in &contents.reports {
-            tracing::warn!("{report}");
-        }
         if contents.valid.is_empty() {
             return;
         }
@@ -663,35 +646,15 @@ impl LeadInbox {
         });
     }
 
-    /// Names a frame nobody here handles, with the head of it.
-    ///
-    /// [`crate::teammate::runner`]'s rule, for its reason: a plain message's body never
-    /// reaches a log line, and a frame that would not decode is undiagnosable
-    /// without seeing some of it.
+    /// Names a frame nobody here handles ([`drop_frame`]).
     fn drop_it(&self, kind: &'static str, message: &MailboxMessage, pass: &mut Pass) {
-        tracing::warn!(
-            from = message.from,
-            frame = head(&message.text),
-            "{DROPPED_FRAME}: {kind}"
-        );
+        drop_frame(self.registry.lead().as_str(), kind, message);
         pass.dropped.push(kind);
     }
 
     /// Takes entries out of one inbox, in one write.
     async fn prune(&self, inbox: &Path, handled: Vec<mailbox::Identity>) {
-        let path = inbox.to_path_buf();
-        let outcome =
-            tokio::task::spawn_blocking(move || mailbox::prune_delivered(&path, &handled))
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|pruned| pruned.map_err(|error| error.to_string()));
-
-        if let Err(error) = outcome {
-            // [`crate::teammate::runner::Runner::prune`]'s posture: the next pass reads
-            // the same entries again, and a redelivery is a cost this side can
-            // pay where a lost message is not.
-            tracing::warn!(%error, "the lead could not prune its inbox");
-        }
+        prune_inbox(inbox.to_path_buf(), handled, self.registry.lead().as_str()).await;
     }
 }
 
@@ -743,10 +706,7 @@ impl Answer {
             }
         };
         let path = self.inbox.clone();
-        let written = tokio::task::spawn_blocking(move || mailbox::write(&path, message))
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|written| written.map_err(|error| error.to_string()));
+        let written = crate::teammate::blocking_io(move || mailbox::write(&path, message)).await;
         match written {
             Ok(_) => tracing::info!(
                 request = self.request_id,
@@ -760,14 +720,6 @@ impl Answer {
                 "FAILED to write a permission answer; the pane is still waiting on it"
             ),
         }
-    }
-}
-
-/// The first [`FRAME_HEAD`] characters, cut on a character boundary.
-fn head(text: &str) -> &str {
-    match text.char_indices().nth(FRAME_HEAD) {
-        Some((end, _)) => &text[..end],
-        None => text,
     }
 }
 
@@ -1299,10 +1251,10 @@ mod tests {
         }
 
         async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
-            Ok(Handle::Pane {
-                pane_id: "%17".to_owned(),
+            Ok(Handle::Pane(crate::teammate::reaper::Pane {
+                id: "%17".to_owned(),
                 birth: "48213".to_owned(),
-            })
+            }))
         }
 
         async fn kill(&self, _handle: &Handle) {}
@@ -1518,14 +1470,6 @@ mod tests {
             .await;
 
         assert_eq!(pass.messages.len(), 1, "once, not twice: {pass:?}");
-    }
-
-    #[test]
-    fn a_frames_head_is_cut_on_a_character_boundary() {
-        let wide: String = "あ".repeat(super::FRAME_HEAD * 2);
-
-        assert_eq!(super::head(&wide).chars().count(), super::FRAME_HEAD);
-        assert_eq!(super::head("{}"), "{}");
     }
 
     /// §2.3's identity is derivable by any reader, and this is that property

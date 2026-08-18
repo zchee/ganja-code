@@ -107,7 +107,7 @@ use serde_json::{Value, json};
 
 use crate::{
     protocol::{Event, PermissionId, PermissionReply, SessionId},
-    subagent::{LEADS, NO_SOCKET, RUNS_ON, UNADDRESSABLE, UNWRITTEN, WRITTEN},
+    teammate::postbox::{self, LEADS, NO_SOCKET},
     tool::team::{self, Address, Body, Peer, Reserved, Sent, Undelivered},
 };
 
@@ -230,10 +230,10 @@ impl MemberPostbox {
                 .filter(|member| !member.name.eq_ignore_ascii_case(self.sender.as_str()))
                 .map(|member| Peer {
                     name: member.name.clone(),
-                    description: Some(format!(
-                        "{RUNS_ON} {} backend",
-                        member.surface().backend_type()
-                    )),
+                    // The backend word here is Claude's own (`tmux`,
+                    // `in-process`), because a TeamFile carries only Claude's
+                    // vocabulary — where the lead's roster speaks ganja's.
+                    description: Some(postbox::peer_description(member.surface().backend_type())),
                     lead: false,
                 }),
         );
@@ -253,14 +253,7 @@ impl MemberPostbox {
 #[async_trait]
 impl team::Postbox for MemberPostbox {
     fn classify(&self, text: &str) -> Reserved {
-        // The one parse `ganja-protocol` owns, exactly as the lead's postbox
-        // answers it: the tool may not name that crate, so no list of frame
-        // names exists on its side to fall out of step with.
-        match Frame::reserved_kind(text) {
-            None => Reserved::No,
-            Some(kind) if Frame::is_agent_sendable_kind(kind) => Reserved::AgentSendable { kind },
-            Some(kind) => Reserved::HarnessOnly { kind },
-        }
+        postbox::classify_reserved(text)
     }
 
     async fn deliver(&self, to: Address, body: Body) -> Result<Sent, Undelivered> {
@@ -282,32 +275,15 @@ impl team::Postbox for MemberPostbox {
         let Some(recipient) = self.recipient(file.as_ref(), &name) else {
             return Err(Undelivered::Unknown);
         };
-        let member = MemberName::parse(&recipient.name).map_err(|error| Undelivered::Failed {
-            reason: format!("{UNADDRESSABLE} {:?}: {error}", recipient.name),
-        })?;
 
-        let (text, summary) = match body {
-            Body::Text { text, summary } => (text, summary),
-            Body::Frame(document) => (document.to_string(), None),
-        };
-        let mut message = MailboxMessage::new(self.sender.as_str(), text, record::now_iso8601());
-        message.summary = summary;
-
-        let path = self.root.inbox_path(&self.team, &member);
-        let written = tokio::task::spawn_blocking(move || mailbox::write(&path, message))
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|written| written.map_err(|error| error.to_string()));
-
-        match written {
-            Ok(_) => Ok(Sent {
-                to: member.into_inner(),
-                note: WRITTEN.to_owned(),
-            }),
-            Err(reason) => Err(Undelivered::Failed {
-                reason: format!("{UNWRITTEN} {reason}"),
-            }),
-        }
+        postbox::write_to_peer(
+            self.sender.as_str(),
+            &self.root,
+            &self.team,
+            &recipient,
+            body,
+        )
+        .await
     }
 
     fn roster(&self) -> Vec<Peer> {
@@ -452,10 +428,7 @@ impl Asks {
             .insert(id.clone(), tool.clone());
 
         let path = self.lead_inbox.clone();
-        let written = tokio::task::spawn_blocking(move || mailbox::write(&path, message))
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|written| written.map_err(|error| error.to_string()));
+        let written = crate::teammate::blocking_io(move || mailbox::write(&path, message)).await;
         if let Err(reason) = written {
             self.pending
                 .lock()

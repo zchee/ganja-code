@@ -158,25 +158,6 @@ pub const SHELL: [&str; 2] = ["/bin/sh", "-s"];
 /// the split, so this is a bound on a machine in trouble, not a schedule.
 const RECORD_WAIT: Duration = Duration::from_secs(5);
 
-/// The line typed into the pane's shell: `exec` the binary with
-/// [`arguments`], every word quoted for `sh`.
-///
-/// `exec`, so the shell is replaced rather than parented — the pane's process
-/// keeps the pid tmux forked, which is the `birth` half of its recorded
-/// identity. Quoted per word ([`tmux::shell_quote`]) so a path with a space
-/// or a quote in it is one word to the shell.
-#[must_use]
-pub fn launch_line(binary: &std::path::Path, spec: &SpawnSpec) -> OsString {
-    let mut line = OsString::from("exec ");
-    line.push(tmux::shell_quote(binary.as_os_str()));
-    for argument in arguments(spec) {
-        line.push(" ");
-        line.push(tmux::shell_quote(&argument));
-    }
-
-    line
-}
-
 /// Waits until the team file names `spec.name` on `pane_id`, polling the
 /// document the registry writes.
 ///
@@ -217,7 +198,20 @@ const RECORD_POLL: Duration = Duration::from_millis(20);
 /// parses exactly these spellings.
 #[must_use]
 pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
-    let mut argv: Vec<OsString> = [
+    let mut argv = identity_flags(spec);
+    if spec.bypass {
+        argv.push(OsString::from(AUTO));
+    }
+
+    argv
+}
+
+/// The five identifying flags in §4.1's own order, each with its value from
+/// `spec` — the prefix both pane backends' argv open with, so the reaper's
+/// witness reads one composition wherever a pane came from.
+#[must_use]
+pub fn identity_flags(spec: &SpawnSpec) -> Vec<OsString> {
+    [
         (AGENT_ID, spec.agent_id()),
         (AGENT_NAME, spec.name.as_str().to_owned()),
         (TEAM_NAME, spec.team.as_str().to_owned()),
@@ -226,12 +220,93 @@ pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
     ]
     .into_iter()
     .flat_map(|(flag, value)| [OsString::from(flag), OsString::from(value)])
-    .collect();
-    if spec.bypass {
-        argv.push(OsString::from(AUTO));
+    .collect()
+}
+
+/// §4.1 step 1 as both pane backends run it: one `split-window` at `spec`'s
+/// working directory carrying `environment` (D502's closed lists, each
+/// caller's own) and holding [`SHELL`] idle, answered with the identifying
+/// pair — then the cosmetic title, warned about rather than failed on.
+///
+/// `refused_as` is the surface a failing split is refused as, and `whose` the
+/// word the log knows the teammate by.
+pub(super) async fn split_idle_shell(
+    server: &Server,
+    spec: &SpawnSpec,
+    environment: &[OsString],
+    refused_as: MemberBackend,
+    whose: &'static str,
+) -> Result<Pane, Unsupported> {
+    let shell: Vec<OsString> = SHELL.iter().map(OsString::from).collect();
+    let pane = server
+        .split(Launch {
+            cwd: &spec.cwd,
+            environment,
+            argv: &shell,
+        })
+        .await
+        .map_err(|error| Unsupported {
+            backend: refused_as,
+            reason: error.to_string(),
+        })?;
+    tracing::info!(
+        teammate = spec.name.as_str(),
+        pane = pane.id,
+        birth = pane.birth,
+        "a pane was split for a {whose}"
+    );
+
+    // From here the pane exists and belongs to a teammate; a title that would
+    // not stick is a pane without a name on it, not a teammate that did not
+    // start. Named rather than swallowed, because a tmux that refuses a
+    // cosmetic call is worth a line in the log.
+    if let Err(error) = server.title(&pane.id, spec.name.as_str()).await {
+        tracing::warn!(
+            teammate = spec.name.as_str(),
+            pane = pane.id,
+            %error,
+            "the teammate's pane could not be titled"
+        );
     }
 
-    argv
+    Ok(pane)
+}
+
+/// Ends what a pane backend's `spawn` produced, identity-checked, in the four
+/// answers both backends log alike: `backend` is the word for the backend
+/// asked, `whose` the word for the teammate whose pane it was.
+pub(super) async fn kill_pane(handle: &Handle, backend: &'static str, whose: &'static str) {
+    let Handle::Pane(pane) = handle else {
+        // Named rather than ignored, because a handle of the other shape
+        // arriving here would mean a registry had crossed two backends.
+        tracing::warn!(
+            ?handle,
+            "a {backend} backend was asked to end something it did not start"
+        );
+        return;
+    };
+    let server = match Server::current() {
+        Ok(server) => server,
+        Err(error) => {
+            // A lead that had a pane to spawn into and now has no `$TMUX` is
+            // not a case this build makes: the pane outlives this process
+            // either way, and the reaper is what finds it.
+            tracing::warn!(pane = pane.id, %error, "a pane could not be ended");
+            return;
+        }
+    };
+    match server.kill(pane).await {
+        Ok(Killed::Yes) => tracing::info!(pane = pane.id, "a {whose}'s pane was ended"),
+        Ok(Killed::AlreadyGone) => {
+            tracing::debug!(pane = pane.id, "a {whose}'s pane was already gone");
+        }
+        Ok(Killed::Recycled) => tracing::warn!(
+            pane = pane.id,
+            birth = pane.birth,
+            "a {whose}'s pane id now names somebody else's pane; left alone"
+        ),
+        Err(error) => tracing::warn!(pane = pane.id, %error, "a pane could not be ended"),
+    }
 }
 
 /// The `ganja`-pane backend.
@@ -297,35 +372,8 @@ impl TeammateBackend for GanjaPane {
         // travels here (D502), through tmux's own door; the launch line comes
         // later, once the record this pane will read exists.
         let environment = tmux::environment(CARRIED_ENV);
-        let shell: Vec<OsString> = SHELL.iter().map(OsString::from).collect();
-        let pane = server
-            .split(Launch {
-                cwd: &spec.cwd,
-                environment: &environment,
-                argv: &shell,
-            })
-            .await
-            .map_err(|error| Self::refused(&error))?;
-        tracing::info!(
-            teammate = spec.name.as_str(),
-            pane = pane.id,
-            birth = pane.birth,
-            "a pane was split for a teammate"
-        );
-
-        // From here the pane exists and belongs to a teammate. Nothing below
-        // may fail the spawn: a title that would not stick is a pane without a
-        // name on it, and the person can still see whose it is by what it is
-        // doing. Named rather than swallowed, because a tmux that refuses a
-        // cosmetic call is worth a line in the log.
-        if let Err(error) = server.title(&pane.id, spec.name.as_str()).await {
-            tracing::warn!(
-                teammate = spec.name.as_str(),
-                pane = pane.id,
-                %error,
-                "the teammate's pane could not be titled"
-            );
-        }
+        let pane =
+            split_idle_shell(&server, spec, &environment, MemberBackend::Pane, "teammate").await?;
 
         // §4.1 step 6, sequenced after step 2 by watching for step 2 itself:
         // the record is what the pane's process reads first, so the record's
@@ -350,13 +398,10 @@ impl TeammateBackend for GanjaPane {
         // `TeammateBackend::launch` the registry calls after its record write,
         // with the registry's own unwind, is the follow-up that closes both
         // (bead ganja-code-ipg); the body here is that method's body already.
-        let handle = Handle::Pane {
-            pane_id: pane.id.clone(),
-            birth: pane.birth.clone(),
-        };
+        let handle = Handle::Pane(pane.clone());
         let watched = Self;
         let owned = spec.clone();
-        let line = launch_line(&binary, spec);
+        let line = tmux::launch_line(&binary, &arguments(spec));
         tokio::spawn(async move {
             match wait_for_record(&owned, &pane.id, RECORD_WAIT).await {
                 Ok(()) => watched.launch(&owned, &pane, &line, &server).await,
@@ -381,37 +426,7 @@ impl TeammateBackend for GanjaPane {
     }
 
     async fn kill(&self, handle: &Handle) {
-        let Some(pane) = Pane::of(handle) else {
-            // Named rather than ignored, because a handle of the other shape
-            // arriving here would mean a registry had crossed two backends.
-            tracing::warn!(
-                ?handle,
-                "a pane backend was asked to end something it did not start"
-            );
-            return;
-        };
-        let server = match Server::current() {
-            Ok(server) => server,
-            Err(error) => {
-                // A lead that had a pane to spawn into and now has no `$TMUX`
-                // is not a case this build makes: the pane outlives this
-                // process either way, and the reaper is what finds it.
-                tracing::warn!(pane = pane.id, %error, "a pane could not be ended");
-                return;
-            }
-        };
-        match server.kill(&pane).await {
-            Ok(Killed::Yes) => tracing::info!(pane = pane.id, "a teammate's pane was ended"),
-            Ok(Killed::AlreadyGone) => {
-                tracing::debug!(pane = pane.id, "a teammate's pane was already gone");
-            }
-            Ok(Killed::Recycled) => tracing::warn!(
-                pane = pane.id,
-                birth = pane.birth,
-                "a teammate's pane id now names somebody else's pane; left alone"
-            ),
-            Err(error) => tracing::warn!(pane = pane.id, %error, "a pane could not be ended"),
-        }
+        kill_pane(handle, "pane", "teammate").await;
     }
 
     fn delivery(&self) -> Delivery {

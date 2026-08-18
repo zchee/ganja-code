@@ -162,7 +162,7 @@ use std::process::Stdio;
 use ganja_team::Surface;
 
 use crate::teammate::{
-    Handle, TeammateRegistry,
+    TeammateRegistry,
     pane::{AGENT_ID, PARENT_SESSION_ID},
     tmux::{Killed, Server},
 };
@@ -192,18 +192,6 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// Reads the pair off a handle, if the handle names a pane at all.
-    #[must_use]
-    pub fn of(handle: &Handle) -> Option<Self> {
-        match handle {
-            Handle::Pane { pane_id, birth } => Some(Self {
-                id: pane_id.clone(),
-                birth: birth.clone(),
-            }),
-            Handle::InProcess(_) => None,
-        }
-    }
-
     /// Whether `live` is really the pane this one recorded.
     ///
     /// Both halves must agree, and they are compared for **equality only**: a
@@ -533,25 +521,13 @@ mod tests {
     };
 
     use super::{AGENT_ID, Fate, PARENT_SESSION_ID, Pane, argv_of, flagged, forget, verdict};
-    use crate::teammate::{Handle, TeammateRegistry};
+    use crate::teammate::TeammateRegistry;
 
     fn pane(id: &str, birth: &str) -> Pane {
         Pane {
             id: id.to_owned(),
             birth: birth.to_owned(),
         }
-    }
-
-    /// The pair is read off the handle a spawn produced, which is the only
-    /// place a live pane's birth is known.
-    #[test]
-    fn a_pane_handle_carries_the_pair_a_reaper_matches_on() {
-        let handle = Handle::Pane {
-            pane_id: "%142".to_owned(),
-            birth: "48213".to_owned(),
-        };
-
-        assert_eq!(Pane::of(&handle), Some(pane("%142", "48213")));
     }
 
     #[test]

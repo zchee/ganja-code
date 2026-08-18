@@ -217,25 +217,9 @@ impl Runner {
     /// One pass of §6.1, in its order.
     pub async fn tick(&self) -> Tick {
         let mut tick = Tick::default();
-        let path = self.inbox.clone();
-        let contents = match tokio::task::spawn_blocking(move || mailbox::read(&path)).await {
-            Ok(Ok(contents)) => contents,
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    teammate = self.teammate.name(),
-                    %error,
-                    "a teammate's inbox could not be read"
-                );
-                return tick;
-            }
-            Err(error) => {
-                tracing::warn!(teammate = self.teammate.name(), %error, "an inbox read was lost");
-                return tick;
-            }
+        let Some(contents) = read_inbox(self.inbox.clone(), self.teammate.name()).await else {
+            return tick;
         };
-        for report in &contents.reports {
-            tracing::warn!(teammate = self.teammate.name(), "{report}");
-        }
         if contents.valid.is_empty() {
             return tick;
         }
@@ -419,18 +403,9 @@ impl Runner {
         Verdict::Applied("mode_set_request")
     }
 
-    /// Names a frame nobody here handles, with the head of it.
-    ///
-    /// The *head*, and only of a frame: a plain message's body never reaches a
-    /// log line, but a frame that would not decode is undiagnosable without
-    /// seeing some of it, which is the trade §6.1 already makes.
+    /// Names a frame nobody here handles ([`drop_frame`]).
     fn drop_it(&self, kind: &'static str, message: &MailboxMessage) -> Verdict {
-        tracing::warn!(
-            teammate = self.teammate.name(),
-            from = message.from,
-            frame = head(&message.text),
-            "{DROPPED_FRAME}: {kind}"
-        );
+        drop_frame(self.teammate.name(), kind, message);
 
         Verdict::Dropped(kind)
     }
@@ -515,59 +490,18 @@ impl Runner {
             pane_id: Some(self.surface.tmux_pane_id().to_owned()),
             backend_type: Some(self.surface.backend_type().to_owned()),
         });
-        let message = match MailboxMessage::from_frame(
+        write_frame(
+            self.lead_inbox.clone(),
             self.teammate.name(),
             &approved,
-            record::now_iso8601(),
-        ) {
-            Ok(message) => message,
-            Err(error) => {
-                tracing::error!(
-                    teammate = self.teammate.name(),
-                    %error,
-                    "a shutdown answer could not be encoded, so the lead is not being told"
-                );
-
-                return;
-            }
-        };
-
-        let path = self.lead_inbox.clone();
-        let written = tokio::task::spawn_blocking(move || mailbox::write(&path, message))
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|written| written.map_err(|error| error.to_string()));
-        if let Err(error) = written {
-            // Worth shouting about, for §6.2's reason in the other direction:
-            // the lead is the side that kills a pane and retires a member, and
-            // it is now not going to.
-            tracing::error!(
-                teammate = self.teammate.name(),
-                %error,
-                "a teammate shut down without being able to tell the lead"
-            );
-        }
+            "a shutdown answer",
+        )
+        .await;
     }
 
     /// Takes everything this pass finished out of the inbox, in one write.
     async fn prune(&self, handled: Vec<mailbox::Identity>) {
-        let path = self.inbox.clone();
-        let outcome =
-            tokio::task::spawn_blocking(move || mailbox::prune_delivered(&path, &handled))
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|pruned| pruned.map_err(|error| error.to_string()));
-
-        if let Err(error) = outcome {
-            // Not fatal, and deliberately not retried here: the next pass reads
-            // the same messages again, and a redelivery is a cost this one can
-            // pay where a lost message is not.
-            tracing::warn!(
-                teammate = self.teammate.name(),
-                %error,
-                "a teammate could not prune its inbox"
-            );
-        }
+        prune_inbox(self.inbox.clone(), handled, self.teammate.name()).await;
     }
 }
 
@@ -593,11 +527,95 @@ enum Verdict {
 }
 
 /// The first [`FRAME_HEAD`] characters, cut on a character boundary.
-fn head(text: &str) -> &str {
+#[must_use]
+pub fn head(text: &str) -> &str {
     match text.char_indices().nth(FRAME_HEAD) {
         Some((end, _)) => &text[..end],
         None => text,
     }
+}
+
+/// Reads one inbox off the runtime's worker threads, and warns — naming
+/// `who`'s pass — instead of failing it: a read that was lost or refused is
+/// this pass finding nothing, and the next pass reads the same file again.
+///
+/// The inbox's own reports (entries it dropped, §2.5) are logged here too,
+/// so every pass over any inbox says the same things about the same
+/// failures. `pub` beside its siblings below because the pane member's pass
+/// in `ganja-tui` is this same pass one crate up.
+pub async fn read_inbox(path: PathBuf, who: &str) -> Option<mailbox::Contents> {
+    let read = path.clone();
+    let contents = match tokio::task::spawn_blocking(move || mailbox::read(&read)).await {
+        Ok(Ok(contents)) => contents,
+        Ok(Err(error)) => {
+            tracing::warn!(who, inbox = %path.display(), %error, "an inbox could not be read");
+
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(who, %error, "an inbox read was lost");
+
+            return None;
+        }
+    };
+    for report in &contents.reports {
+        tracing::warn!(who, "{report}");
+    }
+
+    Some(contents)
+}
+
+/// Takes everything one pass finished out of an inbox, in one write.
+pub async fn prune_inbox(path: PathBuf, handled: Vec<mailbox::Identity>, who: &str) {
+    let outcome =
+        crate::teammate::blocking_io(move || mailbox::prune_delivered(&path, &handled)).await;
+    if let Err(error) = outcome {
+        // Not fatal, and deliberately not retried here: the next pass reads
+        // the same entries again, and a redelivery is a cost this side can
+        // pay where a lost message is not.
+        tracing::warn!(who, %error, "an inbox could not be pruned");
+    }
+}
+
+/// Encodes `frame` as `from` and writes it into the lead's `inbox`, shouting
+/// when it could not — for §6.2's reason in the other direction: the lead
+/// is the side that kills a pane and retires a member, and whoever waits on
+/// `what` is now waiting on nothing.
+pub async fn write_frame(inbox: PathBuf, from: &str, frame: &Frame, what: &'static str) {
+    let message = match MailboxMessage::from_frame(from, frame, record::now_iso8601()) {
+        Ok(message) => message,
+        Err(error) => {
+            tracing::error!(
+                who = from,
+                %error,
+                "{what} could not be encoded, so the lead is not being told"
+            );
+
+            return;
+        }
+    };
+    if let Err(error) = crate::teammate::blocking_io(move || mailbox::write(&inbox, message)).await
+    {
+        tracing::error!(
+            who = from,
+            %error,
+            "{what} could not be written into the lead's inbox"
+        );
+    }
+}
+
+/// Names a frame nobody handles, with the head of it.
+///
+/// The *head*, and only of a frame: a plain message's body never reaches a
+/// log line, but a frame that would not decode is undiagnosable without
+/// seeing some of it, which is the trade §6.1 already makes.
+pub fn drop_frame(who: &str, kind: &str, message: &MailboxMessage) {
+    tracing::warn!(
+        who,
+        from = message.from,
+        frame = head(&message.text),
+        "{DROPPED_FRAME}: {kind}"
+    );
 }
 
 #[cfg(test)]

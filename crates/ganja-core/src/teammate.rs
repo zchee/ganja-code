@@ -151,6 +151,9 @@ pub mod lead_inbox;
 pub mod member;
 /// A teammate in a `ganja` pane of its own (P25b).
 pub mod pane;
+/// What every postbox shares: one classification of the frame vocabulary, and
+/// the write tail a local delivery ends in.
+pub(crate) mod postbox;
 /// What a teammate may do, and who answers when it asks (**D-5**).
 pub mod posture;
 /// Killing panes the lead left behind when it died (P25b).
@@ -574,14 +577,9 @@ impl SpawnSpec {
 pub enum Handle {
     /// A teammate running in this process, holding its own engine.
     InProcess(Arc<Teammate>),
-    /// A teammate with a pane of its own.
-    Pane {
-        /// The `%N` tmux gave it.
-        pane_id: String,
-        /// `#{pane_pid}`: the process tmux forked into the pane, fixed for the
-        /// pane's life. Not a creation time — tmux reports none.
-        birth: String,
-    },
+    /// A teammate with a pane of its own: the recorded `(pane_id, birth)`
+    /// pair, as [`reaper::Pane`] spells it for every identity-checked kill.
+    Pane(reaper::Pane),
 }
 
 impl fmt::Debug for Handle {
@@ -591,10 +589,10 @@ impl fmt::Debug for Handle {
                 .debug_tuple("InProcess")
                 .field(&teammate.name())
                 .finish(),
-            Self::Pane { pane_id, birth } => formatter
+            Self::Pane(pane) => formatter
                 .debug_struct("Pane")
-                .field("pane_id", pane_id)
-                .field("birth", birth)
+                .field("pane_id", &pane.id)
+                .field("birth", &pane.birth)
                 .finish(),
         }
     }
@@ -606,7 +604,7 @@ impl Handle {
     pub fn teammate(&self) -> Option<&Arc<Teammate>> {
         match self {
             Self::InProcess(teammate) => Some(teammate),
-            Self::Pane { .. } => None,
+            Self::Pane(_) => None,
         }
     }
 
@@ -615,8 +613,8 @@ impl Handle {
     pub fn surface(&self) -> Surface {
         match self {
             Self::InProcess(_) => Surface::InProcess,
-            Self::Pane { pane_id, .. } => Surface::Pane {
-                id: pane_id.clone(),
+            Self::Pane(pane) => Surface::Pane {
+                id: pane.id.clone(),
             },
         }
     }
@@ -1460,7 +1458,13 @@ impl TeammateRegistry {
         let seeded = if backend.owns_inbox() {
             None
         } else {
-            match seed_inbox(&spec).await {
+            match seed_inbox(
+                spec.inbox(),
+                spec.lead.as_str().to_owned(),
+                spec.prompt.clone(),
+            )
+            .await
+            {
                 Ok(seeded) => Some(seeded),
                 Err(error) => {
                     self.release(&spec.name);
@@ -1471,14 +1475,14 @@ impl TeammateRegistry {
         let handle = match backend.spawn(&spec).await {
             Ok(handle) => handle,
             Err(unsupported) => {
-                unseed_inbox(&spec, seeded).await;
+                unseed_inbox(spec.inbox(), seeded, spec.name.as_str()).await;
                 self.release(&spec.name);
                 return Err(SpawnError::Unsupported(unsupported));
             }
         };
         if let Err(error) = self.record(&spec, &handle).await {
             backend.kill(&handle).await;
-            unseed_inbox(&spec, seeded).await;
+            unseed_inbox(spec.inbox(), seeded, spec.name.as_str()).await;
             self.release(&spec.name);
             return Err(error);
         }
@@ -1495,7 +1499,7 @@ impl TeammateRegistry {
                     "a refused launch left its record in the team file"
                 ),
             }
-            unseed_inbox(&spec, seeded).await;
+            unseed_inbox(spec.inbox(), seeded, spec.name.as_str()).await;
             self.release(&spec.name);
             return Err(SpawnError::Unsupported(unsupported));
         }
@@ -1849,27 +1853,43 @@ where
     tokio::task::spawn_blocking(work).await?
 }
 
+/// The same hop for every caller whose failure is a sentence rather than a
+/// [`SpawnError`]: a lost blocking task and the work's own error collapse to
+/// one string, which is what each call site was spelling by hand.
+pub(crate) async fn blocking_io<T, E, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|done| done.map_err(|error| error.to_string()))
+}
+
 /// §4.1's steps 4 and 5: the inbox exists, and the task is in it.
 ///
 /// The prompt travels through the mailbox rather than the command line, which
 /// is what makes "here is your task" and "here is a follow-up" one channel with
 /// one ordering and one lock. Returns what identifies the entry, so a spawn
-/// that fails afterwards can take it back out.
-async fn seed_inbox(spec: &SpawnSpec) -> Result<mailbox::Identity, SpawnError> {
-    let path = spec.inbox();
-    let message = MailboxMessage::new(
-        spec.lead.as_str(),
-        spec.prompt.clone(),
-        record::now_iso8601(),
-    );
+/// that fails afterwards can take it back out. Over values rather than a
+/// [`SpawnSpec`], because [`crate::teammate::claude::ClaudePane`] seeds a
+/// different root with a different message through this same body.
+pub(super) async fn seed_inbox(
+    inbox: PathBuf,
+    from: String,
+    text: String,
+) -> Result<mailbox::Identity, SpawnError> {
+    let message = MailboxMessage::new(from, text, record::now_iso8601());
     let identity = mailbox::identity(&message);
 
     blocking(move || {
-        mailbox::seed(&path).map_err(|error| SpawnError::Inbox {
-            path: path.display().to_string(),
+        mailbox::seed(&inbox).map_err(|error| SpawnError::Inbox {
+            path: inbox.display().to_string(),
             source: error,
         })?;
-        mailbox::write(&path, message)?;
+        mailbox::write(&inbox, message)?;
 
         Ok(())
     })
@@ -1882,24 +1902,26 @@ async fn seed_inbox(spec: &SpawnSpec) -> Result<mailbox::Identity, SpawnError> {
 ///
 /// [`None`] is nothing to do rather than an error: a backend that
 /// [`owns`](TeammateBackend::owns_inbox) its inbox was never seeded here, and
-/// unwinding what it wrote is its own — the registry does not know the root, and
-/// would prune the wrong file if it guessed.
+/// unwinding what it wrote goes through this same body with its own root and
+/// identity ([`crate::teammate::claude::ClaudePane`]).
 ///
 /// Reported rather than returned: the spawn has already failed, and a cleanup
 /// that failed too is a line in the log rather than a second error to explain.
-async fn unseed_inbox(spec: &SpawnSpec, seeded: Option<mailbox::Identity>) {
+pub(super) async fn unseed_inbox(
+    inbox: PathBuf,
+    seeded: Option<mailbox::Identity>,
+    teammate: &str,
+) {
     let Some(seeded) = seeded else {
         return;
     };
-    let path = spec.inbox();
-    let outcome = tokio::task::spawn_blocking(move || mailbox::prune_delivered(&path, &[seeded]))
-        .await
-        .map_err(|error| error.to_string())
-        .and_then(|pruned| pruned.map_err(|error| error.to_string()));
+    let pruned = inbox.clone();
+    let outcome = blocking_io(move || mailbox::prune_delivered(&pruned, &[seeded])).await;
 
     if let Err(error) = outcome {
         tracing::warn!(
-            teammate = spec.name.as_str(),
+            teammate,
+            inbox = %inbox.display(),
             %error,
             "a refused spawn left its prompt in an inbox"
         );
@@ -1954,9 +1976,7 @@ async fn fold_calls(
             && named.as_ref() != Some(&part.id)
         {
             named = Some(part.id.clone());
-            let line = tools
-                .get(tool)
-                .map_or_else(|| tool.clone(), |found| found.describe(input));
+            let line = crate::subagent::describe_call(&tools, tool, input);
             let mut ring = recent.lock().expect("the call ring is never poisoned");
             // A different call that reads identically to the last one is still
             // one row: the ring is a live view of what a teammate is doing, and
@@ -1972,7 +1992,7 @@ async fn fold_calls(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
     use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
@@ -1986,26 +2006,27 @@ mod tests {
     };
 
     /// Why [`Never`] refuses.
-    const NEVER: &str = "this door spawns nothing";
+    pub(crate) const NEVER: &str = "this door spawns nothing";
 
-    /// A backend that spawns nothing at all, refusing in its own sentence.
+    /// A backend that spawns nothing at all, refusing in its own sentence and
+    /// answering for whichever surface it was built as.
     ///
     /// A fixture rather than a real pane backend, because a real one spawns:
     /// a test that leaned on `GanjaPane` refusing would split a pane into
     /// whichever tmux session the developer happens to be sitting in the day
     /// its body lands.
     #[derive(Debug)]
-    struct Never;
+    pub(crate) struct Never(pub(crate) MemberBackend);
 
     #[async_trait::async_trait]
     impl TeammateBackend for Never {
         fn backend(&self) -> MemberBackend {
-            MemberBackend::Pane
+            self.0
         }
 
         async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
             Err(Unsupported {
-                backend: MemberBackend::Pane,
+                backend: self.0,
                 reason: NEVER.to_owned(),
             })
         }
@@ -2018,7 +2039,7 @@ mod tests {
     }
 
     /// An empty registry over a tree that goes away with `home`.
-    fn registry(home: &Path) -> Arc<TeammateRegistry> {
+    pub(crate) fn registry(home: &Path) -> Arc<TeammateRegistry> {
         Arc::new(TeammateRegistry::new(
             TeamsRoot::new(home.join("teams")),
             TeamName::parse("session-abcd1234").expect("a team name"),
@@ -2115,7 +2136,7 @@ mod tests {
 
         let refused = registry
             .spawn(
-                Arc::new(Never),
+                Arc::new(Never(MemberBackend::Pane)),
                 request("worker", MemberBackend::Pane, home.path()),
             )
             .await
@@ -2227,15 +2248,15 @@ mod tests {
         }
 
         async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
-            Ok(Handle::Pane {
-                pane_id: "%7".to_owned(),
+            Ok(Handle::Pane(crate::teammate::reaper::Pane {
+                id: "%7".to_owned(),
                 birth: "48213".to_owned(),
-            })
+            }))
         }
 
         async fn launch(&self, spec: &SpawnSpec, handle: &Handle) -> Result<(), Unsupported> {
             assert!(
-                matches!(handle, Handle::Pane { pane_id, .. } if pane_id == "%7"),
+                matches!(handle, Handle::Pane(pane) if pane.id == "%7"),
                 "launched with the handle spawn minted: {handle:?}"
             );
             let recorded = std::fs::read_to_string(spec.root.config_path(&spec.team))
@@ -2255,13 +2276,13 @@ mod tests {
         }
 
         async fn kill(&self, handle: &Handle) {
-            let Handle::Pane { pane_id, birth } = handle else {
+            let Handle::Pane(pane) = handle else {
                 panic!("a pane backend was asked to end something it did not start: {handle:?}");
             };
             self.killed
                 .lock()
                 .expect("the kill log is never poisoned")
-                .push((pane_id.clone(), birth.clone()));
+                .push((pane.id.clone(), pane.birth.clone()));
         }
 
         fn delivery(&self) -> Delivery {
