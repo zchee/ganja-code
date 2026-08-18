@@ -47,6 +47,17 @@
 //! this port's `extended_output_age_overflow_is_rejected` test instead uses
 //! `u64::MAX as u128 + 1` to exercise the bound that actually exists in
 //! Rust.
+//!
+//! # Session-scoped subscription sentinels (divergence)
+//!
+//! Real tmux sends `-` for the window, window index, and pane fields when a
+//! subscription is scoped no narrower than a session. A live capture against
+//! tmux next-3.8 produced `%subscription-changed live-test $0 - - - : x`.
+//! Go's `validateWindowID` and `validatePaneID` in `notification.go` are
+//! applied unconditionally to those fields too, but Go's own real-tmux suite
+//! never exercises a session-scoped subscription. That is an upstream defect
+//! this port fixes rather than reproduces: the three affected fields represent
+//! tmux's not-applicable sentinel as `Option::None`.
 
 use std::time::Duration;
 
@@ -334,13 +345,20 @@ impl Notification {
             ));
         }
         let session = SessionId::new(fields[1].as_str())?;
-        let window = WindowId::new(fields[2].as_str())?;
-        let pane = PaneId::new(fields[4].as_str())?;
+        // See "Session-scoped subscription sentinels (divergence)" in the
+        // module doc for why these three scope fields are optional.
+        let window = dash_as_none(fields[2].as_str())
+            .map(WindowId::new)
+            .transpose()?;
+        let window_index = dash_as_none(fields[3].as_str()).map(str::to_string);
+        let pane = dash_as_none(fields[4].as_str())
+            .map(PaneId::new)
+            .transpose()?;
         Ok(SubscriptionChangedNotification {
             name: fields[0].clone(),
             session,
             window,
-            window_index: fields[3].clone(),
+            window_index,
             pane,
             extension_fields: fields[5..].to_vec(),
             value,
@@ -414,6 +432,16 @@ impl Notification {
                 .map_or_else(String::new, |(_, msg)| msg.to_string()),
         )
     }
+}
+
+/// Maps tmux's `-` not-applicable sentinel to `None`.
+///
+/// Real tmux reports `-` for a `%subscription-changed` field that does
+/// not apply at the subscription's scope (window, window index, and
+/// pane are all `-` for a session-scoped subscription); any other value
+/// is returned unchanged for the caller to validate.
+fn dash_as_none(field: &str) -> Option<&str> {
+    if field == "-" { None } else { Some(field) }
 }
 
 /// Walks `input` for the `splitFieldsBeforeValue` grammar: whitespace-split
@@ -537,12 +565,15 @@ pub struct SubscriptionChangedNotification {
     pub name: String,
     /// The session id reported by tmux.
     pub session: SessionId,
-    /// The window id reported by tmux.
-    pub window: WindowId,
-    /// The window index reported by tmux.
-    pub window_index: String,
-    /// The pane id reported by tmux.
-    pub pane: PaneId,
+    /// The window id reported by tmux, or `None` for the `-` sentinel in a
+    /// session-scoped capture such as `%subscription-changed live-test $0 - - - : x`.
+    pub window: Option<WindowId>,
+    /// The window index reported by tmux, or `None` for the `-` sentinel in a
+    /// session-scoped capture such as `%subscription-changed live-test $0 - - - : x`.
+    pub window_index: Option<String>,
+    /// The pane id reported by tmux, or `None` for the `-` sentinel in a
+    /// session-scoped capture such as `%subscription-changed live-test $0 - - - : x`.
+    pub pane: Option<PaneId>,
     /// Currently reserved fields before the `:` separator.
     pub extension_fields: Vec<String>,
     /// The expanded format value.
@@ -638,11 +669,24 @@ mod tests {
         let sub = n.subscription_changed().unwrap().unwrap();
         assert_eq!(sub.name, "sub");
         assert_eq!(sub.session.as_str(), "$1");
-        assert_eq!(sub.window.as_str(), "@2");
-        assert_eq!(sub.window_index, "3");
-        assert_eq!(sub.pane.as_str(), "%4");
+        assert_eq!(sub.window, Some(WindowId::new("@2").unwrap()));
+        assert_eq!(sub.window_index, Some("3".to_string()));
+        assert_eq!(sub.pane, Some(PaneId::new("%4").unwrap()));
         assert_eq!(sub.extension_fields, vec!["future".to_string()]);
         assert_eq!(sub.value, "value with spaces");
+    }
+
+    // This is the exact line captured live against tmux next-3.8.
+    #[test]
+    fn a_session_scoped_subscription_reports_dashes_as_not_applicable() {
+        let n = parse("%subscription-changed live-test $0 - - - : x").unwrap();
+        let sub = n.subscription_changed().unwrap().unwrap();
+        assert_eq!(sub.name, "live-test");
+        assert_eq!(sub.session.as_str(), "$0");
+        assert!(sub.window.is_none());
+        assert!(sub.window_index.is_none());
+        assert!(sub.pane.is_none());
+        assert_eq!(sub.value, "x");
     }
 
     #[test]

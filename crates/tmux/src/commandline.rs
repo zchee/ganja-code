@@ -131,7 +131,8 @@ impl CommandLine {
 pub struct RenderError(String);
 
 impl RenderError {
-    fn new(message: impl Into<String>) -> RenderError {
+    // Refresh-client validation in flow.rs uses this to surface Error::InvalidCommand.
+    pub(crate) fn new(message: impl Into<String>) -> RenderError {
         RenderError(message.into())
     }
 }
