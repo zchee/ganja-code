@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+                                                                                
+  ┌ team ────────────────────────────────────────────────────────────────────┐  
+  │> team-lead  in-process  lead                                             │  
+  │  w1         in-process                                                   │  
+  │  ⎿ read(src/lib.rs)                                                      │  
+  │  ⎿ grep(fn spawn)                                                        │  
+  │  w2         claude                                                       │  
+  │                                                                          │  
+  │  Spawn teammate…                                                         │  
+  │                                                                          │  
+  │[j/k] [up/down] move   [Enter] choose   [Esc] close                       │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready

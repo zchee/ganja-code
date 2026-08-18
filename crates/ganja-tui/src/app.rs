@@ -16516,6 +16516,185 @@ mod tests {
         assert!(screen.contains("leads no team"), "{screen}");
     }
 
+    /// One `/team` dialog row, as the fixture below hand-builds them.
+    fn team_row(
+        name: &str,
+        backend: ganja_protocol::MemberBackend,
+        is_lead: bool,
+        recent: &[&str],
+    ) -> component::team::Row {
+        component::team::Row {
+            name: name.to_owned(),
+            backend,
+            is_lead,
+            color: None,
+            recent: recent.iter().map(|call| (*call).to_owned()).collect(),
+        }
+    }
+
+    /// The `/team` dialog the tests below open: a lead and two members, one
+    /// with a ring — hand-built, the way the plugin snapshots build theirs, so
+    /// what is pinned is layout and key routing rather than a registry's
+    /// timing.
+    fn team_dialog() -> component::team::Team {
+        component::team::Team::new(vec![
+            team_row(
+                "team-lead",
+                ganja_protocol::MemberBackend::InProcess,
+                true,
+                &[],
+            ),
+            team_row(
+                "w1",
+                ganja_protocol::MemberBackend::InProcess,
+                false,
+                &["read(src/lib.rs)", "grep(fn spawn)"],
+            ),
+            team_row("w2", ganja_protocol::MemberBackend::Claude, false, &[]),
+        ])
+    }
+
+    /// The `/team` dialog's members step: every member with its backend and
+    /// its ring, the lead marked, the Spawn row after them.
+    #[tokio::test]
+    async fn snapshot_team_dialog_open() {
+        let mut app = app();
+        app.team_dialog = Some(team_dialog());
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// The `/team` dialog's per-member action step: whose actions these are,
+    /// then Message and Shutdown.
+    #[tokio::test]
+    async fn snapshot_team_action_menu() {
+        let mut app = app();
+        let mut dialog = team_dialog();
+        dialog.move_selection(1);
+        assert_eq!(dialog.submit(), None, "enter opens the action step");
+        app.team_dialog = Some(dialog);
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    /// Esc walks the `/team` dialog back out from every step: the free-text
+    /// step consumes the first press as "cancel the edit", and the other two
+    /// close the dialog — the `/mcp` and `/plugin` dialogs' own Esc.
+    #[tokio::test]
+    async fn esc_closes_the_team_dialog_from_either_step() {
+        let mut app = app();
+
+        app.team_dialog = Some(team_dialog());
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        assert!(app.team_dialog.is_none(), "Esc on the members step closes");
+
+        let mut dialog = team_dialog();
+        dialog.move_selection(1);
+        dialog.submit();
+        assert!(dialog.is_choosing_action());
+        app.team_dialog = Some(dialog);
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        assert!(app.team_dialog.is_none(), "Esc on the action step closes");
+
+        let mut dialog = team_dialog();
+        dialog.move_selection(9);
+        dialog.submit();
+        assert!(dialog.is_typing());
+        app.team_dialog = Some(dialog);
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        let open = app.team_dialog.as_ref().expect("the dialog stays open");
+        assert!(!open.is_typing(), "the first Esc only abandons the edit");
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        assert!(app.team_dialog.is_none(), "and the second closes");
+    }
+
+    /// While the `/team` dialog is open it owns every key: a list-step press
+    /// moves the cursor or is swallowed, and the free-text step's characters
+    /// land in the dialog's own buffer — none of it reaches the composer.
+    #[tokio::test]
+    async fn keys_while_the_team_dialog_is_open_do_not_reach_the_editor() {
+        let mut app = app();
+        app.team_dialog = Some(team_dialog());
+
+        for code in [
+            KeyCode::Char('x'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('q'),
+        ] {
+            app.handle(key(code, KeyModifiers::NONE))
+                .await
+                .expect("the key is handled");
+        }
+        assert_eq!(app.editor.text(), "", "nothing leaked past the dialog");
+        assert!(app.team_dialog.is_some(), "and none of it closed the dialog");
+
+        let dialog = app.team_dialog.as_mut().expect("the dialog is open");
+        dialog.move_selection(9);
+        dialog.submit();
+        for event in typing("w3") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert_eq!(
+            app.team_dialog.as_ref().and_then(|dialog| dialog.input()),
+            Some("w3"),
+            "the characters landed in the dialog's buffer"
+        );
+        assert_eq!(app.editor.text(), "", "the composer never saw a character");
+    }
+
+    /// The free-text step's Enter runs the dialog's effect: a message typed at
+    /// a member goes through `run_team_effect`, and what the mailbox answered
+    /// lands on the dialog's own notice line.
+    #[tokio::test]
+    async fn enter_on_the_team_dialogs_input_step_runs_the_effect() {
+        let directory = temporary();
+        let (mut app, _registry, _events) = leading(&directory).await;
+        // w1 is a row of the hand-built dialog and nobody in the registry's
+        // roster, so the delivery below is refused by the roster — the answer
+        // that proves the effect really ran.
+        let mut dialog = team_dialog();
+        dialog.move_selection(1);
+        dialog.submit();
+        app.team_dialog = Some(dialog);
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+        assert!(
+            app.team_dialog
+                .as_ref()
+                .is_some_and(component::team::Team::is_typing),
+            "Message opens the free-text step"
+        );
+        for event in typing("status?") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("the key is handled");
+
+        let mut terminal = terminal(90, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+        let screen = screen(&terminal);
+        assert!(
+            screen.contains("nobody on this team answers to that name"),
+            "{screen}"
+        );
+    }
+
     /// **Resolution 4 / D-5**: `--bypass` is a thing a person may ask for, so
     /// the typed door carries it into the request the engine gates — where the
     /// `task` door's is hard-coded false.
