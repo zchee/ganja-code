@@ -5667,6 +5667,94 @@ mod tests {
         );
     }
 
+    /// The trim half of the same rule: a steer whose text is only whitespace
+    /// carries nothing a person said, so beside a teammate's message it drops
+    /// its text part exactly as an empty one does.
+    #[tokio::test]
+    async fn a_whitespace_only_steer_with_peers_drops_its_text_part() {
+        let (turn, _received) = turn_with(
+            CancellationToken::new(),
+            Arc::new(Effectful {
+                marker: PathBuf::from("/nonexistent"),
+            }),
+        );
+        turn.steer
+            .lock()
+            .expect("the steer mailbox is never poisoned")
+            .push(super::SteerInput {
+                id: "steer-1".to_owned(),
+                text: "  ".to_owned(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+                peers: vec![crate::protocol::team::PeerPayload::new(
+                    "w2",
+                    None,
+                    None,
+                    "and I have it",
+                )],
+            });
+
+        let drained = super::drain_steers(&turn).await;
+        assert!(
+            matches!(drained, std::ops::ControlFlow::Continue(true)),
+            "the mailbox had one message to take"
+        );
+
+        let taken = turn
+            .steer
+            .lock()
+            .expect("the steer mailbox is never poisoned")
+            .consumed
+            .clone();
+        let [message] = taken.as_slice() else {
+            panic!("one steer, one message, got {taken:?}")
+        };
+        assert!(
+            matches!(
+                message.parts.as_slice(),
+                [Part {
+                    body: PartBody::Peer { from, .. },
+                    ..
+                }] if from == "w2"
+            ),
+            "whitespace is not text a person typed: {:?}",
+            message.parts
+        );
+    }
+
+    /// The branch that keeps the text: real words beside a teammate's message
+    /// keep their part, and keep it first — the model reads the person, then
+    /// the peer.
+    #[test]
+    fn a_message_with_text_and_peers_keeps_the_text_part_first() {
+        let user = super::user_message(
+            "what did w1 say".to_owned(),
+            &[crate::protocol::team::PeerPayload::new(
+                "w1", None, None, "done",
+            )],
+            &[],
+            &[],
+            &crate::tool::skill::Roots::none(),
+        );
+        assert!(
+            matches!(
+                user.parts.as_slice(),
+                [
+                    Part {
+                        body: PartBody::Text { .. },
+                        ..
+                    },
+                    Part {
+                        body: PartBody::Peer { from, .. },
+                        ..
+                    },
+                ] if from == "w1"
+            ),
+            "text first, then the teammate's words: {:?}",
+            user.parts
+        );
+    }
+
     /// Where the fixture parent's credentials sit, which is nowhere: the guard
     /// compares paths, and what the child must inherit is the *answer*, not a
     /// file.

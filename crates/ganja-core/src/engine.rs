@@ -6551,6 +6551,61 @@ mod tests {
         );
     }
 
+    /// An engine with no store has no honest way to run an in-process
+    /// teammate — its transcript would be a root session nobody could resume —
+    /// so [`Storeless`] refuses the spawn by name while the pane surfaces stay
+    /// somebody else's to provide.
+    #[tokio::test]
+    async fn a_storeless_engine_refuses_an_in_process_teammate_by_name() {
+        struct AllowSpawn;
+
+        #[async_trait::async_trait]
+        impl crate::subagent::SpawnAsker for AllowSpawn {
+            async fn ask(
+                &self,
+                _request: crate::subagent::SpawnAsk,
+            ) -> crate::protocol::PermissionReply {
+                crate::protocol::PermissionReply::Once
+            }
+        }
+
+        let home = tempfile::tempdir().expect("a temp teams root");
+        let engine = engine().with_teammates(Arc::new(teammate::TeammateRegistry::new(
+            ganja_team::TeamsRoot::new(home.path().join("teams")),
+            ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
+            "session-abcd1234",
+            home.path().join("project"),
+        )));
+
+        let refused = engine
+            .teammates()
+            .expect("the engine leads a team")
+            .start(
+                crate::tool::task::TeammateSpawn {
+                    name: "w1".to_owned(),
+                    backend: Some("in-process".to_owned()),
+                    agent_type: "general".to_owned(),
+                    prompt: "hello".to_owned(),
+                },
+                &crate::subagent::Caller {
+                    model: MODEL.to_owned(),
+                    cwd: home.path().join("project"),
+                    permissions: Arc::new(std::sync::Mutex::new(
+                        crate::permission::Permissions::default(),
+                    )),
+                    project_root: home.path().join("project"),
+                },
+                &AllowSpawn,
+            )
+            .await
+            .expect_err("a storeless engine cannot keep a teammate's transcript");
+        assert!(
+            refused.reason.contains(super::STORELESS),
+            "the refusal names the missing store: {}",
+            refused.reason
+        );
+    }
+
     /// One limit, written twice, pinned equal.
     ///
     /// `ganja-tool` may not name `ganja-protocol` — its internal dependency
