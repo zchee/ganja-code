@@ -316,13 +316,13 @@ fn on_path(binary: &str) -> Option<PathBuf> {
 /// The same split [`teams_root`] and [`root_under`] keep, for the same reason: a
 /// test can hold a `PATH` of its own without mutating the process it runs in,
 /// which is what would otherwise cost this one function its own test binary.
-/// Empty components are removed before `which` sees the list because its Unix
-/// behavior follows `which(1)` and treats them as the working directory, while
-/// this backend refuses to discover a teammate binary from a turn's incidental
-/// directory.
+/// Empty and relative components are removed before `which` sees the list
+/// because its Unix behavior follows `which(1)` and can resolve them against
+/// the working directory, while this backend refuses to discover a teammate
+/// binary from a turn's incidental directory.
 fn resolve(path: &std::ffi::OsStr, binary: &str) -> Option<PathBuf> {
     let mut directories = std::env::split_paths(path)
-        .filter(|directory| !directory.as_os_str().is_empty())
+        .filter(|directory| !directory.as_os_str().is_empty() && directory.is_absolute())
         .peekable();
     directories.peek()?;
     let search_path = std::env::join_paths(directories).ok()?;

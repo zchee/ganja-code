@@ -433,13 +433,21 @@ fn stage(path: &Path, bytes: &[u8]) -> Result<NamedTempFile> {
     staged
         .write_all(bytes)
         .with_context(|| format!("{} could not be written", path.display()))?;
+    // The rename publishes the file as complete, so its bytes must reach the
+    // backing store before that atomic namespace change makes them current.
+    staged
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("{} could not be written", path.display()))?;
 
     // A temporary is created `0600`, and a rename carries that mode onto the
     // target — so an existing config would quietly lose whatever mode its
     // owner gave it. Copying the mode across keeps the edit an edit. A file
     // this *creates* keeps the `0600`, which is the safer default for a
     // document whose remote entries carry `Authorization` headers.
-    if let Ok(existing) = fs::metadata(path) {
+    if let Ok(existing) = fs::symlink_metadata(path)
+        && existing.file_type().is_file()
+    {
         staged
             .as_file()
             .set_permissions(existing.permissions())
@@ -725,6 +733,8 @@ fn unknown(name: &str, config: &Config) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
     use jsonc_parser::cst::CstInputValue;
@@ -1105,6 +1115,49 @@ mod tests {
             std::fs::read_to_string(&path).expect("the config is readable"),
             original,
             "and the config it could not edit is the bytes it was"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_config_is_private_to_its_owner() {
+        let directory = tempfile::tempdir().expect("a temporary directory is creatable");
+        let path = directory.path().join(super::CONFIG_FILE);
+        let parsed = document(&path).expect("an absent file is an empty document");
+
+        super::write(&path, &parsed).expect("the config is writable");
+
+        assert_eq!(
+            std::fs::symlink_metadata(&path)
+                .expect("the config has metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "a newly staged config carries no group or other access"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_rewrite_keeps_the_documents_existing_mode() {
+        let directory = tempfile::tempdir().expect("a temporary directory is creatable");
+        let path = directory.path().join(super::CONFIG_FILE);
+        std::fs::write(&path, "{\n  \"theme\": \"ganja\"\n}\n").expect("the fixture is writable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("the fixture mode is settable");
+        let parsed = document(&path).expect("the fixture parses");
+
+        super::write(&path, &parsed).expect("the config is rewritable");
+
+        assert_eq!(
+            std::fs::symlink_metadata(&path)
+                .expect("the config has metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640,
+            "rewriting a regular file preserves the access its owner chose"
         );
     }
 

@@ -1778,7 +1778,9 @@ impl TeammateRegistry {
             // teammate's prompt, model and working directory, and the only
             // reader that has ever mattered — a real `claude` sharing the
             // directory — runs as this same user.
-            if let Ok(existing) = std::fs::metadata(&path) {
+            if let Ok(existing) = std::fs::symlink_metadata(&path)
+                && existing.file_type().is_file()
+            {
                 staged
                     .as_file()
                     .set_permissions(existing.permissions())

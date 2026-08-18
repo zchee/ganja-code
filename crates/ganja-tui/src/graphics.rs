@@ -229,7 +229,7 @@ mod tests {
         let wire = Emitter::direct().transmit(1, &[0u8; 4000]);
 
         let commands: Vec<&str> = wire.split("\x1b\\").filter(|s| !s.is_empty()).collect();
-        assert_eq!(commands.len(), 2, "5334 base64 chars split once");
+        assert_eq!(commands.len(), 2, "5336 base64 chars split once");
         assert!(commands[0].starts_with("\x1b_Ga=t,f=100,t=d,i=1,q=2,m=1;"));
         assert!(commands[1].starts_with("\x1b_Gm=0;"));
     }

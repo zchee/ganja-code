@@ -797,6 +797,10 @@ pub fn signal_group(pid: u32, signal: libc::c_int) {
     // equals its pid; the group holds that child and its descendants and cannot
     // name a group this process did not create.
     //
+    // `Child::id` returns `None` once the child has been reaped, so an id that
+    // reaches this function still names an unreaped child; an unreaped pid
+    // cannot have been recycled onto an unrelated process.
+    //
     // A failure is not worth reporting: `ESRCH` means the group is already
     // gone, which is the outcome being asked for, and `EPERM` cannot arise for
     // a group this process created.

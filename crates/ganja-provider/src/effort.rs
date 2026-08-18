@@ -576,9 +576,14 @@ fn anthropic_opus_45(api_id: &str) -> bool {
 /// `claude-opus-4-20250514` is not read as one; the trailing class is what
 /// makes that stop stick, since a longer run has to end on a separator the
 /// pattern names or the whole minor is given back.
+///
+/// `packages/opencode/src/provider/transform.ts:653` calls one non-global
+/// match. JavaScript's matcher and [`Regex::captures`] both search
+/// leftmost-first for this pattern, so neither needs a separate retry at a
+/// later `claude-`.
 fn claude_version(id: &str) -> Option<(u64, u64)> {
     static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"claude-(?:[a-z]+-)?(\d+)(?:[.-](\d{1,2}))?(?:[.@-]|$)")
+        Regex::new(r"claude-(?:[a-z]+-)?([0-9]+)(?:[.-]([0-9]{1,2}))?(?:[.@-]|$)")
             .expect("the version pattern is a literal")
     });
 
@@ -1127,6 +1132,7 @@ mod tests {
             "an eight-digit date is not a minor version"
         );
         assert_eq!(claude_version("claude-vnext"), None);
+        assert_eq!(claude_version("claude-opus-٤-٦"), None);
 
         // The gpt-5 anchors: start or slash, never mid-word.
         assert!(is_gpt5_family("gpt-5.4-mini"));

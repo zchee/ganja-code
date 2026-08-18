@@ -63,6 +63,6 @@ Handlers take the body as `Bytes` and parse with `serde_json` directly rather th
 
 ### External
 
-`axum` (routes, middleware, SSE body), `secrecy`, `base64`, `libc` (`geteuid` for the socket directory's name and the peer-uid check), `tokio` (with this crate's own `net` opt-in for the listeners it binds)/`tokio-stream`/`futures`, `serde`/`serde_json`, `thiserror`, `tracing`. Dev: `reqwest` (the suites' client; `stream` reads SSE frames as they arrive), `tempfile`, `tracing-subscriber` (the canary's capture).
+`axum` (routes, middleware, SSE body), `secrecy`, `base64`, `tokio` (with this crate's own `net` opt-in for the listeners it binds)/`tokio-stream`/`futures`, `serde`/`serde_json`, `thiserror`, `tracing`. Dev: `reqwest` (the suites' client; `stream` reads SSE frames as they arrive), `tempfile`, `tracing-subscriber` (the canary's capture).
 
 <!-- MANUAL: -->

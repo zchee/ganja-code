@@ -2149,14 +2149,19 @@ mod tests {
     }
 
     #[test]
-    fn the_team_routes_this_side_speaks_match_the_socket_twin_in_ganja_client() {
-        // `crates/ganja-client/src/lib.rs`'s module docs (roughly lines 17-36)
-        // are the independent twin whose declared socket routes this pins.
+    fn the_team_routes_this_side_speaks_match_the_server_and_client_twins() {
+        let server = include_str!("../../ganja-serve/src/routes.rs");
+        let client = include_str!("../../ganja-client/src/lib.rs");
+
         assert_eq!(TEAM_ROUTE, "/team");
         assert_eq!(
             format!("{TEAM_ROUTE}/{}{MESSAGE_ROUTE}", "some-lead"),
             "/team/some-lead/message"
         );
+        assert!(server.contains("/team/{name}/message"));
+        assert!(server.contains("/team"));
+        assert!(client.contains("/team/{name}/message"));
+        assert!(client.contains("/team"));
     }
 
     /// A child's thinking is not a child's answer (bead `pwe`), and the

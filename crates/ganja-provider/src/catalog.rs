@@ -2175,7 +2175,7 @@ mod tests {
         }
 
         assert!(
-            backoff(2) > backoff(0).mul_f64(1.5),
+            scattered(2, 0) > scattered(0, 999_999),
             "the last wait is longer than the first can ever be"
         );
     }

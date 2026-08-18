@@ -40,7 +40,8 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::theme::Theme;
 
@@ -911,16 +912,17 @@ fn truncate_spans(spans: Vec<Span<'static>>, limit: usize, theme: &Theme) -> Vec
             kept.push(span);
             continue;
         }
-        // The span that crosses the cut is kept up to the last whole
-        // character that fits, exactly as OMC walks code points.
+        // A terminal draws extended grapheme clusters as one glyph, so a cut
+        // inside a ZWJ sequence or before a combining mark cannot preserve
+        // what the status text meant.
         let mut partial = String::new();
-        for character in span.content.chars() {
-            let character_width = character.width().unwrap_or(0);
-            if used + character_width > target {
+        for cluster in span.content.graphemes(true) {
+            let cluster_width = cluster.width();
+            if used + cluster_width > target {
                 break;
             }
-            used += character_width;
-            partial.push(character);
+            used += cluster_width;
+            partial.push_str(cluster);
         }
         if !partial.is_empty() {
             kept.push(Span::styled(partial, span.style));
@@ -1075,12 +1077,12 @@ mod tests {
     use std::{cell::RefCell, fs};
 
     use ganja_core::config::StatuslineElement;
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, text::Span};
     use unicode_width::UnicodeWidthStr as _;
 
     use super::{
         Activity, Duration, PlanWindow, RateWindow, SHELL_HINTS, Severity, Status, SystemTime,
-        Todos, Totals, discover_git, head_name, meter_fill, meter_severity,
+        Todos, Totals, discover_git, head_name, meter_fill, meter_severity, truncate_spans,
     };
     use crate::theme::Theme;
 
@@ -1767,6 +1769,24 @@ mod tests {
 
         assert!(line.ends_with("..."), "got {line:?}");
         assert!(line.len() <= 20, "got {line:?}");
+    }
+
+    /// A status cut keeps a ZWJ family together even when its constituent
+    /// code points would cross the ellipsis boundary one by one.
+    #[test]
+    fn truncation_never_splits_a_zwj_family() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        let spans = truncate_spans(
+            vec![Span::raw(format!("{family}xxxx"))],
+            5,
+            &Theme::default(),
+        );
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, format!("{family}..."));
     }
 
     /// The git line reads `.git/HEAD` off the disk — both spellings — and

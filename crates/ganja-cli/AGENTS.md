@@ -50,6 +50,6 @@ Subcommands print to stdout and diagnostics to stderr, so a caller capturing std
 
 ### External
 
-`clap` (derive), `tokio`, `tokio-util` (the login flows' cancellation), `anyhow`, `secrecy`, `futures` (the engine's event stream), `serde_json` (`run --format json`), `ratatui` (raw mode only); dev: `assert_cmd`, `predicates`, `tempfile`, and `expectrl` on unix.
+`clap` (derive), `tokio`, `tokio-util` (the login flows' cancellation), `anyhow`, `secrecy`, `futures` (the engine's event stream), `serde_json` (`run --format json`), `ratatui` (raw mode only), `jiff` (the daily log's civil-date rollover), `tempfile` (the staged `mcp add`/`remove` config write); dev: `assert_cmd`, `predicates`, and `expectrl` on unix.
 
 <!-- MANUAL: -->

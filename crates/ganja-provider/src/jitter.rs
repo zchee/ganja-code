@@ -18,9 +18,10 @@
 /// Eight bytes from the operating system, as a number.
 ///
 /// A draw that fails leaves the schedule standing rather than failing a
-/// request: zero is the unscattered wait, which is still a legal wait. It is
-/// worth a line in the log, because a platform whose entropy source has gone
-/// away has a larger problem than a backoff.
+/// request: zero is still a legal wait, adding nothing to the request retry's
+/// delay and selecting the catalog retry's shortest multiplicative factor. It
+/// is worth a line in the log, because a platform whose entropy source has
+/// gone away has a larger problem than a backoff.
 pub(crate) fn draw() -> u64 {
     let mut bytes = [0_u8; 8];
     if let Err(error) = getrandom::fill(&mut bytes) {

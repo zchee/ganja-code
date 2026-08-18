@@ -931,6 +931,10 @@ impl Servers {
             }
             if !groups.is_empty() {
                 tokio::time::sleep(KILL_GRACE).await;
+                // rmcp owns the `Child`, so this crate cannot `try_wait`
+                // before resending. The accepted residual risk is a same-uid
+                // pid being recycled as an unrelated group leader during the
+                // 200 ms `KILL_GRACE` window.
                 for group in groups {
                     ganja_tool::shell::signal_group(group, libc::SIGKILL);
                 }

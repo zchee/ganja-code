@@ -655,6 +655,8 @@ fn split_frontmatter(text: &str) -> Option<(Frontmatter, &str)> {
 }
 
 /// Whether BOM-free `text` opens with the exact fence grammar [`split`] uses.
+/// Requiring a newline immediately after the fence, without trailing-whitespace
+/// tolerance, deliberately matches that shared grammar and `agent.rs`'s use of it.
 fn opens_frontmatter(text: &str) -> bool {
     let Some(rest) = text.strip_prefix(FENCE) else {
         return false;

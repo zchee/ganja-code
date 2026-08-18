@@ -52,11 +52,12 @@ const SKIPPED: [&str; 6] = ["script", "style", "noscript", "iframe", "object", "
 /// unlisted is treated as inline, which is the right default — a tag a text
 /// rendering has never heard of is far more likely to be a `<span>` than a
 /// `<section>`.
-const BLOCK: [&str; 32] = [
+const BLOCK: [&str; 38] = [
     "address",
     "article",
     "aside",
     "blockquote",
+    "button",
     "caption",
     "dd",
     "div",
@@ -74,17 +75,22 @@ const BLOCK: [&str; 32] = [
     "h6",
     "header",
     "hr",
+    "label",
+    "legend",
     "li",
     "main",
     "nav",
     "ol",
+    "optgroup",
+    "option",
     "p",
     "pre",
     "section",
+    "summary",
     "table",
-    "td",
-    "th",
+    "title",
     "tr",
+    "ul",
 ];
 
 /// Most redirects one fetch will follow, which is reqwest's own default. Spelled
@@ -321,10 +327,10 @@ async fn fetch(
         .header(reqwest::header::ACCEPT, accept(args.format))
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9");
 
-    // One deadline over the whole exchange — connect, headers and body — so a
-    // server that answers instantly and then dribbles the body forever is
-    // still bounded.
-    let response = tokio::time::timeout(timeout, async {
+    // One deadline over the whole exchange — connect, headers, body and
+    // rendering — so neither a dribbling server nor a pathological page can
+    // hold the call forever.
+    tokio::time::timeout(timeout, async {
         let response = request
             .send()
             .await
@@ -341,57 +347,57 @@ async fn fetch(
             .unwrap_or_default()
             .to_owned();
         let body = collect(response).await?;
+        let mime = content_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let title = format!("{} ({content_type})", args.url);
 
-        Ok::<_, ToolError>((content_type, body))
+        // The protocol carries no attachments yet, so an image is reported
+        // rather than returned; upstream hands the bytes back as a data URL.
+        if mime.starts_with("image/") {
+            return Ok(ToolOutput {
+                title,
+                output: format!(
+                    "Image fetched successfully ({mime}, {} bytes). This tool cannot hand image \
+                     bytes to the model yet.",
+                    body.len()
+                ),
+                metadata: serde_json::json!({ "mime": mime, "bytes": body.len() }),
+            });
+        }
+
+        // Owned before entering the blocking task because that task may
+        // outlive this async stack frame after cancellation or a timeout.
+        let content = String::from_utf8_lossy(&body).into_owned();
+        let html = mime.contains("text/html");
+        let rendered = if html && matches!(args.format, Format::Markdown | Format::Text) {
+            let format = args.format;
+            tokio::task::spawn_blocking(move || match format {
+                // Upstream converts HTML to markdown with turndown; this is
+                // `htmd`, which preserves headings, links and lists where the
+                // plain-text rendering deliberately keeps the stripper.
+                Format::Markdown => to_markdown(&content),
+                Format::Text => strip_tags(&content),
+                Format::Html => unreachable!("HTML is not sent to the renderer"),
+            })
+            .await
+            .map_err(|error| ToolError::Failed(format!("the page renderer did not run: {error}")))?
+        } else {
+            content
+        };
+        let clamped = truncate::clamp(&rendered);
+
+        Ok::<_, ToolError>(ToolOutput {
+            title,
+            output: clamped.text,
+            metadata: serde_json::json!({}),
+        })
     })
     .await
-    .map_err(|_elapsed| ToolError::Failed("Request timed out".to_owned()))??;
-
-    let (content_type, body) = response;
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    let title = format!("{} ({content_type})", args.url);
-
-    // The protocol carries no attachments yet, so an image is reported rather
-    // than returned; upstream hands the bytes back as a data URL.
-    if mime.starts_with("image/") {
-        return Ok(ToolOutput {
-            title,
-            output: format!(
-                "Image fetched successfully ({mime}, {} bytes). This tool cannot hand image \
-                 bytes to the model yet.",
-                body.len()
-            ),
-            metadata: serde_json::json!({ "mime": mime, "bytes": body.len() }),
-        });
-    }
-
-    // Lossy, as upstream's `TextDecoder` is: a page that declares one encoding
-    // and serves another is common, and mangling a few characters beats
-    // failing the call.
-    let content = String::from_utf8_lossy(&body);
-    let html = mime.contains("text/html");
-    let rendered = match args.format {
-        // Upstream converts HTML to markdown with turndown; this is `htmd`,
-        // which is the same conversion by a different implementation — the
-        // headings, links and lists survive as markdown instead of being
-        // flattened into the text a stripper leaves behind. A text rendering
-        // is still a text rendering: `Format::Text` keeps the stripper.
-        Format::Markdown if html => to_markdown(&content),
-        Format::Text if html => strip_tags(&content),
-        Format::Markdown | Format::Text | Format::Html => content.into_owned(),
-    };
-    let clamped = truncate::clamp(&rendered);
-
-    Ok(ToolOutput {
-        title,
-        output: clamped.text,
-        metadata: serde_json::json!({}),
-    })
+    .map_err(|_elapsed| ToolError::Failed("Request timed out".to_owned()))?
 }
 
 /// The client one fetch runs through, guarded unless the session lifted it.
@@ -569,38 +575,54 @@ fn strip_tags(html: &str) -> String {
 
 /// Appends the text under `node`, minus what [`SKIPPED`] drops.
 fn push_text(node: &Rc<Node>, out: &mut String) {
-    match &node.data {
-        NodeData::Text { contents } => out.push_str(&contents.borrow()),
-        NodeData::Element { name, .. } => {
-            let tag = &*name.local;
-            if SKIPPED.contains(&tag) {
-                return;
-            }
-            // A line break is one line break, not the blank line a block
-            // earns; markup that lays out an address or a verse with `<br>`
-            // would otherwise come back double-spaced.
-            if tag == "br" {
-                out.push('\n');
-                return;
-            }
+    enum Work {
+        Enter(Rc<Node>),
+        EndBlock,
+    }
 
-            let block = BLOCK.contains(&tag);
-            if block {
-                end_block(out);
+    let mut work = vec![Work::Enter(Rc::clone(node))];
+    while let Some(item) = work.pop() {
+        let Work::Enter(node) = item else {
+            end_block(out);
+            continue;
+        };
+
+        match &node.data {
+            NodeData::Text { contents } => out.push_str(&contents.borrow()),
+            NodeData::Element { name, .. } => {
+                let tag = &*name.local;
+                if SKIPPED.contains(&tag) {
+                    continue;
+                }
+                // A line break is one line break, not the blank line a block
+                // earns; markup that lays out an address or a verse with `<br>`
+                // would otherwise come back double-spaced.
+                if tag == "br" {
+                    out.push('\n');
+                    continue;
+                }
+
+                if BLOCK.contains(&tag) {
+                    end_block(out);
+                    work.push(Work::EndBlock);
+                }
+                work.extend(
+                    node.children
+                        .borrow()
+                        .iter()
+                        .rev()
+                        .map(|child| Work::Enter(Rc::clone(child))),
+                );
             }
-            for child in node.children.borrow().iter() {
-                push_text(child, out);
-            }
-            if block {
-                end_block(out);
-            }
-        }
-        // A document, a doctype, a comment, a processing instruction: nothing
-        // a reader sees, though a document's children are the page.
-        _ => {
-            for child in node.children.borrow().iter() {
-                push_text(child, out);
-            }
+            // A document, a doctype, a comment, a processing instruction:
+            // nothing a reader sees, though a document's children are the page.
+            _ => work.extend(
+                node.children
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .map(|child| Work::Enter(Rc::clone(child))),
+            ),
         }
     }
 }
@@ -1226,5 +1248,26 @@ mod tests {
             !text.contains('\\'),
             "a plain-text reading has no syntax to escape for: {text:?}"
         );
+    }
+
+    /// Titles and rows remain blocks while cells within one row remain inline.
+    #[test]
+    fn a_title_and_table_keep_their_intended_plain_text_boundaries() {
+        let text = super::strip_tags(
+            "<html><head><title>Page title</title></head><body><table>\
+             <tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr>\
+             </table></body></html>",
+        );
+
+        assert_eq!(text, "Page title\n\nAB\n\nCD");
+    }
+
+    /// A page's nesting depth consumes heap worklist space rather than call
+    /// stack frames.
+    #[test]
+    fn deeply_nested_inline_elements_do_not_overflow_the_stack() {
+        let html = format!("{}text{}", "<i>".repeat(100_000), "</i>".repeat(100_000));
+
+        assert_eq!(super::strip_tags(&html), "text");
     }
 }

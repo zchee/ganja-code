@@ -389,11 +389,10 @@ expectrl = "0.9.0"
 insta = "1.48.0"
 predicates = "3.1.4"
 similar-asserts = "2.0.0"
-# Left this group in P25 without moving: `ganja-team` names it under
-# `[dependencies]`, because an inbox rewrite lands through
-# `NamedTempFile::new_in(parent)` → `persist(path)` rather than through a
-# second hand-rolled temp-and-rename. Every other member still takes it as a
-# dev-dependency for a real directory tree to test against.
+# Left this group in P25 without moving: `ganja-team`, `ganja-core`,
+# `ganja-cli`, `ganja-tui`, and the dev-only `ganja-testkit` name it under
+# `[dependencies]`; `ganja-permission`, `ganja-provider`, `ganja-serve`, and
+# `ganja-tool` take it only as a dev-dependency.
 tempfile = "3.27.0"
 
 [profile.release]
