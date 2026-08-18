@@ -3599,6 +3599,10 @@ fn peer_envelope(from: &str, summary: Option<&str>, color: Option<&str>, body: &
 /// The ampersand goes first, and has to: replacing it after the others would
 /// walk back over the entities they just wrote and turn `&lt;` into
 /// `&amp;lt;`.
+///
+/// Not `instruction::escaped`, deliberately: that escaper also turns `'` into
+/// `&#39;`, and sharing it would change the §5.3 envelope's bytes for a
+/// summary or member name holding an apostrophe.
 fn escape_attribute(value: &str) -> String {
     value
         .replace('&', "&amp;")

@@ -1437,8 +1437,8 @@ impl PermissionMode {
     ///   thing is one too many.
     ///
     /// Anything else is refused as the name it was rather than falling back to
-    /// [`PermissionMode::Ask`], because a posture a peer asked for and did not
-    /// get is something its sender has to be told.
+    /// [`PermissionMode::Ask`], so the log line — the only place the refusal
+    /// lands today — names what was asked.
     ///
     /// # Errors
     ///

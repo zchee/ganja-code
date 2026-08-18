@@ -1964,8 +1964,10 @@ impl Engine {
     /// Ends every teammate this session started, waiting for each one's turn
     /// to settle rather than killing it.
     ///
-    /// On the exit path beside [`Engine::shutdown_mcp`] and
-    /// [`Engine::shutdown_jobs`], and idempotent like both. What it must never
+    /// Idempotent like [`Engine::shutdown_mcp`] and [`Engine::shutdown_jobs`]
+    /// — the engine-side twin of the registry shutdown the lead frontend runs
+    /// through the handle it kept; `run` and `serve` lead no team, so nothing
+    /// else calls it. What it must never
     /// do is shut down what a teammate *shares*: an in-process teammate holds
     /// the lead's MCP servers and language servers when it holds any at all,
     /// and those die with the lead one layer below the engine. So this calls
@@ -3759,7 +3761,7 @@ impl Engine {
     /// like that one it is a memo rather than an unconditional rebuild — a
     /// team whose membership has not moved costs a lock and a comparison.
     fn refresh_team(&self) {
-        let Some(roster) = self.lead_roster() else {
+        let Some(roster) = self.postbox_roster() else {
             return;
         };
         let mut installed = self
@@ -3827,7 +3829,7 @@ impl Engine {
     /// `task` either: a delegated turn runs inside the lead's own turn, and
     /// the identity it would send under is the lead's.
     fn team_messaging(&self, registry: Arc<Registry>) -> Arc<Registry> {
-        let Some(roster) = self.lead_roster() else {
+        let Some(roster) = self.postbox_roster() else {
             return registry;
         };
 
@@ -3837,7 +3839,7 @@ impl Engine {
     /// Everybody this engine's own `send_message` may address, as its postbox
     /// answers it. [`None`] when there is no team, which is not the same as a
     /// team of nobody.
-    fn lead_roster(&self) -> Option<Vec<Peer>> {
+    fn postbox_roster(&self) -> Option<Vec<Peer>> {
         self.postbox
             .lock()
             .expect("the postbox is never poisoned")

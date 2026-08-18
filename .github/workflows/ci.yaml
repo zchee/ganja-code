@@ -44,10 +44,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@master
         with:
-          # The same date rust-toolchain.toml pins — this action does not read
-          # that file. The LSP diagnostics drill spawns rust-analyzer from
-          # PATH; the component ships it with the pinned toolchain on every
-          # runner.
+          # The same channel rust-toolchain.toml pins — this action does not
+          # read that file. The LSP diagnostics drill spawns rust-analyzer
+          # from PATH; the component ships it with the installed toolchain on
+          # every runner.
           toolchain: nightly
           components: rust-analyzer
 
@@ -128,7 +128,7 @@ jobs:
       - uses: actions/checkout@v7
 
       # @master is the invocation form that takes an explicit toolchain; the
-      # date matches rust-toolchain.toml, which this action does not read.
+      # channel matches rust-toolchain.toml, which this action does not read.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
@@ -291,8 +291,8 @@ jobs:
       # the runner image.
       - uses: dtolnay/rust-toolchain@master
         with:
-          # The same date rust-toolchain.toml pins; this action does not read
-          # that file, so the date is repeated here on purpose.
+          # The same channel rust-toolchain.toml pins; this action does not
+          # read that file, so the channel is repeated here on purpose.
           toolchain: nightly
 
       - name: dependency audit (advisories, licenses, bans, sources)

@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The types every side of the app speaks: the `Command`s a frontend sends, the `Event`s the engine streams back, and the `Message`/`Part` model a session is stored as. One file, and a dependency list of exactly `serde` plus the value type a tool call's arguments arrive as — which is the whole reason it is a crate. Rendering a transcript, asserting on an event, or later driving a session from the far end of a socket takes none of the engine, and with the protocol on its own nothing has to build one to find that out.
+The types every side of the app speaks: the `Command`s a frontend sends, the `Event`s the engine streams back, and the `Message`/`Part` model a session is stored as. Two files (`lib.rs`, `team.rs`), and a dependency list of exactly `serde`, `serde_json` and `uuid` (**D493**) — a list that short is the whole reason it is a crate. Rendering a transcript, asserting on an event, or later driving a session from the far end of a socket takes none of the engine, and with the protocol on its own nothing has to build one to find that out.
 
 ## Key Files
 
@@ -20,7 +20,7 @@ The types every side of the app speaks: the `Command`s a frontend sends, the `Ev
 ### Working In This Directory
 
 - **Every type here is serde-serializable, and that constraint is load-bearing.** It is not a trait that preserves the path to serving the engine over a socket — it is this. A type that cannot round-trip through `serde` does not belong here, and one that can, but whose representation changes, is a wire break: the stored sessions on disk are these values written out verbatim.
-- **Ids sort in creation order.** `ascending` mints `<prefix>_<millisecond timestamp><per-process counter>`, both fixed-width hex, mirroring upstream. Ordering across processes is only as good as the clock, which is the guarantee upstream makes too. `now` and `ascending` are public because the engine mints ids for messages it did not receive from here, and two implementations of "sorts after everything before it" is one too many.
+- **Ids sort in creation order.** `uuidv7` mints a bare lowercase hyphenated UUIDv7 (**D493**) — no prefix, RFC 9562's monotonic counter within a millisecond, so lexicographic order is creation order — and the id types' own `ascending()` constructors all call it. `now`, `uuidv7` and `is_uuidv7` are public because the engine and the store ask them, and two implementations of "sorts after everything before it" is one too many.
 - **This crate names no other crate in the workspace, and must not start.** If a doc comment here needs to talk about something on the engine's side of the line — the read log `edit` consults, say — it says so in prose rather than as an intra-doc link, because the link would require a dependency the boundary refuses.
 - Adding a `PartBody` variant changes nothing already on the wire; changing or removing one changes what a stored session decodes to. Treat the two cases differently.
 
@@ -28,7 +28,7 @@ The types every side of the app speaks: the `Command`s a frontend sends, the `Ev
 
 ```sh
 cargo test -p ganja-protocol          # its unit tests
-cargo tree -p ganja-protocol -e normal   # the boundary, visible: serde and serde_json
+cargo tree -p ganja-protocol -e normal   # the boundary, visible: serde, serde_json and uuid
 ```
 
 ### Common Patterns
@@ -43,6 +43,6 @@ None, and that is the invariant.
 
 ### External
 
-`serde` (every type derives it) and `serde_json` (a tool call's arguments and metadata are values the protocol carries rather than shapes it re-declares).
+`serde` (every type derives it), `serde_json` (a tool call's arguments and metadata are values the protocol carries rather than shapes it re-declares), and `uuid` (v7 only — the id mint, **D493**).
 
 <!-- MANUAL: -->

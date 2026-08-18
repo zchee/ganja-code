@@ -16,7 +16,7 @@ Container for the workspace members. The split is architectural, not cosmetic. T
 | `ganja-team/` | Claude Code's teams directory: member records and the file-backed mailboxes teammates are addressed through. Names only `ganja-protocol` (see `ganja-team/AGENTS.md`) |
 | `ganja-tool/` | What the model can do besides talk, plus the read log and its watcher (see `ganja-tool/AGENTS.md`) |
 | `ganja-provider/` | Talking to a model vendor: the wires, the credentials they present, and the catalog that sizes and prices what they serve (see `ganja-provider/AGENTS.md`) |
-| `ganja-core/` | Engine: sessions, the agent loop, config, storage. Re-exports the four above under their old module names (see `ganja-core/AGENTS.md`) |
+| `ganja-core/` | Engine: sessions, the agent loop, config, storage. Re-exports the five above under their old module names (see `ganja-core/AGENTS.md`) |
 | `ganja-tui/` | ratatui frontend (see `ganja-tui/AGENTS.md`) |
 | `ganja-serve/` | The engine over a socket: REST routes and the SSE event stream, over TCP and over a per-session Unix socket (see `ganja-serve/AGENTS.md`) |
 | `ganja-client/` | The other end of that wire, and nothing else: the typed routes and the SSE reader `run --attach` and `sessions --live` drive. Names only `ganja-protocol` (see `ganja-client/AGENTS.md`) |
@@ -49,7 +49,7 @@ Member manifests declare dependencies as `foo.workspace = true` and never carry 
 
 Every member is declared as a workspace dependency (a path dep) in the root manifest with the reason it exists, so members reference each other the same way they reference crates.io — `foo.workspace = true`, never a path or a version in a member manifest.
 
-`ganja-core` re-exports the crates beneath it under the module names they had before each split (`ganja_core::protocol`, `::permission`, `::project`, `::tool`, `::watch`, `::auth`, `::catalog`, and `::team` for the one crate that was born rather than split off), which is what let each split land without rewriting every caller. The facade is those module names and nothing more: the crate root names only the engine's own types, so a caller that wants one of the four crates alone depends on it directly rather than reach through the facade — `ganja-cli` does exactly that for `auth login`, which drives `ganja-provider`'s OAuth flows and has no engine at all.
+`ganja-core` re-exports the crates beneath it under the module names they had before each split (`ganja_core::protocol`, `::permission`, `::project`, `::tool`, `::watch`, `::auth`, `::catalog`, and `::team` for the one crate that was born rather than split off), which is what let each split land without rewriting every caller. The facade is those module names and nothing more: the crate root names only the engine's own types, so a caller that wants one of the five crates alone depends on it directly rather than reach through the facade — `ganja-cli` does exactly that for `auth login`, which drives `ganja-provider`'s OAuth flows and has no engine at all.
 
 `ganja_core::provider` is the one facade that is not a bare re-export, because the module did not move whole: the wires left, and the half that reads a `Config` — which provider a session runs as, which model it asks for — stayed, over a glob of `ganja_provider::provider`. Every path a caller already wrote still resolves, and `ganja-core/src/AGENTS.md` says which functions are on which side.
 
