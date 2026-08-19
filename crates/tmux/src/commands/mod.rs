@@ -901,6 +901,34 @@ mod tests {
         );
     }
 
+    /// A letter double-claimed would pass the inventory test twice over —
+    /// the served probe verifies it while the shelf probe reports it
+    /// arrived — so the one place the mistake is visible is here, before
+    /// any tmux is asked.
+    #[test]
+    fn a_letter_is_served_or_shelved_but_never_both() {
+        for entry in REGISTRY {
+            let mut seen = std::collections::BTreeSet::new();
+            for flag in entry.flags.iter().chain(entry.ahead) {
+                assert!(
+                    seen.insert(flag.letter),
+                    "{} claims {} more than once across its served rows and its shelf, and the \
+                     probes would quietly confirm both claims",
+                    entry.name,
+                    flag.letter
+                );
+            }
+            assert!(
+                entry
+                    .ahead
+                    .iter()
+                    .all(|flag| flag.letter.starts_with('-') && flag.letter.len() >= 2),
+                "a shelved flag is carried the way tmux reads it in argv, leading dash and all, \
+                 or the day it is unshelved the probes ask about a different word"
+            );
+        }
+    }
+
     #[test]
     fn no_command_is_both_typed_and_excluded() {
         for entry in REGISTRY {

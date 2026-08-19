@@ -15,12 +15,14 @@
 //!
 //! The direction is deliberately one-way: every command tmux has must be
 //! either typed or explicitly excluded, while a command *this crate* names
-//! and this tmux lacks is not a failure, because the tables are written
-//! against a newer tmux than the oldest one they are meant to serve — an
-//! older tmux would otherwise fail this suite for having fewer commands, and
-//! for the wrong reason. A misspelling in either table is caught all the
-//! same, and by the same assertion: the correctly spelled command then
-//! appears in neither, which is the failure below.
+//! and this tmux lacks is not a failure, because the register serves tmuxes
+//! on both sides of its 3.7c floor — an apt tmux is missing commands the
+//! floor has, the next tmux keeps what only it takes in `Entry::ahead`, and
+//! `switch-mode` is typed ahead of the floor outright — so an older tmux
+//! must not fail this suite for having fewer commands, and for the wrong
+//! reason. A misspelling in either table is caught all the same, and by the
+//! same assertion: the correctly spelled command then appears in neither,
+//! which is the failure below.
 //!
 //! Like `tests/live.rs`, this hard-fails when tmux is unavailable rather than
 //! skipping: a green run that compared against nothing would be worthless.
