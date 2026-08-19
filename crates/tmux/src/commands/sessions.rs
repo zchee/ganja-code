@@ -45,6 +45,18 @@
 //! through that client rather than through a builder here — see
 //! [`RefreshClient`]'s own doc for why the two are not interchangeable.
 //!
+//! # Two flags this family leaves to the escape hatch
+//!
+//! `refresh-client -F`, which wants an argument, and `switch-client -F`,
+//! which takes none. The parser accepts both and **neither** document names
+//! either — not the usage string, not the manual's synopsis, not its prose
+//! — so there is nothing to write a doc line from, and a method whose doc
+//! would be a guess is worse than no method. That is the rule
+//! [`options_misc`][crate::commands::options_misc] states for
+//! `customize-mode -y` and `run-shell -s` and
+//! [`panes`][crate::commands::panes] states for five more;
+//! [`Server::run`][crate::Server::run] carries all of them today.
+//!
 //! # Layout
 //!
 //! Sessions first, then the clients attached to them, then the server both

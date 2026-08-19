@@ -18,6 +18,29 @@
 //! typed in [`options_misc`][crate::commands::options_misc], whose own doc
 //! says why it holds them.
 //!
+//! # Five flags this family leaves to the escape hatch
+//!
+//! The parser takes these and **neither** document names them — not the
+//! binary's usage string, not the manual's synopsis, not its prose — so
+//! there is nothing to write a doc line from, and a method whose doc would
+//! be a guess is worse than no method. This is the rule
+//! [`options_misc`][crate::commands::options_misc] states for
+//! `customize-mode -y` and `run-shell -s`, applied here; all five are
+//! carried by [`Server::run`][crate::Server::run] today, and each is one
+//! documented sentence away from becoming a method.
+//!
+//! - `join-pane -p`, which wants an argument.
+//! - `select-pane -P`, which wants one too.
+//! - `new-pane -E`, `select-pane -g` and `split-window -E`, which take
+//!   none.
+//!
+//! Each arity above was read off the parser itself, by the private-socket
+//! probing [`sessions`][crate::commands::sessions] describes. They are
+//! written down here because `tests/inventory.rs` cannot find them for a
+//! reader: it holds the tables against every flag *this tmux documents*,
+//! and a flag documented nowhere is exactly the one a measurement of the
+//! documents cannot name.
+//!
 //! # Layout
 //!
 //! Panes first, then windows, then layouts — the order somebody reaching for
@@ -344,6 +367,14 @@ invocations! {
     /// [`JoinPane`] until one of the movement flags is given, at which point
     /// it moves the target floating pane instead — the same command name for
     /// two jobs is tmux's arrangement, kept rather than split in two here.
+    ///
+    /// The four directions always spell their amount: [`down`][Self::down]
+    /// builds `-D 5` and never a bare `-D`. tmux takes the bare form too —
+    /// its manual spells the argument optional (`[-D [lines]]`) and moves
+    /// the pane by one without it — but a flag with nothing after it is a
+    /// second method of a different shape, so that spelling is left to
+    /// [`Server::run`][crate::Server::run], which carries every form this
+    /// module has not named a method for.
     MovePane = "move-pane", Some("movep") => {
         /// `-b`: joins the source left of, or above, the destination.
         before: switch "-b";
@@ -357,7 +388,7 @@ invocations! {
         mouse: switch "-M";
         /// `-v`: splits vertically.
         vertical: switch "-v";
-        /// `-D lines`: moves a floating pane down, one line if unsaid.
+        /// `-D lines`: moves a floating pane down by that many.
         down: value "-D";
         /// `-l size`: lines, columns, or a percentage.
         size: value "-l";
@@ -399,6 +430,15 @@ invocations! {
     }
 
     /// Resizes a pane, by an adjustment or to a size.
+    ///
+    /// The four directions always spell their adjustment:
+    /// [`down`][Self::down] builds `-D 5` and never a bare `-D`. tmux takes
+    /// the bare form too — its usage string spells the argument as required
+    /// but its parser does not, and the manual's prose gives the default as
+    /// one — and that spelling is left to
+    /// [`Server::run`][crate::Server::run] for the reason
+    /// [`MovePane`]'s doc gives: a flag with nothing after it is a second
+    /// method of a different shape.
     ResizePane = "resize-pane", Some("resizep") => {
         /// `-M`: begins a mouse resize, for a binding on one.
         mouse: switch "-M";

@@ -86,9 +86,9 @@
 //! # A client invocation
 //!
 //! [`Server::run`] carries any tmux command at all, named by this crate or
-//! not, and answers with a [`Captured`][server::Captured] — the bytes tmux
-//! printed, with text views over them. [`commands`] is the typed layer above
-//! it: one builder per command, rendering the argv words that command wants,
+//! not, and answers with a [`Captured`] — the bytes tmux printed, with text
+//! views over them. [`commands`] is the typed layer above it: one builder
+//! per command, rendering the argv words that command wants,
 //! with [`commands::REGISTRY`] and [`commands::EXCLUDED`] measured against
 //! the running tmux's own `list-commands` rather than claimed.
 //!
@@ -181,10 +181,12 @@ pub mod server;
 // root stays a listing of what every surface speaks rather than of one.
 // `Server` is the exception that proves the rule: the surface it heads *is*
 // the root, so `tmux::Server` and `tmux::server::Server` are one name said
-// twice rather than a type lifted out of a module it belongs to. By the same
-// rule `commands` re-exports nothing: a builder is one surface's vocabulary,
-// so it is named `tmux::commands::SplitWindow` exactly as a control-mode type
-// is named `tmux::control_mode::Client`.
+// twice rather than a type lifted out of a module it belongs to. `Captured`
+// comes with it under the same exception rather than a second one: it is
+// what every `Server::run` hands back, so a caller who names one already
+// holds the other. By the same rule `commands` re-exports nothing: a builder
+// is one surface's vocabulary, so it is named `tmux::commands::SplitWindow`
+// exactly as a control-mode type is named `tmux::control_mode::Client`.
 pub use error::Error;
 pub use ids::{InvalidId, PaneId, SessionId, WindowId};
-pub use server::Server;
+pub use server::{Captured, Server};

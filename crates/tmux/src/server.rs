@@ -165,6 +165,16 @@ impl Server {
     /// tmux's own stderr. A call that succeeds having printed nothing is an
     /// empty [`Captured`] and not an error: plenty of tmux commands answer
     /// with silence.
+    ///
+    /// # There is no timeout
+    ///
+    /// A command that blocks blocks this future, for as long as it blocks —
+    /// `wait-for` is the command written to do exactly that, and it is the
+    /// canonical case. Dropping the future kills the client, because the
+    /// child is spawned `kill_on_drop`, so a caller who wants a deadline
+    /// wraps this call in one of their own and drops it. No deadline is
+    /// imposed here for the reason no refusal sentence is written here: how
+    /// long a caller is willing to wait is the caller's judgment.
     pub async fn run<I, S>(&self, args: I) -> Result<Captured, Error>
     where
         I: IntoIterator<Item = S>,

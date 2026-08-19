@@ -53,6 +53,17 @@
 //! - A target (`-t`, `-s`) takes `impl Into<OsString>` so both a
 //!   [`PaneId`][crate::PaneId] read out of a previous answer and a raw
 //!   `mysession:1.2` spelling pass without either being restrung.
+//! - **A positional argument is emitted in the order its method was
+//!   called.** A flag is named, so the order it was asked for carries
+//!   nothing; a positional is *placed*, so its order is its meaning. The
+//!   five commands taking more than one — `set-option`,
+//!   `set-window-option`, `set-hook`, `set-environment` and `if-shell` —
+//!   must therefore be built in the order tmux's own synopsis gives, and
+//!   building one the other way round is this crate's one quiet failure
+//!   mode: tmux reads a well-formed command line and runs the wrong thing
+//!   rather than refusing it. Where a trailing command follows a
+//!   positional instead (`bind-key`, `run-shell`), nothing is left to the
+//!   caller: the renderer emits every positional before it.
 //!
 //! **A size is a word, not a number.** tmux spells `-x 10`, `-x 10%`, `-S -`
 //! and a negative adjustment in the same argument position, so narrowing a
@@ -103,18 +114,43 @@ pub use options_misc::*;
 pub use panes::*;
 pub use sessions::*;
 
-/// One command this crate has named: what tmux calls it, and what tmux's own
-/// abbreviation for it is.
+/// One command this crate has named: what tmux calls it, what tmux's own
+/// abbreviation for it is, and which flags its builder claims tmux takes.
 ///
 /// The abbreviation is carried because `list-commands` prints it and a
 /// consumer's config may use it, so the inventory test can hold both halves
-/// of tmux's vocabulary against this crate's.
+/// of tmux's vocabulary against this crate's. The flags are carried for the
+/// same reason and one step further: a table can only *claim* that `-d` is a
+/// flag and takes nothing, and a claim nobody measures is where this crate
+/// would quietly stop agreeing with tmux. Carrying them makes the claim
+/// something `tests/inventory.rs` can put to the running tmux's own parser.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Entry {
     /// The command's full name, such as `split-window`.
     pub name: &'static str,
     /// tmux's own abbreviation for it, such as `splitw`, when it has one.
     pub alias: Option<&'static str>,
+    /// The flags its builder declares, in the order the family table spells
+    /// them. A command whose builder is all positionals declares none.
+    pub flags: &'static [Flag],
+}
+
+/// One flag a command declares: the letter tmux spells it with, and whether
+/// tmux reads the word after it as its argument.
+///
+/// Two facts rather than the six method kinds, because these two are what a
+/// parser can be asked about: `value`, `text` and `repeat` differ in what
+/// Rust type the method takes and in how often it may be called, and tmux
+/// cannot see any of that — it sees a letter, and whether a word follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Flag {
+    /// The letter as tmux spells it, `-d` rather than `d`. A doubled letter
+    /// (`-EE`, which `display-popup` reads as `-E` twice) is one word here
+    /// for the same reason it is one word in argv.
+    pub letter: &'static str,
+    /// Whether tmux reads the following word as this flag's argument: false
+    /// for a `switch`, true for a `value`, a `text` and a `repeat`.
+    pub argument: bool,
 }
 
 /// One command this crate has **not** named yet, and why not.
@@ -339,6 +375,15 @@ macro_rules! invocations {
                     );
                 )*
 
+                // The flags above, as data: the same table that spells the
+                // methods answers `tests/inventory.rs`, so the two cannot
+                // drift the way a hand-kept list beside them would.
+                const DECLARED: [$crate::commands::Flag;
+                    { 0 $(+ $crate::commands::flag_count!($kind $(, $flag)?))* }] =
+                    $crate::commands::declared(&[
+                        $($crate::commands::flag_slot!($kind $(, $flag)?),)*
+                    ]);
+
                 #[doc = concat!(
                     "The argv words this `", $name, "` wants, after the socket pin."
                 )]
@@ -365,11 +410,99 @@ macro_rules! invocations {
         ///
         /// [`REGISTRY`]: crate::commands::REGISTRY
         pub(crate) const ENTRIES: &[$crate::commands::Entry] = &[
-            $($crate::commands::Entry { name: $name, alias: $alias },)*
+            $($crate::commands::Entry {
+                name: $name,
+                alias: $alias,
+                flags: &$type::DECLARED,
+            },)*
         ];
     };
 }
 
+/// One method's contribution to its command's [`Entry::flags`]: the flag it
+/// spells, or nothing at all when it spells none.
+///
+/// A sibling of [`method`] for the sibling reason — the kind has to stay a
+/// token tree to be matched on, and this is the second thing worth matching
+/// it for. `positional` and `trailing` produce `None`, which
+/// [`declared`] then compacts away.
+macro_rules! flag_slot {
+    (switch, $flag:literal) => {
+        ::core::option::Option::Some($crate::commands::Flag {
+            letter: $flag,
+            argument: false,
+        })
+    };
+    (value, $flag:literal) => {
+        ::core::option::Option::Some($crate::commands::Flag {
+            letter: $flag,
+            argument: true,
+        })
+    };
+    (text, $flag:literal) => {
+        ::core::option::Option::Some($crate::commands::Flag {
+            letter: $flag,
+            argument: true,
+        })
+    };
+    (repeat, $flag:literal) => {
+        ::core::option::Option::Some($crate::commands::Flag {
+            letter: $flag,
+            argument: true,
+        })
+    };
+    (positional) => {
+        ::core::option::Option::None
+    };
+    (trailing) => {
+        ::core::option::Option::None
+    };
+}
+
+/// How many flags one method contributes: one, or none.
+///
+/// Separate from [`flag_slot`] because an array's length is needed *before*
+/// its elements, and a `macro_rules!` repetition can be summed in the length
+/// position but not counted after the fact.
+macro_rules! flag_count {
+    (positional) => {
+        0
+    };
+    (trailing) => {
+        0
+    };
+    ($kind:tt, $flag:literal) => {
+        1
+    };
+}
+
+/// The flags out of one command's method list, with the methods that spell
+/// no flag dropped.
+///
+/// A `const fn` over `Option`s rather than a table that only holds flags,
+/// because a `macro_rules!` repetition cannot skip an element: every method
+/// line must produce one slot, so the ones that are not flags produce `None`
+/// and this compacts them away before the binary is written.
+const fn declared<const N: usize>(slots: &[Option<Flag>]) -> [Flag; N] {
+    let mut flags = [Flag {
+        letter: "",
+        argument: false,
+    }; N];
+    let mut at = 0;
+    let mut slot = 0;
+    while slot < slots.len() {
+        if let Some(flag) = slots[slot] {
+            flags[at] = flag;
+            at += 1;
+        }
+        slot += 1;
+    }
+
+    flags
+}
+
+pub(crate) use flag_count;
+pub(crate) use flag_slot;
 pub(crate) use invocations;
 pub(crate) use method;
 
@@ -403,6 +536,7 @@ const fn flattened<const N: usize>(families: &[&[Entry]]) -> [Entry; N] {
     let mut all = [Entry {
         name: "",
         alias: None,
+        flags: &[],
     }; N];
     let mut at = 0;
     let mut family = 0;
@@ -548,21 +682,82 @@ mod tests {
         assert_eq!(SplitWindow::NAME, "split-window");
         assert_eq!(SplitWindow::ALIAS, Some("splitw"));
         assert!(
-            REGISTRY.contains(&Entry {
-                name: SplitWindow::NAME,
-                alias: SplitWindow::ALIAS,
-            }),
+            REGISTRY
+                .iter()
+                .any(|entry| entry.name == SplitWindow::NAME && entry.alias == SplitWindow::ALIAS),
             "a builder tmux knows about but the register does not would be invisible to the \
              inventory test"
         );
     }
 
+    /// Every command every family declares reaches [`REGISTRY`] whole.
+    ///
+    /// Deliberately not a length comparison: `REGISTRY`'s length *is*
+    /// `total(FAMILIES)` by its own type, so holding one against the other
+    /// asks the type system a question it has already answered. What is
+    /// worth asking is whether the entries themselves survived the
+    /// flattening — a family dropped, an entry overwritten, or a filler row
+    /// left where a name should be.
     #[test]
-    fn the_register_gathers_every_family() {
+    fn the_register_carries_every_family_entry_and_no_filler() {
+        for family in FAMILIES {
+            assert!(
+                !family.is_empty(),
+                "a family declaring nothing is a table that stopped expanding, and a register \
+                 measured by length alone would never say so"
+            );
+            for entry in *family {
+                assert!(
+                    !entry.name.is_empty(),
+                    "an unnamed entry is the flattening's own filler showing through, which means \
+                     it copied fewer entries than it made room for"
+                );
+                assert!(
+                    REGISTRY.iter().any(|listed| listed == entry),
+                    "{} is declared by a family and missing from the register, so nothing would \
+                     ever hold it against tmux",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_commands_flags_reach_the_register_with_their_arity() {
+        let split = REGISTRY
+            .iter()
+            .find(|entry| entry.name == "split-window")
+            .expect("split-window is typed");
+        assert!(
+            split.flags.contains(&Flag {
+                letter: "-d",
+                argument: false,
+            }),
+            "-d takes nothing, and a register claiming otherwise would send the inventory test \
+             looking for an argument tmux does not want"
+        );
+        assert!(
+            split.flags.contains(&Flag {
+                letter: "-c",
+                argument: true,
+            }),
+            "-c takes a working directory"
+        );
+        assert!(
+            split
+                .flags
+                .iter()
+                .all(|flag| flag.letter.starts_with('-') && flag.letter.len() >= 2),
+            "a flag is carried the way tmux reads it in argv, leading dash and all"
+        );
         assert_eq!(
-            REGISTRY.len(),
-            FAMILIES.iter().map(|family| family.len()).sum::<usize>(),
-            "a family added to FAMILIES but lost by the flattening would go unmeasured"
+            REGISTRY
+                .iter()
+                .find(|entry| entry.name == "kill-server")
+                .map(|entry| entry.flags.len()),
+            Some(0),
+            "kill-server takes no flags, so its entry must declare none rather than inherit a \
+             neighbour's"
         );
     }
 
@@ -613,8 +808,10 @@ mod tests {
     /// wave carried), so comment lines are stripped before the assertion;
     /// what remains is code, and code mentioning `control_mode` in any of
     /// these six files is a crossing. `error.rs` is deliberately outside
-    /// the list: shared vocabulary wraps a control-mode response by the
-    /// architecture's own assignment.
+    /// the list: shared vocabulary wraps *two* control-mode types by the
+    /// architecture's own assignment — `CommandError` wraps a
+    /// `control_mode::protocol::Response`, and `InvalidCommand` wraps a
+    /// `control_mode::commandline::RenderError`.
     #[test]
     fn the_one_shot_surface_crosses_the_transport_boundary_only_in_prose() {
         // Built at run time so this test's own source — which the list below
