@@ -16,7 +16,7 @@ What ganja is allowed to do, and where. A call becomes one or more patterns, the
 | `Cargo.toml` | Member manifest, `publish = false`. |
 | `src/lib.rs` | Crate doc, the two module declarations, and the headline re-exports (`Action`, `Permissions`, `Decision`, `CallDecision`, `PermissionConfig`, `Project`, `ProjectError`) — how a direct consumer avoids the `ganja_permission::permission` stutter, which exists because the inner module's name is load-bearing for `ganja-core`'s facade. No logic. |
 | `src/permission.rs` | The engine: `Rule`, `Action`, `RuleSet`, `PermissionConfig` (a config file's `permission` block with its key order intact), `Permissions` (the layered set and the `decide` that walks it backwards), the wildcard `matches`, the arity table behind what an "always" answer remembers about a shell command, and the `permissions.json` store. Spec: upstream `packages/opencode/src/permission/`. |
-| `src/project.rs` | `Project` — the worktree a session runs in, resolved by walking up to a `.git`. Also `data_home` and `digest`, the stable per-project directory name. |
+| `src/project.rs` | `Project` — the worktree a session runs in, resolved by walking up to a `.git`, and the slug naming its data directory: Claude Code's scheme, the absolute path with every non-alphanumeric character dashed, cut at 200 characters and hashed past that. Also `data_home`, and `digest` — the FNV that no longer names anything here and survives for `ganja-core`'s snapshot store, which keys a worktree by it. |
 
 ## For AI Agents
 

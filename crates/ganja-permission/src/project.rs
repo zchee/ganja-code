@@ -17,10 +17,17 @@
 //! would have them share, and a checkout with no remote is still a project
 //! rather than falling into a global bucket shared with every other one.
 //!
-//! The slug is the root's directory name, reduced to characters that are safe
-//! in a path, followed by a hash of the whole absolute path. The name is there
-//! so a human can tell which directory is which; the hash is what makes it
-//! unambiguous, since `~/work/api` and `~/play/api` share a name.
+//! The slug is Claude Code's: the whole absolute path with every character
+//! that is not ASCII alphanumeric replaced by `-`, so `/Users/me/work/api`
+//! becomes `-Users-me-work-api` and a person scanning the data directory reads
+//! the path back off the listing. A path too long to be a filename is cut and
+//! given a hash of the original.
+//!
+//! Two roots that differ only where that reduction flattens them — `/a/b` and
+//! `/a-b` — share a slug, where the `<directory name>-<hash>` scheme this
+//! replaced told them apart. Claude accepts that collision and so does this: a
+//! slug somebody can read back to a path is worth more than the pair of
+//! directories nobody has.
 //!
 //! Nothing here creates a directory. Resolution is a pure question about a
 //! path, and answering it should not litter the data directory with folders
@@ -47,14 +54,13 @@ const PROJECTS: &str = "project";
 /// Either answers "the tree starts here".
 const GIT: &str = ".git";
 
-/// Longest the readable half of a slug may be, in characters. Long enough to
-/// recognise a project by, short enough to leave room for the hash on the
-/// filesystems that still cap a component at 255 bytes.
-const NAME: usize = 48;
+/// Longest a slug may be before it is cut short and given a hash, in
+/// characters. Claude Code's own 200, which leaves room for the hash inside
+/// the 255 bytes filesystems still cap a path component at.
+const MAX: usize = 200;
 
-/// What a slug is called when the root has no usable name of its own — the
-/// filesystem root itself, in practice.
-const UNNAMED: &str = "root";
+/// The digits [`base36`] renders into, in JavaScript's order and case.
+const BASE36: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 /// Offset basis and prime of FNV-1a, 64 bit.
 ///
@@ -112,9 +118,10 @@ impl Project {
 
     /// Stable name for the project, safe to use as a path component.
     ///
-    /// The same root always produces the same slug, and two different roots
-    /// produce different ones, which is what lets a later run find what an
-    /// earlier one stored.
+    /// The same root always produces the same slug, which is what lets a later
+    /// run find what an earlier one stored. Two roots that differ only in the
+    /// characters the slug flattens can share one; the module docs argue that
+    /// trade.
     #[must_use]
     pub fn slug(&self) -> &str {
         &self.slug
@@ -221,36 +228,92 @@ fn absolute(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// A name for `root` that is unique to it and readable by a person.
+/// A name for `root`, readable as the path it came from.
+///
+/// Claude Code's scheme, reproduced: every character that is not ASCII
+/// alphanumeric becomes `-`, so `/Users/me/work/api` is `-Users-me-work-api`,
+/// case and all. A reduced path longer than [`MAX`] is cut there and given
+/// [`digest32`] of the original, because a filesystem component still has to
+/// fit in 255 bytes.
+///
+/// What this replaced was a `<directory name>-<FNV of the path>` slug of
+/// ganja's own; the module docs carry what that trade costs. What is kept is
+/// the property that matters — the same root always reduces the same way, so a
+/// later run finds what an earlier one stored.
+///
+/// Nothing migrates on the way in. A slug is only ever where to look for what
+/// an earlier run wrote, so a machine upgrading past this change leaves its old
+/// directories where they are and starts new ones beside them.
+///
+/// One divergence stands, and it is in the input rather than the reduction:
+/// Claude normalises the resolved path to NFC before reducing it, where
+/// [`absolute`] hands over whatever the filesystem returned. It costs nothing
+/// here — every resolution of one directory goes through the same call and so
+/// reduces the same way — and buys nothing either, since these directories are
+/// ganja's own and are never read by the tool whose scheme this is.
 fn slug_for(root: &Path) -> String {
-    format!("{}-{}", readable(root), digest(root))
+    let path = root.to_string_lossy();
+    // Claude's regex and its hash both step through UTF-16 code units, and
+    // that is what decides how many dashes a character outside ASCII leaves:
+    // one for `é`, two for anything above the basic plane. Stepping the same
+    // units is what makes the two answers agree.
+    let reduced: String = path
+        .encode_utf16()
+        .map(|unit| match u8::try_from(unit) {
+            Ok(byte) if byte.is_ascii_alphanumeric() => char::from(byte),
+            _ => '-',
+        })
+        .collect();
+
+    if reduced.len() <= MAX {
+        return reduced;
+    }
+
+    // Every character of `reduced` is ASCII, so cutting by bytes cuts by
+    // characters and lands on a boundary.
+    format!("{}-{}", &reduced[..MAX], base36(digest32(&path)))
 }
 
-/// `root`'s own name, reduced to characters that mean the same thing on every
-/// filesystem.
-fn readable(root: &Path) -> String {
-    let name = root
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-
-    let mut reduced = String::with_capacity(name.len());
-    for character in name.chars().take(NAME) {
-        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-            reduced.push(character.to_ascii_lowercase());
-        } else if !reduced.ends_with('-') {
-            reduced.push('-');
-        }
+/// Claude Code's string hash of `path`, as the magnitude it renders.
+///
+/// `hash = hash * 31 + unit` over UTF-16 code units, wrapped to 32 bits
+/// signed — Java's `String.hashCode`, which is what the JavaScript spells as
+/// `(h << 5) - h + c | 0` and what Claude uses to tell apart the paths its
+/// slug had to cut short. Written out here for the reason [`FNV_BASIS`] gives:
+/// the value ends up in a directory name, which has to keep meaning the same
+/// thing across upgrades.
+///
+/// The magnitude rather than the value because Claude takes `Math.abs` of it,
+/// and JavaScript's arithmetic is wide enough to negate [`i32::MIN`] where
+/// Rust's is not: [`i32::unsigned_abs`] is the operation that agrees.
+fn digest32(path: &str) -> u32 {
+    let mut hash: i32 = 0;
+    for unit in path.encode_utf16() {
+        hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
     }
 
-    // A leading dot would make the project directory hidden, and a name that
-    // reduced to nothing but separators says nothing at all.
-    let trimmed = reduced.trim_matches(['-', '.'].as_slice());
-    if trimmed.is_empty() {
-        UNNAMED.to_owned()
-    } else {
-        trimmed.to_owned()
+    hash.unsigned_abs()
+}
+
+/// `value` in base 36, JavaScript's `Number.prototype.toString(36)`.
+///
+/// Written out rather than taken from a formatting crate for [`FNV_BASIS`]'s
+/// reason once more: the alphabet and the case are part of a directory name,
+/// and a crate is free to change its mind about either.
+fn base36(value: u32) -> String {
+    if value == 0 {
+        return "0".to_owned();
     }
+
+    let mut digits = Vec::new();
+    let mut left = value;
+    while left > 0 {
+        digits.push(BASE36[(left % 36) as usize]);
+        left /= 36;
+    }
+    digits.reverse();
+
+    String::from_utf8(digits).expect("base 36 digits are ASCII")
 }
 
 /// A stable 64-bit hash of `root`, as 16 hexadecimal characters.
@@ -280,7 +343,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Project, UNNAMED};
+    use super::{MAX, Project, base36, digest32, slug_for};
 
     fn temporary() -> TempDir {
         TempDir::new().expect("a temporary directory is creatable")
@@ -299,7 +362,7 @@ mod tests {
 
         assert_eq!(inner.root(), outer.root());
         assert_eq!(inner.slug(), outer.slug());
-        assert!(inner.slug().starts_with("api-"), "{}", inner.slug());
+        assert!(inner.slug().ends_with("-api"), "{}", inner.slug());
     }
 
     /// A linked worktree and a submodule both mark their root with a `.git`
@@ -350,13 +413,14 @@ mod tests {
             "projects that share a name must not share their state"
         );
 
-        // Both halves of the slug carry their weight: the name is readable,
-        // the hash is what makes it unambiguous.
+        // And the slug is the path, which is the point of the scheme: the
+        // separators are dashes and every other character is where it was.
         let slug = Project::resolve(&left).slug().to_owned();
-        let (name, hash) = slug.rsplit_once('-').expect("a slug has both halves");
-        assert_eq!(name, "api");
-        assert_eq!(hash.len(), 16, "{slug}");
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{slug}");
+        assert!(slug.ends_with("-work-api"), "{slug}");
+        assert!(
+            slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "{slug}"
+        );
     }
 
     /// A path that reaches the same directory by a different route is the same
@@ -387,16 +451,71 @@ mod tests {
         fs::create_dir(&awkward).expect("the fixture directory is creatable");
 
         let slug = Project::resolve(&awkward).slug().to_owned();
-        let (name, _) = slug.rsplit_once('-').expect("a slug has both halves");
 
-        assert_eq!(name, "my-project-v2");
+        // Case survives where it can, and nothing else does: one dash per
+        // character rather than one per run, so the trailing `)!` leaves two.
+        assert!(slug.ends_with("-My-Project--v2--"), "{slug}");
     }
 
     #[test]
     fn the_filesystem_root_still_gets_a_name() {
-        let slug = Project::resolve(Path::new("/")).slug().to_owned();
+        assert_eq!(Project::resolve(Path::new("/")).slug(), "-");
+    }
 
-        assert!(slug.starts_with(&format!("{UNNAMED}-")), "{slug}");
+    /// The expected value is a directory name Claude Code really wrote, so
+    /// this is the pin that says the two schemes are one scheme. `slug_for`
+    /// rather than `Project::resolve` because resolving canonicalises first,
+    /// and what is under test is the reduction rather than the walk feeding
+    /// it.
+    #[test]
+    fn a_path_reduces_to_the_name_claude_code_gives_it() {
+        assert_eq!(
+            slug_for(Path::new(
+                "/Users/zchee/rust/src/github.com/zchee/ganja-code"
+            )),
+            "-Users-zchee-rust-src-github-com-zchee-ganja-code"
+        );
+    }
+
+    /// A path with no room left in a filename is cut at the cap and given a
+    /// hash, which is the only thing keeping two long paths that share a
+    /// prefix apart.
+    #[test]
+    fn a_path_too_long_for_a_filename_is_cut_and_hashed() {
+        let deep = format!("/{}", "a".repeat(MAX));
+        let deeper = format!("/{}", "a".repeat(MAX + 1));
+
+        let slug = slug_for(Path::new(&deep));
+        let (head, tail) = slug.split_at(MAX);
+
+        assert_eq!(head, format!("-{}", "a".repeat(MAX - 1)));
+        assert!(
+            tail.starts_with('-') && tail.len() > 1,
+            "a cut slug has to carry a hash: {slug}"
+        );
+
+        let sibling = slug_for(Path::new(&deeper));
+        assert_eq!(sibling[..MAX], slug[..MAX], "the fixtures share their cut");
+        assert_ne!(sibling, slug, "the hash is what tells them apart");
+    }
+
+    /// Both halves of the suffix are JavaScript's, and both are pinned because
+    /// a directory name depends on them meaning the same thing forever.
+    #[test]
+    fn the_hash_and_its_digits_are_the_ones_javascript_renders() {
+        // Java's `String.hashCode`, which is what the JavaScript spells out.
+        assert_eq!(digest32(""), 0);
+        assert_eq!(digest32("a"), 97);
+        assert_eq!(digest32("abc"), 96354);
+
+        // The one input that hashes to `i32::MIN`, where `Math.abs` widens and
+        // Rust's `abs` would overflow.
+        assert_eq!(digest32("polygenelubricants"), 2_147_483_648);
+
+        assert_eq!(base36(0), "0");
+        assert_eq!(base36(35), "z");
+        assert_eq!(base36(36), "10");
+        assert_eq!(base36(u32::MAX), "1z141z3");
     }
 
     /// Only the layout is asserted here. Which data home it hangs off is
