@@ -99,16 +99,41 @@ const SCRIPT: &str = "script.json";
 /// The teammate's name, as the spec's own line spells it.
 const MEMBER: &str = "w1";
 
-/// The one thing the lead says right after a spawn (D-7): the prompt is on
-/// disk in cleartext at a named path. A typed `/team spawn` raises no dialog,
-/// so this arrives on the status bar — which is the point of watching for it
-/// here rather than for something shorter, since the path is the half a
-/// smaller notice would have dropped.
-const CLEARTEXT_NOTICE: &str = "cleartext at";
+/// The head of what the lead says right after a spawn — `<name> started`,
+/// with `\u{b7} prompt persisted in cleartext at <path>` following it.
+///
+/// Only the head, and that is a finding rather than a shortcut: since the
+/// teammates' column took 70% of the width, a lead at the remaining 30% has
+/// no room on one status line for the path, and this suite watches a **real**
+/// terminal. That the sentence itself is whole is pinned where a width can be
+/// chosen — `ganja-tui`'s own
+/// `a_team_spawn_is_reaped_by_the_tick_and_says_where_the_prompt_landed`.
+/// What is asserted here is the half only a real lead can show: that it says
+/// anything at all.
+const SPAWN_NOTICE: &str = "started";
 
 /// What the composer draws when nothing else owns the screen — the sign that
 /// the next line typed reaches the composer rather than an overlay.
 const COMPOSER: &str = "Ask ganja something";
+
+/// What the private server is born **without**, so nothing a pane inherits
+/// can be this developer's rather than the fixture's (§10.10). One spelling,
+/// because both tests here start a server and a list that drifted between
+/// them would be two different experiments wearing one name.
+const WITHHELD: &[&str] = &[
+    "GANJA_CONFIG_HOME",
+    "GANJA_CONFIG",
+    "GANJA_MODEL",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "TMUX",
+    "TMUX_PANE",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+];
 
 /// The shared project/data pair, plus this suite's own reads of the team the
 /// lead keeps under its config home.
@@ -374,23 +399,7 @@ impl Drop for Held {
 fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved() {
     require_tmux();
     let fixture = Fixture::new();
-    let tmux = Tmux::start(
-        &fixture.server_env(),
-        &[
-            "GANJA_CONFIG_HOME",
-            "GANJA_CONFIG",
-            "GANJA_MODEL",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "XDG_CACHE_HOME",
-            "XDG_RUNTIME_DIR",
-            "TMUX",
-            "TMUX_PANE",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY",
-        ],
-    );
+    let tmux = Tmux::start(&fixture.server_env(), WITHHELD);
 
     // The lead, in a pane of its own in the project directory — so tmux
     // gives it `TMUX` and `TMUX_PANE` itself. Two words on purpose (`env` and
@@ -409,7 +418,9 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
     // team file names the member on its pane.
     tmux.type_line(&lead, &format!("/team spawn {MEMBER} --backend ganja"));
     wait_for("the spawn to be reported", &tmux, &lead, || {
-        tmux.screen(&lead).contains(CLEARTEXT_NOTICE).then_some(())
+        tmux.screen(&lead)
+            .contains(&format!("{MEMBER} {SPAWN_NOTICE}"))
+            .then_some(())
     });
     let member = wait_for("the member record", &tmux, &lead, || {
         fixture
@@ -594,6 +605,72 @@ fn seed_record(spec: &SpawnSpec) {
                 cwd: spec.cwd.display().to_string(),
             },
         )],
+    );
+}
+
+/// Types one `/team spawn <name> --backend ganja` at the lead and answers with
+/// the pane the team file names for it, once it names one.
+///
+/// The record rather than the screen, because the notice a spawn leaves on
+/// the bar stays there: waiting for it again would be reading the *previous*
+/// teammate's line and calling it this one's.
+fn spawn_pane(tmux: &Tmux, lead: &str, fixture: &Fixture, name: &str) -> String {
+    tmux.type_line(lead, &format!("/team spawn {name} --backend ganja"));
+
+    wait_for(&format!("the record for {name}"), tmux, lead, || {
+        fixture
+            .team_file()?
+            .member(name)
+            .cloned()
+            .filter(|member| member.tmux_pane_id.starts_with('%'))
+    })
+    .tmux_pane_id
+}
+
+/// **The teammates' column.** One column beside the lead, filling downwards.
+///
+/// Two teammates rather than one, because the second is the half worth
+/// proving: opening a column is what a lone `-h` does by itself, while putting
+/// the *next* pane inside that column is what a wrong target would get wrong
+/// silently — by opening a second column, which still looks like a split.
+///
+/// Asserted on tmux's geometry rather than on the argv, for the reason the
+/// suite above gives: a test that repeated the flags would agree with a
+/// mistake as readily as with the layout.
+#[test]
+fn teammates_stack_in_one_column_beside_the_lead() {
+    require_tmux();
+    let fixture = Fixture::new();
+    let tmux = Tmux::start(&fixture.server_env(), WITHHELD);
+    let lead = tmux.split(
+        fixture.homes.project(),
+        &fixture.lead_env(),
+        &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
+    );
+    wait_for("the lead to draw its composer", &tmux, &lead, || {
+        tmux.screen(&lead).contains(COMPOSER).then_some(())
+    });
+
+    let first = spawn_pane(&tmux, &lead, &fixture, "w1");
+    let second = spawn_pane(&tmux, &lead, &fixture, "w2");
+
+    let (lead_left, lead_top) = tmux.corner(&lead);
+    let (first_left, first_top) = tmux.corner(&first);
+    let (second_left, second_top) = tmux.corner(&second);
+
+    assert!(
+        first_left > lead_left,
+        "the column opens right of the lead: lead at column {lead_left}, w1 at {first_left}"
+    );
+    assert_eq!(first_top, lead_top, "and level with it: | lead | w1 |");
+    assert_eq!(
+        second_left, first_left,
+        "the second teammate joins that column instead of opening another: \
+         w1 at column {first_left}, w2 at {second_left}"
+    );
+    assert!(
+        second_top > first_top,
+        "and stacks under the first: w1 at row {first_top}, w2 at {second_top}"
     );
 }
 

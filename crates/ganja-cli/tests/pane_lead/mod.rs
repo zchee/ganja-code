@@ -113,7 +113,12 @@ impl Lead {
         removed.extend_from_slice(withheld);
         let server = PrivateServer::start_in(
             homes.project(),
-            (160, 48),
+            // Wide enough that the lead is still comfortable **after** a
+            // teammate takes its column: since 2026-08-20 a spawn leaves the
+            // lead 30% of the window, and at 160 that is 48 columns — where
+            // the permission dialog's own option line wraps and a screen
+            // assertion reads half of it. 240 leaves the lead 72.
+            (240, 48),
             &[&window],
             &removed,
             &[

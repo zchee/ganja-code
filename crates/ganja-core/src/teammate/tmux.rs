@@ -95,6 +95,17 @@ pub const BINARY: &str = "tmux";
 /// spelled by the same code. Why the second half is a pid is in the module doc.
 pub const PANE_FORMAT: &str = "#{pane_id} #{pane_pid}";
 
+/// What a listing reads to place a pane: its id and its top-left corner.
+const CORNER_FORMAT: &str = "#{pane_id} #{pane_left} #{pane_top}";
+
+/// How much of the width the teammates' column takes when the first one opens
+/// it (user directive, 2026-08-20): `| lead 30% | teammates 70% |`.
+///
+/// tmux's `-l` sizes the **new** pane, so this is the teammates' share and the
+/// lead keeps what is left — which reads backwards from the layout and is why
+/// it is a named constant rather than a literal in the argv.
+const TEAMMATE_SHARE: &str = "70%";
+
 /// Whether this process is running inside a tmux pane.
 ///
 /// Reads the environment on every call rather than once: a lead started outside
@@ -144,6 +155,33 @@ pub struct Launch<'a> {
     pub environment: &'a [OsString],
     /// The program and its arguments, executed directly — no shell.
     pub argv: &'a [OsString],
+    /// Where on the screen the new pane goes.
+    pub placement: Placement,
+}
+
+/// Where a teammate's pane goes: one column of teammates beside the lead,
+/// filling downwards.
+///
+/// ```text
+/// +--------+------------+
+/// |        |     w1     |
+/// |  lead  +------------+
+/// |        |     w2     |
+/// +--------+------------+
+/// ```
+///
+/// Which of the two a spawn gets is read off tmux's own geometry rather than
+/// remembered ([`Server::column_bottom`]), for the reason
+/// [`crate::teammate::reaper`] gives about panes generally: what is on the
+/// screen is the truth, and a pane this build opened may have been closed by
+/// the person whose screen it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// The first teammate: a column of its own, split off the lead and
+    /// taking 70% of the width.
+    Beside,
+    /// A later one, stacked under the pane named — the column's bottom.
+    Under(String),
 }
 
 /// What [`Server::kill`] found when it went to end a pane.
@@ -276,11 +314,11 @@ impl Server {
     /// pane they were in: a teammate's window opening is not a reason to move
     /// their cursor into it.
     ///
-    /// `-h` puts the teammate **beside** the lead rather than under it (user
-    /// directive, 2026-08-20), which is worth stating because tmux's flag
-    /// reads backwards: `-h` is the horizontal *arrangement*, `| lead | w1 |`,
-    /// not a horizontal dividing line. It is also not the default, so leaving
-    /// it off — as this did until now — is choosing the stacked layout by
+    /// `launch.placement` decides where it lands, and the direction flags are
+    /// worth a sentence because tmux's read backwards: `-h` is the horizontal
+    /// *arrangement*, `| lead | w1 |`, not a horizontal dividing line, and
+    /// `-v` is the stacked one. Neither is the default, so leaving both off —
+    /// as this did until 2026-08-20 — was choosing the stacked layout by
     /// omission rather than declining to choose.
     ///
     /// # Errors
@@ -305,18 +343,28 @@ impl Server {
             launch.argv
         );
         let mut command = self.command();
+        command.arg("split-window");
+        match &launch.placement {
+            Placement::Beside => {
+                command.arg("-h").arg("-l").arg(TEAMMATE_SHARE);
+                if let Some(pane) = &self.pane {
+                    command.arg("-t").arg(pane);
+                }
+            }
+            // No size: halving the pane being divided is what tmux does
+            // unasked, and evening the column out afterwards would take a
+            // layout command that would move the lead as well.
+            Placement::Under(pane) => {
+                command.arg("-v").arg("-t").arg(pane);
+            }
+        }
         command
-            .arg("split-window")
-            .arg("-h")
             .arg("-d")
             .arg("-P")
             .arg("-F")
             .arg(PANE_FORMAT)
             .arg("-c")
             .arg(launch.cwd);
-        if let Some(pane) = &self.pane {
-            command.arg("-t").arg(pane);
-        }
         for pair in launch.environment {
             command.arg("-e").arg(pair);
         }
@@ -402,6 +450,67 @@ impl Server {
                 })
             })
             .collect()
+    }
+
+    /// The bottom-most pane in the column beside this one, or [`None`] when
+    /// there is no such column yet.
+    ///
+    /// "Beside" is decided on geometry — a pane whose left edge is right of
+    /// this one's — rather than on which panes this build opened, and that is
+    /// two decisions rather than one. A teammate's pane may hold a `claude`
+    /// process rather than a `ganja` one, so no argv predicate covers both
+    /// backends the way [`crate::teammate::reaper`]'s covers the one it reaps.
+    /// And a column is a thing on a screen, which makes the screen the honest
+    /// place to ask whether there is one.
+    ///
+    /// Scoped to the lead's own window by targeting its pane, so a person who
+    /// switched windows since the last spawn still gets the column they have
+    /// rather than the one in front of them.
+    ///
+    /// # Errors
+    ///
+    /// The client failing to start, tmux refusing, or a listing line that is
+    /// not the id-and-corner triple this asks for.
+    pub async fn column_bottom(&self) -> Result<Option<String>, TmuxError> {
+        let Some(lead) = &self.pane else {
+            return Ok(None);
+        };
+        let mut command = self.command();
+        command
+            .arg("list-panes")
+            .arg("-t")
+            .arg(lead)
+            .arg("-F")
+            .arg(CORNER_FORMAT);
+        let output = run("list-panes", command).await?;
+
+        let corners: Vec<Corner> = output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                parse_corner(line.trim()).ok_or_else(|| TmuxError::Unreadable {
+                    command: "list-panes",
+                    output: line.to_owned(),
+                })
+            })
+            .collect::<Result<_, TmuxError>>()?;
+
+        // A window that does not list the pane this process is in is a
+        // session that moved under us. Nothing here can place against it, so
+        // the caller opens a column as though it were the first to.
+        let Some(edge) = corners
+            .iter()
+            .find(|corner| &corner.id == lead)
+            .map(|corner| corner.left)
+        else {
+            return Ok(None);
+        };
+
+        Ok(corners
+            .into_iter()
+            .filter(|corner| corner.left > edge)
+            .max_by_key(|corner| corner.top)
+            .map(|corner| corner.id))
     }
 
     /// Ends `pane` if, and only if, it is still the pane that was recorded.
@@ -583,6 +692,31 @@ fn socket_of(raw: &OsStr) -> PathBuf {
 }
 
 /// One line of [`PANE_FORMAT`] as a [`Pane`], or [`None`] for anything else.
+/// A pane's id and where its top-left corner sits, as [`CORNER_FORMAT`] reads
+/// it.
+struct Corner {
+    id: String,
+    left: u16,
+    top: u16,
+}
+
+/// One [`CORNER_FORMAT`] line, or [`None`] when it is not one.
+fn parse_corner(line: &str) -> Option<Corner> {
+    let mut words = line.split(' ');
+    let id = words.next()?;
+    let left = words.next()?.parse().ok()?;
+    let top = words.next()?.parse().ok()?;
+    if !id.starts_with('%') || words.next().is_some() {
+        return None;
+    }
+
+    Some(Corner {
+        id: id.to_owned(),
+        left,
+        top,
+    })
+}
+
 fn parse_pane(line: &str) -> Option<Pane> {
     let (id, birth) = line.split_once(' ')?;
     if !id.starts_with('%') || birth.is_empty() || !birth.bytes().all(|byte| byte.is_ascii_digit())

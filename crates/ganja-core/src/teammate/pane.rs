@@ -101,7 +101,7 @@ use crate::{
     teammate::{
         Delivery, Handle, SpawnSpec, TeammateBackend, Unsupported,
         reaper::Pane,
-        tmux::{self, Killed, Launch, Server, TmuxError},
+        tmux::{self, Killed, Launch, Placement, Server, TmuxError},
     },
 };
 
@@ -228,6 +228,10 @@ pub fn identity_flags(spec: &SpawnSpec) -> Vec<OsString> {
 /// caller's own) and holding [`SHELL`] idle, answered with the identifying
 /// pair — then the cosmetic title, warned about rather than failed on.
 ///
+/// Where the pane lands is [`Placement`]'s, chosen here off
+/// [`Server::column_bottom`] so both backends stack into one column rather
+/// than each opening a column of its own.
+///
 /// `refused_as` is the surface a failing split is refused as, and `whose` the
 /// word the log knows the teammate by.
 pub(super) async fn split_idle_shell(
@@ -238,11 +242,30 @@ pub(super) async fn split_idle_shell(
     whose: &'static str,
 ) -> Result<Pane, Unsupported> {
     let shell: Vec<OsString> = SHELL.iter().map(OsString::from).collect();
+    // Where it goes is read off the screen, not remembered: the first
+    // teammate opens a column beside the lead and every later one stacks
+    // under that column's bottom. A listing that fails is not a spawn that
+    // fails — where a pane sits is cosmetic — so it falls back to the
+    // placement a lead with no column would have given it anyway.
+    let placement = match server.column_bottom().await {
+        Ok(Some(bottom)) => Placement::Under(bottom),
+        Ok(None) => Placement::Beside,
+        Err(error) => {
+            tracing::warn!(
+                teammate = spec.name.as_str(),
+                %error,
+                "the teammates' column could not be read; opening beside the lead"
+            );
+
+            Placement::Beside
+        }
+    };
     let pane = server
         .split(Launch {
             cwd: &spec.cwd,
             environment,
             argv: &shell,
+            placement,
         })
         .await
         .map_err(|error| Unsupported {
