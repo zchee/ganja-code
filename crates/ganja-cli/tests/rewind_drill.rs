@@ -60,7 +60,7 @@ use expectrl::{
 use serde_json::json;
 use tempfile::TempDir;
 
-const EXIT_DEADLINE: Duration = Duration::from_secs(10);
+const EXIT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// How long the absence assertion waits before calling the picker absent.
 ///

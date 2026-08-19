@@ -55,7 +55,7 @@ Anything that runs a login redirects `GANJA_AUTH_ISSUER` at an endpoint of its o
 
 ### Common Patterns
 
-Timeouts are generous on purpose (`EXIT_DEADLINE` is 10s): a timeout here should mean "hung", not "slow machine". Assert on stored files wherever a filesystem assertion is available; reach for the screen only when nothing else can observe the behavior.
+Timeouts are generous on purpose (`EXIT_DEADLINE` is 30s — raised from 10s after a loaded 3-core macOS runner outran it, 2026-08-19): a timeout here should mean "hung", not "slow machine". Assert on stored files wherever a filesystem assertion is available; reach for the screen only when nothing else can observe the behavior.
 
 `run.rs` needs no screen at all, which is what makes it the cheapest place to assert on a real turn: it drives the same engine the pty suite drives, but reads its answers off stdout, off stderr and off the filesystem. Two of its assertions lean on surfaces worth knowing about — `ganja sessions` is the independent witness for which session a run created, and the fallback title a completed turn earns is the first fifty characters of the first prompt, which is the one place a headless run records *what it was asked*.
 

@@ -77,7 +77,7 @@ use tempfile::TempDir;
 
 /// How long the resumed run is given to draw and then to quit. Generous on
 /// purpose: a timeout here should mean "hung", not "slow machine".
-const EXIT_DEADLINE: Duration = Duration::from_secs(10);
+const EXIT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The escape that opens the alternate screen. The app enables raw mode
 /// before it emits this, so a pty that has seen it holds a process the line

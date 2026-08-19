@@ -41,7 +41,7 @@ use expectrl::{
 use serde_json::json;
 use tempfile::TempDir;
 
-const EXIT_DEADLINE: Duration = Duration::from_secs(10);
+const EXIT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The escape that opens the alternate screen. The app enables raw mode
 /// before it emits this, so a pty that has seen it holds a process the line
