@@ -1816,29 +1816,27 @@ impl App {
 
     /// Runs a typed `/team` line (**D504**).
     ///
-    /// Every arm opens the dialog first, and that is the design rather than a
-    /// convenience: the dialog is where a spawn's notice, a refusal and the
-    /// roster all get said, so a line typed at the composer and a row chosen
-    /// with the arrow keys converge on one surface instead of one of them
-    /// answering into a status bar the next notice overwrites.
+    /// **Only asking for the roster raises the dialog** (user directive,
+    /// 2026-08-20). Every arm used to open it first so that a spawn's notice,
+    /// a refusal and the roster converged on one surface; what that cost was
+    /// an overlay in front of somebody who had just said, in one line and in
+    /// full, exactly what they wanted done — and who is now looking at the
+    /// composer rather than at a list of members.
+    ///
+    /// So the notice goes where that person is looking, and the one thing
+    /// that made the dialog worth raising travels with it: the sentence a
+    /// finished spawn is reported with is [`team::Spawned::notice`]'s, said
+    /// on the status bar when no dialog is open, cleartext path included. A
+    /// refusal reaches [`App::tell_team`], which has always had the same
+    /// fallback. Nothing here needs a dialog to guard a missing team either —
+    /// [`App::spawn_teammate`], [`App::ask_shutdown`] and
+    /// [`App::ask_whole_team_to_stop`] each answer that for themselves.
     async fn run_team_line(&mut self, line: command::Team) {
-        self.open_team();
-        // A refusal is about the **words**, and a session leading no team
-        // mistyped them just the same. Said before the roster is consulted, so
-        // `/team wat` is answered with what is wrong with it rather than with
-        // an unrelated fact about this session — `tell_team` falls back to the
-        // status bar when there is no dialog to say it on.
-        if let command::Team::Refused(refusal) = line {
-            self.tell_team(refusal);
-
-            return;
-        }
-        if self.team_dialog.is_none() {
-            // No team, and `open_team` has already said so.
-            return;
-        }
         match line {
-            command::Team::List => {}
+            // The roster **is** what the dialog is for, so asking for it is
+            // the one line that raises one. `open_team` says so itself when
+            // this session leads no team.
+            command::Team::List => self.open_team(),
             command::Team::Spawn(spawn) => {
                 self.spawn_teammate(team::SpawnRequest::new(&spawn));
             }
@@ -1849,8 +1847,10 @@ impl App {
                 Some(member) => self.ask_shutdown(&member).await,
                 None => self.ask_whole_team_to_stop().await,
             },
-            // Answered above, before the team was ever consulted.
-            command::Team::Refused(_) => {}
+            // A refusal is about the **words**, and a session leading no team
+            // mistyped them just the same — so it is answered without the
+            // roster being consulted at all.
+            command::Team::Refused(refusal) => self.tell_team(refusal),
         }
     }
 
@@ -1990,12 +1990,24 @@ impl App {
                 // it has to say out loud — the prompt is on disk in cleartext —
                 // belongs beside the row it is about rather than in a bar the
                 // next notice overwrites.
-                let prompt_path = self.team_prompt_path();
-                match (&mut self.team_dialog, prompt_path) {
-                    (Some(dialog), Some(prompt_path)) => {
-                        dialog.spawned(&team::Spawned { name, prompt_path });
+                match self.team_prompt_path() {
+                    Some(prompt_path) => {
+                        // The component owns the sentence either way, because
+                        // the fact it has to say out loud — the prompt is on
+                        // disk in cleartext — is not the dialog's to keep: a
+                        // line typed at the composer raises none, and this is
+                        // where that person is looking instead.
+                        let spawned = team::Spawned { name, prompt_path };
+                        match &mut self.team_dialog {
+                            Some(dialog) => dialog.spawned(&spawned),
+                            None => self.status.set_notice(Some(spawned.notice())),
+                        }
                     }
-                    _ => self
+                    // A team that answered a spawn and then had nowhere to
+                    // keep its documents is not a thing that happens; the
+                    // shorter line is here so it could not be a panic if it
+                    // did.
+                    None => self
                         .status
                         .set_notice(Some(format!("teammate {name} started"))),
                 }
@@ -16443,34 +16455,46 @@ mod tests {
         assert!(lead.recent.is_empty());
     }
 
-    /// **D504's two doors, one dialog.** The palette's data-free action and a
-    /// typed `/team` line both end up at the same surface, which is what keeps
-    /// a refusal, a roster and a spawn's notice in one place.
+    /// **Asking for the roster is what raises the dialog**, and nothing else
+    /// is. The palette's data-free action asks for it and gets it; a line that
+    /// asked for something else is answered where the person who typed it is
+    /// looking, with no overlay in front of the composer they are still at.
     #[tokio::test]
-    async fn both_team_doors_open_the_one_dialog_and_a_refused_line_says_so_on_it() {
+    async fn only_asking_for_the_roster_raises_the_team_dialog() {
         let directory = temporary();
         let (mut app, _registry, _events) = leading(&directory).await;
 
         app.run_command(command::Action::Team).await;
-        assert!(app.team_dialog.is_some(), "the palette's door");
+        assert!(
+            app.team_dialog.is_some(),
+            "the palette's door asks for the roster"
+        );
         app.team_dialog = None;
 
         app.editor.set_text("/team wat");
         app.submit().await;
 
-        let dialog = app.team_dialog.as_ref().expect("the typed door");
-        assert!(dialog.is_busy() || !dialog.is_typing());
+        assert!(
+            app.team_dialog.is_none(),
+            "a line that did not ask for the roster does not raise it"
+        );
         let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");
         let screen = screen(&terminal);
         assert!(
             screen.contains("wat"),
-            "a refused subcommand is named on the dialog that opened for it:\n{screen}"
+            "and the refusal is still said, on the bar instead:\n{screen}"
         );
         assert!(
             app.editor.prompt().is_none(),
             "and the line it came from is out of the composer"
         );
+
+        // `/team list` is the typed spelling of the very same ask, so it
+        // raises the dialog exactly as the palette's row does.
+        app.editor.set_text("/team list");
+        app.submit().await;
+        assert!(app.team_dialog.is_some(), "the typed door onto the roster");
     }
 
     /// A session with nowhere to keep a team says so once, rather than opening
@@ -16760,10 +16784,14 @@ mod tests {
     }
 
     /// The in-process reap (**D504**): the tick reaps the finished spawn, the
-    /// dialog hears the outcome with Resolution 4's cleartext-path sentence,
-    /// and the bar counts the teammate.
+    /// outcome is said with Resolution 4's cleartext-path sentence, and the
+    /// bar counts the teammate.
+    ///
+    /// Driven through the **typed** door, which raises no dialog, so what this
+    /// pins is the half of that change that had to hold: the sentence is the
+    /// same sentence, and the status bar carries the path the dialog used to.
     #[tokio::test]
-    async fn a_team_spawn_is_reaped_by_the_tick_and_lands_on_the_dialog() {
+    async fn a_team_spawn_is_reaped_by_the_tick_and_says_where_the_prompt_landed() {
         let directory = temporary();
         let (mut app, registry, _events) = leading(&directory).await;
         registry_holds_w1(&mut app, &registry).await;

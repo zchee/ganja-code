@@ -198,6 +198,27 @@ pub struct Spawned {
     pub prompt_path: String,
 }
 
+impl Spawned {
+    /// The one sentence a finished spawn is reported with, wherever it is
+    /// reported.
+    ///
+    /// A method rather than a `format!` at each caller because the dialog is
+    /// not always open to hold it: a `/team spawn` line typed at the composer
+    /// raises no dialog at all and reports into the status bar instead. The
+    /// half of this sentence that must survive that is the second one —
+    /// Resolution 4's disclosure that the prompt is on disk in cleartext — and
+    /// the way to keep a shorter spelling from dropping it is for there to be
+    /// no shorter spelling.
+    #[must_use]
+    pub fn notice(&self) -> String {
+        format!(
+            "{name} started \u{b7} {CLEARTEXT} {path}",
+            name = self.name,
+            path = self.prompt_path,
+        )
+    }
+}
+
 /// What Enter resolved to — everything the app has to act on. Movement and
 /// step changes stay inside the dialog.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -344,11 +365,7 @@ impl Team {
     /// sentence of the caller's own: this is where that sentence is written,
     /// so it is written once.
     pub fn spawned(&mut self, outcome: &Spawned) {
-        self.notice = Some(format!(
-            "{name} started \u{b7} {CLEARTEXT} {path}",
-            name = outcome.name,
-            path = outcome.prompt_path,
-        ));
+        self.notice = Some(outcome.notice());
     }
 
     /// Says whether a spawn the app started is still running, which is what

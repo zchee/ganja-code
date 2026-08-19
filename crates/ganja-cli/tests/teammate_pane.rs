@@ -24,8 +24,9 @@
 //!
 //! # What is asserted, in order
 //!
-//! 1. The lead's dialog answers the spawn (the D-7 cleartext notice), and the
-//!    team file names `w1` on a `tmuxPaneId` with `backendType: "tmux"`.
+//! 1. The lead answers the spawn on its status bar (the D-7 cleartext
+//!    notice — a typed line raises no dialog), and the team file names `w1`
+//!    on a `tmuxPaneId` with `backendType: "tmux"`.
 //! 2. The private server lists that pane, and the process in it is `ganja` —
 //!    the launch line was typed into the idle shell and `exec`'d.
 //! 3. The member took the seeded task as its first turn: the fake reply is
@@ -98,13 +99,15 @@ const SCRIPT: &str = "script.json";
 /// The teammate's name, as the spec's own line spells it.
 const MEMBER: &str = "w1";
 
-/// The one thing the lead's dialog says right after a spawn (D-7): the
-/// prompt is on disk in cleartext at a named path. Its presence on screen is
-/// the spawn having gone through the dialog.
+/// The one thing the lead says right after a spawn (D-7): the prompt is on
+/// disk in cleartext at a named path. A typed `/team spawn` raises no dialog,
+/// so this arrives on the status bar — which is the point of watching for it
+/// here rather than for something shorter, since the path is the half a
+/// smaller notice would have dropped.
 const CLEARTEXT_NOTICE: &str = "cleartext at";
 
 /// What the composer draws when nothing else owns the screen — the sign that
-/// the dialog is closed and the next line typed reaches the composer.
+/// the next line typed reaches the composer rather than an overlay.
 const COMPOSER: &str = "Ask ganja something";
 
 /// The shared project/data pair, plus this suite's own reads of the team the
@@ -379,10 +382,11 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
 
-    // 1. The spec's own line, typed. The dialog opens and says where the
-    // prompt went; the team file names the member on its pane.
+    // 1. The spec's own line, typed. The bar says where the prompt went — no
+    // dialog is raised for a line that already said what it wanted — and the
+    // team file names the member on its pane.
     tmux.type_line(&lead, &format!("/team spawn {MEMBER} --backend ganja"));
-    wait_for("the dialog to report the spawn", &tmux, &lead, || {
+    wait_for("the spawn to be reported", &tmux, &lead, || {
         tmux.screen(&lead).contains(CLEARTEXT_NOTICE).then_some(())
     });
     let member = wait_for("the member record", &tmux, &lead, || {
@@ -450,13 +454,12 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
 
     // 4. The handshake through the lead: it asks, the member approves and
     // leaves, and reading the approval is what kills the pane and retires the
-    // record. Nothing here touches tmux to make that so. The dialog is closed
-    // first — it owns every key while it is up — and the composer is waited
-    // for before the next line is typed.
-    tmux.key(&lead, "Escape");
-    wait_for("the dialog to close", &tmux, &lead, || {
-        let screen = tmux.screen(&lead);
-        (!screen.contains(CLEARTEXT_NOTICE) && screen.contains(COMPOSER)).then_some(())
+    // record. Nothing here touches tmux to make that so. Nothing is dismissed
+    // first: a typed `/team spawn` raises no dialog, so the composer never
+    // stopped owning the keyboard — it is waited for all the same, because
+    // typing the next line into a frame that has not caught up is a race.
+    wait_for("the composer to take the next line", &tmux, &lead, || {
+        tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.type_line(&lead, &format!("/team shutdown {MEMBER}"));
     wait_for(
@@ -491,8 +494,7 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
 
     // The lead leaves cleanly, with nothing left to shut down: its pane
     // closes, and only the server's own sleeping pane remains.
-    tmux.key(&lead, "Escape");
-    wait_for("the dialog to close again", &tmux, &lead, || {
+    wait_for("the composer to come back", &tmux, &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.key(&lead, "C-c");
