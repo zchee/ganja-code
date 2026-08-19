@@ -149,6 +149,8 @@ use crate::{
 
 /// A teammate that is a real `claude` pane (P25b).
 pub mod claude;
+/// A teammate that is a headless `codex exec` child (**D508**, **D509**).
+pub mod codex;
 /// The §6.2 pass the lead makes over its own inbox.
 pub mod lead_inbox;
 /// What a process that *is* a member holds: its postbox, and its asks on their
@@ -498,13 +500,24 @@ pub const fn posture_line(backend: MemberBackend) -> Option<&'static str> {
     }
 }
 
-/// codex's pinned posture, until W3's turn-free `codex sandbox` measurement
-/// replaces the unmeasured half.
+/// codex's pinned posture, **measured** — the strongest floor of the three.
 ///
-/// `read-only` is one of `-s`'s three documented values and the strongest
-/// floor of the three CLIs; what it lets the child *read*, and whether it
-/// reaches the network, are questions this build has not yet asked.
-const POSTURE_CODEX: &str = "sandbox=read-only: writes denied; read scope and network unmeasured";
+/// Every clause was taken rather than inferred, and by two instruments that
+/// agree: `codex sandbox` ran a write, a read and a network attempt under
+/// exactly the composed override, and the vendor's own persisted rollout for a
+/// probe turn recorded the same profile — `file_system: restricted` with one
+/// `root`/`read` entry, `network: restricted`.
+///
+/// Writes are denied everywhere, the child's own cwd included. Reads are the
+/// whole disk, which is why the sentence says what that *enables*: a bound
+/// stated without its consequence is a bound nobody can price, and whole-disk
+/// read is the ability to read a credential. The network clause is the one
+/// that separates this floor from grok's — there, whole-disk read sits beside
+/// an unbounded network and the pair is exfiltration; here the second half is
+/// closed, so the sentence ends by saying so rather than by borrowing grok's
+/// words.
+const POSTURE_CODEX: &str = "sandbox=read-only: writes denied, whole-disk read, network denied — may read any file you \
+     can, including credentials, but has no network to send them over";
 
 /// agy's pinned posture, and the arm that **no shipped build reaches**.
 ///

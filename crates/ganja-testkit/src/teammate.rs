@@ -123,7 +123,26 @@ fn backends_with(
         // Production's own stubs rather than test doubles: a test that asked
         // one of these to spawn must read the refusal a real build gives, not
         // a fixture's opinion of it.
-        codex: Arc::new(Unbuilt::new(MemberBackend::Codex)),
+        // The **real** codex backend, searching a `PATH` with nothing on it.
+        //
+        // Not `Unbuilt`, because that sentence — "this build cannot run a
+        // teammate on another vendor's CLI yet" — stopped being true of codex
+        // when W3 landed, and a fixture that asserts a retired refusal is a
+        // fixture asserting a lie. Not this process's own `PATH` either: a
+        // spawn there would find the developer's real `codex`, take a real
+        // turn and spend somebody's quota from inside the ordinary test suite.
+        //
+        // An empty search path is neither of those lies. It is exactly
+        // production on a machine where the CLI is not installed, which is what
+        // a fixture lead should be: the spawn is refused by naming the binary.
+        // A suite that wants a codex child that answers points the backend at a
+        // fake one, the way `shim_support` does.
+        codex: Arc::new(
+            ganja_core::teammate::shim::ShimBackend::new(Arc::new(
+                ganja_core::teammate::codex::Codex::new(),
+            ))
+            .searching(std::ffi::OsString::new()),
+        ),
         agy: Arc::new(Unbuilt::new(MemberBackend::Agy)),
         grok: Arc::new(Unbuilt::new(MemberBackend::Grok)),
     }
@@ -443,5 +462,22 @@ mod tests {
         let file = team_file(&root, &team).expect("the seeded file is on disk");
         assert!(file.member("w1").is_some(), "{file:?}");
         assert_eq!(teammates_recorded(&root, &team), vec!["w1".to_owned()]);
+    }
+
+    /// The fixture's codex backend resolves no binary at all.
+    ///
+    /// The B1 hardening: this fixture is safe because an empty search path
+    /// resolves nothing, which is a property of `shim::resolve`'s
+    /// empty-and-relative component filter rather than of anything written
+    /// here. If that filter ever stops dropping the empty component, the
+    /// fixture lead would quietly find the developer's real `codex` and start
+    /// spending somebody's quota from inside an ordinary test run — a failure
+    /// whose only symptom is a slow suite. So it breaks loudly here instead.
+    #[test]
+    fn the_fixture_codex_backend_resolves_no_binary_at_all() {
+        assert!(
+            ganja_core::teammate::shim::resolve(&std::ffi::OsString::new(), "codex").is_none(),
+            "an empty search path must resolve nothing, or the fixture lead spawns a real codex"
+        );
     }
 }

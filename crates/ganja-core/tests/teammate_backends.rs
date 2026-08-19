@@ -167,17 +167,41 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
 /// which is the P25a shape on purpose: the name and the posture are settled a
 /// wave before the child that runs them.
 ///
-/// The refusal is one sentence for all three, because what is asserted at this
-/// stage is exactly that they refuse identically — a name that parsed and a
-/// door that spawned anyway would be W1 shipping behavior its own wave has
-/// not measured.
+/// The refusal is one sentence for the two whose waves have not landed, because
+/// what is asserted at this stage is exactly that they refuse identically — a
+/// name that parsed and a door that spawned anyway would be W1 shipping
+/// behavior its own wave has not measured.
+///
+/// **codex is no longer among them.** W3 landed its backend, so the sentence
+/// this test pins retired for that one name, and the arm below asserts the
+/// difference rather than deleting the coverage: a codex spawn is now refused
+/// by the *real* backend, for the real reason this fixture's lead is a machine
+/// with no `codex` installed. W4 and W5 shrink this loop the same way, and W5
+/// is what removes [`REFUSED_UNTIL_P27`] with the last of it.
 #[tokio::test]
 async fn a_shim_backend_is_named_and_gated_and_refuses_until_its_wave_lands() {
     let home = ganja_testkit::temp_dir();
     let (root, team, registry, door) = team(home.path());
     let caller = caller(home.path());
 
-    for name in ["codex", "agy", "grok"] {
+    // The wave that has landed: refused by the backend that exists, naming the
+    // binary rather than the plan.
+    let built = door
+        .start(spawn("w1", Some("codex")), &caller, &AllowSpawn)
+        .await
+        .expect_err("this fixture's lead has no codex on its PATH");
+    assert!(
+        built.reason.contains("codex"),
+        "the refusal names the binary: {}",
+        built.reason
+    );
+    assert!(
+        !built.reason.contains(REFUSED_UNTIL_P27),
+        "and no longer says the child is unbuilt, because it is built: {}",
+        built.reason
+    );
+
+    for name in ["agy", "grok"] {
         // Through the real door, because the claim is about the whole chain
         // and not about the stub: the name parses, the gate approves, the
         // backend is reached, and *it* is what refuses.
@@ -236,9 +260,17 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
         assert_eq!(posture_line(backend), None, "{}", backend_name(backend));
     }
 
+    // codex's sentence is **measured** as of W3, and this is the regression
+    // pin rather than the measurement: the assertion that it equals what its
+    // probe actually recorded compares against the recording itself, in
+    // `teammate_shim_codex.rs`. Both matter — one keeps the sentence honest,
+    // the other keeps it from drifting.
     assert_eq!(
         posture_line(MemberBackend::Codex),
-        Some("sandbox=read-only: writes denied; read scope and network unmeasured")
+        Some(
+            "sandbox=read-only: writes denied, whole-disk read, network denied — may read any \
+             file you can, including credentials, but has no network to send them over"
+        )
     );
     assert_eq!(
         posture_line(MemberBackend::Agy),

@@ -467,7 +467,8 @@ impl SpawnAsker for Spawn {
 /// sits in each slot is the engine's to decide — this build's are
 /// [`crate::teammate::InProcess`], [`crate::teammate::pane::GanjaPane`] and
 /// [`crate::teammate::claude::ClaudePane`], and only the first of the three
-/// holds anything of the host's; the three shim backends hold
+/// holds anything of the host's. Of the three shim slots, `codex` holds a real
+/// [`crate::teammate::shim::ShimBackend`] as of W3; `agy` and `grok` still hold
 /// [`crate::teammate::Unbuilt`] until their own waves land.
 #[derive(Debug)]
 pub struct Backends {

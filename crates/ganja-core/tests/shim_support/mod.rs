@@ -417,6 +417,167 @@ pub fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// A fake `codex`, shaped like the real one (**W3**).
+///
+/// Distinct from [`FakeCli`] in the one way that matters: it is driven by the
+/// **real** [`ganja_core::teammate::codex::Codex`] driver, so it cannot be told
+/// where to log through a flag of its own — the real argv carries codex's flags
+/// and nothing else. The log path and the behaviour are therefore baked into
+/// the script at install time, which is the same trick under a different roof:
+/// a fixture written per test into a directory of its own.
+///
+/// It answers two doors, because the driver knocks on two: `codex login status`
+/// for the spawn pre-check, and `codex exec [resume <id>]` for a turn.
+#[derive(Debug)]
+pub struct FakeCodex {
+    directory: tempfile::TempDir,
+    /// Where everything it was handed is appended.
+    pub log: PathBuf,
+}
+
+impl FakeCodex {
+    /// A fake that is logged in and behaves as `mode` says.
+    pub fn install(mode: Mode) -> Self {
+        Self::write(mode.word())
+    }
+
+    /// A fake whose `login status` answers non-zero — **AC-10**'s other arm.
+    pub fn logged_out() -> Self {
+        Self::write("logged-out")
+    }
+
+    fn write(mode: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::Builder::new()
+            .prefix("fake-codex-")
+            .tempdir()
+            .expect("a directory for the fake codex");
+        let log = directory.path().join("received.log");
+        std::fs::write(&log, "").expect("the fake codex log");
+        let path = directory.path().join("codex");
+        std::fs::write(
+            &path,
+            CODEX
+                .replace("@LOG@", &log.display().to_string())
+                .replace("@MODE@", mode),
+        )
+        .expect("the fake codex script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the fake codex is executable");
+
+        Self { directory, log }
+    }
+
+    /// The search path a [`ShimBackend`] is pointed at, and the child's `PATH`.
+    pub fn path(&self) -> OsString {
+        OsString::from(format!("{}:/usr/bin:/bin", self.directory.path().display()))
+    }
+
+    /// Everything it has been handed so far, one record per line.
+    pub fn received(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The records of one kind — `argv`, `env` or `stdin`.
+    pub fn records(&self, kind: &str) -> Vec<String> {
+        let prefix = format!("{kind}:");
+        self.received()
+            .into_iter()
+            .filter_map(|line| {
+                line.strip_prefix(&prefix)
+                    .map(std::borrow::ToOwned::to_owned)
+            })
+            .collect()
+    }
+
+    /// The argv records of turns only, with the pre-check's own left out.
+    ///
+    /// `codex login status` is an invocation this fixture records like any
+    /// other, and a posture assertion that counted it would be asserting about
+    /// a command that takes no turn.
+    pub fn turns(&self) -> Vec<String> {
+        self.records("argv")
+            .into_iter()
+            .filter(|argv| !argv.starts_with("login "))
+            .collect()
+    }
+
+    /// Whether anything it ever saw contains `needle`.
+    pub fn ever_saw(&self, needle: &str) -> bool {
+        self.received().iter().any(|line| line.contains(needle))
+    }
+
+    /// Where the script lives, for a test that wants to name it.
+    pub fn directory(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// The fake `codex`.
+///
+/// Prints the JSONL a probed `codex-cli 0.149.0-alpha.1` actually printed —
+/// `thread.started` carrying `thread_id`, `item.completed` wrapping an item
+/// whose own `type` is the discriminator, `turn.completed` with usage — rather
+/// than a shape invented here, which is what makes the parser test and this
+/// fixture agree about the same vendor.
+///
+/// Its thread id is minted from its own pid, so two members' first turns cannot
+/// come back with one id (**AC-19**), and a `resume` echoes the id it was given.
+const CODEX: &str = r#"#!/bin/sh
+log='@LOG@'
+mode='@MODE@'
+args="$*"
+printf 'argv:%s\n' "$args" >> "$log"
+printf 'env:%s\n' "$(env | cut -d= -f1 | sort | tr '\n' ' ')" >> "$log"
+
+if [ "$1" = "login" ]; then
+  if [ "$mode" = "logged-out" ]; then
+    printf 'Not logged in\n' >&2
+    exit 1
+  fi
+  printf 'Logged in using ChatGPT\n'
+  exit 0
+fi
+
+resume=""
+if [ "$1" = "exec" ] && [ "$2" = "resume" ]; then
+  resume="$3"
+fi
+
+prompt=$(cat)
+printf 'stdin:%s\n' "$(printf '%s' "$prompt" | tr '\n' ' ')" >> "$log"
+
+case "$mode" in
+  refuse) printf 'error: codex refuses to start here\n' >&2; exit 1 ;;
+  fail) printf 'error: the fake was not logged in\n' >&2; exit 3 ;;
+  garbage) printf 'this is not the shape any driver reads\n'; exit 0 ;;
+  hang) sleep 300; exit 0 ;;
+esac
+
+if [ -n "$resume" ]; then
+  id="$resume"
+else
+  id="thread-$$"
+fi
+printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
+printf '{"type":"turn.started"}\n'
+printf '{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"thinking is not mail"}}\n'
+case "$args:$prompt" in
+  *'sandbox_mode="read-only"'*WRITE*)
+    printf '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"refused: the sandbox is read-only"}}\n'
+    printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
+    exit 0 ;;
+esac
+printf '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"starting on it"}}\n'
+printf '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"done"}}\n'
+printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
+"#;
+
 /// The per-message fake.
 ///
 /// Records its whole argv, then the prompt file's contents where it was given

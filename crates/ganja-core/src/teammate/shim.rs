@@ -126,14 +126,23 @@ pub const TIMEOUT_KEY: &str = "teammates.shim_turn_timeout";
 /// if it moves the composed flag moves with it.
 pub const AGY_TURN_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 
-/// `codex`'s per-turn deadline, **provisionally**, and the provisionality is
-/// the point.
+/// `codex`'s per-turn deadline, **derived** from W3's own gating probe.
 ///
 /// That vendor bounds no turn — `--max-turns` counts turns, not wall-clock —
-/// so there is no ordering constraint to derive from, only a measurement, and
-/// W3's gating probes are what take it. Until then this is a bound generous
-/// enough that a first substantive turn is unlikely to reach it, chosen so
-/// that being wrong costs a slow teammate rather than a dead one.
+/// so there is no ordering constraint to derive from as `agy`'s
+/// `--print-timeout` gives, only a measurement. The plan's rule is the larger
+/// of fifteen minutes and twice the longest turn the probe recorded. Driven
+/// through this very backend on 2026-08-20 against `codex-cli 0.149.0-alpha.1`,
+/// a first `codex exec` took **37.1s** and its `codex exec resume` **39.1s**,
+/// so twice the longest is 78.3s and the fifteen-minute clause is what ships.
+///
+/// The measurement is what makes the number honest rather than what makes it
+/// large: both probe turns were deliberately trivial — reply with one word,
+/// then try to write one file — so 78.3s is a floor on a real turn and not an
+/// estimate of one, and the 15m clause is doing the work. That is the right way
+/// round for this failure: being generous costs a slow teammate, being tight
+/// costs a working one, and [`TIMEOUT_KEY`] is the single line that moves all
+/// three CLIs when somebody's turns are genuinely longer.
 pub const CODEX_TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// `grok`'s per-turn deadline, provisionally and for [`CODEX_TURN_TIMEOUT`]'s
@@ -244,6 +253,30 @@ pub trait Driver: std::fmt::Debug + Send + Sync + 'static {
 
     /// How a turn's prompt reaches it.
     fn door(&self) -> Door;
+
+    /// Whether this CLI is in a state where a turn could succeed at all,
+    /// asked once at spawn.
+    ///
+    /// Defaulted to yes, because most of what would make a turn fail cannot be
+    /// asked cheaply and a spawn that guessed would be worse than a first turn
+    /// that reports. A driver overrides it only where its vendor offers a
+    /// *cheap* answer — codex's `login status` is the one such door among the
+    /// three — and the alternative it buys is worth naming: without it a member
+    /// spawns, accepts a message, and reports an authentication failure a whole
+    /// turn later, having already told a person it existed.
+    ///
+    /// Runs after [`prepare`], so `launch` carries the resolved binary and the
+    /// enumerated environment: whatever it asks, it asks as the child would.
+    ///
+    /// # Errors
+    ///
+    /// One sentence naming what said no, which becomes the spawn's own
+    /// refusal.
+    async fn ready(&self, launch: &Launch) -> Result<(), String> {
+        let _ = launch;
+
+        Ok(())
+    }
 
     /// The argv after the binary: for [`Shape::PerMessage`] one turn's whole
     /// invocation, for [`Shape::Resident`] the one launch line.
@@ -1031,6 +1064,15 @@ impl crate::teammate::TeammateBackend for ShimBackend {
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
         let launch = prepare(&*self.driver, spec, self.path.as_deref())?;
+        // After `prepare` rather than inside it: the check is a *subprocess*,
+        // and `prepare` is the sync half every backend shares.
+        self.driver
+            .ready(&launch)
+            .await
+            .map_err(|reason| Unsupported {
+                backend: self.driver.backend(),
+                reason,
+            })?;
         match self.driver.shape() {
             Shape::Resident => {
                 // The launch turn carries no text and no session: a resident

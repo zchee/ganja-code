@@ -1,0 +1,54 @@
+# What `-c sandbox_mode="read-only"` actually bounds, measured rather than inferred.
+#
+# This file is the *recording* AC-27 compares the shipped posture sentence
+# against. It exists so that the sentence a person consents to at spawn is
+# checked against a measurement instead of against a second copy of itself:
+# two string literals agreeing proves only that somebody typed carefully.
+#
+# Operator: p27-w3-impl lane (Claude, lead-supervised)
+# Full record: .omc/plans/2026-08-19-foreign-cli-shim-backends.md, "W3 probe record"
+#
+# Binary:  codex-cli 0.149.0-alpha.1
+# Machine: macOS 27.0.0, 2026-08-20
+# Note:    this machine's own ~/.codex config sets sandbox_mode to
+#          danger-full-access, so every denial below is the composed override
+#          winning over the person's own config rather than agreeing with it.
+#
+# Instrument 1 — `codex sandbox -c 'sandbox_mode="read-only"' -- <cmd>`, which
+# runs an arbitrary command under exactly the composed posture. The ladder is
+# recorded beside the answer because a single row cannot tell "read-only denies
+# this" from "codex sandbox denies this whatever you pass": the three rows ARE
+# the responsiveness control, and the read-only row is only evidence because the
+# two above it answer differently under the same instrument.
+#
+#   sandbox_mode          write in cwd     network        read outside project
+#   danger-full-access    permitted        permitted      permitted
+#   workspace-write       permitted        denied         permitted
+#   read-only             DENIED           DENIED         permitted
+#
+#   read outside project: `wc -c < ~/.ssh/known_hosts`         -> 10196, exit 0
+#   read a credential:    `wc -c < $CODEX_HOME/auth.json`      -> 4621,  exit 0
+#   network (DNS):        `curl https://example.com`           -> exit 6, could not resolve
+#   network (literal IP): `curl http://93.184.215.14/`         -> exit 7, could not connect
+#   write in cwd:         `echo p > target/probe.txt`          -> exit 1, Operation not permitted
+#
+# Instrument 2 — the vendor's own persisted rollout for the gating probe pair,
+# which records one `turn_context` per turn. Both the first turn and the
+# resumed turn carried:
+#
+#   "sandbox_policy":{"type":"read-only"}
+#   "approval_policy":"never"
+#   "permission_profile":{"type":"managed",
+#                         "file_system":{"type":"restricted",
+#                                        "entries":[{"path":{"type":"special",
+#                                                            "value":{"kind":"root"}},
+#                                                    "access":"read"}]},
+#                         "network":"restricted"}
+#
+# One readable `root` entry and no writable one is the same fact instrument 1
+# measured behaviourally: whole-disk read, writes denied everywhere.
+#
+# The sentence those two agree on, in D508 Principle 6's shape — what the
+# posture bounds, then what the read it grants *enables*. Everything after
+# "sentence: " on the next line is the assertion.
+sentence: sandbox=read-only: writes denied, whole-disk read, network denied — may read any file you can, including credentials, but has no network to send them over

@@ -1829,13 +1829,23 @@ impl Engine {
                 in_process,
                 pane: Arc::new(teammate::pane::GanjaPane),
                 claude: Arc::new(teammate::claude::ClaudePane),
+                // This slot searches the real `PATH`; a test that reaches it
+                // spawns the developer's own `codex`. Tests spawn shim
+                // teammates through `ganja_testkit::backends` or
+                // `tests/shim_support::lead`, never through `with_teammates`.
+                //
+                // The trap worth naming: a `#[cfg(test)]` guard would not fire
+                // here. Integration tests link this lib as an ordinary
+                // dependency with `cfg(test)` unset, so the guard is this
+                // comment and those two safe doors rather than anything the
+                // compiler checks.
+                codex: Arc::new(teammate::shim::ShimBackend::new(Arc::new(
+                    teammate::codex::Codex::new(),
+                ))),
                 // Named and gated, but not yet runnable: each of these is
                 // replaced by its real backend in its own wave, and until then
                 // a spawn is refused rather than quietly served by another
                 // surface (**D508**).
-                codex: Arc::new(teammate::Unbuilt::new(
-                    crate::protocol::team::MemberBackend::Codex,
-                )),
                 agy: Arc::new(teammate::Unbuilt::new(
                     crate::protocol::team::MemberBackend::Agy,
                 )),
