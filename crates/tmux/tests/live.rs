@@ -47,12 +47,6 @@ struct KillServerGuard {
     socket: PathBuf,
 }
 
-impl KillServerGuard {
-    fn new(socket: PathBuf) -> Self {
-        Self { socket }
-    }
-}
-
 impl Drop for KillServerGuard {
     fn drop(&mut self) {
         let _ = ProcessCommand::new("tmux")
@@ -83,10 +77,11 @@ impl Scratch {
 
         let test_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let session = format!("ganja-live-{}-{test_id}-{label}", std::process::id());
-        let server_guard = KillServerGuard::new(socket.clone());
 
         Self {
-            _server_guard: server_guard,
+            _server_guard: KillServerGuard {
+                socket: socket.clone(),
+            },
             _temp_dir: temp_dir,
             socket,
             config,

@@ -11,8 +11,8 @@
 //! Go's `NotificationKind` is an open `string` type: any `%token` is a
 //! valid value, known or not. [`NotificationKind`] is a closed enum with the
 //! same twenty known kinds, plus [`NotificationKind::ProtocolError`] — a
-//! kind tmux itself never sends; the client (a later wave) synthesizes it
-//! from `%protocol-error`, a symbolic name it manufactures internally when a
+//! kind tmux itself never sends; [`crate::Client`] synthesizes it from
+//! `%protocol-error`, a symbolic name it manufactures internally when a
 //! [`crate::error::ProtocolError`] surfaces — and a catch-all
 //! [`NotificationKind::Other`] that preserves any unrecognized token
 //! verbatim, so forward compatibility with a newer tmux is a value, not a
@@ -112,9 +112,9 @@ pub enum NotificationKind {
     SessionsChanged,
     /// A `%session-window-changed` notification.
     SessionWindowChanged,
-    /// A `%protocol-error` notification synthesized by the client (a later
-    /// wave) from a parse failure; not a wire token tmux itself sends. See
-    /// the module doc.
+    /// A `%protocol-error` notification synthesized by [`crate::Client`]
+    /// from a parse failure; not a wire token tmux itself sends. See the
+    /// module doc.
     ProtocolError,
     /// Any `%`-token this build does not recognize, preserved verbatim.
     Other(String),

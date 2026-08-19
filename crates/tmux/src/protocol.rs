@@ -80,8 +80,8 @@ struct ResponseBuilder {
 /// Incrementally parses tmux control-mode lines.
 ///
 /// Reusable by a caller that already manages its own tmux control-mode
-/// transport and wants the same response/notification splitting [`crate`]'s
-/// client (a later wave) uses internally.
+/// transport and wants the same response/notification splitting
+/// [`crate::Client`] uses internally.
 #[derive(Debug, Default)]
 pub struct Parser {
     active: Option<ResponseBuilder>,

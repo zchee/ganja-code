@@ -5,8 +5,8 @@
 //! raw bytes, which are not necessarily valid UTF-8 — pane output is not
 //! guaranteed to be text. [`decode_output_value`] recovers the underlying
 //! bytes; the crate-private `text`/`text_lossy` variants (used by the typed
-//! notification accessors in the `notification` module, a later wave)
-//! additionally validate or lossily repair UTF-8.
+//! notification accessors in the `notification` module) additionally
+//! validate or lossily repair UTF-8.
 
 /// An error decoding a tmux `%output`/`%extended-output` escaped value.
 ///
@@ -98,8 +98,7 @@ pub(crate) fn decode_output_value_partial(value: &str) -> (Vec<u8>, Option<Decod
 /// Decodes `value` to terminal bytes and validates the result as UTF-8.
 ///
 /// Spec: pandaemonium pkg/tmux/output.go (`decodeOutputText`); used by the
-/// typed notification accessors in the `notification` module (a later
-/// wave).
+/// typed notification accessors in the `notification` module.
 pub(crate) fn decode_output_text(value: &str) -> Result<String, DecodeError> {
     let bytes = decode_output_value(value)?;
     String::from_utf8(bytes).map_err(|_| DecodeError::NotUtf8)

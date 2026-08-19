@@ -60,8 +60,8 @@ async fn run_real_tmux() -> Result<(), Box<dyn Error>> {
         .with_create_session(true)
         .with_shutdown_timeout(Duration::from_secs(2));
 
-    // This inner scope completes the async close before the outer guard kills
-    // the isolated server and removes its directory, matching Go's LIFO defers.
+    // The guard is dropped only after `run_client` has awaited its close, so
+    // teardown stays ordered the way Go's LIFO defers order it.
     let result = run_client(options, &session).await;
     drop(scratch);
     result

@@ -552,8 +552,8 @@ impl Client {
         not(test),
         expect(
             dead_code,
-            reason = "only this module's #[cfg(test)] tests call it; a \
-                      non-test build of the lib target never does"
+            reason = "only #[cfg(test)] tests call it — this module's and \
+                      `flow`'s; a non-test build of the lib target never does"
         )
     )]
     pub(crate) fn from_duplex(
@@ -1088,7 +1088,7 @@ async fn stderr_drain(source: BoxedRead, shared: Arc<Shared>) {
 
 /// Strips a trailing `\n`, and then a trailing `\r`, from `line`. Ports
 /// Go's `trimLineEnding`.
-fn trim_line_ending(line: &str) -> &str {
+pub(crate) fn trim_line_ending(line: &str) -> &str {
     line.strip_suffix('\n')
         .map_or(line, |rest| rest.strip_suffix('\r').unwrap_or(rest))
 }

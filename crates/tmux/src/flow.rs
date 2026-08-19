@@ -500,9 +500,7 @@ mod tests {
         tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut buf)
             .await
             .unwrap();
-        buf.strip_suffix('\n')
-            .map_or(buf.as_str(), |rest| rest.strip_suffix('\r').unwrap_or(rest))
-            .to_owned()
+        crate::client::trim_line_ending(&buf).to_owned()
     }
 
     async fn answer_command(read: &mut PeerRead, write: &mut PeerWrite, expected: &str) {
@@ -617,6 +615,7 @@ mod tests {
         assert_invalid_command(error, "whole number of seconds");
     }
 
+    // Validated PaneId makes Go's PausePane error case the W1 prefix-rejection test below.
     #[tokio::test]
     async fn pause_pane_renders_pause_state() {
         let Scripted {
@@ -655,7 +654,6 @@ mod tests {
         result.unwrap();
     }
 
-    // Validated PaneId makes Go's PausePane error case the W1 prefix-rejection test below.
     #[tokio::test]
     async fn disable_pane_output_renders_the_off_action() {
         let Scripted {
