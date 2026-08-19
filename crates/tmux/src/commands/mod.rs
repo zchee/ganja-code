@@ -605,4 +605,38 @@ mod tests {
             );
         }
     }
+
+    /// The one-shot surface imports nothing from `control_mode` — the
+    /// quoting quarantine, held by a machine instead of a reviewer.
+    ///
+    /// Doc comments may *name* the boundary (the accepted exception every
+    /// wave carried), so comment lines are stripped before the assertion;
+    /// what remains is code, and code mentioning `control_mode` in any of
+    /// these six files is a crossing. `error.rs` is deliberately outside
+    /// the list: shared vocabulary wraps a control-mode response by the
+    /// architecture's own assignment.
+    #[test]
+    fn the_one_shot_surface_crosses_the_transport_boundary_only_in_prose() {
+        // Built at run time so this test's own source — which the list below
+        // includes — does not carry the token it hunts.
+        let needle = ["control", "_mode"].concat();
+        let surface: &[(&str, &str)] = &[
+            ("server.rs", include_str!("../server.rs")),
+            ("commands/mod.rs", include_str!("mod.rs")),
+            ("commands/panes.rs", include_str!("panes.rs")),
+            ("commands/sessions.rs", include_str!("sessions.rs")),
+            ("commands/buffers_keys.rs", include_str!("buffers_keys.rs")),
+            ("commands/options_misc.rs", include_str!("options_misc.rs")),
+        ];
+        for (name, source) in surface {
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or(line);
+                assert!(
+                    !code.contains(&needle),
+                    "{name}:{} reaches across the transport boundary: {line:?}",
+                    index + 1
+                );
+            }
+        }
+    }
 }
