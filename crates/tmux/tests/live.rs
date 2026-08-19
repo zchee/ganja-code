@@ -17,8 +17,11 @@ use std::{
 
 use tempfile::TempDir;
 use tmux::{
-    Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, Options, PaneId,
-    SubscriptionTarget,
+    PaneId,
+    control_mode::{
+        Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, Options,
+        SubscriptionTarget,
+    },
 };
 use tokio::time::{Instant, sleep, timeout};
 

@@ -10,25 +10,26 @@
 //! in this workspace may depend on it, and it depends on no `ganja-*`
 //! crate, in either direction — CI-asserted, not merely documented.
 //!
-//! [`Client`] owns one persistent `tmux -C` subprocess. Callers send normal
-//! tmux commands through it; the client parses the guarded
-//! `%begin`/`%end`/`%error` response blocks and exposes asynchronous `%`
-//! notifications through a bounded event stream. Command execution is
-//! deliberately serialized: only one command is pending at a time, and
-//! there is no pipelining. If a pending command's future is dropped before
-//! tmux replies, the client is poisoned — a late response can no longer be
-//! safely associated with a future command, which is the Go original's
-//! context-cancellation rule translated into Rust's drop-based
-//! cancellation; see [`Client::exec_raw`]'s doc for the exact rule and a
-//! reconnect example.
+//! [`Client`][control_mode::Client] owns one persistent `tmux -C`
+//! subprocess. Callers send normal tmux commands through it; the client
+//! parses the guarded `%begin`/`%end`/`%error` response blocks and exposes
+//! asynchronous `%` notifications through a bounded event stream. Command
+//! execution is deliberately serialized: only one command is pending at a
+//! time, and there is no pipelining. If a pending command's future is
+//! dropped before tmux replies, the client is poisoned — a late response
+//! can no longer be safely associated with a future command, which is the
+//! Go original's context-cancellation rule translated into Rust's
+//! drop-based cancellation; see
+//! [`Client::exec_raw`][control_mode::Client::exec_raw]'s doc for the exact
+//! rule and a reconnect example.
 //!
 //! ```no_run
 //! # async fn run() -> Result<(), tmux::Error> {
-//! use tmux::{Command, Options};
+//! use tmux::control_mode::{Arg, Client, Command, Options};
 //!
-//! let client = tmux::Client::new(Options::new().with_session_name("work")).await?;
+//! let client = Client::new(Options::new().with_session_name("work")).await?;
 //! let response = client
-//!     .exec(Command::from_static("display-message"), [tmux::Arg::raw("-p")])
+//!     .exec(Command::from_static("display-message"), [Arg::raw("-p")])
 //!     .await?;
 //! println!("{}", response.lines.join("\n"));
 //! client.close().await?;
@@ -44,15 +45,18 @@
 //! `Client` speaks the single `-C` form, communicating with tmux over piped
 //! stdio. The double `-CC` form asks tmux to change terminal attributes and
 //! requires a controlling terminal on current tmux releases; use
-//! [`Parser`] directly if an external PTY-backed transport needs to consume
-//! the extra `\x1bP1000p`/`\x1b\` enter/exit framing `-CC` emits.
+//! [`Parser`][control_mode::Parser] directly if an external PTY-backed
+//! transport needs to consume the extra `\x1bP1000p`/`\x1b\` enter/exit
+//! framing `-CC` emits.
 //!
-//! Every command line is built from a [`Command`] and zero or more
-//! [`Arg`]s, and rendered with [`CommandLine::render`], which applies the
-//! same bare/single/double-quote ladder as the Go original. Asynchronous
+//! Every command line is built from a [`Command`][control_mode::Command] and
+//! zero or more [`Arg`][control_mode::Arg]s, and rendered with
+//! [`CommandLine::render`][control_mode::CommandLine::render], which applies
+//! the same bare/single/double-quote ladder as the Go original. Asynchronous
 //! `%` notifications decode through the `notification` module; pane output
 //! inside `%output`/`%extended-output` frames is tmux's own octal-escaped
-//! encoding, recovered with [`decode_output_value`] or the typed
+//! encoding, recovered with
+//! [`decode_output_value`][control_mode::decode_output_value] or the typed
 //! notification helpers.
 //!
 //! **Divergence**: the Go package gates its real-tmux integration suite
@@ -62,20 +66,12 @@
 //! standing test posture — a green run that skipped everything would be
 //! worthless as a signal.
 
-mod client;
-mod commandline;
-mod error;
-mod flow;
-mod notification;
-mod options;
-mod output;
-mod protocol;
+pub mod control_mode;
+pub mod error;
+pub mod ids;
 
-pub use client::*;
-pub use commandline::*;
-pub use error::*;
-pub use flow::*;
-pub use notification::*;
-pub use options::*;
-pub use output::*;
-pub use protocol::*;
+// Only vocabulary shared across the crate's surfaces is re-exported at the
+// root; a control-mode type is named through `tmux::control_mode::…`, so the
+// root stays a listing of what every surface speaks rather than of one.
+pub use error::Error;
+pub use ids::{InvalidId, PaneId, SessionId, WindowId};

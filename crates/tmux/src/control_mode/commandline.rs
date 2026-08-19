@@ -205,7 +205,7 @@ fn is_bare_arg(value: &str) -> bool {
 /// newlines.
 ///
 /// Spec: pandaemonium pkg/tmux/commandline.go (`validateRawLine`); used by
-/// [`crate::Client::exec_raw`].
+/// [`crate::control_mode::Client::exec_raw`].
 pub(crate) fn validate_raw_line(line: &str) -> Result<(), RenderError> {
     if line.trim().is_empty() {
         return Err(RenderError::new("tmux: command line must not be empty"));

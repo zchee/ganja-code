@@ -11,9 +11,9 @@
 //! Go's `NotificationKind` is an open `string` type: any `%token` is a
 //! valid value, known or not. [`NotificationKind`] is a closed enum with the
 //! same twenty known kinds, plus [`NotificationKind::ProtocolError`] — a
-//! kind tmux itself never sends; [`crate::Client`] synthesizes it from
-//! `%protocol-error`, a symbolic name it manufactures internally when a
-//! [`crate::error::ProtocolError`] surfaces — and a catch-all
+//! kind tmux itself never sends; [`crate::control_mode::Client`] synthesizes
+//! it from `%protocol-error`, a symbolic name it manufactures internally
+//! when a [`crate::error::ProtocolError`] surfaces — and a catch-all
 //! [`NotificationKind::Other`] that preserves any unrecognized token
 //! verbatim, so forward compatibility with a newer tmux is a value, not a
 //! parse failure.
@@ -62,9 +62,9 @@
 use std::time::Duration;
 
 use crate::{
+    control_mode::output::DecodeError,
     error::ProtocolError,
-    flow::{InvalidId, PaneId, SessionId, WindowId},
-    output::DecodeError,
+    ids::{InvalidId, PaneId, SessionId, WindowId},
 };
 
 /// The leading `%name` token of a tmux control-mode notification.
@@ -112,9 +112,9 @@ pub enum NotificationKind {
     SessionsChanged,
     /// A `%session-window-changed` notification.
     SessionWindowChanged,
-    /// A `%protocol-error` notification synthesized by [`crate::Client`]
-    /// from a parse failure; not a wire token tmux itself sends. See the
-    /// module doc.
+    /// A `%protocol-error` notification synthesized by
+    /// [`crate::control_mode::Client`] from a parse failure; not a wire token
+    /// tmux itself sends. See the module doc.
     ProtocolError,
     /// Any `%`-token this build does not recognize, preserved verbatim.
     Other(String),
@@ -496,7 +496,7 @@ impl OutputNotification {
     ///
     /// Returns [`DecodeError`] on a malformed octal escape.
     pub fn bytes(&self) -> Result<Vec<u8>, DecodeError> {
-        crate::output::decode_output_value(&self.value)
+        crate::control_mode::output::decode_output_value(&self.value)
     }
 
     /// Returns the decoded output as UTF-8 text.
@@ -506,14 +506,14 @@ impl OutputNotification {
     /// Returns [`DecodeError`] on a malformed octal escape, or on output
     /// that does not decode to valid UTF-8.
     pub fn text(&self) -> Result<String, DecodeError> {
-        crate::output::decode_output_text(&self.value)
+        crate::control_mode::output::decode_output_text(&self.value)
     }
 
     /// Returns the decoded output as UTF-8 text, replacing invalid
     /// sequences rather than failing.
     #[must_use]
     pub fn text_lossy(&self) -> String {
-        crate::output::decode_output_text_lossy(&self.value)
+        crate::control_mode::output::decode_output_text_lossy(&self.value)
     }
 }
 
@@ -537,7 +537,7 @@ impl ExtendedOutputNotification {
     ///
     /// Returns [`DecodeError`] on a malformed octal escape.
     pub fn bytes(&self) -> Result<Vec<u8>, DecodeError> {
-        crate::output::decode_output_value(&self.value)
+        crate::control_mode::output::decode_output_value(&self.value)
     }
 
     /// Returns the decoded extended output as UTF-8 text.
@@ -547,14 +547,14 @@ impl ExtendedOutputNotification {
     /// Returns [`DecodeError`] on a malformed octal escape, or on output
     /// that does not decode to valid UTF-8.
     pub fn text(&self) -> Result<String, DecodeError> {
-        crate::output::decode_output_text(&self.value)
+        crate::control_mode::output::decode_output_text(&self.value)
     }
 
     /// Returns the decoded extended output as UTF-8 text, replacing invalid
     /// sequences rather than failing.
     #[must_use]
     pub fn text_lossy(&self) -> String {
-        crate::output::decode_output_text_lossy(&self.value)
+        crate::control_mode::output::decode_output_text_lossy(&self.value)
     }
 }
 

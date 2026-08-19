@@ -1,8 +1,8 @@
 //! Spec: pandaemonium `pkg/tmux/options.go`.
 //!
-//! [`Options`] configures a [`crate::Client`] before it starts: the tmux
-//! executable and socket selection, the subprocess environment, which
-//! session the client attaches to or creates, and the three tunables
+//! [`Options`] configures a [`crate::control_mode::Client`] before it starts:
+//! the tmux executable and socket selection, the subprocess environment,
+//! which session the client attaches to or creates, and the three tunables
 //! ([`Options::event_buffer`], [`Options::stderr_line_limit`],
 //! [`Options::shutdown_timeout`]) that bound a running client's resource
 //! use. The zero value is not startable by itself, for the same reason as
@@ -16,10 +16,10 @@
 //! plus chained `with_*` methods that take and return `Self` by value —
 //! this workspace's own builder idiom (see `ganja-core::engine::Engine`'s
 //! `with_*` methods) — with validation happening once, explicitly, in
-//! [`crate::Client::new`] rather than folded into construction. `Options`
-//! itself stays a plain public struct rather than growing a private
-//! constructor, so a caller can also build one with a struct literal plus
-//! `..Options::new()` when a chain reads worse than a literal.
+//! [`crate::control_mode::Client::new`] rather than folded into construction.
+//! `Options` itself stays a plain public struct rather than growing a
+//! private constructor, so a caller can also build one with a struct literal
+//! plus `..Options::new()` when a chain reads worse than a literal.
 //!
 //! # `Env` becomes typed pairs (divergence)
 //!
@@ -49,7 +49,7 @@ const DEFAULT_EVENT_BUFFER: usize = 128;
 const DEFAULT_STDERR_LINE_LIMIT: usize = 100;
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Configures a [`crate::Client`] before it starts.
+/// Configures a [`crate::control_mode::Client`] before it starts.
 ///
 /// See the module doc for how this differs from Go's functional-options
 /// `Option`/`applyOptions` pair.
@@ -79,8 +79,8 @@ impl Options {
     /// Builds an [`Options`] with the package defaults: a 128-entry event
     /// buffer, a 100-line stderr tail, and a five-second shutdown timeout.
     ///
-    /// The result is not yet startable — [`crate::Client::new`] refuses it
-    /// until [`Options::with_initial_command`] or
+    /// The result is not yet startable — [`crate::control_mode::Client::new`]
+    /// refuses it until [`Options::with_initial_command`] or
     /// [`Options::with_session_name`] has been set. See the struct doc.
     #[must_use]
     pub fn new() -> Self {

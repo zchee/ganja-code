@@ -21,7 +21,8 @@
 //! pair) both construct the same [`Client`] shape without a public trait a
 //! downstream crate would otherwise be tempted to implement against. An
 //! external `-CC`/PTY-backed transport still has a first-class entry point:
-//! [`crate::Parser`] directly, exactly as in Go (see the crate doc).
+//! [`crate::control_mode::Parser`] directly, exactly as in Go (see the crate
+//! doc).
 //!
 //! # `Error` is `Clone` (divergence)
 //!
@@ -64,7 +65,7 @@
 //! ```no_run
 //! # async fn run() -> Result<(), tmux::Error> {
 //! use std::time::Duration;
-//! use tmux::{Client, Options};
+//! use tmux::control_mode::{Client, Options};
 //!
 //! let mut client = Client::new(Options::new().with_session_name("work")).await?;
 //! if tokio::time::timeout(Duration::from_secs(2), client.exec_raw("list-panes"))
@@ -100,11 +101,13 @@ use tokio::{
 };
 
 use crate::{
+    control_mode::{
+        flow::DETACH_CLIENT,
+        notification::{Notification, NotificationKind},
+        options::Options,
+        protocol::{Event, Parser, Response},
+    },
     error::Error,
-    flow::DETACH_CLIENT,
-    notification::{Notification, NotificationKind},
-    options::Options,
-    protocol::{Event, Parser, Response},
 };
 
 /// A boxed, type-erased half of a duplex byte stream — see the module doc's
@@ -603,15 +606,17 @@ impl Client {
     /// [`Client::exec_raw`] can return otherwise.
     pub async fn exec(
         &self,
-        command: crate::commandline::Command,
-        args: impl IntoIterator<Item = crate::commandline::Arg>,
+        command: crate::control_mode::commandline::Command,
+        args: impl IntoIterator<Item = crate::control_mode::commandline::Arg>,
     ) -> Result<Response, Error> {
-        self.exec_line(crate::commandline::CommandLine::new(command, args))
-            .await
+        self.exec_line(crate::control_mode::commandline::CommandLine::new(
+            command, args,
+        ))
+        .await
     }
 
-    /// Sends a pre-built [`crate::CommandLine`] and waits for its response
-    /// block. See [`Client::exec`].
+    /// Sends a pre-built [`crate::control_mode::CommandLine`] and waits for
+    /// its response block. See [`Client::exec`].
     ///
     /// # Errors
     ///
@@ -619,7 +624,7 @@ impl Client {
     /// [`Client::exec_raw`] can return otherwise.
     pub async fn exec_line(
         &self,
-        line: crate::commandline::CommandLine,
+        line: crate::control_mode::commandline::CommandLine,
     ) -> Result<Response, Error> {
         let rendered = line.render()?;
         self.exec_raw(&rendered).await
@@ -639,7 +644,7 @@ impl Client {
     /// [`Error::Io`] write failure, or [`Error::Command`] when tmux answers
     /// with a `%error` block.
     pub async fn exec_raw(&self, line: &str) -> Result<Response, Error> {
-        crate::commandline::validate_raw_line(line)?;
+        crate::control_mode::commandline::validate_raw_line(line)?;
 
         let mut guard = self.write.lock().await;
         if let Some(err) = self.shared.closed_error() {
@@ -1098,7 +1103,7 @@ mod tests {
     use futures::StreamExt;
 
     use super::*;
-    use crate::commandline::{Arg, Command};
+    use crate::control_mode::commandline::{Arg, Command};
 
     type PeerRead = tokio::io::ReadHalf<tokio::io::DuplexStream>;
     type PeerWrite = tokio::io::WriteHalf<tokio::io::DuplexStream>;

@@ -30,8 +30,8 @@
 //! active block (see the `mismatched_end_marker_remains_output` test below).
 
 use crate::{
+    control_mode::notification::{self, Notification},
     error::ProtocolError,
-    notification::{self, Notification},
 };
 
 /// A tmux `%begin`, `%end`, or `%error` response marker.
@@ -81,7 +81,7 @@ struct ResponseBuilder {
 ///
 /// Reusable by a caller that already manages its own tmux control-mode
 /// transport and wants the same response/notification splitting
-/// [`crate::Client`] uses internally.
+/// [`crate::control_mode::Client`] uses internally.
 #[derive(Debug, Default)]
 pub struct Parser {
     active: Option<ResponseBuilder>,
@@ -235,7 +235,7 @@ fn same_marker_identity(a: BlockMarker, b: BlockMarker) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notification::NotificationKind;
+    use crate::control_mode::notification::NotificationKind;
 
     fn marker(time: i64, command: i64, flags: i64) -> BlockMarker {
         BlockMarker {

@@ -1,52 +1,35 @@
 //! Spec: pandaemonium `pkg/tmux/flow.go` (the four command constants, the
-//! `ClientFlag`/`SubscriptionTarget` value types) and `pkg/tmux/notification.go`
-//! (`validateSessionID`/`validateWindowID`, consolidated here beside
-//! `validatePaneID` so all three id validators live with the newtypes they
-//! guard).
+//! `ClientFlag`/`SubscriptionTarget` value types, and the `refresh-client`
+//! helpers on `Client`).
 //!
 //! # Wave split
 //!
 //! This module's public surface landed across two waves of the port. **W1**
 //! ported the pure types and validators that need no running `Client`: the
-//! command constants, the [`PaneId`]/[`WindowId`]/[`SessionId`] newtypes,
-//! [`ClientFlag`], [`SubscriptionTarget`], and the two `pub(crate)` fragment
-//! validators. **W3** added the `refresh-client` helper methods on `Client`:
+//! command constants, [`ClientFlag`], [`SubscriptionTarget`], and the two
+//! `pub(crate)` fragment validators — alongside the id newtypes that now
+//! live in [`crate::ids`], since a pane id is vocabulary wider than control
+//! mode. **W3** added the `refresh-client` helper methods on `Client`:
 //! `refresh_client_size`, `set_client_flags`, `set_pause_after`, `pause_pane`,
 //! `continue_pane`, `disable_pane_output`, `enable_pane_output`,
 //! `subscribe_format`, and `unsubscribe_format`. They render the W1 types
 //! into commands and read back a [`Response`].
 //!
-//! # Validated newtypes, not validate-at-use (divergence)
-//!
-//! Go's `PaneID`, `WindowID`, and `SessionID` are unchecked string aliases —
-//! `type PaneID string` — validated only at each call site
-//! (`validatePaneID` is invoked separately by every consumer: `flow.go`'s
-//! `Client` helpers, and `notification.go`'s typed accessors). Rust makes
-//! them **validated newtypes**: [`PaneId::new`], [`WindowId::new`], and
-//! [`SessionId::new`] are the only way to build one, so construction is the
-//! single validation point and every value already in the type system is
-//! guaranteed well-formed thereafter (parse, don't validate). This is why a
-//! [`crate::notification::Notification`]'s raw `%`-fields stay plain
-//! `String`/`Vec<String>` until a typed accessor classifies and validates
-//! them into one of these newtypes exactly once, rather than Go's
-//! re-validate-per-call pattern.
-//!
 //! # Quoting divergence
 //!
-//! Every validator message below mirrors Go's wording with one mechanical
-//! substitution: Go's `%q` verb (Go-escaped double-quoting) becomes Rust's
-//! `{:?}` `Debug` quoting for `&str`. The two escaping rules differ only on
-//! exotic non-printable/non-ASCII input; since this text is a human-readable
-//! error message and never wire data, the substitution is not documented
-//! again at each call site.
+//! Every validator message below substitutes Rust's `{:?}` `Debug` quoting
+//! for Go's `%q` verb, for the reason [`crate::ids`] documents once.
 
 use std::borrow::Cow;
 
 use crate::{
-    client::Client,
-    commandline::{Arg, Command, RenderError},
+    control_mode::{
+        client::Client,
+        commandline::{Arg, Command, RenderError},
+        protocol::Response,
+    },
     error::Error,
-    protocol::Response,
+    ids::PaneId,
 };
 
 /// The tmux `detach-client` command; its alias is `detach`.
@@ -61,129 +44,6 @@ pub const LIST_PANES: Command = Command::from_static("list-panes");
 /// The tmux `refresh-client` command; its alias is `refresh`.
 pub const REFRESH_CLIENT: Command = Command::from_static("refresh-client");
 
-/// A tmux pane id was refused: it did not have the expected prefix followed
-/// by one or more decimal digits.
-///
-/// Shared by [`PaneId`], [`WindowId`], and [`SessionId`], which differ only
-/// in which prefix character and noun they validate against.
-#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
-#[error("{message}")]
-pub struct InvalidId {
-    message: String,
-}
-
-/// Checks that `value` is `prefix` followed by one or more ASCII decimal
-/// digits and nothing else.
-///
-/// Ports the shared shape of Go's `validatePaneID`/`validateWindowID`/
-/// `validateSessionID`: `len(value) < 2 || value[0] != prefix` is one
-/// rejection (too short to hold a prefix and a digit, or the wrong prefix),
-/// and any non-digit rune after the prefix is the other.
-fn validate_prefixed_digits(value: &str, prefix: char, noun: &str) -> Result<(), InvalidId> {
-    let bytes = value.as_bytes();
-    if bytes.len() < 2 || bytes[0] != prefix as u8 {
-        return Err(InvalidId {
-            message: format!("tmux: {noun} {value:?} must have {prefix} prefix"),
-        });
-    }
-    if !value[1..].chars().all(|c| c.is_ascii_digit()) {
-        return Err(InvalidId {
-            message: format!("tmux: {noun} {value:?} must contain decimal digits after {prefix}"),
-        });
-    }
-    Ok(())
-}
-
-/// A stable tmux pane id such as `%0`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PaneId(String);
-
-impl PaneId {
-    /// Validates and wraps a tmux pane id.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidId`] when `value` does not have a `%` prefix
-    /// followed by one or more decimal digits.
-    pub fn new(value: impl Into<String>) -> Result<Self, InvalidId> {
-        let value = value.into();
-        validate_prefixed_digits(&value, '%', "pane ID")?;
-        Ok(Self(value))
-    }
-
-    /// The id's wire text, such as `%0`.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for PaneId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// A stable tmux window id such as `@1`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct WindowId(String);
-
-impl WindowId {
-    /// Validates and wraps a tmux window id.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidId`] when `value` does not have a `@` prefix
-    /// followed by one or more decimal digits.
-    pub fn new(value: impl Into<String>) -> Result<Self, InvalidId> {
-        let value = value.into();
-        validate_prefixed_digits(&value, '@', "window ID")?;
-        Ok(Self(value))
-    }
-
-    /// The id's wire text, such as `@1`.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for WindowId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// A stable tmux session id such as `$2`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SessionId(String);
-
-impl SessionId {
-    /// Validates and wraps a tmux session id.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidId`] when `value` does not have a `$` prefix
-    /// followed by one or more decimal digits.
-    pub fn new(value: impl Into<String>) -> Result<Self, InvalidId> {
-        let value = value.into();
-        validate_prefixed_digits(&value, '$', "session ID")?;
-        Ok(Self(value))
-    }
-
-    /// The id's wire text, such as `$2`.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// A `refresh-client -f` flag value.
 ///
 /// Ports Go's `ClientFlag` open string type. [`ClientFlag::NO_OUTPUT`] and
@@ -192,8 +52,9 @@ impl std::fmt::Display for SessionId {
 /// pause-after=N` composes a flag value at runtime — no closed enum could
 /// represent it — exactly mirroring why Go left `ClientFlag` an open string.
 /// The `Cow<'static, str>` representation and the `const fn` constructor
-/// mirror [`crate::commandline::Command`]'s own shape for the same reason:
-/// both need `const` well-known values alongside runtime-composed ones.
+/// mirror [`crate::control_mode::commandline::Command`]'s own shape for the
+/// same reason: both need `const` well-known values alongside
+/// runtime-composed ones.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClientFlag(Cow<'static, str>);
 
@@ -463,13 +324,13 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::Options;
+    use crate::control_mode::options::Options;
 
     type PeerRead = tokio::io::ReadHalf<tokio::io::DuplexStream>;
     type PeerWrite = tokio::io::WriteHalf<tokio::io::DuplexStream>;
 
     struct Scripted {
-        client: crate::client::Client,
+        client: crate::control_mode::client::Client,
         peer_read: PeerRead,
         peer_write: PeerWrite,
     }
@@ -477,7 +338,7 @@ mod tests {
     fn scripted_client() -> Scripted {
         let options = Options::new().with_session_name("test");
         let (client_end, peer) = tokio::io::duplex(8192);
-        let client = crate::client::Client::from_duplex(&options, client_end, None);
+        let client = crate::control_mode::client::Client::from_duplex(&options, client_end, None);
         let (peer_read, peer_write) = tokio::io::split(peer);
         Scripted {
             client,
@@ -500,7 +361,7 @@ mod tests {
         tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut buf)
             .await
             .unwrap();
-        crate::client::trim_line_ending(&buf).to_owned()
+        crate::control_mode::client::trim_line_ending(&buf).to_owned()
     }
 
     async fn answer_command(read: &mut PeerRead, write: &mut PeerWrite, expected: &str) {
@@ -615,7 +476,8 @@ mod tests {
         assert_invalid_command(error, "whole number of seconds");
     }
 
-    // Validated PaneId makes Go's PausePane error case the W1 prefix-rejection test below.
+    // Validated PaneId makes Go's PausePane error case a prefix-rejection
+    // test on the newtype itself, over in `crate::ids`.
     #[tokio::test]
     async fn pause_pane_renders_pause_state() {
         let Scripted {
@@ -763,55 +625,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_id_without_the_percent_prefix_is_refused() {
-        let err = PaneId::new("1").unwrap_err();
-        assert!(err.to_string().contains("pane ID"));
-    }
-
-    #[test]
-    fn a_pane_id_with_only_the_percent_prefix_is_refused() {
-        let err = PaneId::new("%").unwrap_err();
-        assert!(err.to_string().contains("pane ID"));
-    }
-
-    #[test]
-    fn a_pane_id_with_a_non_digit_after_the_prefix_is_refused() {
-        let err = PaneId::new("%a").unwrap_err();
-        assert!(err.to_string().contains("decimal digits"));
-    }
-
-    #[test]
-    fn a_well_formed_pane_id_round_trips_through_as_str() {
-        let pane = PaneId::new("%12").unwrap();
-        assert_eq!(pane.as_str(), "%12");
-        assert_eq!(pane.to_string(), "%12");
-    }
-
-    #[test]
-    fn a_window_id_without_the_at_prefix_is_refused() {
-        let err = WindowId::new("1").unwrap_err();
-        assert!(err.to_string().contains("window ID"));
-    }
-
-    #[test]
-    fn a_well_formed_window_id_round_trips_through_as_str() {
-        let window = WindowId::new("@3").unwrap();
-        assert_eq!(window.as_str(), "@3");
-    }
-
-    #[test]
-    fn a_session_id_without_the_dollar_prefix_is_refused() {
-        let err = SessionId::new("1").unwrap_err();
-        assert!(err.to_string().contains("session ID"));
-    }
-
-    #[test]
-    fn a_well_formed_session_id_round_trips_through_as_str() {
-        let session = SessionId::new("$4").unwrap();
-        assert_eq!(session.as_str(), "$4");
-    }
-
-    #[test]
     fn an_empty_subscription_name_is_refused() {
         let err = validate_subscription_name("").unwrap_err();
         assert!(err.contains("subscription name"));
@@ -860,6 +673,7 @@ mod tests {
     // itself never tests the bare Go constants either, only the Client
     // helpers that render them (W3), and this wave's contract with Lane A
     // guarantees only `Command::from_static` as a `const fn` — not a
-    // specific accessor to assert wire text through. `use crate::commandline::Command;`
-    // above already makes a mismatch with Lane A's shape a compile error.
+    // specific accessor to assert wire text through. The
+    // `crate::control_mode::commandline::Command` import above already makes a
+    // mismatch with Lane A's shape a compile error.
 }

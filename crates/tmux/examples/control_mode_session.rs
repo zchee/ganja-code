@@ -19,7 +19,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tmux::{Arg, Client, Options};
+use tmux::control_mode::{Arg, Client, Options};
 
 const RUN_REAL_TMUX_TESTS_ENV: &str = "RUN_REAL_TMUX_TESTS";
 const TMUX_EXECUTABLE: &str = "tmux";
@@ -80,7 +80,7 @@ async fn run_client(options: Options, session: &str) -> Result<(), Box<dyn Error
 async fn inspect_session(client: &Client, session: &str) -> Result<(), Box<dyn Error>> {
     let message_response = client
         .exec(
-            tmux::DISPLAY_MESSAGE,
+            tmux::control_mode::DISPLAY_MESSAGE,
             [Arg::raw("-p"), Arg::string("hello from pkg/tmux")],
         )
         .await
@@ -89,7 +89,7 @@ async fn inspect_session(client: &Client, session: &str) -> Result<(), Box<dyn E
 
     let panes_response = client
         .exec(
-            tmux::LIST_PANES,
+            tmux::control_mode::LIST_PANES,
             [
                 Arg::raw("-a"),
                 Arg::raw("-F"),

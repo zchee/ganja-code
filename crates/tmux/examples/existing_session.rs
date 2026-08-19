@@ -13,7 +13,7 @@
 
 use std::{env, error::Error, io, path::PathBuf, time::Duration};
 
-use tmux::{Arg, Client, Options};
+use tmux::control_mode::{Arg, Client, Options};
 
 const SESSION_ENV: &str = "TMUX_RS_SESSION";
 const SOCKET_PATH_ENV: &str = "TMUX_RS_SOCKET_PATH";
@@ -84,7 +84,7 @@ async fn run_existing_session(config: ExistingSessionConfig) -> Result<(), Box<d
 async fn inspect_session(client: &Client, session: &str) -> Result<(), Box<dyn Error>> {
     let session_response = client
         .exec(
-            tmux::DISPLAY_MESSAGE,
+            tmux::control_mode::DISPLAY_MESSAGE,
             [Arg::raw("-p"), Arg::string("#{session_name}")],
         )
         .await
@@ -99,7 +99,7 @@ async fn inspect_session(client: &Client, session: &str) -> Result<(), Box<dyn E
 
     let pane_response = client
         .exec(
-            tmux::DISPLAY_MESSAGE,
+            tmux::control_mode::DISPLAY_MESSAGE,
             [Arg::raw("-p"), Arg::string("#{pane_id}")],
         )
         .await
@@ -111,7 +111,7 @@ async fn inspect_session(client: &Client, session: &str) -> Result<(), Box<dyn E
 
     let panes_response = client
         .exec(
-            tmux::LIST_PANES,
+            tmux::control_mode::LIST_PANES,
             [
                 Arg::raw("-t"),
                 Arg::string(session),

@@ -44,7 +44,7 @@
 
 use std::sync::Arc;
 
-use crate::protocol::Response;
+use crate::control_mode::protocol::Response;
 
 fn command_error_message(line: &str, response: &Response) -> String {
     let output = response.lines.join("\n");
@@ -147,7 +147,8 @@ pub enum Error {
     #[error("tmux: detach-client skipped: write lock held")]
     DetachSkippedWriteLocked,
 
-    /// An [`crate::options::Options`] combination failed validation.
+    /// An [`crate::control_mode::options::Options`] combination failed
+    /// validation.
     ///
     /// Ports the `fmt.Errorf` sites in Go's `Options.validate`; added in W2
     /// since that type does not exist until this wave.
@@ -181,18 +182,19 @@ pub enum Error {
     #[error("tmux: another command is already pending")]
     AlreadyPending,
 
-    /// Rendering a [`crate::CommandLine`] or validating a raw command line
-    /// failed.
+    /// Rendering a [`crate::control_mode::CommandLine`] or validating a raw
+    /// command line failed.
     ///
     /// Ports the `fmt.Errorf` sites `CommandLine.String` and
     /// `ExecRaw`/`validateRawLine` share in Go, folded here into one
-    /// `#[from]` conversion of [`crate::commandline::RenderError`]; added in
-    /// W2 since `Client::exec`/`exec_line`/`exec_raw` are this wave's.
+    /// `#[from]` conversion of
+    /// [`crate::control_mode::commandline::RenderError`]; added in W2 since
+    /// `Client::exec`/`exec_line`/`exec_raw` are this wave's.
     #[error(transparent)]
-    InvalidCommand(#[from] crate::commandline::RenderError),
+    InvalidCommand(#[from] crate::control_mode::commandline::RenderError),
 
-    /// [`crate::Client::new`]'s initial command did not complete
-    /// successfully.
+    /// [`crate::control_mode::Client::new`]'s initial command did not
+    /// complete successfully.
     ///
     /// Ports Go's `fmt.Errorf("tmux: initial command: %w", result.err)` in
     /// `New`; added in W2 since startup does not exist until this wave.
@@ -229,7 +231,7 @@ fn join_close_errors(errors: &[Error]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::BlockMarker;
+    use crate::control_mode::protocol::BlockMarker;
 
     fn marker() -> BlockMarker {
         BlockMarker {
