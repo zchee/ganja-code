@@ -27,7 +27,7 @@ use tmux::{
     Error, PaneId, Server, SessionId, WindowId,
     commands::{
         HasSession, KillPane, KillServer, ListPanes, ListSessions, NewSession, NewWindow,
-        RenameSession, SplitWindow,
+        RenameSession, SetEnvironment, SetOption, ShowEnvironment, ShowOptions, SplitWindow,
     },
     control_mode::{
         Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, Options,
@@ -722,4 +722,83 @@ async fn the_typed_builders_create_rename_and_list_a_real_session() {
         matches!(after, Err(Error::ClientRefused { .. })),
         "a killed server answers nothing: {after:?}"
     );
+}
+
+/// The read shape a real consumer already asks a live server, driven by the
+/// typed builders instead: set a window option, then read it back with the
+/// inherited values included, so that "unset" and "off" can be told apart.
+///
+/// The environment half rides along because it is the same question asked of
+/// a different table — a write this crate spells, and a read that has to
+/// answer with what was written rather than with something adjacent to it.
+#[tokio::test]
+async fn the_option_and_environment_builders_round_trip_on_a_real_server() {
+    let scratch = Scratch::new("options-env");
+    let server = private_server(&scratch);
+    start_private_server(&scratch, &server).await;
+
+    server
+        .run(
+            SetOption::new()
+                .window()
+                .target(scratch.session_name())
+                .option("pane-border-status")
+                .value("top")
+                .args(),
+        )
+        .await
+        .expect("set-option -w should set the session's current window option");
+
+    let read_back = server
+        .run(
+            ShowOptions::new()
+                .window()
+                .quiet()
+                .value_only()
+                .inherited()
+                .target(scratch.session_name())
+                .option("pane-border-status")
+                .args(),
+        )
+        .await
+        .expect("show-options -wqvA should read the option back");
+    assert_eq!(
+        read_back.text().expect("an option value is text").trim(),
+        "top",
+        "the read must answer with what the write set, not with the default"
+    );
+
+    server
+        .run(
+            SetEnvironment::new()
+                .target(scratch.session_name())
+                .variable("GANJA_LIVE_W6")
+                .value("set-by-the-typed-builder")
+                .args(),
+        )
+        .await
+        .expect("set-environment should set the session variable");
+
+    let environment = server
+        .run(
+            ShowEnvironment::new()
+                .target(scratch.session_name())
+                .variable("GANJA_LIVE_W6")
+                .args(),
+        )
+        .await
+        .expect("show-environment should read the session variable back");
+    assert_eq!(
+        environment
+            .text()
+            .expect("an environment listing is text")
+            .trim(),
+        "GANJA_LIVE_W6=set-by-the-typed-builder",
+        "tmux answers one NAME=value line for a named variable"
+    );
+
+    server
+        .run(["kill-server"])
+        .await
+        .expect("kill-server should end the private server");
 }

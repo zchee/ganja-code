@@ -89,6 +89,7 @@
 
 use std::ffi::OsString;
 
+pub mod options_misc;
 pub mod panes;
 pub mod sessions;
 
@@ -96,6 +97,7 @@ pub mod sessions;
 // argued for — but their builders are re-exported here, so a command is named
 // `tmux::commands::SplitWindow` for the same reason a control-mode type is
 // named `tmux::control_mode::Client` rather than through the file it lives in.
+pub use options_misc::*;
 pub use panes::*;
 pub use sessions::*;
 
@@ -371,7 +373,7 @@ pub(crate) use method;
 
 /// The families, in the order [`REGISTRY`] lists them. Each later wave adds
 /// one name here and nothing else.
-const FAMILIES: &[&[Entry]] = &[panes::ENTRIES, sessions::ENTRIES];
+const FAMILIES: &[&[Entry]] = &[panes::ENTRIES, sessions::ENTRIES, options_misc::ENTRIES];
 
 /// How many commands the families hold between them.
 const fn total(families: &[&[Entry]]) -> usize {
@@ -423,9 +425,6 @@ pub const REGISTRY: &[Entry] = &TYPED;
 
 /// Why the buffer, key, prompt and display commands are not here yet.
 const BUFFERS_KEYS: &str = "typed in W5: buffers, keys, the prompt and the display";
-
-/// Why the option, hook, environment and mode commands are not here yet.
-const OPTIONS_MISC: &str = "typed in W6: options, hooks, the environment, the modes and the rest";
 
 /// Every tmux command this crate knows of and has **not** given a builder,
 /// each with the reason.
@@ -540,97 +539,6 @@ pub const EXCLUDED: &[Excluded] = &[
         name: "unbind-key",
         alias: Some("unbind"),
         reason: BUFFERS_KEYS,
-    },
-    // Options, hooks, the environment, the interactive modes, and the rest.
-    Excluded {
-        name: "choose-client",
-        alias: None,
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "choose-tree",
-        alias: None,
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "clock-mode",
-        alias: None,
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "copy-mode",
-        alias: None,
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "customize-mode",
-        alias: None,
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "if-shell",
-        alias: Some("if"),
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "run-shell",
-        alias: Some("run"),
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "set-environment",
-        alias: Some("setenv"),
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "set-hook",
-        alias: None,
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "set-option",
-        alias: Some("set"),
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "set-window-option",
-        alias: Some("setw"),
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "show-environment",
-        alias: Some("showenv"),
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "show-hooks",
-        alias: None,
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "show-options",
-        alias: Some("show"),
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "show-window-options",
-        alias: Some("showw"),
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "source-file",
-        alias: Some("source"),
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "switch-mode",
-        alias: None,
-        reason: OPTIONS_MISC,
-    },
-    Excluded {
-        name: "wait-for",
-        alias: Some("wait"),
-        reason: OPTIONS_MISC,
     },
 ];
 
