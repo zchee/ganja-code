@@ -734,12 +734,6 @@ impl Child {
         self.driver().cli()
     }
 
-    /// Which backend it was spawned as.
-    #[must_use]
-    pub fn backend(&self) -> MemberBackend {
-        self.driver().backend()
-    }
-
     /// How it is driven.
     #[must_use]
     pub fn shape(&self) -> Shape {

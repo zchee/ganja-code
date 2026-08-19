@@ -204,11 +204,6 @@ pub enum Unreadable {
         /// What was wrong with it, for the log.
         reason: &'static str,
     },
-    /// The file could not be read at all.
-    Io {
-        /// What the operating system said.
-        reason: String,
-    },
 }
 
 impl fmt::Display for Unreadable {
@@ -220,7 +215,6 @@ impl fmt::Display for Unreadable {
                 "it is version {token}, which this build does not know"
             ),
             Self::Malformed { reason } => write!(formatter, "it is this version and {reason}"),
-            Self::Io { reason } => write!(formatter, "it could not be read: {reason}"),
         }
     }
 }
@@ -239,7 +233,7 @@ impl Unreadable {
     pub const fn removable(&self) -> bool {
         match self {
             Self::Headerless | Self::Malformed { .. } => true,
-            Self::Version { .. } | Self::Io { .. } => false,
+            Self::Version { .. } => false,
         }
     }
 }
@@ -260,11 +254,12 @@ pub fn temp_path_for(directory: &Path, stem: &str, lead_pid: i32) -> PathBuf {
 
 /// The file-name stem a session's records take.
 ///
-/// The session's own hex prefix where it has one — the same eight digits the
-/// binder's shortest candidate uses, so a person looking at the directory can
-/// pair a `.shims` with a `.sock` at a glance — and a sanitized fallback for
-/// an id that predates UUIDv7. The fallback needs no ceremony because a
-/// `.shims` name is never measured against
+/// The session's first eight hex digits where it has that many — dashes and
+/// any non-hex ignored, case folded, the same eight the binder's shortest
+/// candidate uses, so a person looking at the directory can pair a `.shims`
+/// with a `.sock` at a glance — and a sanitized fallback for an id that
+/// predates UUIDv7. The
+/// fallback needs no ceremony because a `.shims` name is never measured against
 /// [`is_session_stem`](ganja_tool::socket::is_session_stem): what makes two
 /// leads' files distinct is the pid, not the stem.
 #[must_use]
@@ -399,9 +394,11 @@ pub fn render(records: &Records) -> String {
 ///
 /// # Errors
 ///
-/// [`Unreadable`], whose variants are exactly the four retention arms: a
-/// header-less file, a version this build does not own, corruption of a
-/// version it does, and a read that failed.
+/// [`Unreadable`], whose variants are exactly the three retention arms a parse
+/// failure maps to: a header-less file, a version this build does not own, and
+/// corruption of a version it does. A read that failed never reaches here —
+/// [`sweep_file`](crate::teammate::reaper) decides it at its own
+/// `read_to_string` arm.
 pub fn parse(text: &str) -> Result<Records, Unreadable> {
     let mut lines = text.lines();
     let Some(version) = lines.next() else {
@@ -731,12 +728,6 @@ mod tests {
         assert!(
             !Unreadable::Version {
                 token: "ganja-shims-2".to_owned()
-            }
-            .removable()
-        );
-        assert!(
-            !Unreadable::Io {
-                reason: "denied".to_owned()
             }
             .removable()
         );

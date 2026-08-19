@@ -885,7 +885,6 @@ fn sweep_file(path: &Path) -> ShimFile {
                 Unreadable::Headerless => ShimFate::Headerless,
                 Unreadable::Version { .. } => ShimFate::Foreign,
                 Unreadable::Malformed { .. } => ShimFate::Corrupt,
-                Unreadable::Io { .. } => ShimFate::Undeterminable,
             };
             // Logged **before** anything is unlinked, so the account of what
             // happened survives the file it is about.
