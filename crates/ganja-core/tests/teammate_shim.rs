@@ -888,6 +888,69 @@ async fn a_composed_posture_is_something_the_child_acts_on_and_the_lead_reads() 
     registry.shutdown().await;
 }
 
+/// The **ordering** a turn that stopped part-way is owed, asserted as one
+/// sequence because each half is wrong without the others: the session is
+/// stored, the words already said are mailed, and only then is the stop
+/// reported.
+///
+/// The failure each part rules out is different. Dropping the session would
+/// make the next message start a *second* conversation and silently lose
+/// everything said before the stop. Skipping the words would throw away the
+/// half-answer the lead was waiting on. And reporting first would leave the
+/// account of a turn sitting above the turn's own words in the same inbox.
+///
+/// Here rather than in a per-CLI suite because it is the shim core's promise:
+/// what a CLI *says* when it stops is that vendor's business, and the order the
+/// runner does these three things in is this file's.
+#[tokio::test]
+async fn a_turn_that_stopped_part_way_keeps_its_session_mails_its_words_then_reports() {
+    let home = ganja_testkit::temp_dir();
+    let cli = FakeCli::install();
+    let (registry, door) = shim_support::lead(
+        home.path(),
+        home.path(),
+        Arc::new(PerMessage::new(&cli.log, Mode::Stopped)),
+        cli.path(),
+    );
+    let (root, team) = shim_support::team_of(&registry);
+
+    door.start(
+        ganja_testkit::spawn_with_prompt("w1", Some("codex"), TASK),
+        &ganja_testkit::caller(home.path()),
+        &AllowSpawn,
+    )
+    .await
+    .expect("the fake spawns");
+
+    assert!(
+        until(ANSWERS, || lead_mail(&root, &team).len() >= 2).await,
+        "the words and the account both arrive: {:?}",
+        lead_mail(&root, &team)
+    );
+    let mail = lead_mail(&root, &team);
+    assert!(mail[0].contains("half an answer"), "{mail:?}");
+    assert!(mail[1].contains("the fake stopped part-way"), "{mail:?}");
+    assert!(
+        mail[1].contains("ended without completing"),
+        "and the account does not contradict the words above it: {mail:?}"
+    );
+
+    // The session survived, which only the *next* turn can show.
+    send(&root, &team, "w1", "team-lead", "carry on");
+    assert!(
+        until(ANSWERS, || cli.records("argv").len() == 2).await,
+        "{:?}",
+        cli.received()
+    );
+    assert!(
+        cli.records("argv")[1].contains("--resume fake-session-1"),
+        "a stopped turn leaves a conversation to resume: {:?}",
+        cli.records("argv")
+    );
+
+    registry.shutdown().await;
+}
+
 /// The spawn's own ring lines (**AC-17**): what the posture bounds rather than
 /// which flag was passed, the honest rider beside it, and — for grok — what the
 /// composed permission mode actually does. Compared against the table both the

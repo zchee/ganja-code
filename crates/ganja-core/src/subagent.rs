@@ -471,8 +471,9 @@ impl SpawnAsker for Spawn {
 /// `codex` holds a real [`crate::teammate::shim::ShimBackend`] as of W3; `agy`
 /// holds [`crate::teammate::agy::Agy`], which is equally real and refuses
 /// every spawn, because W4's ship test measured that CLI's `--sandbox` as a
-/// bound on its terminal and not on its filesystem; `grok` still holds
-/// [`crate::teammate::Unbuilt`] until its own wave lands.
+/// bound on its terminal and not on its filesystem; and `grok` holds a real
+/// [`crate::teammate::shim::ShimBackend`] as of W5, which is the wave that
+/// left no stub behind.
 #[derive(Debug)]
 pub struct Backends {
     /// The teammate that runs in the lead's own process.

@@ -36,8 +36,9 @@ use ganja_core::{
     protocol::team::MemberBackend,
     provider::FakeProvider,
     teammate::{
-        BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, REFUSED_UNTIL_P27, TeammateBackend,
-        Unbuilt, backend_name, claude::ClaudePane, pane::GanjaPane, parse_backend, posture_line,
+        BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, TeammateBackend, agy::Agy, backend_name,
+        claude::ClaudePane, codex::Codex, grok::Grok, pane::GanjaPane, parse_backend, posture_line,
+        shim::ShimBackend,
     },
     tool::Registry,
 };
@@ -142,17 +143,25 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
     // precisely because a foreign process reads at its own pace and marks a
     // message read when it reads it, not when a turn takes it on.
     //
-    // Asserted against the stub rather than deferred to W3-W5, because
-    // `delivery()` is the trait's answer rather than the child's: a wave that
-    // fills in a child must not be free to change what the lead's queue strip
-    // does.
-    for backend in [
-        MemberBackend::Codex,
-        MemberBackend::Agy,
-        MemberBackend::Grok,
-    ] {
-        let shim = Unbuilt::new(backend);
-
+    // Asserted over the three **real** backends as of W5, which is what the
+    // waves were for: the answer this table pins was settled at W1 against
+    // stubs precisely so that filling in the children could not change what
+    // the lead's queue strip does, and here is the same answer from the
+    // children themselves. agy is among them though it never spawns — its
+    // `delivery()` is the trait's answer rather than the child's, so a
+    // backend that refuses still owes it.
+    let shims: [(MemberBackend, Arc<dyn TeammateBackend>); 3] = [
+        (
+            MemberBackend::Codex,
+            Arc::new(ShimBackend::new(Arc::new(Codex::new()))),
+        ),
+        (MemberBackend::Agy, Arc::new(Agy::new())),
+        (
+            MemberBackend::Grok,
+            Arc::new(ShimBackend::new(Arc::new(Grok::new()))),
+        ),
+    ];
+    for (backend, shim) in shims {
         assert_eq!(shim.backend(), backend);
         assert_eq!(
             shim.delivery(),
@@ -163,60 +172,64 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
     }
 }
 
-/// **AC-1's other half.** A shim backend parses, gates and then *refuses*,
-/// which is the P25a shape on purpose: the name and the posture are settled a
-/// wave before the child that runs them.
+/// **AC-1's other half.** A shim backend parses, gates and *then* answers —
+/// and as of W5 every one of the three answers with something it measured
+/// rather than with a promissory note.
 ///
-/// The refusal is one sentence for the two whose waves have not landed, because
-/// what is asserted at this stage is exactly that they refuse identically — a
-/// name that parsed and a door that spawned anyway would be W1 shipping
-/// behavior its own wave has not measured.
-///
-/// **codex is no longer among them.** W3 landed its backend, so the sentence
-/// this test pins retired for that one name, and the arm below asserts the
-/// difference rather than deleting the coverage: a codex spawn is now refused
-/// by the *real* backend, for the real reason this fixture's lead is a machine
-/// with no `codex` installed. W4 and W5 shrink this loop the same way, and W5
-/// is what removes [`REFUSED_UNTIL_P27`] with the last of it.
+/// The P25a shape this test was written for is finished: `pane` and `claude`
+/// were values that parsed, gated and refused for one wave before their bodies
+/// landed, and W3-W5 did the same for the three CLIs. What the assertion is
+/// about now is that the refusals a person actually meets are the **real
+/// backends'** — the name parses, the gate approves, the backend is reached,
+/// and *it* is what refuses, for a reason that is either this machine's or that
+/// vendor's rather than this build's own not-yet.
 #[tokio::test]
-async fn a_shim_backend_is_named_and_gated_and_refuses_until_its_wave_lands() {
+async fn every_shim_backend_refuses_with_something_it_measured() {
     let home = ganja_testkit::temp_dir();
     let (root, team, registry, door) = team(home.path());
     let caller = caller(home.path());
 
-    // The wave that has landed: refused by the backend that exists, naming the
-    // binary rather than the plan.
-    let built = door
-        .start(spawn("w1", Some("codex")), &caller, &AllowSpawn)
-        .await
-        .expect_err("this fixture's lead has no codex on its PATH");
-    assert!(
-        built.reason.contains("codex"),
-        "the refusal names the binary: {}",
-        built.reason
-    );
-    assert!(
-        !built.reason.contains(REFUSED_UNTIL_P27),
-        "and no longer says the child is unbuilt, because it is built: {}",
-        built.reason
-    );
+    // The two that search a `PATH`: refused by naming the binary, because this
+    // fixture's lead is production on a machine with neither installed.
+    for cli in ["codex", "grok"] {
+        let refused = door
+            .start(spawn("w1", Some(cli)), &caller, &AllowSpawn)
+            .await
+            .expect_err("this fixture's lead has no such binary on its PATH");
 
-    // agy is refused too, but by its **own** measured sentence rather than
-    // by the not-built-yet one: W4's ship test found `--sandbox` bounds agy's
-    // terminal and not its filesystem, so the backend is real and refuses.
-    // Asserted here, at the whole-chain door, because the claim is that the
-    // name still parses and the gate still approves — the refusal is the
-    // backend's, not the parser's.
+        assert!(
+            refused.reason.contains(cli),
+            "the refusal names the binary: {}",
+            refused.reason
+        );
+        assert!(
+            refused
+                .reason
+                .contains(ganja_core::teammate::shim::REFUSED_NO_BINARY),
+            "and says what about it: {}",
+            refused.reason
+        );
+        // The sentence W1 shipped and W5 retired. Nothing may say it again:
+        // there is no unbuilt backend left, so a build claiming one would be
+        // claiming a state it cannot be in.
+        assert!(
+            !refused
+                .reason
+                .contains("cannot run a teammate on another vendor's CLI yet"),
+            "no backend is unbuilt any more: {}",
+            refused.reason
+        );
+    }
+
+    // agy is refused by its **own measured sentence** rather than by anything
+    // about a PATH: W4's ship test found `--sandbox` bounds agy's terminal and
+    // not its filesystem, so the backend is real and refuses before it looks at
+    // anything.
     let refused = door
         .start(spawn("w1", Some("agy")), &caller, &AllowSpawn)
         .await
         .expect_err("agy does not ship in v1");
 
-    assert!(
-        !refused.reason.contains(REFUSED_UNTIL_P27),
-        "agy no longer claims to be unbuilt; it was measured and refused: {}",
-        refused.reason
-    );
     assert!(
         refused
             .reason
@@ -225,30 +238,8 @@ async fn a_shim_backend_is_named_and_gated_and_refuses_until_its_wave_lands() {
         refused.reason
     );
 
-    // Through the real door, because the claim is about the whole chain and
-    // not about the stub: the name parses, the gate approves, the backend is
-    // reached, and *it* is what refuses.
-    let refused = door
-        .start(spawn("w1", Some("grok")), &caller, &AllowSpawn)
-        .await
-        .expect_err("no grok child is built yet");
-
-    assert!(
-        refused.reason.contains(REFUSED_UNTIL_P27),
-        "a refusal says the child is not built yet: {}",
-        refused.reason
-    );
-    assert!(
-        refused
-            .reason
-            .contains("2026-08-19-foreign-cli-shim-backends"),
-        "and where it is coming from: {}",
-        refused.reason
-    );
-
-    // A refused spawn leaves nothing behind: no member on disk and nothing
-    // the registry would have to shut down. The stub's refusal rides the same
-    // unwind a real backend's failed launch does.
+    // A refused spawn leaves nothing behind: no member on disk and nothing the
+    // registry would have to shut down.
     assert!(
         teammates_recorded(&root, &team).is_empty(),
         "a refused spawn records no member"
@@ -295,12 +286,17 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
              file you can, including credentials, but has no network to send them over"
         )
     );
+    // grok's is **measured** as of W5, last clause included: its gating probe
+    // completed a pure-read turn and cancelled a write and a shell turn on the
+    // same conversation. The comparison against the recording itself is in
+    // `teammate_shim_grok.rs`; this is the regression pin.
     assert_eq!(
         posture_line(MemberBackend::Grok),
         Some(
             "sandbox=read-only: writes denied outside ~/.grok and temp, whole-disk read, no \
              network bound (macOS) — may read any file you can, including credentials, and may \
-             send them anywhere; what an unapproved tool ask costs a turn is unmeasured"
+             send them anywhere; reading takes no approval, and a tool request that needs one \
+             ends the turn"
         )
     );
 

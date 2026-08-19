@@ -1,0 +1,164 @@
+# What `--sandbox read-only --permission-mode dontAsk` actually bounds, and what
+# an unapproved tool ask costs a turn — measured rather than inferred.
+#
+# This file is the *recording* AC-27 compares the shipped posture sentence
+# against, and AC-29 derives grok's per-turn deadline from. It exists so that
+# the sentence a person consents to at spawn is checked against a measurement
+# instead of against a second copy of itself: two string literals agreeing
+# proves only that somebody typed carefully.
+#
+# Operator: p27-w5-impl lane (Claude, lead-supervised)
+# Full record: .omc/plans/2026-08-19-foreign-cli-shim-backends.md, "W5 probe record"
+#
+# Binary:  grok 1.0.6 (24c70bc7ffdd) [alpha]
+# Machine: macOS 27.0.0, 2026-08-20
+# Note:    this machine's own ~/.grok/config.toml sets `[ui] yolo = true` and
+#          `permission_mode = "always-approve"`, which is what makes the cancel
+#          rows below evidence about the composed flag rather than agreement
+#          with a default: without `--permission-mode dontAsk` this person's own
+#          config would have auto-approved every one of them.
+# Note:    ~/.grok on this machine is a SYMLINK, and the read-only profile
+#          refuses to start under one ("hook write-deny ensure failed: symlinked
+#          GROK_HOME is not allowed under sandbox write-deny"). Every turn below
+#          therefore ran with HOME pointed at a scratch home whose .grok is a
+#          real directory linking to this person's own config and credential.
+#          HOME is a variable the shim already carries, so nothing about the
+#          shipped enumeration was bent to make this run — and a machine in the
+#          symlinked state gets that vendor's refusal as structured mail, which
+#          is AC-8's fourth arm rather than a gap.
+#
+# ---------------------------------------------------------------------------
+# Instrument 1 — the turn-free ladder. `apply_sandbox` runs at process entry,
+# before the headless branch is computed, so `--prompt-file /nonexistent` reaches
+# the sandbox decision and nothing else: every row below cost zero quota. The
+# ladder IS the responsiveness control — row 2 is what proves rows 1/3/4 are
+# about `--sandbox` rather than about this instrument refusing everything.
+#
+#   row  flags                              outcome
+#   1    --sandbox read-only                rc=1, "could not apply the 'read-only' sandbox
+#                                           profile ... Refusing to start with its protections
+#                                           missing." (cause: symlinked GROK_HOME)
+#   2    (no --sandbox)                     rc=1, "Failed to read '/nonexistent/nope.txt'" —
+#                                           the sandbox was not applied, so the instrument
+#                                           reaches the next stage
+#   3    --sandbox read_only                rc=1, refuses naming **'read_only'** — the typo
+#                                           became a custom profile, exactly as the
+#                                           clap-unvalidated flag predicts
+#   4    --sandbox readonly                 rc=1, refuses naming **'read-only'** — that
+#                                           spelling normalizes to the built-in
+#   5    scratch HOME, --sandbox read-only  rc=1, "Failed to read ..." — the profile applied
+#
+#   Rows 3 and 4 are why the shipped value is pinned as a literal byte string:
+#   `read_only` is not a spelling of the built-in, it is somebody else's profile
+#   name that fails to load and hard-exits the child.
+#
+# ---------------------------------------------------------------------------
+# Instrument 2 — the gating ladder. Three real turns, one conversation, each
+# prompt sent once, composed by the shipped driver and run through the shipped
+# launch. Nothing here was retried.
+#
+#   (a) PURE READ — the ship/no-ship instrument.
+#       prompt:  "Summarize NOTES.txt in your current working directory. Read it first."
+#       argv:    --prompt-file <0600 file> --session-id 01a01bd0-fe91-7e10-bc3d-340339750d61
+#                --sandbox read-only --permission-mode dontAsk
+#                --output-format streaming-messages-json --include-partial-messages
+#       outcome: COMPLETED. exit 0, subtype "success", stop_reason "end_turn",
+#                num_turns 2, and a real summary of the file's contents.
+#       mechanism ran: tool `hashline_read` was called AND reached terminal
+#                status (a `tool_result` for call-4f92d8cf-…-0 came back). A
+#                completion with no terminal read call would have been a probe
+#                failure rather than evidence, and this is the guard that says
+#                which one it was.
+wall-clock: 14.7s
+#
+#   (b) WRITE, on the resume line.
+#       prompt:  "Create a file named PROBE_WROTE.txt in your current working
+#                directory ... reply with exactly WROTE ... or exactly REFUSED"
+#       argv:    --resume 01a01bd0-fe91-7e10-bc3d-340339750d61 --prompt-file <0600 file>
+#                --permission-mode dontAsk --sandbox read-only
+#                --output-format streaming-messages-json --include-partial-messages
+#       outcome: CANCELLED. exit 0, subtype "error_during_execution",
+#                is_error true, errors ["cancelled"], stop_reason "cancelled".
+#                PROBE_WROTE.txt does not exist.
+#       tool named: `write`, opened and never settled.
+#       the cwd was inside the profile's own writable temp set, so the kernel
+#       was deliberately NOT the thing that could stop this: what stopped it is
+#       the permission layer, which is what makes this a measurement of the ask.
+wall-clock: 4.1s
+#
+#   (c) BASH-SHAPED, on the resume line. Separates "the sandbox refused at the
+#       kernel" from "the permission layer raised an ask".
+#       prompt:  "Run the shell command `echo probe-ran` and reply with exactly
+#                what it printed."
+#       outcome: CANCELLED, identically — errors ["cancelled"], stop_reason
+#                "cancelled". tool named: `run_terminal_command`.
+#       So the cancel is the permission layer on both rows, not a kernel denial
+#       wearing two hats.
+wall-clock: 6.8s
+#
+#   And the whole chain, separately, through the shipped runner and mailbox:
+#   a spawn prompt of "Reply with exactly: HELLO" answered HELLO into the lead's
+#   inbox, and a second message answered AGAIN. on the resumed conversation.
+#
+# ---------------------------------------------------------------------------
+# Instrument 3 — the vendor's own event log, which is to grok what the rollout's
+# `turn_context` is to codex: a second witness that agrees with the behaviour.
+# `~/.grok/sandbox-events.jsonl` recorded one line per launch, all ten identical
+# in the fields that matter:
+#
+#   {"event_type":"ProfileApplied","profile":"read-only",
+#    "platform":"macos/seatbelt","enforced":true,"restrict_network":true,
+#    "read_write_paths":["<grok home>","/tmp","/var/tmp","/private/tmp",
+#                        "/private/var/tmp","/private/var/folders","$TMPDIR"]}
+#
+# - `enforced: true` on `macos/seatbelt` is the profile actually being installed
+#   rather than merely selected, on every turn including the resumes.
+# - `read_write_paths` is the write bound MEASURED rather than inferred from a
+#   source clone, and it is exactly what the shipped sentence says: the grok
+#   home plus temp, where temp on macOS includes `/private/var/folders` and
+#   `$TMPDIR`. Nothing else on the disk is writable.
+# - It also proves (b)'s reading: the probe cwd was **inside** that writable
+#   set, so the kernel could not have been what stopped the write.
+#
+# One field is recorded here as an OPEN QUESTION rather than as a measurement,
+# because the honest answer is that it was not measured: `restrict_network:
+# true` appears beside `platform: macos/seatbelt`, while the source read D508(a)
+# rests on says that switch is gated to Linux. What IS known behaviourally is
+# only that the process has egress to the vendor's own API — every turn above
+# reached `cli-chat-proxy.grok.com`, and one reached it far enough to be
+# refused with a 401. Whether an *arbitrary* host is reachable under the applied
+# profile on macOS is unmeasured, and the composed posture cancels any tool that
+# would find out. The shipped sentence therefore keeps its over-disclosing
+# wording — telling a person a teammate may send a credential anywhere when it
+# may not is the safe direction of that error, and the opposite is not.
+#
+# ---------------------------------------------------------------------------
+# Instrument 4 — drift, turn-free. "The sandbox is guaranteed on resume by the
+# vendor's conflict refusal" is a claim worth measuring, because a refusal that
+# never fires and a flag that is ignored look identical from outside. Resuming
+# (a)'s conversation with a *different* profile, verbatim:
+#
+#   error: cannot resume this session under sandbox profile 'strict' — it was
+#   created with 'read-only'. Omit --sandbox to resume with 'read-only', or
+#   start a new session to use 'strict'.
+#
+# The refusal fires, which is only possible if the resume line's `--sandbox` is
+# read and checked against what the conversation was created under.
+#
+# ---------------------------------------------------------------------------
+# What the three answers settle:
+#
+# - The pre-decided consequence is the FIRST one: (a) completes and (b) cancels,
+#   so grok ships as **wedges-with-mail** — an unapproved tool ask ends the turn,
+#   the shim mails the lead a sentence naming the tool, and the member stays
+#   alive for the next message.
+# - `--permission-mode dontAsk` is not inert: against a config that says
+#   always-approve and yolo, the composed launch still took the cancel arm.
+# - `dontAsk` is still NOT wired into the permission engine at 1.0.6: a wired
+#   `DontAsk` would silently *deny* and let the turn continue, and what arrived
+#   was a cancel that ended it. No drift.
+#
+# The sentence those answers add up to, in D508 Principle 6's shape — what the
+# posture bounds, what the read it grants enables, then what an ask costs.
+# Everything after "sentence: " on the next line is the assertion.
+sentence: sandbox=read-only: writes denied outside ~/.grok and temp, whole-disk read, no network bound (macOS) — may read any file you can, including credentials, and may send them anywhere; reading takes no approval, and a tool request that needs one ends the turn

@@ -154,6 +154,8 @@ pub mod agy;
 pub mod claude;
 /// A teammate that is a headless `codex exec` child (**D508**, **D509**).
 pub mod codex;
+/// A teammate that is a headless `grok` child (**D508**, **D509**, **D510**).
+pub mod grok;
 /// The §6.2 pass the lead makes over its own inbox.
 pub mod lead_inbox;
 /// What a process that *is* a member holds: its postbox, and its asks on their
@@ -535,19 +537,29 @@ pub const fn posture_line(backend: MemberBackend) -> Option<&'static str> {
 const POSTURE_CODEX: &str = "sandbox=read-only: writes denied, whole-disk read, network denied — may read any file you \
      can, including credentials, but has no network to send them over";
 
-/// grok's pinned posture, measured except for what a refused tool ask costs.
+/// grok's pinned posture, **measured** — every clause of it, as of W5.
 ///
-/// Long because every clause of it is load-bearing. The write bound is real
-/// but narrow, and "temp" is spelled out because a reader pictures `/tmp` and
-/// on macOS it is also the per-user folder root. The read scope is the whole
-/// disk, which is what makes the second half necessary: a bound stated without
-/// what it *enables* is a bound nobody can price, and whole-disk read plus an
-/// unbounded network is the ability to read a credential and post it
-/// somewhere. The `(macOS)` qualifier belongs to both halves — one Linux-only
-/// switch is why neither holds here.
+/// Long because every clause is load-bearing. The write bound is real but
+/// narrow, and "temp" is spelled out because a reader pictures `/tmp` and on
+/// macOS it is also the per-user folder root. The read scope is the whole disk,
+/// which is what makes the second half necessary: a bound stated without what
+/// it *enables* is a bound nobody can price, and whole-disk read plus an
+/// unbounded network is the ability to read a credential and post it somewhere.
+/// The `(macOS)` qualifier belongs to both halves — one Linux-only switch is
+/// why neither holds here.
+///
+/// The last clause is W5's gating measurement and it is what a person consents
+/// to rather than a detail: a pure-read turn **completed**, with the read tool
+/// call reaching terminal status, and a write turn and a shell turn on the same
+/// conversation each ended `stop_reason: "cancelled"` with the tool named. So a
+/// grok teammate is a read-and-answer teammate that stops mid-answer the moment
+/// it wants anything else — bounded, mailed, and survivable, but not silent
+/// about it. Said in the dialog and the ring because somebody agreeing to a
+/// teammate that may stop mid-answer should be agreeing to that.
 const POSTURE_GROK: &str = "sandbox=read-only: writes denied outside ~/.grok and temp, whole-disk \
      read, no network bound (macOS) — may read any file you can, including credentials, and may \
-     send them anywhere; what an unapproved tool ask costs a turn is unmeasured";
+     send them anywhere; reading takes no approval, and a tool request that needs one ends the \
+     turn";
 
 /// `a`, `b` and `c` — the list a refusal ends with.
 fn spell(names: &[&str]) -> String {
@@ -576,92 +588,6 @@ pub struct Unsupported {
     pub backend: MemberBackend,
     /// Why it could not be had, in the terms whoever asked reads next.
     pub reason: String,
-}
-
-impl Unsupported {
-    /// The refusal a shim backend answers with until its own wave lands.
-    #[must_use]
-    pub fn until_p27(backend: MemberBackend) -> Self {
-        Self {
-            backend,
-            reason: REFUSED_UNTIL_P27.to_owned(),
-        }
-    }
-}
-
-/// Why a shim backend refuses before W3-W5 fill it in.
-///
-/// One sentence for all three, because what is being asserted at this stage is
-/// exactly that the three refuse *identically*: a name that parses and a door
-/// that spawns anyway would be W1 shipping a behavior its own wave has not
-/// measured. Naming the plan rather than a wave, since which wave owes which
-/// CLI is the plan's to say and would be a second place to keep it right.
-///
-/// The sentence says "another vendor's CLI" rather than "a shim", because it
-/// is read by whoever asked for the teammate: *shim* is what this tree calls
-/// the mechanism, not something a person typing `--backend codex` has agreed
-/// to learn.
-pub const REFUSED_UNTIL_P27: &str = "this build cannot run a teammate on another vendor's CLI yet; the backend is named and its \
-     posture is settled, but the child that runs it lands with its own wave of \
-     .omc/plans/2026-08-19-foreign-cli-shim-backends.md";
-
-/// A backend whose name and posture are settled and whose child is not built
-/// yet.
-///
-/// The P25a shape, deliberately: `pane` and `claude` were values that parsed,
-/// gated and refused for one wave before their bodies landed, which is what
-/// let the naming, the record shape and the permission clause be reviewed
-/// against real call sites rather than against a sketch. Short-lived by
-/// construction — each of W3, W4 and W5 replaces one of these with a real
-/// backend, and the last of them takes the type with it.
-///
-/// It carries the backend rather than being three unit structs, because there
-/// is nothing per-CLI to say here: the whole content of this type is "not
-/// yet", and three spellings of that would be three places to forget to
-/// delete.
-#[derive(Clone, Copy, Debug)]
-pub struct Unbuilt {
-    backend: MemberBackend,
-}
-
-impl Unbuilt {
-    /// The stub for `backend`.
-    #[must_use]
-    pub const fn new(backend: MemberBackend) -> Self {
-        Self { backend }
-    }
-}
-
-#[async_trait]
-impl TeammateBackend for Unbuilt {
-    fn backend(&self) -> MemberBackend {
-        self.backend
-    }
-
-    async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
-        Err(Unsupported::until_p27(self.backend))
-    }
-
-    async fn kill(&self, handle: &Handle) {
-        // Nothing this backend made can be here to end: its `spawn` has never
-        // returned a handle. Named rather than ignored, because a handle
-        // arriving here would mean a registry had crossed two backends.
-        tracing::warn!(
-            ?handle,
-            backend = backend_name(self.backend),
-            "an unbuilt backend was asked to end something it did not start"
-        );
-    }
-
-    fn delivery(&self) -> Delivery {
-        // The promise the real shim will keep, settled now because it is the
-        // trait's to decide rather than the child's: a shim reads its own
-        // inbox and takes the message onto a turn in this process, so the
-        // acknowledgement is that read. Answering anything else here would
-        // mean the lead's queue strip behaved differently before and after a
-        // wave that changes nothing about delivery.
-        Delivery::Acknowledged
-    }
 }
 
 /// What a backend can tell the lead about a message it handed over

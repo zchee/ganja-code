@@ -63,9 +63,9 @@ async fn an_agy_spawn_is_refused_by_name_with_the_measured_sentence() {
     // assertion fail, naming the ask it caught —
     // `SpawnAsk { args: { "backend": "agy", "bypass": true, .. } }` — so that
     // dialog is opened and answered before the backend is ever called. It is
-    // left on `AllowSpawn` there because the only assertion this recorder
-    // offers is "nobody was asked", which is the wrong direction for a path
-    // where somebody is.
+    // left on `AllowSpawn` there because that path wants the opposite
+    // assertion, which W5 gave this recorder as `asked()` and asserts on grok's
+    // own bypass arm.
     let spawn_asks = ganja_testkit::RecordedSpawns::default();
 
     let refusal = door
@@ -87,8 +87,10 @@ async fn an_agy_spawn_is_refused_by_name_with_the_measured_sentence() {
         refusal.reason.starts_with("the agy backend is unavailable"),
         "the refusal names the surface before the reason: {refusal:?}"
     );
-    // And it says what was measured rather than that a wave is pending, which
-    // is the difference between this refusal and grok's.
+    // And it says what was measured rather than that a wave is pending. As of
+    // W5 no refusal in this tree says the latter — that sentence retired with
+    // the last stub — so what this pins is that agy's own measurement is the
+    // reason a person is given.
     assert!(refusal.reason.contains("terminal only"), "{refusal:?}");
 
     // A refused spawn leaves nothing behind: no member on disk, and nothing

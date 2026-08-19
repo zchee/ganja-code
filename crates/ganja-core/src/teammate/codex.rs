@@ -412,7 +412,14 @@ impl Driver for Codex {
             );
         }
 
-        Ok(Reply { messages, session })
+        Ok(Reply {
+            messages,
+            session,
+            // This vendor's own failure is a `turn.failed` line, refused above:
+            // there is no shape here where a turn ends with neither an answer
+            // nor a reason, so nothing reaches for the third field.
+            refused: None,
+        })
     }
 }
 

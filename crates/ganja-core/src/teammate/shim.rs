@@ -153,8 +153,24 @@ pub const AGY_TURN_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 /// three CLIs when somebody's turns are genuinely longer.
 pub const CODEX_TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-/// `grok`'s per-turn deadline, provisionally and for [`CODEX_TURN_TIMEOUT`]'s
-/// reason. W5's probes are what replace it.
+/// `grok`'s per-turn deadline, **derived** from W5's own gating probe.
+///
+/// That vendor bounds no turn either — its `--max-turns` counts turns, not
+/// wall-clock — so this is [`CODEX_TURN_TIMEOUT`]'s situation exactly, and the
+/// rule is the same: the larger of fifteen minutes and twice the longest turn
+/// the probe recorded. Composed by the shipped driver and run through the
+/// shipped launch on 2026-08-20 against `grok 1.0.6`, the three ladder turns
+/// took **14.7s** (a pure read that completed), **4.1s** and **6.8s** (a write
+/// and a shell turn, each cancelled on an unapproved tool ask), so twice the
+/// longest is 29.4s and the fifteen-minute clause is what ships.
+///
+/// The measurement is what makes the number honest rather than what makes it
+/// large: all three turns were deliberately trivial, so 29.4s is a floor on a
+/// real turn and not an estimate of one, and the 15m clause is doing the work.
+/// A fourth run — an unauthenticated turn that failed on the network after 30s
+/// — is recorded in the probe file and changes nothing, since twice it is still
+/// a minute. [`TIMEOUT_KEY`] is the single line that moves all three CLIs when
+/// somebody's turns are genuinely longer.
 pub const GROK_TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// How long a failing resident turn waits for the child's own stderr to have
@@ -182,9 +198,9 @@ pub const CARRIED: [&str; 3] = ["HOME", "PATH", "TMPDIR"];
 
 /// Why a shim backend refuses a spawn that asked to bypass its dialogs.
 ///
-/// Names the follow-up rather than the wave, for
-/// [`crate::teammate::REFUSED_UNTIL_P27`]'s reason: which version carries the
-/// permission channel is the plan's to say.
+/// Names the follow-up rather than the wave, because which version carries the
+/// permission channel is the plan's to say and a constant naming a wave would
+/// be a second place to keep that right.
 pub const REFUSED_BYPASS: &str = "a teammate on another vendor's CLI runs at one pinned posture and asks nobody, so there is \
      no dialog for --bypass to skip and no escalation door to open; what bypass would map to is \
      recorded in D508(b) and lands with the permission channel that can carry it";
@@ -292,6 +308,14 @@ pub trait Driver: std::fmt::Debug + Send + Sync + 'static {
     /// Pure, so a composed line is a thing a test can hold in its hand — and
     /// so the posture assertions are over a value rather than over a running
     /// process.
+    ///
+    /// **One driver departs from that, bounded and deliberately**:
+    /// [`crate::teammate::grok::Grok`] mints a fresh session UUID on a *first*
+    /// turn, because that vendor's door is choose-then-resume rather than
+    /// observe-then-resume. It is called exactly once per turn, so one call is
+    /// one conversation, and the minted id is written back through
+    /// [`Reply::session`] like any observed one — the runner still owns the
+    /// per-member state. That module's header carries the whole argument.
     fn argv(&self, turn: &Turn<'_>) -> Vec<OsString>;
 
     /// One turn's NDJSON line for a [`Shape::Resident`] child.
@@ -352,6 +376,24 @@ pub struct Reply {
     /// The CLI's own conversation id, when this turn revealed one. Recorded so
     /// the next turn resumes rather than starting a second conversation.
     pub session: Option<String>,
+    /// Why the turn ended without an answer, in the **CLI's** own account,
+    /// when it ended that way.
+    ///
+    /// The difference from an `Err` out of [`Driver::reply`] is the difference
+    /// between *this build could not read what the child wrote* and *this build
+    /// read it perfectly and the child says it cancelled*, and both halves of
+    /// that difference are load-bearing:
+    ///
+    /// - the lead is told the second thing rather than the first, because a
+    ///   refusal that reads as garbage output is a refusal nobody acts on;
+    /// - the **session is still recorded**, because a cancelled turn is a live
+    ///   conversation the CLI created and the next message should resume it
+    ///   rather than starting a second one.
+    ///
+    /// Set beside [`Reply::messages`] rather than instead of them: a turn may
+    /// say something and *then* stop, and those words are still owed to the
+    /// lead.
+    pub refused: Option<String>,
 }
 
 /// What one line of a resident child's stdout was worth.
@@ -363,6 +405,14 @@ pub enum Read {
     Done(Reply),
     /// The CLI said something this build cannot read, which ends the turn as a
     /// structured failure rather than as silence.
+    ///
+    /// **Not the same fact as [`Failure::Refused`]**, and the shared word is
+    /// worth one clause because the two are opposites: this is *this build*
+    /// failing to read the child, and it becomes [`Failure::Unreadable`]; that
+    /// one is *the child* saying it ended the turn without an answer, read
+    /// perfectly. Naming them apart is a doc's job here rather than a rename's,
+    /// since one of the two names is on a resident path this build ships no
+    /// driver for.
     Refused(String),
 }
 
@@ -1552,6 +1602,15 @@ impl ShimRunner {
             self.mail(self.lead_inbox.clone(), message).await;
         }
         self.remember(format!("turn ended on {cli} · {count} message(s) out"));
+        // After the session and after the words: a turn the CLI stopped is
+        // still a conversation to resume, and whatever it managed to say before
+        // stopping is still owed to whoever asked.
+        if let Some(reason) = reply.refused {
+            return Err(Failure::Refused {
+                reason,
+                spoke: count > 0,
+            });
+        }
 
         Ok(())
     }
@@ -1906,11 +1965,19 @@ impl ShimRunner {
         let sentence = failure.sentence(cli);
         self.remember(format!("turn failed on {cli} · {}", failure.summary()));
         tracing::warn!(teammate = self.spec.name.as_str(), cli, "{sentence}");
+        // Branched on what the lead has already read rather than fixed, because
+        // the fixed opening is a lie in exactly one case: a turn that mailed
+        // half an answer and then stopped, where "did not produce an answer"
+        // contradicts the message directly above it in the same inbox.
+        let opening = match failure {
+            Failure::Refused { spoke: true, .. } => "ended without completing",
+            _ => "did not produce an answer",
+        };
         self.mail(
             self.lead_inbox.clone(),
             format!(
-                "{name}'s turn did not produce an answer. {sentence} The teammate is still \
-                 running, and the next message it is sent starts a fresh turn.",
+                "{name}'s turn {opening}. {sentence} The teammate is still running, and the next \
+                 message it is sent starts a fresh turn.",
                 name = self.spec.name.as_str()
             ),
         )
@@ -1954,9 +2021,10 @@ enum Halt {
 
 /// Why a turn ended without an answer.
 ///
-/// Four shapes the lead reads differently — a vendor's own refusal, output this
-/// build cannot parse, a deadline, and something that went wrong on this side
-/// before the CLI was reached — plus the one that is never mailed.
+/// Five shapes the lead reads differently — a non-zero exit, output this build
+/// cannot parse, a turn the CLI itself ended without an answer, a deadline, and
+/// something that went wrong on this side before the CLI was reached — plus the
+/// one that is never mailed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
     /// The CLI exited non-zero.
@@ -1970,6 +2038,26 @@ pub enum Failure {
     Unreadable {
         /// What the driver said was wrong with it.
         reason: String,
+    },
+    /// It ran the turn, ended it without completing, and said why.
+    ///
+    /// Distinct from [`Failure::Unreadable`] because the two are opposite
+    /// facts: that one is this build failing to read a child, and this one is
+    /// this build reading it exactly and reporting what it found. The reason is
+    /// the driver's own complete sentence, so it stands alone rather than being
+    /// wrapped in one of this side's.
+    Refused {
+        /// The CLI's own account, as its driver phrased it.
+        reason: String,
+        /// Whether the turn had already said something to the lead before it
+        /// stopped.
+        ///
+        /// Carried because the mail opens on it: a turn that mailed half an
+        /// answer and *then* stopped has not "produced no answer", and telling
+        /// a lead it did — in the message right after the words themselves —
+        /// is a contradiction a reader has to resolve against the evidence in
+        /// their own inbox.
+        spoke: bool,
     },
     /// The per-turn deadline fired.
     Deadline {
@@ -1995,6 +2083,7 @@ impl Failure {
             Self::Unreadable { reason } => {
                 format!("{cli} finished, and this build could not read what it wrote: {reason}")
             }
+            Self::Refused { reason, .. } => reason.clone(),
             Self::Deadline { after } => format!(
                 "{cli} was still running after {seconds}s, so its process group was ended. Set \
                  {TIMEOUT_KEY} (in seconds) to give it longer.",
@@ -2011,6 +2100,8 @@ impl Failure {
         match self {
             Self::Exit { status, .. } => format!("exited {status}"),
             Self::Unreadable { .. } => "unreadable output".to_owned(),
+            Self::Refused { spoke: false, .. } => "ended without an answer".to_owned(),
+            Self::Refused { spoke: true, .. } => "stopped part-way".to_owned(),
             Self::Deadline { after } => format!("deadline of {}s fired", after.as_secs()),
             Self::Local(_) => "could not be run".to_owned(),
             Self::Cancelled => "cancelled".to_owned(),

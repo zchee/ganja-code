@@ -1,5 +1,5 @@
-//! A CLI that is not one: the fake `codex`/`agy` the shim core is driven
-//! against.
+//! A CLI that is not one: the fakes the shim core and the real drivers are
+//! driven against.
 //!
 //! Not a test binary of its own — cargo does not discover `tests/*/mod.rs` as
 //! one — but a module the shim binaries declare, so the scripts and the drivers
@@ -12,9 +12,16 @@
 //! never a prompt, that its environment is exactly an enumeration, that its
 //! process group dies with it, that a deadline reaches it. A double behind the
 //! [`Driver`] trait would assert none of those, because none of them happen on
-//! this side of a `fork`. So the fakes are two POSIX shell scripts on a
-//! `PATH` the test owns, and everything they were handed is recorded to a file
-//! the test reads back.
+//! this side of a `fork`. So the fakes are POSIX shell scripts on a `PATH` the
+//! test owns, and everything they were handed is recorded to a file the test
+//! reads back.
+//!
+//! Two families live here. The **shape** fakes ([`FakeCli`]) are driven by the
+//! fixture drivers below and assert the shim *mechanism*, one per [`Shape`].
+//! The **per-CLI** fakes ([`FakeCodex`], [`FakeGrok`]) are driven by the real
+//! drivers and assert those vendors' own flags and wire shapes. All of them
+//! share [`Fake`], which is the directory, the log and the five readers over
+//! it.
 //!
 //! # Everything travels in argv, and that is deliberate
 //!
@@ -58,9 +65,9 @@ pub const LOG: &str = "--fake-log";
 /// The flag the fakes take their behaviour on.
 pub const MODE: &str = "--fake-mode";
 
-/// The posture flag the fakes read, standing in for whatever D508(a) pins per
-/// CLI — this module asserts the *mechanism*, and each real posture arrives
-/// with its own wave.
+/// The posture flag the shape fakes read, standing in for whatever D508(a) pins
+/// per CLI — those fakes assert the *mechanism*, and each real posture is
+/// asserted against its own vendor's fake instead.
 pub const SANDBOX: &str = "--sandbox";
 
 /// The value of it that makes the fake refuse a would-write instruction.
@@ -79,6 +86,9 @@ pub enum Mode {
     Hang,
     /// Refuse to start at all, the way a vendor's own startup gate does.
     Refuse,
+    /// Answer part of the turn and then report that it stopped — the shape a
+    /// CLI's own account of an unfinished turn takes.
+    Stopped,
 }
 
 impl Mode {
@@ -90,21 +100,35 @@ impl Mode {
             Self::Garbage => "garbage",
             Self::Hang => "hang",
             Self::Refuse => "refuse",
+            Self::Stopped => "stopped",
         }
     }
 }
 
-/// A `PATH` of a test's own, holding the two fakes.
+/// A `PATH` of a test's own, holding whichever fakes were installed on it, and
+/// the log everything they were handed is appended to.
+///
+/// **One fixture for every fake CLI in this tree** (W5's hoist): the five
+/// accessors below were duplicated verbatim between the shape fixture and the
+/// per-CLI ones, which is one place for the two to drift about what a record
+/// line looks like. What stays per CLI is what actually differs — the script,
+/// and whatever narrow reader that CLI's own argv needs.
 #[derive(Debug)]
-pub struct FakeCli {
+pub struct Fake {
     directory: tempfile::TempDir,
     /// Where everything the fakes were handed is appended.
     pub log: PathBuf,
 }
 
-impl FakeCli {
-    /// Writes both scripts and the log they append to.
-    pub fn install() -> Self {
+impl Fake {
+    /// Writes every `(name, body)` script and the log they append to.
+    ///
+    /// `@LOG@` and `@MODE@` are substituted into each body, which is how a fake
+    /// driven by a **real** driver is told anything at all: the argv is that
+    /// vendor's, so there is no flag of the fixture's own to carry them. A
+    /// script that takes both on flags instead simply has neither marker, and
+    /// the substitution is then a no-op.
+    pub fn install(scripts: &[(&str, &str)], mode: &str) -> Self {
         use std::os::unix::fs::PermissionsExt as _;
 
         let directory = tempfile::Builder::new()
@@ -114,12 +138,14 @@ impl FakeCli {
         let log = directory.path().join("received.log");
         std::fs::write(&log, "").expect("the fake CLI log");
 
-        for (name, body) in [
-            ("fake-per-message", PER_MESSAGE),
-            ("fake-resident", RESIDENT),
-        ] {
+        for (name, body) in scripts {
             let path = directory.path().join(name);
-            std::fs::write(&path, body).expect("a fake CLI script");
+            std::fs::write(
+                &path,
+                body.replace("@LOG@", &log.display().to_string())
+                    .replace("@MODE@", mode),
+            )
+            .expect("a fake CLI script");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
                 .expect("a fake CLI is executable");
         }
@@ -146,7 +172,7 @@ impl FakeCli {
             .collect()
     }
 
-    /// The records of one kind — `argv`, `stdin`, `line` or `file`.
+    /// The records of one kind — `argv`, `env`, `stdin`, `line` or `file`.
     pub fn records(&self, kind: &str) -> Vec<String> {
         let prefix = format!("{kind}:");
         self.received()
@@ -164,9 +190,57 @@ impl FakeCli {
         self.received().iter().any(|line| line.contains(needle))
     }
 
+    /// Everything one invocation was handed, grouped — the `argv:` record that
+    /// opens it and every record written before the next one.
+    ///
+    /// The flat reader above cannot answer "which prompt did *that* command
+    /// line carry", which is exactly what an assertion about two members
+    /// holding conversations of their own has to ask.
+    pub fn grouped(&self) -> Vec<Vec<String>> {
+        let mut invocations: Vec<Vec<String>> = Vec::new();
+        for line in self.received() {
+            if line.starts_with("argv:") {
+                invocations.push(Vec::new());
+            }
+            if let Some(current) = invocations.last_mut() {
+                current.push(line);
+            }
+        }
+
+        invocations
+    }
+
     /// Where the scripts live, for a test that wants to name one.
     pub fn directory(&self) -> &Path {
         self.directory.path()
+    }
+}
+
+/// The two shape fakes — one per [`Shape`] — driven by the fixture drivers
+/// below rather than by any real one.
+#[derive(Debug)]
+pub struct FakeCli(Fake);
+
+impl FakeCli {
+    /// Writes both scripts and the log they append to.
+    pub fn install() -> Self {
+        // Both take their log and their mode on flags of their own, so the mode
+        // passed here reaches neither: it is the fixture drivers that carry it.
+        Self(Fake::install(
+            &[
+                ("fake-per-message", PER_MESSAGE),
+                ("fake-resident", RESIDENT),
+            ],
+            Mode::Answer.word(),
+        ))
+    }
+}
+
+impl std::ops::Deref for FakeCli {
+    type Target = Fake;
+
+    fn deref(&self) -> &Fake {
+        &self.0
     }
 }
 
@@ -325,6 +399,14 @@ fn decode(text: &str) -> Result<Reply, String> {
             .get("session")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        // Optional, and read rather than hard-coded to `None`: *what* a CLI
+        // says when it stops is a per-CLI fact, but the **ordering** the runner
+        // owes such a turn — session stored, words mailed, then the report — is
+        // the shim core's, so the shape fixtures have to be able to produce one.
+        refused: value
+            .get("refused")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
     })
 }
 
@@ -375,9 +457,21 @@ pub fn lead_with_timeout(
         )),
         pane: Arc::new(GanjaPane),
         claude: Arc::new(ClaudePane),
-        codex: Arc::new(ganja_core::teammate::Unbuilt::new(MemberBackend::Codex)),
-        agy: Arc::new(ganja_core::teammate::Unbuilt::new(MemberBackend::Agy)),
-        grok: Arc::new(ganja_core::teammate::Unbuilt::new(MemberBackend::Grok)),
+        // The two slots this lead is *not* pointing at its fake hold the real
+        // backends made harmless the way `ganja_testkit::backends` makes them
+        // harmless, and for the same reason: no stub is truthful any more, and
+        // a real backend on this process's own `PATH` would spawn the
+        // developer's own CLI. The two that search get an empty search path;
+        // agy searches nothing and refuses every spawn already.
+        codex: Arc::new(
+            ShimBackend::new(Arc::new(ganja_core::teammate::codex::Codex::new()))
+                .searching(OsString::new()),
+        ),
+        agy: Arc::new(ganja_core::teammate::agy::Agy::new()),
+        grok: Arc::new(
+            ShimBackend::new(Arc::new(ganja_core::teammate::grok::Grok::new()))
+                .searching(OsString::new()),
+        ),
     };
     match backend {
         MemberBackend::Codex => backends.codex = fake,
@@ -423,98 +517,124 @@ pub fn alive(pid: i32) -> bool {
 /// **real** [`ganja_core::teammate::codex::Codex`] driver, so it cannot be told
 /// where to log through a flag of its own — the real argv carries codex's flags
 /// and nothing else. The log path and the behaviour are therefore baked into
-/// the script at install time, which is the same trick under a different roof:
-/// a fixture written per test into a directory of its own.
+/// the script at install time by [`Fake::install`], which is the same trick
+/// under a different roof: a fixture written per test into a directory of its
+/// own.
 ///
 /// It answers two doors, because the driver knocks on two: `codex login status`
 /// for the spawn pre-check, and `codex exec [resume <id>]` for a turn.
 #[derive(Debug)]
-pub struct FakeCodex {
-    directory: tempfile::TempDir,
-    /// Where everything it was handed is appended.
-    pub log: PathBuf,
-}
+pub struct FakeCodex(Fake);
 
 impl FakeCodex {
     /// A fake that is logged in and behaves as `mode` says.
     pub fn install(mode: Mode) -> Self {
-        Self::write(mode.word())
+        Self(Fake::install(&[("codex", CODEX)], mode.word()))
     }
 
     /// A fake whose `login status` answers non-zero — **AC-10**'s other arm.
+    ///
+    /// A mode word that is not a [`Mode`], because it is not a *shape* of turn
+    /// this fixture family has: it is one CLI's own pre-check answering no.
     pub fn logged_out() -> Self {
-        Self::write("logged-out")
-    }
-
-    fn write(mode: &str) -> Self {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let directory = tempfile::Builder::new()
-            .prefix("fake-codex-")
-            .tempdir()
-            .expect("a directory for the fake codex");
-        let log = directory.path().join("received.log");
-        std::fs::write(&log, "").expect("the fake codex log");
-        let path = directory.path().join("codex");
-        std::fs::write(
-            &path,
-            CODEX
-                .replace("@LOG@", &log.display().to_string())
-                .replace("@MODE@", mode),
-        )
-        .expect("the fake codex script");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("the fake codex is executable");
-
-        Self { directory, log }
-    }
-
-    /// The search path a [`ShimBackend`] is pointed at, and the child's `PATH`.
-    pub fn path(&self) -> OsString {
-        OsString::from(format!("{}:/usr/bin:/bin", self.directory.path().display()))
-    }
-
-    /// Everything it has been handed so far, one record per line.
-    pub fn received(&self) -> Vec<String> {
-        std::fs::read_to_string(&self.log)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
-
-    /// The records of one kind — `argv`, `env` or `stdin`.
-    pub fn records(&self, kind: &str) -> Vec<String> {
-        let prefix = format!("{kind}:");
-        self.received()
-            .into_iter()
-            .filter_map(|line| {
-                line.strip_prefix(&prefix)
-                    .map(std::borrow::ToOwned::to_owned)
-            })
-            .collect()
+        Self(Fake::install(&[("codex", CODEX)], "logged-out"))
     }
 
     /// The argv records of turns only, with the pre-check's own left out.
     ///
     /// `codex login status` is an invocation this fixture records like any
     /// other, and a posture assertion that counted it would be asserting about
-    /// a command that takes no turn.
+    /// a command that takes no turn. codex's alone, because it is the only one
+    /// of these CLIs with a door that is not a turn.
     pub fn turns(&self) -> Vec<String> {
         self.records("argv")
             .into_iter()
             .filter(|argv| !argv.starts_with("login "))
             .collect()
     }
+}
 
-    /// Whether anything it ever saw contains `needle`.
-    pub fn ever_saw(&self, needle: &str) -> bool {
-        self.received().iter().any(|line| line.contains(needle))
+impl std::ops::Deref for FakeCodex {
+    type Target = Fake;
+
+    fn deref(&self) -> &Fake {
+        &self.0
+    }
+}
+
+/// A fake `grok`, shaped like the real one (**W5**).
+///
+/// [`FakeCodex`]'s shape and for its reason — it is driven by the **real**
+/// [`ganja_core::teammate::grok::Grok`] driver, so the argv is that vendor's
+/// and the log path is baked in — differing in the two ways that vendor's
+/// surface differs: the prompt arrives in the file `--prompt-file` names rather
+/// than on stdin, and the answer is NDJSON in the Anthropic Messages wire
+/// format rather than codex's own event stream.
+///
+/// Every invocation of it is a turn: unlike codex there is no pre-check
+/// subcommand to filter out of the argv records, which is why this one has no
+/// `turns()` of its own.
+#[derive(Debug)]
+pub struct FakeGrok(Fake);
+
+impl FakeGrok {
+    /// A fake that behaves as `mode` says.
+    pub fn install(mode: Mode) -> Self {
+        Self(Fake::install(&[("grok", GROK)], mode.word()))
     }
 
-    /// Where the script lives, for a test that wants to name it.
-    pub fn directory(&self) -> &Path {
-        self.directory.path()
+    /// A fake whose turn ends with a tool named and no answer — what an
+    /// unapproved tool ask costs on the probed version.
+    ///
+    /// A mode word that is not a [`Mode`], for [`FakeCodex::logged_out`]'s
+    /// reason: it is this one CLI's own posture rather than a shape of turn.
+    pub fn cancelling() -> Self {
+        Self(Fake::install(&[("grok", GROK)], "cancel"))
+    }
+
+    /// The session id each turn was told to use, in turn order — a `--resume`
+    /// value where the turn resumed and a `--session-id` value where it minted.
+    ///
+    /// Read off the fake's own argv records rather than off its answers,
+    /// because what **AC-6** and **AC-19** assert is what was *composed*.
+    pub fn sessions(&self) -> Vec<String> {
+        self.records("argv")
+            .iter()
+            .map(|argv| session_of(argv))
+            .collect()
+    }
+
+    /// The session id of the one turn whose prompt mentions `needle`.
+    ///
+    /// **AC-19**'s reader: two members' turns interleave in one log, and the
+    /// only thing that tells them apart is what each was asked to do.
+    pub fn session_for(&self, needle: &str) -> Option<String> {
+        self.grouped().into_iter().find_map(|invocation| {
+            let carried = invocation
+                .iter()
+                .any(|line| line.starts_with("file:") && line.contains(needle));
+            let argv = invocation.first()?.strip_prefix("argv:")?;
+
+            carried.then(|| session_of(argv))
+        })
+    }
+}
+
+/// The value after `--resume` or `--session-id` on one composed line.
+fn session_of(argv: &str) -> String {
+    let tokens: Vec<&str> = argv.split(' ').collect();
+    tokens
+        .iter()
+        .position(|token| *token == "--resume" || *token == "--session-id")
+        .and_then(|at| tokens.get(at + 1))
+        .map_or_else(String::new, |id| (*id).to_owned())
+}
+
+impl std::ops::Deref for FakeGrok {
+    type Target = Fake;
+
+    fn deref(&self) -> &Fake {
+        &self.0
     }
 }
 
@@ -578,6 +698,88 @@ printf '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","t
 printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
 "#;
 
+/// The fake `grok`.
+///
+/// Prints the NDJSON a probed `grok 1.0.6` actually printed under
+/// `--output-format streaming-messages-json --include-partial-messages`: a
+/// `system`/`init` record naming the session, `stream_event` records wrapping
+/// Anthropic Messages events, one whole `assistant` message, and a terminal
+/// `result`. Not a shape invented here, which is what makes the parser's unit
+/// tests and this fixture agree about the same vendor.
+///
+/// **It echoes the session id it was given** rather than minting one of its
+/// own, because for this CLI the id is the shim's to choose: a first turn is
+/// told `--session-id <uuid>` and a later one `--resume <uuid>`, and echoing is
+/// how the driver learns the child accepted it (**AC-6**, **AC-19**).
+///
+/// Its `refuse` mode prints that vendor's own could-not-apply sentence and
+/// exits 1 **before reading the prompt file**, which is the order the real one
+/// refuses in: the sandbox is applied at process entry, before the headless
+/// branch is even computed. Its `cancel` mode prints what a probed 1.0.6
+/// printed for a turn whose tool ask nothing approved: the tool named in the
+/// partial stream, then a terminal `result` carrying `stop_reason: "cancelled"`
+/// and a one-word `errors: ["cancelled"]`, on a **zero** exit.
+const GROK: &str = r#"#!/bin/sh
+log='@LOG@'
+mode='@MODE@'
+args="$*"
+printf 'argv:%s\n' "$args" >> "$log"
+printf 'env:%s\n' "$(env | cut -d= -f1 | sort | tr '\n' ' ')" >> "$log"
+
+prompt=""
+session=""
+resume=""
+sandbox=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prompt-file) prompt="$2"; shift 2 ;;
+    --session-id) session="$2"; shift 2 ;;
+    --resume) resume="$2"; shift 2 ;;
+    --sandbox) sandbox="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [ "$mode" = "refuse" ]; then
+  printf "error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.\n" >&2
+  exit 1
+fi
+
+text=""
+if [ -n "$prompt" ]; then
+  text=$(tr '\n' ' ' < "$prompt")
+  printf 'file:%s\n' "$text" >> "$log"
+fi
+
+case "$mode" in
+  fail) printf 'error: the fake grok was not logged in\n' >&2; exit 3 ;;
+  garbage) printf 'this is not the shape any driver reads\n'; exit 0 ;;
+  hang) sleep 300; exit 0 ;;
+esac
+
+id="$resume"
+if [ -z "$id" ]; then id="$session"; fi
+printf '{"type":"system","subtype":"init","session_id":"%s","apiKeySource":"oauth","model":"grok-4.6","permissionMode":"dontAsk"}\n' "$id"
+
+if [ "$mode" = "cancel" ]; then
+  printf '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"write"}}}\n'
+  printf '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["cancelled"],"stop_reason":"cancelled","num_turns":1}\n'
+  exit 0
+fi
+
+printf '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}\n'
+printf '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thinking is not mail"}}}\n'
+case "$sandbox:$text" in
+  read-only:*WRITE*)
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"refused: the sandbox is read-only"}],"stop_reason":"end_turn"}}\n'
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"refused: the sandbox is read-only","stop_reason":"end_turn"}\n'
+    exit 0 ;;
+esac
+printf '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answered"}}}\n'
+printf '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"thinking is not mail","signature":"x"},{"type":"text","text":"answered"}],"stop_reason":"end_turn"}}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":12,"num_turns":1,"result":"answered","stop_reason":"end_turn"}\n'
+"#;
+
 /// The per-message fake.
 ///
 /// Records its whole argv, then the prompt file's contents where it was given
@@ -610,6 +812,7 @@ case "$mode" in
   fail) printf 'error: the fake was not logged in\n' >&2; exit 3 ;;
   garbage) printf 'this is not the shape any driver reads\n'; exit 0 ;;
   hang) sleep 300; exit 0 ;;
+  stopped) printf '{"session":"fake-session-1","messages":["half an answer"],"refused":"the fake stopped part-way"}\n'; exit 0 ;;
 esac
 case "$sandbox:$text" in
   read-only:*WRITE*)

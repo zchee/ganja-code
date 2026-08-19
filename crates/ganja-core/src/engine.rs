@@ -1851,12 +1851,13 @@ impl Engine {
                 // Nothing about this slot searches a `PATH`, which is why it
                 // carries none of the hazard the codex slot above does.
                 agy: Arc::new(teammate::agy::Agy::new()),
-                // Named and gated, but not yet runnable: replaced by its real
-                // backend in its own wave, and until then a spawn is refused
-                // rather than quietly served by another surface (**D508**).
-                grok: Arc::new(teammate::Unbuilt::new(
-                    crate::protocol::team::MemberBackend::Grok,
-                )),
+                // Real as of W5, and carrying the codex slot's hazard for the
+                // same reason: it searches the real `PATH`, so a test that
+                // reached it would spawn the developer's own `grok`. The two
+                // safe doors are the same two.
+                grok: Arc::new(teammate::shim::ShimBackend::new(Arc::new(
+                    teammate::grok::Grok::new(),
+                ))),
             },
         )));
         self.install_postbox(lead);

@@ -26,15 +26,12 @@ use ganja_core::{
         mailbox, record,
     },
     teammate::{
-        InProcess, SpawnSpec, Teammate, TeammateRegistry, Unbuilt, claude::ClaudePane,
-        pane::GanjaPane, runner::Runner,
+        InProcess, SpawnSpec, Teammate, TeammateRegistry, claude::ClaudePane, pane::GanjaPane,
+        runner::Runner,
     },
     tool::{Registry, task::TeammateSpawn},
 };
-use ganja_protocol::{
-    Event, PermissionReply,
-    team::{Frame, MemberBackend},
-};
+use ganja_protocol::{Event, PermissionReply, team::Frame};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -83,6 +80,20 @@ impl RecordedSpawns {
             "a teammate working inside the project asks nobody: {asked:?}"
         );
     }
+
+    /// Every ask that reached this person, in the order they arrived.
+    ///
+    /// The mirror of [`RecordedSpawns::asked_nobody`], and it exists because
+    /// its absence had a cost: a suite meaning *"this dialog does fire"* had
+    /// no way to say so, so the claim was evidenced in a comment describing a
+    /// run somebody did once by hand. A path where somebody **is** asked is as
+    /// much a promise as one where nobody is.
+    pub fn asked(&self) -> Vec<SpawnAsk> {
+        self.asked
+            .lock()
+            .expect("the ask log is never poisoned")
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -123,10 +134,11 @@ fn backends_with(
         // **The rule for all three shim CLIs**, stated once here because the
         // three arrive one wave apart and the reason is the same each time: a
         // fixture lead is *production on a machine where the foreign CLI is
-        // not installed*. Never `Unbuilt` once that CLI's wave has landed —
-        // that sentence ("this build cannot run a teammate on another vendor's
-        // CLI yet") stops being true, and a fixture asserting a retired
-        // refusal is a fixture asserting a lie. Never this process's own
+        // not installed*. Never a stub once that CLI's wave has landed — the
+        // not-built-yet sentence stops being true, and a fixture asserting a
+        // retired refusal is a fixture asserting a lie. W5 was the wave that
+        // retired the last of them, so no slot below is a stub any more.
+        // Never this process's own
         // `PATH` either: a spawn there would find the developer's real binary,
         // take a real turn and spend somebody's quota from inside the ordinary
         // test suite. A suite that wants a child which answers points the
@@ -149,9 +161,14 @@ fn backends_with(
         // already harmless, and giving it an empty `PATH` would suggest the
         // `PATH` was what made it so.
         agy: Arc::new(ganja_core::teammate::agy::Agy::new()),
-        // grok's wave has not landed, so production's own stub is still the
-        // truthful answer here.
-        grok: Arc::new(Unbuilt::new(MemberBackend::Grok)),
+        // grok searches, exactly as codex does, so it gets the same empty
+        // search path and refuses by naming the binary.
+        grok: Arc::new(
+            ganja_core::teammate::shim::ShimBackend::new(Arc::new(
+                ganja_core::teammate::grok::Grok::new(),
+            ))
+            .searching(std::ffi::OsString::new()),
+        ),
     }
 }
 
