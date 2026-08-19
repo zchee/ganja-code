@@ -165,6 +165,9 @@ pub mod posture;
 pub mod reaper;
 /// The §6.1 loop that drives one in-process teammate.
 pub mod runner;
+/// A teammate that is another vendor's CLI, driven through its own
+/// non-interactive door (**D508**, **D509**).
+pub mod shim;
 /// The tmux calls the two pane backends are built on (P25b).
 pub mod tmux;
 
@@ -762,6 +765,16 @@ pub enum Handle {
     /// A teammate with a pane of its own: the recorded `(pane_id, birth)`
     /// pair, as [`reaper::Pane`] spells it for every identity-checked kill.
     Pane(reaper::Pane),
+    /// A teammate that is a foreign CLI child this process shims for
+    /// (**D508**): the group a signal goes to, and the state that says whether
+    /// there is anything to signal.
+    ///
+    /// Deliberately holds no `tokio::process::Child`. [`TeammateBackend::kill`]
+    /// takes a **shared** reference and a member is reached only through an
+    /// [`Arc`], while a child's `kill`/`wait` all want `&mut` — so the child is
+    /// owned by the task that drives it, under `kill_on_drop(true)`, and what
+    /// is here is what a signal needs. See [`shim::Child`].
+    Child(Arc<shim::Child>),
 }
 
 impl fmt::Debug for Handle {
@@ -776,6 +789,7 @@ impl fmt::Debug for Handle {
                 .field("pane_id", &pane.id)
                 .field("birth", &pane.birth)
                 .finish(),
+            Self::Child(child) => child.fmt(formatter),
         }
     }
 }
@@ -786,7 +800,22 @@ impl Handle {
     pub fn teammate(&self) -> Option<&Arc<Teammate>> {
         match self {
             Self::InProcess(teammate) => Some(teammate),
-            Self::Pane(_) => None,
+            Self::Pane(_) | Self::Child(_) => None,
+        }
+    }
+
+    /// The foreign child behind a shim handle.
+    ///
+    /// The sibling of [`Handle::teammate`], and the reason it exists is that
+    /// every *call site* of that one is guard-shaped: a third variant falling
+    /// through an `if let Some(teammate) = handle.teammate()` compiles silently
+    /// and behaves wrongly, so each such site now asks both questions rather
+    /// than one.
+    #[must_use]
+    pub fn child(&self) -> Option<&Arc<shim::Child>> {
+        match self {
+            Self::Child(child) => Some(child),
+            Self::InProcess(_) | Self::Pane(_) => None,
         }
     }
 
@@ -798,6 +827,13 @@ impl Handle {
             Self::Pane(pane) => Surface::Pane {
                 id: pane.id.clone(),
             },
+            // Which is what makes the registry's record write produce W1's
+            // shape with no change of its own: `Surface::Shim` puts the
+            // in-process sentinel in `tmuxPaneId` and the CLI's name in
+            // `backendType`, so every older reader classifies the member
+            // safely and the one reader that needs shim-ness reads the field
+            // that says so.
+            Self::Child(child) => Surface::Shim { cli: child.cli() },
         }
     }
 }
@@ -1004,6 +1040,14 @@ impl TeammateBackend for InProcess {
     }
 
     async fn kill(&self, handle: &Handle) {
+        // The guard is the other-shape check every backend's `kill` keeps: a
+        // handle that is not this backend's — a pane, or since P27 a shim
+        // child — never reaches here through the registry, which hands back
+        // the handle this backend's own `spawn` returned. It falls through
+        // silently rather than being named, and that is the one difference
+        // from `pane::kill_pane`'s spelling: there is nothing here to end and
+        // nothing to warn about that the registry has not already gone wrong
+        // about.
         if let Some(teammate) = handle.teammate()
             && !teammate.shutdown(SETTLE).await
         {
@@ -1193,6 +1237,29 @@ pub struct TeammateRegistry {
     /// The tasks a spawn started, kept so a shutdown can wait for them to
     /// actually finish rather than only ask them to.
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// The one writer of this session's shim orphan records (**D508**).
+    ///
+    /// Behind a `std::sync::Mutex` and nothing else, which is the whole of the
+    /// write-concurrency answer: a per-message shim registers once per *turn*,
+    /// so several turn tasks would otherwise read-modify-write one file. They
+    /// do not — every mutation goes through this one value under this one
+    /// lock, the same single-writer discipline [`TeammateRegistry::tasks`]
+    /// already keeps. Nothing inside it awaits, so no guard is ever held
+    /// across one.
+    ///
+    /// An [`Arc`] because the shim loops hold it directly rather than through
+    /// the registry: a loop holding an `Arc<TeammateRegistry>` would be a
+    /// cycle through the member map that owns its handle.
+    shims: Arc<Mutex<shim::ShimRecords>>,
+    /// What a foreign-CLI turn's deadline is when a config named one, resolved
+    /// **once** at construction (**D509**).
+    ///
+    /// [`crate::Engine::seed_effort`]'s shape: a curated config value handed to
+    /// the runtime once rather than re-read from a `Config` the runtime does
+    /// not hold. [`None`] leaves each CLI's own default alone, which is where
+    /// the real numbers live — this type has no business knowing that `agy` is
+    /// four minutes.
+    shim_turn_timeout: Option<Duration>,
     /// Where a teammate's permission dialogs are handed to the lead (**D-5**).
     ///
     /// [`None`] until a frontend attaches one, and a registry that never gets
@@ -1248,11 +1315,17 @@ impl TeammateRegistry {
         lead_session_id: impl Into<String>,
         cwd: impl Into<PathBuf>,
     ) -> Self {
+        let lead_session_id = lead_session_id.into();
+        let shims = Arc::new(Mutex::new(shim::ShimRecords::new(
+            ganja_tool::socket::directory(),
+            &lead_session_id,
+        )));
+
         Self {
             root,
             team,
             lead: MemberName::lead(),
-            lead_session_id: lead_session_id.into(),
+            lead_session_id,
             cwd: cwd.into(),
             cancel: CancellationToken::new(),
             members: Mutex::new(BTreeMap::new()),
@@ -1260,8 +1333,58 @@ impl TeammateRegistry {
             team_file: tokio::sync::Mutex::new(()),
             next_color: Mutex::new(0),
             tasks: Mutex::new(Vec::new()),
+            shims,
+            shim_turn_timeout: None,
             dialogs: Mutex::new(None),
         }
+    }
+
+    /// The per-turn deadline a foreign-CLI teammate runs under (**D509**).
+    ///
+    /// Resolved once and carried, rather than read per turn: the deadline is a
+    /// property of the runtime, not of one spawn, and a `SpawnSpec` field would
+    /// let two teammates of the same backend disagree about it for a reason
+    /// nobody asked for.
+    #[must_use]
+    pub fn with_shim_turn_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.shim_turn_timeout = timeout;
+
+        self
+    }
+
+    /// How long one `cli` turn may run in this session.
+    #[must_use]
+    pub fn shim_turn_timeout(&self, cli: ganja_team::ShimCli) -> Duration {
+        self.shim_turn_timeout
+            .unwrap_or_else(|| shim::default_turn_timeout(cli))
+    }
+
+    /// The directory this session's shim orphan records live in (**D508**).
+    ///
+    /// The socket scheme's own `/tmp/ganja-<uid>` unless somebody says
+    /// otherwise, and the reason to say otherwise is a test: a suite that
+    /// spawned shim members against the real directory would leave one
+    /// `.shims` file per test process in a directory `ganja sessions --live`
+    /// walks, and a records file is exactly the kind of litter whose owner is
+    /// gone by the time anybody looks.
+    ///
+    /// On the same consuming builder as [`TeammateRegistry::with_shim_turn_timeout`]
+    /// and for the same reason: where the records live is a property of the
+    /// runtime, settled once, before anything can have written one.
+    #[must_use]
+    pub fn with_shim_directory(mut self, directory: PathBuf) -> Self {
+        self.shims = Arc::new(Mutex::new(shim::ShimRecords::new(
+            directory,
+            &self.lead_session_id,
+        )));
+
+        self
+    }
+
+    /// This session's shim orphan records, for the one writer and the sweep.
+    #[must_use]
+    pub fn shims(&self) -> &Arc<Mutex<shim::ShimRecords>> {
+        &self.shims
     }
 
     /// The registry a frontend installs for the session it has just opened.
@@ -2049,6 +2172,43 @@ impl TeammateRegistry {
                 alive.store(false, Ordering::Relaxed);
             }));
             held = Some(runner);
+        } else if let Some(child) = handle.child() {
+            // **The seam a `Handle::Child` would otherwise fall straight
+            // through**, silently, with no loop and no postbox: every arm above
+            // is guarded on `handle.teammate()`, which a shim answers `None`
+            // to. What a shim member gets instead is one task — its own mailbox
+            // loop — and three things that task owns rather than inherits.
+            //
+            // The ring is written by the shim itself, because `fold_calls`
+            // folds from an engine event stream a shim member has none of; the
+            // spawn's own posture lines go on before the loop starts, so a
+            // person opening `/team` sees what was granted even if the first
+            // turn has not happened yet (**AC-17**). `alive` is cleared by the
+            // loop when it ends, for the same reason the in-process runner's
+            // task clears it: nothing else is watching. And `runner` stays
+            // `None` — `Member.runner` is typed to the in-process loop, and
+            // everything that one does past reading the inbox is exactly what
+            // a shim has no engine for.
+            for line in shim::spawn_lines(spec.backend) {
+                shim::push_recent(&recent, line);
+            }
+            let loop_ = shim::ShimRunner::new(
+                Arc::clone(child),
+                spec.clone(),
+                shim::Lent {
+                    lead_inbox: self.lead_inbox(),
+                    recent: Arc::clone(&recent),
+                    alive: Arc::clone(&alive),
+                    shims: Arc::clone(&self.shims),
+                    cancel: self.cancel.child_token(),
+                },
+                self.shim_turn_timeout(child.cli()),
+            );
+            // Registered in `tasks`, which is what makes `shutdown()` correct:
+            // it cancels, `join_all`s every `kill`, **and then drains this
+            // list**. A shim task that was never pushed would leave a child
+            // being reaped after the process it belonged to had returned.
+            tasks.push(tokio::spawn(loop_.run()));
         }
 
         self.members().insert(
@@ -2206,16 +2366,12 @@ async fn fold_calls(
         {
             named = Some(part.id.clone());
             let line = crate::subagent::describe_call(&tools, tool, input);
-            let mut ring = recent.lock().expect("the call ring is never poisoned");
             // A different call that reads identically to the last one is still
             // one row: the ring is a live view of what a teammate is doing, and
-            // two of the same line say nothing the one line did not.
-            if ring.back() != Some(&line) {
-                if ring.len() == RECENT_CALLS {
-                    ring.pop_front();
-                }
-                ring.push_back(line);
-            }
+            // two of the same line say nothing the one line did not. Shared
+            // with the shim's own writer since P27, so the two cannot come to
+            // disagree about the cap or about what counts as a repeat.
+            shim::push_recent(&recent, line);
         }
     }
 }

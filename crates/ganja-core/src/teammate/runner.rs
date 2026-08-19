@@ -78,7 +78,11 @@ pub const DROPPED_FRAME: &str = "an inbox frame was dropped";
 /// spelling of it here would be two envelopes to keep in step. This is the one
 /// place a delivered message becomes words, so there is one place for that
 /// envelope to arrive.
-fn envelope(from: &str, text: &str) -> String {
+///
+/// `pub(crate)` since P27: [`crate::teammate::shim`] delivers into a foreign
+/// CLI's prompt rather than into an engine, and a second spelling of "who said
+/// this" would be two ways a teammate learns who it is answering.
+pub(crate) fn envelope(from: &str, text: &str) -> String {
     format!("A message from {from}:\n{text}")
 }
 

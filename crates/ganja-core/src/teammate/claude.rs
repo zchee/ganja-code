@@ -150,8 +150,12 @@ use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use ganja_protocol::team::MemberBackend;
 use ganja_team::{TeamsRoot, mailbox};
 
+// `shim::on_path` is the `PATH` walk this module used to own: it moved to the
+// shim core in P27, where four backends now need it, so that two of them cannot
+// come to disagree about what counts as a runnable teammate binary.
 use crate::teammate::{
     Delivery, Handle, SpawnSpec, TeammateBackend, Unsupported, pane,
+    shim::on_path,
     tmux::{self, Server, TmuxError},
 };
 
@@ -300,40 +304,6 @@ pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
     argv
 }
 
-/// `binary` as `PATH` resolves it for this process, or [`None`].
-///
-/// `which` asks the operating system whether this process may execute each
-/// candidate, which is the question the later spawn needs answered. The old
-/// mode-bit walk instead asked whether somebody could execute the file, so a
-/// binary executable only by another owner was reported as runnable and failed
-/// later with `EACCES` instead of [`REFUSED_NO_BINARY`].
-fn on_path(binary: &str) -> Option<PathBuf> {
-    resolve(&std::env::var_os("PATH")?, binary)
-}
-
-/// [`on_path`]'s decision over an explicit path list.
-///
-/// The same split [`teams_root`] and [`root_under`] keep, for the same reason: a
-/// test can hold a `PATH` of its own without mutating the process it runs in,
-/// which is what would otherwise cost this one function its own test binary.
-/// Empty and relative components are removed before `which` sees the list
-/// because its Unix behavior follows `which(1)` and can resolve them against
-/// the working directory, while this backend refuses to discover a teammate
-/// binary from a turn's incidental directory. A literal `~/bin` entry is
-/// dropped by the same test — the crate would tilde-expand it, but an entry
-/// only a shell would have expanded is not a directory this backend trusts.
-fn resolve(path: &std::ffi::OsStr, binary: &str) -> Option<PathBuf> {
-    let mut directories = std::env::split_paths(path)
-        .filter(|directory| !directory.as_os_str().is_empty() && directory.is_absolute())
-        .peekable();
-    directories.peek()?;
-    let search_path = std::env::join_paths(directories).ok()?;
-
-    which::which_in_global(binary, Some(search_path))
-        .ok()?
-        .next()
-}
-
 /// The real-`claude` pane backend.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ClaudePane;
@@ -452,9 +422,12 @@ impl TeammateBackend for ClaudePane {
     async fn launch(&self, spec: &SpawnSpec, handle: &Handle) -> Result<(), Unsupported> {
         let Handle::Pane(pane) = handle else {
             // Not reachable through the registry, which hands back the handle
-            // this backend's own `spawn` returned — but a handle of the other
+            // this backend's own `spawn` returned — but a handle of another
             // shape arriving here would mean a registry had crossed two
             // backends, and that is worth a refusal rather than a silent skip.
+            // Two other shapes since P27, and a refusal is right for both: a
+            // shim child has no pane to type a launch line into any more than
+            // an in-process teammate does.
             return Err(Self::cannot(
                 "this backend was asked to launch something it did not make",
             ));
@@ -514,11 +487,16 @@ mod tests {
 
     use super::{
         BINARY, BYPASS_PERMISSIONS, ClaudePane, PERMISSION_MODE, PLAN_MODE_REQUIRED,
-        TEAMS_DIRECTORY, arguments, carried_env, preamble, resolve, root_under,
+        TEAMS_DIRECTORY, arguments, carried_env, preamble, root_under,
     };
+    // `shim::resolve` is the hoisted walk. These tests stayed here because what
+    // they pin is what *this* backend's binary resolution must refuse — a
+    // shadowing directory, a file this process may not execute — and they are
+    // the reason the hoist changed no behaviour.
     use crate::teammate::{
         SpawnSpec, TeammateBackend as _,
         pane::CARRIED_ENV,
+        shim::resolve,
         tmux::{REFUSED_NO_TMUX, TmuxError},
     };
 

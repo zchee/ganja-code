@@ -749,6 +749,10 @@ pub struct Config {
     /// [`AgentsConfig`].
     #[serde(default)]
     pub agents: AgentsConfig,
+    /// How this session runs the *teammates* it spawns, as opposed to what
+    /// they are; see [`TeammateConfig`] (**D509**).
+    #[serde(default)]
+    pub teammates: TeammateConfig,
     /// Permission rules layered over the built-in ones.
     #[serde(default)]
     pub permission: PermissionConfig,
@@ -909,6 +913,62 @@ impl AgentsConfig {
     #[must_use]
     pub fn concurrency(&self) -> usize {
         self.concurrency.unwrap_or(Self::DEFAULT_CONCURRENCY)
+    }
+}
+
+/// How this session runs the teammates it spawns, rather than what they are
+/// (**D509**).
+///
+/// **`teammates` is plural for [`AgentsConfig`]'s reason**, and the plural is
+/// load-bearing rather than taste: this file already spells that distinction
+/// once — [`Config::agent`] is the name-keyed map, [`Config::agents`] is the
+/// settings object beside it — so a settings object called `teammate` would
+/// invert the very pair it copies, and would spend the singular a later
+/// per-name teammate map will want.
+///
+/// Not a key upstream has, and not one Claude Code has either: upstream
+/// opencode has no teammates at all, and Claude's own teammates are agents of
+/// its harness rather than somebody else's CLI, so nothing over there has a
+/// turn to bound.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TeammateConfig {
+    /// How long one foreign-CLI teammate's turn may run before the shim ends
+    /// its process group and mails the lead, in **seconds**.
+    ///
+    /// **Absent is the per-CLI default** the shim derives — this is the one
+    /// number a person can move without a source edit, so it overrides all
+    /// three at once. An [`Option`] rather than a bare number for
+    /// [`AgentsConfig::concurrency`]'s reason: a tier that says nothing has to
+    /// leave the tier below it alone. Refused at load when it is zero — a
+    /// deadline of nothing is a teammate whose every turn is killed before it
+    /// speaks.
+    ///
+    /// Seconds rather than milliseconds follows
+    /// [`HookCommand::timeout`](crate::config::HookCommand::timeout), the
+    /// closest analogue in this file: a whole external process's budget.
+    ///
+    /// # Why only this shape of teammate has one
+    ///
+    /// Every other duration on the teammate path is an unwind budget, and no
+    /// native teammate's *turn* is bounded at all. A foreign child earns a
+    /// bound because it is the only shape whose progress ganja cannot observe:
+    /// an in-process teammate streams events into this process and a `ganja`
+    /// pane is a ganja whose own status bar a person can look at, while a shim
+    /// child that has stopped writing to a pipe is indistinguishable from one
+    /// that is thinking. The deadline is what turns that ambiguity into mail.
+    pub shim_turn_timeout: Option<u64>,
+}
+
+impl TeammateConfig {
+    /// The per-turn deadline this config asks for, if it asks for one.
+    ///
+    /// [`None`] leaves the per-CLI default alone, which is where the real
+    /// numbers live — this file has no business knowing that `agy` is four
+    /// minutes.
+    #[must_use]
+    pub fn shim_turn_timeout(&self) -> Option<std::time::Duration> {
+        self.shim_turn_timeout.map(std::time::Duration::from_secs)
     }
 }
 
@@ -1358,6 +1418,10 @@ impl Config {
         overlay(&mut self.snapshot, other.snapshot);
         overlay(&mut self.tool_defer_threshold, other.tool_defer_threshold);
         overlay(&mut self.agents.concurrency, other.agents.concurrency);
+        overlay(
+            &mut self.teammates.shim_turn_timeout,
+            other.teammates.shim_turn_timeout,
+        );
         overlay(&mut self.tui.notifications, other.tui.notifications);
         overlay(
             &mut self.tui.notification_method,
@@ -1789,6 +1853,10 @@ fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
         path: path.to_owned(),
         message,
     })?;
+    check_teammates(&config.teammates).map_err(|message| ConfigError::Parse {
+        path: path.to_owned(),
+        message,
+    })?;
     check_openrouter(&config.openrouter).map_err(|message| ConfigError::Parse {
         path: path.to_owned(),
         message,
@@ -1959,6 +2027,25 @@ fn check_agents(agents: &AgentsConfig) -> Result<(), String> {
         return Err(
             "agents.concurrency must be at least 1; a cap of 0 is a session where every \
              delegation waits forever"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Refuses a `teammates` block asking for a deadline of nothing.
+///
+/// [`check_agents`]'s shape and [`check_agents`]'s reason: zero is the one
+/// value whose consequence is invisible until a teammate takes a turn, and
+/// then it is a turn killed before the child has written a byte. Every
+/// positive value is somebody's real answer — a second is absurd but it is an
+/// answer — so the refusal is only about the value that means "never finish".
+fn check_teammates(teammates: &TeammateConfig) -> Result<(), String> {
+    if teammates.shim_turn_timeout == Some(0) {
+        return Err(
+            "teammates.shim_turn_timeout must be at least 1 second; a deadline of 0 kills \
+             every foreign-CLI turn before it has written a byte"
                 .to_owned(),
         );
     }
@@ -2311,6 +2398,40 @@ mod tests {
             panic!("expected a parse failure, got {error:?}");
         };
         assert!(message.contains("agents.concurrency"), "{message}");
+    }
+
+    /// The plural is the settings object here too, and an absent key leaves
+    /// the per-CLI defaults — which live in the shim, not in this file —
+    /// alone.
+    #[test]
+    fn teammates_carries_the_one_deadline_a_person_can_move() {
+        let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        assert_eq!(
+            config.teammates.shim_turn_timeout(),
+            None,
+            "absent leaves each CLI's own default alone"
+        );
+
+        let config = parse(r#"{"teammates": {"shim_turn_timeout": 90}}"#).expect("it parses");
+        assert_eq!(
+            config.teammates.shim_turn_timeout(),
+            Some(std::time::Duration::from_secs(90)),
+            "the key is seconds, like a hook's timeout"
+        );
+
+        let error = parse(r#"{"teammates": {"shim_turn_timeout": 0}}"#)
+            .expect_err("a deadline of nothing is not a deadline");
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("teammates.shim_turn_timeout"), "{message}");
+
+        let error = parse(r#"{"teammates": {"shim_turn_timout": 90}}"#)
+            .expect_err("a misspelled key is refused rather than ignored");
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("shim_turn_timout"), "{message}");
     }
 
     /// `true` is both moments and `false` is none — the same answer absent

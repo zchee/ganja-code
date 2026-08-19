@@ -121,19 +121,16 @@ pub(crate) use unix::{PeerChecked, bind_path, bind_session};
 mod unix {
     use std::{
         fs, io,
-        os::unix::fs::{
-            DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
-            PermissionsExt as _,
-        },
+        os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _, PermissionsExt as _},
         path::{Path, PathBuf},
     };
 
     use axum::serve::Listener;
-    use ganja_core::tool::socket::{DIRECTORY_MODE, SOCKET_MODE, uid};
+    use ganja_core::tool::socket::{SOCKET_MODE, uid};
     use ganja_protocol::SessionId;
     use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
 
-    use super::{DirectoryRefusal, candidates, lock_path, peer_allowed, vet_directory};
+    use super::{candidates, lock_path, peer_allowed};
     use crate::{Address, ServeError};
 
     /// A listener that answers only its own user: every accepted connection
@@ -340,50 +337,21 @@ mod unix {
         })
     }
 
-    /// Creates `directory` at `0700` when it is absent, and refuses it by
-    /// name when what is there is not a real directory of ours at exactly
-    /// that mode. The refusal is the point: `/tmp` is world-writable, so
-    /// whatever sits at `/tmp/ganja-<uid>` before we get there was put there
-    /// by somebody, and only a private directory we own is somewhere a
-    /// private socket can live.
+    /// [`ganja_core::tool::socket::prepare_directory`] in the vocabulary this
+    /// crate's routes answer in.
+    ///
+    /// The sequence itself moved down to the scheme crate, where the mode and
+    /// the vetting rules already live and where a second reader — the shim
+    /// orphan records, which write a `.shims` sibling into this same
+    /// directory — needs it too. What stays here is the wrap: [`ServeError`]
+    /// cannot move down, and nothing about it needs to.
     fn prepare_directory(directory: &Path) -> Result<(), ServeError> {
-        let refuse = |reason| ServeError::UnsafeSocketDirectory {
-            path: directory.to_path_buf(),
-            reason,
-        };
-
-        // The window between vetting the directory and binding inside it is
-        // safe only because a foreign uid cannot rename or unlink an entry
-        // it does not own in the parent — which is what the sticky bit on a
-        // world-writable parent (`/tmp`) guarantees, and nothing else does.
-        // Asserted rather than assumed: a `/tmp` that has lost the bit is
-        // refused by name, before anything is made in it. A parent that is
-        // not world-writable needs no bit — nobody else can write there.
-        if let Some(parent) = directory.parent() {
-            let found = fs::symlink_metadata(parent)
-                .map_err(|error| refuse(DirectoryRefusal::Io(error)))?;
-            let mode = found.mode();
-            let world_writable = mode & 0o002 != 0;
-            let sticky = mode & 0o1000 != 0;
-            if world_writable && !sticky {
-                return Err(refuse(DirectoryRefusal::ParentNotSticky {
-                    parent: parent.to_path_buf(),
-                }));
+        ganja_core::tool::socket::prepare_directory(directory).map_err(|reason| {
+            ServeError::UnsafeSocketDirectory {
+                path: directory.to_path_buf(),
+                reason,
             }
-        }
-
-        match fs::DirBuilder::new().mode(DIRECTORY_MODE).create(directory) {
-            // Ours, this instant; the umask can only have removed bits, so put
-            // the mode where the check below expects it.
-            Ok(()) => {
-                fs::set_permissions(directory, fs::Permissions::from_mode(DIRECTORY_MODE))
-                    .map_err(|error| refuse(DirectoryRefusal::Io(error)))?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(refuse(DirectoryRefusal::Io(error))),
-        }
-
-        vet_directory(directory).map_err(refuse)
+        })
     }
 
     #[cfg(test)]

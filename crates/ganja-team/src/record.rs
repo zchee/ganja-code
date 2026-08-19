@@ -238,6 +238,21 @@ impl ShimCli {
             Self::Grok => BACKEND_GROK,
         }
     }
+
+    /// [`ShimCli::backend_type`] read back, or [`None`] for anything else.
+    ///
+    /// The other direction of the same table, beside it for
+    /// [`Surface::read`]'s reason: two spellings of which strings name which
+    /// CLI is how a record comes to be written under one name and read under
+    /// another. Answers [`None`] for [`BACKEND_IN_PROCESS`] and
+    /// [`BACKEND_TMUX`] as much as for a string nothing here minted — neither
+    /// of those names a shim.
+    #[must_use]
+    pub fn read(backend_type: &str) -> Option<Self> {
+        [Self::Codex, Self::Agy, Self::Grok]
+            .into_iter()
+            .find(|cli| cli.backend_type() == backend_type)
+    }
 }
 
 /// What a spawn decides about a teammate, gathered so building the record is

@@ -21,9 +21,13 @@
 //! four — its internal dependency list is exactly `ganja-permission` — so
 //! the scheme is spelled once here and re-exported upward, and the binder,
 //! the lister, the tool and the deliverer cannot come to disagree about
-//! what a session socket is. What is *not* here is anything that binds:
-//! the name walk over a session's candidates, the lock that says a name is
-//! live, and the peer-uid check on accept are the server's, in
+//! what a session socket is. Making the directory is here too, for the same
+//! reason and since P27: [`prepare_directory`] was `ganja-serve`'s until a
+//! fifth reader appeared — the shim orphan records, which write a `.shims`
+//! sibling into this same directory from a crate that cannot name the
+//! server. What is *not* here is anything that binds: the name walk over a
+//! session's candidates, the lock that says a name is live, and the
+//! peer-uid check on accept are the server's, in
 //! `ganja-serve/src/socket.rs`.
 //!
 //! # A `uds:` address is a session socket of ours, or it is refused
@@ -317,6 +321,74 @@ pub fn vet_directory(directory: &Path) -> Result<(), DirectoryRefusal> {
     }
 
     vet(found.uid(), found.mode(), uid())
+}
+
+/// Makes the socket directory at [`DIRECTORY_MODE`] when nothing is there,
+/// and refuses by name when what is there is not a private directory of
+/// ours — [`vet_directory`]'s verdict, after the creation attempt rather
+/// than instead of it.
+///
+/// Lives beside the predicate it ends in, and that placement is
+/// **D505's scheme/binder split, amended once**: the *scheme* crate now
+/// owns "make the directory correctly" as well as "recognize one", while
+/// everything that actually binds — the name walk, the flock'd `.lock`
+/// sibling, the peer-uid check on accept — stays the server's. Two readers
+/// need it and only one of them binds: `ganja-serve` before it binds a
+/// session socket, and the shim orphan records
+/// ([`crate`]'s consumer in `ganja-core`) before they write a `.shims`
+/// sibling into the same directory. A second copy of this sequence is the
+/// day the two disagree about what `0700` means.
+///
+/// The refusal type is [`DirectoryRefusal`] rather than any caller's own
+/// error, so nothing above has to move down: `ganja-serve` wraps it in the
+/// `ServeError` its routes answer in, exactly as it did when it owned the
+/// body.
+///
+/// # Errors
+///
+/// [`DirectoryRefusal::ParentNotSticky`] when the parent is world-writable
+/// without the sticky bit — the one assumption the check-then-bind window
+/// rests on, asserted rather than leaned on; [`DirectoryRefusal::Io`] when
+/// the directory could not be made or inspected; then [`vet_directory`]'s
+/// own refusals for whatever is already there.
+#[cfg(unix)]
+pub fn prepare_directory(directory: &Path) -> Result<(), DirectoryRefusal> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+
+    // The window between vetting the directory and binding inside it is safe
+    // only because a foreign uid cannot rename or unlink an entry it does not
+    // own in the parent — which is what the sticky bit on a world-writable
+    // parent (`/tmp`) guarantees, and nothing else does. Asserted rather than
+    // assumed: a `/tmp` that has lost the bit is refused by name, before
+    // anything is made in it. A parent that is not world-writable needs no
+    // bit — nobody else can write there.
+    if let Some(parent) = directory.parent() {
+        let found = std::fs::symlink_metadata(parent).map_err(DirectoryRefusal::Io)?;
+        let mode = found.mode();
+        let world_writable = mode & 0o002 != 0;
+        let sticky = mode & 0o1000 != 0;
+        if world_writable && !sticky {
+            return Err(DirectoryRefusal::ParentNotSticky {
+                parent: parent.to_path_buf(),
+            });
+        }
+    }
+
+    match std::fs::DirBuilder::new()
+        .mode(DIRECTORY_MODE)
+        .create(directory)
+    {
+        // Ours, this instant; the umask can only have removed bits, so put
+        // the mode where the check below expects it.
+        Ok(()) => {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(DIRECTORY_MODE))
+                .map_err(DirectoryRefusal::Io)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(DirectoryRefusal::Io(error)),
+    }
+
+    vet_directory(directory)
 }
 
 /// A session socket of ours, as a test builds one: a real socket bound at a

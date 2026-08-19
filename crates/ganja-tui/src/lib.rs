@@ -339,11 +339,14 @@ pub async fn run(
     let (engine, teammates, socket) =
         match ganja_core::config::config_home().filter(|_| membership.is_none()) {
             Some(home) => {
-                let registry = Arc::new(TeammateRegistry::for_session(
-                    &home,
-                    engine.session_id().as_str(),
-                    &cwd,
-                ));
+                let registry = Arc::new(
+                    TeammateRegistry::for_session(&home, engine.session_id().as_str(), &cwd)
+                        // Resolved **once**, here, rather than read per turn
+                        // (**D509**): the deadline is a property of the
+                        // runtime, not of one spawn, and `shim.rs` therefore
+                        // names no config type at all.
+                        .with_shim_turn_timeout(config.teammates.shim_turn_timeout()),
+                );
                 // **D506**: panes a previous lead of this team left running,
                 // before this one spawns anything of its own. Best-effort by
                 // construction — it returns a `Swept` and never an error, and a
@@ -359,6 +362,22 @@ pub async fn run(
                 let swept = ganja_core::teammate::reaper::sweep(&registry).await;
                 if !swept.is_empty() {
                     tracing::info!(?swept, "a previous lead's panes were swept at startup");
+                }
+                // **D508**: and the shim children a previous lead left,
+                // which is a *separate* call rather than a branch inside the
+                // one above. `sweep` is gated on there being a tmux server to
+                // look at — correct for panes, fatal for shims, whose common
+                // case has no tmux at all — and hoisting that gate would
+                // change the pane arm's own contract. Unconditional here, and
+                // asserted so at the function level by
+                // `ganja-core/tests/teammate_shim_sweep.rs`; the call itself
+                // has the same no-headless-seam gap the pane sweep's does.
+                let orphans = ganja_core::teammate::reaper::sweep_shims(&registry).await;
+                if !orphans.is_empty() {
+                    tracing::info!(
+                        ?orphans,
+                        "a previous lead's foreign-CLI children were swept at startup"
+                    );
                 }
 
                 (

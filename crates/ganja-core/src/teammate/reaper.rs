@@ -156,13 +156,21 @@
 //! rule about whose record a lead may drop; the kill is the harm that had to
 //! stop, and it has.
 
-use std::process::Stdio;
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
-use ganja_team::Surface;
+use ganja_team::{ShimCli, Surface};
 
 use crate::teammate::{
     TeammateRegistry,
     pane::{AGENT_ID, PARENT_SESSION_ID},
+    shim::{
+        records::{self, Started, Unreadable},
+        signal_group,
+    },
     tmux::{Killed, Server},
 };
 
@@ -516,6 +524,536 @@ async fn forget(registry: &TeammateRegistry, name: &str) {
             %error,
             "a swept member's record could not be taken out of the team file"
         ),
+    }
+}
+
+/// How long a signalled group is given to go before it is killed.
+///
+/// Short on purpose, and much shorter than `SETTLE`: this runs at lead start,
+/// in a blocking job the frontend is waiting on, and an orphan that ignores
+/// `SIGTERM` is exactly the process the second signal exists for. Polled
+/// rather than slept through, so the common case — a child that goes at once —
+/// costs one check.
+const GRACE: Duration = Duration::from_millis(500);
+
+/// How often that grace is checked.
+const GRACE_STEP: Duration = Duration::from_millis(25);
+
+/// What one sweep decided about one `.shims` file.
+///
+/// Six arms, and five of them are about *not* signalling: "no owner proof, no
+/// signal" is the whole rule, so the interesting part of this type is how many
+/// ways it says no.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShimFate {
+    /// The owner pid is live and its start time matches: the file is left
+    /// **entirely** alone — not parsed further, not logged as a problem,
+    /// nothing.
+    OwnerLive,
+    /// The owner's liveness could not be established at all, so it is not
+    /// proven gone. Skipped, and left byte-identical for the next sweep.
+    Undeterminable,
+    /// No readable version line — a zero-byte file, a header-less one, or the
+    /// staging file a crash left between a write and its rename. No live lead
+    /// can publish one.
+    Headerless,
+    /// A version token this build does not know: a newer lead owns the file.
+    Foreign,
+    /// A known version and content that is not this format's. Since a
+    /// same-version writer publishes only whole files, this can only be
+    /// corruption.
+    Corrupt,
+    /// The owner is provably gone, and every child line was decided one way or
+    /// another.
+    Swept {
+        /// How many children matched their recorded identity exactly and were
+        /// ended.
+        signalled: usize,
+        /// How many were proven not to be the recorded child — a recycled pid,
+        /// this lead's own group, or a pid that is simply gone — and were
+        /// therefore left alone.
+        spared: usize,
+        /// How many could not be decided at all, which is what keeps the file
+        /// from being unlinked.
+        undecided: usize,
+    },
+}
+
+/// One `.shims` file, and what became of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShimFile {
+    /// Where it was.
+    pub path: PathBuf,
+    /// What the sweep decided.
+    pub fate: ShimFate,
+    /// Whether it was unlinked — never true where the owner-line pid still
+    /// exists under any reading, because an unlink is the one action here that
+    /// cannot be retried.
+    pub removed: bool,
+}
+
+/// What a whole sweep of the records directory did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShimsSwept {
+    /// One entry per file looked at, in the order they were read.
+    pub files: Vec<ShimFile>,
+    /// The shim members whose records this sweep retired — the other half of
+    /// the same startup pass, over the team file rather than over `/tmp`.
+    pub retired: Vec<String>,
+}
+
+impl ShimsSwept {
+    /// What the sweep decided about one file, by name.
+    #[must_use]
+    pub fn fate_of(&self, path: &Path) -> Option<&ShimFate> {
+        self.files
+            .iter()
+            .find(|file| file.path == path)
+            .map(|file| &file.fate)
+    }
+
+    /// Whether the sweep did nothing at all.
+    ///
+    /// **Both halves**, and the second is not decoration: a startup that swept
+    /// no `/tmp` records but retired three members did something worth a log
+    /// line, and a predicate reading only `files` would have the one caller —
+    /// the lead's startup, which logs `if !swept.is_empty()` — say nothing
+    /// about it. The common shape of a resumed session is exactly that: the
+    /// previous lead's records were already unlinked by an earlier sweep, and
+    /// its member rows were not.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.retired.is_empty()
+    }
+}
+
+/// Ends the shim children a previous lead left running (**D508**).
+///
+/// Called at lead startup **beside** [`sweep`] rather than inside it, and
+/// **unconditionally**: `sweep` is gated on there being a tmux server to look
+/// at, which is right for panes and fatal for shims — a shim child is headless
+/// and its common case has no tmux at all. Hoisting that gate would change the
+/// pane arm's own contract, so the shim arm gets its own caller.
+///
+/// Best-effort by construction, like its pane sibling: every failure below is
+/// logged and answered with a fate, never returned. A lead that could not sweep
+/// is still a lead.
+///
+/// **The directory is never created here.** This runs possibly before any shim
+/// has ever spawned, and making a private directory in order to enumerate
+/// nothing is a directory made for no reason; the first *record write* is what
+/// creates it.
+pub async fn sweep_shims(registry: &TeammateRegistry) -> ShimsSwept {
+    let directory = registry
+        .shims()
+        .lock()
+        .expect("the shim records are never poisoned")
+        .directory()
+        .to_path_buf();
+
+    let mut swept = sweep_shims_in(directory).await;
+    // The other half of the same startup pass, and a different document: the
+    // `/tmp` records say which *processes* a dead lead owned, while the team
+    // file says which *members* it recorded. A process ended above leaves a row
+    // behind that would otherwise be listed as a running teammate forever.
+    swept.retired = retire_shim_records(registry).await;
+
+    swept
+}
+
+/// [`sweep_shims`], against a named directory rather than this session's own.
+///
+/// The seam a test drives, and the pane sweep's `sweep_on` is the precedent:
+/// a private directory, so a sweep can be watched deciding about real
+/// processes without going near `/tmp/ganja-<uid>`.
+pub async fn sweep_shims_in(directory: PathBuf) -> ShimsSwept {
+    // One blocking job for the whole sweep, because the identity primitive is
+    // a `ps` fork and the decisions are pure file reads: an async spelling
+    // would fork from a runtime worker for every line of every file.
+    tokio::task::spawn_blocking(move || sweep_records(&directory))
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "the shim sweep was lost, so nothing was swept");
+
+            ShimsSwept::default()
+        })
+}
+
+/// Marks this team's shim members inactive, because their processes died with
+/// the lead that recorded them.
+///
+/// **The one reader in this build that needs shim-ness off a record**, and the
+/// field it reads is `backendType` and nothing else: `Surface::read` is
+/// deliberately lossy — a shim member writes the in-process sentinel into
+/// `tmuxPaneId`, so `MemberRecord::surface()` answers `InProcess` for one and
+/// will never hand this an `InProcess`-versus-`Shim` distinction. Comparing
+/// against the three `backendType` strings is the whole test, and
+/// [`ShimCli::read`] is the one table that knows them.
+///
+/// # Marked, not dropped
+///
+/// A pane member's stale record is *dropped*, because the pane sweep can prove
+/// what happened to the pane. This cannot: a shim child leaves no surface a
+/// later process can interrogate, and the `/tmp` records are a best-effort net
+/// that may be absent entirely. So the row stays and says it is not running,
+/// which is what `isActive` is for.
+///
+/// **What that costs, stated (Dv-3):** the row is still a row, and
+/// `TeammateRegistry::taken` counts every one of them without consulting
+/// `isActive` — so `resolve_unique` gives the next `w1` the name `w1-2`. The
+/// retired name is not freed, and freeing it is the worse answer rather than
+/// the missing one: dropping the row would hand a dead teammate's identity to
+/// the next live one, in a document a real `claude` may be reading at the same
+/// time. "Respawnable" therefore means the work can be restaffed, not that the
+/// string comes back.
+///
+/// # The co-tenant guard is the pane sweep's, transposed
+///
+/// Two leads that start inside one 65-second UUIDv7 bucket share a team *name*
+/// and therefore a team *file*, and the record write never restamps
+/// `leadSessionId`. Retiring rows in a document that names another lead's
+/// session would mark a **live** co-tenant's members dead, so this bails on
+/// exactly the check `sweep_on` makes (reaper.rs's own `lead_session_id`
+/// clause) before it touches anything.
+///
+/// **The residual that guard does not cover, named rather than papered over
+/// (D2).** It answers the case where the *document* is another lead's. The
+/// mirror image survives: where **this** lead created the file and a co-tenant
+/// later spawned into it, the document names this session, the guard passes,
+/// and the co-tenant's live shim members are marked inactive. Nothing closes
+/// it, by construction — `MemberRecord` carries no per-member lead witness,
+/// and the pane arm's own witness (`--parent-session-id` on the pane's command
+/// line) has no shim analogue, since a headless child's argv is the vendor's.
+/// The blast radius is small and worth stating: **nothing in ganja reads
+/// `isActive`**, so the wrong value costs this build nothing at all; its one
+/// consumer is Claude's own document, where a live teammate would read as
+/// stopped until its own lead's next write.
+///
+/// # Before the first spawn, and only then
+///
+/// Called at startup, ahead of everything this lead starts — which is what
+/// makes "every shim row in this file belongs to a previous lead" true. Called
+/// *after* a spawn it would mark this lead's own live members inactive, so the
+/// precondition is asserted rather than trusted: a registry already holding
+/// members retires nothing and says so by answering empty.
+///
+/// Best-effort throughout: a lead that could not retire a row is still a lead,
+/// and the next startup meets the same row again.
+pub async fn retire_shim_records(registry: &TeammateRegistry) -> Vec<String> {
+    // Bound to a `let` rather than tested inline, so the member map's guard is
+    // released at the end of this statement and cannot be held across the
+    // awaits below.
+    let already_spawning = !registry.members().is_empty();
+    if already_spawning {
+        tracing::debug!(
+            "this lead has already spawned into its team, so no shim record was retired"
+        );
+
+        return Vec::new();
+    }
+
+    let mut file = match registry.read_team().await {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(%error, "the team file could not be read, so no shim record was retired");
+
+            return Vec::new();
+        }
+    };
+    if file.lead_session_id != registry.lead_session_id {
+        tracing::info!(
+            team = registry.team.as_str(),
+            "the team file names another lead's session, so its shim members were left alone"
+        );
+
+        return Vec::new();
+    }
+
+    let mut retired = Vec::new();
+    for member in &mut file.members {
+        if member.is_lead() {
+            continue;
+        }
+        // `backendType`, never `surface()` — see this function's own doc for
+        // why the read that looks more natural cannot answer this.
+        let shim = member
+            .backend_type
+            .as_deref()
+            .and_then(ShimCli::read)
+            .is_some();
+        if !shim || member.is_active == Some(false) {
+            continue;
+        }
+        member.is_active = Some(false);
+        retired.push(member.name.clone());
+    }
+    if retired.is_empty() {
+        return retired;
+    }
+
+    let writing = registry.team_file.lock().await;
+    if let Err(error) = registry.write_team(file, &writing).await {
+        tracing::warn!(
+            %error,
+            "a previous lead's shim members could not be marked inactive, so they will be \
+             listed as running until the next startup"
+        );
+
+        return Vec::new();
+    }
+    tracing::info!(
+        retired = retired.len(),
+        "a previous lead's foreign-CLI members were marked inactive"
+    );
+
+    retired
+}
+
+/// The whole sweep, synchronously.
+fn sweep_records(directory: &Path) -> ShimsSwept {
+    let mut swept = ShimsSwept::default();
+    if !directory.exists() {
+        // Nothing has ever recorded a shim child here, which is the ordinary
+        // answer for every session that never spawned one.
+        return swept;
+    }
+    if let Err(refusal) = ganja_tool::socket::vet_directory(directory) {
+        tracing::warn!(
+            directory = %directory.display(),
+            %refusal,
+            "the shim records directory is not a private one of ours, so nothing was swept"
+        );
+
+        return swept;
+    }
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                directory = %directory.display(),
+                %error,
+                "the shim records could not be listed, so nothing was swept"
+            );
+
+            return swept;
+        }
+    };
+
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(records::EXTENSION))
+        })
+        .collect();
+    // Read in a stable order, so a test asserting two files' fates does not
+    // depend on what the filesystem felt like today.
+    paths.sort();
+
+    for path in paths {
+        swept.files.push(sweep_file(&path));
+    }
+
+    swept
+}
+
+/// One `.shims` file, from its version line down.
+fn sweep_file(path: &Path) -> ShimFile {
+    let decided = |fate: ShimFate, removed: bool| ShimFile {
+        path: path.to_path_buf(),
+        fate,
+        removed,
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                file = %path.display(),
+                %error,
+                "a shim records file could not be read, so it was left for the next sweep"
+            );
+
+            return decided(ShimFate::Undeterminable, false);
+        }
+    };
+    let records = match records::parse(&text) {
+        Ok(records) => records,
+        Err(unreadable) => {
+            let fate = match &unreadable {
+                Unreadable::Headerless => ShimFate::Headerless,
+                Unreadable::Version { .. } => ShimFate::Foreign,
+                Unreadable::Malformed { .. } => ShimFate::Corrupt,
+                Unreadable::Io { .. } => ShimFate::Undeterminable,
+            };
+            // Logged **before** anything is unlinked, so the account of what
+            // happened survives the file it is about.
+            tracing::info!(
+                file = %path.display(),
+                "a shim records file was not read: {unreadable}"
+            );
+
+            return decided(fate, unreadable.removable() && remove(path));
+        }
+    };
+
+    let owner = records::started_at(records.owner.pid);
+    match &owner {
+        // Fail-closed: "cannot prove gone" and "gone" must never be the same
+        // branch.
+        Started::Unknown => {
+            tracing::info!(
+                file = %path.display(),
+                owner = records.owner.pid,
+                "a shim records file's owner could not be established, so it was left alone"
+            );
+
+            decided(ShimFate::Undeterminable, false)
+        }
+        // The owner is live. The file is left **entirely** alone — a
+        // concurrently running lead's children are its own business, alive or
+        // dead, and this is the clause that says so.
+        Started::At(rendered) if *rendered == records.owner.started => {
+            decided(ShimFate::OwnerLive, false)
+        }
+        // Fail-**open** on the owner, and named as such: a pid that exists
+        // with a different start time is read as gone. What makes that safe is
+        // not this arm but the child lines, which are compared with the same
+        // primitive on the same rendered bytes and so mismatch for whatever
+        // reason the owner's did. The hardening clause is the `removed` half:
+        // an owner pid that still exists means the file is never unlinked,
+        // because an unlink is the one action here that cannot be retried.
+        Started::At(_) | Started::Gone => {
+            let (signalled, spared, undecided) = sweep_children(path, &records);
+            let owner_present = matches!(owner, Started::At(_));
+            let removable = undecided == 0 && !owner_present;
+
+            decided(
+                ShimFate::Swept {
+                    signalled,
+                    spared,
+                    undecided,
+                },
+                removable && remove(path),
+            )
+        }
+    }
+}
+
+/// Every child line of one file whose owner is provably gone.
+fn sweep_children(path: &Path, records: &records::Records) -> (usize, usize, usize) {
+    let own = records::own_pgid();
+    let (mut signalled, mut spared, mut undecided) = (0, 0, 0);
+    for child in &records.children {
+        let cli = child.cli.backend_type();
+        // Belt beside braces. The owner rule should already have made this
+        // unreachable — this lead's own group belongs to this lead, which is
+        // alive by definition — and a guard that is unreachable in theory is
+        // exactly the one worth keeping.
+        if child.pgid == own {
+            tracing::warn!(
+                file = %path.display(),
+                cli,
+                pgid = child.pgid,
+                "a shim record names this lead's own process group, so nothing was signalled"
+            );
+            spared += 1;
+            continue;
+        }
+        match records::started_at(child.process.pid) {
+            Started::At(rendered) if rendered == child.process.started => {
+                end_group(child.pgid);
+                tracing::info!(
+                    file = %path.display(),
+                    cli,
+                    pid = child.process.pid,
+                    "an orphaned shim child outlived its lead and was ended"
+                );
+                signalled += 1;
+            }
+            Started::At(_) => {
+                tracing::info!(
+                    file = %path.display(),
+                    cli,
+                    pid = child.process.pid,
+                    "that pid belongs to somebody else now and was left alone"
+                );
+                spared += 1;
+            }
+            Started::Gone => {
+                // The recorded child is gone, so no identity match is possible
+                // — while its own subprocesses may still be alive. v1 leaves
+                // them, naming what a person can run: the survivors are the
+                // CLI's own tools, which the CLI would normally have reaped,
+                // and signalling a group whose leader cannot be identified is
+                // exactly what "no owner proof, no signal" forbids.
+                if group_alive(child.pgid) {
+                    tracing::warn!(
+                        file = %path.display(),
+                        cli,
+                        pgid = child.pgid,
+                        "a shim child is gone but its process group is not; \
+                         `kill -- -{pgid}` ends what is left",
+                        pgid = child.pgid
+                    );
+                }
+                spared += 1;
+            }
+            Started::Unknown => {
+                tracing::info!(
+                    file = %path.display(),
+                    cli,
+                    pid = child.process.pid,
+                    "nothing could be established about a recorded shim child, so it was left \
+                     as it is"
+                );
+                undecided += 1;
+            }
+        }
+    }
+
+    (signalled, spared, undecided)
+}
+
+/// Whether anything is left in `pgid`.
+fn group_alive(pgid: i32) -> bool {
+    // SAFETY: signal 0 sends nothing; it only asks whether the group exists
+    // and whether this process could signal it.
+    unsafe { libc::kill(-pgid, 0) == 0 }
+}
+
+/// TERM the group, and KILL whatever is still there after [`GRACE`].
+fn end_group(pgid: i32) {
+    signal_group(pgid, libc::SIGTERM);
+    let deadline = std::time::Instant::now() + GRACE;
+    while std::time::Instant::now() < deadline {
+        if !group_alive(pgid) {
+            return;
+        }
+        std::thread::sleep(GRACE_STEP);
+    }
+    signal_group(pgid, libc::SIGKILL);
+}
+
+/// Unlinks a records file that has no future reader, saying so when it could
+/// not.
+fn remove(path: &Path) -> bool {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            tracing::info!(file = %path.display(), "a shim records file with no future reader was removed");
+
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                file = %path.display(),
+                %error,
+                "a shim records file could not be removed, so the next sweep will meet it again"
+            );
+
+            false
+        }
     }
 }
 

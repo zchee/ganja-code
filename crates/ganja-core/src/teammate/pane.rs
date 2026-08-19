@@ -277,8 +277,11 @@ pub(super) async fn split_idle_shell(
 /// asked, `whose` the word for the teammate whose pane it was.
 pub(super) async fn kill_pane(handle: &Handle, backend: &'static str, whose: &'static str) {
     let Handle::Pane(pane) = handle else {
-        // Named rather than ignored, because a handle of the other shape
-        // arriving here would mean a registry had crossed two backends.
+        // Named rather than ignored, because a handle of another shape
+        // arriving here would mean a registry had crossed two backends. Two
+        // other shapes since P27 — an in-process teammate and a shim child —
+        // and the answer is the same for both: this backend made neither, so
+        // ending either would be ending somebody else's teammate.
         tracing::warn!(
             ?handle,
             "a {backend} backend was asked to end something it did not start"
