@@ -1,7 +1,8 @@
 // CI's `-D warnings` promotes this P26 AC-10 documentation check to an error.
 #![warn(missing_docs)]
 
-//! An async Rust client for the tmux control-mode protocol.
+//! An async Rust client for tmux: the control-mode protocol, and plain
+//! client invocations.
 //!
 //! Spec: pandaemonium pkg/tmux/doc.go, pkg/tmux/README.md. This crate is a
 //! behavioral port — the Go package is the specification, not source to
@@ -9,6 +10,23 @@
 //! rule. It is a sealed leaf by explicit user directive: no `ganja-*` crate
 //! in this workspace may depend on it, and it depends on no `ganja-*`
 //! crate, in either direction — CI-asserted, not merely documented.
+//!
+//! # Two transports
+//!
+//! **Control mode** is the persistent one: [`control_mode::Client`] owns a
+//! `tmux -C` subprocess for as long as it lives, and everything under
+//! [`control_mode`] is the port described above. **Plain client invocations**
+//! are the other: [`Server`] runs one `tmux <command>` to completion per call
+//! and owns nothing between calls, and everything at the crate root is this
+//! port's own synthesis — the Go package spells no such surface, so no module
+//! here carries a `Spec:` line.
+//!
+//! The two meet only in the vocabulary they share ([`ids`], [`error`]), and
+//! they part company where it matters most: control mode renders its words
+//! into one quoted *line* for a pipe, while a [`Server`] hands its words to
+//! execve unaltered. That is why [`control_mode::CommandLine`]'s quoting
+//! ladder stays inside [`control_mode`] and is never reached for from the
+//! root.
 //!
 //! [`Client`][control_mode::Client] owns one persistent `tmux -C`
 //! subprocess. Callers send normal tmux commands through it; the client
@@ -69,9 +87,14 @@
 pub mod control_mode;
 pub mod error;
 pub mod ids;
+pub mod server;
 
 // Only vocabulary shared across the crate's surfaces is re-exported at the
 // root; a control-mode type is named through `tmux::control_mode::…`, so the
 // root stays a listing of what every surface speaks rather than of one.
+// `Server` is the exception that proves the rule: the surface it heads *is*
+// the root, so `tmux::Server` and `tmux::server::Server` are one name said
+// twice rather than a type lifted out of a module it belongs to.
 pub use error::Error;
 pub use ids::{InvalidId, PaneId, SessionId, WindowId};
+pub use server::Server;

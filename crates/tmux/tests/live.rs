@@ -6,8 +6,15 @@
 //! documented by [`tmux`]. Every test owns a private server, socket, empty
 //! config, and session so concurrent test processes and threads cannot share
 //! state.
+//!
+//! The last two tests drive the other transport — [`tmux::Server`], one plain
+//! client invocation per call — which the Go package has no counterpart for
+//! and no `Spec:` line therefore names. They share the scaffolding above,
+//! because "private server, unique session, hard-fail" is a property of this
+//! file rather than of either transport.
 
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
@@ -17,7 +24,7 @@ use std::{
 
 use tempfile::TempDir;
 use tmux::{
-    PaneId,
+    Error, PaneId, Server,
     control_mode::{
         Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, Options,
         SubscriptionTarget,
@@ -439,4 +446,110 @@ async fn an_unclosed_dropped_client_reaps_its_subprocess() {
         "an_unclosed_dropped_client_reaps_its_subprocess",
     )
     .await;
+}
+
+/// This scratch's private server, addressed by socket alone: nothing here
+/// runs inside tmux, so there is no `$TMUX` to read and no pane to inherit.
+fn private_server(scratch: &Scratch) -> Server {
+    Server::at(scratch.socket.clone(), None)
+}
+
+/// Starts the private server and its one session.
+///
+/// The only call that needs the empty config: `-f` is a *client* flag, read
+/// when a server is created rather than when a running one is asked
+/// something, so every later call in these tests leads with its subcommand.
+async fn start_private_server(scratch: &Scratch, server: &Server) {
+    let argv = vec![
+        OsString::from("-f"),
+        scratch.config.clone().into_os_string(),
+        OsString::from("new-session"),
+        OsString::from("-d"),
+        OsString::from("-s"),
+        OsString::from(scratch.session_name()),
+    ];
+
+    let created = server.run(argv).await.unwrap_or_else(|error| {
+        panic!("new-session -d should start the private server and its session: {error}")
+    });
+    assert!(
+        created.bytes().is_empty(),
+        "a detached new-session answers with silence, not with {:?}",
+        created.text_lossy()
+    );
+}
+
+#[tokio::test]
+async fn a_client_invocation_creates_a_session_and_reads_it_back() {
+    let scratch = Scratch::new("server-roundtrip");
+    let server = private_server(&scratch);
+    start_private_server(&scratch, &server).await;
+
+    let named = server
+        .run([
+            "display-message",
+            "-p",
+            "-t",
+            scratch.session_name(),
+            "#{session_name}",
+        ])
+        .await
+        .expect("display-message -p should read the private session back");
+    assert_eq!(
+        named.text().expect("a session name is text").trim(),
+        scratch.session_name(),
+        "the round trip must return the session this test created and no other"
+    );
+
+    server
+        .run(["kill-server"])
+        .await
+        .expect("kill-server should end the private server");
+
+    let after = server
+        .run(["display-message", "-p", "#{session_name}"])
+        .await;
+    assert!(
+        matches!(after, Err(Error::ClientRefused { .. })),
+        "a killed server answers nothing: {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_client_invocation_carries_tmuxs_own_stderr() {
+    let scratch = Scratch::new("server-refusal");
+    let server = private_server(&scratch);
+    start_private_server(&scratch, &server).await;
+
+    // tmux resolves a command name only once it has a server to resolve it
+    // against — an unknown command on a dead socket fails at connect instead,
+    // which is why this runs against the live private server.
+    let refused = server
+        .run(["bogus-subcommand"])
+        .await
+        .expect_err("tmux has no such command");
+    match refused {
+        Error::ClientRefused {
+            command,
+            status,
+            stderr,
+        } => {
+            assert_eq!(
+                command.as_deref(),
+                Some("bogus-subcommand"),
+                "the error names the word the call led with"
+            );
+            assert!(!status.success(), "a refusal exits non-zero: {status}");
+            assert!(
+                stderr.contains("unknown command") && stderr.contains("bogus-subcommand"),
+                "tmux's own account of the refusal must survive verbatim: {stderr:?}"
+            );
+        }
+        other => panic!("a running server should refuse in its own words, not: {other}"),
+    }
+
+    server
+        .run(["kill-server"])
+        .await
+        .expect("kill-server should end the private server");
 }

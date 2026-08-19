@@ -218,6 +218,73 @@ pub enum Error {
         /// `Close` would have joined them.
         errors: Vec<Error>,
     },
+
+    /// A [`crate::Server`] was asked for from outside tmux: `$TMUX` is
+    /// unset, empty, or carries an empty socket field, so there is no server
+    /// to address.
+    ///
+    /// Synthesized, with no Go counterpart — the specification launches a
+    /// server of its own and never reads that variable. Deliberately a bare
+    /// fact and not a sentence to show somebody: what an absent tmux *means*
+    /// belongs to the consumer, per [`crate::server`]'s doc.
+    #[error("tmux: $TMUX is unset or names no socket")]
+    NotInTmux,
+
+    /// A client invocation against a [`crate::Server`] could not be run at
+    /// all: no `tmux` on `PATH`, or the subprocess would not start.
+    ///
+    /// Synthesized, with no Go counterpart. Distinct from [`Error::Spawn`],
+    /// which is the same misfortune befalling the persistent `tmux -C`
+    /// client: that one names the executable path it resolved, this one
+    /// names the word the call led with, because a plain invocation has one
+    /// and a control-mode launch does not.
+    #[error("tmux: {} could not be run: {source}", client_subject(.command))]
+    ClientStart {
+        /// The word the call led with, when it had one.
+        command: Option<String>,
+        /// The underlying I/O failure. `Arc`-wrapped — see the module doc.
+        #[source]
+        source: Arc<std::io::Error>,
+    },
+
+    /// A client invocation against a [`crate::Server`] ran and refused, in
+    /// its own words.
+    ///
+    /// Synthesized, with no Go counterpart: the control-mode transport
+    /// learns of a refusal as a `%error`-marked response block
+    /// ([`CommandError`]), which is a protocol event and not an exit status.
+    #[error("{}", client_refusal(.command, .status, .stderr))]
+    ClientRefused {
+        /// The word the call led with, when it had one.
+        command: Option<String>,
+        /// How the client ended.
+        status: std::process::ExitStatus,
+        /// The client's stderr, trimmed — tmux's own account of the refusal,
+        /// carried verbatim rather than re-worded here.
+        stderr: String,
+    },
+}
+
+/// The word a client invocation led with — its subcommand, for a call that
+/// pinned no client flags of its own — or a noun for one that led with no
+/// word at all, which is legal if unusual.
+fn client_subject(command: &Option<String>) -> &str {
+    command.as_deref().unwrap_or("the client")
+}
+
+fn client_refusal(
+    command: &Option<String>,
+    status: &std::process::ExitStatus,
+    stderr: &str,
+) -> String {
+    let subject = client_subject(command);
+    if stderr.is_empty() {
+        // tmux almost always says why; when it says nothing, how it ended is
+        // the only fact left to report, and reporting none would be worse.
+        format!("tmux: {subject} failed: {status}")
+    } else {
+        format!("tmux: {subject} failed: {stderr}")
+    }
 }
 
 fn join_close_errors(errors: &[Error]) -> String {
@@ -335,5 +402,53 @@ mod tests {
         };
         let err: Error = source.clone().into();
         assert_eq!(err.to_string(), source.to_string());
+    }
+
+    #[test]
+    fn a_client_that_will_not_start_names_the_word_that_would_have_run() {
+        let err = Error::ClientStart {
+            command: Some("new-session".to_string()),
+            source: Arc::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No such file or directory",
+            )),
+        };
+        assert_eq!(
+            err.to_string(),
+            "tmux: new-session could not be run: No such file or directory"
+        );
+    }
+
+    /// A refusal is worth carrying only if it still says what tmux said, so
+    /// this pins the stderr passthrough — and the fallback for the rare call
+    /// that fails silently.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_client_carries_tmuxs_words_or_else_its_status() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let spoke = Error::ClientRefused {
+            command: Some("list-panes".to_string()),
+            status,
+            stderr: "no server running on /tmp/x".to_string(),
+        };
+        assert_eq!(
+            spoke.to_string(),
+            "tmux: list-panes failed: no server running on /tmp/x"
+        );
+
+        let silent = Error::ClientRefused {
+            command: None,
+            status,
+            stderr: String::new(),
+        };
+        let message = silent.to_string();
+        let prefix = "tmux: the client failed: ";
+        assert!(message.starts_with(prefix), "{message:?}");
+        assert!(
+            message.len() > prefix.len(),
+            "a silent refusal must still say how the client ended: {message:?}"
+        );
     }
 }
