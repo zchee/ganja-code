@@ -26,3 +26,14 @@ fail-fast = false
 # pty timings is visible before it reaches the terminate-after cap.
 slow-timeout = { period = "30s", terminate-after = 8 }
 final-status-level = "slow"
+
+[[profile.ci.overrides]]
+# Each test in the tmux crate's live suite forks a real tmux server, and on
+# the three-core macOS runner those spawns ran beside the pty drills' own
+# ten-second exit deadline and starved them past it — first seen the moment
+# this suite and the teammate engine-door tests shared one run, with both
+# green apart. Reserving the whole runner for each server-spawning test
+# keeps the union under the deadline; eight briefly-serial tests are cheaper
+# than a lane that reddens under load it did not cause.
+filter = 'package(tmux) and binary(live)'
+threads-required = "num-cpus"
