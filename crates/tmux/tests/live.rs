@@ -24,8 +24,11 @@ use std::{
 
 use tempfile::TempDir;
 use tmux::{
-    Error, PaneId, Server, WindowId,
-    commands::{KillPane, ListPanes, NewWindow, SplitWindow},
+    Error, PaneId, Server, SessionId, WindowId,
+    commands::{
+        HasSession, KillPane, KillServer, ListPanes, ListSessions, NewSession, NewWindow,
+        RenameSession, SplitWindow,
+    },
     control_mode::{
         Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, Options,
         SubscriptionTarget,
@@ -642,4 +645,81 @@ async fn a_refused_client_invocation_carries_tmuxs_own_stderr() {
         .run(["kill-server"])
         .await
         .expect("kill-server should end the private server");
+}
+
+/// One round trip driven by the session family's builders, in the shape a
+/// caller who wants a session and not a terminal writes it: create it
+/// detached, ask whether it is there, rename it, read the new name back out
+/// of the listing, and end the server.
+///
+/// Deliberately one test for the family, for the reason the pane family's own
+/// live test states: which flags a builder renders is a process-free
+/// question, and only whether tmux accepts the words needs a real server.
+#[tokio::test]
+async fn the_typed_builders_create_rename_and_list_a_real_session() {
+    let scratch = Scratch::new("typed-sessions");
+    let server = private_server(&scratch);
+
+    // `-f` is a client flag, read when a server is created rather than when a
+    // running one is asked something, so it leads the words the builder
+    // assembles instead of living among them.
+    let mut argv = vec![
+        OsString::from("-f"),
+        scratch.config.clone().into_os_string(),
+    ];
+    argv.extend(
+        NewSession::new()
+            .detached()
+            .print()
+            .format("#{session_id}")
+            .session_name(scratch.session_name())
+            .args(),
+    );
+    let created = server.run(argv).await.unwrap_or_else(|error| {
+        panic!("new-session -d should start the private server and its session: {error}")
+    });
+    let session = SessionId::new(created.text_lossy().trim())
+        .expect("new-session -P -F #{session_id} should answer with a session id");
+
+    server
+        .run(HasSession::new().target(&session).args())
+        .await
+        .expect("has-session should find the session new-session just made");
+
+    let renamed = format!("{}-renamed", scratch.session_name());
+    server
+        .run(
+            RenameSession::new()
+                .target(&session)
+                .new_name(renamed.as_str())
+                .args(),
+        )
+        .await
+        .expect("rename-session should rename the session new-session made");
+
+    let listed = server
+        .run(
+            ListSessions::new()
+                .format("#{session_id} #{session_name}")
+                .args(),
+        )
+        .await
+        .expect("list-sessions should list the private server's sessions");
+    let row = format!("{session} {renamed}");
+    assert!(
+        listed.text_lossy().lines().any(|line| line == row),
+        "the listing should carry the name rename-session gave: {:?}",
+        listed.text_lossy()
+    );
+
+    server
+        .run(KillServer::new().args())
+        .await
+        .expect("kill-server should end the private server");
+
+    let after = server.run(HasSession::new().target(&session).args()).await;
+    assert!(
+        matches!(after, Err(Error::ClientRefused { .. })),
+        "a killed server answers nothing: {after:?}"
+    );
 }

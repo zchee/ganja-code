@@ -90,12 +90,14 @@
 use std::ffi::OsString;
 
 pub mod panes;
+pub mod sessions;
 
 // The families keep their own modules — each one's doc is where its roster is
 // argued for — but their builders are re-exported here, so a command is named
 // `tmux::commands::SplitWindow` for the same reason a control-mode type is
 // named `tmux::control_mode::Client` rather than through the file it lives in.
 pub use panes::*;
+pub use sessions::*;
 
 /// One command this crate has named: what tmux calls it, and what tmux's own
 /// abbreviation for it is.
@@ -369,7 +371,7 @@ pub(crate) use method;
 
 /// The families, in the order [`REGISTRY`] lists them. Each later wave adds
 /// one name here and nothing else.
-const FAMILIES: &[&[Entry]] = &[panes::ENTRIES];
+const FAMILIES: &[&[Entry]] = &[panes::ENTRIES, sessions::ENTRIES];
 
 /// How many commands the families hold between them.
 const fn total(families: &[&[Entry]]) -> usize {
@@ -419,9 +421,6 @@ const TYPED: [Entry; total(FAMILIES)] = flattened(FAMILIES);
 /// name.
 pub const REGISTRY: &[Entry] = &TYPED;
 
-/// Why the session, client and server commands are not here yet.
-const SESSIONS: &str = "typed in W4: sessions, clients and the server itself";
-
 /// Why the buffer, key, prompt and display commands are not here yet.
 const BUFFERS_KEYS: &str = "typed in W5: buffers, keys, the prompt and the display";
 
@@ -436,103 +435,6 @@ const OPTIONS_MISC: &str = "typed in W6: options, hooks, the environment, the mo
 /// a table that starts empty would have made the test red for three waves,
 /// and a red test nobody can fix is a test nobody reads.
 pub const EXCLUDED: &[Excluded] = &[
-    // Clients and sessions: the server, who is attached to it, and what they
-    // are attached to.
-    Excluded {
-        name: "attach-session",
-        alias: Some("attach"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "detach-client",
-        alias: Some("detach"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "has-session",
-        alias: Some("has"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "kill-server",
-        alias: None,
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "kill-session",
-        alias: None,
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "list-clients",
-        alias: Some("lsc"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "list-commands",
-        alias: Some("lscm"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "list-sessions",
-        alias: Some("ls"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "lock-client",
-        alias: Some("lockc"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "lock-server",
-        alias: Some("lock"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "lock-session",
-        alias: Some("locks"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "new-session",
-        alias: Some("new"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "refresh-client",
-        alias: Some("refresh"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "rename-session",
-        alias: Some("rename"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "server-access",
-        alias: None,
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "show-messages",
-        alias: Some("showmsgs"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "start-server",
-        alias: Some("start"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "suspend-client",
-        alias: Some("suspendc"),
-        reason: SESSIONS,
-    },
-    Excluded {
-        name: "switch-client",
-        alias: Some("switchc"),
-        reason: SESSIONS,
-    },
     // Buffers, keys, the prompt and the display.
     Excluded {
         name: "bind-key",
