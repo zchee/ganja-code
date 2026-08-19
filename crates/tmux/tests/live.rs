@@ -1181,10 +1181,16 @@ async fn both_transports_see_one_server() {
         .await
         .expect("kill-window should destroy the first window the one-shot side made");
 
-    // The predicate takes the whole window-close family so that a wrong
-    // member of it fails the assertion below by name, rather than timing out
-    // with nothing to say about what did arrive.
-    let notification = recv_until(&client, Duration::from_secs(10), |notification| {
+    // The predicate takes the whole window-close family, and deliberately
+    // settles for it: which member carries the fact is the server's
+    // version, not this crate's. tmux through 3.7 unlinks the dying window
+    // from its session before composing the notification, so even a window
+    // of the attached session arrives as %unlinked-window-close, while
+    // next-3.8 reads linkage at close time and says %window-close. Both
+    // spellings decode — the parser's own tests tell the kinds apart — so
+    // what this pins is the fact both agree on: the kill crossed
+    // transports, naming the window the one-shot side made.
+    let closed = recv_until(&client, Duration::from_secs(10), |notification| {
         matches!(
             notification.kind,
             NotificationKind::WindowClose | NotificationKind::UnlinkedWindowClose
@@ -1199,11 +1205,10 @@ async fn both_transports_see_one_server() {
         )
     });
     assert_eq!(
-        notification.kind,
-        NotificationKind::WindowClose,
-        "the killed window was in the session this client is attached to, which is what tells \
-         %window-close from %unlinked-window-close: {:?}",
-        notification.raw
+        closed.args,
+        [first.as_str()],
+        "the close notification names the killed window: {:?}",
+        closed.raw
     );
 
     // The exit path with the server still alive: `close` detaches, waits for

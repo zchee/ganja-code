@@ -61,13 +61,24 @@ jobs:
           tool: nextest
 
       # The pane suites (ganja-core's teammate_pane_*, ganja-cli's
-      # teammate_* and pane_lead consumers) drive a real tmux server and
-      # hard-fail rather than skip when tmux is missing — the same posture
-      # as the golden differential's bun below, so CI has to provide it.
-      # The ubuntu images ship tmux; the xcode image does not.
+      # teammate_* and pane_lead consumers) and the tmux crate's own
+      # hard-fail live suite drive a real tmux server, so CI has to provide
+      # one — the same posture as the golden differential's bun below. Both
+      # lanes pour homebrew's bottle rather than trusting the image: the
+      # ubuntu image's apt tmux predates commands the register types
+      # (new-pane), and the xcode image ships none at all, so this is the
+      # one way both lanes measure the same tmux without compiling one.
+      # Linuxbrew is preinstalled but off PATH (the image README's own
+      # note); GITHUB_PATH prepends, so the poured tmux outranks the
+      # image's /usr/bin/tmux in every later step.
       - name: install tmux
-        if: runner.os == 'macOS'
-        run: brew install tmux
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+            echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          fi
+          brew install tmux
+          tmux -V
 
       # The golden differential test drives the real upstream opencode at its
       # pinned tag, headless under bun, and hard-fails when the checkout is

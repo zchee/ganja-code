@@ -34,14 +34,15 @@
 //!
 //! - `choose-tree -i`: the manual's synopsis lists it, the usage string does
 //!   not, and the parser answers `unknown flag -i`. Not a method — the
-//!   manual is describing [`ChooseClient::information`], whose command does
-//!   accept it.
+//!   manual is describing `choose-client -i`, which the next tmux's own
+//!   command accepts; that row now sits shelved ahead of the floor.
 //! - `choose-tree -y` and `choose-client -y`: the usage strings omit them,
 //!   the manual documents both as disabling confirmation prompts, and the
 //!   parser takes them. Methods:
 //!   [`ChooseTree::no_confirm`]/[`ChooseClient::no_confirm`].
-//! - `choose-client -i`: the usage string lists it and the manual's synopsis
-//!   does not, though its prose explains exactly what it does. A method.
+//! - `choose-client -i`: the next tmux's usage string lists it and the
+//!   manual's synopsis does not, though its prose explains exactly what it
+//!   does. Typed — and shelved ahead of the floor, which refuses it.
 //! - `customize-mode -y` and `run-shell -s`: the parser accepts both and
 //!   neither document names either, so there is nothing to write a doc line
 //!   from — and a method whose doc would be a guess is worse than no
@@ -155,7 +156,7 @@ invocations! {
         /// `-w`: the window options.
         window: switch "-w";
         /// `-F format`: what each line looks like.
-        format: text "-F";
+        format: ahead_text "-F";
         /// `-t target-pane`: whose options to show.
         target: value "-t";
         /// One option to show; every option at the scope if omitted.
@@ -200,7 +201,7 @@ invocations! {
         /// `-v`: prints the value alone, without the option's name.
         value_only: switch "-v";
         /// `-F format`: what each line looks like.
-        format: text "-F";
+        format: ahead_text "-F";
         /// `-t target-window`: whose options to show.
         target: value "-t";
         /// One option to show; every window option if omitted.
@@ -213,20 +214,19 @@ invocations! {
     /// the same name reaches it through `set-option`, and
     /// [`ShowOptions::hooks`] lists it among the others.
     ///
-    /// Three of the flags do something other than setting: [`fire`] raises a
+    /// Three of the flags do something other than setting: `-E` raises a
     /// user event rather than storing anything, [`run_now`] runs the named
-    /// hook immediately, and [`monitor`] installs a subscription that
-    /// re-evaluates a format once a second.
+    /// hook immediately, and `-B` installs a subscription that re-evaluates
+    /// a format once a second — the first and last shelved ahead of the
+    /// floor, which refuses both.
     ///
-    /// [`fire`]: Self::fire
     /// [`run_now`]: Self::run_now
-    /// [`monitor`]: Self::monitor
     SetHook = "set-hook", None => {
         /// `-a`: appends to the hook already stored under this name.
         append: switch "-a";
         /// `-E`: fires the user event [`hook`][Self::hook] names, whose
         /// name must begin with `@`.
-        fire: switch "-E";
+        fire: ahead_switch "-E";
         /// `-g`: the global hook.
         global: switch "-g";
         /// `-p`: a pane hook.
@@ -235,9 +235,9 @@ invocations! {
         run_now: switch "-R";
         /// `-T`: with [`monitor`][Self::monitor], runs the hook only while
         /// the subscription's format is true.
-        when_true: switch "-T";
-        /// `-u`: unsets the hook, or removes the subscription
-        /// [`monitor`][Self::monitor] names.
+        when_true: ahead_switch "-T";
+        /// `-u`: unsets the hook, or removes the subscription a `-B`
+        /// names.
         unset: switch "-u";
         /// `-w`: a window hook.
         window: switch "-w";
@@ -249,11 +249,10 @@ invocations! {
         ///
         /// Set twice, the last wins: tmux reads one subscription per call,
         /// so a second `-B` in the same argv replaces rather than adds.
-        monitor: text "-B";
+        monitor: ahead_text "-B";
         /// `-t target-pane`: whose hook to set.
         target: value "-t";
-        /// The hook's name, or the user event's under
-        /// [`fire`][Self::fire].
+        /// The hook's name, or the user event's under the shelved `-E`.
         hook: positional;
         /// The tmux command the hook runs.
         command: positional;
@@ -266,7 +265,7 @@ invocations! {
     ShowHooks = "show-hooks", None => {
         /// `-B`: shows the subscriptions [`SetHook::monitor`] installed
         /// rather than the hooks themselves.
-        subscriptions: switch "-B";
+        subscriptions: ahead_switch "-B";
         /// `-g`: the global hooks.
         global: switch "-g";
         /// `-p`: the pane hooks.
@@ -274,7 +273,7 @@ invocations! {
         /// `-w`: the window hooks.
         window: switch "-w";
         /// `-F format`: what each line looks like.
-        format: text "-F";
+        format: ahead_text "-F";
         /// `-t target-pane`: whose hooks to show.
         target: value "-t";
         /// One hook to show; every hook at the scope if omitted.
@@ -342,7 +341,7 @@ invocations! {
         /// `-H`: hides the position indicator in the top right.
         hide_position: switch "-H";
         /// `-k`: kills the pane when the mode is left.
-        kill_on_exit: switch "-k";
+        kill_on_exit: ahead_switch "-k";
         /// `-M`: begins a mouse drag, for a binding on one.
         mouse: switch "-M";
         /// `-q`: cancels copy mode, and every other mode with it.
@@ -368,7 +367,7 @@ invocations! {
     /// browsed and changed from a list.
     CustomizeMode = "customize-mode", None => {
         /// `-k`: kills the pane when the mode is left.
-        kill_on_exit: switch "-k";
+        kill_on_exit: ahead_switch "-k";
         /// `-N`: starts without the option information.
         without_information: switch "-N";
         /// `-Z`: zooms the pane.
@@ -384,6 +383,14 @@ invocations! {
 
     /// Puts a pane into switch mode, where a session or window is chosen
     /// from a list narrowed by typing.
+    ///
+    /// The one whole command typed ahead of the 3.7c floor: the next tmux's
+    /// addition, which the floor answers with `unknown command` — reported
+    /// by `tests/inventory.rs`, never failed, the way every version gap in
+    /// a whole command is. Its rows stay live rather than shelved because
+    /// shelving them would say nothing the command's own absence does not
+    /// already say, and a caller reaching for it finds out loudly, whole,
+    /// and immediately.
     SwitchMode = "switch-mode", None => {
         /// `-k`: kills the pane when the mode is left.
         kill_on_exit: switch "-k";
@@ -410,11 +417,11 @@ invocations! {
     /// caller driving a detached server should know before reaching for it.
     ChooseClient = "choose-client", None => {
         /// `-h`: hides the pane the mode is in.
-        hide_pane: switch "-h";
+        hide_pane: ahead_switch "-h";
         /// `-i`: shows client information instead of the preview.
-        information: switch "-i";
+        information: ahead_switch "-i";
         /// `-k`: kills the pane when the mode is left.
-        kill_on_exit: switch "-k";
+        kill_on_exit: ahead_switch "-k";
         /// `-N`: starts without the preview.
         ///
         /// tmux reads a *second* `-N` as "with the larger preview", which
@@ -455,9 +462,9 @@ invocations! {
         /// first alone.
         all_session_groups: switch "-G";
         /// `-h`: hides the pane the mode is in.
-        hide_pane: switch "-h";
+        hide_pane: ahead_switch "-h";
         /// `-k`: kills the pane when the mode is left.
-        kill_on_exit: switch "-k";
+        kill_on_exit: ahead_switch "-k";
         /// `-N`: starts without the preview; a second `-N` would ask for
         /// the larger one, which this builder cannot spell — see
         /// [`ChooseClient::without_preview`].
@@ -569,9 +576,9 @@ invocations! {
     WaitFor = "wait-for", Some("wait") => {
         /// `-E`: waits for the next event of that name — a hook, a
         /// notification, or a user `@` event.
-        event: switch "-E";
+        event: ahead_switch "-E";
         /// `-l`: lists the waiters on the channel.
-        list: switch "-l";
+        list: ahead_switch "-l";
         /// `-L`: locks the channel, so anything else locking it waits.
         lock: switch "-L";
         /// `-S`: wakes whatever is waiting on the channel.
@@ -580,13 +587,13 @@ invocations! {
         unlock: switch "-U";
         /// `-v`: prints the event's payload keys, whether or not
         /// [`format`][Self::format] is true.
-        payload_keys: switch "-v";
+        payload_keys: ahead_switch "-v";
         /// `-F format`: with [`event`][Self::event], a format that must
         /// also be true.
-        format: text "-F";
+        format: ahead_text "-F";
         /// `-w waiter`: wakes this one waiter immediately.
-        waiter: value "-w";
-        /// The channel, or the event's name under [`event`][Self::event].
+        waiter: ahead_value "-w";
+        /// The channel, or the event's name under the shelved `-E`.
         name: positional;
     }
 }
@@ -660,7 +667,6 @@ mod tests {
                     .server()
                     .value_only()
                     .window()
-                    .format("#{option_name}")
                     .target("%1")
                     .option("pane-border-status")
             ),
@@ -674,8 +680,6 @@ mod tests {
                 "-s",
                 "-v",
                 "-w",
-                "-F",
-                "#{option_name}",
                 "-t",
                 "%1",
                 "--",
@@ -719,7 +723,6 @@ mod tests {
                 &ShowWindowOptions::new()
                     .global()
                     .value_only()
-                    .format("#{option_value}")
                     .target("@1")
                     .option("pane-border-status")
             ),
@@ -727,8 +730,6 @@ mod tests {
                 "show-window-options",
                 "-g",
                 "-v",
-                "-F",
-                "#{option_value}",
                 "-t",
                 "@1",
                 "--",
@@ -744,14 +745,11 @@ mod tests {
             words(
                 &SetHook::new()
                     .append()
-                    .fire()
                     .global()
                     .pane()
                     .run_now()
-                    .when_true()
                     .unset()
                     .window()
-                    .monitor("@alert:pane:#{pane_dead}")
                     .target("%1")
                     .hook("pane-exited")
                     .command("display-message gone")
@@ -759,15 +757,11 @@ mod tests {
             [
                 "set-hook",
                 "-a",
-                "-E",
                 "-g",
                 "-p",
                 "-R",
-                "-T",
                 "-u",
                 "-w",
-                "-B",
-                "@alert:pane:#{pane_dead}",
                 "-t",
                 "%1",
                 "--",
@@ -778,39 +772,21 @@ mod tests {
     }
 
     #[test]
-    fn a_second_subscription_replaces_the_first_because_tmux_reads_one() {
-        assert_eq!(
-            words(
-                &SetHook::new()
-                    .monitor("@one:pane:#{pane_id}")
-                    .monitor("@two:pane:#{pane_id}")
-            ),
-            ["set-hook", "-B", "@two:pane:#{pane_id}"],
-            "a live server keeps only the last -B of a call, so the builder must not send two"
-        );
-    }
-
-    #[test]
     fn show_hooks_can_list_subscriptions_instead() {
         assert_eq!(
             words(
                 &ShowHooks::new()
-                    .subscriptions()
                     .global()
                     .pane()
                     .window()
-                    .format("#{hook}")
                     .target("%1")
                     .hook("pane-exited")
             ),
             [
                 "show-hooks",
-                "-B",
                 "-g",
                 "-p",
                 "-w",
-                "-F",
-                "#{hook}",
                 "-t",
                 "%1",
                 "--",
@@ -881,7 +857,6 @@ mod tests {
                     .page_down()
                     .exit_at_bottom()
                     .hide_position()
-                    .kill_on_exit()
                     .mouse()
                     .cancel()
                     .scroll_to_mouse()
@@ -894,7 +869,6 @@ mod tests {
                 "-d",
                 "-e",
                 "-H",
-                "-k",
                 "-M",
                 "-q",
                 "-S",
@@ -920,7 +894,6 @@ mod tests {
         assert_eq!(
             words(
                 &CustomizeMode::new()
-                    .kill_on_exit()
                     .without_information()
                     .zoom()
                     .format("#{option_name}")
@@ -929,7 +902,6 @@ mod tests {
             ),
             [
                 "customize-mode",
-                "-k",
                 "-N",
                 "-Z",
                 "-F",
@@ -976,9 +948,6 @@ mod tests {
         assert_eq!(
             words(
                 &ChooseClient::new()
-                    .hide_pane()
-                    .information()
-                    .kill_on_exit()
                     .without_preview()
                     .reverse()
                     .no_confirm()
@@ -992,9 +961,6 @@ mod tests {
             ),
             [
                 "choose-client",
-                "-h",
-                "-i",
-                "-k",
                 "-N",
                 "-r",
                 "-y",
@@ -1021,8 +987,6 @@ mod tests {
             words(
                 &ChooseTree::new()
                     .all_session_groups()
-                    .hide_pane()
-                    .kill_on_exit()
                     .without_preview()
                     .reverse()
                     .collapsed_sessions()
@@ -1039,8 +1003,6 @@ mod tests {
             [
                 "choose-tree",
                 "-G",
-                "-h",
-                "-k",
                 "-N",
                 "-r",
                 "-s",
@@ -1155,33 +1117,8 @@ mod tests {
     #[test]
     fn wait_for_renders_every_flag_it_has() {
         assert_eq!(
-            words(
-                &WaitFor::new()
-                    .event()
-                    .list()
-                    .lock()
-                    .signal()
-                    .unlock()
-                    .payload_keys()
-                    .format("#{pane_id}")
-                    .waiter("w1")
-                    .name("build-done")
-            ),
-            [
-                "wait-for",
-                "-E",
-                "-l",
-                "-L",
-                "-S",
-                "-U",
-                "-v",
-                "-F",
-                "#{pane_id}",
-                "-w",
-                "w1",
-                "--",
-                "build-done",
-            ]
+            words(&WaitFor::new().lock().signal().unlock().name("build-done")),
+            ["wait-for", "-L", "-S", "-U", "--", "build-done"]
         );
     }
 

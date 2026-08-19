@@ -171,7 +171,7 @@ invocations! {
     /// given — with `%%` standing for the chosen buffer's name.
     ChooseBuffer = "choose-buffer", None => {
         /// `-k`: kills the pane when the mode is left.
-        kill_on_exit: switch "-k";
+        kill_on_exit: ahead_switch "-k";
         /// `-N`: starts with the preview off.
         no_preview: switch "-N";
         /// `-r`: reverses [`sort_order`][Self::sort_order].
@@ -386,7 +386,7 @@ invocations! {
         numeric: switch "-N";
         /// `-P`: opens the prompt inside a pane rather than on the status
         /// line.
-        in_pane: switch "-P";
+        in_pane: ahead_switch "-P";
         /// `-I inputs`: the initial text of each prompt, comma-separated
         /// unless [`literal`][Self::literal].
         inputs: value "-I";
@@ -751,7 +751,6 @@ mod tests {
         assert_eq!(
             words(
                 &ChooseBuffer::new()
-                    .kill_on_exit()
                     .no_preview()
                     .reverse()
                     .skip_confirmations()
@@ -765,7 +764,6 @@ mod tests {
             ),
             [
                 "choose-buffer",
-                "-k",
                 "-N",
                 "-r",
                 "-y",
@@ -983,7 +981,6 @@ mod tests {
                     .one_key_name()
                     .literal()
                     .numeric()
-                    .in_pane()
                     .inputs("main")
                     .prompts("name:")
                     .target("/dev/ttys001")
@@ -1001,7 +998,6 @@ mod tests {
                 "-k",
                 "-l",
                 "-N",
-                "-P",
                 "-I",
                 "main",
                 "-p",

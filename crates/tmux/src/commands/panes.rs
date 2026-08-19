@@ -110,11 +110,11 @@ invocations! {
         /// `-v`: splits vertically, which is also the default.
         vertical: switch "-v";
         /// `-W`: waits for the command to exit and returns its status.
-        wait: switch "-W";
+        wait: ahead_switch "-W";
         /// `-Z`: zooms the window, or keeps it zoomed if it already was.
         zoom: switch "-Z";
         /// `-B border-lines`: the border lines for a floating pane.
-        border_lines: text "-B";
+        border_lines: ahead_text "-B";
         /// `-c start-directory`: the new pane's working directory.
         start_directory: value "-c";
         /// `-e environment`: one `NAME=VALUE` pair, and callable once per
@@ -137,7 +137,7 @@ invocations! {
         /// `-R inactive-border-style`: the border style while it is not.
         inactive_border_style: text "-R";
         /// `-T title`: the pane's title.
-        title: value "-T";
+        title: ahead_value "-T";
         /// `-t target-pane`: the pane to split.
         target: value "-t";
         /// The program and its arguments. Two or more words are execvp'd
@@ -159,7 +159,7 @@ invocations! {
         /// `-b`: puts the new pane left of, or above, the target.
         before: switch "-b";
         /// `-C`: closes a modal pane when the mouse is clicked outside it.
-        close_modal_on_click: switch "-C";
+        close_modal_on_click: ahead_switch "-C";
         /// `-d`: leaves the current pane active.
         detached: switch "-d";
         /// `-f`: spans the full window height or width.
@@ -174,20 +174,20 @@ invocations! {
         /// `-L`: behaves like [`SplitWindow`] instead of floating.
         split_like: switch "-L";
         /// `-M`: follows a mouse drag, for a binding on one.
-        mouse: switch "-M";
+        mouse: ahead_switch "-M";
         /// `-O`: makes the pane modal — always active, and blocking every
         /// other pane while it lives.
-        modal: switch "-O";
+        modal: ahead_switch "-O";
         /// `-P`: prints the new pane, in [`format`][Self::format].
         print: switch "-P";
         /// `-v`: splits vertically.
         vertical: switch "-v";
         /// `-W`: waits for the command to exit and returns its status.
-        wait: switch "-W";
+        wait: ahead_switch "-W";
         /// `-Z`: zooms the window.
         zoom: switch "-Z";
         /// `-B border-lines`: the floating pane's border lines.
-        border_lines: text "-B";
+        border_lines: ahead_text "-B";
         /// `-c start-directory`: the new pane's working directory.
         start_directory: value "-c";
         /// `-e environment`: one `NAME=VALUE` pair, callable once per
@@ -208,7 +208,7 @@ invocations! {
         /// `-R inactive-border-style`: the border style while inactive.
         inactive_border_style: text "-R";
         /// `-T title`: the pane's title.
-        title: value "-T";
+        title: ahead_value "-T";
         /// `-x width`: columns, or a percentage of the window.
         width: value "-x";
         /// `-y height`: lines, or a percentage of the window.
@@ -274,7 +274,7 @@ invocations! {
         all_others: switch "-a";
         /// `-f filter`: with [`all_others`][Self::all_others], kills only
         /// the panes the filter is true for.
-        filter: text "-f";
+        filter: ahead_text "-f";
         /// `-t target-pane`: the pane to kill, or to spare under
         /// [`all_others`][Self::all_others].
         target: value "-t";
@@ -306,8 +306,9 @@ invocations! {
 
     /// Moves a pane out of its window and into a window of its own.
     ///
-    /// The inverse of [`JoinPane`], and — with [`floating`][Self::floating]
-    /// — the way a tiled pane is lifted out of the layout instead.
+    /// The inverse of [`JoinPane`] — and, on the next tmux, `-W` lifts a
+    /// tiled pane out of the layout into a floating one instead; that row
+    /// is shelved below with its geometry.
     BreakPane = "break-pane", Some("breakp") => {
         /// `-a`: puts the new window at the next index after the target.
         after: switch "-a";
@@ -319,7 +320,7 @@ invocations! {
         print: switch "-P";
         /// `-W`: lifts the pane out of the tiled layout and floats it
         /// instead of making a window.
-        floating: switch "-W";
+        floating: ahead_switch "-W";
         /// `-F format`: what [`print`][Self::print] answers with; the
         /// default is `#{session_name}:#{window_index}.#{pane_index}`.
         format: text "-F";
@@ -330,13 +331,13 @@ invocations! {
         /// `-t dst-window`: where the new window goes.
         target: value "-t";
         /// `-x width`: a floating pane's width.
-        width: value "-x";
+        width: ahead_value "-x";
         /// `-y height`: a floating pane's height.
-        height: value "-y";
+        height: ahead_value "-y";
         /// `-X x-position`: a floating pane's left edge.
-        x_position: value "-X";
+        x_position: ahead_value "-X";
         /// `-Y y-position`: a floating pane's top edge.
-        y_position: value "-Y";
+        y_position: ahead_value "-Y";
     }
 
     /// Splits a pane and moves an existing pane into the space.
@@ -362,19 +363,14 @@ invocations! {
         target: value "-t";
     }
 
-    /// Joins a pane, or moves a floating one.
+    /// Joins a pane — and, on the next tmux, moves a floating one.
     ///
-    /// [`JoinPane`] until one of the movement flags is given, at which point
-    /// it moves the target floating pane instead — the same command name for
-    /// two jobs is tmux's arrangement, kept rather than split in two here.
-    ///
-    /// The four directions always spell their amount: [`down`][Self::down]
-    /// builds `-D 5` and never a bare `-D`. tmux takes the bare form too —
-    /// its manual spells the argument optional (`[-D [lines]]`) and moves
-    /// the pane by one without it — but a flag with nothing after it is a
-    /// second method of a different shape, so that spelling is left to
-    /// [`Server::run`][crate::Server::run], which carries every form this
-    /// module has not named a method for.
+    /// [`JoinPane`]'s near-twin on the floor. The second job arrived with
+    /// the next tmux's floating panes: given a movement flag it moves the
+    /// target floating pane instead, the same command name for two jobs
+    /// being tmux's arrangement — and that whole half sits shelved below,
+    /// direction rows, positions and stacking alike, until the floor grows
+    /// it.
     MovePane = "move-pane", Some("movep") => {
         /// `-b`: joins the source left of, or above, the destination.
         before: switch "-b";
@@ -385,32 +381,32 @@ invocations! {
         /// `-h`: splits horizontally.
         horizontal: switch "-h";
         /// `-M`: begins a mouse drag, for a binding on one.
-        mouse: switch "-M";
+        mouse: ahead_switch "-M";
         /// `-v`: splits vertically.
         vertical: switch "-v";
         /// `-D lines`: moves a floating pane down by that many.
-        down: value "-D";
+        down: ahead_value "-D";
         /// `-l size`: lines, columns, or a percentage.
         size: value "-l";
         /// `-L columns`: moves a floating pane left.
-        left: value "-L";
+        left: ahead_value "-L";
         /// `-P position`: one of tmux's named positions, such as `centre`,
         /// `top-left` or `forward-loop`.
-        position: text "-P";
+        position: ahead_text "-P";
         /// `-R columns`: moves a floating pane right.
-        right: value "-R";
+        right: ahead_value "-R";
         /// `-s src-pane`: the pane to move.
         source: value "-s";
         /// `-t dst-pane`: the pane to split for it.
         target: value "-t";
         /// `-U lines`: moves a floating pane up.
-        up: value "-U";
+        up: ahead_value "-U";
         /// `-X x-position`: moves it to an absolute column.
-        x_position: value "-X";
+        x_position: ahead_value "-X";
         /// `-Y y-position`: moves it to an absolute line.
-        y_position: value "-Y";
+        y_position: ahead_value "-Y";
         /// `-z z-index`: moves it in the stack; zero is the front.
-        z_index: value "-z";
+        z_index: ahead_value "-z";
     }
 
     /// Exchanges two panes without moving either one's position.
@@ -467,7 +463,7 @@ invocations! {
     /// Runs a command again in a pane whose own has exited.
     RespawnPane = "respawn-pane", Some("respawnp") => {
         /// `-E`: leaves the pane with nothing running.
-        empty: switch "-E";
+        empty: ahead_switch "-E";
         /// `-k`: kills whatever is still running first, instead of refusing.
         kill_running: switch "-k";
         /// `-c start-directory`: a new working directory for the pane.
@@ -515,7 +511,7 @@ invocations! {
         /// `-q`: says nothing when there is no alternate screen.
         quiet: switch "-q";
         /// `-R`: dumps the internal grid, for diagnostics.
-        grid_dump: switch "-R";
+        grid_dump: ahead_switch "-R";
         /// `-T`: ignores trailing positions holding no character.
         ignore_trailing: switch "-T";
         /// `-b buffer-name`: the buffer to capture into.
@@ -551,18 +547,21 @@ invocations! {
 
     /// Shows each pane's number over the window and waits for a choice.
     DisplayPanes = "display-panes", Some("displayp") => {
+        /// `-b`: does not block other commands from running until the
+        /// indicator is closed.
+        no_block: switch "-b";
         /// `-k`: kills the pane when the mode is left.
-        kill_on_exit: switch "-k";
+        kill_on_exit: ahead_switch "-k";
         /// `-N`: stays up until the time runs out rather than until a key.
         ignore_keys: switch "-N";
         /// `-Z`: starts unzoomed; the mode is zoomed by default.
-        unzoomed: switch "-Z";
+        unzoomed: ahead_switch "-Z";
         /// `-d duration`: milliseconds to stay up; zero means until a key.
         duration: value "-d";
         /// `-s source-window`: shows this window's panes instead of the
         /// target's.
-        source_window: value "-s";
-        /// `-t target-pane`: the pane to put into the mode.
+        source_window: ahead_value "-s";
+        /// `-t target-client`: the client to display the indicator on.
         target: value "-t";
         /// The command run for the chosen pane, with `%%` standing for its
         /// id; the default is `select-pane -t '%%'`.
@@ -578,7 +577,7 @@ invocations! {
         /// `-d`: leaves the current window current.
         detached: switch "-d";
         /// `-E`: creates the first pane with nothing running in it.
-        empty: switch "-E";
+        empty: ahead_switch "-E";
         /// `-k`: destroys whatever already occupies the target index.
         kill_existing: switch "-k";
         /// `-P`: prints the new window, in [`format`][Self::format].
@@ -613,7 +612,7 @@ invocations! {
         all_others: switch "-a";
         /// `-f filter`: with [`all_others`][Self::all_others], kills only
         /// the windows the filter is true for.
-        filter: text "-f";
+        filter: ahead_text "-f";
         /// `-t target-window`: the window to kill, or to spare.
         target: value "-t";
     }
@@ -742,7 +741,7 @@ invocations! {
     /// Runs a command again in a window whose own has exited.
     RespawnWindow = "respawn-window", Some("respawnw") => {
         /// `-E`: leaves the window with one pane and nothing running.
-        empty: switch "-E";
+        empty: ahead_switch "-E";
         /// `-k`: kills whatever is still running first, instead of refusing.
         kill_running: switch "-k";
         /// `-c start-directory`: a new working directory for the window.
@@ -881,9 +880,7 @@ mod tests {
                     .keep_open()
                     .print()
                     .vertical()
-                    .wait()
                     .zoom()
-                    .border_lines("rounded")
                     .start_directory("/work")
                     .environment("A=1")
                     .format("#{pane_id}")
@@ -893,7 +890,6 @@ mod tests {
                     .style("bg=black")
                     .active_border_style("fg=green")
                     .inactive_border_style("fg=grey")
-                    .title("worker")
                     .target("%2")
                     .command(["sh", "-c", "true"])
             ),
@@ -907,10 +903,7 @@ mod tests {
                 "-k",
                 "-P",
                 "-v",
-                "-W",
                 "-Z",
-                "-B",
-                "rounded",
                 "-c",
                 "/work",
                 "-e",
@@ -929,8 +922,6 @@ mod tests {
                 "fg=green",
                 "-R",
                 "fg=grey",
-                "-T",
-                "worker",
                 "-t",
                 "%2",
                 "--",
@@ -947,10 +938,6 @@ mod tests {
             words(
                 &NewPane::new()
                     .detached()
-                    .modal()
-                    .close_modal_on_click()
-                    .split_like()
-                    .mouse()
                     .width("60%")
                     .height("40%")
                     .x_position("10")
@@ -958,8 +945,7 @@ mod tests {
                     .target("%0")
             ),
             [
-                "new-pane", "-d", "-O", "-C", "-L", "-M", "-x", "60%", "-y", "40%", "-X", "10",
-                "-Y", "2", "-t", "%0",
+                "new-pane", "-d", "-x", "60%", "-y", "40%", "-X", "10", "-Y", "2", "-t", "%0",
             ]
         );
     }
@@ -1000,13 +986,8 @@ mod tests {
     #[test]
     fn kill_pane_can_spare_the_one_it_targets() {
         assert_eq!(
-            words(
-                &KillPane::new()
-                    .all_others()
-                    .filter("#{==:#{pane_dead},1}")
-                    .target("%1")
-            ),
-            ["kill-pane", "-a", "-f", "#{==:#{pane_dead},1}", "-t", "%1",]
+            words(&KillPane::new().all_others().target("%1")),
+            ["kill-pane", "-a", "-t", "%1",]
         );
     }
 
@@ -1049,15 +1030,10 @@ mod tests {
                     .before()
                     .detached()
                     .print()
-                    .floating()
                     .format("#{window_id}")
                     .window_name("scratch")
                     .source("%4")
                     .target("work:9")
-                    .width("80")
-                    .height("24")
-                    .x_position("0")
-                    .y_position("0")
             ),
             [
                 "break-pane",
@@ -1065,7 +1041,6 @@ mod tests {
                 "-b",
                 "-d",
                 "-P",
-                "-W",
                 "-F",
                 "#{window_id}",
                 "-n",
@@ -1074,14 +1049,6 @@ mod tests {
                 "%4",
                 "-t",
                 "work:9",
-                "-x",
-                "80",
-                "-y",
-                "24",
-                "-X",
-                "0",
-                "-Y",
-                "0",
             ]
         );
     }
@@ -1126,46 +1093,13 @@ mod tests {
         assert_eq!(
             words(
                 &MovePane::new()
-                    .mouse()
                     .before()
                     .detached()
                     .full_size()
                     .horizontal()
                     .vertical()
-                    .down("2")
-                    .left("3")
-                    .position("centre")
-                    .right("4")
-                    .up("1")
-                    .x_position("10")
-                    .y_position("5")
-                    .z_index("0")
             ),
-            [
-                "move-pane",
-                "-M",
-                "-b",
-                "-d",
-                "-f",
-                "-h",
-                "-v",
-                "-D",
-                "2",
-                "-L",
-                "3",
-                "-P",
-                "centre",
-                "-R",
-                "4",
-                "-U",
-                "1",
-                "-X",
-                "10",
-                "-Y",
-                "5",
-                "-z",
-                "0",
-            ]
+            ["move-pane", "-b", "-d", "-f", "-h", "-v"]
         );
     }
 
@@ -1225,7 +1159,6 @@ mod tests {
         assert_eq!(
             words(
                 &RespawnPane::new()
-                    .empty()
                     .kill_running()
                     .start_directory("/srv")
                     .environment("A=1")
@@ -1235,7 +1168,6 @@ mod tests {
             ),
             [
                 "respawn-pane",
-                "-E",
                 "-k",
                 "-c",
                 "/srv",
@@ -1270,7 +1202,6 @@ mod tests {
                     .stdout()
                     .pending()
                     .quiet()
-                    .grid_dump()
                     .ignore_trailing()
                     .buffer("scratch")
                     .end_line("-")
@@ -1291,7 +1222,6 @@ mod tests {
                 "-p",
                 "-P",
                 "-q",
-                "-R",
                 "-T",
                 "-b",
                 "scratch",
@@ -1339,25 +1269,20 @@ mod tests {
         assert_eq!(
             words(
                 &DisplayPanes::new()
-                    .kill_on_exit()
+                    .no_block()
                     .ignore_keys()
-                    .unzoomed()
                     .duration("2000")
-                    .source_window("@1")
-                    .target("%0")
+                    .target("/dev/ttys001")
                     .template("select-pane -t '%%'")
             ),
             [
                 "display-panes",
-                "-k",
+                "-b",
                 "-N",
-                "-Z",
                 "-d",
                 "2000",
-                "-s",
-                "@1",
                 "-t",
-                "%0",
+                "/dev/ttys001",
                 "--",
                 "select-pane -t '%%'",
             ]
@@ -1372,7 +1297,6 @@ mod tests {
                     .after()
                     .before()
                     .detached()
-                    .empty()
                     .kill_existing()
                     .print()
                     .select_existing()
@@ -1388,7 +1312,6 @@ mod tests {
                 "-a",
                 "-b",
                 "-d",
-                "-E",
                 "-k",
                 "-P",
                 "-S",
@@ -1412,20 +1335,8 @@ mod tests {
     #[test]
     fn kill_window_can_spare_the_one_it_targets() {
         assert_eq!(
-            words(
-                &KillWindow::new()
-                    .all_others()
-                    .filter("#{==:#{window_name},scratch}")
-                    .target("@1")
-            ),
-            [
-                "kill-window",
-                "-a",
-                "-f",
-                "#{==:#{window_name},scratch}",
-                "-t",
-                "@1",
-            ]
+            words(&KillWindow::new().all_others().target("@1")),
+            ["kill-window", "-a", "-t", "@1"]
         );
     }
 
@@ -1576,7 +1487,6 @@ mod tests {
         assert_eq!(
             words(
                 &RespawnWindow::new()
-                    .empty()
                     .kill_running()
                     .start_directory("/srv")
                     .environment("A=1")
@@ -1585,7 +1495,6 @@ mod tests {
             ),
             [
                 "respawn-window",
-                "-E",
                 "-k",
                 "-c",
                 "/srv",

@@ -75,8 +75,10 @@ jobs:
           printf '{"hasCompletedOnboarding": true, "customApiKeyResponses": {"approved": ["%s"]}}' "$approved" \
             > "$RUNNER_TEMP/claude-seed.json"
 
-      # The ubuntu images ship tmux (ci.yaml's own note), and the test
-      # hard-fails rather than skips without it, so nothing needs installing.
+      # The ubuntu image's apt tmux is enough here — the pane suite asks
+      # nothing of the commands ci.yaml pours homebrew's newer tmux for —
+      # and the test hard-fails rather than skips without it, so nothing
+      # needs installing.
       # The key reaches the pane as ambient process environment through the
       # test's private tmux server — ganja itself carries no credential into
       # a pane (D502's enumerated list stays closed).

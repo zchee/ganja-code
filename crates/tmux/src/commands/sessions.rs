@@ -22,9 +22,10 @@
 //!
 //! # Where the flags came from
 //!
-//! From the binary's own usage strings, cross-checked against the
-//! next-3.8 manual, and — where the two disagreed — from what the binary
-//! actually accepts, probed against a private socket. Two of these
+//! From the binary's own usage strings, cross-checked against the manual
+//! — first next-3.8's, re-measured against 3.7c's when the floor settled
+//! there — and, where the two disagreed, from what the binary actually
+//! accepts, probed against a private socket. Two of these
 //! commands' usage strings are stale in opposite directions, so neither
 //! source alone would have been right:
 //!
@@ -214,7 +215,7 @@ invocations! {
         group: switch "-g";
         /// `-f filter`: with [`all_others`][Self::all_others], kills only
         /// the sessions the filter is true for.
-        filter: text "-f";
+        filter: ahead_text "-f";
         /// `-t target-session`: the session to kill, or to spare under
         /// [`all_others`][Self::all_others].
         target: value "-t";
@@ -362,9 +363,9 @@ invocations! {
     ListClients = "list-clients", Some("lsc") => {
         /// `-r`: reverses [`sort_order`][Self::sort_order].
         ///
-        /// tmux next-3.8 prints no `-r` in this command's usage line and
-        /// accepts one all the same; the manual documents it, and the
-        /// binary was asked directly.
+        /// tmux prints no `-r` in this command's usage line and accepts
+        /// one all the same — measured on 3.7c and next-3.8 alike; the
+        /// manual documents it, and the binary was asked directly.
         reverse: switch "-r";
         /// `-F format`: what each line looks like.
         format: text "-F";
@@ -414,9 +415,10 @@ invocations! {
     /// have already been widened — which the manual warns against, and
     /// this crate repeats rather than softens.
     ///
-    /// tmux next-3.8 prints `[-t target-pane]` in this command's usage
-    /// line and then answers `unknown flag -t`; there is deliberately no
-    /// method for it, since one could only build argv tmux refuses.
+    /// tmux prints `[-t target-pane]` in this command's usage line and
+    /// then answers `unknown flag -t` — on both sides of the 3.7c floor,
+    /// measured there and on next-3.8; there is deliberately no method for
+    /// it, since one could only build argv tmux refuses.
     ServerAccess = "server-access", None => {
         /// `-a`: grants access to the named user or group.
         allow: switch "-a";
@@ -424,7 +426,7 @@ invocations! {
         /// for.
         deny: switch "-d";
         /// `-g`: reads the name as a group rather than a user.
-        group: switch "-g";
+        group: ahead_switch "-g";
         /// `-l`: lists the current permissions — `U` for a user, `G` for a
         /// group, `R` or `W` for read-only or writable.
         list: switch "-l";
@@ -593,20 +595,8 @@ mod tests {
     #[test]
     fn kill_session_can_spare_the_one_it_targets() {
         assert_eq!(
-            words(
-                &KillSession::new()
-                    .all_others()
-                    .filter("#{==:#{session_attached},0}")
-                    .target("keep")
-            ),
-            [
-                "kill-session",
-                "-a",
-                "-f",
-                "#{==:#{session_attached},0}",
-                "-t",
-                "keep",
-            ]
+            words(&KillSession::new().all_others().target("keep")),
+            ["kill-session", "-a", "-t", "keep"]
         );
         assert_eq!(
             words(&KillSession::new().clear_alerts().group()),
@@ -840,7 +830,6 @@ mod tests {
                 &ServerAccess::new()
                     .allow()
                     .deny()
-                    .group()
                     .list()
                     .read_only()
                     .writable()
@@ -850,7 +839,6 @@ mod tests {
                 "server-access",
                 "-a",
                 "-d",
-                "-g",
                 "-l",
                 "-r",
                 "-w",

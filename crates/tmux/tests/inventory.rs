@@ -255,9 +255,10 @@ fn resolve(tmux: &PrivateTmux, word: &str) -> Option<(String, Option<String>)> {
     let printed = String::from_utf8(output.stdout)
         .expect("tmux prints its own command names, which are ASCII");
     let mut words = printed.split_whitespace();
-    let name = words.next().unwrap_or_else(|| {
-        panic!("`tmux list-commands {word}` printed nothing this test could read")
-    });
+    // tmux 3.5 answers a word it does not know with an empty listing and
+    // success where newer ones refuse aloud — the same fact in a quieter
+    // dialect, so it reads as the same `None`.
+    let name = words.next()?;
     let alias = words.next().and_then(|word| {
         word.strip_prefix('(')
             .and_then(|word| word.strip_suffix(')'))
@@ -362,6 +363,10 @@ enum Verdict {
     WantsArgument,
     /// `unknown flag -X`: this tmux has no such flag on this command.
     Unknown,
+    /// `unknown command`: this tmux lacks the command itself — a fact about
+    /// the installed version, not about any flag, so the flag probes skip
+    /// the whole entry rather than read it as one flag's verdict.
+    NoSuchCommand,
     /// `too many arguments`: what followed the flags outnumbered what this
     /// command takes. Used to find where that boundary is.
     TooMany,
@@ -394,7 +399,9 @@ fn parse_only(tmux: &PrivateTmux, command: &str, words: &[&str]) -> Verdict {
     }
 
     let refusal = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if refusal.contains("unknown flag") {
+    if refusal.contains("unknown command") {
+        Verdict::NoSuchCommand
+    } else if refusal.contains("unknown flag") {
         Verdict::Unknown
     } else if refusal.contains("expects an argument") {
         Verdict::WantsArgument
@@ -410,13 +417,16 @@ fn parse_only(tmux: &PrivateTmux, command: &str, words: &[&str]) -> Verdict {
 /// A flag this tmux takes **either** way: bare, or with the word after it.
 ///
 /// The bare probe cannot tell an optional argument from no argument at all,
-/// so without this table these eight would read as eight wrong
-/// declarations. They are not wrong: the builder always spells the amount,
-/// which is the form a caller wants, and the bare spelling is left to
-/// `Server::run` — which is what the two commands' own docs say. Each row
-/// still has to earn its place through [`consumes_the_word_after_it`]; an
-/// allowance nobody measures would be exactly the kind of claim this test
-/// exists to stop taking on trust.
+/// so without this table these four would read as four wrong declarations.
+/// They are not wrong: the builder always spells the amount, which is the
+/// form a caller wants, and the bare spelling is left to `Server::run` —
+/// which is what the command's own doc says. Each row still has to earn its
+/// place through [`consumes_the_word_after_it`] or through the builder's
+/// own spelling parsing whole — 3.7 reads the amount as the positional
+/// adjustment beside the flag, the next tmux as the flag's own optional
+/// argument, and both read it to the same effect; an allowance nobody
+/// measures would be exactly the kind of claim this test exists to stop
+/// taking on trust.
 struct Optional {
     /// The command it is a flag of.
     command: &'static str,
@@ -428,26 +438,6 @@ struct Optional {
 }
 
 const OPTIONAL: &[Optional] = &[
-    Optional {
-        command: "move-pane",
-        letter: "-D",
-        reason: "moves a floating pane down by one; the manual spells the argument optional",
-    },
-    Optional {
-        command: "move-pane",
-        letter: "-L",
-        reason: "moves a floating pane left by one; the manual spells the argument optional",
-    },
-    Optional {
-        command: "move-pane",
-        letter: "-R",
-        reason: "moves a floating pane right by one; the manual spells the argument optional",
-    },
-    Optional {
-        command: "move-pane",
-        letter: "-U",
-        reason: "moves a floating pane up by one; the manual spells the argument optional",
-    },
     Optional {
         command: "resize-pane",
         letter: "-D",
@@ -540,27 +530,45 @@ fn documented(tmux: &PrivateTmux) -> BTreeMap<String, BTreeSet<char>> {
 /// `unknown flag -X` says the table invented a flag, and `-X expects an
 /// argument` says whether a word follows.
 ///
-/// The direction differs from this file's other two tests, deliberately. A
-/// *command* an older tmux lacks is reported, because the register is
-/// written against a newer one; a *flag* it refuses is failed, because a
-/// missing command is a builder nobody on that tmux can reach by accident,
-/// while a missing flag is a method whose argv that tmux answers with
-/// `unknown flag`. The other direction stays one-way as everywhere else: a
-/// flag this tmux documents and no builder declares is named, never failed.
+/// The direction is one-way here as everywhere in this file: a command an
+/// older tmux lacks skips its flags, and a served flag one refuses as
+/// `unknown` is reported rather than failed, because the register serves
+/// tmuxes on both sides of its 3.7c floor — an apt tmux lacks `new-pane`
+/// whole, and the next tmux's own additions sit in [`Entry::ahead`] rather
+/// than among the served rows. On the floor itself every list is empty,
+/// which is where a misspelled letter still fails. What *is* asserted on
+/// every version is arity: a flag both sides have but disagree about — a
+/// word demanded where the table says none, a builder's spelling no parse
+/// will read — is an argv whose meaning moved, and no version difference
+/// excuses that. The shelf is put to the same parser: a shelved letter the
+/// running tmux serves is reported as already arrived — and failed if it
+/// demands a word the shelf says it does not take, because then the shelf
+/// preserves the wrong knowledge. The other direction stays one-way as
+/// everywhere else: a letter this tmux documents that neither the rows nor
+/// the shelf claim is named, never failed.
+///
+/// [`Entry::ahead`]: tmux::commands::Entry::ahead
 #[test]
 fn every_declared_flag_is_one_this_tmux_takes_the_same_way() {
     let tmux = PrivateTmux::serving();
-    let mut declared = 0usize;
+    let declared: usize = REGISTRY.iter().map(|entry| entry.flags.len()).sum();
     let mut verified = 0usize;
     let mut optional: Vec<String> = Vec::new();
+    let mut positional: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
     let mut mismatched: Vec<String> = Vec::new();
+    let mut arrived: Vec<String> = Vec::new();
+    let mut not_yet: Vec<String> = Vec::new();
 
-    for entry in REGISTRY {
+    'entries: for entry in REGISTRY {
         for flag in entry.flags {
-            declared += 1;
             let named = format!("{} {}", entry.name, flag.letter);
             match (parse_only(&tmux, entry.name, &[flag.letter]), flag.argument) {
+                (Verdict::NoSuchCommand, _) => {
+                    missing.push(entry.name.to_owned());
+                    continue 'entries;
+                }
                 (Verdict::Unknown, _) => refused.push(named),
                 (Verdict::WantsArgument, true) | (Verdict::Read | Verdict::TooMany, false) => {
                     verified += 1;
@@ -581,15 +589,25 @@ fn every_declared_flag_is_one_this_tmux_takes_the_same_way() {
                         continue;
                     };
 
-                    assert!(
-                        consumes_the_word_after_it(&tmux, entry.name, flag.letter),
-                        "{named} is declared with an argument and allowed to be, because it {}; \
-                         but this tmux does not read the word after it as its argument, which is \
-                         the very thing the builder emits",
-                        allowed.reason
-                    );
-                    verified += 1;
-                    optional.push(named);
+                    if consumes_the_word_after_it(&tmux, entry.name, flag.letter) {
+                        verified += 1;
+                        optional.push(named);
+                    } else if parse_only(&tmux, entry.name, &[flag.letter, "1"]) == Verdict::Read {
+                        // The word lands in the positional slot beside the
+                        // flag instead of on it — 3.7 spells the resize
+                        // adjustment that way — and the command reads it to
+                        // the same effect, so the builder's argv still
+                        // means what the table says it means.
+                        verified += 1;
+                        positional.push(named);
+                    } else {
+                        mismatched.push(format!(
+                            "{named} is declared with an argument and allowed to be, because it \
+                             {}; but this tmux neither reads the word after it as its argument \
+                             nor parses the builder's own spelling with the word beside it",
+                            allowed.reason
+                        ));
+                    }
                 }
                 (Verdict::Unexpected(refusal), _) => panic!(
                     "probing {named} got a refusal this test cannot read, so the flag was neither \
@@ -597,15 +615,27 @@ fn every_declared_flag_is_one_this_tmux_takes_the_same_way() {
                 ),
             }
         }
+
+        for flag in entry.ahead {
+            let named = format!("{} {}", entry.name, flag.letter);
+            match (parse_only(&tmux, entry.name, &[flag.letter]), flag.argument) {
+                (Verdict::NoSuchCommand, _) => {
+                    missing.push(entry.name.to_owned());
+                    continue 'entries;
+                }
+                (Verdict::Unknown, _) => not_yet.push(named),
+                (Verdict::WantsArgument, false) => mismatched.push(format!(
+                    "{named} is shelved as taking nothing, and this tmux demands a word after \
+                     it, so the shelf preserves the wrong knowledge"
+                )),
+                (Verdict::Unexpected(refusal), _) => {
+                    panic!("probing shelved {named} got a refusal this test cannot read: {refusal}")
+                }
+                _ => arrived.push(named),
+            }
+        }
     }
 
-    assert!(
-        refused.is_empty(),
-        "this tmux has no such flag as {} of the ones the register declares: {}\n\
-         Each is a method whose argv this tmux answers with `unknown flag`.",
-        refused.len(),
-        refused.join(", ")
-    );
     assert!(
         mismatched.is_empty(),
         "{} declared flag(s) disagree with this tmux's parser about whether a word follows:\n  {}",
@@ -626,6 +656,7 @@ fn every_declared_flag_is_one_this_tmux_takes_the_same_way() {
         let claimed: BTreeSet<char> = entry
             .flags
             .iter()
+            .chain(entry.ahead)
             .flat_map(|flag| flag.letter.chars().skip(1))
             .collect();
         for letter in letters.difference(&claimed) {
@@ -638,14 +669,27 @@ fn every_declared_flag_is_one_this_tmux_takes_the_same_way() {
     }
 
     // Read with `--nocapture`; every number is measured against the tmux that
-    // ran the test, and the last two lists are notes rather than verdicts.
+    // ran the test, and every list but `mismatched` is a note, not a verdict.
     println!(
         "tmux flag arity: {declared} declared across {} commands — {verified} verified against \
-         this tmux's parser, {} of them flags it also takes bare ({}); documented and not \
-         declared: {} this tmux accepts ({}), {} its own parser refuses ({})",
+         this tmux's parser, {} of them flags it also takes bare ({}), {} answered by the \
+         positional beside the flag ({}); this tmux lacks {} whole command(s) ({}) and refuses \
+         {} served flag(s) ({}); of the shelf, {} already arrived here ({}) and {} not yet \
+         ({}); documented and not claimed: {} this tmux accepts ({}), {} its own parser \
+         refuses ({})",
         REGISTRY.len(),
         optional.len(),
         list(&optional),
+        positional.len(),
+        list(&positional),
+        missing.len(),
+        list(&missing),
+        refused.len(),
+        list(&refused),
+        arrived.len(),
+        list(&arrived),
+        not_yet.len(),
+        list(&not_yet),
         untyped.len(),
         list(&untyped),
         outgrown.len(),

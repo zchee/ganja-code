@@ -92,11 +92,20 @@
 //!
 //! # Baseline
 //!
-//! Flags are those of the tmux the port was written against (next-3.8), read
-//! from that binary's own usage strings and documented from its manual. An
-//! older tmux refuses a flag it does not know, in its own words; a newer one
-//! grows commands this module has not named, and the inventory test reports
-//! them by name rather than going quiet.
+//! The floor is tmux **3.7c** — the release homebrew bottles and CI pours
+//! on both platforms — read from that binary's own usage strings and
+//! documented from its manual. The tables were first written against the
+//! next tmux (next-3.8), and what only it takes was not deleted but
+//! *shelved*: an `ahead_` prefix on the row keeps the letter, arity, name
+//! and doc in place while generating no method and no served flag, so a
+//! builder cannot spell an argv the floor answers with `unknown flag`, and
+//! serving the row again when the floor moves is deleting the prefix
+//! ([`Entry::ahead`] carries the shelf as data, and the inventory test
+//! measures it). An older tmux refuses a flag it does not know, in its own
+//! words; a newer one grows commands this module has not named, and the
+//! inventory test reports them by name rather than going quiet —
+//! `switch-mode` is the one whole command typed ahead of the floor, for the
+//! reason its own doc gives.
 
 use std::ffi::OsString;
 
@@ -133,6 +142,17 @@ pub struct Entry {
     /// The flags its builder declares, in the order the family table spells
     /// them. A command whose builder is all positionals declares none.
     pub flags: &'static [Flag],
+    /// The flags held ahead of the floor: letters a newer tmux takes and
+    /// the targeted 3.7c refuses, kept in the family table as `ahead_*`
+    /// rows — doc and all, one prefix away from being served — with no
+    /// method generated, so no builder can spell an argv the floor answers
+    /// with `unknown flag`. Carried as data for the same reason
+    /// [`Entry::flags`] is: a shelf nobody measures is where this crate
+    /// would quietly stop agreeing with tmux, so `tests/inventory.rs` holds
+    /// each against the running parser — arity-checked where it is served,
+    /// reported where it has not arrived, failed if the floor turns out to
+    /// take it.
+    pub ahead: &'static [Flag],
 }
 
 /// One flag a command declares: the letter tmux spells it with, and whether
@@ -329,6 +349,14 @@ macro_rules! method {
             self
         }
     };
+    // The shelf: an `ahead_*` row keeps its method name, kind and doc in
+    // the table and produces no method at all — the letter lives on in
+    // [`Entry::ahead`] instead, so the knowledge is measured while the
+    // argv it would build stays unbuildable against the floor.
+    (ahead_switch, $method:ident, $flag:literal, $(#[$doc:meta])*) => {};
+    (ahead_value, $method:ident, $flag:literal, $(#[$doc:meta])*) => {};
+    (ahead_text, $method:ident, $flag:literal, $(#[$doc:meta])*) => {};
+    (ahead_repeat, $method:ident, $flag:literal, $(#[$doc:meta])*) => {};
 }
 
 /// Declares one family of tmux commands: a builder type each, and the
@@ -345,6 +373,12 @@ macro_rules! method {
 /// (`&str`, for tmux's own languages), `repeat` (a value flag tmux accepts
 /// more than once), `positional` and `trailing`; the last two take no flag
 /// letter. See this module's doc for why each is typed the way it is.
+///
+/// Any of the four flag kinds may be shelved by an `ahead_` prefix: the row
+/// stays in the table — doc, method name, letter, arity — and produces no
+/// method and no [`Entry::flags`] slot, landing in [`Entry::ahead`] instead.
+/// That is the spelling for a flag the next tmux takes and the targeted
+/// 3.7c refuses; serving it later is deleting the prefix.
 macro_rules! invocations {
     ($(
         $(#[$outer:meta])*
@@ -384,6 +418,14 @@ macro_rules! invocations {
                         $($crate::commands::flag_slot!($kind $(, $flag)?),)*
                     ]);
 
+                // The shelf beside them: the `ahead_*` rows, as data, so
+                // the same test can measure what has not arrived yet.
+                const AHEAD: [$crate::commands::Flag;
+                    { 0 $(+ $crate::commands::ahead_count!($kind $(, $flag)?))* }] =
+                    $crate::commands::declared(&[
+                        $($crate::commands::ahead_slot!($kind $(, $flag)?),)*
+                    ]);
+
                 #[doc = concat!(
                     "The argv words this `", $name, "` wants, after the socket pin."
                 )]
@@ -414,6 +456,7 @@ macro_rules! invocations {
                 name: $name,
                 alias: $alias,
                 flags: &$type::DECLARED,
+                ahead: &$type::AHEAD,
             },)*
         ];
     };
@@ -457,13 +500,27 @@ macro_rules! flag_slot {
     (trailing) => {
         ::core::option::Option::None
     };
+    (ahead_switch, $flag:literal) => {
+        ::core::option::Option::None
+    };
+    (ahead_value, $flag:literal) => {
+        ::core::option::Option::None
+    };
+    (ahead_text, $flag:literal) => {
+        ::core::option::Option::None
+    };
+    (ahead_repeat, $flag:literal) => {
+        ::core::option::Option::None
+    };
 }
 
 /// How many flags one method contributes: one, or none.
 ///
 /// Separate from [`flag_slot`] because an array's length is needed *before*
 /// its elements, and a `macro_rules!` repetition can be summed in the length
-/// position but not counted after the fact.
+/// position but not counted after the fact. The `ahead_*` arms must sit
+/// before the catch-all, which would otherwise count a shelved letter as a
+/// declared one.
 macro_rules! flag_count {
     (positional) => {
         0
@@ -471,8 +528,88 @@ macro_rules! flag_count {
     (trailing) => {
         0
     };
+    (ahead_switch, $flag:literal) => {
+        0
+    };
+    (ahead_value, $flag:literal) => {
+        0
+    };
+    (ahead_text, $flag:literal) => {
+        0
+    };
+    (ahead_repeat, $flag:literal) => {
+        0
+    };
     ($kind:tt, $flag:literal) => {
         1
+    };
+}
+
+/// [`flag_slot`]'s mirror for [`Entry::ahead`]: the shelved rows produce
+/// the flag, and everything served today produces `None`.
+///
+/// The arity survives the shelving — `ahead_switch` is a letter the newer
+/// tmux takes bare, the other three one it wants a word after — because
+/// that is the half of the row `tests/inventory.rs` can still hold against
+/// a parser that serves it.
+macro_rules! ahead_slot {
+    (ahead_switch, $flag:literal) => {
+        ::core::option::Option::Some($crate::commands::Flag {
+            letter: $flag,
+            argument: false,
+        })
+    };
+    (ahead_value, $flag:literal) => {
+        ::core::option::Option::Some($crate::commands::Flag {
+            letter: $flag,
+            argument: true,
+        })
+    };
+    (ahead_text, $flag:literal) => {
+        ::core::option::Option::Some($crate::commands::Flag {
+            letter: $flag,
+            argument: true,
+        })
+    };
+    (ahead_repeat, $flag:literal) => {
+        ::core::option::Option::Some($crate::commands::Flag {
+            letter: $flag,
+            argument: true,
+        })
+    };
+    (positional) => {
+        ::core::option::Option::None
+    };
+    (trailing) => {
+        ::core::option::Option::None
+    };
+    ($kind:tt, $flag:literal) => {
+        ::core::option::Option::None
+    };
+}
+
+/// [`flag_count`]'s mirror for [`Entry::ahead`]: one per shelved row.
+macro_rules! ahead_count {
+    (positional) => {
+        0
+    };
+    (trailing) => {
+        0
+    };
+    (ahead_switch, $flag:literal) => {
+        1
+    };
+    (ahead_value, $flag:literal) => {
+        1
+    };
+    (ahead_text, $flag:literal) => {
+        1
+    };
+    (ahead_repeat, $flag:literal) => {
+        1
+    };
+    ($kind:tt, $flag:literal) => {
+        0
     };
 }
 
@@ -501,6 +638,8 @@ const fn declared<const N: usize>(slots: &[Option<Flag>]) -> [Flag; N] {
     flags
 }
 
+pub(crate) use ahead_count;
+pub(crate) use ahead_slot;
 pub(crate) use flag_count;
 pub(crate) use flag_slot;
 pub(crate) use invocations;
@@ -537,6 +676,7 @@ const fn flattened<const N: usize>(families: &[&[Entry]]) -> [Entry; N] {
         name: "",
         alias: None,
         flags: &[],
+        ahead: &[],
     }; N];
     let mut at = 0;
     let mut family = 0;
