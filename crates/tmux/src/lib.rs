@@ -1,3 +1,6 @@
+// CI's `-D warnings` promotes this P26 AC-10 documentation check to an error.
+#![warn(missing_docs)]
+
 //! An async Rust client for the tmux control-mode protocol.
 //!
 //! Spec: pandaemonium pkg/tmux/doc.go, pkg/tmux/README.md. This crate is a

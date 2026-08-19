@@ -22,7 +22,7 @@ Container for the workspace members. The split is architectural, not cosmetic. T
 | `ganja-client/` | The other end of that wire, and nothing else: the typed routes and the SSE reader `run --attach` and `sessions --live` drive. Names only `ganja-protocol` (see `ganja-client/AGENTS.md`) |
 | `ganja-cli/` | The `ganja` binary (see `ganja-cli/AGENTS.md`) |
 | `ganja-testkit/` | Dev-only scaffolding shared by `ganja-core`'s integration suites: scripted providers, recorder/blocking tools, drain and storage-seeding builders (see `ganja-testkit/AGENTS.md`) |
-| `tmux/` | A sealed-leaf tmux control-mode client over one persistent `tmux -C`; deliberately outside the ganja dependency graph. |
+| `tmux/` | A sealed-leaf tmux control-mode client over one persistent `tmux -C`; deliberately outside the ganja dependency graph (see `tmux/AGENTS.md`) |
 
 ## For AI Agents
 
