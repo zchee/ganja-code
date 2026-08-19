@@ -147,6 +147,9 @@ use crate::{
     tool::Registry,
 };
 
+/// The `agy` backend: a name that parses and a spawn that refuses, because
+/// W4's ship test measured `--sandbox` as terminal-only (**D508(a)**).
+pub mod agy;
 /// A teammate that is a real `claude` pane (P25b).
 pub mod claude;
 /// A teammate that is a headless `codex exec` child (**D508**, **D509**).
@@ -475,6 +478,11 @@ pub const fn backend_name(backend: MemberBackend) -> &'static str {
 /// spawn — a headless CLI child has no channel to ask through — so the spawn
 /// is the last moment anybody can be told, and this is what they are told.
 ///
+/// [`None`] for `agy` too, and for a third reason that is neither of those:
+/// W4 measured its floor and it does not hold, so that backend refuses every
+/// spawn (see [`crate::teammate::agy`]). There is no running teammate to
+/// describe, and a sentence describing nobody is worse than silence.
+///
 /// One table with two readers, so a dialog and a ring line cannot come to
 /// describe one grant differently: the spawn dialog's `args` carry it under
 /// `posture`, and the registry's ring line opens with it.
@@ -494,8 +502,16 @@ pub const fn backend_name(backend: MemberBackend) -> &'static str {
 pub const fn posture_line(backend: MemberBackend) -> Option<&'static str> {
     match backend {
         MemberBackend::InProcess | MemberBackend::Ganja | MemberBackend::Claude => None,
+        // agy answers `None` for a different reason than the three above, and
+        // the difference is the whole of W4: they disclose nothing because
+        // they keep asking, and agy discloses nothing because it never runs.
+        // W4's ship test measured `--sandbox` as a bound on the terminal and
+        // not on the filesystem, so `agy::Agy::spawn` refuses every spawn and
+        // there is no running teammate for a posture row to describe. A
+        // sentence here would be a description of nobody, shown in a dialog
+        // that never opens.
+        MemberBackend::Agy => None,
         MemberBackend::Codex => Some(POSTURE_CODEX),
-        MemberBackend::Agy => Some(POSTURE_AGY),
         MemberBackend::Grok => Some(POSTURE_GROK),
     }
 }
@@ -518,14 +534,6 @@ pub const fn posture_line(backend: MemberBackend) -> Option<&'static str> {
 /// words.
 const POSTURE_CODEX: &str = "sandbox=read-only: writes denied, whole-disk read, network denied — may read any file you \
      can, including credentials, but has no network to send them over";
-
-/// agy's pinned posture, and the arm that **no shipped build reaches**.
-///
-/// W4's ship test is one probe: if `--sandbox` is not a filesystem bound, agy
-/// does not spawn at all, so there is no posture to disclose and this sentence
-/// is never read. It exists so that the enum is total while W4 is in flight,
-/// and W6 either deletes it or replaces it with the measured sentence.
-const POSTURE_AGY: &str = "sandbox: filesystem bound unmeasured; plan mode composed";
 
 /// grok's pinned posture, measured except for what a refused tool ask costs.
 ///

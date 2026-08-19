@@ -118,12 +118,20 @@ use crate::teammate::{
 /// if fifteen minutes was the wrong number.
 pub const TIMEOUT_KEY: &str = "teammates.shim_turn_timeout";
 
-/// `agy`'s per-turn deadline, and the one number here that is **derived**
-/// rather than provisional.
+/// `agy`'s per-turn deadline — derived rather than probed, and **unreached**.
 ///
-/// Its own `--print-timeout` is composed at *deadline + 1m* (W4), so the shim
-/// always fires first — that ordering constraint is what fixes this value, and
-/// if it moves the composed flag moves with it.
+/// The derivation stands and is worth keeping: agy's own `--print-timeout`
+/// defaults to `5m0s`, so a shim deadline equal to it would let both fire
+/// together and wedge a turn; 4m is the largest round value that keeps the
+/// shim strictly first, and a composed `--print-timeout` at *deadline + 1m*
+/// would have kept that ordering under a config override.
+///
+/// No turn reaches it. W4's ship test measured `--sandbox` as a bound on agy's
+/// terminal and not on its filesystem, so [`crate::teammate::agy::Agy`]
+/// refuses every spawn and no agy child is ever started. The constant stays
+/// because [`default_turn_timeout`]'s match over [`ShimCli`] is total, and a
+/// number that was derived from a vendor constraint is better kept with its
+/// derivation than deleted and re-guessed by whichever wave revives this CLI.
 pub const AGY_TURN_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 
 /// `codex`'s per-turn deadline, **derived** from W3's own gating probe.
@@ -2138,11 +2146,11 @@ mod tests {
     /// string literals.
     #[test]
     fn a_spawn_ring_line_carries_the_same_posture_the_dialog_does() {
-        for backend in [
-            MemberBackend::Codex,
-            MemberBackend::Agy,
-            MemberBackend::Grok,
-        ] {
+        // `Agy` is deliberately absent: W4 measured its floor and it does not
+        // hold, so that backend never spawns and has no posture to state. It
+        // is asserted the other way — `posture_line` answers `None` and
+        // `spawn_lines` is empty — in `teammate_shim_agy.rs`.
+        for backend in [MemberBackend::Codex, MemberBackend::Grok] {
             let lines = spawn_lines(backend);
             let posture = posture_line(backend).expect("a shim backend states its posture");
             assert!(lines[0].ends_with(posture), "{lines:?}");

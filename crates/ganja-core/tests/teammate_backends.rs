@@ -201,28 +201,50 @@ async fn a_shim_backend_is_named_and_gated_and_refuses_until_its_wave_lands() {
         built.reason
     );
 
-    for name in ["agy", "grok"] {
-        // Through the real door, because the claim is about the whole chain
-        // and not about the stub: the name parses, the gate approves, the
-        // backend is reached, and *it* is what refuses.
-        let refused = door
-            .start(spawn("w1", Some(name)), &caller, &AllowSpawn)
-            .await
-            .expect_err("no shim child is built yet");
+    // agy is refused too, but by its **own** measured sentence rather than
+    // by the not-built-yet one: W4's ship test found `--sandbox` bounds agy's
+    // terminal and not its filesystem, so the backend is real and refuses.
+    // Asserted here, at the whole-chain door, because the claim is that the
+    // name still parses and the gate still approves — the refusal is the
+    // backend's, not the parser's.
+    let refused = door
+        .start(spawn("w1", Some("agy")), &caller, &AllowSpawn)
+        .await
+        .expect_err("agy does not ship in v1");
 
-        assert!(
-            refused.reason.contains(REFUSED_UNTIL_P27),
-            "a refusal says the child is not built yet: {}",
-            refused.reason
-        );
-        assert!(
-            refused
-                .reason
-                .contains("2026-08-19-foreign-cli-shim-backends"),
-            "and where it is coming from: {}",
-            refused.reason
-        );
-    }
+    assert!(
+        !refused.reason.contains(REFUSED_UNTIL_P27),
+        "agy no longer claims to be unbuilt; it was measured and refused: {}",
+        refused.reason
+    );
+    assert!(
+        refused
+            .reason
+            .contains(ganja_core::teammate::agy::REFUSED_NO_FILESYSTEM_BOUND),
+        "it refuses with what its probe measured: {}",
+        refused.reason
+    );
+
+    // Through the real door, because the claim is about the whole chain and
+    // not about the stub: the name parses, the gate approves, the backend is
+    // reached, and *it* is what refuses.
+    let refused = door
+        .start(spawn("w1", Some("grok")), &caller, &AllowSpawn)
+        .await
+        .expect_err("no grok child is built yet");
+
+    assert!(
+        refused.reason.contains(REFUSED_UNTIL_P27),
+        "a refusal says the child is not built yet: {}",
+        refused.reason
+    );
+    assert!(
+        refused
+            .reason
+            .contains("2026-08-19-foreign-cli-shim-backends"),
+        "and where it is coming from: {}",
+        refused.reason
+    );
 
     // A refused spawn leaves nothing behind: no member on disk and nothing
     // the registry would have to shut down. The stub's refusal rides the same
@@ -243,10 +265,11 @@ async fn a_shim_backend_is_named_and_gated_and_refuses_until_its_wave_lands() {
 /// to say something a ring line does not. A wording change is a change to what
 /// was consented to, so it belongs in a diff somebody reads.
 ///
-/// [`MemberBackend::Agy`]'s sentence is unreachable in a shipped build: under
-/// W4's ship test an unmeasured agy does not spawn at all, so nobody is ever
-/// shown it. It is pinned anyway, because "unreachable" is a claim about
-/// another wave's code and this table is this wave's.
+/// [`MemberBackend::Agy`] has no sentence at all, which is W4's answer rather
+/// than a gap in this table: its ship test measured `--sandbox` as a bound on
+/// agy's terminal and not on its filesystem, so that backend refuses every
+/// spawn and there is no running teammate for a row to describe. Pinned as
+/// `None` below, beside the three that answer `None` for the opposite reason.
 #[test]
 fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
     // The P25 surfaces answer nothing, and the absence is the honest answer:
@@ -273,10 +296,6 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
         )
     );
     assert_eq!(
-        posture_line(MemberBackend::Agy),
-        Some("sandbox: filesystem bound unmeasured; plan mode composed")
-    );
-    assert_eq!(
         posture_line(MemberBackend::Grok),
         Some(
             "sandbox=read-only: writes denied outside ~/.grok and temp, whole-disk read, no \
@@ -292,13 +311,17 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
     // sentence.
     for name in BACKENDS {
         let backend = parse_backend(name).expect("a listed value parses");
-        let shim = matches!(
-            backend,
-            MemberBackend::Codex | MemberBackend::Agy | MemberBackend::Grok
-        );
+        // `Agy` is on neither side of this equivalence, and that is the point
+        // rather than an omission: it neither keeps asking (it is a shim) nor
+        // asks nobody after spawn (it never spawns). W4 measured its floor and
+        // it does not hold, so it discloses nothing because there is nobody to
+        // describe — asserted directly, just below.
+        let discloses = matches!(backend, MemberBackend::Codex | MemberBackend::Grok);
 
-        assert_eq!(posture_line(backend).is_some(), shim, "{name}");
+        assert_eq!(posture_line(backend).is_some(), discloses, "{name}");
     }
+
+    assert_eq!(posture_line(MemberBackend::Agy), None);
 }
 
 /// **Two spawns of one name at once are two teammates, not one and a ghost.**

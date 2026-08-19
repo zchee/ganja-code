@@ -120,30 +120,37 @@ fn backends_with(
         in_process: Arc::new(InProcess::new(provider, tools, storage, posture)),
         pane: Arc::new(GanjaPane),
         claude: Arc::new(ClaudePane),
-        // Production's own stubs rather than test doubles: a test that asked
-        // one of these to spawn must read the refusal a real build gives, not
-        // a fixture's opinion of it.
-        // The **real** codex backend, searching a `PATH` with nothing on it.
+        // **The rule for all three shim CLIs**, stated once here because the
+        // three arrive one wave apart and the reason is the same each time: a
+        // fixture lead is *production on a machine where the foreign CLI is
+        // not installed*. Never `Unbuilt` once that CLI's wave has landed —
+        // that sentence ("this build cannot run a teammate on another vendor's
+        // CLI yet") stops being true, and a fixture asserting a retired
+        // refusal is a fixture asserting a lie. Never this process's own
+        // `PATH` either: a spawn there would find the developer's real binary,
+        // take a real turn and spend somebody's quota from inside the ordinary
+        // test suite. A suite that wants a child which answers points the
+        // backend at a fake one, the way `shim_support` does.
         //
-        // Not `Unbuilt`, because that sentence — "this build cannot run a
-        // teammate on another vendor's CLI yet" — stopped being true of codex
-        // when W3 landed, and a fixture that asserts a retired refusal is a
-        // fixture asserting a lie. Not this process's own `PATH` either: a
-        // spawn there would find the developer's real `codex`, take a real
-        // turn and spend somebody's quota from inside the ordinary test suite.
-        //
-        // An empty search path is neither of those lies. It is exactly
-        // production on a machine where the CLI is not installed, which is what
-        // a fixture lead should be: the spawn is refused by naming the binary.
-        // A suite that wants a codex child that answers points the backend at a
-        // fake one, the way `shim_support` does.
+        // How a backend is made harmless depends on what it does with a
+        // `PATH`, which is why the three slots below do not look alike.
+
+        // codex searches, so it is given an empty search path: the spawn is
+        // refused by naming the binary, exactly as it would be on a machine
+        // without one.
         codex: Arc::new(
             ganja_core::teammate::shim::ShimBackend::new(Arc::new(
                 ganja_core::teammate::codex::Codex::new(),
             ))
             .searching(std::ffi::OsString::new()),
         ),
-        agy: Arc::new(Unbuilt::new(MemberBackend::Agy)),
+        // agy searches nothing and spawns nothing: W4 measured its floor and
+        // it does not hold, so the real backend refuses every spawn. It is
+        // already harmless, and giving it an empty `PATH` would suggest the
+        // `PATH` was what made it so.
+        agy: Arc::new(ganja_core::teammate::agy::Agy::new()),
+        // grok's wave has not landed, so production's own stub is still the
+        // truthful answer here.
         grok: Arc::new(Unbuilt::new(MemberBackend::Grok)),
     }
 }

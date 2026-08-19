@@ -933,17 +933,65 @@ mod tests {
         );
     }
 
+    /// The other half of AC-16's clause: agy raises **no** foreign gate,
+    /// because there is no spawn to gate.
+    ///
+    /// It is absent from that test's `shims` array — which is
+    /// `[MemberBackend::Codex, MemberBackend::Grok]` — and the absence is W4's
+    /// answer rather than a hole in AC-16. That clause gates a spawn which is
+    /// going to happen; agy's never does, because its ship test measured
+    /// `--sandbox` as a bound on that CLI's terminal and not on its
+    /// filesystem, so [`crate::teammate::agy::Agy`] refuses unconditionally.
+    /// Raising the gate would mean opening a consent dialog for a surface
+    /// nobody can be given. `posture_line` answering [`None`] for it is what
+    /// keeps that clause and this refusal from both firing.
+    ///
+    /// **"The refusal comes first" is true of this clause and of no other.**
+    /// `bypass` and `external_directory` are decided without reference to the
+    /// backend, so an agy spawn that asks for a bypass — or that names a
+    /// directory the project does not reach — still raises its dialog, and is
+    /// answered, before the backend is ever called. That is fails-closed and
+    /// intended rather than an oversight: those two clauses are about what the
+    /// *caller* asked for and not about which surface would have answered, and
+    /// being asked about something that then turns out to be unavailable is
+    /// the cheap failure. The expensive one is the reverse.
+    ///
+    /// Asserted rather than left as an absence, so that a later wave which
+    /// gives agy a posture sentence — the day a permission channel makes one
+    /// truthful — has to come here and say so, instead of the dialog quietly
+    /// reappearing.
+    #[test]
+    fn agy_raises_no_foreign_gate_because_it_never_spawns() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+
+        let gate = spawn_gate(
+            &lead(Vec::new()),
+            directory.path(),
+            false,
+            "general",
+            directory.path(),
+            MemberBackend::Agy,
+        );
+
+        assert_eq!(gate.foreign, None);
+        assert_eq!(
+            gate.refusal(),
+            None,
+            "the refusal is the backend's, not the gate's"
+        );
+    }
+
     /// **D508(c)**, and P27's **AC-16**: a spawn onto a foreign CLI always
     /// asks, a stored deny refuses it, and a stored allow changes nothing.
     ///
     /// The third arm is the one worth reading twice, because it looks like a
     /// bug and is the mechanism. [`Permissions::inherited_by_subagent`]'s
-    /// filter keeps a deny and an `external_directory` rule and drops
-    /// everything else, so an `allow` written for [`FOREIGN`] never reaches
-    /// [`decide`] at all and the clause answers its `Ask` default. That is
-    /// what makes "every shim spawn raises a dialog, and there is no rule
-    /// anybody can write to stop it" a property of the code rather than a
-    /// promise in a doc.
+    /// filter (permission.rs:803) keeps a deny and an `external_directory`
+    /// rule and drops everything else, so an `allow` written for [`FOREIGN`]
+    /// never reaches [`decide`] at all and the clause answers its `Ask`
+    /// default. That is what makes "every shim spawn raises a dialog, and
+    /// there is no rule anybody can write to stop it" a property of the code
+    /// rather than a promise in a doc.
     ///
     /// Nothing writes such a rule either — the spawn dialog discards
     /// `PermissionReply::Always` — so the arm is not reachable through the UI.
@@ -952,11 +1000,7 @@ mod tests {
     #[test]
     fn a_spawn_onto_a_foreign_cli_always_asks_and_only_a_deny_can_change_that() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let shims = [
-            MemberBackend::Codex,
-            MemberBackend::Agy,
-            MemberBackend::Grok,
-        ];
+        let shims = [MemberBackend::Codex, MemberBackend::Grok];
 
         for backend in shims {
             let name = backend_name(backend);

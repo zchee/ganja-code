@@ -1842,13 +1842,18 @@ impl Engine {
                 codex: Arc::new(teammate::shim::ShimBackend::new(Arc::new(
                     teammate::codex::Codex::new(),
                 ))),
-                // Named and gated, but not yet runnable: each of these is
-                // replaced by its real backend in its own wave, and until then
-                // a spawn is refused rather than quietly served by another
-                // surface (**D508**).
-                agy: Arc::new(teammate::Unbuilt::new(
-                    crate::protocol::team::MemberBackend::Agy,
-                )),
+                // Real, and it refuses: W4's ship test measured `--sandbox`
+                // as a bound on agy's terminal and not on its filesystem, so
+                // this backend never spawns a child. It is wired here anyway
+                // because "named and refused" is the grammar — a name that
+                // says why beats a name that is missing (**D508(a)**).
+                //
+                // Nothing about this slot searches a `PATH`, which is why it
+                // carries none of the hazard the codex slot above does.
+                agy: Arc::new(teammate::agy::Agy::new()),
+                // Named and gated, but not yet runnable: replaced by its real
+                // backend in its own wave, and until then a spawn is refused
+                // rather than quietly served by another surface (**D508**).
                 grok: Arc::new(teammate::Unbuilt::new(
                     crate::protocol::team::MemberBackend::Grok,
                 )),

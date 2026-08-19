@@ -467,9 +467,12 @@ impl SpawnAsker for Spawn {
 /// sits in each slot is the engine's to decide — this build's are
 /// [`crate::teammate::InProcess`], [`crate::teammate::pane::GanjaPane`] and
 /// [`crate::teammate::claude::ClaudePane`], and only the first of the three
-/// holds anything of the host's. Of the three shim slots, `codex` holds a real
-/// [`crate::teammate::shim::ShimBackend`] as of W3; `agy` and `grok` still hold
-/// [`crate::teammate::Unbuilt`] until their own waves land.
+/// holds anything of the host's. The three shim slots no longer answer alike:
+/// `codex` holds a real [`crate::teammate::shim::ShimBackend`] as of W3; `agy`
+/// holds [`crate::teammate::agy::Agy`], which is equally real and refuses
+/// every spawn, because W4's ship test measured that CLI's `--sandbox` as a
+/// bound on its terminal and not on its filesystem; `grok` still holds
+/// [`crate::teammate::Unbuilt`] until its own wave lands.
 #[derive(Debug)]
 pub struct Backends {
     /// The teammate that runs in the lead's own process.
@@ -480,7 +483,7 @@ pub struct Backends {
     pub claude: Arc<dyn TeammateBackend>,
     /// The teammate that is a headless `codex exec` child.
     pub codex: Arc<dyn TeammateBackend>,
-    /// The teammate that is a resident `agy` child.
+    /// The `agy` surface: named, and refusing every spawn.
     pub agy: Arc<dyn TeammateBackend>,
     /// The teammate that is a headless `grok` child.
     pub grok: Arc<dyn TeammateBackend>,
