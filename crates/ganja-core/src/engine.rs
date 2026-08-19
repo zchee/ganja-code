@@ -1829,6 +1829,19 @@ impl Engine {
                 in_process,
                 pane: Arc::new(teammate::pane::GanjaPane),
                 claude: Arc::new(teammate::claude::ClaudePane),
+                // Named and gated, but not yet runnable: each of these is
+                // replaced by its real backend in its own wave, and until then
+                // a spawn is refused rather than quietly served by another
+                // surface (**D508**).
+                codex: Arc::new(teammate::Unbuilt::new(
+                    crate::protocol::team::MemberBackend::Codex,
+                )),
+                agy: Arc::new(teammate::Unbuilt::new(
+                    crate::protocol::team::MemberBackend::Agy,
+                )),
+                grok: Arc::new(teammate::Unbuilt::new(
+                    crate::protocol::team::MemberBackend::Grok,
+                )),
             },
         )));
         self.install_postbox(lead);

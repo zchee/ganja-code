@@ -26,12 +26,15 @@ use ganja_core::{
         mailbox, record,
     },
     teammate::{
-        InProcess, SpawnSpec, Teammate, TeammateRegistry, claude::ClaudePane, pane::GanjaPane,
-        runner::Runner,
+        InProcess, SpawnSpec, Teammate, TeammateRegistry, Unbuilt, claude::ClaudePane,
+        pane::GanjaPane, runner::Runner,
     },
     tool::{Registry, task::TeammateSpawn},
 };
-use ganja_protocol::{Event, PermissionReply, team::Frame};
+use ganja_protocol::{
+    Event, PermissionReply,
+    team::{Frame, MemberBackend},
+};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -117,6 +120,12 @@ fn backends_with(
         in_process: Arc::new(InProcess::new(provider, tools, storage, posture)),
         pane: Arc::new(GanjaPane),
         claude: Arc::new(ClaudePane),
+        // Production's own stubs rather than test doubles: a test that asked
+        // one of these to spawn must read the refusal a real build gives, not
+        // a fixture's opinion of it.
+        codex: Arc::new(Unbuilt::new(MemberBackend::Codex)),
+        agy: Arc::new(Unbuilt::new(MemberBackend::Agy)),
+        grok: Arc::new(Unbuilt::new(MemberBackend::Grok)),
     }
 }
 

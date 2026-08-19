@@ -319,7 +319,7 @@ impl GanjaPane {
     /// exactly [`tmux::REFUSED_NO_TMUX`], the D501 sentence.
     fn refused(error: &TmuxError) -> Unsupported {
         Unsupported {
-            backend: MemberBackend::Pane,
+            backend: MemberBackend::Ganja,
             reason: error.to_string(),
         }
     }
@@ -356,7 +356,7 @@ impl GanjaPane {
 #[async_trait]
 impl TeammateBackend for GanjaPane {
     fn backend(&self) -> MemberBackend {
-        MemberBackend::Pane
+        MemberBackend::Ganja
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
@@ -366,7 +366,7 @@ impl TeammateBackend for GanjaPane {
         // The binary is resolved *now*, before the pane exists, so a process
         // that cannot name itself makes no pane it would then have to unmake.
         let binary = std::env::current_exe().map_err(|error| Unsupported {
-            backend: MemberBackend::Pane,
+            backend: MemberBackend::Ganja,
             reason: format!("this build cannot name its own binary to run in the pane: {error}"),
         })?;
         // The launch line under the same rule: its one refusal — a word no
@@ -378,8 +378,14 @@ impl TeammateBackend for GanjaPane {
         // travels here (D502), through tmux's own door; the launch line is
         // typed later, once the record this pane will read exists.
         let environment = tmux::environment(CARRIED_ENV);
-        let pane =
-            split_idle_shell(&server, spec, &environment, MemberBackend::Pane, "teammate").await?;
+        let pane = split_idle_shell(
+            &server,
+            spec,
+            &environment,
+            MemberBackend::Ganja,
+            "teammate",
+        )
+        .await?;
 
         // §4.1 step 6, sequenced after step 2 by watching for step 2 itself:
         // the record is what the pane's process reads first, so the record's
@@ -460,7 +466,7 @@ mod tests {
             team: TeamName::parse("session-abcd1234").expect("a team name"),
             lead: MemberName::lead(),
             root: TeamsRoot::new("/nowhere/teams"),
-            backend: MemberBackend::Pane,
+            backend: MemberBackend::Ganja,
             agent_type: "general".to_owned(),
             model: "recorder-model".to_owned(),
             color: "blue".to_owned(),

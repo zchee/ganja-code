@@ -1,4 +1,4 @@
-//! `/team spawn w1 --backend pane` makes a real pane teammate, and its
+//! `/team spawn w1 --backend ganja` makes a real pane teammate, and its
 //! `shutdown_approved` ends it (**AC-11**, as the spec spells it).
 //!
 //! Spec: Claude Code's teammates — §4.1's spawn sequence and §6.2's shutdown
@@ -341,12 +341,12 @@ impl Drop for Held {
     }
 }
 
-/// **AC-11.** `/team spawn w1 --backend pane` in a real lead makes a real pane
+/// **AC-11.** `/team spawn w1 --backend ganja` in a real lead makes a real pane
 /// teammate on a private tmux server; the member runs its seeded task and
 /// reports; `/team shutdown w1` ends in the lead reading the approval and the
 /// pane being gone.
 #[test]
-fn a_pane_teammate_spawned_with_backend_pane_is_created_and_killed_on_shutdown_approved() {
+fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved() {
     require_tmux();
     let fixture = Fixture::new();
     let tmux = Tmux::start(
@@ -381,7 +381,7 @@ fn a_pane_teammate_spawned_with_backend_pane_is_created_and_killed_on_shutdown_a
 
     // 1. The spec's own line, typed. The dialog opens and says where the
     // prompt went; the team file names the member on its pane.
-    tmux.type_line(&lead, &format!("/team spawn {MEMBER} --backend pane"));
+    tmux.type_line(&lead, &format!("/team spawn {MEMBER} --backend ganja"));
     wait_for("the dialog to report the spawn", &tmux, &lead, || {
         tmux.screen(&lead).contains(CLEARTEXT_NOTICE).then_some(())
     });
@@ -519,7 +519,7 @@ fn guard_spec(root: &TeamsRoot, cwd: &Path, bypass: bool) -> SpawnSpec {
         team: TeamName::parse(GUARD_TEAM).expect("a team name"),
         lead: MemberName::lead(),
         root: root.clone(),
-        backend: MemberBackend::Pane,
+        backend: MemberBackend::Ganja,
         agent_type: "general".to_owned(),
         model: "recorder-model".to_owned(),
         color: "blue".to_owned(),

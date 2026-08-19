@@ -141,7 +141,7 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
     let spawn_asks = RecordedSpawns::default();
 
     door.start(
-        spawn_with_prompt("worker", None, "leave a note in notes.md"),
+        spawn_with_prompt("worker", Some("in-process"), "leave a note in notes.md"),
         // The lead's own live handle — the rules the deny was stored in,
         // which is what the gate has to be judging by.
         &caller_with(project.path(), Arc::clone(&lead)),

@@ -604,7 +604,11 @@ impl Inbox {
     pub async fn approve_shutdown(&self, request_id: &str) {
         let pane = match self.membership.surface() {
             Surface::Pane { id } => Some(id.clone()),
-            Surface::Leader | Surface::InProcess => None,
+            // A shim member has no pane to name, and no `ganja` frontend of
+            // its own to reach this code — the shimmed CLI is what runs in
+            // its place. Unreachable through `surface()` besides, which
+            // classifies a shim's record as in-process.
+            Surface::Leader | Surface::InProcess | Surface::Shim { .. } => None,
         };
         let approved = Frame::ShutdownApproved(ShutdownApproved {
             request_id: request_id.to_owned(),

@@ -53,7 +53,7 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     // §4.1: the spawn registers the member, seeds the inbox with the task and
     // returns at once — the call does not wait for any of the work.
     let spawned = door
-        .start(spawn("worker", None), &caller, &AllowSpawn)
+        .start(spawn("worker", Some("in-process")), &caller, &AllowSpawn)
         .await
         .expect("an in-process teammate spawns");
     assert_eq!(spawned.name, "worker");

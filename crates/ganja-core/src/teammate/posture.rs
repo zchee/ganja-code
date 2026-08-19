@@ -80,8 +80,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     engine::Evicted,
     permission::{Decision, EXTERNAL_DIRECTORY, Permissions, Rule, matches, resolve},
-    protocol::{Command, Event, PermissionId, PermissionReply},
-    teammate::{SpawnSpec, Teammate},
+    protocol::{Command, Event, PermissionId, PermissionReply, team::MemberBackend},
+    teammate::{SpawnSpec, Teammate, backend_name, posture_line},
 };
 
 /// The permission a spawn asking to skip dialogs is judged under (§10.11-10).
@@ -93,6 +93,37 @@ use crate::{
 /// like — judged against the teammate's `agentType`, the way `task` is judged
 /// against its `subagent_type`.
 pub const BYPASS: &str = "teammate_bypass";
+
+/// The permission a spawn onto a foreign CLI is judged under (**D508(c)**).
+///
+/// Spelled like [`BYPASS`] and for the same reason — a config may write
+/// `"teammate_foreign": {"grok": "deny"}` and have it mean what it looks like
+/// — but judged against the **backend name**, not the `agentType`: what a
+/// person is being asked to consent to here is which vendor's binary runs, and
+/// two teammates of one agent type on two different CLIs are two different
+/// grants.
+///
+/// # A stored allow cannot exist, and that is the mechanism
+///
+/// [`spawn_gate`] reads the lead's rules through
+/// [`Permissions::inherited_by_subagent`], whose filter keeps a deny and an
+/// `external_directory` rule and drops everything else — so a stored
+/// `teammate_foreign: allow` never reaches `decide` and this clause answers
+/// its [`Decision::Ask`] default anyway. Nothing writes such a rule either:
+/// the spawn dialog's only consumer tests for a rejection and discards
+/// `PermissionReply::Always`, because storing an answer here would mean
+/// inventing a decision about a call that never happened.
+///
+/// The result is the property this clause exists for: **every** shim spawn
+/// raises a dialog, every time, and there is no way to turn that off. That is
+/// stronger than it first reads — a vendor's trust gate that cannot be
+/// permanently pre-cleared is a gate that is never cleared silently — and it
+/// is proportionate only because of what it gates: v1 composes each CLI's
+/// most restrictive working posture and refuses `bypass` by name, so the
+/// question a person is answering repeatedly is about a read-only agent.
+///
+/// A stored **deny** does pass that filter, and refuses.
+pub const FOREIGN: &str = "teammate_foreign";
 
 /// The pattern a rule covering every teammate is written with.
 const ANY: &str = "*";
@@ -197,6 +228,14 @@ pub struct SpawnGate {
     /// The teammate's own directory and what the rules say about working
     /// there. [`None`] when it is inside the project, which asks nothing.
     pub directory: Option<(PathBuf, Decision)>,
+    /// The foreign CLI this spawn would run, and what the rules say about
+    /// running it (**D508(c)**). [`None`] for P25's three surfaces, which is
+    /// what keeps their spawns exactly as silent as they were.
+    ///
+    /// Carries the backend for the same reason [`SpawnGate::directory`]
+    /// carries its path: a refusal a person cannot act on is a refusal that
+    /// does not say which of the six was refused.
+    pub foreign: Option<(MemberBackend, Decision)>,
 }
 
 impl SpawnGate {
@@ -209,6 +248,7 @@ impl SpawnGate {
         self.bypass
             .into_iter()
             .chain(self.directory.as_ref().map(|(_, decision)| *decision))
+            .chain(self.foreign.map(|(_, decision)| decision))
             .max()
             .unwrap_or(Decision::Allow)
     }
@@ -245,6 +285,12 @@ impl SpawnGate {
                 directory.display()
             ));
         }
+        if let Some((backend, Decision::Deny)) = self.foreign {
+            refused.push(format!(
+                "a rule refuses teammates on the {} backend; spawn it on one of this build's own",
+                backend_name(backend)
+            ));
+        }
 
         (!refused.is_empty()).then(|| refused.join(", and "))
     }
@@ -264,6 +310,14 @@ impl SpawnGate {
 /// So a blanket `"permission": "allow"` is invisible here and a foreign
 /// directory is still asked about: the error is towards asking, which is the
 /// direction the permission layer errs in everywhere else.
+///
+/// That filter is not merely a safety margin for the third clause — it **is**
+/// the third clause's mechanism. A stored `teammate_foreign: allow` is dropped
+/// before `decide` sees it, so [`FOREIGN`] answers [`Decision::Ask`]
+/// whatever a config says, and a stored deny passes the filter and refuses.
+/// The invariant that falls out is the one **D508(c)** wanted: every spawn
+/// onto a foreign CLI raises a dialog, and there is no rule anybody can write
+/// to stop it.
 #[must_use]
 pub fn spawn_gate(
     lead: &Permissions,
@@ -271,8 +325,9 @@ pub fn spawn_gate(
     bypass: bool,
     agent_type: &str,
     cwd: &Path,
+    backend: MemberBackend,
 ) -> SpawnGate {
-    // The three arguments are the three facts a spawn decides that the rules
+    // The four arguments are the four facts a spawn decides that the rules
     // have an opinion about — handed in bare rather than behind a
     // [`SpawnSpec`], because the real spec is built by the registry after
     // this gate answers and a placeholder-stuffed one here would be a value a
@@ -293,8 +348,30 @@ pub fn spawn_gate(
 
         (directory, decide(&rules, EXTERNAL_DIRECTORY, &pattern))
     });
+    // Read only for the shims, so P25's three surfaces keep answering exactly
+    // what they answered before this clause existed.
+    //
+    // `posture_line` is the discriminator rather than a second list of which
+    // backends are foreign, because the two questions have one answer: a
+    // backend has a posture to disclose exactly when nobody can be asked
+    // anything after its spawn. Two lists would be two places to add a
+    // seventh backend to, and the one that got forgotten would be this one.
+    //
+    // Never below `Ask`, though here that floor is belt and braces rather
+    // than the mechanism — `inherited_by_subagent` has already dropped any
+    // allow that could have lowered it (see [`FOREIGN`]).
+    let foreign = posture_line(backend).map(|_| {
+        (
+            backend,
+            decide(&rules, FOREIGN, backend_name(backend)).max(Decision::Ask),
+        )
+    });
 
-    SpawnGate { bypass, directory }
+    SpawnGate {
+        bypass,
+        directory,
+        foreign,
+    }
 }
 
 /// The teammate's directory, when the project does not reach it.
@@ -562,8 +639,8 @@ mod tests {
     use ganja_team::{MemberName, TeamName, TeamsRoot};
 
     use super::{
-        ANY, Arc, BYPASS, CancellationToken, Event, Forwarded, Forwarding, Posture, SpawnGate,
-        SpawnSpec, Teammate, mpsc, oneshot, permissions_for, spawn_gate,
+        ANY, Arc, BYPASS, CancellationToken, Event, FOREIGN, Forwarded, Forwarding, Posture,
+        SpawnGate, SpawnSpec, Teammate, backend_name, mpsc, oneshot, permissions_for, spawn_gate,
     };
     use crate::{
         Storage,
@@ -729,6 +806,7 @@ mod tests {
             true,
             "general",
             directory.path(),
+            MemberBackend::InProcess,
         );
         assert_eq!(asked.bypass, Some(Decision::Ask));
         assert_eq!(asked.action(), Decision::Ask);
@@ -740,6 +818,7 @@ mod tests {
             true,
             "general",
             directory.path(),
+            MemberBackend::InProcess,
         );
         assert_eq!(
             allowed.bypass,
@@ -753,6 +832,7 @@ mod tests {
             true,
             "general",
             directory.path(),
+            MemberBackend::InProcess,
         );
         assert_eq!(denied.action(), Decision::Deny);
         assert!(
@@ -769,6 +849,7 @@ mod tests {
             false,
             "general",
             directory.path(),
+            MemberBackend::InProcess,
         );
         assert_eq!(
             ordinary.bypass, None,
@@ -791,6 +872,7 @@ mod tests {
             false,
             "general",
             &project.path().join("crates"),
+            MemberBackend::InProcess,
         );
         assert_eq!(
             inside.directory, None,
@@ -804,6 +886,7 @@ mod tests {
             false,
             "general",
             elsewhere.path(),
+            MemberBackend::InProcess,
         );
         let (named, decision) = outside.directory.clone().expect("somewhere else was named");
         assert_eq!(decision, Decision::Ask);
@@ -824,6 +907,7 @@ mod tests {
             false,
             "general",
             elsewhere.path(),
+            MemberBackend::InProcess,
         );
         assert_eq!(
             answered.action(),
@@ -837,6 +921,7 @@ mod tests {
             false,
             "general",
             elsewhere.path(),
+            MemberBackend::InProcess,
         );
         assert_eq!(refused.action(), Decision::Deny);
         assert!(
@@ -846,6 +931,125 @@ mod tests {
             "a refused spawn says why: {:?}",
             refused.refusal()
         );
+    }
+
+    /// **D508(c)**, and P27's **AC-16**: a spawn onto a foreign CLI always
+    /// asks, a stored deny refuses it, and a stored allow changes nothing.
+    ///
+    /// The third arm is the one worth reading twice, because it looks like a
+    /// bug and is the mechanism. [`Permissions::inherited_by_subagent`]'s
+    /// filter keeps a deny and an `external_directory` rule and drops
+    /// everything else, so an `allow` written for [`FOREIGN`] never reaches
+    /// [`decide`] at all and the clause answers its `Ask` default. That is
+    /// what makes "every shim spawn raises a dialog, and there is no rule
+    /// anybody can write to stop it" a property of the code rather than a
+    /// promise in a doc.
+    ///
+    /// Nothing writes such a rule either — the spawn dialog discards
+    /// `PermissionReply::Always` — so the arm is not reachable through the UI.
+    /// It is asserted anyway, because a config file is a thing a person can
+    /// edit by hand.
+    #[test]
+    fn a_spawn_onto_a_foreign_cli_always_asks_and_only_a_deny_can_change_that() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let shims = [
+            MemberBackend::Codex,
+            MemberBackend::Agy,
+            MemberBackend::Grok,
+        ];
+
+        for backend in shims {
+            let name = backend_name(backend);
+
+            // No stored rule at all: the spawn is asked about, and being asked
+            // is not being refused.
+            let asked = spawn_gate(
+                &lead(Vec::new()),
+                directory.path(),
+                false,
+                "general",
+                directory.path(),
+                backend,
+            );
+            assert_eq!(asked.foreign, Some((backend, Decision::Ask)), "{name}");
+            assert_eq!(asked.action(), Decision::Ask, "{name}");
+            assert_eq!(asked.refusal(), None, "{name}: asking is not refusing");
+
+            // A stored allow is inert, by the filter above.
+            let allowed = spawn_gate(
+                &lead(vec![rule(FOREIGN, ANY, Action::Allow)]),
+                directory.path(),
+                false,
+                "general",
+                directory.path(),
+                backend,
+            );
+            assert_eq!(
+                allowed.action(),
+                Decision::Ask,
+                "{name}: an allow cannot pre-clear a vendor's gate"
+            );
+
+            // A stored deny passes the filter and refuses, in a sentence that
+            // names which surface — a refusal a person cannot act on is a
+            // refusal that does not say what to change.
+            let denied = spawn_gate(
+                &lead(vec![rule(FOREIGN, name, Action::Deny)]),
+                directory.path(),
+                false,
+                "general",
+                directory.path(),
+                backend,
+            );
+            assert_eq!(denied.action(), Decision::Deny, "{name}");
+            assert!(
+                denied.refusal().is_some_and(|why| why.contains(name)),
+                "{name}: a refused spawn says which backend: {:?}",
+                denied.refusal()
+            );
+
+            // And the rule is read against the **backend**, not the agent
+            // type: a deny stored for one CLI leaves the others asking.
+            let other = spawn_gate(
+                &lead(vec![rule(FOREIGN, "codex", Action::Deny)]),
+                directory.path(),
+                false,
+                "general",
+                directory.path(),
+                backend,
+            );
+            let expected = if backend == MemberBackend::Codex {
+                Decision::Deny
+            } else {
+                Decision::Ask
+            };
+            assert_eq!(other.action(), expected, "{name}");
+        }
+
+        // P25's three surfaces are untouched by any of it: an in-project
+        // spawn asking for no bypass still raises nothing at all, which is
+        // `posture.rs`'s own `Allow` default and the thing this clause must
+        // not have moved.
+        for backend in [
+            MemberBackend::InProcess,
+            MemberBackend::Ganja,
+            MemberBackend::Claude,
+        ] {
+            let gate = spawn_gate(
+                // Even with a deny stored for every backend name there is:
+                // the clause is not read for these surfaces at all.
+                &lead(vec![rule(FOREIGN, ANY, Action::Deny)]),
+                directory.path(),
+                false,
+                "general",
+                directory.path(),
+                backend,
+            );
+
+            assert_eq!(gate.foreign, None, "{}", backend_name(backend));
+            assert_eq!(gate.action(), Decision::Allow);
+            assert_eq!(gate.refusal(), None);
+        }
     }
 
     /// Nothing asked, nothing to answer.

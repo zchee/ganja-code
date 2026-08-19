@@ -74,19 +74,22 @@
 //! Minted here, because this is where the decision is made rather than where
 //! the panes are built. Three surfaces a teammate can run on, one trait
 //! ([`crate::teammate::TeammateBackend`]) and one vocabulary — the protocol's
-//! own [`ganja_protocol::team::MemberBackend`], whose three spellings are
+//! own [`ganja_protocol::team::MemberBackend`], whose six spellings are
 //! exactly the argument both doors take:
 //!
 //! | Door | Argument | Default |
 //! |---|---|---|
-//! | the `task` tool | `name`, `backend: "in-process" \| "pane" \| "claude"` | `in-process` |
-//! | `/team spawn <name>` | `--backend in-process\|pane\|claude` | `in-process` |
+//! | the `task` tool | `name`, `backend: "in-process" \| "ganja" \| "claude" \| "codex" \| "agy" \| "grok"` | `ganja` |
+//! | `/team spawn <name>` | `--backend in-process\|ganja\|claude\|codex\|agy\|grok` | `ganja` |
 //!
-//! **The backend is an explicit argument on both doors, never inferred.**
+//! **The backend is an explicit argument on both doors, never inferred**, and
+//! the default is a fixed value rather than a guess (**Dv-1**).
 //! `$TMUX` governs whether a pane backend *can run*, not which backend is
-//! chosen: a session without it refuses `pane` and `claude` readably rather
+//! chosen: a session without it refuses `ganja` and `claude` readably rather
 //! than falling back to `in-process`, because a person who asked for a window
-//! and silently got none has been lied to. Both pane values refuse
+//! and silently got none has been lied to — and since Dv-1 that refusal is
+//! what a session with no tmux gets for an **unnamed** backend too, since
+//! `ganja` is what unnamed means. Both pane values refuse
 //! **identically** — one [`crate::teammate::Unsupported`] carrying
 //! [`crate::teammate::tmux::REFUSED_NO_TMUX`], since a door that spawned where
 //! the other refused would be two behaviours wearing one argument — and an
@@ -313,17 +316,37 @@ impl Teammate {
     }
 }
 
-/// The three spellings the `backend` argument takes, in the order a refusal
-/// lists them.
+/// The six spellings the `backend` argument takes, in the order a refusal
+/// lists them: P25's three surfaces, then P27's three shim CLIs.
 ///
 /// Written out rather than derived from [`MemberBackend`]'s serde renaming,
 /// and checked against it by `every_backend_value_is_spelled_the_way_it_is
 /// _serialized`: the argument's vocabulary and the document's have to agree,
 /// and a test saying so is cheaper than a reader assuming it.
-pub const BACKENDS: [&str; 3] = ["in-process", "pane", "claude"];
+///
+/// The `ganja` surface was spelled `pane` until Dv-1, and **no alias was
+/// kept**: `pane` is refused by the ordinary unknown-name sentence, which
+/// lists these six. An alias would have been a second spelling of one surface
+/// living in the grammar forever, where a refusal that names the list teaches
+/// the new word once.
+pub const BACKENDS: [&str; 6] = ["in-process", "ganja", "claude", "codex", "agy", "grok"];
 
-/// What a door spawns when nobody named a backend (**D501**).
-pub const DEFAULT_BACKEND: MemberBackend = MemberBackend::InProcess;
+/// What a door spawns when nobody named a backend (**D501**, amended by
+/// **Dv-1**).
+///
+/// A teammate with a window of its own, which is what somebody starting one
+/// without saying where almost always meant: a pane they can watch. It was
+/// `in-process` until Dv-1.
+///
+/// **Absence still infers nothing**, which is D501's rule and is worth
+/// separating from the choice of default. This value is what an unnamed
+/// backend *is*, unconditionally — not a guess informed by whether `$TMUX` is
+/// set or a `claude` is on the path. A session that cannot reach tmux is
+/// therefore **refused by name at spawn** rather than quietly served an
+/// in-process teammate: a person who asked for a teammate and got a different
+/// kind of teammate has been told something untrue about their own session.
+/// `in-process` stays selectable by name for anybody who wants it.
+pub const DEFAULT_BACKEND: MemberBackend = MemberBackend::Ganja;
 
 /// How long a teammate is given to reach the end of its turn before what it
 /// owns is ended anyway.
@@ -405,13 +428,16 @@ pub struct UnknownBackend {
 ///
 /// # Errors
 ///
-/// [`UnknownBackend`], naming the value and listing the three — an unknown
+/// [`UnknownBackend`], naming the value and listing the six — an unknown
 /// backend is a typo somebody can fix, and the fix is the list.
 pub fn parse_backend(value: &str) -> Result<MemberBackend, UnknownBackend> {
     match value {
         "in-process" => Ok(MemberBackend::InProcess),
-        "pane" => Ok(MemberBackend::Pane),
+        "ganja" => Ok(MemberBackend::Ganja),
         "claude" => Ok(MemberBackend::Claude),
+        "codex" => Ok(MemberBackend::Codex),
+        "agy" => Ok(MemberBackend::Agy),
+        "grok" => Ok(MemberBackend::Grok),
         other => Err(UnknownBackend {
             value: other.to_owned(),
         }),
@@ -420,16 +446,84 @@ pub fn parse_backend(value: &str) -> Result<MemberBackend, UnknownBackend> {
 
 /// How a backend is spelled as an argument.
 ///
-/// An exhaustive match rather than a lookup, so a fourth surface is a build
+/// An exhaustive match rather than a lookup, so a seventh surface is a build
 /// failure here instead of a value that prints as nothing.
 #[must_use]
 pub const fn backend_name(backend: MemberBackend) -> &'static str {
     match backend {
         MemberBackend::InProcess => BACKENDS[0],
-        MemberBackend::Pane => BACKENDS[1],
+        MemberBackend::Ganja => BACKENDS[1],
         MemberBackend::Claude => BACKENDS[2],
+        MemberBackend::Codex => BACKENDS[3],
+        MemberBackend::Agy => BACKENDS[4],
+        MemberBackend::Grok => BACKENDS[5],
     }
 }
+
+/// The posture a shim teammate is pinned to, in the terms a person consenting
+/// to it has to read (**D508(c)**).
+///
+/// [`None`] for P25's three surfaces, and that absence is the honest answer
+/// rather than a missing sentence: an in-process or pane teammate forwards its
+/// dialogs to the lead, so its bounds are the lead's own rules and a person
+/// stays in the loop for every one of them. A shim asks **nobody** after
+/// spawn — a headless CLI child has no channel to ask through — so the spawn
+/// is the last moment anybody can be told, and this is what they are told.
+///
+/// One table with two readers, so a dialog and a ring line cannot come to
+/// describe one grant differently: the spawn dialog's `args` carry it under
+/// `posture`, and the registry's ring line opens with it.
+///
+/// # What these sentences may say
+///
+/// Each names what the posture **bounds**, never which flag was passed: a
+/// person consenting to "reads this project" when the sandbox reads the whole
+/// disk has consented under a wrong description. And under the plan's
+/// acceptance-sequencing rule no bound ships ahead of the probe that measured
+/// it, so a sentence here says `unmeasured` where its wave has not yet
+/// measured, rather than guessing generously.
+///
+/// An exhaustive match, so a seventh backend that forgets to answer is a build
+/// failure rather than a teammate spawning with no posture disclosed.
+#[must_use]
+pub const fn posture_line(backend: MemberBackend) -> Option<&'static str> {
+    match backend {
+        MemberBackend::InProcess | MemberBackend::Ganja | MemberBackend::Claude => None,
+        MemberBackend::Codex => Some(POSTURE_CODEX),
+        MemberBackend::Agy => Some(POSTURE_AGY),
+        MemberBackend::Grok => Some(POSTURE_GROK),
+    }
+}
+
+/// codex's pinned posture, until W3's turn-free `codex sandbox` measurement
+/// replaces the unmeasured half.
+///
+/// `read-only` is one of `-s`'s three documented values and the strongest
+/// floor of the three CLIs; what it lets the child *read*, and whether it
+/// reaches the network, are questions this build has not yet asked.
+const POSTURE_CODEX: &str = "sandbox=read-only: writes denied; read scope and network unmeasured";
+
+/// agy's pinned posture, and the arm that **no shipped build reaches**.
+///
+/// W4's ship test is one probe: if `--sandbox` is not a filesystem bound, agy
+/// does not spawn at all, so there is no posture to disclose and this sentence
+/// is never read. It exists so that the enum is total while W4 is in flight,
+/// and W6 either deletes it or replaces it with the measured sentence.
+const POSTURE_AGY: &str = "sandbox: filesystem bound unmeasured; plan mode composed";
+
+/// grok's pinned posture, measured except for what a refused tool ask costs.
+///
+/// Long because every clause of it is load-bearing. The write bound is real
+/// but narrow, and "temp" is spelled out because a reader pictures `/tmp` and
+/// on macOS it is also the per-user folder root. The read scope is the whole
+/// disk, which is what makes the second half necessary: a bound stated without
+/// what it *enables* is a bound nobody can price, and whole-disk read plus an
+/// unbounded network is the ability to read a credential and post it
+/// somewhere. The `(macOS)` qualifier belongs to both halves — one Linux-only
+/// switch is why neither holds here.
+const POSTURE_GROK: &str = "sandbox=read-only: writes denied outside ~/.grok and temp, whole-disk \
+     read, no network bound (macOS) — may read any file you can, including credentials, and may \
+     send them anywhere; what an unapproved tool ask costs a turn is unmeasured";
 
 /// `a`, `b` and `c` — the list a refusal ends with.
 fn spell(names: &[&str]) -> String {
@@ -458,6 +552,92 @@ pub struct Unsupported {
     pub backend: MemberBackend,
     /// Why it could not be had, in the terms whoever asked reads next.
     pub reason: String,
+}
+
+impl Unsupported {
+    /// The refusal a shim backend answers with until its own wave lands.
+    #[must_use]
+    pub fn until_p27(backend: MemberBackend) -> Self {
+        Self {
+            backend,
+            reason: REFUSED_UNTIL_P27.to_owned(),
+        }
+    }
+}
+
+/// Why a shim backend refuses before W3-W5 fill it in.
+///
+/// One sentence for all three, because what is being asserted at this stage is
+/// exactly that the three refuse *identically*: a name that parses and a door
+/// that spawns anyway would be W1 shipping a behavior its own wave has not
+/// measured. Naming the plan rather than a wave, since which wave owes which
+/// CLI is the plan's to say and would be a second place to keep it right.
+///
+/// The sentence says "another vendor's CLI" rather than "a shim", because it
+/// is read by whoever asked for the teammate: *shim* is what this tree calls
+/// the mechanism, not something a person typing `--backend codex` has agreed
+/// to learn.
+pub const REFUSED_UNTIL_P27: &str = "this build cannot run a teammate on another vendor's CLI yet; the backend is named and its \
+     posture is settled, but the child that runs it lands with its own wave of \
+     .omc/plans/2026-08-19-foreign-cli-shim-backends.md";
+
+/// A backend whose name and posture are settled and whose child is not built
+/// yet.
+///
+/// The P25a shape, deliberately: `pane` and `claude` were values that parsed,
+/// gated and refused for one wave before their bodies landed, which is what
+/// let the naming, the record shape and the permission clause be reviewed
+/// against real call sites rather than against a sketch. Short-lived by
+/// construction — each of W3, W4 and W5 replaces one of these with a real
+/// backend, and the last of them takes the type with it.
+///
+/// It carries the backend rather than being three unit structs, because there
+/// is nothing per-CLI to say here: the whole content of this type is "not
+/// yet", and three spellings of that would be three places to forget to
+/// delete.
+#[derive(Clone, Copy, Debug)]
+pub struct Unbuilt {
+    backend: MemberBackend,
+}
+
+impl Unbuilt {
+    /// The stub for `backend`.
+    #[must_use]
+    pub const fn new(backend: MemberBackend) -> Self {
+        Self { backend }
+    }
+}
+
+#[async_trait]
+impl TeammateBackend for Unbuilt {
+    fn backend(&self) -> MemberBackend {
+        self.backend
+    }
+
+    async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
+        Err(Unsupported::until_p27(self.backend))
+    }
+
+    async fn kill(&self, handle: &Handle) {
+        // Nothing this backend made can be here to end: its `spawn` has never
+        // returned a handle. Named rather than ignored, because a handle
+        // arriving here would mean a registry had crossed two backends.
+        tracing::warn!(
+            ?handle,
+            backend = backend_name(self.backend),
+            "an unbuilt backend was asked to end something it did not start"
+        );
+    }
+
+    fn delivery(&self) -> Delivery {
+        // The promise the real shim will keep, settled now because it is the
+        // trait's to decide rather than the child's: a shim reads its own
+        // inbox and takes the message onto a turn in this process, so the
+        // acknowledgement is that read. Answering anything else here would
+        // mean the lead's queue strip behaved differently before and after a
+        // wave that changes nothing about delivery.
+        Delivery::Acknowledged
+    }
 }
 
 /// What a backend can tell the lead about a message it handed over
@@ -2047,8 +2227,8 @@ pub(crate) mod tests {
     use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 
     use super::{
-        DEFAULT_BACKEND, Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec,
-        TeammateBackend, TeammateRegistry, Unsupported, session_team,
+        Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec, TeammateBackend,
+        TeammateRegistry, Unsupported, session_team,
     };
     use crate::{
         Storage, permission::Permissions, provider::FakeProvider, tool::Registry as Tools,
@@ -2156,7 +2336,7 @@ pub(crate) mod tests {
         let started = registry
             .spawn(
                 in_process(home.path()),
-                request("worker", DEFAULT_BACKEND, home.path()),
+                request("worker", MemberBackend::InProcess, home.path()),
             )
             .await
             .expect("a teammate joins");
@@ -2185,8 +2365,8 @@ pub(crate) mod tests {
 
         let refused = registry
             .spawn(
-                Arc::new(Never(MemberBackend::Pane)),
-                request("worker", MemberBackend::Pane, home.path()),
+                Arc::new(Never(MemberBackend::Ganja)),
+                request("worker", MemberBackend::Ganja, home.path()),
             )
             .await
             .expect_err("this backend spawns nothing");
@@ -2221,7 +2401,7 @@ pub(crate) mod tests {
         registry
             .spawn(
                 in_process(home.path()),
-                request("w1", DEFAULT_BACKEND, home.path()),
+                request("w1", MemberBackend::InProcess, home.path()),
             )
             .await
             .expect("a teammate joins");
@@ -2341,7 +2521,7 @@ pub(crate) mod tests {
         registry
             .spawn(
                 in_process(home.path()),
-                request("w1", DEFAULT_BACKEND, home.path()),
+                request("w1", MemberBackend::InProcess, home.path()),
             )
             .await
             .expect("the teammate starts");
@@ -2551,7 +2731,7 @@ pub(crate) mod tests {
     #[async_trait::async_trait]
     impl TeammateBackend for Recording {
         fn backend(&self) -> MemberBackend {
-            MemberBackend::Pane
+            MemberBackend::Ganja
         }
 
         async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
@@ -2574,7 +2754,7 @@ pub(crate) mod tests {
                 .push((spec.name.as_str().to_owned(), recorded));
             if self.refuse_launch {
                 return Err(Unsupported {
-                    backend: MemberBackend::Pane,
+                    backend: MemberBackend::Ganja,
                     reason: UNLAUNCHABLE.to_owned(),
                 });
             }
@@ -2609,7 +2789,7 @@ pub(crate) mod tests {
         registry
             .spawn(
                 Arc::clone(&backend) as Arc<dyn TeammateBackend>,
-                request("w1", MemberBackend::Pane, home.path()),
+                request("w1", MemberBackend::Ganja, home.path()),
             )
             .await
             .expect("the recording backend spawns");
@@ -2650,7 +2830,7 @@ pub(crate) mod tests {
         registry
             .spawn(
                 Arc::clone(&backend) as Arc<dyn TeammateBackend>,
-                request("w1", MemberBackend::Pane, home.path()),
+                request("w1", MemberBackend::Ganja, home.path()),
             )
             .await
             .expect("the recording backend spawns and launches");
@@ -2672,7 +2852,7 @@ pub(crate) mod tests {
         let refused = registry
             .spawn(
                 Arc::clone(&refusing) as Arc<dyn TeammateBackend>,
-                request("w2", MemberBackend::Pane, home.path()),
+                request("w2", MemberBackend::Ganja, home.path()),
             )
             .await
             .expect_err("a refused launch is a refused spawn");

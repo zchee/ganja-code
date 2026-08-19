@@ -465,7 +465,7 @@ pub fn submitted(text: &str) -> Option<&'static Entry> {
 /// can carry arguments: the palette has nowhere to type them and the dropdown
 /// closes the moment a space follows the name, so a line with a subcommand
 /// has to be read off the buffer on submit exactly as [`submitted`] reads an
-/// argument-less one. That is what lets `/team spawn w1 --backend pane` — the
+/// argument-less one. That is what lets `/team spawn w1 --backend ganja` — the
 /// spec's own spelling — reach the same spawn sequence the `task` tool's
 /// teammate door reaches (**D504**).
 ///
@@ -512,7 +512,7 @@ pub struct TeamSpawn {
     pub bypass: bool,
     /// What the teammate is being asked to do, verbatim from the first word
     /// that is not a flag. Empty is allowed — AC-11's own spelling
-    /// (`/team spawn w1 --backend pane`) carries no prompt, and a teammate
+    /// (`/team spawn w1 --backend ganja`) carries no prompt, and a teammate
     /// started to be messaged afterwards is a real thing to want.
     pub prompt: String,
 }
@@ -1244,10 +1244,10 @@ mod tests {
     fn a_team_spawn_line_takes_its_flags_before_its_prompt() {
         let cases = [
             (
-                "/team spawn w1 --backend pane",
+                "/team spawn w1 --backend ganja",
                 TeamSpawn {
                     name: "w1".to_owned(),
-                    backend: Some("pane".to_owned()),
+                    backend: Some("ganja".to_owned()),
                     agent_type: None,
                     bypass: false,
                     prompt: String::new(),
@@ -1288,7 +1288,7 @@ mod tests {
         let cases = [
             ("/team nonesuch", "nonesuch"),
             ("/team spawn", "/team spawn"),
-            ("/team spawn --backend pane", "/team spawn"),
+            ("/team spawn --backend ganja", "/team spawn"),
             ("/team spawn w1 --backend", "--backend"),
             ("/team spawn w1 --agent", "--agent"),
             ("/team spawn w1 --nonesuch go", "--nonesuch"),

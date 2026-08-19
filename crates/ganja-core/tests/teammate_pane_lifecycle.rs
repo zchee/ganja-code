@@ -6,7 +6,7 @@
 //! handshake, read against this tree in §10.2 and §10.4. Upstream opencode has
 //! no teammates and no counterpart to any of it.
 //!
-//! AC-11 as the spec spells it — `/team spawn w1 --backend pane` in a real
+//! AC-11 as the spec spells it — `/team spawn w1 --backend ganja` in a real
 //! `ganja`, in a PTY — is `crates/ganja-cli/tests/teammate_pane.rs`, which needs
 //! the pane child to be the real binary parsing the spawn flags. This binary is
 //! the half a core test can hold: the same door, the same registry, the same
@@ -27,7 +27,7 @@
 //!
 //! # What is asserted
 //!
-//! 1. The door answers `backend: "pane"` and the member record carries the
+//! 1. The door answers `backend: "ganja"` and the member record carries the
 //!    pane's id under `tmuxPaneId` with `backendType: "tmux"`.
 //! 2. tmux lists the pane, alive, with the pid `pane.rs` recorded as its
 //!    birth — the pair the reaper matches on.
@@ -54,12 +54,12 @@ use pane_support::{expected_argv, pane_child_if_asked, run_one, spawn_pane_worke
 fn main() {
     pane_child_if_asked();
     run_one(
-        "a_pane_teammate_spawned_with_backend_pane_is_created_and_killed_on_shutdown_approved",
-        a_pane_teammate_spawned_with_backend_pane_is_created_and_killed_on_shutdown_approved(),
+        "a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved",
+        a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved(),
     );
 }
 
-async fn a_pane_teammate_spawned_with_backend_pane_is_created_and_killed_on_shutdown_approved() {
+async fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved() {
     let server = PrivateServer::start(&["sleep", "3600"], &[], &[]);
     let config_home = ganja_testkit::temp_dir();
     let project = ganja_testkit::temp_dir();

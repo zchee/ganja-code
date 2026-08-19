@@ -136,7 +136,7 @@ use crate::{
     storage::{self, SessionId, SessionInfo},
     teammate::{
         DEFAULT_BACKEND, SpawnRequest, Teammate, TeammateBackend, TeammateRegistry, backend_name,
-        parse_backend, postbox::LEADS, posture,
+        parse_backend, postbox::LEADS, posture, posture_line,
     },
     tool::{
         Credentials, Registry,
@@ -459,15 +459,16 @@ impl SpawnAsker for Spawn {
     }
 }
 
-/// One implementation per surface a teammate can run on (**D501**).
+/// One implementation per surface a teammate can run on (**D501**, **D508**).
 ///
-/// Three fields rather than a lookup, so [`Teammates`] picks one by an
-/// exhaustive match: a fourth surface is then a build failure here instead of a
-/// `backend` value that resolves to nothing at run time. Which implementation
+/// A field per surface rather than a lookup, so [`Teammates`] picks one by an
+/// exhaustive match: a seventh surface is then a build failure here instead of
+/// a `backend` value that resolves to nothing at run time. Which implementation
 /// sits in each slot is the engine's to decide — this build's are
 /// [`crate::teammate::InProcess`], [`crate::teammate::pane::GanjaPane`] and
 /// [`crate::teammate::claude::ClaudePane`], and only the first of the three
-/// holds anything of the host's.
+/// holds anything of the host's; the three shim backends hold
+/// [`crate::teammate::Unbuilt`] until their own waves land.
 #[derive(Debug)]
 pub struct Backends {
     /// The teammate that runs in the lead's own process.
@@ -476,6 +477,12 @@ pub struct Backends {
     pub pane: Arc<dyn TeammateBackend>,
     /// The teammate that is a real `claude`.
     pub claude: Arc<dyn TeammateBackend>,
+    /// The teammate that is a headless `codex exec` child.
+    pub codex: Arc<dyn TeammateBackend>,
+    /// The teammate that is a resident `agy` child.
+    pub agy: Arc<dyn TeammateBackend>,
+    /// The teammate that is a headless `grok` child.
+    pub grok: Arc<dyn TeammateBackend>,
 }
 
 impl Backends {
@@ -483,8 +490,11 @@ impl Backends {
     fn of(&self, backend: MemberBackend) -> Arc<dyn TeammateBackend> {
         match backend {
             MemberBackend::InProcess => Arc::clone(&self.in_process),
-            MemberBackend::Pane => Arc::clone(&self.pane),
+            MemberBackend::Ganja => Arc::clone(&self.pane),
             MemberBackend::Claude => Arc::clone(&self.claude),
+            MemberBackend::Codex => Arc::clone(&self.codex),
+            MemberBackend::Agy => Arc::clone(&self.agy),
+            MemberBackend::Grok => Arc::clone(&self.grok),
         }
     }
 }
@@ -644,6 +654,13 @@ impl Teammates {
             // Absence is the default and never an inference: what a session
             // does or does not have — `$TMUX`, a `claude` on the path — decides
             // whether a *named* surface can run, never which one is chosen.
+            //
+            // Which since **Dv-1** is a rule with teeth rather than a nicety.
+            // The default is `ganja`, a pane, so an unnamed backend in a
+            // session that cannot reach tmux is **refused by name at spawn**
+            // — the same refusal naming it explicitly would have earned. The
+            // refusal happens there and not here: this is where a *name* is
+            // read, and "no tmux" is not a thing a name can be wrong about.
             None => DEFAULT_BACKEND,
         };
         // Parsed here, so a name the grammar refuses is refused before a
@@ -660,6 +677,7 @@ impl Teammates {
             bypass,
             &request.agent_type,
             &caller.cwd,
+            backend,
         );
         match gate.action() {
             Decision::Deny => {
@@ -672,6 +690,25 @@ impl Teammates {
                 });
             }
             Decision::Ask => {
+                let mut args = serde_json::json!({
+                    "name": name.as_str(),
+                    "backend": backend_name(backend),
+                    "agent_type": request.agent_type,
+                    "cwd": caller.cwd.to_string_lossy(),
+                    "bypass": bypass,
+                });
+                // What the grant actually bounds, for the spawns where this
+                // dialog is the last thing anybody is asked (**D508(c)**).
+                //
+                // Inserted rather than written into the literal above, because
+                // the key is **absent** for P25's three surfaces rather than
+                // `null`: their bounds are the lead's own rules and they go on
+                // asking afterwards, so a null here would invite a reader to
+                // look for a posture that is not a thing those spawns have.
+                if let Some(posture) = posture_line(backend) {
+                    args["posture"] = serde_json::Value::from(posture);
+                }
+
                 let reply = asker
                     .ask(SpawnAsk {
                         // The name **asked for**, which is not always the name
@@ -686,13 +723,7 @@ impl Teammates {
                             "start teammate {name} on the {} backend (a name already taken gets a counter)",
                             backend_name(backend)
                         ),
-                        args: serde_json::json!({
-                            "name": name.as_str(),
-                            "backend": backend_name(backend),
-                            "agent_type": request.agent_type,
-                            "cwd": caller.cwd.to_string_lossy(),
-                            "bypass": bypass,
-                        }),
+                        args,
                         directories: gate.directories(),
                     })
                     .await;
@@ -2125,8 +2156,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Host, Incoming,
-        MESSAGE_ROUTE, NOT_A_SESSION_SOCKET, NotReceived, NotSpawned, PermissionReply, Postbox,
+        Address, Backends, Body, Caller, FRAME_OVER_SOCKET, Host, Incoming, MESSAGE_ROUTE,
+        MemberBackend, NOT_A_SESSION_SOCKET, NotReceived, NotSpawned, PermissionReply, Postbox,
         Reserved, SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent,
         SocketMessage, Spawn, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate,
         TeammateRegistry, TeammateSpawn, Teammated, Teammates, Undelivered, Watched, async_trait,
@@ -2457,7 +2488,7 @@ mod tests {
                     )),
                     SpawnRequest {
                         name: "worker".to_owned(),
-                        backend: DEFAULT_BACKEND,
+                        backend: MemberBackend::InProcess,
                         agent_type: "general".to_owned(),
                         model: "recorder-model".to_owned(),
                         color: None,
@@ -2598,6 +2629,9 @@ mod tests {
                 in_process: Arc::new(Never(MemberBackend::InProcess)),
                 pane: Arc::new(Never(MemberBackend::InProcess)),
                 claude: Arc::new(Never(MemberBackend::InProcess)),
+                codex: Arc::new(Never(MemberBackend::Codex)),
+                agy: Arc::new(Never(MemberBackend::Agy)),
+                grok: Arc::new(Never(MemberBackend::Grok)),
             },
         )
     }

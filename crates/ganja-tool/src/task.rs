@@ -111,8 +111,9 @@ struct Args {
     /// answer
     #[serde(default)]
     name: Option<String>,
-    /// Which surface a teammate runs on: "in-process", "pane" or "claude".
-    /// Absent means in-process. Only meaningful alongside name
+    /// Which surface a teammate runs on: "in-process", "ganja", "claude",
+    /// "codex", "agy" or "grok". Absent means ganja, a pane of its own. Only
+    /// meaningful alongside name
     #[serde(default)]
     backend: Option<String>,
 }
@@ -630,7 +631,7 @@ mod tests {
                 "description": "spin up a worker",
                 "prompt": "hold the fort",
                 "subagent_type": "general",
-                "backend": "pane",
+                "backend": "ganja",
             }),
         )
         .await;

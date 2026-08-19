@@ -232,7 +232,7 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
     // behaviours wearing one argument. One backend suffices for the
     // propagation claim; the per-backend sentences, and that a refused spawn
     // leaves nothing behind, are `teammate_no_tmux.rs`'s.
-    let refused = match tool.run(args("pane"), &ctx).await {
+    let refused = match tool.run(args("ganja"), &ctx).await {
         Err(ToolError::Failed(message)) => message,
         other => panic!("expected pane to be refused, got {other:?}"),
     };

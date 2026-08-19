@@ -26,6 +26,25 @@
 //! is not a value that crosses a wire — the frame inside one crosses it as a
 //! [`Frame`]. What it is is a constructor with a condition attached, and a
 //! `Deserialize` impl is precisely a constructor that skips it.
+//!
+//! # Changing [`MemberBackend`] is a version-skew event, and a wide one
+//!
+//! [`MemberView`] is `deny_unknown_fields` over a **typed** `backend`, so a
+//! name added here — or **renamed**, as `"pane"` became `"ganja"` — is a name
+//! an older `ganja-client` refuses to decode. The
+//! blast radius is the part worth stating plainly, because the field's own
+//! position hides it: the refusal is not scoped to the member carrying the new
+//! name. [`TeamView::members`] decodes as one value, so a single `codex`
+//! teammate makes the **entire** `GET /team` response unreadable to that
+//! client — every other member's row included, and the team's own name with
+//! them. The rename is the worse of the two, since it needs no new teammate
+//! at all: an existing `ganja`-backed member is enough.
+//!
+//! That is the declared posture rather than a defect: this crate refuses what
+//! it does not understand readably instead of guessing, and a client that
+//! silently dropped the row it could not read would show a team missing a
+//! member that is running. What the posture does not do is make skew free, so
+//! the two ends are versioned together.
 
 use std::fmt;
 
@@ -671,8 +690,66 @@ impl Frame {
     /// cost with no answer in it.
     #[must_use]
     pub fn reserved_kind(text: &str) -> Option<&'static str> {
-        serde_json::from_str::<ReservedTag>(text).ok()?.0
+        match tag_of(text, Naming::Skip) {
+            Tagged::Reserved(kind) => Some(kind),
+            Tagged::NotAnObject | Tagged::Untagged | Tagged::Unknown { .. } => None,
+        }
     }
+
+    /// The same walk as [`Frame::reserved_kind`], reporting what it *found*
+    /// rather than only whether the answer was one of the fifteen.
+    ///
+    /// [`Frame::reserved_kind`] compresses three different facts into
+    /// [`None`]: text that is no JSON object at all, an object carrying no
+    /// `type`, and an object whose `type` is a kind this build has never heard
+    /// of. A guard deciding whether some text may be composed into a foreign
+    /// CLI's prompt has to tell the third from the first two — a document
+    /// shaped like a frame is a document some *other* build, or a newer one,
+    /// would act on — and it has to be able to name the kind it refused, so
+    /// the drop is something a reader can account for rather than a silent
+    /// disappearance.
+    ///
+    /// Every rule [`Frame::reserved_kind`] documents holds here unchanged,
+    /// because it is literally this walk: any `type` naming one of the fifteen
+    /// wins over any position and over any other `type`.
+    ///
+    /// # Cost
+    ///
+    /// One [`String`] for the unknown name, and only in that arm. The
+    /// no-allocation promise [`Frame::reserved_kind`]'s own `Cost` section
+    /// makes is kept by that reader asking this walk not to keep the name.
+    #[must_use]
+    pub fn classify(text: &str) -> Tagged {
+        tag_of(text, Naming::Keep)
+    }
+}
+
+/// What [`Frame::classify`] found at the top level of some text.
+///
+/// The three not-a-frame answers are kept apart because they are different
+/// facts about the sender: prose is somebody talking, an untagged object is
+/// somebody's data, and a tagged object this build cannot name is a frame
+/// nobody here can read — which is the one of the three that is evidence of
+/// skew rather than of content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Tagged {
+    /// Not a JSON object: prose, an array, a bare string or number, or
+    /// malformed JSON. Ordinary content, and the common answer.
+    NotAnObject,
+    /// A JSON object, and not one entry of it is `type`.
+    Untagged,
+    /// A JSON object whose `type` names one of the fifteen (§5.1).
+    Reserved(&'static str),
+    /// A JSON object carrying a `type` this build has never heard of.
+    Unknown {
+        /// What it called itself, when the value was a string; [`None`] when
+        /// it was a number, an array or an object.
+        ///
+        /// Absence is not the same as no `type` at all — a `{"type": 42}` is
+        /// still tagged, and a guard reading this must not be told otherwise
+        /// merely because there was no name to report.
+        name: Option<String>,
+    },
 }
 
 /// The `'static` spelling of a reserved kind, if the text names one.
@@ -686,30 +763,64 @@ fn reserved_name(tag: &str) -> Option<&'static str> {
         .find(|kind| *kind == tag)
 }
 
-/// What [`Frame::reserved_kind`] decoded: the reserved kind some `type` entry
-/// of a JSON object named, if any of them named one.
+/// Whether the walk keeps the name of a `type` outside the fifteen.
 ///
-/// Hand-written rather than derived, and that is the whole point of it — a
-/// derived `Deserialize` errors on a repeated key, and an error here means
-/// "not a frame", which is exactly the answer an attacker wants for a frame
-/// they prefixed with a decoy `type`.
-struct ReservedTag(Option<&'static str>);
+/// Both readers do the same walk and differ only here.
+/// [`Frame::reserved_kind`] answers a yes-or-no question on every outbound
+/// message and has a documented no-allocation promise to keep, so it asks for
+/// [`Naming::Skip`] and the name is never built; [`Frame::classify`] is the
+/// one that has to report the kind it refused.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Naming {
+    /// Build the [`String`] for an unknown tag.
+    Keep,
+    /// Do not: the caller cannot tell an unnamed unknown from a named one.
+    Skip,
+}
 
-impl<'de> Deserialize<'de> for ReservedTag {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_map(ReservedTagVisitor)
+/// Walks `text` as one JSON object, reading the value of every `type`.
+///
+/// The map walk is hand-written rather than derived, and that is the whole
+/// point of it — a derived `Deserialize` errors on a repeated key, and an
+/// error here would mean "not a frame", which is exactly the answer an
+/// attacker wants for a frame they prefixed with a decoy `type`.
+///
+/// Anything that is not a JSON object, and anything with trailing input after
+/// one, is [`Tagged::NotAnObject`]: the trailing check is
+/// `serde_json::from_str`'s own, kept because this walk stands in for a call
+/// that had it and a text both readers disagree about is the bypass this whole
+/// module is built to refuse.
+fn tag_of(text: &str, naming: Naming) -> Tagged {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let Ok(found) = de::DeserializeSeed::deserialize(TagWalk { naming }, &mut deserializer) else {
+        return Tagged::NotAnObject;
+    };
+
+    match deserializer.end() {
+        Ok(()) => found,
+        Err(_) => Tagged::NotAnObject,
     }
 }
 
-/// Walks a JSON object, reading the value of every `type` and skipping the
-/// rest.
-struct ReservedTagVisitor;
+/// The object walk, carrying what the caller wants done with an unknown name.
+#[derive(Clone, Copy)]
+struct TagWalk {
+    naming: Naming,
+}
 
-impl<'de> de::Visitor<'de> for ReservedTagVisitor {
-    type Value = ReservedTag;
+impl<'de> de::DeserializeSeed<'de> for TagWalk {
+    type Value = Tagged;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> de::Visitor<'de> for TagWalk {
+    type Value = Tagged;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a JSON object")
@@ -719,19 +830,34 @@ impl<'de> de::Visitor<'de> for ReservedTagVisitor {
     where
         M: de::MapAccess<'de>,
     {
-        let mut found = None;
+        let mut reserved = None;
+        let mut unknown = None;
 
         // The loop runs to the end even once an answer is in hand: stopping
         // early would leave the document half-read, and the point of reading
         // it all is that no position in the object is privileged.
         while let Some(key) = map.next_key::<TagKey>()? {
             match key {
-                TagKey::Type => found = found.or(map.next_value_seed(TagValue)?),
+                TagKey::Type => match map.next_value_seed(TagValue {
+                    naming: self.naming,
+                })? {
+                    TagSeen::Reserved(kind) => reserved = reserved.or(Some(kind)),
+                    // First unknown rather than last, so a decoy cannot change
+                    // which kind a refusal names. It is reported only when no
+                    // entry named one of the fifteen.
+                    TagSeen::Unknown(name) => unknown = unknown.or(Some(name)),
+                },
                 TagKey::Other => drop(map.next_value::<de::IgnoredAny>()?),
             }
         }
 
-        Ok(ReservedTag(found))
+        Ok(match (reserved, unknown) {
+            // Reserved wins over everything, from whichever entry it came —
+            // the strictness rung 7 depends on.
+            (Some(kind), _) => Tagged::Reserved(kind),
+            (None, Some(name)) => Tagged::Unknown { name },
+            (None, None) => Tagged::Untagged,
+        })
     }
 }
 
@@ -775,17 +901,35 @@ impl<'de> Deserialize<'de> for TagKey {
     }
 }
 
-/// Reads one `type` value into the reserved name it spells, if it spells one.
+/// What one `type` entry spelled.
+///
+/// Not an [`Option`], because "outside the fifteen" and "no `type` here" are
+/// the two facts [`Frame::classify`] exists to keep apart, and a walk that
+/// collapsed them at the value would have nothing left to report at the
+/// object.
+enum TagSeen {
+    /// The value was a string naming one of the fifteen.
+    Reserved(&'static str),
+    /// The value named no frame this build knows. [`Some`] carries what it
+    /// called itself, which is [`None`] when the value was not a string at all
+    /// — and also when the caller asked for [`Naming::Skip`], which is why
+    /// only [`Frame::classify`] may read this as "not a string".
+    Unknown(Option<String>),
+}
+
+/// Reads one `type` value into what it spelled.
 ///
 /// Every shape a JSON value can take has an arm, and none of them is an error:
 /// a `type` that is a number, an array or an object names no frame, but
 /// *failing* on one would abandon the rest of the document and answer "not a
 /// frame" for a text whose second `type` is `shutdown_approved`.
 #[derive(Clone, Copy)]
-struct TagValue;
+struct TagValue {
+    naming: Naming,
+}
 
 impl<'de> de::DeserializeSeed<'de> for TagValue {
-    type Value = Option<&'static str>;
+    type Value = TagSeen;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -796,7 +940,7 @@ impl<'de> de::DeserializeSeed<'de> for TagValue {
 }
 
 impl<'de> de::Visitor<'de> for TagValue {
-    type Value = Option<&'static str>;
+    type Value = TagSeen;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("any JSON value")
@@ -806,63 +950,69 @@ impl<'de> de::Visitor<'de> for TagValue {
     where
         E: de::Error,
     {
-        Ok(reserved_name(tag))
+        Ok(match reserved_name(tag) {
+            Some(kind) => TagSeen::Reserved(kind),
+            None => TagSeen::Unknown(match self.naming {
+                Naming::Keep => Some(tag.to_owned()),
+                Naming::Skip => None,
+            }),
+        })
     }
 
     fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 
     fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 
     fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 
     fn visit_i128<E>(self, _: i128) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 
     fn visit_u128<E>(self, _: u128) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 
     fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 
     fn visit_unit<E>(self) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 
     fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
@@ -878,7 +1028,7 @@ impl<'de> de::Visitor<'de> for TagValue {
     {
         while seq.next_element::<de::IgnoredAny>()?.is_some() {}
 
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 
     fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
@@ -890,7 +1040,7 @@ impl<'de> de::Visitor<'de> for TagValue {
             .is_some()
         {}
 
-        Ok(None)
+        Ok(TagSeen::Unknown(None))
     }
 }
 
@@ -1076,15 +1226,25 @@ pub fn display_summary(summary: Option<&str>) -> Option<&str> {
 /// ganja's own vocabulary, and not Claude's `backendType` — that one is
 /// carried as text where it appears on a frame, because it is somebody else's
 /// word list.
+///
+/// Growing this enum is version skew with a wide blast radius; the module doc
+/// says how wide and why the posture is still the right one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MemberBackend {
     /// A teammate running inside this process.
     InProcess,
-    /// A `ganja` pane of its own.
-    Pane,
+    /// A `ganja` pane of its own, and the default a spawn that names no
+    /// backend gets.
+    Ganja,
     /// A real `claude` pane.
     Claude,
+    /// A headless `codex exec` child, driven one turn per message (**D508**).
+    Codex,
+    /// A resident `agy` child, driven one NDJSON line per message (**D508**).
+    Agy,
+    /// A headless `grok` child, driven one turn per message (**D508**).
+    Grok,
 }
 
 /// One member of a team, as a reader of the team sees it.
@@ -1140,7 +1300,7 @@ mod tests {
         IdleNotification, IdleReason, LeadFrame, MemberBackend, MemberView, ModeSetRequest,
         PermissionRequest, PermissionResponse, PermissionResponseBody, PermissionResponseSubtype,
         PlanApprovalRequest, PlanApprovalResponse, SandboxPermissionRequest,
-        SandboxPermissionResponse, ShutdownApproved, ShutdownRejected, ShutdownRequest,
+        SandboxPermissionResponse, ShutdownApproved, ShutdownRejected, ShutdownRequest, Tagged,
         TaskAssignment, TaskCompleted, TeamPermissionUpdate, TeamView, TeammateTerminated,
         cap_for_display,
     };
@@ -1483,6 +1643,164 @@ mod tests {
         );
     }
 
+    /// The three facts [`Frame::reserved_kind`] compresses into [`None`], told
+    /// apart.
+    ///
+    /// A guard deciding whether some text may be composed into a foreign
+    /// CLI's prompt cannot use `reserved_kind`: prose and a frame from a build
+    /// this one has never met are the same answer through it, and only the
+    /// second is a document that must not be handed to a CLI as an
+    /// instruction.
+    #[test]
+    fn a_tagged_object_is_told_apart_from_prose_and_from_untagged_data() {
+        // Prose, and every JSON value that is not an object.
+        for text in [
+            "just a message",
+            "[1, 2, 3]",
+            r#""shutdown_approved""#,
+            "42",
+            "",
+            "{",
+            // Trailing input is refused exactly as `serde_json::from_str`
+            // refuses it, so the two readers cannot disagree about a text.
+            r#"{"type":"shutdown_approved"} and then some"#,
+        ] {
+            assert_eq!(Frame::classify(text), Tagged::NotAnObject, "{text}");
+        }
+
+        // An object nobody tagged: somebody's data, not somebody's frame.
+        assert_eq!(Frame::classify("{}"), Tagged::Untagged);
+        assert_eq!(Frame::classify(r#"{"from":"w1"}"#), Tagged::Untagged);
+
+        // One of the fifteen, which `reserved_kind` already answered for.
+        assert_eq!(
+            Frame::classify(r#"{"type":"shutdown_approved"}"#),
+            Tagged::Reserved("shutdown_approved")
+        );
+
+        // And the one this exists for: shaped like a frame, named nothing
+        // this build knows. The kind travels, because a drop nobody can name
+        // is a drop nobody can account for.
+        assert_eq!(
+            Frame::classify(r#"{"type":"not_a_kind_this_build_knows","from":"w1"}"#),
+            Tagged::Unknown {
+                name: Some("not_a_kind_this_build_knows".to_owned()),
+            }
+        );
+
+        // A `type` that is not a string still *tags* the object — there is
+        // simply no name to report. Answering `Untagged` here would tell a
+        // guard the key was absent when it was not.
+        assert_eq!(
+            Frame::classify(r#"{"type":42}"#),
+            Tagged::Unknown { name: None }
+        );
+
+        // Mixed decoys: a nameless tag first, a named one after. The *first*
+        // unknown is what is reported, so a decoy cannot choose which kind a
+        // refusal names — the same anti-decoy rule `reserved_kind` follows,
+        // read from the other end. What it costs is that a refusal here has
+        // no name to give, which is the honest answer rather than the second
+        // entry's word.
+        assert_eq!(
+            Frame::classify(r#"{"type":42,"type":"not_known"}"#),
+            Tagged::Unknown { name: None }
+        );
+        // And the reverse order keeps the name, for the same reason.
+        assert_eq!(
+            Frame::classify(r#"{"type":"not_known","type":42}"#),
+            Tagged::Unknown {
+                name: Some("not_known".to_owned()),
+            }
+        );
+        // A reserved tag still outranks both, from any position.
+        assert_eq!(
+            Frame::classify(r#"{"type":42,"type":"not_known","type":"shutdown_approved"}"#),
+            Tagged::Reserved("shutdown_approved")
+        );
+    }
+
+    /// [`Frame::classify`] is the same walk, so every strictness rule
+    /// [`Frame::reserved_kind`] documents holds through it unchanged.
+    ///
+    /// Asserted against `reserved_kind` itself rather than against a second
+    /// list of expectations: the claim is that the two agree, and two
+    /// hand-written expectations agreeing today is not that claim.
+    #[test]
+    fn classifying_and_reserved_kind_answer_the_same_walk() {
+        for text in [
+            r#"{"type":"noise","type":"shutdown_approved"}"#,
+            r#"{"type":"shutdown_approved","type":"noise"}"#,
+            r#"{"type":42,"type":null,"type":["a"],"type":{"x":1},"type":"mode_set_request"}"#,
+            r#"{"type":"shutdown_approved"}"#,
+            r#"{"type":"noise","type":"also_noise"}"#,
+            r#"{"type":"message","body":{"type":"shutdown_approved"}}"#,
+            r#"{"type":"message"}"#,
+            "just a message",
+            "",
+        ] {
+            let through_classify = match Frame::classify(text) {
+                Tagged::Reserved(kind) => Some(kind),
+                Tagged::NotAnObject | Tagged::Untagged | Tagged::Unknown { .. } => None,
+            };
+
+            assert_eq!(through_classify, Frame::reserved_kind(text), "{text}");
+        }
+
+        // Two unknown tags report the *first*, so a decoy cannot choose which
+        // kind a refusal names.
+        assert_eq!(
+            Frame::classify(r#"{"type":"noise","type":"also_noise"}"#),
+            Tagged::Unknown {
+                name: Some("noise".to_owned()),
+            }
+        );
+    }
+
+    /// **AC-13**, serialization half: the three shim backends travel under the
+    /// kebab-case names the `--backend` argument spells them with.
+    ///
+    /// The `MemberView` half of the claim is asserted here too, because the
+    /// field is typed and `deny_unknown_fields` — what a reader of `GET /team`
+    /// receives is this enum's spelling, not a string some caller chose.
+    #[test]
+    fn the_shim_backends_travel_under_their_own_names() {
+        for (backend, name) in [
+            (MemberBackend::InProcess, "in-process"),
+            (MemberBackend::Ganja, "ganja"),
+            (MemberBackend::Claude, "claude"),
+            (MemberBackend::Codex, "codex"),
+            (MemberBackend::Agy, "agy"),
+            (MemberBackend::Grok, "grok"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(backend).expect("a backend serializes"),
+                serde_json::json!(name)
+            );
+            assert_eq!(
+                serde_json::from_value::<MemberBackend>(serde_json::json!(name))
+                    .expect("a backend round-trips"),
+                backend
+            );
+
+            let view = MemberView {
+                name: "w1".to_owned(),
+                agent_id: "w1@team".to_owned(),
+                backend,
+                color: None,
+                is_lead: false,
+                recent_calls: Vec::new(),
+            };
+            let encoded = serde_json::to_value(&view).expect("a view serializes");
+
+            assert_eq!(encoded["backend"], serde_json::json!(name));
+            assert_eq!(
+                serde_json::from_value::<MemberView>(encoded).expect("a view round-trips"),
+                view
+            );
+        }
+    }
+
     /// §7-2, as a type: the handler's argument is what cannot be built.
     #[test]
     fn a_peer_frame_cannot_build_a_lead_frame() {
@@ -1650,7 +1968,7 @@ mod tests {
                 .is_err()
         );
         assert!(serde_json::from_str::<MemberView>(
-            r#"{"name":"w1","agent_id":"w1@t","backend":"pane","is_lead":false,"prompt":"secret"}"#
+            r#"{"name":"w1","agent_id":"w1@t","backend":"ganja","is_lead":false,"prompt":"secret"}"#
         )
         .is_err());
     }

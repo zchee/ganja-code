@@ -5,7 +5,7 @@
 //! `ganja-core/tests/pane_support` pins with a fake pane child: here **both**
 //! processes are the shipped binary — the lead is the terminal UI running
 //! inside a private tmux server, and the pane is whatever that lead's `/team
-//! spawn w1 --backend pane` split off — and the test reaches them the way a
+//! spawn w1 --backend ganja` split off — and the test reaches them the way a
 //! person would, through `send-keys` and `capture-pane`.
 //!
 //! # Where the environment goes

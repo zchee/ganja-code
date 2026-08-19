@@ -72,6 +72,21 @@ pub const BACKEND_IN_PROCESS: &str = "in-process";
 /// `backendType` for a member that owns a tmux pane.
 pub const BACKEND_TMUX: &str = "tmux";
 
+/// `backendType` for a member driven as a headless `codex exec` child.
+///
+/// ganja's own word, not Claude's: §2.2's vocabulary has no name for a
+/// teammate that is somebody else's CLI, because Claude has no such teammate.
+/// Safe to mint because a shim member is recorded in **ganja's** teams root
+/// only — the claude root is never written for one — so these strings never
+/// reach a directory a real `claude` owns.
+pub const BACKEND_CODEX: &str = "codex";
+
+/// `backendType` for a member driven as a resident `agy` child.
+pub const BACKEND_AGY: &str = "agy";
+
+/// `backendType` for a member driven as a headless `grok` child.
+pub const BACKEND_GROK: &str = "grok";
+
 /// The `tmuxPaneId` a lead's record carries instead of a pane id (§2.2).
 pub const PANE_LEADER: &str = "leader";
 
@@ -110,6 +125,32 @@ pub enum Surface {
         /// The `%N` tmux gave it.
         id: String,
     },
+    /// A teammate that is a CLI child this process shims for (**D508**).
+    ///
+    /// *Shim* rather than *foreign*: the `claude` backend is a foreign binary
+    /// too and is not in this class. What these three have in common is that
+    /// they do not speak the mailbox at all, so ganja stands between the
+    /// mailbox and the child — which is also the word the rest of the tree
+    /// already uses for them.
+    Shim {
+        /// Which CLI drives it.
+        cli: ShimCli,
+    },
+}
+
+/// Which CLI a [`Surface::Shim`] member is driven by.
+///
+/// A vocabulary of its own rather than ganja's `MemberBackend`, so the variant
+/// cannot be built holding a surface that is not shimmed at all — the three
+/// names here are exactly the three that have no other way of being recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShimCli {
+    /// A headless `codex exec` child.
+    Codex,
+    /// A resident `agy` child.
+    Agy,
+    /// A headless `grok` child.
+    Grok,
 }
 
 impl Surface {
@@ -119,6 +160,29 @@ impl Surface {
     /// recognized in the first place — there is no separate marker, and a
     /// `backendType` disagreeing with this is somebody else's inconsistency to
     /// notice, not a reason to refuse the document.
+    ///
+    /// # This read never answers [`Surface::Shim`], and that is deliberate
+    ///
+    /// A shim member writes [`PANE_IN_PROCESS`] into `tmuxPaneId`, so it reads
+    /// back as [`Surface::InProcess`] — the round trip is **lossy in one
+    /// direction on purpose**, and [`MemberRecord::surface`] inherits the
+    /// loss.
+    ///
+    /// The alternative was a fourth sentinel, and it is worse than it looks.
+    /// This function classifies any non-sentinel string as a pane id, so a
+    /// `"codex"` in that field would be read by every build that exists today
+    /// — and by a real `claude` sharing the directory — as
+    /// `Surface::Pane { id: "codex" }`: a pane that can never exist, handed to
+    /// code whose whole job is to act on panes. Reusing the in-process
+    /// sentinel means every reader that does not know about shims classifies
+    /// the surface *safely*, and what each of them then believes is true: an
+    /// older ganja sees an in-process member it renders but cannot drive, and
+    /// it cannot; a real `claude` sees an in-process member whose mailbox
+    /// address works, and it does, because the shim reads that inbox.
+    ///
+    /// The one reader that genuinely needs shim-ness — the lead-restart sweep
+    /// — reads `backendType` directly, which [`MemberRecord::teammate`]
+    /// populates from this surface.
     #[must_use]
     pub fn read(tmux_pane_id: &str) -> Self {
         match tmux_pane_id {
@@ -129,11 +193,14 @@ impl Surface {
     }
 
     /// What this surface writes into `tmuxPaneId`.
+    ///
+    /// A foreign teammate answers the **in-process** sentinel rather than one
+    /// of its own; [`Surface::read`] owns why.
     #[must_use]
     pub fn tmux_pane_id(&self) -> &str {
         match self {
             Self::Leader => PANE_LEADER,
-            Self::InProcess => PANE_IN_PROCESS,
+            Self::InProcess | Self::Shim { .. } => PANE_IN_PROCESS,
             Self::Pane { id } => id,
         }
     }
@@ -143,11 +210,32 @@ impl Surface {
     /// A lead's record says `in-process` in §2.2's own excerpt, even though the
     /// lead is not a teammate at all — the two fields answer different
     /// questions and only `tmuxPaneId` distinguishes the three cases.
+    ///
+    /// This is the field that carries shim-ness, and the only one: it is where
+    /// a reader that needs to tell a foreign child from a teammate in this
+    /// process has to look, precisely because `tmuxPaneId` deliberately does
+    /// not say.
     #[must_use]
     pub fn backend_type(&self) -> &str {
         match self {
             Self::Leader | Self::InProcess => BACKEND_IN_PROCESS,
             Self::Pane { .. } => BACKEND_TMUX,
+            Self::Shim { cli } => cli.backend_type(),
+        }
+    }
+}
+
+impl ShimCli {
+    /// What this CLI writes into `backendType`.
+    ///
+    /// An exhaustive match, so a fourth CLI is a build failure here rather
+    /// than a member recorded under a name nothing reads.
+    #[must_use]
+    pub const fn backend_type(self) -> &'static str {
+        match self {
+            Self::Codex => BACKEND_CODEX,
+            Self::Agy => BACKEND_AGY,
+            Self::Grok => BACKEND_GROK,
         }
     }
 }
@@ -921,8 +1009,8 @@ mod tests {
     use ganja_protocol::team::{Frame, IdleNotification, IdleReason};
 
     use super::{
-        MailboxMessage, MemberRecord, Spawn, Surface, TeamFile, Value, document, iso8601,
-        now_millis,
+        BACKEND_AGY, BACKEND_CODEX, BACKEND_GROK, MailboxMessage, MemberRecord, PANE_IN_PROCESS,
+        ShimCli, Spawn, Surface, TeamFile, Value, document, iso8601, now_millis,
     };
     use crate::team::{MemberName, TeamName};
 
@@ -995,6 +1083,65 @@ mod tests {
                 id: "%142".to_owned()
             }
         );
+    }
+
+    /// A shim member writes both fields, and reads back as **in-process** —
+    /// the asymmetry is the design, not a defect (**D508**).
+    ///
+    /// `tmuxPaneId` carries the in-process sentinel deliberately, because
+    /// [`Surface::read`] classifies anything else as a pane id: a `"codex"`
+    /// there would be read by every build that exists today, and by a real
+    /// `claude` sharing the directory, as a pane that can never exist. So the
+    /// surface a reader recovers is a *safe* answer rather than a complete
+    /// one, and `backendType` is where shim-ness actually lives.
+    ///
+    /// Both halves are asserted here so that a later change which "fixes" the
+    /// round trip has to delete a test that says why it is not broken.
+    #[test]
+    fn a_shim_record_says_which_cli_in_its_backend_type_and_reads_back_as_in_process() {
+        for (cli, backend_type) in [
+            (ShimCli::Codex, BACKEND_CODEX),
+            (ShimCli::Agy, BACKEND_AGY),
+            (ShimCli::Grok, BACKEND_GROK),
+        ] {
+            let surface = Surface::Shim { cli };
+
+            // What lands on disk: the borrowed sentinel, and the CLI's own word.
+            assert_eq!(surface.tmux_pane_id(), PANE_IN_PROCESS);
+            assert_eq!(surface.backend_type(), backend_type);
+
+            let name = MemberName::parse("demo-worker-1").expect("a valid member name");
+            let record = MemberRecord::teammate(
+                &name,
+                &team(),
+                Spawn {
+                    agent_type: "general-purpose".to_owned(),
+                    model: "claude-opus-5[1m]".to_owned(),
+                    color: "blue".to_owned(),
+                    prompt: "do the thing".to_owned(),
+                    plan_mode_required: false,
+                    surface: surface.clone(),
+                    cwd: "/w".to_owned(),
+                },
+                1_786_734_154_864,
+            );
+
+            assert_eq!(record.tmux_pane_id, PANE_IN_PROCESS);
+            assert_eq!(record.backend_type.as_deref(), Some(backend_type));
+
+            // And what a reader recovers: not the surface that was written.
+            assert_eq!(
+                record.surface(),
+                Surface::InProcess,
+                "the read is lossy on purpose; `backendType` is what a sweep asks"
+            );
+            assert_ne!(record.surface(), surface);
+
+            // Emphatically not a pane: the sentinel is what keeps a reader
+            // that has never heard of shims from acting on one as though it
+            // owned a window.
+            assert!(!matches!(record.surface(), Surface::Pane { .. }));
+        }
     }
 
     #[test]

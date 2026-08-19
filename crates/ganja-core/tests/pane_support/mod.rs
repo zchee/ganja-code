@@ -265,12 +265,12 @@ pub async fn spawn_pane_worker(config_home: &Path, project: &Path, prompt: &str)
     let ctx = ctx(project, Arc::clone(&door));
 
     let output = tool
-        .run(task_args("worker", "pane", prompt), &ctx)
+        .run(task_args("worker", "ganja", prompt), &ctx)
         .await
         .expect("the door spawns a pane teammate inside tmux");
     assert_eq!(
         output.metadata.get("backend").and_then(|on| on.as_str()),
-        Some("pane"),
+        Some("ganja"),
         "the surface it really runs on: {output:?}"
     );
 

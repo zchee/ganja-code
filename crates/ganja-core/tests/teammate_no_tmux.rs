@@ -10,9 +10,15 @@
 //! `Unsupported` would still not know whether their session or their build was
 //! the problem. And it pins that the refusal is a refusal — the in-process
 //! backend spawns in the very same session, so nothing here silently
-//! substitutes one for the other in either direction: a `pane` request does not
-//! become an in-process teammate, and an `in-process` request is not refused
-//! for lack of a window it never wanted.
+//! substitutes one for the other in either direction: a `ganja` request does
+//! not become an in-process teammate, and an `in-process` request is not
+//! refused for lack of a window it never wanted.
+//!
+//! Since **Dv-1** it pins one more arm, and the one with the most room to go
+//! wrong: an **unnamed** backend is `ganja`, so it is refused here too. That
+//! is the case where a silent fallback would be most tempting and least
+//! honest — nobody typed a surface, so nobody would notice getting a different
+//! one.
 //!
 //! One test, because it mutates `TMUX` (and `TMUX_PANE`, which would otherwise
 //! name a pane of whatever server the developer is running the suite in), and
@@ -47,7 +53,7 @@ async fn a_pane_spawn_without_tmux_is_refused_readably() {
     // loop because both have real bodies now, and the claim is that they
     // refuse in **one** sentence: a `claude` spawn that said something else
     // about a missing session would be two behaviours wearing one argument.
-    for backend in ["pane", "claude"] {
+    for backend in ["ganja", "claude"] {
         let refused = door
             .start(spawn("worker", Some(backend)), &caller, &AllowSpawn)
             .await
@@ -90,10 +96,27 @@ async fn a_pane_spawn_without_tmux_is_refused_readably() {
         "a refused spawn left its prompt in an inbox"
     );
 
-    // The other direction of "no silent fallback": the backend that needs no
-    // window still runs in this very session.
-    let started = door
+    // **AC-3, as Dv-1 amends it.** An absent backend means `ganja`, so it is
+    // refused here in the same sentence naming it would have earned — the
+    // whole point of the no-silent-fallback rule, now reaching the spawns that
+    // named nothing. A build that quietly handed back an in-process teammate
+    // would be answering a question nobody asked.
+    let defaulted = door
         .start(spawn("worker", None), &caller, &AllowSpawn)
+        .await
+        .expect_err("an unnamed backend is `ganja`, and this session has no pane to give");
+    assert!(
+        defaulted.reason.ends_with(REFUSED_NO_TMUX),
+        "an unnamed backend refuses in the sentence its name would have: {}",
+        defaulted.reason
+    );
+    assert_eq!(registry.running(), 0, "and started nothing instead");
+
+    // The other direction of "no silent fallback": the backend that needs no
+    // window still runs in this very session — asked for **by name**, which
+    // since Dv-1 is the only way to reach it.
+    let started = door
+        .start(spawn("worker", Some("in-process")), &caller, &AllowSpawn)
         .await
         .expect("an in-process teammate needs no tmux");
     assert_eq!(started.backend, "in-process");

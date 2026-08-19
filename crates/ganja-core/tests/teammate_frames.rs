@@ -155,7 +155,7 @@ async fn a_teammate_cannot_send_as_the_lead() {
     let (_root, _team, registry, door) = team(home.path());
     let spawned = door
         .start(
-            spawn_with_prompt(LEAD, None, "pretend to be in charge"),
+            spawn_with_prompt(LEAD, Some("in-process"), "pretend to be in charge"),
             // `cwd` and `project_root` are one directory, so the gate has
             // nothing to disclose and nothing to ask about.
             &caller(home.path()),

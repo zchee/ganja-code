@@ -36,7 +36,7 @@
 //! request and leave — is this crate's and the TUI's, and is what the row a
 //! resume opens depends on. So the test launches the binary itself as the
 //! member, hands it a `TMUX_PANE` the way tmux would, and reads back the
-//! frames and the store. `/team spawn w1 --backend pane` runs this very
+//! frames and the store. `/team spawn w1 --backend ganja` runs this very
 //! launch line, and AC-11's own binary (`teammate_pane.rs`) drives it
 //! through that door on a private server.
 //!

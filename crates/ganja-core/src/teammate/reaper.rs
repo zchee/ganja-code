@@ -301,7 +301,13 @@ pub async fn sweep_on(registry: &TeammateRegistry, server: &Server) -> Swept {
         .filter(|member| !member.is_lead())
         .filter_map(|member| match member.surface() {
             Surface::Pane { id } => Some((member.name.clone(), member.agent_id.clone(), id)),
-            Surface::Leader | Surface::InProcess => None,
+            // A shim child owns no pane, so this sweep has nothing to say
+            // about one. Unreachable through `surface()` in any case —
+            // `Surface::read` classifies a shim's record as in-process, by
+            // the design its own doc gives — and written out rather than
+            // folded into a wildcard so that a seventh surface still has to
+            // decide what a pane sweep does with it.
+            Surface::Leader | Surface::InProcess | Surface::Shim { .. } => None,
         })
         .collect();
     if recorded.is_empty() {

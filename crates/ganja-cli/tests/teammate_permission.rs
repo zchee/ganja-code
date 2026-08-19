@@ -5,7 +5,7 @@
 //! permission frames riding the §2 mailbox between two processes. What is
 //! pinned here is the whole loop with **both** processes being the shipped
 //! binary: a real lead in a private tmux server spawns a real pane with
-//! `/team spawn w1 --backend pane`, the pane's scripted turn calls `bash` —
+//! `/team spawn w1 --backend ganja`, the pane's scripted turn calls `bash` —
 //! a tool the builtin rules ask about — and under `ForwardToLead` no dialog
 //! opens in the pane: the ask crosses to the lead as a `permission_request`,
 //! the lead's own pass puts it in front of the same dialog its in-process
@@ -56,7 +56,7 @@ fn a_panes_ask_reaches_the_leads_dialog_and_the_leads_answer_lets_the_call_run()
     // is asked at spawn: the pane works inside the project and asks for no
     // bypass, so the spawn gate has nothing to raise.
     lead.type_line(&format!(
-        "/team spawn {TEAMMATE} --backend pane write the marker"
+        "/team spawn {TEAMMATE} --backend ganja write the marker"
     ));
     let (pane, _) = lead.wait_for_teammate_pane();
 

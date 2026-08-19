@@ -142,7 +142,7 @@ async fn spawn_worker(lead: &Lead) -> Teammated {
         .teammates()
         .expect("this session leads a team")
         .start(
-            spawn_with_prompt("worker", None, TEAMMATE_PROMPT),
+            spawn_with_prompt("worker", Some("in-process"), TEAMMATE_PROMPT),
             &caller(lead.home.path()),
             &lead.asker,
         )

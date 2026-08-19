@@ -73,7 +73,7 @@ fn a_secret_the_lead_holds_never_reaches_a_panes_command_line() {
         ],
     );
 
-    lead.type_line(&format!("/team spawn {TEAMMATE} --backend pane {PROMPT}"));
+    lead.type_line(&format!("/team spawn {TEAMMATE} --backend ganja {PROMPT}"));
     let argv = pane_argv(&lead);
 
     assert!(
@@ -130,7 +130,7 @@ fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_export() 
     );
 
     lead.type_line(&format!(
-        "/team spawn {TEAMMATE} --backend pane say the word"
+        "/team spawn {TEAMMATE} --backend ganja say the word"
     ));
     let (pane, _) = lead.wait_for_teammate_pane();
 

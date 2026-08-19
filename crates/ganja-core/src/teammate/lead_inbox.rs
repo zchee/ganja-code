@@ -740,8 +740,8 @@ mod tests {
         permission::Permissions,
         provider::FakeProvider,
         teammate::{
-            DEFAULT_BACKEND, Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec,
-            TeammateBackend, TeammateRegistry, Unsupported, member,
+            Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec, TeammateBackend,
+            TeammateRegistry, Unsupported, member,
         },
         tool::Registry as Tools,
     };
@@ -1186,7 +1186,7 @@ mod tests {
                 )),
                 SpawnRequest {
                     name: "w1".to_owned(),
-                    backend: DEFAULT_BACKEND,
+                    backend: MemberBackend::InProcess,
                     agent_type: "general".to_owned(),
                     model: "recorder-model".to_owned(),
                     color: None,

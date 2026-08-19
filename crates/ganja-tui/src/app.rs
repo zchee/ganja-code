@@ -5405,7 +5405,7 @@ impl App {
         // `/team`'s own grammar, read here because it is the one UI command
         // that takes arguments: `command::Action` is `Copy` and carries none, so
         // a bare `/team` reaches `run_command` above while `/team spawn w1
-        // --backend pane` reaches this (**D504**, AC-11's own spelling). Both
+        // --backend ganja` reaches this (**D504**, AC-11's own spelling). Both
         // doors end up in the same dialog, which is what keeps the palette and
         // the typed line one thing rather than two.
         if let Some(line) = command::team(&prompt) {

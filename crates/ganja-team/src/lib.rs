@@ -71,7 +71,7 @@ pub mod record;
 pub mod team;
 
 pub use mailbox::{Contents, Identity, MailboxError, Pruned};
-pub use record::{MailboxMessage, MemberRecord, Spawn, Surface, TeamFile};
+pub use record::{MailboxMessage, MemberRecord, ShimCli, Spawn, Surface, TeamFile};
 pub use team::{
     COLLISION_SEPARATOR, DEFAULT_TEAM, LEAD, MAIN, MemberName, NAME_MAX, NameError, TeamName,
     TeamsRoot,

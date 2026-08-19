@@ -827,13 +827,16 @@ impl TwoStep for Team {
 
 /// How a member's surface is spelled on its row.
 ///
-/// The `--backend` argument's own three spellings, so the word on the row is
+/// The `--backend` argument's own six spellings, so the word on the row is
 /// the word a person would type to ask for another one like it.
 fn backend_label(backend: MemberBackend) -> &'static str {
     match backend {
         MemberBackend::InProcess => "in-process",
-        MemberBackend::Pane => "pane",
+        MemberBackend::Ganja => "ganja",
         MemberBackend::Claude => "claude",
+        MemberBackend::Codex => "codex",
+        MemberBackend::Agy => "agy",
+        MemberBackend::Grok => "grok",
     }
 }
 
@@ -991,13 +994,13 @@ mod tests {
             ),
             // AC-11's own spelling, which carries no prompt at all.
             (
-                "w3 --backend pane",
+                "w3 --backend ganja",
                 serde_json::json!({
                     "description": "spin up a worker",
                     "prompt": "",
                     "subagent_type": "general",
                     "name": "w3",
-                    "backend": "pane",
+                    "backend": "ganja",
                 }),
             ),
             // A named agent kind reaches the same field `subagent_type` does.
@@ -1333,17 +1336,25 @@ mod tests {
     /// The word on a row is serde's own wire spelling of the backend — which
     /// is also the word a person would type after `--backend` to ask for
     /// another one like it.
+    ///
+    /// Driven off the engine's own [`ganja_core::teammate::BACKENDS`] rather
+    /// than a list written out here, so a seventh surface joins this assertion
+    /// by existing. A hand-written list is exactly how this test came to cover
+    /// three arms of six.
     #[test]
     fn the_backend_label_is_the_wires_own_spelling() {
-        for backend in [
-            MemberBackend::InProcess,
-            MemberBackend::Pane,
-            MemberBackend::Claude,
-        ] {
+        for name in ganja_core::teammate::BACKENDS {
+            let backend = ganja_core::teammate::parse_backend(name)
+                .expect("a value the grammar lists parses");
+
             assert_eq!(
                 serde_json::to_value(backend).expect("a backend serializes"),
                 serde_json::Value::String(super::backend_label(backend).to_owned()),
+                "the row and the wire must spell {name} the same"
             );
+            // And the row spells it the way the argument does, which is the
+            // half a person acts on: the word they read is the word they type.
+            assert_eq!(super::backend_label(backend), name);
         }
     }
 
