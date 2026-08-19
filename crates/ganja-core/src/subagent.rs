@@ -2125,12 +2125,12 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Incoming,
-        MESSAGE_ROUTE, NOT_A_SESSION_SOCKET, NotReceived, PermissionReply, Postbox, Reserved,
-        SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent,
-        SocketMessage, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate,
-        TeammateRegistry, TeammateSpawn, Teammates, Undelivered, Watched, async_trait, denies_task,
-        receive, roster, subagent_rules, team, watch,
+        Address, Backends, Body, Caller, DEFAULT_BACKEND, FRAME_OVER_SOCKET, Host, Incoming,
+        MESSAGE_ROUTE, NOT_A_SESSION_SOCKET, NotReceived, NotSpawned, PermissionReply, Postbox,
+        Reserved, SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent,
+        SocketMessage, Spawn, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate,
+        TeammateRegistry, TeammateSpawn, Teammated, Teammates, Undelivered, Watched, async_trait,
+        denies_task, receive, roster, subagent_rules, team, watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -2140,7 +2140,7 @@ mod tests {
         protocol::{Event, MessageId, Part, PartBody, PartId, SessionId, ToolState},
         tool::{
             Tool as _,
-            task::{DESCRIPTION, ROSTER_HEADER, TaskTool},
+            task::{DESCRIPTION, ROSTER_HEADER, Subagents as _, TaskTool},
         },
     };
 
@@ -2702,6 +2702,220 @@ mod tests {
 
         assert_eq!(refused.reason, super::REFUSED_BY_HAND);
         assert_eq!(asked.seen().len(), 1, "and it was asked exactly once");
+    }
+
+    /// A [`Host`] whose calling turn works in `cwd`, judged against `root` —
+    /// the two values [`Spawn::caller`] hands the spawn gate, divergent here
+    /// so the gate asks. Everything else is the least the type will hold.
+    fn host_at(
+        cwd: &std::path::Path,
+        root: &std::path::Path,
+        teammates: Arc<Teammates>,
+    ) -> Arc<Host> {
+        Arc::new(Host {
+            provider: Arc::new(crate::provider::FakeProvider::new(
+                "on it",
+                std::time::Duration::ZERO,
+            )),
+            model: "recorder-model".to_owned(),
+            small_model: None,
+            agents: Arc::new(registry()),
+            tools: Arc::new(crate::tool::Registry::new(Vec::new())),
+            deferral: crate::tool::deferral::Deferral::none(),
+            permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
+            base_prompt: None,
+            prompt_suffix: None,
+            cwd: cwd.to_path_buf(),
+            root: root.to_path_buf(),
+            credentials: crate::tool::Credentials::Unguarded,
+            lsp: None,
+            persistence: None,
+            jobs: None,
+            hooks: None,
+            concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
+            teammates: Some(teammates),
+        })
+    }
+
+    /// A [`Spawn`] over `host` whose fanout this test reads: the value
+    /// `session.rs` builds per `task` call, built here so its own
+    /// [`SpawnAsker`] impl — the register→publish→select→terminal-reply dance
+    /// — is what these tests drive, not a stub's.
+    fn spawn_over(host: Arc<Host>) -> (Spawn, mpsc::Receiver<Event>) {
+        let (events, received) = mpsc::channel(64);
+
+        (
+            Spawn {
+                host,
+                events: Arc::new(Fanout::new(events)),
+                session_id: SessionId::from("ses_parent".to_owned()),
+                pending: Arc::default(),
+                message_id: MessageId::ascending(),
+                part_id: PartId::ascending(),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+            received,
+        )
+    }
+
+    /// Drives one `task {name}` spawn through the real [`Spawn`] up to its
+    /// dialog: returns the join handle and the dialog's id, having asserted
+    /// the published request names the `task` tool and this call's own part.
+    async fn raised_dialog(
+        spawn: &Spawn,
+        received: &mut mpsc::Receiver<Event>,
+    ) -> (
+        tokio::task::JoinHandle<Result<Teammated, NotSpawned>>,
+        crate::protocol::PermissionId,
+    ) {
+        let door = spawn.clone();
+        let handle = tokio::spawn(async move { door.spawn_teammate(wanted()).await });
+
+        let Some(Event::PermissionRequested {
+            session_id,
+            id,
+            call_id,
+            tool,
+            ..
+        }) = received.recv().await
+        else {
+            panic!("the gate's question crosses the calling turn's fanout");
+        };
+        assert_eq!(tool, crate::tool::task::ID, "the dialog names the tool");
+        assert_eq!(
+            call_id,
+            spawn.part_id.as_str(),
+            "and the part the call reports on, so a frontend can say which"
+        );
+        assert_eq!(
+            session_id, spawn.session_id,
+            "addressed to the caller's own session"
+        );
+
+        (handle, id)
+    }
+
+    /// The engine-side half of the `task {name}` dialog (**D504**): the
+    /// request is answered **by its id** through the shared pending-reply
+    /// registry, a yes reaches the backend, and the terminal
+    /// [`Event::PermissionReplied`] retires the entry on the way out.
+    #[tokio::test]
+    async fn the_task_doors_dialog_is_answered_by_id_and_a_yes_reaches_the_backend() {
+        let home = ganja_testkit::temp_dir();
+        let elsewhere = ganja_testkit::temp_dir();
+        let (spawn, mut received) = spawn_over(host_at(
+            elsewhere.path(),
+            home.path(),
+            Arc::new(door(home.path())),
+        ));
+
+        let (handle, id) = raised_dialog(&spawn, &mut received).await;
+        assert!(
+            spawn
+                .pending
+                .lock()
+                .expect("no panic")
+                .answer_permission(&id, PermissionReply::Once),
+            "the reply routes by the id the request carried"
+        );
+
+        let refused = handle
+            .await
+            .expect("the door settles")
+            .expect_err("the backend under this door spawns nothing");
+        assert!(
+            refused.reason.contains(NEVER),
+            "an approved spawn reaches the backend: {refused:?}"
+        );
+        let Some(Event::PermissionReplied {
+            id: replied, reply, ..
+        }) = received.recv().await
+        else {
+            panic!("the wait ends in the terminal reply every other permission wait sends");
+        };
+        assert_eq!(replied, id);
+        assert_eq!(reply, PermissionReply::Once);
+        assert!(
+            !spawn
+                .pending
+                .lock()
+                .expect("no panic")
+                .answer_permission(&id, PermissionReply::Once),
+            "and the entry is closed behind it"
+        );
+    }
+
+    /// A person's no through the engine-side dialog reads as the same
+    /// [`REFUSED_BY_HAND`](super::REFUSED_BY_HAND) sentence the seam-level
+    /// door refuses in — one refusal, whichever layer asked.
+    #[tokio::test]
+    async fn a_rejected_task_door_dialog_reads_refused_by_hand() {
+        let home = ganja_testkit::temp_dir();
+        let elsewhere = ganja_testkit::temp_dir();
+        let (spawn, mut received) = spawn_over(host_at(
+            elsewhere.path(),
+            home.path(),
+            Arc::new(door(home.path())),
+        ));
+
+        let (handle, id) = raised_dialog(&spawn, &mut received).await;
+        assert!(
+            spawn
+                .pending
+                .lock()
+                .expect("no panic")
+                .answer_permission(&id, PermissionReply::Reject)
+        );
+
+        let refused = handle
+            .await
+            .expect("the door settles")
+            .expect_err("a refused spawn does not happen");
+        assert_eq!(refused.reason, super::REFUSED_BY_HAND);
+        let Some(Event::PermissionReplied { reply, .. }) = received.recv().await else {
+            panic!("a no is still answered terminally");
+        };
+        assert_eq!(reply, PermissionReply::Reject);
+    }
+
+    /// A cancelled turn does not strand its spawn dialog: nothing else closes
+    /// this entry — the registry is an `Arc` that outlives the turn — so the
+    /// cancel arm itself must retire it, answer terminally, and read as a
+    /// refusal.
+    #[tokio::test]
+    async fn a_cancelled_turn_closes_the_task_doors_open_dialog() {
+        let home = ganja_testkit::temp_dir();
+        let elsewhere = ganja_testkit::temp_dir();
+        let (spawn, mut received) = spawn_over(host_at(
+            elsewhere.path(),
+            home.path(),
+            Arc::new(door(home.path())),
+        ));
+
+        let (handle, id) = raised_dialog(&spawn, &mut received).await;
+        spawn.cancel.cancel();
+
+        let refused = handle
+            .await
+            .expect("the door settles")
+            .expect_err("a spawn nobody could be asked about is one nobody approved");
+        assert_eq!(refused.reason, super::REFUSED_BY_HAND);
+        let Some(Event::PermissionReplied {
+            id: replied, reply, ..
+        }) = received.recv().await
+        else {
+            panic!("the frontend is told to retire its dialog");
+        };
+        assert_eq!(replied, id);
+        assert_eq!(reply, PermissionReply::Reject);
+        assert!(
+            !spawn
+                .pending
+                .lock()
+                .expect("no panic")
+                .answer_permission(&id, PermissionReply::Once),
+            "the pending entry is closed, not stranded"
+        );
     }
 
     /// **D-5, Resolution 4**: the human door carries `--bypass` into the gate,

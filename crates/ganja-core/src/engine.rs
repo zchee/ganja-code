@@ -3948,9 +3948,13 @@ impl Engine {
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks(),
             concurrency: self.concurrency,
-            // No team for a child, which is the depth guard the missing `task`
-            // tool already states: a delegated turn does not start teammates.
-            teammates: None,
+            // The root turn's Host, so the team crosses whole: `task {name}`
+            // is the model-side spawn door (D504), and a `None` here is what
+            // once left it answering NO_TEAM while the schema advertised the
+            // argument. The depth guard lives elsewhere — a *delegated* child
+            // runs with `spawn: None` (no `task` tool at all), and a teammate
+            // engine is built without a team of its own.
+            teammates: self.teammates.clone(),
         }))
     }
 
