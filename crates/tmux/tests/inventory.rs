@@ -22,17 +22,67 @@
 //!
 //! Like `tests/live.rs`, this hard-fails when tmux is unavailable rather than
 //! skipping: a green run that compared against nothing would be worthless.
-//! Unlike it, nothing here starts a server — `list-commands` is answered by
-//! the client alone.
+//! And like it, every call pins a private `-S` socket and an empty `-f`
+//! config: `list-commands` is answered from the client's own tables, but a
+//! client given no socket honors `$TMUX` — the developer's live server — and
+//! with no server running **creates** the default one, sourcing the
+//! person's own config on the way (measured; the Phase-4 security review's
+//! finding 1). The throwaway server these calls start is killed on drop.
 
-use std::{collections::BTreeMap, process::Command};
+use std::{collections::BTreeMap, path::PathBuf, process::Command};
 
 use tmux::commands::{EXCLUDED, REGISTRY};
 
+/// A private tmux to ask, so no probe ever reaches the developer's server.
+struct PrivateTmux {
+    _dir: tempfile::TempDir,
+    socket: PathBuf,
+    config: PathBuf,
+}
+
+impl PrivateTmux {
+    fn start() -> Self {
+        let dir = tempfile::TempDir::new().expect("a scratch directory is made");
+        let config = dir.path().join("empty.conf");
+        std::fs::write(&config, b"").expect("an empty config is written");
+
+        Self {
+            socket: dir.path().join("inventory.sock"),
+            config,
+            _dir: dir,
+        }
+    }
+
+    /// A client invocation against the private server and nothing else.
+    fn client(&self) -> Command {
+        let mut command = Command::new("tmux");
+        command
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("-f")
+            .arg(&self.config)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
+
+        command
+    }
+}
+
+impl Drop for PrivateTmux {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .output();
+    }
+}
+
 /// One command as the running tmux describes it: its name, and its own
 /// abbreviation when it has one.
-fn installed() -> BTreeMap<String, Option<String>> {
-    let output = Command::new("tmux")
+fn installed(tmux: &PrivateTmux) -> BTreeMap<String, Option<String>> {
+    let output = tmux
+        .client()
         .arg("list-commands")
         .output()
         .unwrap_or_else(|error| {
@@ -76,7 +126,8 @@ fn installed() -> BTreeMap<String, Option<String>> {
 
 #[test]
 fn every_command_this_tmux_has_is_either_typed_or_excluded_by_name() {
-    let installed = installed();
+    let tmux = PrivateTmux::start();
+    let installed = installed(&tmux);
     let mut unclaimed: Vec<String> = Vec::new();
     let mut typed = 0usize;
     let mut excluded = 0usize;
@@ -142,8 +193,9 @@ fn every_command_this_tmux_has_is_either_typed_or_excluded_by_name() {
 /// `None` when this tmux does not know the word at all — which is a fact
 /// about the installed version, not a verdict, for the same reason the test
 /// above runs one-way.
-fn resolve(word: &str) -> Option<(String, Option<String>)> {
-    let output = Command::new("tmux")
+fn resolve(tmux: &PrivateTmux, word: &str) -> Option<(String, Option<String>)> {
+    let output = tmux
+        .client()
         .args(["list-commands", word])
         .output()
         .unwrap_or_else(|error| {
@@ -202,6 +254,7 @@ fn resolve(word: &str) -> Option<(String, Option<String>)> {
 /// [`Entry`]: tmux::commands::Entry
 #[test]
 fn every_abbreviation_the_register_claims_resolves_to_the_command_it_names() {
+    let tmux = PrivateTmux::start();
     let mut unknown: Vec<&str> = Vec::new();
     let mut resolved = 0usize;
 
@@ -209,7 +262,7 @@ fn every_abbreviation_the_register_claims_resolves_to_the_command_it_names() {
         // The abbreviation when there is one: resolving by it proves both
         // halves at once, since tmux answers with the canonical pair.
         let word = entry.alias.unwrap_or(entry.name);
-        let Some((name, alias)) = resolve(word) else {
+        let Some((name, alias)) = resolve(&tmux, word) else {
             unknown.push(entry.name);
             continue;
         };

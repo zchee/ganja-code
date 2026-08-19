@@ -693,7 +693,7 @@ async fn the_typed_builders_round_trip_a_buffer_and_type_it_into_a_pane() {
                 .format("#{pane_id}")
                 .window_name("w5")
                 .target(scratch.session_name())
-                .command(["cat"])
+                .command(["/bin/cat"])
                 .args(),
         )
         .await
@@ -942,7 +942,7 @@ async fn cat_window(server: &Server, session: &str, name: &str) -> WindowId {
                 .format("#{window_id}")
                 .window_name(name)
                 .target(session)
-                .command(["cat"])
+                .command(["/bin/cat"])
                 .args(),
         )
         .await

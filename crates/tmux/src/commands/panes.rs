@@ -117,8 +117,12 @@ invocations! {
         title: value "-T";
         /// `-t target-pane`: the pane to split.
         target: value "-t";
-        /// The program and its arguments, run directly rather than through a
-        /// shell, behind the `--` that keeps them out of the flags.
+        /// The program and its arguments. Two or more words are execvp'd
+        /// directly, behind the `--` that keeps them out of the flags; **one
+        /// word is handed to the person's login shell**, which parses it and
+        /// sources their startup files first — so anything not written by the
+        /// caller itself travels as a program plus arguments, never one
+        /// string (the workspace's D502 lesson).
         command: trailing;
     }
 
@@ -554,8 +558,12 @@ invocations! {
         window_name: value "-n";
         /// `-t target-window`: where it goes.
         target: value "-t";
-        /// The program and its arguments, run directly rather than through a
-        /// shell.
+        /// The program and its arguments. Two or more words are execvp'd
+        /// directly, behind the `--` that keeps them out of the flags; **one
+        /// word is handed to the person's login shell**, which parses it and
+        /// sources their startup files first — so anything not written by the
+        /// caller itself travels as a program plus arguments, never one
+        /// string (the workspace's D502 lesson).
         command: trailing;
     }
 

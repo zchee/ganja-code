@@ -47,6 +47,16 @@
 //! value. Stdin is `/dev/null` because no call here is interactive, and the
 //! child is `kill_on_drop`, so a dropped future leaves no client behind.
 //!
+//! Two things are **inherited, not scrubbed**: the child gets this process's
+//! environment and working directory. The non-obvious half is what tmux then
+//! does with the first — a server started by one of these clients copies the
+//! client's environment into the server's *global* environment, so every
+//! pane anybody creates on that server afterwards sees it, for the server's
+//! whole life (measured; the Phase-4 security review's finding 2). Which
+//! variables may travel is policy, and policy stays the consumer's: a caller
+//! that must not leak a credential enumerates an environment itself before
+//! calling, the way this workspace's D502 list does.
+//!
 //! ```no_run
 //! # async fn run() -> Result<(), tmux::Error> {
 //! use tmux::Server;
