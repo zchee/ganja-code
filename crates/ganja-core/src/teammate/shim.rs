@@ -229,6 +229,17 @@ pub const GROK_MODE_LINE: &str = "permission-mode dontAsk composed; selects neit
 pub enum Shape {
     /// One child for the member's whole life; one turn is one line on its
     /// stdin.
+    ///
+    /// # No shipping backend drives this shape, and it stays anyway
+    ///
+    /// agy was to be its consumer, and W4's ship test refused agy on a
+    /// measurement (see [`crate::teammate::agy`]), so the resident spawn ring
+    /// is exercised by the fake-CLI suite and by no production wire. It is
+    /// kept rather than deleted because it is the shape a CLI with a resident
+    /// non-interactive door needs, and agy's own revival is a named follow-up
+    /// whose recorded design assumes it. A reader meeting this variant while
+    /// chasing a live teammate is in the wrong arm: everything that ships
+    /// today is [`Shape::PerMessage`].
     Resident,
     /// One child per inbox message.
     PerMessage,

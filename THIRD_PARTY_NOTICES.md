@@ -30,6 +30,24 @@ Three spans were redacted before commit — one prompt and two absolute paths �
 
 ---
 
+## Foreign CLI probe recordings
+
+P27 made `codex`, `agy` and `grok` teammate backends, and what each one's sandbox actually bounds was **measured** rather than read off a `--help` page. The three recordings those measurements produced — `crates/ganja-core/tests/fixtures/{codex,agy,grok}-posture-probe.txt` — are ganja's own prose: the instrument, the ladder with its control row, the verdict, and on the last line the single sentence a test compares the shipped posture against. **No vendor source file, prompt text or documentation is reproduced at length**, and **no ganja-authored constant carries a vendor's words** — a vendor's own diagnostic is forwarded verbatim only where the thing being reported *is* that vendor's output.
+
+They are recorded here regardless, because each quotes short spans of what another tool's process wrote, and this repository's rule is that anything in the tree another process authored is attributed. What is quoted is diagnostic output, a few short sandbox-profile and format literals with the symbol names beside them, and one clause of agy's own `--sandbox` help — a line or a clause at a time, each attributed in place to the binary and version that emitted it:
+
+- **codex-cli 0.149.0-alpha.1** — the field-and-value shape of its own persisted `turn_context` record, and the exit codes and refusal messages of the commands run under `codex sandbox`.
+- **agy 1.1.15** — denial and validator messages (`operation not permitted`, the artifact-path rule); four Seatbelt-profile and Go format literals read out of the binary with `strings` (`(version 1) (deny default)`, `(allow file-read* (literal "/"))`, `(allow %s (subpath %q))`, `(allow network-outbound)`) with the gate symbol name beside them; and one clause of `--sandbox`'s own help text, its claim of *"terminal restrictions"* — which is **vendor documentation**, quoted because it is precisely the claim the ship test was built to check.
+- **grok 1.0.6** — three startup refusals (could-not-apply, the symlinked-`GROK_HOME` refusal, and the resume-under-a-different-profile conflict), the `Failed to read` control line beside them, and one `sandbox-events.jsonl` record.
+
+The same attribution reaches past the fixtures, and the rule is stated here rather than only implied: a few of those sentences are quoted again in the module doc comments that act on them — `agy.rs`, `codex.rs` and `grok.rs` each cite the vendor line their own behavior answers to — and `shim.rs`'s failure mail forwards a child's own first stderr line verbatim, because the whole purpose of that mail is to tell a person what the vendor said.
+
+They are quoted rather than paraphrased on purpose: the claim being made is *what the program did*, and a paraphrase of the evidence is not the evidence.
+
+No vendor conversation log, transcript or credential is committed. Where a probe left records inside a vendor's own home directory they were left there as that vendor's and that user's data, and the plan's per-wave probe records say exactly what remained.
+
+---
+
 ## Scope of this file
 
 These notices cover material **incorporated into this repository's own sources**: ported behavior, prompt texts, theme definitions, and the captured documents committed as interop test data.
