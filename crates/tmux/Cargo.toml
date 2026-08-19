@@ -25,14 +25,14 @@ publish = false
 # protocol surfaces — the same choice every other member of this workspace
 # makes.
 thiserror.workspace = true
-# The async runtime a later wave's `Client` drives the `tmux -C` subprocess
-# over (tokio::process, piped stdio, spawned read/stderr tasks). Declared
-# from W1 so this manifest — which a later wave's CI gate pins an exact
-# external-dependency allowlist against — does not change shape again
-# between W1 and W2.
+# The async runtime both transports' subprocesses ride: the persistent
+# `tmux -C` client (tokio::process, piped stdio, spawned read/stderr tasks)
+# and the one-shot client each `Server::run` spawns. Declared from the
+# port's first commit so this manifest — which the CI gate pins an exact
+# external-dependency allowlist against — does not change shape as waves
+# land.
 tokio.workspace = true
-# Stream adapters for the client's drop-oldest event queue, added in the
-# same later wave `tokio` is for.
+# Stream adapters for the control-mode client's drop-oldest event queue.
 futures.workspace = true
 
 [dev-dependencies]

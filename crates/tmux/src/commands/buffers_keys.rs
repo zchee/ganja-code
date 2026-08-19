@@ -21,8 +21,9 @@
 //! buffer question, and [`crate::commands::panes`] says so from the other
 //! side. The chooser is likewise split by *what is chosen* rather than by
 //! its being a mode: `choose-buffer` is here because it chooses a buffer,
-//! while `choose-client` and `choose-tree` wait for the wave that takes the
-//! rest of the interactive modes.
+//! while `choose-client` and `choose-tree` are typed in
+//! [`options_misc`][crate::commands::options_misc] with the rest of the
+//! interactive modes.
 //!
 //! # Three flags the usage strings do not mention
 //!

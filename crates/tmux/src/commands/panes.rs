@@ -15,8 +15,8 @@
 //! `customize-mode` and `switch-mode` — because they put a pane into an
 //! interactive mode and wait for a person, which makes them relatives of the
 //! prompt and the chooser rather than of splitting and resizing; they are
-//! named in [`EXCLUDED`][crate::commands::EXCLUDED] against the wave that
-//! takes them.
+//! typed in [`options_misc`][crate::commands::options_misc], whose own doc
+//! says why it holds them.
 //!
 //! # Layout
 //!

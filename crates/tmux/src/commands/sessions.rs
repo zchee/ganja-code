@@ -13,9 +13,8 @@
 //! - `source-file` is in that section and is **not** here. It reads a
 //!   configuration file and runs the commands in it, which makes it a
 //!   relative of `set-option` and `show-options` rather than of attaching
-//!   and detaching; it stays named in
-//!   [`EXCLUDED`][crate::commands::EXCLUDED] against the wave that takes
-//!   the options.
+//!   and detaching; it is typed beside them in
+//!   [`options_misc`][crate::commands::options_misc].
 //! - `lock-server` is filed under `MISCELLANEOUS` and **is** here, because
 //!   the manual defines the other two locks in terms of it — `lock-client`
 //!   reads "see the lock-server command" — and a trio the manual

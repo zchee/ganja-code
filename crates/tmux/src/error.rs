@@ -96,11 +96,14 @@ fn exit_message(reason: &str) -> String {
     }
 }
 
-/// Why a call against the tmux control client did not produce an answer.
+/// Why a call against tmux did not produce an answer, on either transport.
 ///
 /// Ports Go's `errors.go` as a whole: the package-level sentinels
 /// (`ErrClosed`, `errDetachSkippedWriteLocked`) become unit variants, and
-/// `CommandError`/`ProtocolError`/`ExitError` become wrapping variants.
+/// `CommandError`/`ProtocolError`/`ExitError` become wrapping variants. The
+/// last three variants are the one-shot surface's and have no Go
+/// counterpart at all; one enum covers both transports so a caller holding
+/// both matches once, as the crate doc says.
 /// `#[non_exhaustive]` — see the module doc. `Clone` — see the module doc's
 /// `Error is Clone` section.
 #[derive(Clone, Debug, thiserror::Error)]

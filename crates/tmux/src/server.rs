@@ -3,8 +3,10 @@
 //!
 //! Synthesized, not ported — the Go specification under
 //! [`crate::control_mode`] speaks only the persistent protocol, so by the
-//! convention that module's doc states, nothing at the crate root carries a
-//! `Spec:` line.
+//! convention that module's doc states, this module carries no `Spec:` line.
+//! (The crate root's other two modules do: [`crate::ids`] and
+//! [`crate::error`] were hoisted out of the port because both transports
+//! need them, and they name the Go file they came from.)
 //!
 //! [`crate::control_mode::Client`] is one `tmux -C` process kept alive and
 //! spoken to; a [`Server`] is the other half of how tmux is used — the plain
