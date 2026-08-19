@@ -225,6 +225,28 @@ impl Tmux {
         self.server.split(Some(cwd), &pairs, argv)
     }
 
+    /// Where a pane's top-left corner sits in the window, as tmux reports
+    /// it — the only honest way to ask which side of the lead a teammate
+    /// opened on, since what a person sees is the layout rather than the
+    /// argv that produced it.
+    fn corner(&self, pane: &str) -> (u16, u16) {
+        let reported = self.server.run(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{pane_left} #{pane_top}",
+        ]);
+        let mut columns = reported.split_whitespace().map(|word| {
+            word.parse()
+                .unwrap_or_else(|_| panic!("tmux reports a corner as two numbers: {reported:?}"))
+        });
+        let left = columns.next().expect("a left column");
+        let top = columns.next().expect("a top row");
+
+        (left, top)
+    }
+
     /// The live pane ids.
     fn panes(&self) -> Vec<String> {
         self.server.panes()
@@ -412,6 +434,21 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
     wait_for("the launch line to reach the pane", &tmux, &lead, || {
         (tmux.current_command(&pane) == "ganja").then_some(())
     });
+
+    // The teammate opens **beside** the lead rather than under it: the same
+    // top row, further right. Asserted on tmux's geometry rather than on the
+    // `-h` in an argv, because the flag reads backwards and a test that
+    // repeated it would agree with a mistake as readily as with the layout.
+    let (lead_left, lead_top) = tmux.corner(&lead);
+    let (member_left, member_top) = tmux.corner(&pane);
+    assert_eq!(
+        member_top, lead_top,
+        "a teammate shares the lead's top row: | lead | {MEMBER} |"
+    );
+    assert!(
+        member_left > lead_left,
+        "and sits to its right: lead at column {lead_left}, {MEMBER} at {member_left}"
+    );
 
     // 3. The member is a teammate: the seed became its first turn (the fake
     // reply is on its own screen), and the idle_notification it wrote reached

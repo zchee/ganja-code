@@ -276,6 +276,13 @@ impl Server {
     /// pane they were in: a teammate's window opening is not a reason to move
     /// their cursor into it.
     ///
+    /// `-h` puts the teammate **beside** the lead rather than under it (user
+    /// directive, 2026-08-20), which is worth stating because tmux's flag
+    /// reads backwards: `-h` is the horizontal *arrangement*, `| lead | w1 |`,
+    /// not a horizontal dividing line. It is also not the default, so leaving
+    /// it off — as this did until now — is choosing the stacked layout by
+    /// omission rather than declining to choose.
+    ///
     /// # Errors
     ///
     /// The client failing to start, tmux refusing (the pane target gone, a
@@ -300,6 +307,7 @@ impl Server {
         let mut command = self.command();
         command
             .arg("split-window")
+            .arg("-h")
             .arg("-d")
             .arg("-P")
             .arg("-F")
