@@ -16707,9 +16707,18 @@ mod tests {
     /// Starts `w1` through the typed door and waits, off the loop, for the
     /// registry to hold it — without ticking the app, so a test can watch what
     /// the next tick does with the moved roster.
+    ///
+    /// **The backend is named**, and naming it is Dv-1's own audit clause: an
+    /// absent `--backend` means `ganja` since that deviation, so this line
+    /// without one splits a real pane in whatever tmux session the developer
+    /// happens to be sitting in. What these tests mean is in-process semantics
+    /// — a member the registry holds, so the tick and the dialog have a roster
+    /// that moved — and that is now said rather than inherited from a default.
     async fn registry_holds_w1(app: &mut App, registry: &ganja_core::teammate::TeammateRegistry) {
-        app.run_team_line(command::team("/team spawn w1").expect("a /team line"))
-            .await;
+        app.run_team_line(
+            command::team("/team spawn w1 --backend in-process").expect("a /team line"),
+        )
+        .await;
         assert!(app.team_spawn.is_some(), "the spawn runs off the loop");
         for _ in 0..500 {
             if registry.view().members.len() == 2 {
