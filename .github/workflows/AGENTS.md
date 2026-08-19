@@ -5,12 +5,13 @@
 
 ## Purpose
 
-CI definitions. One workflow, three jobs, and it is the contract every phase is gated against: a phase is not done until these pass.
+CI definitions. Two workflows: `ci.yaml` — three jobs, the contract every phase is gated against (a phase is not done until these pass) — and `claude-live.yaml`, a scheduled probe that is deliberately *not* part of that contract.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
+| `claude-live.yaml` | AC-13's live half on a weekly clock plus `workflow_dispatch`: installs the current `claude` from npm, pre-approves the `ANTHROPIC_API_KEY` repository secret in a seeded `.claude.json` (the sha256 arithmetic lives beside the secret; the test copies the file via `GANJA_LIVE_CLAUDE_SEED`), and runs `teammate_claude_live` under `GANJA_LIVE_TEST=1`. Scheduled rather than per-push because what drifts is claude's own release stream, which no push here witnesses; hard-fails by name when the secret is absent, because a run that tested nothing must not look like interop evidence. |
 | `ci.yaml` | `lint` (rustfmt, clippy, rustdoc under `RUSTDOCFLAGS=-D warnings`, core-purity) on ubuntu; `deny` (cargo-deny advisories/licenses/bans/sources against `deny.toml`) on ubuntu only, because lockfile analysis cannot differ by OS; `test` matrixed over ubuntu and xcode runners — every lane blocking — with the upstream opencode checkout provisioned for the golden differential suite. The windows lanes (`windows-lint`, a `windows-2025` matrix entry) left on 2026-08-12: windows support is parked for now. |
 
 ## For AI Agents

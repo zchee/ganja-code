@@ -1,0 +1,90 @@
+name: claude-live
+
+# AC-13's live half: a real `claude` pane round-tripping over the shared
+# inbox (`crates/ganja-core/tests/teammate_claude_live.rs`). Deliberately not
+# part of ci.yaml — the binary is proprietary and versioned outside this
+# repository, and a green run spends a real model turn on the
+# ANTHROPIC_API_KEY secret — so it runs on a weekly clock (this is the
+# claude-format drift probe the P25 plan's risk table defers to exactly this
+# test) and on demand, never per push.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, early Monday UTC — drift detection needs a clock, not a diff:
+    # the thing that drifts is claude's own release stream, which no push to
+    # this repository witnesses.
+    - cron: "17 3 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  claude-live:
+    name: claude-live/ubuntu
+    runs-on: ubuntu-26.04
+
+    # Naming bash adds pipefail to every run step, as ci.yaml does.
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Hard-fail with the reason named rather than skip-green: a run that
+      # tested nothing must not look like interop evidence — the same posture
+      # the golden differential takes on a missing checkout.
+      - name: require the credential
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY is not set as a repository secret; the live pane has no way to authenticate"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # The same channel rust-toolchain.toml pins — this action does not
+          # read that file.
+          toolchain: nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The pane is a real `claude`, installed the way its own docs install
+      # it. Latest on purpose: this workflow exists to catch drift against
+      # whatever claude ships now, and a pinned version would test yesterday.
+      - name: install claude
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      # A runner has no keychain and no stored login, and a real `claude`
+      # takes ANTHROPIC_API_KEY only once the key is pre-approved in the
+      # config home's own state file (`customApiKeyResponses`, keyed by the
+      # key's sha256 first twenty hex; `hasCompletedOnboarding` keeps a fresh
+      # home from stopping to ask). The hash arithmetic lives here beside the
+      # secret it hashes; the test only copies this file into the config home
+      # it mints — see `GANJA_LIVE_CLAUDE_SEED` in the test itself.
+      - name: write the auth seed
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          approved="$(printf %s "$ANTHROPIC_API_KEY" | sha256sum | cut -c1-20)"
+          printf '{"hasCompletedOnboarding": true, "customApiKeyResponses": {"approved": ["%s"]}}' "$approved" \
+            > "$RUNNER_TEMP/claude-seed.json"
+
+      # The ubuntu images ship tmux (ci.yaml's own note), and the test
+      # hard-fails rather than skips without it, so nothing needs installing.
+      # The key reaches the pane as ambient process environment through the
+      # test's private tmux server — ganja itself carries no credential into
+      # a pane (D502's enumerated list stays closed).
+      - name: live round-trip
+        timeout-minutes: 15
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GANJA_LIVE_TEST: "1"
+        run: |
+          GANJA_LIVE_CLAUDE_SEED="$RUNNER_TEMP/claude-seed.json" \
+            cargo test -p ganja-core --test teammate_claude_live -- --ignored --nocapture

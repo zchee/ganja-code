@@ -108,6 +108,28 @@ const LIVE: &str = "GANJA_LIVE_TEST";
 /// to say anything about it at all.
 const SECURE_STORAGE_ENV: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 
+/// Names a file to install as the config home's `.claude.json` before the
+/// pane starts — the CI lane's door into a machine nobody ever logged into.
+///
+/// A runner has no keychain and no stored profile, so its pane authenticates
+/// with `ANTHROPIC_API_KEY` — which a real `claude` only *takes* once the key
+/// is pre-approved in the config home's own state file, Claude Code's
+/// `customApiKeyResponses` mechanism (approval is the key's sha256, first
+/// twenty hex, plus `hasCompletedOnboarding` so a fresh home does not stop to
+/// ask). The workflow computes that hash and writes this file, so the
+/// arithmetic lives beside the secret it hashes; this test only copies it
+/// into the config home it mints. The key itself travels as ambient process
+/// environment into the tmux server (§10.10) and from there into the pane —
+/// `claude::carried_env` does not name it, and D502's list stays closed.
+///
+/// Unset — every local run — nothing is seeded and this test is exactly what
+/// it always was: the keychain lane, on the developer's own login. The two
+/// lanes were separated empirically: under a developer shell that is itself a
+/// Claude Code session, ambient `CLAUDE_*`/`ANTHROPIC_*` state routes the
+/// pane to profile auth no matter what this seed says, so the CI lane can
+/// only be exercised where the environment is clean — which a runner is.
+const SEED: &str = "GANJA_LIVE_CLAUDE_SEED";
+
 /// The team, spelled from [`LEAD_SESSION_ID`]'s first eight hex the way a
 /// lead's implicit session team is.
 const TEAM: &str = "session-01998ad0";
@@ -138,6 +160,11 @@ async fn a_real_claude_pane_round_trips_over_the_shared_inbox() {
 
     let home = ganja_testkit::temp_dir();
     let config_dir = home.path().join("claude");
+    if let Some(seed) = std::env::var_os(SEED) {
+        std::fs::create_dir_all(&config_dir).expect("the config home is made");
+        std::fs::copy(&seed, config_dir.join(".claude.json"))
+            .expect("the workflow's auth seed installs as the pane's state file");
+    }
 
     // SAFETY: as below — one test in this binary, so nothing else here is
     // reading the environment. It is written *before* the server rather than
