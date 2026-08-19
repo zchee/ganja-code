@@ -135,3 +135,109 @@ fn every_command_this_tmux_has_is_either_typed_or_excluded_by_name() {
         installed.len()
     );
 }
+
+/// One command as the running tmux resolves it: the canonical name and
+/// abbreviation it prints when asked about a single word.
+///
+/// `None` when this tmux does not know the word at all — which is a fact
+/// about the installed version, not a verdict, for the same reason the test
+/// above runs one-way.
+fn resolve(word: &str) -> Option<(String, Option<String>)> {
+    let output = Command::new("tmux")
+        .args(["list-commands", word])
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "the tmux crate's inventory test requires a runnable tmux binary on PATH; \
+                 `tmux list-commands {word}` could not start: {error}"
+            )
+        });
+    if !output.status.success() {
+        let refusal = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // tmux tells the two refusals apart itself, and only one of them is
+        // survivable: a word it has never heard of may simply postdate this
+        // tmux, while a word it finds *several* commands for was never an
+        // abbreviation of any single one, whatever the register claims.
+        assert!(
+            !refusal.starts_with("ambiguous command"),
+            "the register claims {word:?} as a command word, but tmux reads it as several: \
+             {refusal}"
+        );
+        return None;
+    }
+
+    let printed = String::from_utf8(output.stdout)
+        .expect("tmux prints its own command names, which are ASCII");
+    let mut words = printed.split_whitespace();
+    let name = words.next().unwrap_or_else(|| {
+        panic!("`tmux list-commands {word}` printed nothing this test could read")
+    });
+    let alias = words.next().and_then(|word| {
+        word.strip_prefix('(')
+            .and_then(|word| word.strip_suffix(')'))
+            .map(ToOwned::to_owned)
+    });
+
+    Some((name.to_owned(), alias))
+}
+
+/// Every abbreviation the register claims is a word this tmux answers to,
+/// and answers to with the command the register names.
+///
+/// This deliberately does **not** repeat the test above, which reads the
+/// bulk `list-commands` listing and holds the abbreviation printed there
+/// against the register's. A listing proves tmux *prints* a word; it cannot
+/// prove tmux *accepts* it. That second half is the whole reason [`Entry`]
+/// carries an alias at all — a consumer's config may be written in
+/// abbreviations — so it is asked here directly: each entry is resolved by
+/// the shortest word it claims, and the canonical pair tmux answers with
+/// must be the pair the register holds.
+///
+/// The direction stays one-way for the reason the module doc gives: a
+/// register entry this tmux has never heard of is reported rather than
+/// failed, because the tables are written against a newer tmux than the
+/// oldest they are meant to serve. An *ambiguous* word is a failure all the
+/// same — that one is a claim about this tmux that this tmux contradicts.
+///
+/// [`Entry`]: tmux::commands::Entry
+#[test]
+fn every_abbreviation_the_register_claims_resolves_to_the_command_it_names() {
+    let mut unknown: Vec<&str> = Vec::new();
+    let mut resolved = 0usize;
+
+    for entry in REGISTRY {
+        // The abbreviation when there is one: resolving by it proves both
+        // halves at once, since tmux answers with the canonical pair.
+        let word = entry.alias.unwrap_or(entry.name);
+        let Some((name, alias)) = resolve(word) else {
+            unknown.push(entry.name);
+            continue;
+        };
+
+        resolved += 1;
+        assert_eq!(
+            name, entry.name,
+            "this tmux resolves {word:?} to {name}, not to the {} the register claims it for",
+            entry.name
+        );
+        assert_eq!(
+            alias.as_deref(),
+            entry.alias,
+            "this tmux spells {}'s abbreviation differently from the register",
+            entry.name
+        );
+    }
+
+    // Read with `--nocapture`. Not an assertion: on the tmux the tables were
+    // written against this list is empty, and on an older one every name in
+    // it is a command that tmux simply does not have yet.
+    println!(
+        "tmux command resolution: {resolved} of {} register entries resolved{}",
+        REGISTRY.len(),
+        if unknown.is_empty() {
+            String::new()
+        } else {
+            format!("; unknown to this tmux: {}", unknown.join(", "))
+        }
+    );
+}

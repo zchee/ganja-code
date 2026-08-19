@@ -7,11 +7,12 @@
 //! config, and session so concurrent test processes and threads cannot share
 //! state.
 //!
-//! The last two tests drive the other transport — [`tmux::Server`], one plain
-//! client invocation per call — which the Go package has no counterpart for
-//! and no `Spec:` line therefore names. They share the scaffolding above,
-//! because "private server, unique session, hard-fail" is a property of this
-//! file rather than of either transport.
+//! The tests below the control-mode ones drive the other transport —
+//! [`tmux::Server`], one plain client invocation per call — which the Go
+//! package has no counterpart for and no `Spec:` line therefore names, and
+//! the last one drives both at once against a single server. They share the
+//! scaffolding above, because "private server, unique session, hard-fail" is
+//! a property of this file rather than of either transport.
 
 use std::{
     ffi::OsString,
@@ -26,12 +27,13 @@ use tempfile::TempDir;
 use tmux::{
     Error, PaneId, Server, SessionId, WindowId,
     commands::{
-        CapturePane, HasSession, KillPane, KillServer, ListPanes, ListSessions, NewSession,
-        NewWindow, RenameSession, SendKeys, SetBuffer, SetEnvironment, SetOption, ShowBuffer,
-        ShowEnvironment, ShowOptions, SplitWindow,
+        CapturePane, HasSession, Invocation, KillPane, KillServer, KillWindow, ListPanes,
+        ListSessions, ListWindows, NewSession, NewWindow, PasteBuffer, RenameSession, ResizePane,
+        SendKeys, SetBuffer, SetEnvironment, SetOption, ShowBuffer, ShowEnvironment, ShowOptions,
+        SplitWindow,
     },
     control_mode::{
-        Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, Options,
+        Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, NotificationKind, Options,
         SubscriptionTarget,
     },
 };
@@ -75,7 +77,7 @@ impl Drop for KillServerGuard {
 struct Scratch {
     // Rust drops fields in declaration order, so tmux dies before TempDir unlinks its socket.
     _server_guard: KillServerGuard,
-    _temp_dir: TempDir,
+    temp_dir: TempDir,
     socket: PathBuf,
     config: PathBuf,
     session: String,
@@ -97,7 +99,7 @@ impl Scratch {
             _server_guard: KillServerGuard {
                 socket: socket.clone(),
             },
-            _temp_dir: temp_dir,
+            temp_dir,
             socket,
             config,
             session,
@@ -115,6 +117,12 @@ impl Scratch {
 
     fn session_name(&self) -> &str {
         &self.session
+    }
+
+    /// The private directory this scratch's things live in, for a test that
+    /// needs a path of its own to hand tmux.
+    fn dir(&self) -> &Path {
+        self.temp_dir.path()
     }
 }
 
@@ -609,6 +617,38 @@ async fn the_typed_builders_split_list_and_kill_a_real_pane() {
         .expect("kill-server should end the private server");
 }
 
+/// Polls `capture-pane` until the pane's visible contents hold `needle`.
+///
+/// A pane's echo is asynchronous — the write into the pty, the program's own
+/// answer and tmux's redraw all happen after the call that caused them has
+/// returned — so what a capture is allowed to assert is *what arrives*,
+/// never when. The builder is the caller's rather than this helper's because
+/// which capture-pane flags a test needs is part of what that test is
+/// asking; the polling is all that is shared.
+async fn capture_until(
+    server: &Server,
+    capture: &CapturePane,
+    needle: &str,
+    label: &str,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let captured = server
+            .run(capture.args())
+            .await
+            .expect("capture-pane -p should print the pane's visible contents");
+        let visible = captured.text_lossy().into_owned();
+        if visible.contains(needle) {
+            return visible;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label}: {needle:?} never appeared; the pane held {visible:?}"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// One round trip through the buffer and key builders, for the half of their
 /// contract only a real server can answer: that a caller's own bytes come
 /// back unchanged.
@@ -678,24 +718,13 @@ async fn the_typed_builders_round_trip_a_buffer_and_type_it_into_a_pane() {
         .expect("send-keys -l should type the marker and the word Enter into the pane");
     let typed = format!("{marker}Enter");
 
-    // The pane's own echo is asynchronous, so the capture is polled rather
-    // than taken once: the assertion is about what arrives, not about when.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let captured = server
-            .run(CapturePane::new().stdout().target(&pane).args())
-            .await
-            .expect("capture-pane -p should print the pane's visible contents");
-        let visible = captured.text_lossy().into_owned();
-        if visible.contains(&typed) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the pane never echoed {typed:?} back; it held {visible:?}"
-        );
-        sleep(Duration::from_millis(50)).await;
-    }
+    capture_until(
+        &server,
+        &CapturePane::new().stdout().target(&pane),
+        &typed,
+        "the pane should echo what send-keys -l typed into it",
+    )
+    .await;
 
     server
         .run(["kill-server"])
@@ -896,4 +925,302 @@ async fn the_option_and_environment_builders_round_trip_on_a_real_server() {
         .run(["kill-server"])
         .await
         .expect("kill-server should end the private server");
+}
+
+/// Adds one window running `cat` to the scratch session, and answers with the
+/// window id tmux minted for it.
+///
+/// `cat` rather than the login shell, for the reason the buffer round trip
+/// above states: a pty echoes what is typed into it either way, and `cat`
+/// brings no prompt of its own for a capture to read past.
+async fn cat_window(server: &Server, session: &str, name: &str) -> WindowId {
+    let created = server
+        .run(
+            NewWindow::new()
+                .detached()
+                .print()
+                .format("#{window_id}")
+                .window_name(name)
+                .target(session)
+                .command(["cat"])
+                .args(),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("new-window should add {name} to the private session: {error}")
+        });
+
+    WindowId::new(created.text_lossy().trim()).unwrap_or_else(|error| {
+        panic!("new-window -P -F #{{window_id}} should answer with a window id for {name}: {error}")
+    })
+}
+
+/// Splits each line of a `#{id} #{something}` listing into its two halves.
+///
+/// The id is one word and everything after the first space is the value, so
+/// a window name or a path holding spaces still arrives whole.
+fn listed_pairs(text: &str) -> Vec<(&str, &str)> {
+    text.lines()
+        .map(|line| line.split_once(' ').unwrap_or((line, "")))
+        .collect()
+}
+
+/// The two transports against one server: the world built entirely through
+/// the typed one-shot builders is the world a control-mode client attached
+/// to the same socket reads back, and a one-shot change made while that
+/// client is listening reaches it as a notification.
+///
+/// Every other test in this file drives one transport. This is the only
+/// place they meet, so it is deliberately a scenario rather than a probe: a
+/// session, two windows, a split carrying a working directory and an
+/// enumerated variable, a buffer pasted into that split, a resize — and only
+/// then a [`Client`], which must name the same session and list the same
+/// windows and panes, by the very ids the one-shot side was told. Two layers
+/// that had drifted apart — a socket addressed differently, a session
+/// created beside the other one instead of joined, an id spelled one way
+/// here and another there — cannot pass this, and no single-transport test
+/// can fail for that reason at all.
+///
+/// The kill at the end is the crossing in the other direction: nothing on
+/// the control connection asks for it, and the client learns of it anyway.
+#[tokio::test]
+async fn both_transports_see_one_server() {
+    let scratch = Scratch::new("dual-transport");
+    let server = private_server(&scratch);
+    start_private_server(&scratch, &server).await;
+
+    // A directory of this scratch's own to hand `split-window -c`,
+    // canonicalized because tmux answers `#{pane_current_path}` with the
+    // path the kernel holds — on macOS the `/private` form of what TempDir
+    // handed out, which a literal comparison would otherwise miss.
+    let workdir = scratch.dir().join("split-cwd");
+    fs::create_dir(&workdir).expect("create the directory the split is asked to start in");
+    let workdir = fs::canonicalize(&workdir).expect("canonicalize the split's start directory");
+
+    let first = cat_window(&server, scratch.session_name(), "w7-first").await;
+    let second = cat_window(&server, scratch.session_name(), "w7-second").await;
+    assert_ne!(first, second, "two new-windows must be two windows");
+
+    // The proven consumer shape, with both of its caller-supplied halves
+    // made observable: the pane prints the variable `-e` gave it and then
+    // holds itself open with `cat`, while `-c` is read back out of tmux's
+    // own view of where the process is.
+    let variable = format!("{}-env", scratch.session_name());
+    let split = server
+        .run(
+            SplitWindow::new()
+                .detached()
+                .print()
+                .format("#{pane_id}")
+                .start_directory(&workdir)
+                .environment(format!("GANJA_W7_ENV={variable}"))
+                .target(&second)
+                .command(["sh", "-c", "printf '%s\\n' \"$GANJA_W7_ENV\"; exec cat"])
+                .args(),
+        )
+        .await
+        .expect("split-window should split the second window");
+    let pane = PaneId::new(split.text_lossy().trim())
+        .expect("split-window -P -F #{pane_id} should answer with a pane id");
+
+    capture_until(
+        &server,
+        &CapturePane::new().stdout().join_wrapped().target(&pane),
+        &variable,
+        "the split's process should have been started with the variable -e named",
+    )
+    .await;
+
+    let paths = server
+        .run(
+            ListPanes::new()
+                .format("#{pane_id} #{pane_current_path}")
+                .target(&second)
+                .args(),
+        )
+        .await
+        .expect("list-panes should report where each pane's process is");
+    let paths = paths.text_lossy();
+    assert!(
+        listed_pairs(&paths)
+            .iter()
+            .any(|(id, path)| *id == pane.as_str() && Path::new(path) == workdir),
+        "the split's process should be in the directory -c named ({}): {paths:?}",
+        workdir.display()
+    );
+
+    // The buffer leg: a marker set on the server, pasted into the pane, and
+    // read back off the pane's own echo — three commands from three
+    // different families passing one caller's bytes between them.
+    let pasted = format!("{}-pasted", scratch.session_name());
+    server
+        .run(SetBuffer::new().buffer("w7").data(&pasted).args())
+        .await
+        .expect("set-buffer should take the marker as its data");
+    server
+        .run(
+            PasteBuffer::new()
+                .buffer("w7")
+                .delete()
+                .target(&pane)
+                .args(),
+        )
+        .await
+        .expect("paste-buffer should paste the marker into the split pane");
+    capture_until(
+        &server,
+        &CapturePane::new().stdout().join_wrapped().target(&pane),
+        &pasted,
+        "the split pane should echo the pasted buffer",
+    )
+    .await;
+
+    // The resize is asserted before the control client attaches: attaching
+    // gives the session a client with a size of its own, and this assertion
+    // is about the height the builder asked for rather than about which
+    // client the window is currently sized to.
+    server
+        .run(ResizePane::new().height("5").target(&pane).args())
+        .await
+        .expect("resize-pane -y should resize the split pane");
+    let heights = server
+        .run(
+            ListPanes::new()
+                .format("#{pane_id} #{pane_height}")
+                .target(&second)
+                .args(),
+        )
+        .await
+        .expect("list-panes should report each pane's height");
+    let heights = heights.text_lossy();
+    assert!(
+        listed_pairs(&heights)
+            .iter()
+            .any(|(id, height)| *id == pane.as_str() && *height == "5"),
+        "the split pane should be the five rows resize-pane asked for: {heights:?}"
+    );
+
+    // Only now the other transport, against the same socket.
+    let client = new_client(&scratch).await;
+
+    // `Options` asked for `new-session -A -s <name>`, and `-A` is what makes
+    // that an attach to the session the one-shot side already built rather
+    // than a second session beside it. Everything below rests on this.
+    let named = client
+        .exec(
+            DISPLAY_MESSAGE,
+            [Arg::raw("-p"), Arg::string("#{session_name}")],
+        )
+        .await
+        .expect("display-message should name the session the control client is in");
+    assert_eq!(
+        named.lines.join("\n"),
+        scratch.session_name(),
+        "the control client must have joined the one-shot side's session, not made its own"
+    );
+
+    // The command name comes from the registry's own literal, so the two
+    // transports cannot end up asking for differently spelled commands: one
+    // renders it into argv, the other into a control-mode line.
+    let windows = client
+        .exec(
+            Command::from_static(<ListWindows as Invocation>::NAME),
+            [
+                Arg::raw("-t"),
+                Arg::string(scratch.session_name()),
+                Arg::raw("-F"),
+                Arg::string("#{window_id} #{window_name}"),
+            ],
+        )
+        .await
+        .expect("list-windows should list the private session's windows");
+    let listing = windows.lines.join("\n");
+    assert_eq!(
+        windows.lines.len(),
+        3,
+        "the session's own window plus the two the one-shot side added: {listing:?}"
+    );
+    for (window, name) in [(&first, "w7-first"), (&second, "w7-second")] {
+        assert!(
+            listed_pairs(&listing)
+                .iter()
+                .any(|(id, listed)| *id == window.as_str() && *listed == name),
+            "the control client should see {window} named {name:?}, as the one-shot side made it: \
+             {listing:?}"
+        );
+    }
+
+    let panes = client
+        .exec(
+            LIST_PANES,
+            [
+                Arg::raw("-t"),
+                Arg::string(second.as_str()),
+                Arg::raw("-F"),
+                Arg::string("#{pane_id}"),
+            ],
+        )
+        .await
+        .expect("list-panes should list the split window's panes");
+    assert_eq!(
+        panes.lines.len(),
+        2,
+        "the split window holds the window's original pane and the split one: {:?}",
+        panes.lines
+    );
+    assert!(
+        panes.lines.iter().any(|line| line == pane.as_str()),
+        "the pane split-window minted should be one the control client sees: {:?}",
+        panes.lines
+    );
+
+    // The other direction: a change made by the transport that is not
+    // listening, observed by the one that is.
+    server
+        .run(KillWindow::new().target(&first).args())
+        .await
+        .expect("kill-window should destroy the first window the one-shot side made");
+
+    // The predicate takes the whole window-close family so that a wrong
+    // member of it fails the assertion below by name, rather than timing out
+    // with nothing to say about what did arrive.
+    let notification = recv_until(&client, Duration::from_secs(10), |notification| {
+        matches!(
+            notification.kind,
+            NotificationKind::WindowClose | NotificationKind::UnlinkedWindowClose
+        ) && notification.args == [first.as_str()]
+    })
+    .await
+    .unwrap_or_else(|| {
+        panic!(
+            "no window-close notification named {first}; drops={} stderr={:?}",
+            client.dropped_notifications(),
+            client.stderr_tail()
+        )
+    });
+    assert_eq!(
+        notification.kind,
+        NotificationKind::WindowClose,
+        "the killed window was in the session this client is attached to, which is what tells \
+         %window-close from %unlinked-window-close: {:?}",
+        notification.raw
+    );
+
+    // The exit path with the server still alive: `close` detaches, waits for
+    // the subprocess and joins both reader tasks inside this scratch's
+    // two-second shutdown budget, so its `Ok` is the reap assertion.
+    close_client(&client).await;
+
+    server
+        .run(KillServer::new().args())
+        .await
+        .expect("kill-server should end the private server");
+
+    let after = server
+        .run(ListWindows::new().target(scratch.session_name()).args())
+        .await;
+    assert!(
+        matches!(after, Err(Error::ClientRefused { .. })),
+        "a killed server answers nothing: {after:?}"
+    );
 }
