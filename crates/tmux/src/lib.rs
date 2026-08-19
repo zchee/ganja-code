@@ -28,6 +28,12 @@
 //! ladder stays inside [`control_mode`] and is never reached for from the
 //! root.
 //!
+//! [`Server::run`] carries any tmux command at all, named here or not.
+//! [`commands`] is the typed layer over it — one builder per command,
+//! producing the argv words that command wants — landed family by family,
+//! with [`commands::REGISTRY`] and [`commands::EXCLUDED`] measuring how far
+//! it has got against the running tmux's own `list-commands`.
+//!
 //! [`Client`][control_mode::Client] owns one persistent `tmux -C`
 //! subprocess. Callers send normal tmux commands through it; the client
 //! parses the guarded `%begin`/`%end`/`%error` response blocks and exposes
@@ -84,6 +90,7 @@
 //! standing test posture — a green run that skipped everything would be
 //! worthless as a signal.
 
+pub mod commands;
 pub mod control_mode;
 pub mod error;
 pub mod ids;
@@ -94,7 +101,10 @@ pub mod server;
 // root stays a listing of what every surface speaks rather than of one.
 // `Server` is the exception that proves the rule: the surface it heads *is*
 // the root, so `tmux::Server` and `tmux::server::Server` are one name said
-// twice rather than a type lifted out of a module it belongs to.
+// twice rather than a type lifted out of a module it belongs to. By the same
+// rule `commands` re-exports nothing: a builder is one surface's vocabulary,
+// so it is named `tmux::commands::SplitWindow` exactly as a control-mode type
+// is named `tmux::control_mode::Client`.
 pub use error::Error;
 pub use ids::{InvalidId, PaneId, SessionId, WindowId};
 pub use server::Server;

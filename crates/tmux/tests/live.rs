@@ -24,7 +24,8 @@ use std::{
 
 use tempfile::TempDir;
 use tmux::{
-    Error, PaneId, Server,
+    Error, PaneId, Server, WindowId,
+    commands::{KillPane, ListPanes, NewWindow, SplitWindow},
     control_mode::{
         Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, Options,
         SubscriptionTarget,
@@ -513,6 +514,95 @@ async fn a_client_invocation_creates_a_session_and_reads_it_back() {
         matches!(after, Err(Error::ClientRefused { .. })),
         "a killed server answers nothing: {after:?}"
     );
+}
+
+/// One round trip driven entirely by the typed builders, to prove the argv
+/// they assemble is argv tmux accepts — the unit tests assert the words, and
+/// only a real server can say whether the words were right.
+///
+/// Deliberately one test rather than one per command: what varies between
+/// builders is which flags they render, which is a process-free question, and
+/// a live test per command would buy tmux's parser being exercised 34 times
+/// over for the same answer.
+#[tokio::test]
+async fn the_typed_builders_split_list_and_kill_a_real_pane() {
+    let scratch = Scratch::new("typed-builders");
+    let server = private_server(&scratch);
+    start_private_server(&scratch, &server).await;
+
+    let created = server
+        .run(
+            NewWindow::new()
+                .detached()
+                .print()
+                .format("#{window_id}")
+                .window_name("typed")
+                .target(scratch.session_name())
+                .args(),
+        )
+        .await
+        .expect("new-window should create a window in the private session");
+    let window = WindowId::new(created.text_lossy().trim())
+        .expect("new-window -P -F #{window_id} should answer with a window id");
+
+    // The proven consumer shape: detached, printing the new pane's id, with a
+    // working directory, an enumerated environment, and the program behind
+    // the `--` this layer emits.
+    let split = server
+        .run(
+            SplitWindow::new()
+                .detached()
+                .print()
+                .format("#{pane_id}")
+                .start_directory("/")
+                .environment("GANJA_LIVE_TEST_PANE=1")
+                .target(&window)
+                .command(["sh", "-c", "sleep 30"])
+                .args(),
+        )
+        .await
+        .expect("split-window should split the window the previous call made");
+    let pane = PaneId::new(split.text_lossy().trim())
+        .expect("split-window -P -F #{pane_id} should answer with a pane id");
+
+    let listed = server
+        .run(ListPanes::new().format("#{pane_id}").target(&window).args())
+        .await
+        .expect("list-panes should list the window's panes");
+    let panes: Vec<PaneId> = listed
+        .text_lossy()
+        .lines()
+        .map(|line| PaneId::new(line).expect("list-panes -F #{pane_id} answers with pane ids"))
+        .collect();
+    assert_eq!(
+        panes.len(),
+        2,
+        "the split window should hold the original pane and the new one: {panes:?}"
+    );
+    assert!(
+        panes.contains(&pane),
+        "the pane split-window named should be one of the panes list-panes reports: {panes:?}"
+    );
+
+    server
+        .run(KillPane::new().target(&pane).args())
+        .await
+        .expect("kill-pane should destroy the pane split-window made");
+
+    let after = server
+        .run(ListPanes::new().format("#{pane_id}").target(&window).args())
+        .await
+        .expect("list-panes should still answer after the kill");
+    assert!(
+        !after.text_lossy().lines().any(|line| line == pane.as_str()),
+        "the killed pane should be gone: {:?}",
+        after.text_lossy()
+    );
+
+    server
+        .run(["kill-server"])
+        .await
+        .expect("kill-server should end the private server");
 }
 
 #[tokio::test]

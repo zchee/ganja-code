@@ -156,9 +156,65 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// Gives an id the one conversion the argv-building surface asks of a
+/// target: into an [`OsString`], owned or borrowed.
+///
+/// [`crate::commands`]'s `-t` and `-s` methods take `impl Into<OsString>` so
+/// a raw `mysession:1.2` spelling passes as readily as an id does. Without
+/// these, an id read out of a previous answer would have to be turned back
+/// into a string to be used in the next call — which is the parse-don't-
+/// validate discipline above undone one line after it was applied.
+///
+/// Deliberately one-way: nothing here converts an `OsString` *into* an id,
+/// because that direction is validation and validation is [`PaneId::new`]'s.
+macro_rules! into_os_string {
+    ($($type:ident),*) => {
+        $(
+            impl From<$type> for std::ffi::OsString {
+                fn from(id: $type) -> Self {
+                    Self::from(id.0)
+                }
+            }
+
+            impl From<&$type> for std::ffi::OsString {
+                fn from(id: &$type) -> Self {
+                    Self::from(id.0.clone())
+                }
+            }
+        )*
+    };
+}
+
+into_os_string!(PaneId, WindowId, SessionId);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_id_converts_into_an_argv_word_owned_or_borrowed() {
+        let pane = PaneId::new("%12").expect("a well-formed pane id");
+        assert_eq!(
+            std::ffi::OsString::from(&pane),
+            std::ffi::OsString::from("%12")
+        );
+        assert_eq!(
+            std::ffi::OsString::from(pane),
+            std::ffi::OsString::from("%12")
+        );
+
+        let window = WindowId::new("@3").expect("a well-formed window id");
+        assert_eq!(
+            std::ffi::OsString::from(window),
+            std::ffi::OsString::from("@3")
+        );
+
+        let session = SessionId::new("$4").expect("a well-formed session id");
+        assert_eq!(
+            std::ffi::OsString::from(session),
+            std::ffi::OsString::from("$4")
+        );
+    }
 
     #[test]
     fn a_pane_id_without_the_percent_prefix_is_refused() {
