@@ -26,8 +26,9 @@ use tempfile::TempDir;
 use tmux::{
     Error, PaneId, Server, SessionId, WindowId,
     commands::{
-        HasSession, KillPane, KillServer, ListPanes, ListSessions, NewSession, NewWindow,
-        RenameSession, SetEnvironment, SetOption, ShowEnvironment, ShowOptions, SplitWindow,
+        CapturePane, HasSession, KillPane, KillServer, ListPanes, ListSessions, NewSession,
+        NewWindow, RenameSession, SendKeys, SetBuffer, SetEnvironment, SetOption, ShowBuffer,
+        ShowEnvironment, ShowOptions, SplitWindow,
     },
     control_mode::{
         Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, Options,
@@ -601,6 +602,100 @@ async fn the_typed_builders_split_list_and_kill_a_real_pane() {
         "the killed pane should be gone: {:?}",
         after.text_lossy()
     );
+
+    server
+        .run(["kill-server"])
+        .await
+        .expect("kill-server should end the private server");
+}
+
+/// One round trip through the buffer and key builders, for the half of their
+/// contract only a real server can answer: that a caller's own bytes come
+/// back unchanged.
+///
+/// The marker leads with a `-` and carries a shell's metacharacters on
+/// purpose. Nothing between this process and the pane is allowed a say in
+/// what those bytes mean: the `--` fence keeps `set-buffer` from reading the
+/// leading dash as a flag, and `send-keys -l` keeps tmux from looking any of
+/// it up as a key name — which is exactly the shape a real consumer types a
+/// line with.
+#[tokio::test]
+async fn the_typed_builders_round_trip_a_buffer_and_type_it_into_a_pane() {
+    let scratch = Scratch::new("typed-buffers");
+    let server = private_server(&scratch);
+    start_private_server(&scratch, &server).await;
+
+    let marker = format!("-{}-w5 'quoted' $dollar", scratch.session_name());
+
+    server
+        .run(SetBuffer::new().buffer("w5").data(&marker).args())
+        .await
+        .expect("set-buffer should take the marker as its data");
+    let shown = server
+        .run(ShowBuffer::new().buffer("w5").args())
+        .await
+        .expect("show-buffer should print the buffer set-buffer just filled");
+    assert_eq!(
+        shown.bytes(),
+        marker.as_bytes(),
+        "a buffer must come back byte for byte: {:?}",
+        shown.text_lossy()
+    );
+
+    // A window running `cat` rather than the login shell: a pty echoes what
+    // is typed into it either way, and `cat` brings no prompt of its own for
+    // the capture to read past.
+    let created = server
+        .run(
+            NewWindow::new()
+                .detached()
+                .print()
+                .format("#{pane_id}")
+                .window_name("w5")
+                .target(scratch.session_name())
+                .command(["cat"])
+                .args(),
+        )
+        .await
+        .expect("new-window should create the window this test types into");
+    let pane = PaneId::new(created.text_lossy().trim())
+        .expect("new-window -P -F #{pane_id} should answer with a pane id");
+
+    // `Enter` is sent as a second key on purpose, and it is what makes `-l`
+    // load-bearing here: with the flag it is five characters typed after the
+    // marker, and without it the return key, which would end the line instead
+    // of appearing in it.
+    server
+        .run(
+            SendKeys::new()
+                .target(&pane)
+                .literal()
+                .key(&marker)
+                .key("Enter")
+                .args(),
+        )
+        .await
+        .expect("send-keys -l should type the marker and the word Enter into the pane");
+    let typed = format!("{marker}Enter");
+
+    // The pane's own echo is asynchronous, so the capture is polled rather
+    // than taken once: the assertion is about what arrives, not about when.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let captured = server
+            .run(CapturePane::new().stdout().target(&pane).args())
+            .await
+            .expect("capture-pane -p should print the pane's visible contents");
+        let visible = captured.text_lossy().into_owned();
+        if visible.contains(&typed) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane never echoed {typed:?} back; it held {visible:?}"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
 
     server
         .run(["kill-server"])

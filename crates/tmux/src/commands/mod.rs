@@ -89,6 +89,7 @@
 
 use std::ffi::OsString;
 
+pub mod buffers_keys;
 pub mod options_misc;
 pub mod panes;
 pub mod sessions;
@@ -97,6 +98,7 @@ pub mod sessions;
 // argued for — but their builders are re-exported here, so a command is named
 // `tmux::commands::SplitWindow` for the same reason a control-mode type is
 // named `tmux::control_mode::Client` rather than through the file it lives in.
+pub use buffers_keys::*;
 pub use options_misc::*;
 pub use panes::*;
 pub use sessions::*;
@@ -373,7 +375,12 @@ pub(crate) use method;
 
 /// The families, in the order [`REGISTRY`] lists them. Each later wave adds
 /// one name here and nothing else.
-const FAMILIES: &[&[Entry]] = &[panes::ENTRIES, sessions::ENTRIES, options_misc::ENTRIES];
+const FAMILIES: &[&[Entry]] = &[
+    panes::ENTRIES,
+    sessions::ENTRIES,
+    buffers_keys::ENTRIES,
+    options_misc::ENTRIES,
+];
 
 /// How many commands the families hold between them.
 const fn total(families: &[&[Entry]]) -> usize {
@@ -423,124 +430,15 @@ const TYPED: [Entry; total(FAMILIES)] = flattened(FAMILIES);
 /// name.
 pub const REGISTRY: &[Entry] = &TYPED;
 
-/// Why the buffer, key, prompt and display commands are not here yet.
-const BUFFERS_KEYS: &str = "typed in W5: buffers, keys, the prompt and the display";
-
 /// Every tmux command this crate knows of and has **not** given a builder,
 /// each with the reason.
 ///
-/// Seeded with the three families this crate has not reached, so the
-/// inventory test can be green today and shrink to nothing as they land —
-/// a table that starts empty would have made the test red for three waves,
-/// and a red test nobody can fix is a test nobody reads.
-pub const EXCLUDED: &[Excluded] = &[
-    // Buffers, keys, the prompt and the display.
-    Excluded {
-        name: "bind-key",
-        alias: Some("bind"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "choose-buffer",
-        alias: None,
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "clear-history",
-        alias: Some("clearhist"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "clear-prompt-history",
-        alias: Some("clearphist"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "command-prompt",
-        alias: None,
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "confirm-before",
-        alias: Some("confirm"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "delete-buffer",
-        alias: Some("deleteb"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "display-menu",
-        alias: Some("menu"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "display-message",
-        alias: Some("display"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "display-popup",
-        alias: Some("popup"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "list-buffers",
-        alias: Some("lsb"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "list-keys",
-        alias: Some("lsk"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "load-buffer",
-        alias: Some("loadb"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "paste-buffer",
-        alias: Some("pasteb"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "save-buffer",
-        alias: Some("saveb"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "send-keys",
-        alias: Some("send"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "send-prefix",
-        alias: None,
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "set-buffer",
-        alias: Some("setb"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "show-buffer",
-        alias: Some("showb"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "show-prompt-history",
-        alias: Some("showphist"),
-        reason: BUFFERS_KEYS,
-    },
-    Excluded {
-        name: "unbind-key",
-        alias: Some("unbind"),
-        reason: BUFFERS_KEYS,
-    },
-];
+/// Empty since the last family landed — 92 of 92 installed commands are
+/// typed. The table stays because it is the inventory test's second answer:
+/// when a future tmux grows a command this crate has not met, the red test's
+/// fix is either a builder or a row here carrying its reason, and the row is
+/// the honest holding state while the builder is written.
+pub const EXCLUDED: &[Excluded] = &[];
 
 #[cfg(test)]
 mod tests {
