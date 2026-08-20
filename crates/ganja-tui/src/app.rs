@@ -1498,6 +1498,20 @@ impl App {
         // between accepting the first prompt and starting the turn it becomes,
         // so message two of three waited out another cadence for nothing.
         self.deliver_peers(fresh).await;
+        // A TUI teammate whose pane stopped running is said once, where a
+        // finished spawn is said (D512 as amended for bead g9u): the pass
+        // already retired it, and the model already has the prose. Two in one
+        // pass share the one notice line rather than the later overwriting
+        // the earlier.
+        if !pass.exited.is_empty() {
+            let notice = pass
+                .exited
+                .iter()
+                .map(ganja_core::teammate::shim_tui::Exited::notice)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            self.tell_team(notice);
+        }
         if !pass.retired.is_empty() {
             // The roster shrank under the bar, and nothing else this tick will
             // notice.

@@ -30,11 +30,12 @@ use ganja_core::{
         TeammateRegistry,
         claude::ClaudePane,
         codex::{APPROVAL_OVERRIDE, Codex, READY_MARKER, SANDBOX_OVERRIDE},
+        lead_inbox::LeadInbox,
         pane::GanjaPane,
         reaper::Pane,
         shim_tui::{
-            REFUSED_DIED, RING_DELIVERED, RING_DELIVERY_FAILED, RING_NOT_READY,
-            RING_PASTED_UNSUBMITTED, RING_READY, Readiness, ShimTui, TuiPane,
+            LIVENESS_POLL, PaneFate, REFUSED_DIED, RING_DELIVERED, RING_DELIVERY_FAILED,
+            RING_NOT_READY, RING_PASTED_UNSUBMITTED, RING_READY, Readiness, ShimTui, TuiPane,
         },
         tmux::Server,
     },
@@ -80,7 +81,9 @@ const DEFANGED: &str = "look[201~/quit\nharmless\ttail";
 /// refusal before exiting 1, so the pane a readiness poll captures shows a
 /// composer that is already a corpse. `hup-immune` is a composer that ignores
 /// `SIGHUP` and, on `SIGTERM`, writes down whether its pane was still live
-/// when the signal arrived — the F3 witness — before exiting.
+/// when the signal arrived — the F3 witness — before exiting. `quits` is a
+/// composer that reads exactly one submitted body and then exits 0 with a
+/// parting line — a CLI a person quit after its first turn, bead g9u's case.
 fn stub_script() -> String {
     format!(
         r##"#!/bin/sh
@@ -106,6 +109,17 @@ case "$MODE" in
     printf '%s\n' '{marker}'
     printf '%s\n' '{refusal}'
     exit 1
+    ;;
+  quits)
+    printf '%s\n' '{marker}'
+    printf '\033[?2004h'
+    # One submitted body is three canonical lines: the envelope header, then
+    # TASK's two, the last carrying the paste's close bracket and ended by
+    # the Enter. A TASK of another length moves this count with it, or the
+    # stub waits out LANDS.
+    head -n 3 >> "$LOG.received"
+    printf 'bye from the stub\n'
+    exit 0
     ;;
   hup-immune)
     printf '%s\n' '{marker}'
@@ -523,6 +537,13 @@ async fn a_tui_that_shows_its_marker_and_then_dies_is_refused_and_never_a_live_m
 /// door an unreadable frame is refused by. And the text is not pasted a second
 /// time — it may be sitting unsubmitted in a composer, and pasting it again
 /// unseen is the one thing forbidden.
+///
+/// The failure is staged by ending the tmux **server** under the runner — a
+/// paste with no server to paste through — rather than by closing the pane,
+/// because a pane closed by hand is now the exit path's case (bead g9u, the
+/// test after this one): a liveness listing that *fails* retires nobody ("no
+/// proof, no retire"), so the member stays, and what stays with it is exactly
+/// this courtesy.
 #[tokio::test]
 async fn a_delivery_that_fails_tells_the_sender_and_is_never_pasted_again() {
     let home = ganja_testkit::temp_dir();
@@ -545,14 +566,19 @@ async fn a_delivery_that_fails_tells_the_sender_and_is_never_pasted_again() {
         .and_then(|file| file.member("w1").cloned())
         .expect("w1 joined the team")
         .tmux_pane_id;
+    let live_pid: i32 = live_pane(&server, &pane_id)
+        .expect("the pane is live before its server goes")
+        .birth
+        .parse()
+        .expect("a pid");
 
-    // The pane goes out from under the runner — the shape of a person closing
-    // it by hand — so the next paste has nowhere to land.
-    server.run(&["kill-pane", "-t", &pane_id]);
+    // The server goes out from under the runner, pane and all, so the next
+    // paste has nothing to paste through — and nothing to list, so the
+    // liveness poll can prove nothing and leaves the member where it is.
+    server.run(&["kill-server"]);
     assert!(
-        until(LANDS, || !server.panes().contains(&pane_id)).await,
-        "the pane is gone: {:?}",
-        server.panes()
+        until(LANDS, || !alive(live_pid)).await,
+        "the stub went down with its server"
     );
     let landed = received(&stub);
 
@@ -581,6 +607,138 @@ async fn a_delivery_that_fails_tells_the_sender_and_is_never_pasted_again() {
             .iter()
             .any(|line| line.starts_with(RING_DELIVERY_FAILED)),
         "the ring says the delivery failed: {lines:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// **Bead g9u (D512 as amended).** A TUI that exits *after* readiness — the
+/// CLI quit, or a person closed it — is noticed by the member's own loop with
+/// no delivery to fail into it: the corpse is closed with no shutdown asked,
+/// the lead is told in prose with the pane's parting line, and the lead's
+/// next pass retires the member — off the roster, out of the team file — and
+/// hands a frontend the same words once.
+///
+/// A message sent to the member *around* its exit is deliberately not
+/// asserted on: one pasted into a composer that quits a moment later is lost
+/// in the pty, honestly, under
+/// [`ganja_core::teammate::Delivery::FireAndForget`]; one pasted after the
+/// pane died fails (measured: `paste-buffer` refuses a dead pane with "target
+/// pane has exited") and takes MEDIUM-5's road; and one still in the inbox
+/// when the loop notices is answered by the loop itself. Which of the three a
+/// run takes is a race this test cannot place — what it pins is that the lead
+/// learns the member is gone whichever way.
+#[tokio::test]
+async fn a_tui_that_exits_after_readiness_is_retired_and_its_pane_closed_unasked() {
+    let home = ganja_testkit::temp_dir();
+    let server = PrivateServer::start(&["sleep", "3600"], &[], &[]);
+    let stub = stub("quits");
+    let (registry, door, root, team) = lead(home.path(), &server, stub.path());
+
+    door.start(
+        ganja_testkit::spawn_with_prompt("w1", Some("codex"), TASK),
+        &ganja_testkit::caller(home.path()),
+        &AllowSpawn,
+    )
+    .await
+    .expect("the stub TUI spawns in a pane");
+    let pane_id = ganja_testkit::team_file(&root, &team)
+        .and_then(|file| file.member("w1").cloned())
+        .expect("w1 joined the team")
+        .tmux_pane_id;
+
+    // The prompt lands; the stub reads it and quits. `remain-on-exit` keeps
+    // the corpse on screen, which is what the loop's liveness poll sees.
+    assert!(
+        until(LANDS, || received(&stub) == framed("team-lead", TASK)).await,
+        "the prompt reached the composer before it quit; got {:?}",
+        String::from_utf8_lossy(&received(&stub))
+    );
+
+    // The loop notices inside its own cadence and the lead's inbox carries
+    // the member's own word, parting line included.
+    let lead_inbox = root.inbox_path(&team, &MemberName::parse("team-lead").expect("a name"));
+    let told = || {
+        mailbox::read(&lead_inbox)
+            .map(|contents| {
+                contents.valid.iter().any(|message| {
+                    message.from == "w1"
+                        && message.text.contains("has exited")
+                        && message.text.contains("bye from the stub")
+                })
+            })
+            .unwrap_or(false)
+    };
+    assert!(
+        until(LANDS + LIVENESS_POLL, told).await,
+        "the lead was told its teammate exited, in the teammate's own words: {:?}",
+        mailbox::read(&lead_inbox).map(|contents| contents
+            .valid
+            .iter()
+            .map(|message| message.text.clone())
+            .collect::<Vec<_>>())
+    );
+    // The corpse is gone from the server with nobody having asked for a
+    // shutdown, and the member is off the live roster.
+    assert!(
+        until(LANDS, || !server.panes().contains(&pane_id)).await,
+        "the dead pane was closed by the member's own loop: {:?}",
+        server.panes()
+    );
+    assert!(
+        until(LANDS, || registry
+            .view()
+            .members
+            .iter()
+            .all(|member| member.name != "w1"))
+        .await,
+        "w1 stopped being listed"
+    );
+
+    // The lead's next pass retires it: out of the team file, reported once
+    // under both `retired` and `exited`, with the words a frontend shows.
+    let pass = LeadInbox::new(Arc::clone(&registry)).poll().await;
+    let exited = pass
+        .exited
+        .iter()
+        .find(|exited| exited.name == "w1")
+        .expect("the pass reports the exit");
+    assert_eq!(exited.pane_id, pane_id);
+    assert_eq!(
+        exited.pane,
+        PaneFate::Closed,
+        "what `end` left is reported, not assumed"
+    );
+    assert_eq!(exited.last_words.as_deref(), Some("bye from the stub"));
+    assert!(
+        exited
+            .notice()
+            .starts_with("w1 (codex) exited in its pane — last line: bye from the stub"),
+        "{}",
+        exited.notice()
+    );
+    assert!(
+        pass.retired.iter().any(|retired| retired.name == "w1"
+            && retired.pane_id.as_deref() == Some(pane_id.as_str())
+            && retired.backend_type.as_deref() == Some("codex")),
+        "{:?}",
+        pass.retired
+    );
+    assert!(
+        ganja_testkit::team_file(&root, &team).is_none_or(|file| file.member("w1").is_none()),
+        "the record left the team file"
+    );
+    // And the pass hands the member's prose to the lead's model like any
+    // other message.
+    assert!(
+        pass.messages
+            .iter()
+            .any(|message| message.from == "w1" && message.body.contains("has exited")),
+        "{:?}",
+        pass.messages
+            .iter()
+            .map(|message| message.body.clone())
+            .collect::<Vec<_>>()
     );
 
     registry.shutdown().await;

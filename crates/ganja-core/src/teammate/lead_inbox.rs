@@ -94,13 +94,14 @@ use std::{
 use ganja_protocol::team::{
     Frame, IdleNotification, MemberBackend, PermissionRequest, PermissionResponse, ShutdownApproved,
 };
-use ganja_team::{MailboxMessage, MemberName, TeamsRoot, mailbox, record};
+use ganja_team::{MailboxMessage, MemberName, Surface, TeamsRoot, mailbox, record};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
     Delivery, TeammateRegistry, claude, member,
     posture::Forwarded,
     runner::{drop_frame, prune_inbox, read_inbox},
+    shim_tui::Exited,
 };
 use crate::protocol::{PermissionReply, SessionId};
 
@@ -247,8 +248,19 @@ pub struct Asked {
 pub struct Pass {
     /// The plain messages, oldest first, still owed a delivery.
     pub messages: Vec<Delivered>,
-    /// The members this pass forgot.
+    /// The members this pass forgot — on their own `shutdown_approved`, or
+    /// because their pane stopped running (those are also under `exited`).
+    ///
+    /// One member may appear twice in one pass: a TUI member whose inbox held
+    /// a `shutdown_request` at the moment its pane died approves it as it
+    /// exits *and* is reported exited, and each road retires it — harmless,
+    /// since the second retire finds nothing to remove and the one consumer
+    /// recounts the roster rather than subtracting.
     pub retired: Vec<Retired>,
+    /// The TUI members whose panes stopped running after readiness, retired
+    /// by this pass (**D512** as amended for bead g9u); what a frontend says
+    /// about each is [`Exited::notice`].
+    pub exited: Vec<Exited>,
     /// The teammates that reported themselves available.
     pub idle: Vec<Idle>,
     /// The pane asks this pass routed, or refused because it could not.
@@ -264,6 +276,7 @@ impl Pass {
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
             && self.retired.is_empty()
+            && self.exited.is_empty()
             && self.idle.is_empty()
             && self.asked.is_empty()
             && self.dropped.is_empty()
@@ -364,8 +377,47 @@ impl LeadInbox {
         for root in self.roots() {
             self.poll_one(&root, &mut pass).await;
         }
+        self.retire_exited(&mut pass).await;
 
         pass
+    }
+
+    /// Retires every TUI member whose own loop saw its pane stop running since
+    /// the last pass (**D512** as amended for bead g9u).
+    ///
+    /// The same door a `shutdown_approved` takes ([`LeadInbox::retire`]):
+    /// [`TeammateRegistry::retire`] ends the surface — whose `end` answers the
+    /// fate the loop's own call already recorded, touching nothing — and takes
+    /// the record out of the team file. Reported under both `retired`, so a
+    /// frontend's roster shrinks the way it does for any retirement, and
+    /// `exited`, so it can say what the pane said. The loop that noticed has
+    /// already told the lead's model in prose; this is the harness's half.
+    async fn retire_exited(&self, pass: &mut Pass) {
+        for exited in self.registry.take_exited() {
+            if let Err(error) = self.registry.retire(&exited.name).await {
+                tracing::warn!(
+                    teammate = exited.name,
+                    %error,
+                    "a teammate's TUI exited but its record could not be taken out of the team file"
+                );
+            }
+            tracing::info!(
+                teammate = exited.name,
+                pane = exited.pane_id,
+                last = ?exited.last_words,
+                "a teammate's TUI exited and the lead has forgotten it"
+            );
+            let surface = Surface::Shim {
+                cli: exited.cli,
+                pane: Some(exited.pane_id.clone()),
+            };
+            pass.retired.push(Retired {
+                name: exited.name.clone(),
+                pane_id: Some(exited.pane_id.clone()),
+                backend_type: Some(surface.backend_type().to_owned()),
+            });
+            pass.exited.push(exited);
+        }
     }
 
     /// One pass over the lead's inbox under one root.

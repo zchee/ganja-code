@@ -1284,6 +1284,15 @@ pub struct TeammateRegistry {
     /// the registry: a loop holding an `Arc<TeammateRegistry>` would be a
     /// cycle through the member map that owns its handle.
     shims: Arc<Mutex<shim::ShimRecords>>,
+    /// The TUI members whose panes stopped running after readiness, put here
+    /// by their own loops for the lead's next pass to retire
+    /// ([`shim_tui::Exited`], **D512** as amended for bead g9u).
+    ///
+    /// An [`Arc`] for `shims`' reason — the loop that writes it would
+    /// otherwise hold the registry that holds the loop — and drained, not
+    /// read, by [`TeammateRegistry::take_exited`]: each entry is acted on
+    /// exactly once, by the one pass that takes it.
+    exited: Arc<Mutex<Vec<shim_tui::Exited>>>,
     /// What a foreign-CLI turn's deadline is when a config named one, resolved
     /// **once** at construction (**D509**).
     ///
@@ -1367,9 +1376,27 @@ impl TeammateRegistry {
             next_color: Mutex::new(0),
             tasks: Mutex::new(Vec::new()),
             shims,
+            exited: Arc::default(),
             shim_turn_timeout: None,
             dialogs: Mutex::new(None),
         }
+    }
+
+    /// The TUI members whose panes stopped running since the last call, each
+    /// taken out so it is retired once (**D512** as amended for bead g9u).
+    ///
+    /// The lead's pass ([`lead_inbox::LeadInbox::poll`]) is the one caller: it
+    /// retires each through [`TeammateRegistry::retire`], the same door a
+    /// `shutdown_approved` takes, so a member that ended on its own and one
+    /// that was asked to end leave the roster and the team file the same way.
+    #[must_use]
+    pub fn take_exited(&self) -> Vec<shim_tui::Exited> {
+        std::mem::take(
+            &mut *self
+                .exited
+                .lock()
+                .expect("the exited list is never poisoned"),
+        )
     }
 
     /// The per-turn deadline a foreign-CLI teammate runs under (**D509**).
@@ -2263,6 +2290,7 @@ impl TeammateRegistry {
                     lead_inbox: self.lead_inbox(),
                     recent: Arc::clone(&recent),
                     alive: Arc::clone(&alive),
+                    exited: Arc::clone(&self.exited),
                     cancel: self.cancel.child_token(),
                 },
             );

@@ -109,6 +109,18 @@
 //! writes a shim orphan record either: the `.shims` sweep signals what it
 //! proves is ours, and a pane whose process ganja did not fork is not that.
 //!
+//! A pane whose process ends **after** readiness — the CLI quit on its own,
+//! crashed, or a person closed the pane — is noticed by the member's own loop
+//! ([`LIVENESS_POLL`](crate::teammate::shim_tui::LIVENESS_POLL)), not only by the next paste that would have failed
+//! into it: the pane's last line is read while the corpse is still on screen,
+//! the messages still in that member's inbox are answered to their senders
+//! rather than left unread, the corpse is closed through the same dead-only
+//! door, the lead's model is told in prose, and the registry is handed an
+//! [`Exited`](crate::teammate::shim_tui::Exited) the lead's next pass retires the member on — the record out of
+//! the team file, the row off the roster. The spawn-window death stays what
+//! it was, a refusal carrying the CLI's last words; this is the other half,
+//! for a member that was live and then was not.
+//!
 //! # Where the vendor's spelling lives
 //!
 //! [`TuiDriver`](crate::teammate::shim_tui::TuiDriver) is a companion trait over the three driver types of the
@@ -217,6 +229,24 @@ pub const RING_DELIVERY_FAILED: &str = "delivery to pane failed";
 /// ordinary [`RING_DELIVERED`] instead.
 pub const RING_PASTED_UNSUBMITTED: &str = "pasted into the pane, unsubmitted — no composer \
      marker was seen, so a person submits it";
+
+/// What the ring says when the pane's process ended **after** readiness —
+/// the CLI quit on its own, crashed, or a person closed the pane — followed
+/// by the pane's own last line where it showed one.
+pub const RING_EXITED: &str = "exited in the pane";
+
+/// How often a member's loop asks whether its pane is still running.
+///
+/// A question a delivery cannot be the only thing to ask: under
+/// [`Delivery::FireAndForget`] a TUI that quits between messages is, to this
+/// side, indistinguishable from one that is thinking — until the next paste
+/// fails into it, which may be never. Two seconds is four inbox passes
+/// ([`shim::POLL`]): a dead pane is a matter of what is on a person's screen
+/// and of a roster row that no longer answers, not of a turn's correctness,
+/// so it need not be noticed faster than a person would notice it; and each
+/// ask is one `list-panes` client per member, which at this cadence costs
+/// less than the inbox read beside it.
+pub const LIVENESS_POLL: Duration = Duration::from_secs(2);
 
 /// The opening of a spawn refusal for a TUI that exited inside the readiness
 /// window; the CLI's own last words follow it.
@@ -500,6 +530,8 @@ pub struct TuiPane {
     /// `shutdown_request` teardown followed by the lead's retire — looks and
     /// signals nothing.
     ended: AtomicBool,
+    /// What the first `end` found, for every later one to answer.
+    fate: std::sync::OnceLock<PaneFate>,
 }
 
 impl std::fmt::Debug for TuiPane {
@@ -535,6 +567,7 @@ impl TuiPane {
             readiness,
             cancel: CancellationToken::new(),
             ended: AtomicBool::new(false),
+            fate: std::sync::OnceLock::new(),
         }
     }
 
@@ -570,12 +603,27 @@ impl TuiPane {
 
     /// Ends the pane and the process in it, identity-checked, in the order
     /// the module doc gives: TERM the group while the pane pins the pid, wait,
-    /// KILL, then close the dead pane. Idempotent.
-    pub async fn end(&self) {
+    /// KILL, then close the dead pane — and says what it left.
+    ///
+    /// Idempotent: the first call does the work and the answer is kept, so a
+    /// second call (the registry's kill after a loop's own exit path, say)
+    /// touches nothing and answers what the first found — or
+    /// [`PaneFate::Left`] while the first is still at it, which is the
+    /// honest "not known closed".
+    pub async fn end(&self) -> PaneFate {
         self.cancel.cancel();
         if self.ended.swap(true, Ordering::AcqRel) {
-            return;
+            return self.fate.get().copied().unwrap_or(PaneFate::Left);
         }
+        let fate = self.end_once().await;
+        // Set exactly once, by the one caller that got past the swap above.
+        let _ = self.fate.set(fate);
+
+        fate
+    }
+
+    /// The body of [`TuiPane::end`], run by its first caller only.
+    async fn end_once(&self) -> PaneFate {
         let cli = backend_name(self.backend);
         let pane = &self.pane;
 
@@ -586,16 +634,13 @@ impl TuiPane {
                 // not come; the pane outlives this process and is a person's
                 // to close. Named rather than guessed at.
                 tracing::warn!(cli, pane = pane.id, %error, "a TUI pane could not be listed, so it was left");
-                return;
+                return PaneFate::Left;
             }
         };
         match live.iter().find(|listed| listed.id == pane.id) {
             // Not running: dead and kept, or already closed. The corpse, if
             // there is one, is closed through the dead-only door.
-            None => {
-                self.close_corpse().await;
-                return;
-            }
+            None => return self.close_corpse().await,
             Some(listed) if !pane.is(listed) => {
                 tracing::warn!(
                     cli,
@@ -603,7 +648,7 @@ impl TuiPane {
                     birth = pane.birth,
                     "a TUI pane's id now names somebody else's pane; left alone"
                 );
-                return;
+                return PaneFate::Recycled;
             }
             Some(_) => {}
         }
@@ -613,8 +658,7 @@ impl TuiPane {
         let Ok(group) = pane.birth.parse::<i32>() else {
             // A birth the listing accepted is digits; this arm is the type
             // system's. The identity-checked kill is the honest fallback.
-            self.kill_pane().await;
-            return;
+            return self.kill_pane().await;
         };
         shim::signal_group(group, libc::SIGTERM);
         if !self.gone_within(SETTLE).await {
@@ -629,8 +673,7 @@ impl TuiPane {
                 // A group KILL cannot take is not a thing a user process sees
                 // outside a wedged kernel; what is left is to end the pane
                 // itself, identity-checked.
-                self.kill_pane().await;
-                return;
+                return self.kill_pane().await;
             }
         }
         tracing::info!(
@@ -638,7 +681,8 @@ impl TuiPane {
             pane = pane.id,
             "a TUI teammate's process group was ended"
         );
-        self.close_corpse().await;
+
+        self.close_corpse().await
     }
 
     /// Whether the pane stops listing live inside `limit`.
@@ -659,12 +703,14 @@ impl TuiPane {
         }
     }
 
-    /// Closes the pane if its process has ended, through the dead-only door.
-    async fn close_corpse(&self) {
+    /// Closes the pane if its process has ended, through the dead-only door,
+    /// and says what it left.
+    async fn close_corpse(&self) -> PaneFate {
         let cli = backend_name(self.backend);
         match self.server.close_dead(&self.pane.id).await {
             Ok(Closed::Yes) => {
-                tracing::info!(cli, pane = self.pane.id, "a TUI teammate's pane was closed")
+                tracing::info!(cli, pane = self.pane.id, "a TUI teammate's pane was closed");
+                PaneFate::Closed
             }
             Ok(Closed::AlreadyGone) => {
                 tracing::debug!(
@@ -672,11 +718,12 @@ impl TuiPane {
                     pane = self.pane.id,
                     "a TUI teammate's pane was already gone"
                 );
+                PaneFate::Closed
             }
             Ok(Closed::Alive) => {
                 // Live again — respawned by a person into the same id, or the
                 // process outlived a KILL. The identity check decides.
-                self.kill_pane().await;
+                self.kill_pane().await
             }
             Ok(Closed::Refused) => {
                 // Dead, the kill sent, and still there: a corpse tmux would
@@ -687,20 +734,23 @@ impl TuiPane {
                     pane = self.pane.id,
                     "a TUI teammate's dead pane would not close; it is dead, and a person closes it"
                 );
+                PaneFate::Left
             }
             Err(error) => {
                 tracing::warn!(cli, pane = self.pane.id, %error, "a TUI teammate's dead pane could not be closed");
+                PaneFate::Left
             }
         }
     }
 
     /// The identity-checked `kill-pane`, for the paths where the group could
-    /// not be signalled or the pane came back live.
-    async fn kill_pane(&self) {
+    /// not be signalled or the pane came back live; says what it left.
+    async fn kill_pane(&self) -> PaneFate {
         let cli = backend_name(self.backend);
         match self.server.kill(&self.pane).await {
             Ok(Killed::Yes) => {
-                tracing::info!(cli, pane = self.pane.id, "a TUI teammate's pane was ended")
+                tracing::info!(cli, pane = self.pane.id, "a TUI teammate's pane was ended");
+                PaneFate::Closed
             }
             Ok(Killed::AlreadyGone) => {
                 tracing::debug!(
@@ -708,18 +758,38 @@ impl TuiPane {
                     pane = self.pane.id,
                     "a TUI teammate's pane was already gone"
                 );
+                PaneFate::Closed
             }
-            Ok(Killed::Recycled) => tracing::warn!(
-                cli,
-                pane = self.pane.id,
-                birth = self.pane.birth,
-                "a TUI teammate's pane id now names somebody else's pane; left alone"
-            ),
+            Ok(Killed::Recycled) => {
+                tracing::warn!(
+                    cli,
+                    pane = self.pane.id,
+                    birth = self.pane.birth,
+                    "a TUI teammate's pane id now names somebody else's pane; left alone"
+                );
+                PaneFate::Recycled
+            }
             Err(error) => {
                 tracing::warn!(cli, pane = self.pane.id, %error, "a TUI teammate's pane could not be ended");
+                PaneFate::Left
             }
         }
     }
+}
+
+/// What [`TuiPane::end`] left of the pane — the fact a sentence about "the
+/// pane was closed" has to be read off rather than assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneFate {
+    /// Gone from the server: closed here, or already gone.
+    Closed,
+    /// Still on the server, dead, and not taken away — the kill was refused,
+    /// or no listing could be had to check it against — so a person closes
+    /// it; logged as such.
+    Left,
+    /// Its id now names a live pane under another pid: recycled, somebody
+    /// else's, and not touched.
+    Recycled,
 }
 
 /// One [`TuiDriver`] as a [`TeammateBackend`] that opens its CLI's native
@@ -1031,8 +1101,87 @@ pub struct Lent {
     /// Cleared when the loop ends, so a member that answered a shutdown stops
     /// being listed without the registry having to be told.
     pub alive: Arc<AtomicBool>,
+    /// Where a loop that saw its pane stop running puts the fact, for the
+    /// lead's next pass to retire the member on ([`Exited`]).
+    pub exited: Arc<Mutex<Vec<Exited>>>,
     /// The registry's own cancellation, beside the handle's own.
     pub cancel: CancellationToken,
+}
+
+/// A TUI member whose pane stopped running **after** readiness — the CLI
+/// quit, crashed, or a person closed the pane (bead g9u's case, **D512** as
+/// amended): what the loop that noticed hands the registry, for the lead's
+/// next pass to retire the member on.
+///
+/// Carried through the registry rather than written as a frame because no
+/// frame says it honestly: a `shutdown_approved` answers a request nobody
+/// sent, and `teammate_terminated` is the lead's word to a teammate, never a
+/// teammate's to the lead (§5). The lead's *model* is told in prose beside
+/// this, by the loop itself, so the harness's bookkeeping and the model's
+/// knowledge do not depend on each other arriving.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exited {
+    /// Which member.
+    pub name: String,
+    /// Which CLI it ran.
+    pub cli: ShimCli,
+    /// Its backend, for a frontend that names members by it.
+    pub backend: MemberBackend,
+    /// The pane it ran in.
+    pub pane_id: String,
+    /// What the loop left of that pane — read off [`TuiPane::end`], never
+    /// assumed: a corpse tmux would not take away, or an id that now names
+    /// somebody else's pane, is said rather than called closed.
+    pub pane: PaneFate,
+    /// The last non-empty line the pane showed, where the pane was still this
+    /// member's to read and the capture found one: the CLI's own parting
+    /// words. Never a recycled pane's screen.
+    pub last_words: Option<String>,
+}
+
+impl Exited {
+    /// The one sentence a frontend shows for this.
+    #[must_use]
+    pub fn notice(&self) -> String {
+        let cli = backend_name(self.backend);
+        let said = self
+            .last_words
+            .as_deref()
+            .map(|words| format!(" — last line: {words}"))
+            .unwrap_or_default();
+        format!(
+            "{name} ({cli}) exited in its pane{said}; {fate}",
+            name = self.name,
+            fate = self.pane_sentence(),
+        )
+    }
+
+    /// What became of the pane and the member, as one clause.
+    #[must_use]
+    pub fn pane_sentence(&self) -> &'static str {
+        match self.pane {
+            PaneFate::Closed => "the pane was closed and the teammate retired",
+            PaneFate::Left => {
+                "the teammate is retired, and its dead pane could not be closed from here — close \
+                 it by hand"
+            }
+            PaneFate::Recycled => {
+                "the teammate is retired; its pane id now names another pane, which was left alone"
+            }
+        }
+    }
+}
+
+/// How a pane stopped being this member's ([`TuiRunner::gone`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gone {
+    /// Not listed live: dead under `remain-on-exit`, or closed. A corpse, if
+    /// tmux kept one, is still this member's, and its screen may be read.
+    Dead,
+    /// Listed live under another pid: the id was recycled, somebody respawned
+    /// something into it. Not ours any more and not ours to touch — no
+    /// capture, no close.
+    Recycled,
 }
 
 /// What one pass of [`TuiRunner`] did.
@@ -1070,10 +1219,12 @@ pub struct TuiRunner {
     lead_inbox: PathBuf,
     recent: Arc<Mutex<VecDeque<String>>>,
     alive: Arc<AtomicBool>,
+    exited: Arc<Mutex<Vec<Exited>>>,
     /// The registry's own token, beside the handle's — [`shim::ShimRunner`]
     /// says why there are two.
     registry: CancellationToken,
     poll: Duration,
+    liveness: Duration,
 }
 
 impl std::fmt::Debug for TuiRunner {
@@ -1097,8 +1248,10 @@ impl TuiRunner {
             lead_inbox: lent.lead_inbox,
             recent: lent.recent,
             alive: lent.alive,
+            exited: lent.exited,
             registry: lent.cancel,
             poll: shim::POLL,
+            liveness: LIVENESS_POLL,
         }
     }
 
@@ -1120,11 +1273,22 @@ impl TuiRunner {
         let registry = self.registry.clone();
         let mut poll = tokio::time::interval(self.poll);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Starting one period out: the pane was listed live by the spawn's own
+        // readiness re-check moments ago, so an immediate first ask would be
+        // one `list-panes` that can only answer what is already known.
+        let mut liveness =
+            tokio::time::interval_at(tokio::time::Instant::now() + self.liveness, self.liveness);
+        liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
                 () = cancel.cancelled() => break,
                 () = registry.cancelled() => break,
+                _ = liveness.tick() => {
+                    if self.gone().await.is_some() {
+                        break;
+                    }
+                }
                 _ = poll.tick() => {
                     if self.tick().await.shutdown.is_some() {
                         break;
@@ -1134,9 +1298,175 @@ impl TuiRunner {
         }
 
         // The pane itself is ended by whoever cancelled — the backend's kill,
-        // or this loop's own shutdown teardown — so all that is left is to
-        // stop being listed.
+        // this loop's own shutdown teardown, or its own exit path, which
+        // closed the corpse before breaking — so all that is left is to stop
+        // being listed.
         self.alive.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether the pane has stopped being this member's — and, when it has,
+    /// everything that follows from that ([`Self::exited`]; bead g9u's case,
+    /// **D512** as amended). [`None`] while the pane is still running under
+    /// its recorded pair.
+    ///
+    /// A pane that is dead under `remain-on-exit` or gone because a person
+    /// closed it is [`Gone::Dead`]; one wearing this id under another pid is
+    /// [`Gone::Recycled`] — either way a member whose CLI is not there to
+    /// paste into. A listing that *fails* says nothing either way and leaves
+    /// the member as it is — "no proof, no retire", the reaper's own rule —
+    /// because the cost of a wrong [`None`] is one more poll, and the cost of
+    /// a wrong [`Some`] is a teammate retired out from under a person.
+    async fn gone(&self) -> Option<Gone> {
+        let pane = self.handle.pane();
+        let live = match self.handle.server().panes().await {
+            Ok(live) => live,
+            Err(error) => {
+                tracing::debug!(
+                    teammate = self.spec.name.as_str(),
+                    pane = pane.id,
+                    %error,
+                    "a liveness listing failed; the member is left as it is"
+                );
+                return None;
+            }
+        };
+        let how = match live.iter().find(|listed| listed.id == pane.id) {
+            Some(listed) if pane.is(listed) => return None,
+            Some(_) => Gone::Recycled,
+            None => Gone::Dead,
+        };
+        self.exited(how).await;
+
+        Some(how)
+    }
+
+    /// The pane stopped being this member's after readiness: read what it
+    /// said if it is still ours to read, answer whoever is still waiting on
+    /// it, close the corpse if there is one, and hand the fact to the lead.
+    ///
+    /// In that order on purpose. The last words are read **first**, while the
+    /// corpse is still on screen — ruling 8(c)'s order for the spawn-window
+    /// death, kept for this one — and only from a pane that is still this
+    /// member's: a recycled id is somebody else's screen, and quoting it as
+    /// the dead member's parting words would put a stranger's terminal into
+    /// the lead's context. The messages still in this member's inbox are
+    /// answered before the loop ends, because a message nobody will ever read
+    /// is the one thing a [`Delivery::FireAndForget`] sender cannot find out
+    /// on its own. The pane is closed *here* rather than on the lead's next
+    /// pass — that pass is a frontend's tick, and this loop does not leave a
+    /// corpse behind on the chance it never comes; the pass's own `end` then
+    /// finds the pane already gone. What [`TuiPane::end`] actually left is
+    /// read off its answer and said, never assumed. And the lead's model is
+    /// told in prose, beside the registry's [`Exited`], so the person and the
+    /// model learn it the way they learn everything else a teammate says.
+    async fn exited(&self, how: Gone) {
+        let name = self.spec.name.as_str();
+        let cli = backend_name(self.handle.backend);
+        let pane = self.handle.pane().id.clone();
+        let words = match how {
+            Gone::Dead => match self.handle.server().capture(&pane).await {
+                Ok(captured) => last_words(&captured),
+                Err(_) => None,
+            },
+            Gone::Recycled => None,
+        };
+        tracing::info!(
+            teammate = name,
+            pane,
+            cli,
+            ?how,
+            last = ?words,
+            "a TUI teammate's pane stopped being its own after readiness; the member is retired"
+        );
+        self.remember(match &words {
+            Some(words) => format!("{RING_EXITED} · {words}"),
+            None => RING_EXITED.to_owned(),
+        });
+        self.answer_left_behind().await;
+        let fate = self.handle.end().await;
+        let exited = Exited {
+            name: name.to_owned(),
+            cli: self.handle.cli(),
+            backend: self.handle.backend,
+            pane_id: pane,
+            pane: fate,
+            last_words: words,
+        };
+        let said = exited
+            .last_words
+            .as_deref()
+            .map(|words| format!(" — its pane's last line was: {words}"))
+            .unwrap_or_default();
+        self.mail(
+            self.lead_inbox.clone(),
+            format!(
+                "{name}'s {cli} TUI has exited{said}; {fate}. If the work is still owed, spawn a \
+                 new teammate.",
+                fate = exited.pane_sentence(),
+            ),
+        )
+        .await;
+        self.exited
+            .lock()
+            .expect("the exited list is never poisoned")
+            .push(exited);
+    }
+
+    /// Answers every message still in this member's inbox, now that nothing
+    /// will read it: a shutdown request is approved — the member is, after
+    /// all, shutting down — and each plain message's sender is told it was not
+    /// delivered; frames of any other kind are taken out as the information
+    /// they were.
+    ///
+    /// Read once. A message that lands between this read and the lead's
+    /// retire — a window of one lead pass, during which the name is still in
+    /// the team file — sits unread, which the headless shim's own shutdown
+    /// path shares; narrower than a poll and carried as bead `ganja-code-ffs`
+    /// rather than as a second drain from the lead's side.
+    async fn answer_left_behind(&self) {
+        let Some(contents) = runner::read_inbox(self.inbox(), self.spec.name.as_str()).await else {
+            return;
+        };
+        if contents.valid.is_empty() {
+            return;
+        }
+        let mut handled = Vec::with_capacity(contents.valid.len());
+        for message in &contents.valid {
+            handled.push(mailbox::identity(message));
+            match Frame::classify(&message.text) {
+                Tagged::NotAnObject | Tagged::Untagged => {
+                    self.note_left_behind(&message.from).await;
+                }
+                Tagged::Reserved("shutdown_request") => match message.frame() {
+                    Some(Frame::ShutdownRequest(request)) => self.tear_down(&request).await,
+                    _ => tracing::warn!(
+                        teammate = self.spec.name.as_str(),
+                        from = message.from,
+                        "a shutdown request this member could not read arrived as it exited; \
+                         the exit is the answer"
+                    ),
+                },
+                Tagged::Reserved(_) | Tagged::Unknown { .. } => {}
+            }
+        }
+        self.prune(handled).await;
+    }
+
+    /// Tells `from` that its message reached a member that is no longer there.
+    async fn note_left_behind(&self, from: &str) {
+        let Some(inbox) = self.sender_inbox(from) else {
+            return;
+        };
+        self.mail(
+            inbox,
+            format!(
+                "That message was not delivered: {name}'s {cli} TUI has exited, so nothing will \
+                 read it. {name} is retired; spawn a new teammate if the work is still owed.",
+                name = self.spec.name.as_str(),
+                cli = backend_name(self.handle.backend),
+            ),
+        )
+        .await;
     }
 
     /// One pass: read, classify, paste whatever was really prompt material —
