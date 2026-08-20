@@ -103,12 +103,15 @@
 //! of the shim core rather than of anything here — pinned by a test in this
 //! file's suite so it cannot quietly stop being true.
 //!
-//! It is not hypothetical. On the machine this was written on, `~/.grok` is a
-//! symlink, and the `read-only` profile refuses to start under one: *"hook
-//! write-deny ensure failed: symlinked GROK_HOME is not allowed under sandbox
-//! write-deny"*. A grok teammate there refuses every turn with that sentence,
-//! which is the honest outcome — the alternative would be starting with the
-//! protections missing.
+//! It is not hypothetical. On the machine this was written on, `~/.grok` was
+//! a symlink until 2026-08-20, and the `read-only` profile refuses to start
+//! under one: *"hook write-deny ensure failed: symlinked GROK_HOME is not
+//! allowed under sandbox write-deny"*. A grok teammate there refused every
+//! turn with that sentence, which is the honest outcome — the alternative
+//! would be starting with the protections missing. The user un-symlinked the
+//! directory and the same launch line then ran real turns; the `GROK_HOME`
+//! carve-out that would have spared the symlink stays filed as bead
+//! `ganja-code-q98` for a machine that keeps one.
 //!
 //! # The parser, and the door it did not take (**D510**)
 //!
@@ -207,13 +210,14 @@ pub const OUTPUT_FORMAT: &str = "streaming-messages-json";
 /// no `--prompt-json`, no `--prompt-file`. No identity flag, because that CLI
 /// has none to give.
 ///
-/// Measured on 2026-08-20 against `grok 1.0.6 (24c70bc7ffdd) [alpha]`: the
-/// flags parse, and then on this machine the read-only profile refuses to
-/// apply under a symlinked `~/.grok` (bead `ganja-code-q98`) with the same
-/// sentence the headless child exits on. That is the honest outcome and the one
-/// a pane exists to keep on screen — the recording,
-/// `tests/fixtures/grok-tui-probe.txt`, carries the launch line and the
-/// refusal verbatim, and the test compares this table against it rather than
+/// Measured twice on 2026-08-20, and the recording
+/// (`tests/fixtures/grok-tui-probe.txt`) carries both: against `grok 1.0.6`
+/// with `~/.grok` a symlink the flags parse and then the read-only profile
+/// refuses to apply (bead `ganja-code-q98`), with the same sentence the
+/// headless child exits on — the dead-pane case a pane exists to keep on
+/// screen, kept verbatim; and against `grok 1.0.7` with `~/.grok` a real
+/// directory the same argv reaches the composer under `sandbox:read-only`.
+/// The test compares this table against the recorded launch line rather than
 /// against a second literal.
 pub const TUI_ARGV: [&str; 4] = [
     "--sandbox",
@@ -222,28 +226,26 @@ pub const TUI_ARGV: [&str; 4] = [
     PERMISSION_MODE,
 ];
 
-/// What a readiness poll looks for in a captured pane — **provisional, and
-/// unprobed on a working grok home**.
+/// What a readiness poll looks for in a captured pane: the composer's prompt
+/// glyph, **measured** (`tests/fixtures/grok-tui-probe.txt`, the 1.0.7
+/// recording).
 ///
-/// grok never reached a composer on this machine: the read-only profile
-/// refuses to start under a symlinked `~/.grok` (bead `ganja-code-q98`), in
-/// TUI mode exactly as headless, so there is no capture of an empty grok
-/// composer to pin this against, and `tests/fixtures/grok-tui-probe.txt`
-/// records the refusal rather than a marker. What is pinned instead is the
-/// name of the welcome banner that TUI draws — the string the vendor's own pty
-/// end-to-end suite waits on as `WELCOME_BANNER`
-/// (`crates/codegen/xai-grok-pager/tests/pty_e2e/minimal/`, in the source
-/// clone at 1.0.5), read out of that source rather than observed here — and
-/// recorded as the fixture's `provisional marker` line, source named, which
-/// the test beside this byte-compares it against. That test also asserts the
-/// recording holds **no** composer capture in either spelling a recording
-/// here has used, so the day a probe on a working home lands one, it fails
-/// and this becomes a byte comparison against the capture, like codex's and
-/// agy's. Until then the cost of a wrong
-/// marker is bounded by the poll's own rule — a miss is a ring note and a
-/// proceed, never a failure — which is why a provisional value is shipped
-/// rather than a sentence this build cannot measure.
-pub const READY_MARKER: &str = "Grok Build";
+/// grok's composer draws no placeholder text — codex's `Ask Codex to do
+/// anything` has no counterpart here — so the empty composer line is the box
+/// border and this glyph and nothing else, and the glyph is what a poll can
+/// look for. The test beside this reads the recording's `composer capture`
+/// line, strips the box border, and byte-compares what is left against this
+/// constant, the way codex's and agy's markers are pinned. Until the user
+/// un-symlinked this machine's `~/.grok` (bead `ganja-code-q98`) the marker
+/// was the vendor's welcome-banner string read out of its own source; the
+/// banner still co-renders with the composer in the first frame, but a
+/// captured composer outranks a string nobody observed.
+///
+/// The glyph also opens every user row grok's transcript draws after a
+/// submit, which is no hazard to a readiness poll: it only ever asks whether
+/// the composer has been drawn at all, and the settle and the liveness
+/// re-listing in `shim_tui` bound what a too-early sighting can cost.
+pub const READY_MARKER: &str = "❯";
 
 /// Everything this CLI's argv may **never** carry, in every spelling that
 /// binary has.
@@ -1235,14 +1237,28 @@ mod tests {
 
         assert_eq!(*binary, BINARY);
         assert_eq!(tui(), floors);
-        // The flags parsed: what the recording says happened next is the
-        // vendor's refusal on this machine, not a parse error — which is the
-        // outcome a pane is meant to keep in front of a person.
-        let outcome = TUI_PROBE
+        // The flags parsed on both recordings: under a symlinked home what
+        // happened next was the vendor's refusal, not a parse error — the
+        // outcome a pane is meant to keep in front of a person — and under a
+        // real one the composer.
+        let outcomes: Vec<&str> = TUI_PROBE
             .lines()
-            .find_map(|line| line.strip_prefix("outcome: "))
-            .expect("the recording says what the launch reached");
-        assert!(outcome.starts_with("flags parse;"), "{outcome}");
+            .filter(|line| line.trim_start().starts_with("outcome ("))
+            .collect();
+        assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+        // Keyed on what each recording says about the home rather than on
+        // position, so a third recording fails this loudly instead of
+        // shifting which line answers which question.
+        let symlinked = outcomes
+            .iter()
+            .find(|line| line.contains("a symlink"))
+            .expect("the symlinked-home recording");
+        let real = outcomes
+            .iter()
+            .find(|line| line.contains("a real directory"))
+            .expect("the real-home recording");
+        assert!(symlinked.contains("flags parse;"), "{symlinked}");
+        assert!(real.contains("composer reached"), "{real}");
         let refusal = TUI_PROBE
             .lines()
             .find_map(|line| line.strip_prefix("error: "))
@@ -1254,46 +1270,32 @@ mod tests {
     }
 
     #[test]
-    fn the_ready_marker_is_provisional_until_a_working_home_is_probed() {
-        // The honest-absence pin, two-sided. grok reached no composer on this
-        // machine, so the recording holds no composer capture in either
-        // spelling a recorder here has used — codex's `composer capture` line
-        // and agy's `footer marker:` line — and [`READY_MARKER`] is the
-        // vendor's own welcome-banner string, read out of the grok-build
-        // source the recording names, rather than a captured line. The day
-        // `grok-tui-probe.txt` gains the `composer capture: ` line its header
-        // asks a working-home probe to add, this must be replaced by the byte
-        // comparison codex's and agy's markers get.
-        for captured in ["composer capture", "footer marker:"] {
-            assert!(
-                !TUI_PROBE
-                    .lines()
-                    .any(|line| line.trim_start().starts_with(captured)),
-                "a composer was captured ({captured}) — pin READY_MARKER against it \
-                 instead of this"
-            );
-        }
-        let outcome = TUI_PROBE
+    fn the_ready_marker_is_the_composer_glyph_the_probe_captured() {
+        // The line under `composer capture`, minus the box border it was
+        // drawn inside: grok's composer carries no placeholder, so what the
+        // recording shows with nothing typed is the border and the glyph, and
+        // the glyph is the marker.
+        let captured = TUI_PROBE
             .lines()
-            .find_map(|line| line.strip_prefix("outcome: "))
-            .expect("the recording says what the launch reached");
+            .skip_while(|line| !line.trim_start().starts_with("composer capture"))
+            .nth(1)
+            .expect("the recording captured the empty composer");
+        let glyph = captured
+            .trim()
+            .strip_prefix('│')
+            .and_then(|inner| inner.strip_suffix('│'))
+            .expect("the composer line is drawn inside a box")
+            .trim();
+
+        assert_eq!(READY_MARKER, glyph);
+        // And nothing provisional is left: the recording no longer carries a
+        // marker read out of somebody's source instead of off a screen.
         assert!(
-            outcome.contains("profile application refused"),
-            "the reason there is no capture is the recorded refusal: {outcome}"
+            !TUI_PROBE
+                .lines()
+                .any(|line| line.trim_start().starts_with("provisional marker")),
+            "the composer was captured; the provisional line has no reader left"
         );
-        // Provisional is not unpinned: the constant is byte-compared against
-        // the recording's own provisional line, whose parenthesis says it is
-        // unprobed and names the source the string was read out of.
-        let (provenance, marker) = TUI_PROBE
-            .lines()
-            .find_map(|line| line.strip_prefix("provisional marker ("))
-            .expect("the recording carries the provisional marker and where it came from")
-            .rsplit_once("): ")
-            .expect("a provenance in parentheses, then the marker");
-        assert!(provenance.starts_with("unprobed;"), "{provenance}");
-        assert!(provenance.contains("WELCOME_BANNER"), "{provenance}");
-        assert!(!marker.is_empty(), "a poll needs a string to look for");
-        assert_eq!(READY_MARKER, marker);
     }
 
     #[test]

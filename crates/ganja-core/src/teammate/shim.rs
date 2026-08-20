@@ -886,10 +886,11 @@ pub fn signal_group(pgid: i32, signal: i32) {
 /// composed permission mode actually does on the headless door, so the ring
 /// neither implies an axis the vendor's code does not have nor understates the
 /// one it does. That third line is this door's and not the pane's: a grok TUI
-/// (**D512**) runs under the same flag, but what the flag does *there* is
-/// unprobed on this machine, so [`crate::teammate::shim_tui::spawn_lines`]
-/// ends on its own pane sentence instead of borrowing this one (the lead's
-/// ruling 5 for P28).
+/// (**D512**) runs under the same flag and, measured, does the opposite with
+/// it — the TUI raises its own approval prompt to the person where this door
+/// cancels the turn — so [`crate::teammate::shim_tui::spawn_lines`] ends on
+/// its own pane sentence instead of borrowing this one (the lead's ruling 5
+/// for P28, and the 1.0.7 recording in `grok-tui-probe.txt` that settled it).
 #[must_use]
 pub fn spawn_lines(backend: MemberBackend) -> Vec<String> {
     let mut lines = posture_lines(backend);

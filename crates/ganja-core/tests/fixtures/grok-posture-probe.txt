@@ -158,6 +158,43 @@ wall-clock: 6.8s
 #   `DontAsk` would silently *deny* and let the turn continue, and what arrived
 #   was a cancel that ended it. No drift.
 #
+# ---- Re-probe, 2026-08-20 (later the same day), grok 1.0.7, ~/.grok a real
+# directory (the user un-symlinked it; bead ganja-code-q98's machine fact is
+# gone). Same composed launch line, three headless turns and one TUI turn,
+# each checked on disk rather than on the model's word:
+#
+# - write tool INSIDE the writable set (a file under /tmp, the cwd):
+#   performed, no ask, stop_reason end_turn, file present with "WROTE".
+#   DRIFT from 1.0.6, where the ask cancelled it.
+# - write tool OUTSIDE the writable set (the repo cwd): blocked by the sandbox
+#   ("IO Error: Operation not permitted (os error 1)"); the model fell back to
+#   a shell write, which raised an ask — headless: "User cancelled the
+#   execution for tool `run_terminal_command`", stop_reason cancelled, no file;
+#   TUI: grok's own three-option approval prompt to the person, and an
+#   approved shell write was STILL denied by read-only (no file), a rejection
+#   ending the turn ("Turn cancelled by user").
+#   The live ladder asserts the outside case at a third location the
+#   recording above did not probe — `$HOME/.cache/ganja/probes/<pid>/`, chosen
+#   because the repo cwd is not a place a test may write probe files into and
+#   a second temp path is writable by design — and that location was measured
+#   by the ladder's own first two runs on 2026-08-20 (1.0.7): write tool →
+#   "IO Error: Operation not permitted (os error 1)", no file; shell write →
+#   asked, cancelled headless, no file. `~/.cache` is outside the set.
+# - run_terminal_command `echo probe-ran`: ran, no ask, end_turn. DRIFT from
+#   1.0.6, where the ask cancelled it.
+# - run_terminal_command `curl … https://example.com`: ran, no ask, HTTP 200,
+#   headless AND in the TUI. The network bound is now MEASURED absent (bead
+#   ganja-code-vaz): "may send them anywhere" was over-disclosure at 1.0.6 and
+#   is literal at 1.0.7.
+#
+# What that does to the sentence below: nothing. Every bound clause holds
+# (writes denied outside ~/.grok and temp, whole-disk read, no network bound),
+# and "a tool request that needs one ends the turn" is still what happens to
+# the asks that remain — what shrank at 1.0.7 is the SET of requests that ask:
+# a sandbox-permitted shell command or write is performed unasked now, where
+# 1.0.6's ask used to wedge it. The live ladder (`teammate_grok_live.rs`)
+# asserts 1.0.7's answers; a 1.0.6 binary now fails it, by design.
+#
 # The sentence those answers add up to, in D508 Principle 6's shape — what the
 # posture bounds, what the read it grants enables, then what an ask costs.
 # Everything after "sentence: " on the next line is the assertion.

@@ -271,24 +271,40 @@ const PANE_CODEX: &str = "codex's own TUI in a tmux pane beside you; approval_po
 const PANE_AGY: &str = "agy's own TUI in a tmux pane beside you, opening in accept-edits mode: \
      file edits auto-approved";
 
-/// What a grok pane adds after [`SEND_ONLY`] — the one row written
-/// **narrower than the other two**, because grok's TUI reached no composer
-/// when probed (`tests/fixtures/grok-tui-probe.txt`: the sandbox profile
-/// refuses to apply under this machine's symlinked `~/.grok`, bead
-/// `ganja-code-q98`).
+/// What a grok pane adds after [`SEND_ONLY`], **measured**
+/// (`tests/fixtures/grok-tui-probe.txt`, the 1.0.7 recording) — and the one
+/// row that has to *contradict* its own bound sentence on purpose.
 ///
-/// So no clause here claims a prompt renders for a person: which of grok's
-/// dialogs show under `--permission-mode dontAsk` is unprobed, and the lead's
-/// ruling 5 for P28 forbids crediting that flag with an approval axis on this
-/// door any more than the headless one. What *is* said is the bound
-/// sentence's own last clause, restated rather than pointed at — a dialog and
-/// a ring order their rows differently, and a clause that says "above" is
-/// only true of one of them — because it is the clause a TUI invites a
-/// reader to assume away: a tool request that needs approval is not put to
-/// the person in the pane, it ends the turn, as measured on the headless
-/// door under the same flag.
-const PANE_GROK: &str = "grok's own TUI in a tmux pane beside you; permission-mode dontAsk puts no \
-     approval to you there, a tool request that needs one ends the turn";
+/// [`posture_line`](crate::teammate::posture_line)'s grok row ends "a tool
+/// request that needs one ends the turn", which is the headless door's
+/// measurement and still true there. In the TUI the same flags do something
+/// else: the write tool is blocked outright by the sandbox, and when grok
+/// then proposes a shell command the TUI raises its **own** three-option
+/// approval prompt to the person — `--permission-mode dontAsk` silences
+/// nothing on this door — and a rejection is what ends the turn. Approving
+/// does not widen the floor: an approved shell write into the working
+/// directory was still denied by `read-only`, and no file appeared. So this
+/// row says who answers an ask here, that the bound holds against their yes,
+/// and that only their no ends the turn — the three facts a person reading
+/// the bound row beside it would otherwise get wrong.
+///
+/// It is also the one row whose shape is inverted — the ask first, the
+/// "its own TUI in a tmux pane beside you" preamble the other two open on
+/// pushed behind the facts, the flag's name last — because of where it is
+/// read: the spawn dialog is 76 columns at its widest, its argument preview
+/// is clamped, and grok's four-row bound sentence leaves this row exactly
+/// one line there, about twenty characters past [`SEND_ONLY`]; the `/team`
+/// ring cuts at the same width. Codex's and agy's per-CLI clauses are the
+/// kind that may fall off that edge (ruling 15's HIGH-2); grok's ask is the
+/// fact a person has to act on — a pane that is waiting for them — so it is
+/// the twenty characters that survive, and `ganja-tui`'s render test asserts
+/// they do at 80x24. Before the probe reached a composer this row claimed
+/// none of that (the lead's ruling 5 for P28, written when grok refused to
+/// start on this machine); the recording now holds it, and a recording
+/// outranks a ruling written without one.
+const PANE_GROK: &str = "grok asks you in the pane before a tool that needs approval; read-only \
+     holds against your yes and only your no ends the turn; its own TUI in a tmux pane beside \
+     you — dontAsk silences nothing";
 
 /// The sentence a shim pane adds to its posture, per CLI (**D512**).
 ///
@@ -826,7 +842,9 @@ impl ShimTui {
                     // pane that printed its marker and then died still captures
                     // under `remain-on-exit`, so a `Seen` returned on the
                     // capture alone would hand back a live member over a dead
-                    // process (grok's provisional banner is exactly this risk).
+                    // process (a banner drawn before the composer, or a
+                    // composer that dies right after drawing, is exactly this
+                    // risk).
                     // One more liveness listing settles it — still live is
                     // `Seen`, gone is `Died` with the last words read now,
                     // while they are on the kept pane — and, run after the
@@ -1700,23 +1718,40 @@ Pane is dead (status 1, Thu Aug 20 15:28:47 2026)
         assert!(codex.contains("asks no approval"), "{codex}");
     }
 
-    /// grok's pane sentence claims no prompt renders for a person and credits
-    /// its permission mode with no approval axis — because its recording
-    /// reached no composer, and the lead's ruling 5 for P28 says so.
+    /// grok's pane sentence is the approval behaviour its 1.0.7 recording
+    /// holds — the TUI asks the person, a rejection ends the turn, an approved
+    /// write is still denied by read-only — and it still carries none of the
+    /// headless rider about that flag.
     #[test]
-    fn the_grok_pane_sentence_claims_nothing_its_probe_did_not_reach() {
+    fn the_grok_pane_sentence_is_the_approval_behaviour_its_probe_recorded() {
+        let probe = GROK_TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("approval probe ("))
+            .expect("grok's recording carries the approval probe");
+        assert!(probe.contains("approval prompt to the person"), "{probe}");
+        assert!(probe.contains("did NOT create the file"), "{probe}");
+        assert!(probe.contains("rejecting that ended the turn"), "{probe}");
         assert!(
-            !GROK_TUI_PROBE
+            GROK_TUI_PROBE
                 .lines()
                 .any(|line| line.starts_with("composer capture")),
-            "a composer was reached after all; this sentence may now say more"
+            "the sentence rests on a probe that reached the composer"
         );
         let grok = pane_line(MemberBackend::Grok).expect("grok states what the pane adds");
-        assert!(!grok.contains("render"), "{grok}");
-        assert!(!grok.contains("for you to answer"), "{grok}");
-        assert!(grok.contains("ends the turn"), "{grok}");
-        assert!(grok.contains("permission-mode dontAsk"), "{grok}");
-        assert!(grok.contains("no approval to you"), "{grok}");
+        // The three facts, and their order: the ask first (the twenty
+        // characters the dialog's clamp leaves this row), then the bound
+        // against a yes, then the no that ends the turn, with the preamble
+        // and the flag's name behind them, because both readers cut this row
+        // from the right.
+        let asks = grok.find("asks you in the pane").expect(&grok);
+        let holds = grok.find("holds against your yes").expect(&grok);
+        let ends = grok.find("only your no ends the turn").expect(&grok);
+        let preamble = grok.find("own TUI in a tmux pane").expect(&grok);
+        let flag = grok.find("dontAsk").expect(&grok);
+        assert!(
+            asks < holds && holds < ends && ends < preamble && preamble < flag,
+            "{grok}"
+        );
         // And the headless rider about that flag is not borrowed onto this door.
         let lines = spawn_lines(MemberBackend::Grok);
         assert!(

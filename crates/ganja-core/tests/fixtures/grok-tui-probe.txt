@@ -1,35 +1,43 @@
-# Whether grok's own TUI accepts the pinned floors — and, on this machine, what
-# it does next: the recording **D512**'s pane-mode spelling is compared
-# against.
+# Whether grok's own TUI accepts the pinned floors, and what it does next —
+# the recording **D512**'s pane-mode spelling is compared against. Two
+# recordings, because the answer changed with this machine:
 #
-# This file is the *recording* the `tui_argv` test beside `src/teammate/grok.rs`
-# compares against, rather than a second string literal: two literals agreeing
-# proves only that somebody typed carefully. Everything after `launch: ` is the
-# argv the pane ran, binary first. The flags parse; the profile then refuses to
-# apply under this machine's symlinked `~/.grok` (bead ganja-code-q98), in TUI
-# mode with the very sentence the headless child exits on — so NO composer was
-# reached, NO composer capture is recorded here, and grok's readiness marker is
-# therefore provisional rather than pinned: everything after
-# `provisional marker (...): ` is the welcome-banner string the vendor's own
-# pty end-to-end suite waits on, read out of the grok-build source the
-# parenthesis names rather than observed here, and the test beside
-# `READY_MARKER` byte-compares the constant against that line. The same test
-# asserts this recording holds neither a `composer capture` line (codex's
-# recording's spelling) nor a `footer marker:` line (agy's), so the day a probe
-# on a working grok home reaches the composer, whoever records it must add
-# exactly one line here —
-#     composer capture: <the captured empty-composer line, verbatim>
-# — and that test then fails until the marker is turned into a byte comparison
-# against it, like codex's and agy's. Everything after `error: ` is the
-# vendor's refusal, verbatim.
+# 1. 2026-08-20, grok 1.0.6, `~/.grok` a SYMLINK: the flags parse, then the
+#    read-only profile refuses to apply (bead ganja-code-q98) — in TUI mode
+#    with the very sentence the headless child exits on, so no composer was
+#    reached. Kept verbatim under `error: ` because it is the dead-pane case
+#    `tmux.rs`'s capture test and the spawn's refusal path are pinned against.
+# 2. 2026-08-20, later the same day, grok 1.0.7, `~/.grok` a real directory
+#    (the user un-symlinked it): the composer IS reached, and the paste, Enter
+#    and approval probes below were run against it.
 #
-# Operator: P28 lead (Claude), probes run live; recorded by the W2 lane
+# This file is the *recording* the `tui_argv` and `READY_MARKER` tests beside
+# `src/teammate/grok.rs` compare against, rather than a second string literal:
+# two literals agreeing proves only that somebody typed carefully. Everything
+# after `launch: ` is the argv the pane ran, binary first. The line under
+# `composer capture` is what `capture-pane -p -J` showed with nothing typed, at
+# 160 columns, box border included — grok's composer draws NO placeholder
+# text, only its prompt glyph, so the glyph is the marker. Everything after
+# `error: ` is the vendor's refusal, verbatim.
+#
+# Operator: P28 lead (Claude), probes run live; recording 1 by the W2 lane,
+# recording 2 by the lead after W5
 # Full record: .omc/plans/2026-08-20-shim-native-tui-panes.md, "Measured facts"
+# and rulings 9 and 16
 #
-# Binary:  grok 1.0.6 (24c70bc7ffdd) [alpha]
+# Binary:  grok 1.0.6 (24c70bc7ffdd) [alpha] — recording 1
+#          grok 1.0.7 (325eae35b09b) [alpha] — recording 2
 # Host:    tmux next-3.8, macOS, 2026-08-20
 #
 launch: grok --sandbox read-only --permission-mode dontAsk
-outcome: flags parse; profile application refused on this machine (~/.grok is a symlink, bead ganja-code-q98); exit 1; verbatim:
+outcome (1.0.6, ~/.grok a symlink): flags parse; profile application refused on this machine (~/.grok is a symlink, bead ganja-code-q98); exit 1; verbatim:
 error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.
-provisional marker (unprobed; source: grok-build 1.0.5, crates/codegen/xai-grok-pager/tests/pty_e2e/minimal/minimal_new_session_keeps_history_and_resets.rs:19 WELCOME_BANNER): Grok Build
+outcome (1.0.7, ~/.grok a real directory): composer reached, floors accepted; the first frame draws the welcome panel ("Grok Build  1.0.7", New worktree / Resume session / Changelog / Quit) above the composer box, and the status line after the first turn reads "main sandbox:read-only ~/rust/src/github.com/zchee/ganja-code"
+composer capture (empty composer line, 1.0.7):
+  │ ❯                                                                                                                                                        │  
+composer box footer (model-dependent, not a marker): Grok 4.6 (xhigh)
+paste probe (1.0.7): load-buffer + paste-buffer -p delivered two lines into the composer unsubmitted, cursor at the end of line two:
+  │ ❯ ganja paste probe line one
+  │   line two stays put
+enter probe (1.0.7): Enter after the paste submitted BOTH lines as one user message and a real turn ran ("Both lines arrived as one message … The second line stayed in the same prompt; it was not treated as a separate turn.")
+approval probe (1.0.7, --permission-mode dontAsk, TUI): asked to create ganja-probe.txt in cwd — the write tool was blocked by the sandbox ("The write tool was blocked; I'll create the file from the shell instead."), grok proposed a shell write and the TUI raised its own three-option approval prompt to the person ("1 (●) Yes, and don't ask again for anything (always-approve mode) / 2 (○) Yes, proceed / 3 (○) No, reject (type to add feedback)"); approving it did NOT create the file — read-only denied the shell write too — and grok asked again, for a /tmp probe; rejecting that ended the turn ("Turn cancelled by user in 1m16s."). So in TUI mode dontAsk does not silence approval prompts, a person answers them in the pane, and the read-only floor holds against an approved write.

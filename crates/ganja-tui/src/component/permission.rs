@@ -339,6 +339,18 @@ mod tests {
                 screen.contains("\"surface\""),
                 "{name}: no surface row:\n{screen}"
             );
+            // grok's row is the one that contradicts its own bound row on
+            // purpose (D512, the 1.0.7 recording): where the bound row says an
+            // unapproved ask ends the turn, the pane asks the person. Its
+            // four-row bound sentence leaves the surface exactly one row here
+            // — about twenty characters past the opener — so the row leads
+            // with the ask, and the ask is what must survive the same cut.
+            if backend == MemberBackend::Grok {
+                assert!(
+                    screen.contains("asks you"),
+                    "{name}: the ask fell off the dialog:\n{screen}"
+                );
+            }
         }
     }
 
