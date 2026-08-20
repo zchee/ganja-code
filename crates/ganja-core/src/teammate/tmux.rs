@@ -66,9 +66,12 @@
 //! pane rather than through a pipe, and three calls are what that takes.
 //! [`Server::paste_submit`](crate::teammate::tmux::Server::paste_submit) is
 //! the delivery wire: the text goes into a tmux buffer **through the client's
-//! stdin**, is pasted bracketed, and Enter submits it — measured 2026-08-20
-//! as the sequence that lands a multi-line body in both codex's and agy's
-//! composer as one message. Not `send-keys -l`, for two reasons: its text is
+//! stdin** and is pasted bracketed — both inside **one client invocation**,
+//! so the buffer's whole life is one process and a delivery dropped
+//! mid-flight kills that process rather than stranding a cleartext prompt
+//! between two — and Enter submits it — measured 2026-08-20 as the sequence
+//! that lands a multi-line body in both codex's and agy's composer as one
+//! message. Not `send-keys -l`, for two reasons: its text is
 //! argv, which `ps` shows to every user on the machine (the rule the grok
 //! prompt file already encodes), and it types the bytes bare, where a
 //! composer reads a newline as a keystroke rather than as part of a message.
@@ -156,6 +159,11 @@ const CORNER_FORMAT: &str = "#{pane_id} #{pane_left} #{pane_top}";
 /// What a listing reads to tell a dead pane from a live one: its id and
 /// tmux's own `0`/`1` for whether its process has ended.
 const DEAD_FORMAT: &str = "#{pane_id} #{pane_dead}";
+
+/// How the delivery invocation names itself in an error: the two commands it
+/// carries, in the order tmux runs them. tmux's own stderr says which of the
+/// two refused; this says that it was the one invocation they share.
+const DELIVERY: &str = "load-buffer ; paste-buffer";
 
 /// How much of the width the teammates' column takes when the first one opens
 /// it (user directive, 2026-08-20): `| lead 30% | teammates 70% |`.
@@ -262,15 +270,31 @@ pub enum Killed {
 }
 
 /// What [`Server::close_dead`] found when it went to close a pane.
+///
+/// Every answer but [`Closed::Yes`] leaves the pane as it was, and the
+/// listing read **after** the kill is what decides between them: only a pane
+/// that listing shows **running** answers [`Closed::Alive`], so a caller that
+/// keeps a member for as long as the answer is `Alive` is never keeping one
+/// for a corpse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Closed {
     /// The pane was dead, and it is gone now.
     Yes,
-    /// The pane's process is still running, so the pane was left alone: this
-    /// door closes dead panes and nothing else.
+    /// The pane's process is running, so the pane was left alone: this door
+    /// closes dead panes and nothing else. Running at the **second** listing
+    /// — a pane found dead and then respawned under the kill is `Alive` too,
+    /// and correctly, since it is.
     Alive,
     /// No pane by that id exists: nothing to do, and not an error.
     AlreadyGone,
+    /// The pane was dead, the kill was sent, and the pane is **still there,
+    /// still dead**: `if-shell` ran and said nothing — it exits 0 for a pane
+    /// it killed and for one it left alone alike (measured, 2026-08-20) —
+    /// and the second listing prints the id with tmux's own `1` beside it.
+    /// Not an error, because tmux reported none; not `Alive`, because
+    /// nothing is running there — a caller hears this and treats the pane as
+    /// the corpse it is, rather than as a member.
+    Refused,
 }
 
 /// A tmux call that did not do what was asked.
@@ -636,6 +660,27 @@ impl Server {
     /// which is what a `kill` asked twice, or asked after the teammate exited
     /// on its own, should hear.
     ///
+    /// # A shutdown that also signals the pane's process group: TERM **first**
+    ///
+    /// A pane that holds somebody else's TUI ends by two means — its process
+    /// group is signalled (`crate::teammate::shim::signal_group`, the
+    /// TERM-then-KILL follow-through that ends the children the CLI itself
+    /// started) and the pane is killed — and the order is load-bearing.
+    /// Signal the group **while the pane still pins the pid**: TERM it,
+    /// verify the process is gone, and only then `kill`. A `kill-pane` that
+    /// goes first ends the pane's process and frees its pid, and a
+    /// `signal_group` sent after that aims at a pid the kernel may have
+    /// reissued by then — some other process group, this person's own —
+    /// which is D506's recycled-identity hazard one level down, and exactly
+    /// what the pair check here exists to refuse at the pane level. A pane
+    /// that is live pins its `pane_pid`: tmux holds the process, the pid
+    /// cannot be reissued, and a signal aimed at its group reaches the
+    /// group it was aimed at. One practical note for a signaller:
+    /// [`Pane::birth`](crate::teammate::reaper::Pane) is the pid as tmux
+    /// printed it — a `String`, because it is matched and never arithmetic'd
+    /// here — and `signal_group` wants an `i32`, so the signaller parses it,
+    /// refusing rather than guessing at anything that is not a pid.
+    ///
     /// # Errors
     ///
     /// The client failing to start or tmux refusing. A `kill-pane` that races
@@ -719,95 +764,134 @@ impl Server {
         run("capture-pane", command).await
     }
 
-    /// Delivers `text` to `pane_id` as **one submitted composer message**:
-    /// into a tmux buffer through the client's stdin, pasted bracketed, then
-    /// Enter.
+    /// Lands `text` in `pane_id`'s composer as **one unsubmitted message** —
+    /// into a tmux buffer through the client's stdin and pasted bracketed, one
+    /// client invocation for both — and presses **no** Enter.
     ///
-    /// Three calls, each for a reason measured on 2026-08-20. `load-buffer -`
-    /// takes the text on **stdin**, so no byte of it is on an argv that `ps`
-    /// shows to every user on the machine — the rule the grok prompt file
-    /// already encodes, kept for the same text travelling another way.
+    /// This is the paste-only door; [`Server::paste_submit`] is this plus the
+    /// Enter that submits what it left. The split is P28's readiness rule made
+    /// real: a spawn whose composer marker never showed
+    /// ([`crate::teammate::shim_tui`]) pastes *without* submitting, because an
+    /// Enter into a pane that may be holding a trust or login dialog answers
+    /// that dialog with its default on behalf of a person who never saw it — so
+    /// the text is left in the composer, and the person, who is looking at the
+    /// pane, submits it. A spawn that did see its marker uses `paste_submit`.
+    ///
+    /// The one client invocation is tmux's own command list, `load-buffer -b
+    /// <name> - ';' paste-buffer -p -d -b <name> -t <pane>` handed to one
+    /// client, each part measured on 2026-08-20: `load-buffer -` takes the
+    /// text on **stdin**, so no byte of it is on an argv that `ps` shows to
+    /// every user on the machine — the rule the grok prompt file already
+    /// encodes, kept for the same text travelling another way — and
     /// `paste-buffer -p` wraps it in the bracketed-paste codes when the pane's
     /// program asked for them, which is how a TUI composer takes a multi-line
-    /// body as one unsubmitted message with its newlines intact where the
-    /// same bytes typed through the pty would reach it as keystrokes; `-d`
-    /// frees the buffer the moment it is pasted, so the text does not sit in
-    /// the server's buffer stack for a `list-buffers` to show. And Enter
-    /// submits what the paste left in the composer. The buffer is **named**,
-    /// once per call (`buffer_name`), because the unnamed stack is shared
-    /// by everyone on the server and its top is whoever loaded last: two
-    /// deliveries racing each other would otherwise paste each other's
-    /// **text**. That is all the name buys — buffer contents kept apart, not
-    /// composers. Two of these calls running at once against the **same
-    /// pane** can still land as paste A, paste B, Enter, Enter — one message
-    /// made of both and one empty submit — so this method is not safe
+    /// body as one message with its newlines intact where the same bytes typed
+    /// through the pty would reach it as keystrokes; `-d` frees the buffer the
+    /// moment it is pasted, so the text does not sit in the server's buffer
+    /// stack for a `list-buffers` to show. The buffer is **named**, once per
+    /// call (`buffer_name`), because the unnamed stack is shared by everyone on
+    /// the server and its top is whoever loaded last: two deliveries racing
+    /// each other would otherwise paste each other's **text**. That is all the
+    /// name buys — buffer contents kept apart, not composers. Two of these
+    /// calls (or their `paste_submit` form) running at once against the
+    /// **same pane** can still interleave their pastes, so neither is safe
     /// against concurrent calls to one pane, and the caller serializes
     /// deliveries per member (the shim runtime does, one at a time per
-    /// teammate); what it is safe against is two panes at once.
+    /// teammate); what they are safe against is two panes at once.
     ///
-    /// An empty `text` is no message: nothing is loaded, pasted or
-    /// submitted, because the only thing an Enter could submit then is
-    /// whatever a person had half-typed into that composer themselves.
+    /// # The buffer's whole life is one process
+    ///
+    /// Load and paste share one invocation so that **cancellation cannot leak
+    /// the buffer**: this future is awaited inside the shim runtime's
+    /// `select!`, and a future dropped mid-await runs no cleanup of its own.
+    /// Were the load one client and the paste another, a drop between the two
+    /// would leave a teammate's prompt in cleartext on the server under a
+    /// name nothing reclaims. As one invocation, a drop kills the one client
+    /// (`feed` kills it **before** closing its stdin, for the reason given
+    /// there), and a killed client's read is ended by the server with an
+    /// error that sets no buffer — tmux loads a buffer only from a read it saw
+    /// end (measured 2026-08-20: a client `SIGKILL`ed mid-stream leaves
+    /// `list-buffers` empty and pastes nothing). The one way the buffer
+    /// outlives the process is the load taking and the paste being refused —
+    /// the pane gone — where tmux keeps what the load set (measured: the
+    /// buffer survives a `can't find pane`); that case is reclaimed on a task
+    /// of its own, spawned rather than awaited, so a caller letting go of this
+    /// future on seeing the error cannot skip it either.
+    ///
+    /// An empty `text` is no message: nothing is loaded or pasted.
     ///
     /// # Errors
     ///
     /// The client failing to start, tmux refusing (the pane gone), or tmux
     /// ceasing to read the text before it was all handed over
-    /// ([`TmuxError::Stdin`]). Every failure between the load and the paste
-    /// frees the named buffer, best-effort, for the reason `-d` exists — a
-    /// load that stopped early may have left part of the text in it, and a
-    /// teammate's prompt must not sit on the server in cleartext for the
-    /// server's life. And a failure is **not** a delivery that did not
-    /// happen: the Enter failing after a paste that succeeded leaves the text
-    /// pasted but unsubmitted in the composer, so a caller that retried
-    /// blindly would deliver it twice — a failed call is something to report,
-    /// never to redo unseen.
-    pub async fn paste_submit(&self, pane_id: &str, text: &str) -> Result<(), TmuxError> {
+    /// ([`TmuxError::Stdin`]). A refused invocation frees the named buffer,
+    /// best-effort and off this future: a teammate's prompt must not sit on
+    /// the server in cleartext for the server's life.
+    pub async fn paste(&self, pane_id: &str, text: &str) -> Result<(), TmuxError> {
         if text.is_empty() {
             return Ok(());
         }
         let buffer = buffer_name();
 
-        if let Err(error) = self.load_then_paste(pane_id, &buffer, text).await {
-            // Whichever step stopped, the buffer may hold the text or part of
-            // it. The failure being reported is that step's own; a buffer
-            // that is already gone, or a server that is, adds nothing to it.
-            let mut delete = self.command();
-            delete.arg("delete-buffer").arg("-b").arg(&buffer);
-            let _ = run("delete-buffer", delete).await;
-            return Err(error);
-        }
-
-        self.press_enter(pane_id).await
-    }
-
-    /// The two steps of [`Server::paste_submit`] between which the named
-    /// `buffer` exists on the server: the load, then the paste that frees it.
-    /// One call rather than two inline so that every early return out of
-    /// either step lands on the one cleanup in the caller — the invariant is
-    /// structural, not a comment somebody has to keep true.
-    async fn load_then_paste(
-        &self,
-        pane_id: &str,
-        buffer: &str,
-        text: &str,
-    ) -> Result<(), TmuxError> {
-        let mut load = self.command();
-        load.arg("load-buffer").arg("-b").arg(buffer).arg("-");
-        feed("load-buffer", load, text.as_bytes()).await?;
-
-        let mut paste = self.command();
-        paste
+        let mut delivery = self.command();
+        delivery
+            .arg("load-buffer")
+            .arg("-b")
+            .arg(&buffer)
+            .arg("-")
+            .arg(";")
             .arg("paste-buffer")
             .arg("-p")
             .arg("-d")
             .arg("-b")
-            .arg(buffer)
+            .arg(&buffer)
             .arg("-t")
             .arg(pane_id);
-        run("paste-buffer", paste).await?;
+        if let Err(error) = feed(DELIVERY, delivery, text.as_bytes()).await {
+            // The load may have taken and the paste been refused, and tmux
+            // keeps what the load set. Spawned, not awaited: the spawn is
+            // synchronous and the task outlives this future, so a caller
+            // that drops it on the error cannot strand the buffer. The
+            // failure reported is the invocation's own; a buffer that is
+            // already gone, or a server that is, adds nothing to it.
+            let mut delete = self.command();
+            delete.arg("delete-buffer").arg("-b").arg(&buffer);
+            tokio::spawn(async move {
+                let _ = run("delete-buffer", delete).await;
+            });
+            return Err(error);
+        }
 
         Ok(())
+    }
+
+    /// Delivers `text` to `pane_id` as **one submitted composer message**:
+    /// [`Server::paste`] to land it, then Enter to submit it.
+    ///
+    /// Two client calls — the one-invocation load-and-paste, then the Enter —
+    /// so the concurrency, stdin-not-argv and cancel-safety facts are all
+    /// [`Server::paste`]'s and are not restated here. What the Enter adds is a
+    /// second place the call can fail after the paste already landed: the paste
+    /// having succeeded and the Enter having not leaves the text **pasted but
+    /// unsubmitted** in the composer, so a failure here is **not** a delivery
+    /// that did not happen — a caller that retried blindly would deliver it
+    /// twice. A failed call is something to report, never to redo unseen.
+    ///
+    /// An empty `text` is no message: nothing is loaded, pasted or submitted,
+    /// because the only thing an Enter could submit then is whatever a person
+    /// had half-typed into that composer themselves.
+    ///
+    /// # Errors
+    ///
+    /// [`Server::paste`]'s errors, or the Enter's own `send-keys` refusing —
+    /// after a paste that already succeeded, which is why the doc above calls
+    /// a failure something to report rather than to redo.
+    pub async fn paste_submit(&self, pane_id: &str, text: &str) -> Result<(), TmuxError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.paste(pane_id, text).await?;
+        self.press_enter(pane_id).await
     }
 
     /// Keeps, or stops keeping, `pane_id` on screen after its process exits
@@ -855,6 +939,14 @@ impl Server {
     /// is where a teammate's recorded pane id comes from and which could
     /// otherwise carry a second command in the same string.
     ///
+    /// What it answers is read off a **second** listing, because `if-shell`
+    /// says nothing about what it found — it exits 0 for a pane it killed,
+    /// for a live pane it left alone and for an id nobody wears alike
+    /// (measured, 2026-08-20) — and that listing is read by `after_kill`:
+    /// gone is [`Closed::Yes`], running is [`Closed::Alive`], and still there
+    /// and still dead is [`Closed::Refused`] — never `Alive`, which only a
+    /// pane the listing shows running may answer.
+    ///
     /// # Errors
     ///
     /// The client failing to start, tmux refusing, or a listing line that is
@@ -876,13 +968,7 @@ impl Server {
             .arg(format!("kill-pane -t {pane_id}"));
         run("if-shell", command).await?;
 
-        // `if-shell` says nothing about what it found — it exits 0 for a
-        // live pane it left alone and for an id nobody wears (measured,
-        // 2026-08-20) — so the listing decides what happened.
-        Ok(match self.dead(pane_id).await? {
-            None => Closed::Yes,
-            Some(_) => Closed::Alive,
-        })
+        Ok(after_kill(self.dead(pane_id).await?))
     }
 
     /// Whether `pane_id` is on this server, and if it is, whether its process
@@ -1107,6 +1193,25 @@ fn parse_listing(line: &str) -> Option<Listed> {
     }
 }
 
+/// What [`Server::close_dead`] answers for a pane it found dead and sent the
+/// kill for, read off the listing taken **after** that kill — `listed` being
+/// what [`Server::dead`] said: no such pane, or tmux's verdict on it.
+///
+/// A function of its own rather than a `match` at the call site so the one
+/// rule it exists for is a thing a test can pin without a server: `Alive` is
+/// for a pane the listing shows **running** and for nothing else. A pane that
+/// is gone was closed; a pane that is running was respawned under the kill
+/// and is left as the live pane it is; a pane that is still there and still
+/// dead is one the kill did not take, and `if-shell`, which exits 0 either
+/// way, will not be the one to say so.
+fn after_kill(listed: Option<bool>) -> Closed {
+    match listed {
+        None => Closed::Yes,
+        Some(false) => Closed::Alive,
+        Some(true) => Closed::Refused,
+    }
+}
+
 /// A buffer name no other delivery on this server is using: this process's
 /// pid and a counter, because the buffer stack is one per tmux server and the
 /// unnamed top of it is whoever loaded last. The name keeps two deliveries'
@@ -1144,6 +1249,19 @@ async fn run(
 /// write's end closes the pipe, because that EOF is what tells
 /// `load-buffer -` the text has ended. tmux's own status is reported first
 /// when both sides have something to say — it is the one that knows why.
+///
+/// Dropped mid-flight, this kills the client **before** it closes the
+/// client's stdin, and the order is the point: a closed pipe is EOF, EOF is
+/// "the text has ended", and a client that read the cut as the end would
+/// hand the server the fraction that had arrived to be loaded and pasted as
+/// if it were the whole — a partial prompt in a foreign composer. A client
+/// killed first reads nothing more; the server ends its read with an error
+/// and sets no buffer (measured 2026-08-20, see [`Server::paste_submit`]).
+/// The order is the language's, not a comment's: the `Child` rides inside
+/// the `join!` temporary, which a cancelled `await` drops before this
+/// function's own `stdin` local — and `stdin` is a local, borrowed by the
+/// writer and closed by it explicitly at the write's end, precisely so it is
+/// not dropped as part of that temporary.
 async fn feed(
     name: &'static str,
     mut command: tokio::process::Command,
@@ -1158,15 +1276,21 @@ async fn feed(
             command: name,
             source,
         })?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .expect("stdin was asked for as a pipe a line above");
-    let (fed, output) = tokio::join!(
-        // `stdin` drops when the write ends, and dropping is the EOF.
-        async move { stdin.write_all(input).await },
-        child.wait_with_output(),
+    let mut stdin = Some(
+        child
+            .stdin
+            .take()
+            .expect("stdin was asked for as a pipe a line above"),
     );
+    let (output, fed) = tokio::join!(child.wait_with_output(), async {
+        let Some(pipe) = stdin.as_mut() else {
+            unreachable!("the pipe is taken once, below, after this write");
+        };
+        let fed = pipe.write_all(input).await;
+        // Closing the pipe is the EOF that tells tmux the text has ended.
+        drop(stdin.take());
+        fed
+    });
     let output = output.map_err(|source| TmuxError::Start {
         command: name,
         source,
@@ -1204,8 +1328,8 @@ mod tests {
 
     use super::{
         Closed, Killed, LIVENESS_FORMAT, Launch, Listed, PANE_FORMAT, Placement, REFUSED_NO_TMUX,
-        Server, TmuxError, buffer_name, environment, parse_listing, parse_pane, shell_quote,
-        socket_of,
+        Server, TmuxError, after_kill, buffer_name, environment, parse_listing, parse_pane,
+        shell_quote, socket_of,
     };
     use crate::teammate::reaper::Pane;
 
@@ -1371,6 +1495,24 @@ mod tests {
         assert!(parse_listing("").is_none());
     }
 
+    /// After the kill, `Alive` is for a pane the listing shows running and
+    /// for nothing else: gone is closed, running is left alone (it was
+    /// respawned under the kill), and still-there-still-dead is the honest
+    /// fourth answer — a kill that did not take is never reported as a live
+    /// member. Pinned here without a server because a real tmux cannot be
+    /// cheaply made to refuse a `kill-pane`; the real-server test below
+    /// covers the three answers it can produce.
+    #[test]
+    fn after_the_kill_only_a_running_pane_answers_alive() {
+        assert_eq!(after_kill(None), Closed::Yes);
+        assert_eq!(after_kill(Some(false)), Closed::Alive);
+        assert_eq!(
+            after_kill(Some(true)),
+            Closed::Refused,
+            "a pane still listed dead after the kill is not alive"
+        );
+    }
+
     /// Every delivery loads its own buffer, named for this process and a
     /// counter, so two deliveries on one server cannot paste each other's
     /// text — which is the whole of what the name promises.
@@ -1531,6 +1673,90 @@ mod tests {
             server.run(&["list-buffers"]).trim(),
             "",
             "the buffer was freed by the paste"
+        );
+    }
+
+    /// A delivery dropped mid-flight — the shim runtime's `select!` letting
+    /// go of it — leaves no buffer on the server, pastes nothing and presses
+    /// no Enter, and the pane takes the next delivery as if the dropped one
+    /// had never been asked for.
+    ///
+    /// Mid-flight by construction rather than by timing: the text is well
+    /// past what a pipe holds and the future is dropped after its **first**
+    /// poll, which spawned the client and filled the pipe and then had to
+    /// wait — so the writer itself had not handed the text over, and the
+    /// client cannot have seen it end. What the drop then does is the thing
+    /// under test: kill the client before closing its stdin, so
+    /// the cut is never read as the text's end and tmux, which loads a
+    /// buffer only from a read it saw end, sets nothing. `biased;` is what
+    /// makes the first branch the one polled first; without it the select
+    /// might never poll the delivery at all and prove nothing.
+    #[tokio::test]
+    async fn a_delivery_dropped_mid_flight_leaves_no_buffer_and_presses_no_enter() {
+        let dir = ganja_testkit::temp_dir();
+        let server = PrivateServer::start(&["sleep", "3600"], &[], &[]);
+        let at = Server::at(server.socket(), Some(server.first_pane().to_owned()));
+        let received = dir.path().join("received.txt");
+        let pane = split(
+            &at,
+            dir.path(),
+            &[
+                "sh",
+                "-c",
+                "exec cat > \"$0\"",
+                received.to_str().expect("a utf-8 temp path"),
+            ],
+        )
+        .await;
+        eventually("the stub to open its file", async || {
+            if received.exists() {
+                Ok(())
+            } else {
+                Err("no file yet".to_owned())
+            }
+        })
+        .await;
+
+        // ~4 MiB: two orders of magnitude past any pipe buffer (64 KiB at
+        // most), so one poll of the writer ends in a full pipe, not in EOF.
+        let dropped: String = (0..65536)
+            .map(|line| format!("line {line:05}: the quick brown fox jumps over the lazy dog\n"))
+            .collect();
+        tokio::select! {
+            biased;
+            outcome = at.paste_submit(&pane.id, &dropped) => {
+                panic!("a delivery this size cannot finish in one poll: {outcome:?}");
+            }
+            () = std::future::ready(()) => {}
+        }
+        // The select dropped the delivery, and with it the client. No await
+        // has passed since: whatever the server holds for that client, it
+        // is not a buffer — one is set only from a read that ended.
+        assert_eq!(
+            server.run(&["list-buffers"]).trim(),
+            "",
+            "a dropped delivery left no buffer on the server"
+        );
+
+        // The pane is untouched, and the next delivery is the first thing it
+        // hears: had the dropped one pasted, the file would open with its
+        // text; had it pressed Enter, with a newline.
+        at.paste_submit(&pane.id, "after\n")
+            .await
+            .expect("the next delivery lands");
+        eventually("the next delivery to reach the stub's file", async || {
+            let got = std::fs::read_to_string(&received).map_err(|error| error.to_string())?;
+            if got == "after\n\n" {
+                Ok(())
+            } else {
+                Err(format!("{:?}", got.chars().take(120).collect::<String>()))
+            }
+        })
+        .await;
+        assert_eq!(
+            server.run(&["list-buffers"]).trim(),
+            "",
+            "and the server's buffer stack is as the test found it"
         );
     }
 
@@ -1700,7 +1926,10 @@ mod tests {
     /// dead it closes it, asked again it finds nothing by that id — and an
     /// id the listing does not print never reaches the server's command
     /// string, which is what keeps a recorded id from carrying a second
-    /// command in.
+    /// command in. The three answers a real server produces; the fourth,
+    /// `Refused`, needs a `kill-pane` that does not take, which a real
+    /// server cannot cheaply be made to do, and is pinned on `after_kill`
+    /// without one.
     #[tokio::test]
     async fn close_dead_closes_a_dead_pane_and_leaves_a_live_one_alone() {
         let dir = ganja_testkit::temp_dir();
