@@ -29,9 +29,27 @@
 use std::{path::Path, process::Command, time::Duration};
 
 use ganja_core::teammate::{
-    reaper::{ShimFate, sweep_shims_in},
+    reaper::{ShimFate, sweep_shims_in, sweep_shims_in_with},
     shim::records::{self, Identity, Recorded, Records, Started},
 };
+
+/// A pid no `ps`/`kill` pair can portably answer for — the sentinel that
+/// forces the "could not be established" arm. Shared by [`cannot_establish`]
+/// and the record that drives the sweep so the two cannot drift apart.
+const UNASKABLE: i32 = 999_999;
+
+/// A start-time primitive that cannot establish one pid — the portable
+/// stand-in for a `ps`/`kill` pair that genuinely could not answer. A real pid
+/// is `Gone` on every platform (the `ESRCH` probe), so `Unknown` is untestable
+/// through one; this declines [`UNASKABLE`] and defers every other pid to the
+/// real primitive.
+fn cannot_establish(pid: i32) -> Started {
+    if pid == UNASKABLE {
+        Started::Unknown
+    } else {
+        records::started_at(pid)
+    }
+}
 use ganja_team::ShimCli;
 
 /// A real process a sweep may or may not end, killed when the test is done with
@@ -495,10 +513,11 @@ async fn retention_turns_how_old_is_too_old_into_who_wrote_this() {
 #[tokio::test]
 async fn a_file_with_an_undecided_child_is_left_exactly_as_it_is() {
     let directory = records_directory();
-    // A pid too large for this platform's `ps`, which answers with a complaint
-    // rather than an absence — the shape of "could not be established" rather
-    // than of "gone".
-    let unaskable = 999_999;
+    // A pid the primitive declines to establish — the "could not be
+    // established" shape rather than "gone". No real pid is portably that: a
+    // nonexistent one is `Gone` (the `ESRCH` probe) on every platform, so the
+    // sweep is driven with `cannot_establish`, which refuses exactly this pid.
+    let unaskable = UNASKABLE;
     let path = write_records(
         directory.path(),
         "0198c1a2-11.shims",
@@ -519,7 +538,7 @@ async fn a_file_with_an_undecided_child_is_left_exactly_as_it_is() {
     );
     let before = std::fs::read_to_string(&path).expect("readable");
 
-    let swept = sweep_shims_in(directory.path().to_path_buf()).await;
+    let swept = sweep_shims_in_with(directory.path().to_path_buf(), cannot_establish).await;
 
     assert_eq!(
         swept.fate_of(&path),

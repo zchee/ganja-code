@@ -667,10 +667,24 @@ pub async fn sweep_shims(registry: &TeammateRegistry) -> ShimsSwept {
 /// a private directory, so a sweep can be watched deciding about real
 /// processes without going near `/tmp/ganja-<uid>`.
 pub async fn sweep_shims_in(directory: PathBuf) -> ShimsSwept {
+    sweep_shims_in_with(directory, records::started_at).await
+}
+
+/// [`sweep_shims_in`] with the start-time primitive handed in.
+///
+/// The seam exists for one fate a real pid cannot portably be made to take:
+/// `Unknown`, the "could not be established" answer an owner or child reaches
+/// only when the primitive itself cannot decide. A nonexistent pid is `Gone`
+/// on every platform (the `kill(pid, 0)`/`ESRCH` probe in
+/// [`records::started_at`]), so "undecided" is untestable through a real pid;
+/// a test drives it by passing a primitive that declines one. Production
+/// always passes [`records::started_at`].
+#[doc(hidden)] // a test-only injection seam, not a supported entry point
+pub async fn sweep_shims_in_with(directory: PathBuf, started: fn(i32) -> Started) -> ShimsSwept {
     // One blocking job for the whole sweep, because the identity primitive is
     // a `ps` fork and the decisions are pure file reads: an async spelling
     // would fork from a runtime worker for every line of every file.
-    tokio::task::spawn_blocking(move || sweep_records(&directory))
+    tokio::task::spawn_blocking(move || sweep_records(&directory, started))
         .await
         .unwrap_or_else(|error| {
             tracing::warn!(%error, "the shim sweep was lost, so nothing was swept");
@@ -810,7 +824,7 @@ pub async fn retire_shim_records(registry: &TeammateRegistry) -> Vec<String> {
 }
 
 /// The whole sweep, synchronously.
-fn sweep_records(directory: &Path) -> ShimsSwept {
+fn sweep_records(directory: &Path, started: fn(i32) -> Started) -> ShimsSwept {
     let mut swept = ShimsSwept::default();
     if !directory.exists() {
         // Nothing has ever recorded a shim child here, which is the ordinary
@@ -853,14 +867,14 @@ fn sweep_records(directory: &Path) -> ShimsSwept {
     paths.sort();
 
     for path in paths {
-        swept.files.push(sweep_file(&path));
+        swept.files.push(sweep_file(&path, started));
     }
 
     swept
 }
 
 /// One `.shims` file, from its version line down.
-fn sweep_file(path: &Path) -> ShimFile {
+fn sweep_file(path: &Path, started: fn(i32) -> Started) -> ShimFile {
     let decided = |fate: ShimFate, removed: bool| ShimFile {
         path: path.to_path_buf(),
         fate,
@@ -897,7 +911,7 @@ fn sweep_file(path: &Path) -> ShimFile {
         }
     };
 
-    let owner = records::started_at(records.owner.pid);
+    let owner = started(records.owner.pid);
     match &owner {
         // Fail-closed: "cannot prove gone" and "gone" must never be the same
         // branch.
@@ -924,7 +938,7 @@ fn sweep_file(path: &Path) -> ShimFile {
         // an owner pid that still exists means the file is never unlinked,
         // because an unlink is the one action here that cannot be retried.
         Started::At(_) | Started::Gone => {
-            let (signalled, spared, undecided) = sweep_children(path, &records);
+            let (signalled, spared, undecided) = sweep_children(path, &records, started);
             let owner_present = matches!(owner, Started::At(_));
             let removable = undecided == 0 && !owner_present;
 
@@ -941,7 +955,11 @@ fn sweep_file(path: &Path) -> ShimFile {
 }
 
 /// Every child line of one file whose owner is provably gone.
-fn sweep_children(path: &Path, records: &records::Records) -> (usize, usize, usize) {
+fn sweep_children(
+    path: &Path,
+    records: &records::Records,
+    started: fn(i32) -> Started,
+) -> (usize, usize, usize) {
     let own = records::own_pgid();
     let (mut signalled, mut spared, mut undecided) = (0, 0, 0);
     for child in &records.children {
@@ -960,7 +978,7 @@ fn sweep_children(path: &Path, records: &records::Records) -> (usize, usize, usi
             spared += 1;
             continue;
         }
-        match records::started_at(child.process.pid) {
+        match started(child.process.pid) {
             Started::At(rendered) if rendered == child.process.started => {
                 end_group(child.pgid);
                 tracing::info!(

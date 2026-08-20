@@ -300,6 +300,14 @@ pub fn stem_of(session_id: &str) -> String {
 /// force one of them to be wrong.
 #[must_use]
 pub fn started_at(pid: i32) -> Started {
+    // A non-positive pid is never a live process the sweep tracks, and the
+    // existence probe below reads 0 as "my own process group" and a negative
+    // value as a broadcast target rather than an existence question — so it is
+    // answered here instead of letting the probe signal the wrong thing.
+    if pid <= 0 {
+        return Started::Gone;
+    }
+
     let Ok(output) = Command::new("ps")
         // `lstart` is the only start-time keyword this platform's `ps` has —
         // `etimes` does not exist here, and `etime` is an elapsed duration
@@ -319,21 +327,28 @@ pub fn started_at(pid: i32) -> Started {
     };
 
     let rendered = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if output.status.success() {
-        return if rendered.is_empty() {
-            Started::Gone
-        } else {
-            Started::At(rendered)
-        };
+    if output.status.success() && !rendered.is_empty() {
+        return Started::At(rendered);
     }
 
-    // A pid that does not exist is a silent non-zero exit on this platform —
-    // measured, not assumed. Anything that also *says* something is `ps`
-    // refusing or misunderstanding us, and that is not proof of anything.
-    if output.stderr.is_empty() {
-        Started::Gone
-    } else {
-        Started::Unknown
+    // `ps` rendered no start time, and its exit says nothing portable about
+    // why. Measured on both: a *nonexistent* pid is a silent non-zero exit on
+    // macOS and on procps alike, and each writes to stderr only for a pid it
+    // refuses to parse — but they draw that line in different places. macOS
+    // accepts 0 silently and complains above 99999; procps complains at <= 0
+    // and is silent above pid_max. So empty stderr never meant "gone", it
+    // meant "ps took the argument", and the old heuristic only looked right on
+    // macOS because the two pids the tests used fell either side of its bound.
+    // `kill(pid, 0)` is the portable existence probe: `ESRCH` is the only proof
+    // of "gone", and anything else — a live pid (`0`), one that is not ours
+    // (`EPERM`), or an unforeseen error — is not proof and stays `Unknown`.
+    // SAFETY: signal 0 sends nothing; it only asks whether the pid exists and
+    // whether this process could signal it. `pid` is a plain integer, already
+    // guarded positive above, and the call cannot touch this process's memory.
+    match unsafe { libc::kill(pid, 0) } {
+        0 => Started::Unknown,
+        _ if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) => Started::Gone,
+        _ => Started::Unknown,
     }
 }
 
@@ -790,9 +805,10 @@ mod tests {
         // what makes the rendering an identity at all.
         assert_eq!(started_at(own.pid), Started::At(own.started));
 
-        // pid 0 is the kernel's on every platform this runs on and is never
-        // something `ps -p` reports.
+        // A non-positive pid is answered by the guard before any probe runs,
+        // on every platform — so both the boundary and a negative are pinned.
         assert_eq!(started_at(0), Started::Gone);
+        assert_eq!(started_at(-1), Started::Gone);
     }
 
     /// The guard the sweep checks before any `kill(-pgid, …)` needs this to be

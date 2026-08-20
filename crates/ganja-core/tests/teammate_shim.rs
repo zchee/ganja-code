@@ -190,6 +190,16 @@ async fn a_shim_child_gets_exactly_the_enumerated_environment() {
         .map(str::to_owned)
         .collect();
     for name in shim::CARRIED {
+        // A carried variable travels only if this process actually holds it —
+        // except `PATH`, which `environment()` pushes unconditionally from the
+        // resolved binary path rather than the parent env. `environment()`
+        // copies what exists, and `TMPDIR` is set on macOS but not on a bare
+        // Linux runner, so its absence there is the enumeration doing its job
+        // rather than failing it. `HOME` and `PATH` are set on both and stay
+        // asserted; the skip mirrors production so it never drops `PATH`.
+        if name != "PATH" && std::env::var_os(name).is_none() {
+            continue;
+        }
         assert!(
             names.contains(&name.to_owned()),
             "{name} travels: {names:?}"
