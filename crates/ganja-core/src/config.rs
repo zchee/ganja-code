@@ -930,11 +930,17 @@ impl AgentsConfig {
 /// opencode has no teammates at all, and Claude's own teammates are agents of
 /// its harness rather than somebody else's CLI, so nothing over there has a
 /// turn to bound.
+///
+/// Its one key has outlived the spawn shape it was written for. Since P28
+/// (**D512**) what `shim_turn_timeout` bounds is the *headless* shim
+/// machinery, which no spawn door in this build reaches; the field's own doc
+/// says why a key nobody's session reads is still spelled here rather than
+/// removed.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TeammateConfig {
-    /// How long one foreign-CLI teammate's turn may run before the shim ends
-    /// its process group and mails the lead, in **seconds**.
+    /// How long one **headless** foreign-CLI teammate's turn may run before
+    /// the shim ends its process group and mails the lead, in **seconds**.
     ///
     /// **Absent is the per-CLI default** the shim derives — this is the one
     /// number a person can move without a source edit, so it overrides all
@@ -948,15 +954,35 @@ pub struct TeammateConfig {
     /// [`HookCommand::timeout`](crate::config::HookCommand::timeout), the
     /// closest analogue in this file: a whole external process's budget.
     ///
-    /// # Why only this shape of teammate has one
+    /// # What it governs, and what it no longer reaches (**D512**)
+    ///
+    /// It is the deadline of [`crate::teammate::shim`], the machinery that
+    /// drives a foreign CLI *headlessly* through a pipe. Since P28 every
+    /// codex, agy and grok spawn instead opens that CLI's own native TUI in a
+    /// tmux pane ([`crate::teammate::shim_tui`]), and a pane-mode shim runs
+    /// under **no per-turn deadline at all** — nothing on that path reads this
+    /// key, so on this build the number a config writes here moves nothing a
+    /// session does.
+    ///
+    /// It stays curated anyway, and not out of sentiment: the headless
+    /// machinery is still in the tree and still driven by the testkit, and a
+    /// key spelled in a config file somebody already has must keep loading —
+    /// `deny_unknown_fields` refuses the *whole file* over one name it does
+    /// not know, so retiring the key would turn a stale line into a session
+    /// that will not start.
+    ///
+    /// # Why only that shape of teammate ever had one (**D509**)
     ///
     /// Every other duration on the teammate path is an unwind budget, and no
-    /// native teammate's *turn* is bounded at all. A foreign child earns a
-    /// bound because it is the only shape whose progress ganja cannot observe:
-    /// an in-process teammate streams events into this process and a `ganja`
-    /// pane is a ganja whose own status bar a person can look at, while a shim
-    /// child that has stopped writing to a pipe is indistinguishable from one
-    /// that is thinking. The deadline is what turns that ambiguity into mail.
+    /// native teammate's *turn* is bounded at all. A headless foreign child
+    /// earned a bound because it was the only shape whose progress ganja could
+    /// not observe: an in-process teammate streams events into this process
+    /// and a `ganja` pane is a ganja whose own status bar a person can look
+    /// at, while a shim child that has stopped writing to a pipe is
+    /// indistinguishable from one that is thinking. The deadline is what
+    /// turned that ambiguity into mail — which is also why a pane took it
+    /// away rather than inheriting it: the CLI's own TUI is a thing a person
+    /// can look at. [`crate::teammate::shim_tui`]'s module doc owns that half.
     pub shim_turn_timeout: Option<u64>,
 }
 
@@ -2037,15 +2063,24 @@ fn check_agents(agents: &AgentsConfig) -> Result<(), String> {
 /// Refuses a `teammates` block asking for a deadline of nothing.
 ///
 /// [`check_agents`]'s shape and [`check_agents`]'s reason: zero is the one
-/// value whose consequence is invisible until a teammate takes a turn, and
-/// then it is a turn killed before the child has written a byte. Every
-/// positive value is somebody's real answer — a second is absurd but it is an
-/// answer — so the refusal is only about the value that means "never finish".
+/// value whose consequence is invisible until a headless teammate takes a
+/// turn, and then it is a turn killed before the child has written a byte.
+/// Every positive value is somebody's real answer — a second is absurd but it
+/// is an answer — so the refusal is only about the value that means "never
+/// finish".
+///
+/// Still refused although **D512** left no spawn door reading the key: a file
+/// is checked for what it says, not for whether this build happens to act on
+/// it, and a zero silently accepted today is a zero that bites whoever drives
+/// the headless machinery next. The sentence says which turns it would kill
+/// so nobody reads the refusal as a claim about their pane-mode teammates.
 fn check_teammates(teammates: &TeammateConfig) -> Result<(), String> {
     if teammates.shim_turn_timeout == Some(0) {
         return Err(
-            "teammates.shim_turn_timeout must be at least 1 second; a deadline of 0 kills \
-             every foreign-CLI turn before it has written a byte"
+            "teammates.shim_turn_timeout must be at least 1 second; a deadline of 0 would kill \
+             every headless foreign-CLI turn before the child has written a byte (pane-mode shim \
+             teammates, the only shape a spawn reaches since D512, run no per-turn deadline and \
+             do not read this key)"
                 .to_owned(),
         );
     }

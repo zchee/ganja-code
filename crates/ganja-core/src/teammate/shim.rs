@@ -30,6 +30,13 @@
 //! timeout flag of their own, so the mechanism has to live here rather than in
 //! a per-CLI module.
 //!
+//! Since P28 (**D512**) this is the *headless* door's rule alone: every spawn
+//! door reaches [`crate::teammate::shim_tui`] instead, a CLI's own TUI in a
+//! pane, which runs no per-turn deadline because a pane is a thing a person
+//! can look at. The machinery here stays built and unit-tested, reachable
+//! through `ganja_testkit::backends`, and `teammates.shim_turn_timeout` moves
+//! its number and nothing a spawn reaches.
+//!
 //! The *value* is per CLI ([`default_turn_timeout`](crate::teammate::shim::default_turn_timeout)) and one curated config
 //! key moves all three ([`TIMEOUT_KEY`](crate::teammate::shim::TIMEOUT_KEY)). The key is resolved once, at
 //! [`crate::teammate::TeammateRegistry`] construction, and read off the
@@ -870,35 +877,52 @@ pub fn signal_group(pgid: i32, signal: i32) {
     }
 }
 
-/// The ring lines a shim spawn writes (**AC-17**).
+/// The ring lines a **headless** shim spawn writes (**AC-17**).
 ///
 /// Written by the shim rather than folded from an engine event stream, because
 /// `fold_calls` folds from exactly that and a shim member has no engine.
 ///
-/// The first line is [`posture_line`]'s own sentence, so the ring and the spawn
-/// dialog cannot come to say different things about one grant — that is the
-/// whole reason the table is a function rather than two string literals. The
-/// second is the honest rider: a managed requirement, a person's own
-/// always-approve, their own allow rules all outrank what ganja composed, so
-/// ganja cannot promise more than its own flags bound. The third is grok's
-/// alone and says what the composed permission mode actually does, so the ring
+/// [`posture_lines`]' two, then a third that is grok's alone and says what the
+/// composed permission mode actually does on the headless door, so the ring
 /// neither implies an axis the vendor's code does not have nor understates the
-/// one it does.
+/// one it does. That third line is this door's and not the pane's: a grok TUI
+/// (**D512**) runs under the same flag, but what the flag does *there* is
+/// unprobed on this machine, so [`crate::teammate::shim_tui::spawn_lines`]
+/// ends on its own pane sentence instead of borrowing this one (the lead's
+/// ruling 5 for P28).
 #[must_use]
 pub fn spawn_lines(backend: MemberBackend) -> Vec<String> {
-    let Some(posture) = posture_line(backend) else {
-        return Vec::new();
-    };
-    let cli = backend_name(backend);
-    let mut lines = vec![
-        format!("spawned {cli} · {posture}"),
-        format!("effective posture bounded by {cli}'s own config"),
-    ];
-    if backend == MemberBackend::Grok {
+    let mut lines = posture_lines(backend);
+    if !lines.is_empty() && backend == MemberBackend::Grok {
         lines.push(GROK_MODE_LINE.to_owned());
     }
 
     lines
+}
+
+/// The two ring lines every shim spawn opens with, on either door.
+///
+/// The first is [`posture_line`]'s own sentence, so the ring and the spawn
+/// dialog cannot come to say different things about one grant — that is the
+/// whole reason the table is a function rather than two string literals. The
+/// second is the honest rider: a managed requirement, a person's own
+/// always-approve, their own allow rules all outrank what ganja composed, so
+/// ganja cannot promise more than its own flags bound — and on the pane door
+/// the rider is if anything truer, since a pane inherits the tmux server's
+/// environment on top of the CLI's own config. Empty for a backend with no
+/// posture to disclose, so a caller composing a ring can chain its own door's
+/// rider onto this without first asking which backend it holds.
+#[must_use]
+pub fn posture_lines(backend: MemberBackend) -> Vec<String> {
+    let Some(posture) = posture_line(backend) else {
+        return Vec::new();
+    };
+    let cli = backend_name(backend);
+
+    vec![
+        format!("spawned {cli} · {posture}"),
+        format!("effective posture bounded by {cli}'s own config"),
+    ]
 }
 
 /// Pushes one line onto a member's ring, the way the engine-folded one does.

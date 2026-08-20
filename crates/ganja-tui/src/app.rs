@@ -465,6 +465,16 @@ pub struct App {
     /// [`App::spawn_asks`], and a loop that awaited the spawn would be waiting
     /// on a person it had stopped drawing for. Also the guard that keeps a
     /// second spawn off the team file while one is being written.
+    ///
+    /// A pane-mode shim spawn (`--backend codex|agy|grok`, **D512**) holds
+    /// this handle for up to [`ganja_core::teammate::shim_tui::READY_WAIT`]
+    /// plus [`ganja_core::teammate::shim_tui::READY_SETTLE`] — about sixteen
+    /// seconds — while its readiness poll waits for the CLI's own composer
+    /// and then lets it settle, or times out into a paste nobody submits, so
+    /// a second `/team spawn` typed meanwhile is answered [`team::BUSY`] for
+    /// that long. That is the design and not a hang: the wait is off this loop,
+    /// which keeps drawing, and the guard is exactly what stops two spawns
+    /// writing the team file at once.
     team_spawn: Option<JoinHandle<Result<String, String>>>,
     /// Where a spawn in flight puts its own permission dialog (**D-5**).
     spawn_asks: tokio::sync::mpsc::Receiver<SpawnQuestion>,

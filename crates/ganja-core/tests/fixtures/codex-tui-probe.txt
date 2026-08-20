@@ -25,3 +25,4 @@ banner: >_ OpenAI Codex (v0.149.0-alpha.1)
 paste probe: load-buffer + paste-buffer -p delivered two lines into the composer unsubmitted:
 › ganja paste probe line one
   line two stays in the composer
+settle probe: W5 walkthrough, 2026-08-20, live codex in a tmux pane, paste-buffer -p then send-keys Enter, measured from the moment the composer line first showed (a composer that has just drawn is not yet one that submits): 0.2s after: unsubmitted in 4 of 5 runs (the one that submitted saw its marker latest, at 0.29s); 0.5s after: submitted in 6 of 6 runs; 1.0s after: submitted in 3 of 3 runs. READY_SETTLE is pinned at or above the smallest delay that submitted every run.

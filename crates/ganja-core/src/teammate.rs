@@ -477,12 +477,19 @@ pub const fn backend_name(backend: MemberBackend) -> &'static str {
 /// to it has to read (**D508(c)**).
 ///
 /// [`None`] for P25's three surfaces, and that absence is the honest answer
-/// rather than a missing sentence: an in-process or pane teammate forwards its
-/// dialogs to the lead, so its bounds are the lead's own rules and a person
-/// stays in the loop for every one of them. A shim asks **nobody** after
-/// spawn — a headless CLI child has no channel to ask through — so the spawn
-/// is the last moment anybody can be told, and this is what they are told.
-///
+/// rather than a missing sentence: an in-process or `ganja`/`claude` pane
+/// teammate forwards its dialogs to the lead, so its bounds are the lead's
+/// own rules and a person stays in the loop for every one of them. A shim
+/// asks **ganja** nothing after spawn, on either of its doors: a headless CLI
+/// child has no channel to ask through, and a CLI's native TUI in a pane
+/// (**D512**) puts that CLI's *own* prompts in front of a person — answered
+/// there, under the CLI's rules, never routed through the lead's — so the
+/// spawn dialog is the last moment ganja can tell anybody anything, and this
+/// is what they are told. What a pane adds to that — whose prompts show
+/// there, and that the lead hears nothing back — is the backend's own
+/// sentence, [`TeammateBackend::surface_line`], read beside this one rather
+/// than folded into it, because the bound is the same on both doors and this
+/// sentence is pinned against the probe that measured the bound.
 ///
 /// One table with two readers, so a dialog and a ring line cannot come to
 /// describe one grant differently: the spawn dialog's `args` carry it under
@@ -935,6 +942,26 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
 
     /// What this backend can tell the lead about a message it handed over.
     fn delivery(&self) -> Delivery;
+
+    /// What the *surface* adds to [`posture_line`]'s sentence, for the spawns
+    /// where that sentence is not the whole of what a person is consenting to.
+    ///
+    /// The default is [`None`], and it is the right answer for every backend
+    /// whose teammate goes on asking the lead afterwards, and for the headless
+    /// shim, whose posture sentence already says all there is — a child that
+    /// asks nobody. A shim in its CLI's native TUI (**D512**) answers with
+    /// the two facts a pane changes: which of the CLI's own prompts now render
+    /// in front of a person, and that the lead hears nothing back (v1 is
+    /// send-only). Per CLI and not shared, because the first fact differs
+    /// under each CLI's own flags (the lead's ruling 5 for P28).
+    ///
+    /// The same table has the same two readers [`posture_line`] has — the
+    /// spawn dialog carries it under `surface`, and the registry's ring
+    /// closes its spawn lines with it — so the two cannot describe one pane
+    /// differently.
+    fn surface_line(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A teammate in the lead's own process: the D500 shape, as a backend.
@@ -2222,9 +2249,11 @@ impl TeammateRegistry {
             // — and **no deadline**: the loop is handed nothing to bound a
             // turn with, because a native TUI in a pane is a thing a person
             // can look at (the module doc owns why). The posture lines go on
-            // first, as above, and the loop adds the spawn's own readiness
-            // finding before its first delivery.
-            for line in shim::spawn_lines(spec.backend) {
+            // first, as above — this door's own set, which ends on the pane
+            // sentence the spawn dialog carried under `surface` rather than
+            // on the headless grok rider — and the loop adds the spawn's own
+            // readiness finding before its first delivery.
+            for line in shim_tui::spawn_lines(spec.backend) {
                 shim::push_recent(&recent, line);
             }
             let loop_ = shim_tui::TuiRunner::new(

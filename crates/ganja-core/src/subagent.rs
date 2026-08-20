@@ -713,6 +713,17 @@ impl Teammates {
                 if let Some(posture) = posture_line(backend) {
                     args["posture"] = serde_json::Value::from(posture);
                 }
+                // And what the *surface* adds to it, where it adds anything:
+                // a shim in its CLI's native TUI (**D512**) says whose prompts
+                // now render in the pane and that the lead hears nothing
+                // back. The backend's own answer rather than a second table
+                // keyed on `backend`, because which door a shim spawns on is
+                // the wired backend's fact — the headless one answers `None`
+                // — and the same answer closes the registry's ring lines, so
+                // the dialog and `/team` cannot describe one pane differently.
+                if let Some(surface) = self.backends.of(backend).surface_line() {
+                    args["surface"] = serde_json::Value::from(surface);
+                }
 
                 let reply = asker
                     .ask(SpawnAsk {

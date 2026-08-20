@@ -189,12 +189,18 @@ impl Surface {
     /// address works, and it does, because the shim reads that inbox.
     ///
     /// A shim member **in a pane** (P28, **D512**) writes the real `%N`, and
-    /// so reads back as [`Surface::Pane`] — lossy the other way, and safe for
-    /// the same reason: the pane exists, every reader that acts on panes acts
-    /// on a pane that is there, and the identity-checked kills those readers
-    /// run compare a birth no record carries, so none of them can end it by
-    /// mistake. What is lost is only which CLI sits in the pane, and that is
-    /// in `backendType`, where it always was.
+    /// so reads back as [`Surface::Pane`] — lossy the other way, and safe as
+    /// far as this crate can speak for: the pane exists, so every reader that
+    /// acts on panes acts on a pane that is there, and ganja's own kills
+    /// identity-check the `(pane_id, birth)` pair against the running server,
+    /// where no record carries a birth — ganja cannot end this one by mistake.
+    /// What a *foreign* reader does with a real `%N` is that reader's: a real
+    /// `claude` sharing the directory is not known to check anything, and
+    /// where the in-process sentinel gave it nothing to act on a pane id gives
+    /// it a pane. The residual is bounded rather than absent — the worst such
+    /// a reader can do is end a pane that is on screen in front of a person,
+    /// who sees it go. What is lost on the read is only which CLI sat in it,
+    /// and that is in `backendType`, where it always was.
     ///
     /// The one reader that genuinely needs shim-ness — the lead-restart sweep
     /// — reads `backendType` directly, which [`MemberRecord::teammate`]

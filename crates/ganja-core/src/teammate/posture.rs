@@ -353,9 +353,12 @@ pub fn spawn_gate(
     //
     // `posture_line` is the discriminator rather than a second list of which
     // backends are foreign, because the two questions have one answer: a
-    // backend has a posture to disclose exactly when nobody can be asked
-    // anything after its spawn. Two lists would be two places to add a
-    // seventh backend to, and the one that got forgotten would be this one.
+    // backend has a posture to disclose exactly when *ganja* can ask nothing
+    // after its spawn — a headless child has no channel, and a CLI's native
+    // TUI in a pane (**D512**) puts the CLI's own prompts in front of a
+    // person under the CLI's rules, never this gate's. Two lists would be two
+    // places to add a seventh backend to, and the one that got forgotten
+    // would be this one.
     //
     // Never below `Ask`, though here that floor is belt and braces rather
     // than the mechanism — `inherited_by_subagent` has already dropped any

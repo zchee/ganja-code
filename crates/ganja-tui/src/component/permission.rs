@@ -286,6 +286,62 @@ mod tests {
         assert!(screen.contains("reject"), "got:\n{screen}");
     }
 
+    /// A shim pane's spawn dialog keeps its must-not-miss clause on screen
+    /// (P28, **D512**): the one fact a person consenting to a codex, agy or
+    /// grok pane would otherwise assume the other way — that the teammate
+    /// they are about to speak to answers — has to survive this dialog's
+    /// clamp, which leaves a seventh argument about two rows at its widest.
+    /// Built from the real sentences rather than literals, with every key
+    /// `subagent.rs` puts beside them, so a longer posture row or a reordered
+    /// key shows up here as the cut it would be on a terminal.
+    #[test]
+    fn a_shim_spawn_dialog_keeps_the_send_only_clause_on_screen() {
+        use ganja_core::teammate::{posture_line, shim_tui::pane_line};
+        use ganja_protocol::team::MemberBackend;
+
+        for (backend, name) in [
+            (MemberBackend::Codex, "codex"),
+            (MemberBackend::Agy, "agy"),
+            (MemberBackend::Grok, "grok"),
+        ] {
+            let surface = pane_line(backend).expect("a shim pane discloses its surface");
+            let dialog = Permission::new(
+                PermissionId::from("perm_spawn".to_owned()),
+                "spawn".to_owned(),
+                format!(
+                    "start teammate foo on the {name} backend (a name already taken gets a counter)"
+                ),
+                serde_json::json!({
+                    "name": "foo",
+                    "backend": name,
+                    "agent_type": "build",
+                    "cwd": "/Users/somebody/src/github.com/somebody/a-project-name",
+                    "bypass": false,
+                    "posture": posture_line(backend).expect("a shim discloses a posture"),
+                    "surface": surface,
+                }),
+                Vec::new(),
+            );
+            // The box's rows, borders off and trailing padding off, joined
+            // without the row breaks: `wrap` cuts at the exact width with no
+            // word awareness, so a clause straddling two rows keeps its bytes
+            // only if the leading spaces of the second row are kept too.
+            let screen = rendered(&dialog, Rect::new(0, 0, 80, 24))
+                .lines()
+                .map(|row| row.trim_matches('│').trim_end())
+                .collect::<Vec<_>>()
+                .join("");
+            assert!(
+                screen.contains("hears nothing back"),
+                "{name}: the send-only clause fell off the dialog:\n{screen}"
+            );
+            assert!(
+                screen.contains("\"surface\""),
+                "{name}: no surface row:\n{screen}"
+            );
+        }
+    }
+
     #[test]
     fn the_args_preview_is_pretty_printed_json() {
         let screen = rendered(&permission(), Rect::new(0, 0, 60, 18));

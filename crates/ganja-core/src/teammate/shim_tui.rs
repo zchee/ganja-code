@@ -21,8 +21,8 @@
 //! spawn raises the same always-ask `teammate_foreign` gate. A pane does not
 //! widen what a person consented to; it changes who answers the CLI's *own*
 //! prompts. A headless child answers nobody (the deadline was how a wedged one
-//! was noticed), while a TUI's trust dialog, login screen and approval prompts
-//! now render in front of a person who can answer them — which is exactly why
+//! was noticed), while a TUI's own screens are in its own pane, where a person
+//! can answer whatever that CLI shows — which is exactly why
 //! this shape has **no per-turn deadline**: **D509**'s own rationale for the
 //! deadline was that a shim's progress was unobservable, and a TUI in a pane
 //! is a thing a person can look at. `teammates.shim_turn_timeout` keeps
@@ -31,9 +31,12 @@
 //! What also does not change is **v1 is send-only**: the lead's words reach
 //! the composer, and the lead hears nothing back. The CLI's replies render in
 //! the pane for a person; no transcript is read back into the mailbox. The
-//! posture row, the spawn dialog and the `/team` ring say so rather than
-//! implying a conversation — those sentences are W4's, and this module's ring
-//! lines are the facts they are built from.
+//! spawn dialog and the `/team` ring say so rather than implying a
+//! conversation: [`pane_line`](crate::teammate::shim_tui::pane_line) is that
+//! sentence, per CLI, read by both through [`TeammateBackend::surface_line`]
+//! and [`spawn_lines`](crate::teammate::shim_tui::spawn_lines) — beside
+//! [`posture_line`]'s bound, which a pane does not move and which stays
+//! pinned to the probe that measured it.
 //!
 //! # The wire is bracketed paste, never `send-keys -l`
 //!
@@ -66,7 +69,9 @@
 //!
 //! After the launch line the pane is captured every [`READY_POLL`](crate::teammate::shim_tui::READY_POLL) for up to
 //! [`READY_WAIT`](crate::teammate::shim_tui::READY_WAIT), looking for the driver's own composer marker. Seeing it is
-//! the ordinary case. **Not** seeing it is a ring note and a proceed, never a
+//! the ordinary case — held for [`READY_SETTLE`](crate::teammate::shim_tui::READY_SETTLE) before the first paste, because
+//! a composer that has just drawn drops an Enter (codex, measured in the W5
+//! walkthrough). **Not** seeing it is a ring note and a proceed, never a
 //! spawn failure: a first spawn in an untrusted directory shows a trust
 //! dialog before the composer, a logged-out CLI shows a login screen, and a
 //! person answers both in the pane. What the timeout changes is not whether a
@@ -156,6 +161,29 @@ pub const READY_WAIT: Duration = Duration::from_secs(15);
 /// How often the readiness poll captures the pane.
 pub const READY_POLL: Duration = Duration::from_millis(250);
 
+/// How long a spawn waits **after** the composer marker first shows before
+/// it pastes — the P28 W5 walkthrough's finding, measured against codex.
+///
+/// A marker on screen is a composer that *draws*; it is not yet one that
+/// *submits*. The live walkthrough spawned a real codex, saw its composer
+/// line at 0.2–0.3 s, pasted and pressed Enter at once — and the text sat in
+/// the composer unsubmitted while the `/team` ring said "delivered": codex
+/// takes the paste but drops an Enter that arrives inside its first moments
+/// (4 of 5 runs at 0.2 s; the one that submitted was the slowest marker, at
+/// 0.29 s), where the same paste-and-Enter half a second after the marker
+/// submitted in 6 of 6 runs and a full second in 3 of 3 — all recorded in
+/// `tests/fixtures/codex-tui-probe.txt`. A second is twice the measured
+/// floor, on a ceiling of fifteen, and it is spent only on the spawn's own
+/// first paste: later deliveries find a composer long past its startup.
+/// Spent by all three CLIs although only codex was measured, because the
+/// failure is a TUI's own startup window rather than anything codex-shaped,
+/// and a second on a fifteen-second ceiling is not worth a per-driver answer
+/// until a driver is measured to need a different one.
+/// The liveness listing that turns a sighting into [`Readiness::Seen`] runs
+/// **after** this wait, so a pane that dies during it is still refused by
+/// its last words rather than handed back as a member.
+pub const READY_SETTLE: Duration = Duration::from_secs(1);
+
 /// How often the runner looks for a pane that has stopped listing live after
 /// its group was signalled.
 const GONE_POLL: Duration = Duration::from_millis(50);
@@ -198,6 +226,112 @@ pub const REFUSED_DIED: &str = "exited before its composer was ready";
 /// (`remain-on-exit-format`, measured on next-3.8: `Pane is dead (status 1,
 /// <time>)`). Not the CLI's words, so [`last_words`] leaves it out.
 const PANE_IS_DEAD: &str = "Pane is dead";
+
+/// The clause every pane sentence **opens** on: what v1 does not do.
+///
+/// One spelling rather than three, because it is the one fact a person
+/// consenting to any shim pane must not miss and the one a reader would most
+/// readily assume the other way: a teammate that is spoken to is presumed to
+/// answer. Here it does not — the lead pastes, the CLI replies on screen, and
+/// nothing carries the reply back into the mailbox (read-back is bead
+/// `ganja-code-9u1`).
+///
+/// First, and short, because of where the sentence is read: the spawn dialog
+/// is the generic permission modal, whose clamp leaves a seventh argument
+/// about two rows at its widest, and a `/team` ring row is one line cut at
+/// the dialog's width — so whatever must survive has to be inside the first
+/// forty characters, and the per-CLI clause after it is the part that may be
+/// cut. `ganja-tui`'s permission test renders the real sentences at 80x24
+/// and asserts this clause is on screen for all three.
+pub const SEND_ONLY: &str = "send-only: the lead hears nothing back";
+
+/// What a codex pane adds after [`SEND_ONLY`], **measured**
+/// (`tests/fixtures/codex-tui-probe.txt`).
+///
+/// The floors are the same two `-c` keys the headless door pins, and the
+/// second of them is the whole of the approval clause: under
+/// `approval_policy="never"` the TUI asks no approval of anybody — a tool the
+/// sandbox denies is denied, not asked about. Nothing is claimed about which
+/// other screens codex may show first (its directory-trust dialog, a login):
+/// the recording holds no capture of either, and a TUI's own screens being in
+/// its own pane is not a fact worth a consent clause.
+const PANE_CODEX: &str = "codex's own TUI in a tmux pane beside you; approval_policy=never asks no \
+     approval, a denied tool is denied";
+
+/// What an agy pane adds after [`SEND_ONLY`], **measured**
+/// (`tests/fixtures/agy-tui-probe.txt`).
+///
+/// The one flag that carries over, `--sandbox`, bounds the terminal only
+/// (**Dv-7**'s finding, which the bound sentence already states), and the TUI
+/// opens in **accept-edits** mode. That clause is the probe's own `outcome:`
+/// words — "accept-edits mode" and "file edits auto-approved" — because it is
+/// the one pane-mode fact that widens what a person might assume: a TUI
+/// looks like a thing that asks before it writes, and this one does not.
+/// Nothing further is measured, so nothing further is claimed.
+const PANE_AGY: &str = "agy's own TUI in a tmux pane beside you, opening in accept-edits mode: \
+     file edits auto-approved";
+
+/// What a grok pane adds after [`SEND_ONLY`] — the one row written
+/// **narrower than the other two**, because grok's TUI reached no composer
+/// when probed (`tests/fixtures/grok-tui-probe.txt`: the sandbox profile
+/// refuses to apply under this machine's symlinked `~/.grok`, bead
+/// `ganja-code-q98`).
+///
+/// So no clause here claims a prompt renders for a person: which of grok's
+/// dialogs show under `--permission-mode dontAsk` is unprobed, and the lead's
+/// ruling 5 for P28 forbids crediting that flag with an approval axis on this
+/// door any more than the headless one. What *is* said is the bound
+/// sentence's own last clause, restated rather than pointed at — a dialog and
+/// a ring order their rows differently, and a clause that says "above" is
+/// only true of one of them — because it is the clause a TUI invites a
+/// reader to assume away: a tool request that needs approval is not put to
+/// the person in the pane, it ends the turn, as measured on the headless
+/// door under the same flag.
+const PANE_GROK: &str = "grok's own TUI in a tmux pane beside you; permission-mode dontAsk puts no \
+     approval to you there, a tool request that needs one ends the turn";
+
+/// The sentence a shim pane adds to its posture, per CLI (**D512**).
+///
+/// [`None`] for the three surfaces that disclose no posture, for
+/// [`posture_line`](crate::teammate::posture_line)'s reason and as an
+/// exhaustive match for its reason too: a seventh backend that forgets to
+/// answer is a build failure rather than a pane spawning with half its
+/// sentence. Each row is [`SEND_ONLY`] followed by its CLI's own clause,
+/// joined here so the shared clause has one spelling, one position, and
+/// cannot be dropped by a per-CLI row.
+///
+/// Two readers, one table: [`ShimTui`]'s
+/// [`surface_line`](crate::teammate::TeammateBackend::surface_line) hands it
+/// to the spawn dialog under `surface`, and [`spawn_lines`] closes the ring
+/// with it.
+#[must_use]
+pub fn pane_line(backend: MemberBackend) -> Option<String> {
+    let own = match backend {
+        MemberBackend::InProcess | MemberBackend::Ganja | MemberBackend::Claude => return None,
+        MemberBackend::Codex => PANE_CODEX,
+        MemberBackend::Agy => PANE_AGY,
+        MemberBackend::Grok => PANE_GROK,
+    };
+
+    Some(format!("{SEND_ONLY}; {own}"))
+}
+
+/// The ring lines a pane-mode shim spawn writes: [`shim::posture_lines`]'
+/// two, then [`pane_line`].
+///
+/// The headless door's [`shim::spawn_lines`] ends on grok's
+/// `--permission-mode` rider instead; that rider describes what the flag
+/// does to the headless client and is deliberately not borrowed here (the
+/// lead's ruling 5 for P28). Empty for a backend with no posture to disclose.
+#[must_use]
+pub fn spawn_lines(backend: MemberBackend) -> Vec<String> {
+    let mut lines = shim::posture_lines(backend);
+    if !lines.is_empty() {
+        lines.extend(pane_line(backend));
+    }
+
+    lines
+}
 
 /// What a per-CLI module answers for its native TUI, and the whole of it.
 ///
@@ -682,6 +816,12 @@ impl ShimTui {
             }
             match server.capture(&pane.id).await {
                 Ok(shown) if shown.contains(marker) => {
+                    // A composer that has just drawn is not yet one that
+                    // submits: codex drops an Enter that lands inside its
+                    // first moments (`READY_SETTLE` owns the measurement), so
+                    // the sighting is held for that long before anything is
+                    // pasted into it.
+                    tokio::time::sleep(READY_SETTLE).await;
                     // A marker on a corpse is not a ready composer (D512): a
                     // pane that printed its marker and then died still captures
                     // under `remain-on-exit`, so a `Seen` returned on the
@@ -689,7 +829,8 @@ impl ShimTui {
                     // process (grok's provisional banner is exactly this risk).
                     // One more liveness listing settles it — still live is
                     // `Seen`, gone is `Died` with the last words read now,
-                    // while they are on the kept pane.
+                    // while they are on the kept pane — and, run after the
+                    // settle, it also catches a pane that died during it.
                     match server.panes().await {
                         Ok(live) if live.iter().any(|listed| listed.id == pane.id) => {
                             return Ready::Seen;
@@ -850,6 +991,10 @@ impl TeammateBackend for ShimTui {
         // can watch it do so — so the lead retires its queue entry at write
         // time (**D503**).
         Delivery::FireAndForget
+    }
+
+    fn surface_line(&self) -> Option<String> {
+        pane_line(self.driver.backend())
     }
 }
 
@@ -1257,15 +1402,24 @@ pub fn launch_line(binary: &OsStr, driver: &dyn TuiDriver) -> Result<OsString, T
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{OsStr, OsString};
+    use std::{
+        ffi::{OsStr, OsString},
+        sync::Arc,
+    };
 
-    use super::{TuiDriver, environment_names, last_words, launch_line, paste_body};
+    use ganja_protocol::team::MemberBackend;
+
+    use super::{
+        SEND_ONLY, ShimTui, TuiDriver, environment_names, last_words, launch_line, pane_line,
+        paste_body, spawn_lines,
+    };
     use crate::teammate::{
+        TeammateBackend as _,
         agy::{self, Agy},
         codex::{self, Codex},
         grok::{self, Grok},
         pane::CARRIED_ENV,
-        shim::Driver as _,
+        shim::{self, Driver as _},
     };
 
     /// The companion trait says exactly what the inherent items say — it is
@@ -1431,6 +1585,44 @@ Pane is dead (status 1, Thu Aug 20 15:28:47 2026)
         );
     }
 
+    /// The settle after a marker sighting is at least the delay codex's own
+    /// recording says submitted every time, and under the ceiling it is spent
+    /// from — read off the fixture rather than restated, so a re-probe that
+    /// moves the number moves this test.
+    #[test]
+    fn the_ready_settle_is_at_least_what_the_codex_probe_measured_as_enough() {
+        let line = CODEX_TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("settle probe: "))
+            .expect("codex's recording carries the settle probe");
+        // Each observation reads `<delay>s after: <verdict> in <n> of <m>
+        // runs`; the pin rests on those, not on the line's closing sentence.
+        let observed: Vec<(f64, bool)> = line
+            .split(';')
+            .filter_map(|clause| {
+                let (delay, rest) = clause.trim().split_once("s after:")?;
+                let delay = delay.rsplit(' ').next()?.parse::<f64>().ok()?;
+                let words: Vec<&str> = rest.split_once(" in ")?.1.split_whitespace().collect();
+                let every_run = words.first() == words.get(2) && !rest.contains("unsubmitted");
+                Some((delay, every_run))
+            })
+            .collect();
+        let failed = observed
+            .iter()
+            .filter(|(_, every)| !every)
+            .map(|(delay, _)| *delay)
+            .fold(f64::NAN, f64::max);
+        let enough = observed
+            .iter()
+            .filter(|(_, every)| *every)
+            .map(|(delay, _)| *delay)
+            .fold(f64::INFINITY, f64::min);
+        assert!(!failed.is_nan() && enough.is_finite(), "{observed:?}");
+        assert!(failed < enough, "{observed:?}");
+        assert!(super::READY_SETTLE.as_secs_f64() >= enough, "{observed:?}");
+        assert!(super::READY_SETTLE < super::READY_WAIT);
+    }
+
     /// The ring constants are sentences a person reads, not codes.
     #[test]
     fn the_ring_lines_say_what_happened_in_words() {
@@ -1438,5 +1630,122 @@ Pane is dead (status 1, Thu Aug 20 15:28:47 2026)
         assert!(super::RING_DELIVERED.contains("pane"));
         assert!(super::RING_DELIVERY_FAILED.contains("failed"));
         let _: OsString = OsString::from(super::REFUSED_DIED);
+    }
+
+    const AGY_TUI_PROBE: &str = include_str!("../../tests/fixtures/agy-tui-probe.txt");
+    const CODEX_TUI_PROBE: &str = include_str!("../../tests/fixtures/codex-tui-probe.txt");
+    const GROK_TUI_PROBE: &str = include_str!("../../tests/fixtures/grok-tui-probe.txt");
+
+    /// Every pane sentence opens on the one send-only clause, every shim has
+    /// one, and no other surface does (**D512**).
+    #[test]
+    fn every_shim_pane_sentence_opens_on_the_send_only_clause_and_nothing_else_has_one() {
+        for backend in [
+            MemberBackend::Codex,
+            MemberBackend::Agy,
+            MemberBackend::Grok,
+        ] {
+            let line = pane_line(backend).expect("a shim pane states what the pane adds");
+            // Opens on it — the dialog and the ring both cut from the right.
+            assert!(line.starts_with(SEND_ONLY), "{line}");
+            assert!(line.contains("tmux pane"), "{line}");
+            // The bound is not restated here — it is `posture_line`'s and
+            // pinned elsewhere; a second copy would be a second thing to drift.
+            assert!(!line.contains("sandbox="), "{line}");
+            // And no row points at another row's position: the dialog sorts
+            // keys and the ring stacks lines, so "above" is true of one only.
+            assert!(!line.contains("above"), "{line}");
+        }
+        for backend in [
+            MemberBackend::InProcess,
+            MemberBackend::Ganja,
+            MemberBackend::Claude,
+        ] {
+            assert_eq!(pane_line(backend), None);
+        }
+        assert!(SEND_ONLY.contains("hears nothing back"));
+    }
+
+    /// The two pane-mode facts that widen what a person might assume are the
+    /// probe's own words: agy's accept-edits clause is quoted from its
+    /// recording's `outcome:` line, and codex's approval clause names the
+    /// floor its recording launched under.
+    #[test]
+    fn the_agy_and_codex_pane_clauses_are_the_ones_their_probes_recorded() {
+        let agy_outcome = AGY_TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("outcome: "))
+            .expect("agy's recording states its outcome");
+        assert!(
+            agy_outcome.contains("accept-edits mode")
+                && agy_outcome.contains("file edits auto-approved"),
+            "{agy_outcome}"
+        );
+        let agy = pane_line(MemberBackend::Agy).expect("agy states what the pane adds");
+        assert!(
+            agy.contains("accept-edits mode") && agy.contains("file edits auto-approved"),
+            "{agy}"
+        );
+
+        let codex_launch = CODEX_TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("launch: "))
+            .expect("codex's recording states its launch line");
+        assert!(
+            codex_launch.contains(r#"approval_policy="never""#),
+            "{codex_launch}"
+        );
+        let codex = pane_line(MemberBackend::Codex).expect("codex states what the pane adds");
+        assert!(codex.contains("approval_policy=never"), "{codex}");
+        assert!(codex.contains("asks no approval"), "{codex}");
+    }
+
+    /// grok's pane sentence claims no prompt renders for a person and credits
+    /// its permission mode with no approval axis — because its recording
+    /// reached no composer, and the lead's ruling 5 for P28 says so.
+    #[test]
+    fn the_grok_pane_sentence_claims_nothing_its_probe_did_not_reach() {
+        assert!(
+            !GROK_TUI_PROBE
+                .lines()
+                .any(|line| line.starts_with("composer capture")),
+            "a composer was reached after all; this sentence may now say more"
+        );
+        let grok = pane_line(MemberBackend::Grok).expect("grok states what the pane adds");
+        assert!(!grok.contains("render"), "{grok}");
+        assert!(!grok.contains("for you to answer"), "{grok}");
+        assert!(grok.contains("ends the turn"), "{grok}");
+        assert!(grok.contains("permission-mode dontAsk"), "{grok}");
+        assert!(grok.contains("no approval to you"), "{grok}");
+        // And the headless rider about that flag is not borrowed onto this door.
+        let lines = spawn_lines(MemberBackend::Grok);
+        assert!(
+            !lines.iter().any(|line| line == shim::GROK_MODE_LINE),
+            "{lines:?}"
+        );
+    }
+
+    /// The ring a pane spawn opens with is the shared posture pair, then the
+    /// pane sentence — the same string the backend hands the spawn dialog.
+    #[test]
+    fn a_pane_spawns_ring_closes_on_the_sentence_its_dialog_carried() {
+        for (backend, driver) in [
+            (
+                MemberBackend::Codex,
+                Arc::new(Codex::new()) as Arc<dyn TuiDriver>,
+            ),
+            (MemberBackend::Agy, Arc::new(Agy::new())),
+            (MemberBackend::Grok, Arc::new(Grok::new())),
+        ] {
+            let lines = spawn_lines(backend);
+            let shared = shim::posture_lines(backend);
+            assert_eq!(lines.len(), 3, "{lines:?}");
+            assert_eq!(&lines[..2], &shared[..], "{lines:?}");
+            let dialog = ShimTui::new(driver)
+                .surface_line()
+                .expect("a shim pane backend discloses its surface");
+            assert_eq!(lines[2], dialog);
+        }
+        assert!(spawn_lines(MemberBackend::Ganja).is_empty());
     }
 }
