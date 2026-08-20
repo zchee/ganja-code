@@ -1,0 +1,27 @@
+# Whether codex's own TUI accepts the pinned floors, and what its empty
+# composer says — the recording **D512**'s pane-mode spelling is compared
+# against.
+#
+# This file is the *recording* the `tui_argv` and `READY_MARKER` tests beside
+# `src/teammate/codex.rs` compare against, rather than a second string literal:
+# two literals agreeing proves only that somebody typed carefully. Everything
+# after `launch: ` is the argv the pane ran, binary first, one word per
+# whitespace-separated token exactly as the binary received it — the quotes in
+# the two `-c` values are bytes codex reads as TOML strings, not shell syntax.
+# The line under `composer capture` is what `capture-pane -p` showed with
+# nothing typed, prompt glyph included.
+#
+# Operator: P28 lead (Claude), probes run live; recorded by the W2 lane
+# Full record: .omc/plans/2026-08-20-shim-native-tui-panes.md, "Measured facts"
+#
+# Binary:  codex-cli 0.149.0-alpha.1
+# Host:    tmux next-3.8, macOS, 2026-08-20
+#
+launch: codex -c sandbox_mode="read-only" -c approval_policy="never"
+outcome: composer reached, floors accepted
+composer capture (empty composer line):
+› Ask Codex to do anything
+banner: >_ OpenAI Codex (v0.149.0-alpha.1)
+paste probe: load-buffer + paste-buffer -p delivered two lines into the composer unsubmitted:
+› ganja paste probe line one
+  line two stays in the composer

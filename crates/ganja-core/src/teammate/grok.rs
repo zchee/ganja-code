@@ -194,6 +194,57 @@ pub const PERMISSION_MODE: &str = "dontAsk";
 /// format"*.
 pub const OUTPUT_FORMAT: &str = "streaming-messages-json";
 
+/// The floors, and **only** the floors, for a pane running this CLI's own TUI
+/// (**D512**): the bound, then the mode beside it, in the first turn's order.
+///
+/// Nothing else. No `--prompt-file` — an interactive grok takes its prompt
+/// from its composer, and the words travel a tmux paste buffer rather than
+/// argv or a `0600` file — no `--session-id` and no `--resume`, because a TUI
+/// holds its own conversation, and neither `--output-format` nor
+/// `--include-partial-messages`, which are the headless wire's and which a
+/// composer never prints. The absence of every prompt door is also what makes
+/// that vendor *start* a TUI: it computes "interactive" as no command, no `-p`,
+/// no `--prompt-json`, no `--prompt-file`. No identity flag, because that CLI
+/// has none to give.
+///
+/// Measured on 2026-08-20 against `grok 1.0.6 (24c70bc7ffdd) [alpha]`: the
+/// flags parse, and then on this machine the read-only profile refuses to
+/// apply under a symlinked `~/.grok` (bead `ganja-code-q98`) with the same
+/// sentence the headless child exits on. That is the honest outcome and the one
+/// a pane exists to keep on screen — the recording,
+/// `tests/fixtures/grok-tui-probe.txt`, carries the launch line and the
+/// refusal verbatim, and the test compares this table against it rather than
+/// against a second literal.
+pub const TUI_ARGV: [&str; 4] = [
+    "--sandbox",
+    SANDBOX_VALUE,
+    "--permission-mode",
+    PERMISSION_MODE,
+];
+
+/// What a readiness poll looks for in a captured pane — **provisional, and
+/// unprobed on a working grok home**.
+///
+/// grok never reached a composer on this machine: the read-only profile
+/// refuses to start under a symlinked `~/.grok` (bead `ganja-code-q98`), in
+/// TUI mode exactly as headless, so there is no capture of an empty grok
+/// composer to pin this against, and `tests/fixtures/grok-tui-probe.txt`
+/// records the refusal rather than a marker. What is pinned instead is the
+/// name of the welcome banner that TUI draws — the string the vendor's own pty
+/// end-to-end suite waits on as `WELCOME_BANNER`
+/// (`crates/codegen/xai-grok-pager/tests/pty_e2e/minimal/`, in the source
+/// clone at 1.0.5), read out of that source rather than observed here — and
+/// recorded as the fixture's `provisional marker` line, source named, which
+/// the test beside this byte-compares it against. That test also asserts the
+/// recording holds **no** composer capture in either spelling a recording
+/// here has used, so the day a probe on a working home lands one, it fails
+/// and this becomes a byte comparison against the capture, like codex's and
+/// agy's. Until then the cost of a wrong
+/// marker is bounded by the poll's own rule — a miss is a ring note and a
+/// proceed, never a failure — which is why a provisional value is shipped
+/// rather than a sentence this build cannot measure.
+pub const READY_MARKER: &str = "Grok Build";
+
 /// Everything this CLI's argv may **never** carry, in every spelling that
 /// binary has.
 ///
@@ -407,6 +458,17 @@ impl Grok {
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    /// [`TUI_ARGV`] as the owned words a pane's launch line is composed from.
+    ///
+    /// Takes no [`Turn`] on purpose: there is no prompt file, no session and
+    /// no deadline to read, so nothing a peer said can reach this argv by
+    /// construction rather than by a test — and no id is minted, because a TUI
+    /// holds its own conversation.
+    #[must_use]
+    pub fn tui_argv(&self) -> Vec<OsString> {
+        TUI_ARGV.iter().map(OsString::from).collect()
     }
 }
 
@@ -1135,5 +1197,144 @@ mod tests {
         let reply = Grok.reply(&stdout).expect("what arrived is what there is");
 
         assert_eq!(reply.messages, vec!["half an answer"]);
+    }
+
+    /// The pane-mode recording (**D512**), compared against rather than
+    /// re-typed — the P27 posture-probe pattern: two literals agreeing proves
+    /// only that somebody typed carefully.
+    const TUI_PROBE: &str = include_str!("../../tests/fixtures/grok-tui-probe.txt");
+
+    /// The launch line the recording says the pane ran, binary first.
+    fn recorded_launch() -> Vec<&'static str> {
+        TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("launch: "))
+            .expect("the recording names the launch line it probed")
+            .split_whitespace()
+            .collect()
+    }
+
+    /// What the driver composes for a pane, as strings.
+    fn tui() -> Vec<String> {
+        Grok.tui_argv()
+            .iter()
+            .map(|token| token.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
+        // Byte for byte against the recording, binary included — and the
+        // `read-only` bytes matter here for the reason the headless test
+        // states: `--sandbox` is unvalidated at clap, so a near-spelling is a
+        // custom profile that fails to load.
+        let recorded = recorded_launch();
+        let (binary, floors) = recorded
+            .split_first()
+            .expect("a binary, then the floors it was launched with");
+
+        assert_eq!(*binary, BINARY);
+        assert_eq!(tui(), floors);
+        // The flags parsed: what the recording says happened next is the
+        // vendor's refusal on this machine, not a parse error — which is the
+        // outcome a pane is meant to keep in front of a person.
+        let outcome = TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("outcome: "))
+            .expect("the recording says what the launch reached");
+        assert!(outcome.starts_with("flags parse;"), "{outcome}");
+        let refusal = TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("error: "))
+            .expect("the recording carries the vendor's own refusal verbatim");
+        assert!(
+            refusal.contains("could not apply the 'read-only' sandbox profile"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn the_ready_marker_is_provisional_until_a_working_home_is_probed() {
+        // The honest-absence pin, two-sided. grok reached no composer on this
+        // machine, so the recording holds no composer capture in either
+        // spelling a recorder here has used — codex's `composer capture` line
+        // and agy's `footer marker:` line — and [`READY_MARKER`] is the
+        // vendor's own welcome-banner string, read out of the grok-build
+        // source the recording names, rather than a captured line. The day
+        // `grok-tui-probe.txt` gains the `composer capture: ` line its header
+        // asks a working-home probe to add, this must be replaced by the byte
+        // comparison codex's and agy's markers get.
+        for captured in ["composer capture", "footer marker:"] {
+            assert!(
+                !TUI_PROBE.lines().any(|line| line.starts_with(captured)),
+                "a composer was captured ({captured}) — pin READY_MARKER against it \
+                 instead of this"
+            );
+        }
+        let outcome = TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("outcome: "))
+            .expect("the recording says what the launch reached");
+        assert!(
+            outcome.contains("profile application refused"),
+            "the reason there is no capture is the recorded refusal: {outcome}"
+        );
+        // Provisional is not unpinned: the constant is byte-compared against
+        // the recording's own provisional line, whose parenthesis says it is
+        // unprobed and names the source the string was read out of.
+        let (provenance, marker) = TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("provisional marker ("))
+            .expect("the recording carries the provisional marker and where it came from")
+            .rsplit_once("): ")
+            .expect("a provenance in parentheses, then the marker");
+        assert!(provenance.starts_with("unprobed;"), "{provenance}");
+        assert!(provenance.contains("WELCOME_BANNER"), "{provenance}");
+        assert!(!marker.is_empty(), "a poll needs a string to look for");
+        assert_eq!(READY_MARKER, marker);
+    }
+
+    #[test]
+    fn the_tui_argv_carries_the_posture_and_none_of_the_headless_machinery() {
+        let tui = tui();
+        assert_eq!(value(&tui, "--sandbox").as_deref(), Some(SANDBOX_VALUE));
+        assert_eq!(
+            value(&tui, "--permission-mode").as_deref(),
+            Some(PERMISSION_MODE)
+        );
+        // Every word here is a word of the headless first turn — one posture
+        // rule, not a second one written for panes.
+        let headless = argv(None);
+        for token in &tui {
+            assert!(headless.contains(token), "{token} is not a headless word");
+        }
+        // And none of the headless wire: no prompt door of any kind (their
+        // absence is what makes that vendor start a TUI at all), no minted or
+        // resumed id, no output flags.
+        for headless_only in [
+            "--prompt-file",
+            "--session-id",
+            "--resume",
+            "--output-format",
+            OUTPUT_FORMAT,
+            "--include-partial-messages",
+        ] {
+            assert!(
+                !tui.iter().any(|token| token == headless_only),
+                "{headless_only} is the headless wire's, and is in {tui:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_never_composed_spelling_reaches_the_tui_argv() {
+        // Iterated rather than re-listed, exactly as for the headless argvs.
+        let tui = tui();
+        for refused in NEVER_COMPOSED {
+            assert!(
+                !tui.iter().any(|token| token == refused),
+                "{refused} must never be composed, and is in {tui:?}"
+            );
+        }
     }
 }

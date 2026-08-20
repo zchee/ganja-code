@@ -132,6 +132,40 @@ pub const APPROVAL_OVERRIDE: &str = "approval_policy=\"never\"";
 /// the key nobody listed.
 pub const PINNED_KEYS: [&str; 2] = ["sandbox_mode", "approval_policy"];
 
+/// The floors, and **only** the floors, for a pane running this CLI's own TUI
+/// (**D512**): the same two `-c` tokens the headless argv pins, quotes
+/// included, and nothing else.
+///
+/// No `exec`, no `--json`, no `--enable`, no `-s`, no `--color` and no `-` —
+/// every one of those is the headless wire's. An interactive `codex` takes its
+/// prompt from its composer, so **no prompt is ever here** either: the words
+/// travel a tmux paste buffer, which keeps them out of `ps` the way `-` kept
+/// them off the exec line. No identity flag, because that CLI has none to
+/// give, and the reaper's witness is therefore deliberately blind to a pane
+/// running it (the plan says so out loud).
+///
+/// Measured on 2026-08-20 against `codex-cli 0.149.0-alpha.1`: a pane launched
+/// with exactly these words reached the composer with both floors accepted.
+/// The recording, `tests/fixtures/codex-tui-probe.txt`, is what the test
+/// compares this against rather than a second literal. The quotes inside the
+/// two values are bytes codex reads as TOML strings and must reach the binary
+/// as bytes, so whoever types this into a pane shell-quotes each word around
+/// them — [`crate::teammate::tmux::launch_line`]'s job, not this table's.
+pub const TUI_ARGV: [&str; 4] = ["-c", SANDBOX_OVERRIDE, "-c", APPROVAL_OVERRIDE];
+
+/// What a readiness poll looks for in a captured pane: the empty composer's
+/// own placeholder, drawn after the `›` prompt glyph.
+///
+/// The placeholder and not the banner, because the banner is on screen before
+/// the composer is — the composer drawing its own placeholder is what says a
+/// paste has somewhere to land. Not a promise that the TUI *stays* ready: a
+/// first spawn in an untrusted directory shows a trust dialog first, which is
+/// why a poll that never sees this string is a ring note and a proceed rather
+/// than a failure (the plan's fact 6). Pinned against the recording, which
+/// names the binary it was read off: a release that rewords its composer
+/// moves the fixture, not a literal in a test.
+pub const READY_MARKER: &str = "Ask Codex to do anything";
+
 /// The feature the worker-to-lead mail rides.
 ///
 /// Composed explicitly rather than trusted: `codex features list` reports it
@@ -250,6 +284,16 @@ impl Codex {
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    /// [`TUI_ARGV`] as the owned words a pane's launch line is composed from.
+    ///
+    /// Takes no [`Turn`] on purpose: there is no prompt, no session and no
+    /// deadline to read, so nothing a peer said can reach this argv by
+    /// construction rather than by a test.
+    #[must_use]
+    pub fn tui_argv(&self) -> Vec<OsString> {
+        TUI_ARGV.iter().map(OsString::from).collect()
     }
 }
 
@@ -699,5 +743,120 @@ mod tests {
                 .any(|name| name.contains("PERMISSION")),
             "no environment door onto the posture may be carried"
         );
+    }
+
+    /// The pane-mode recording (**D512**), compared against rather than
+    /// re-typed — the P27 posture-probe pattern: two literals agreeing proves
+    /// only that somebody typed carefully.
+    const TUI_PROBE: &str = include_str!("../../tests/fixtures/codex-tui-probe.txt");
+
+    /// The launch line the recording says the pane ran, binary first.
+    fn recorded_launch() -> Vec<&'static str> {
+        TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("launch: "))
+            .expect("the recording names the launch line it probed")
+            .split_whitespace()
+            .collect()
+    }
+
+    /// What the driver composes for a pane, as strings.
+    fn tui() -> Vec<String> {
+        Codex
+            .tui_argv()
+            .iter()
+            .map(|token| token.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
+        // Byte for byte against the recording, binary included: the two `-c`
+        // values carry their quotes in the fixture exactly as they do in
+        // [`SANDBOX_OVERRIDE`] and [`APPROVAL_OVERRIDE`], because that is how
+        // the binary received them.
+        let recorded = recorded_launch();
+        let (binary, floors) = recorded
+            .split_first()
+            .expect("a binary, then the floors it was launched with");
+
+        assert_eq!(*binary, BINARY);
+        assert_eq!(tui(), floors);
+        // And the recording says those words reached the composer, which is
+        // what makes them a launch line and not a parse experiment.
+        let outcome = TUI_PROBE
+            .lines()
+            .find_map(|line| line.strip_prefix("outcome: "))
+            .expect("the recording says what the launch reached");
+        assert!(outcome.starts_with("composer reached"), "{outcome}");
+    }
+
+    #[test]
+    fn the_ready_marker_is_the_empty_composer_the_probe_captured() {
+        // The line under `composer capture`, minus the prompt glyph it was
+        // drawn after: a poll reads a captured pane, and the pane shows the
+        // glyph, so what is pinned is the placeholder and what is stripped is
+        // the decoration.
+        let captured = TUI_PROBE
+            .lines()
+            .skip_while(|line| !line.starts_with("composer capture"))
+            .nth(1)
+            .expect("the recording captured the empty composer");
+        let placeholder = captured
+            .strip_prefix("› ")
+            .expect("the composer draws its placeholder after the prompt glyph");
+
+        assert_eq!(READY_MARKER, placeholder);
+    }
+
+    #[test]
+    fn the_tui_argv_carries_the_posture_and_none_of_the_headless_machinery() {
+        let tui = tui();
+        // Both pinned tokens, as the same bytes the headless argv carries.
+        for pinned in [SANDBOX_OVERRIDE, APPROVAL_OVERRIDE] {
+            assert!(tui.iter().any(|token| token == pinned), "{tui:?}");
+        }
+        // Every word here is a word of the headless first turn — one posture
+        // rule, not a second one written for panes.
+        let headless = argv(None);
+        for token in &tui {
+            assert!(headless.contains(token), "{token} is not a headless word");
+        }
+        // And none of the headless wire: no subcommand, no output flags, no
+        // prompt door. An interactive codex given `-` would be asked to read a
+        // prompt from a stdin that is a pty.
+        for headless_only in ["exec", "--json", "--enable", FEATURE, "-s", "--color", "-"] {
+            assert!(
+                !tui.iter().any(|token| token == headless_only),
+                "{headless_only} is the headless wire's, and is in {tui:?}"
+            );
+        }
+        // The `-c` narrowing the headless argv is held to, held here too: the
+        // danger of that flag is the key nobody listed.
+        let overrides: Vec<&String> = tui
+            .iter()
+            .zip(tui.iter().skip(1))
+            .filter_map(|(flag, value)| (flag == "-c" || flag == "--config").then_some(value))
+            .collect();
+        assert_eq!(overrides.len(), PINNED_KEYS.len(), "in {tui:?}");
+        for value in overrides {
+            let key = value.split('=').next().expect("a key before the equals");
+            assert!(
+                PINNED_KEYS.contains(&key),
+                "{key} is not one of the pinned posture keys"
+            );
+        }
+    }
+
+    #[test]
+    fn no_never_composed_spelling_reaches_the_tui_argv() {
+        // Iterated rather than re-listed, exactly as for the headless argvs.
+        let tui = tui();
+        for refused in NEVER_COMPOSED {
+            assert!(
+                !tui.iter().any(|token| token == refused),
+                "{refused} must never be composed, and is in {tui:?}"
+            );
+        }
     }
 }
