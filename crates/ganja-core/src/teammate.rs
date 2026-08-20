@@ -175,6 +175,9 @@ pub mod runner;
 /// A teammate that is another vendor's CLI, driven through its own
 /// non-interactive door (**D508**, **D509**).
 pub mod shim;
+/// The same three CLIs rendered in their own native TUI, in a pane of their
+/// own, spoken to through bracketed paste (P28, **D512**).
+pub mod shim_tui;
 /// The tmux calls the two pane backends are built on (P25b).
 pub mod tmux;
 
@@ -725,7 +728,8 @@ impl SpawnSpec {
 
 /// What a spawn produced: the thing that has to be torn down again.
 ///
-/// Two shapes, and the pane's is a **pair** rather than an id: `%N` recycles,
+/// Four shapes since P28, and each pane's identity is a **pair** rather than
+/// an id: `%N` recycles,
 /// so a lead that killed panes by id alone would eventually kill somebody
 /// else's window. What tmux reports beside the id is `#{pane_pid}` — there is no
 /// `pane_start_time` format, as [`crate::teammate::tmux`]'s module doc records
@@ -749,6 +753,13 @@ pub enum Handle {
     /// owned by the task that drives it, under `kill_on_drop(true)`, and what
     /// is here is what a signal needs. See [`shim::Child`].
     Child(Arc<shim::Child>),
+    /// A shim teammate in a pane of its own, running its CLI's native TUI
+    /// (P28, **D512**): the recorded `(pane_id, birth)` pair, the server it
+    /// is on, and the token that ends the runner pasting into it. See
+    /// [`shim_tui::TuiPane`] — a fourth shape rather than a [`Handle::Pane`],
+    /// because ending it is not a `kill-pane`: the group is signalled first,
+    /// while the pane still vouches for the pid.
+    TuiPane(Arc<shim_tui::TuiPane>),
 }
 
 impl fmt::Debug for Handle {
@@ -764,6 +775,7 @@ impl fmt::Debug for Handle {
                 .field("birth", &pane.birth)
                 .finish(),
             Self::Child(child) => child.fmt(formatter),
+            Self::TuiPane(tui) => tui.fmt(formatter),
         }
     }
 }
@@ -774,7 +786,7 @@ impl Handle {
     pub fn teammate(&self) -> Option<&Arc<Teammate>> {
         match self {
             Self::InProcess(teammate) => Some(teammate),
-            Self::Pane(_) | Self::Child(_) => None,
+            Self::Pane(_) | Self::Child(_) | Self::TuiPane(_) => None,
         }
     }
 
@@ -789,7 +801,17 @@ impl Handle {
     pub fn child(&self) -> Option<&Arc<shim::Child>> {
         match self {
             Self::Child(child) => Some(child),
-            Self::InProcess(_) | Self::Pane(_) => None,
+            Self::InProcess(_) | Self::Pane(_) | Self::TuiPane(_) => None,
+        }
+    }
+
+    /// The TUI pane behind a pane-mode shim handle — the third of the three
+    /// guard-shaped accessors, for [`Handle::child`]'s reason.
+    #[must_use]
+    pub fn tui(&self) -> Option<&Arc<shim_tui::TuiPane>> {
+        match self {
+            Self::TuiPane(tui) => Some(tui),
+            Self::InProcess(_) | Self::Pane(_) | Self::Child(_) => None,
         }
     }
 
@@ -807,7 +829,17 @@ impl Handle {
             // `backendType`, so every older reader classifies the member
             // safely and the one reader that needs shim-ness reads the field
             // that says so.
-            Self::Child(child) => Surface::Shim { cli: child.cli() },
+            Self::Child(child) => Surface::Shim {
+                cli: child.cli(),
+                pane: None,
+            },
+            // The same `backendType`, and the **real** pane id where the
+            // headless shape writes the sentinel: the pane is there, and a
+            // reader acting on panes acts on something real (**D512**).
+            Self::TuiPane(tui) => Surface::Shim {
+                cli: tui.cli(),
+                pane: Some(tui.pane().id.clone()),
+            },
         }
     }
 }
@@ -2182,6 +2214,29 @@ impl TeammateRegistry {
             // it cancels, `join_all`s every `kill`, **and then drains this
             // list**. A shim task that was never pushed would leave a child
             // being reaped after the process it belonged to had returned.
+            tasks.push(tokio::spawn(loop_.run()));
+        } else if let Some(tui) = handle.tui() {
+            // The pane-mode shim (P28, **D512**): the same one-task shape as
+            // the headless shim above, for the same reasons — a ring the loop
+            // writes itself, `alive` the loop clears, `runner` staying `None`
+            // — and **no deadline**: the loop is handed nothing to bound a
+            // turn with, because a native TUI in a pane is a thing a person
+            // can look at (the module doc owns why). The posture lines go on
+            // first, as above, and the loop adds the spawn's own readiness
+            // finding before its first delivery.
+            for line in shim::spawn_lines(spec.backend) {
+                shim::push_recent(&recent, line);
+            }
+            let loop_ = shim_tui::TuiRunner::new(
+                Arc::clone(tui),
+                spec.clone(),
+                shim_tui::Lent {
+                    lead_inbox: self.lead_inbox(),
+                    recent: Arc::clone(&recent),
+                    alive: Arc::clone(&alive),
+                    cancel: self.cancel.child_token(),
+                },
+            );
             tasks.push(tokio::spawn(loop_.run()));
         }
 

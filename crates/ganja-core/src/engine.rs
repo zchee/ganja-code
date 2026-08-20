@@ -1816,10 +1816,6 @@ impl Engine {
             None => Arc::new(Storeless),
         };
 
-        // Read before the registry is handed on, because it is the registry's
-        // own answer that a resident launch line has to be composed from.
-        let agy_deadline = registry.shim_turn_timeout(ganja_team::ShimCli::Agy);
-
         let (dialogs, waiting) = mpsc::channel(TEAMMATE_DIALOGS);
         registry.forward_dialogs_to(dialogs);
         *self
@@ -1833,6 +1829,17 @@ impl Engine {
                 in_process,
                 pane: Arc::new(teammate::pane::GanjaPane),
                 claude: Arc::new(teammate::claude::ClaudePane),
+                // **D512 (P28)**: all three shim slots open the CLI's own
+                // native TUI in a pane (`teammate::shim_tui`), spoken to
+                // through bracketed paste, and **no spawn door in this build
+                // reaches the headless `teammate::shim::ShimBackend`** any
+                // more — that machinery stays in the tree, unit-tested,
+                // reachable only by the tests that drive it against a fake
+                // CLI. Which is also why `teammates.shim_turn_timeout` is
+                // not read here: a pane-mode shim has no per-turn deadline
+                // (the module doc owns why), and the key governs only the
+                // headless machinery it was written for (**D509**).
+                //
                 // This slot searches the real `PATH`; a test that reaches it
                 // spawns the developer's own `codex`. Tests spawn shim
                 // teammates through `ganja_testkit::backends` or
@@ -1843,25 +1850,22 @@ impl Engine {
                 // dependency with `cfg(test)` unset, so the guard is this
                 // comment and those two safe doors rather than anything the
                 // compiler checks.
-                codex: Arc::new(teammate::shim::ShimBackend::new(Arc::new(
+                codex: Arc::new(teammate::shim_tui::ShimTui::new(Arc::new(
                     teammate::codex::Codex::new(),
                 ))),
                 // Real as of Dv-7, and carrying the codex slot's hazard for
-                // the same reason. It is also the one slot that is handed a
-                // deadline: agy composes a `--print-timeout` of its own on the
-                // launch line, and the number it is derived from has to be the
-                // one the runner will actually enforce. Taken from the
-                // registry rather than re-read from the config, so the two
-                // cannot disagree (**D509**).
-                agy: Arc::new(
-                    teammate::shim::ShimBackend::new(Arc::new(teammate::agy::Agy::new()))
-                        .with_deadline(agy_deadline),
-                ),
+                // the same reason. No deadline is handed over any more: the
+                // `--print-timeout` a resident launch line derived from one
+                // belongs to the headless shape, and a TUI is launched with
+                // its floors alone.
+                agy: Arc::new(teammate::shim_tui::ShimTui::new(Arc::new(
+                    teammate::agy::Agy::new(),
+                ))),
                 // Real as of W5, and carrying the codex slot's hazard for the
                 // same reason: it searches the real `PATH`, so a test that
                 // reached it would spawn the developer's own `grok`. The two
                 // safe doors are the same two.
-                grok: Arc::new(teammate::shim::ShimBackend::new(Arc::new(
+                grok: Arc::new(teammate::shim_tui::ShimTui::new(Arc::new(
                     teammate::grok::Grok::new(),
                 ))),
             },

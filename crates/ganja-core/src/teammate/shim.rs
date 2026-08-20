@@ -2140,6 +2140,9 @@ impl ShimRunner {
         self.handle.ended();
         let surface = Surface::Shim {
             cli: self.driver().cli(),
+            // A headless child owns no pane; the pane-mode shim is
+            // `crate::teammate::shim_tui`'s, and writes its own surface.
+            pane: None,
         };
         let approved = Frame::ShutdownApproved(ShutdownApproved {
             request_id: request.request_id.clone(),

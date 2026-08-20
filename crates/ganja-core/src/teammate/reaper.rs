@@ -307,15 +307,40 @@ pub async fn sweep_on(registry: &TeammateRegistry, server: &Server) -> Swept {
         .members
         .iter()
         .filter(|member| !member.is_lead())
-        .filter_map(|member| match member.surface() {
-            Surface::Pane { id } => Some((member.name.clone(), member.agent_id.clone(), id)),
-            // A shim child owns no pane, so this sweep has nothing to say
-            // about one. Unreachable through `surface()` in any case —
-            // `Surface::read` classifies a shim's record as in-process, by
-            // the design its own doc gives — and written out rather than
-            // folded into a wildcard so that a seventh surface still has to
-            // decide what a pane sweep does with it.
-            Surface::Leader | Surface::InProcess | Surface::Shim { .. } => None,
+        .filter_map(|member| {
+            // A shim teammate in a pane (P28, D512) writes the **real** `%N`,
+            // so its record reads back as `Surface::Pane` and would fall into
+            // the arm below — but this sweep must not touch it. Its witness is
+            // `--agent-id`/`--parent-session-id` on the pane's command line,
+            // and a foreign CLI's argv carries neither, so `witnessed` never
+            // matches and the pane is read as `Recycled`: **left alive**
+            // (right) but its record **dropped** (wrong — that is this
+            // teammate's own codex, not a stranger's window). Recognized here
+            // by `backendType`, the one field still saying shim once
+            // `tmuxPaneId` holds a real id (`retire_shim_records`'s own test),
+            // and left entirely alone: the live pane keeps its record, which
+            // `retire_shim_records` marks inactive instead. Teaching the sweep
+            // to fully witness a shim pane is bead `ganja-code-3nz`; not
+            // dropping its record is the safe half of that, done here.
+            if member
+                .backend_type
+                .as_deref()
+                .and_then(ShimCli::read)
+                .is_some()
+            {
+                return None;
+            }
+            match member.surface() {
+                Surface::Pane { id } => Some((member.name.clone(), member.agent_id.clone(), id)),
+                // A headless shim child and an in-process teammate own no pane,
+                // so this sweep has nothing to say about either; `Surface::Shim`
+                // is unreachable through `surface()` besides (the shim guard
+                // above catches every shim first, and `Surface::read` answers
+                // in-process for a headless one). Written out rather than folded
+                // into a wildcard so that a seventh surface still has to decide
+                // what a pane sweep does with it.
+                Surface::Leader | Surface::InProcess | Surface::Shim { .. } => None,
+            }
         })
         .collect();
     if recorded.is_empty() {

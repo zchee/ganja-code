@@ -1266,7 +1266,9 @@ mod tests {
         // comparison codex's and agy's markers get.
         for captured in ["composer capture", "footer marker:"] {
             assert!(
-                !TUI_PROBE.lines().any(|line| line.starts_with(captured)),
+                !TUI_PROBE
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(captured)),
                 "a composer was captured ({captured}) — pin READY_MARKER against it \
                  instead of this"
             );

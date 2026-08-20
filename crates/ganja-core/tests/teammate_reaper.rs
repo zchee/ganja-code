@@ -32,7 +32,7 @@
 use std::path::PathBuf;
 
 use ganja_core::{
-    team::{MemberName, Spawn, Surface, TeamFile, TeamName, TeamsRoot},
+    team::{MemberName, ShimCli, Spawn, Surface, TeamFile, TeamName, TeamsRoot},
     teammate::{
         TeammateRegistry,
         reaper::{self, Fate},
@@ -240,6 +240,53 @@ async fn a_recycled_pane_id_is_not_killed() {
         team.members(),
         vec!["team-lead".to_owned()],
         "the stale record still went, because the teammate it named runs nowhere"
+    );
+}
+
+/// **MEDIUM-4 (P28, D512).** A shim teammate in a pane is a *foreign* CLI, so
+/// its argv carries none of the flags this witness reads — it looks exactly
+/// like the stranger above. Leaving its pane alone is right. Dropping its
+/// **record** with it would not be: that is this teammate's own codex, still on
+/// screen beside the lead, and un-naming it would strand a member a person can
+/// see.
+///
+/// The record is told apart by `backendType`, which is the one field still
+/// saying "shim" now that `tmuxPaneId` holds a real `%N` — read back, such a
+/// record *is* a pane surface, which is precisely why the arm that judges panes
+/// would otherwise claim it. Against
+/// [`a_recycled_pane_id_is_not_killed`], which is the same shape of pane under
+/// a record with no `backendType` and is dropped, as it should be. Witnessing a
+/// shim pane properly is bead `ganja-code-3nz`; not dropping it is the half
+/// that holds without one.
+#[tokio::test]
+async fn a_shim_teammates_pane_record_survives_a_sweep_that_cannot_witness_it() {
+    let server = server();
+    // No `--agent-id` on it, because no foreign CLI has ever heard of one.
+    let pane = stranger_pane(&server);
+    let team = Team::written(
+        "session-01998ad0",
+        SESSION,
+        &[(
+            "worker",
+            Surface::Shim {
+                cli: ShimCli::Codex,
+                pane: Some(pane.clone()),
+            },
+        )],
+    );
+
+    let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
+
+    assert_eq!(
+        swept.fate_of("worker"),
+        None,
+        "a shim pane is not this sweep's to pass judgement on at all: {swept:?}"
+    );
+    assert!(holds(&server, &pane), "its pane is untouched: {pane}");
+    assert!(
+        team.members().iter().any(|member| member == "worker"),
+        "and its record still names it: {:?}",
+        team.members()
     );
 }
 

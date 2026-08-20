@@ -604,10 +604,14 @@ impl Inbox {
     pub async fn approve_shutdown(&self, request_id: &str) {
         let pane = match self.membership.surface() {
             Surface::Pane { id } => Some(id.clone()),
-            // A shim member has no pane to name, and no `ganja` frontend of
-            // its own to reach this code — the shimmed CLI is what runs in
-            // its place. Unreachable through `surface()` besides, which
-            // classifies a shim's record as in-process.
+            // A shim member has no `ganja` frontend of its own to reach this
+            // code — the shimmed CLI is what runs in its place, and this is an
+            // in-process member's own `approve_shutdown`. A shim member in a
+            // pane (P28, D512) reads back through `surface()` as `Surface::Pane`
+            // rather than `Surface::Shim` (its `tmuxPaneId` holds the real
+            // `%N`), so the `Shim` arm is unreachable here — but that path
+            // belongs to the shim runtime's own teardown, not to this frontend,
+            // so nothing routes such a member through here anyway.
             Surface::Leader | Surface::InProcess | Surface::Shim { .. } => None,
         };
         let approved = Frame::ShutdownApproved(ShutdownApproved {
