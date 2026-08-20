@@ -1332,6 +1332,34 @@ mod tests {
         }
     }
 
+    /// What the `/team` dialog's free-text step takes is the same grammar
+    /// the composer line takes after `/team spawn `, so a spawn decided in the
+    /// dialog is remembered in the prompt history as that line — and this is
+    /// the invariant the remembering rests on: put `/team spawn ` back in
+    /// front of the dialog's words and the composer reads the very same
+    /// spawn. A grammar that grew a positional flag, or a trim that moved,
+    /// would otherwise recall a line that spawns something other than what
+    /// was spawned, silently.
+    #[test]
+    fn a_dialog_spawn_re_emitted_as_a_team_spawn_line_reads_back_the_same() {
+        for typed in [
+            "w1",
+            "w1 --backend ganja",
+            "w1 --agent explore",
+            "w1 --bypass",
+            "w1 --bypass --agent explore --backend claude read the tree --carefully",
+            "w1 --backend codex explain  this  crate, twice-spaced and dashed-for-good",
+            "  w1 --backend grok hold the fort  ",
+        ] {
+            let dialog = super::team_spawn(typed).expect("the dialog's grammar takes it");
+            assert_eq!(
+                super::team(&format!("/team spawn {typed}")),
+                Some(Team::Spawn(dialog)),
+                "{typed:?}: the composer line reads back the dialog's spawn"
+            );
+        }
+    }
+
     /// The palette groups by category, so every command needs one that reads
     /// as a heading.
     #[test]

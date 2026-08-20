@@ -224,8 +224,20 @@ impl Spawned {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     /// Start a teammate, through the same door a `task` call reaches.
-    Spawn(SpawnRequest),
+    Spawn {
+        /// The spawn, parsed.
+        request: SpawnRequest,
+        /// The words as typed into the step — [`crate::command::SPAWN_GRAMMAR`]'s
+        /// shape, without the `/team spawn` a composer line carries — so the
+        /// app can remember the spawn in the prompt history as the line it
+        /// is equivalent to, and an Up-arrow can bring it back to edit.
+        typed: String,
+    },
     /// Send what was typed to one member.
+    ///
+    /// Not remembered in the prompt history, on purpose: recalled into the
+    /// composer it would be sent to the lead's own model, which is not where
+    /// it went.
     Message {
         /// Who it goes to.
         to: String,
@@ -567,7 +579,10 @@ impl Team {
                     }
                     Asking::Spawn => match crate::command::team_spawn(&typed) {
                         Ok(line) => {
-                            let effect = Effect::Spawn(SpawnRequest::new(&line));
+                            let effect = Effect::Spawn {
+                                request: SpawnRequest::new(&line),
+                                typed,
+                            };
                             self.step = Step::Members;
 
                             Some(effect)
@@ -944,7 +959,10 @@ mod tests {
         type_in(&mut dialog, line);
 
         match dialog.submit() {
-            Some(Effect::Spawn(request)) => request,
+            Some(Effect::Spawn { request, typed }) => {
+                assert_eq!(typed, line, "the words travel with the spawn, as typed");
+                request
+            }
             other => panic!("expected a spawn, got {other:?}"),
         }
     }

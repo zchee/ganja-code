@@ -1921,7 +1921,17 @@ impl App {
     /// waiting on somebody it had stopped drawing for.
     async fn run_team_effect(&mut self, effect: team::Effect) {
         match effect {
-            team::Effect::Spawn(request) => self.spawn_teammate(request),
+            team::Effect::Spawn { request, typed } => {
+                // Remembered as the composer line it is equivalent to, so the
+                // two doors onto a spawn leave the same thing behind for an
+                // Up-arrow or Ctrl+R to bring back (user directive,
+                // 2026-08-20). Before the spawn, which may stop to ask a
+                // person: what is remembered is what was typed, not whether
+                // the team took it — the rule every `/team` line follows.
+                self.history
+                    .append(history::PromptInfo::text(format!("/team spawn {typed}")));
+                self.spawn_teammate(request);
+            }
             team::Effect::Message { to, text } => {
                 let said = self.post_to_member(
                     &to,
@@ -5446,6 +5456,16 @@ impl App {
         // the typed line one thing rather than two.
         if let Some(line) = command::team(&prompt) {
             self.clear_composer();
+            // Remembered whatever the line turns out to mean — accepted or
+            // refused by the grammar — because the words are out of the
+            // composer either way and the history is where an Up-arrow finds
+            // them again: a long spawn prompt behind a mistyped flag is
+            // edited, not retyped (user directive, 2026-08-20). Unlike a
+            // prompt, which is remembered only once the engine took it, there
+            // is no engine here to take or refuse it first. A bare `/team`
+            // never reaches this: it is the palette's own door above, and is
+            // remembered no more than `/help` is.
+            self.history.append(history::PromptInfo::text(&prompt));
             self.run_team_line(line).await;
             return;
         }
@@ -16534,6 +16554,81 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
         let screen = screen(&terminal);
         assert!(screen.contains("leads no team"), "{screen}");
+    }
+
+    /// Every `/team` line with arguments joins the prompt history — accepted
+    /// or refused by the grammar — because the words leave the composer either
+    /// way and the history is where Up finds them again. A bare `/team` is the
+    /// palette's own door, like `/help`, and is remembered no more than those
+    /// are.
+    #[tokio::test]
+    async fn a_team_line_is_remembered_whatever_it_turned_out_to_mean() {
+        let directory = temporary();
+        let mut app = app_with_history(&directory, &[]);
+
+        for line in [
+            "/team spawn w1 --backend in-process explain this crate",
+            "/team wat",
+            "/team",
+        ] {
+            app.editor.set_text(line);
+            app.submit().await;
+            app.team_dialog = None;
+            assert!(
+                app.editor.prompt().is_none(),
+                "{line}: the line left the composer"
+            );
+        }
+
+        let remembered: Vec<String> = app
+            .history
+            .entries()
+            .into_iter()
+            .map(|recalled| recalled.prompt.input)
+            .collect();
+        assert_eq!(
+            remembered,
+            [
+                "/team wat",
+                "/team spawn w1 --backend in-process explain this crate",
+            ],
+            "newest first, every argument-bearing line as typed, the bare ask not"
+        );
+        assert_eq!(
+            app.history
+                .step(history::Direction::Older, "")
+                .map(|recalled| recalled.input)
+                .as_deref(),
+            Some("/team wat"),
+            "and Up brings the newest one back to fix"
+        );
+    }
+
+    /// A spawn decided in the `/team` dialog is remembered as the composer
+    /// line it is equivalent to, so the two doors leave the same thing behind.
+    #[tokio::test]
+    async fn a_spawn_from_the_team_dialog_is_remembered_as_its_team_spawn_line() {
+        let directory = temporary();
+        let mut app = app_with_history(&directory, &[]);
+        let Some(command::Team::Spawn(line)) =
+            command::team("/team spawn w2 --backend in-process hold the fort")
+        else {
+            panic!("a /team spawn line parses");
+        };
+
+        app.run_team_effect(component::team::Effect::Spawn {
+            request: component::team::SpawnRequest::new(&line),
+            typed: "w2 --backend in-process hold the fort".to_owned(),
+        })
+        .await;
+
+        assert_eq!(
+            app.history
+                .entries()
+                .first()
+                .map(|recalled| recalled.prompt.input.as_str()),
+            Some("/team spawn w2 --backend in-process hold the fort")
+        );
     }
 
     /// One `/team` dialog row, as the fixture below hand-builds them.
